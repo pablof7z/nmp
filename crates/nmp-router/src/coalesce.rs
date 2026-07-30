@@ -38,7 +38,7 @@ pub const MAX_IDS_PER_FILTER: usize = 256;
 ///
 /// Deliberately NOT [`MAX_IDS_PER_FILTER`]: that cap bounds 64-char hex event
 /// ids, where 256 values is already ~16KB of filter. Indexed tag values —
-/// NIP-29 `d` identifiers, hashtags, coordinates — are short, so 500 values
+/// `d` identifiers, hashtags, coordinates — are short, so 500 values
 /// is a comparable frame size, and 500 is the number field experience reports
 /// as unremarkable for a relay to accept. Measured against the operational
 /// reality this whole module exists to respect: relays cap CONCURRENT

@@ -42,7 +42,7 @@ fn real_corpus_typed_batch_to_redb_matrix() {
         for _ in 0..3 {
             let dir = tempfile::tempdir().expect("tempdir");
             let store = RedbStore::open(dir.path().join("bench.redb")).expect("open redb");
-            let mut core = EngineCore::new(store, Box::new(FixtureDirectory::new()), 10);
+            let mut core = EngineCore::new(store, 10);
             let _ = core.handle(EngineMsg::RelayConnected(handle, session.clone()));
             let frames: Vec<_> = corpus[..size]
                 .iter()

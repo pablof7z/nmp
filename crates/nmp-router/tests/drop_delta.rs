@@ -16,7 +16,7 @@ use nmp_resolver::testkit::Harness;
 use nmp_resolver::LiveQuery;
 use nostr::Keys;
 
-use nmp_router::{test_relay, DiscoveryKinds, FixtureDirectory, Router, RuleRegistry, WireOp};
+use nmp_router::{test_relay, FixtureRoutingFacts, Router, RuleRegistry, WireOp};
 
 fn literal_author_filter(author_hex: &str) -> Filter {
     Filter {
@@ -31,12 +31,12 @@ fn dropped_handle_close_reaches_wire() {
     let author = Keys::generate();
     let author_hex = author.public_key().to_hex();
 
-    let dir =
-        FixtureDirectory::new().with_write(author_hex.clone(), [test_relay(0), test_relay(1)]);
-    let mut router = Router::new(
-        DiscoveryKinds::default(),
-        RuleRegistry::default_widen_only(),
+    let dir = FixtureRoutingFacts::new().with_author_routes(
+        author.public_key(),
+        [test_relay(0), test_relay(1)],
+        [],
     );
+    let mut router = Router::new(RuleRegistry::default_widen_only());
 
     let mut h = Harness::new();
     let (handle, _open_delta) =

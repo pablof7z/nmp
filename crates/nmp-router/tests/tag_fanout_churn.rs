@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
-use nmp_router::{DiscoveryKinds, FixtureDirectory, RelayUrl, Router, RuleRegistry, WireOp};
+use nmp_router::{FixtureRoutingFacts, RelayUrl, Router, RuleRegistry, WireOp};
 
 const OUTER_KINDS: [u16; 3] = [39_000, 39_001, 39_002];
 const CAP: usize = 64;
@@ -61,7 +61,7 @@ impl Ops {
 
 fn compile_step(
     router: &mut Router,
-    dir: &FixtureDirectory,
+    dir: &FixtureRoutingFacts,
     demand: &BTreeSet<ContextualAtom>,
 ) -> Ops {
     let delta = router.compile(demand, dir, CAP);
@@ -84,11 +84,8 @@ fn live_reqs(router: &Router) -> usize {
 /// Grow a `#d` set from 1 to `n` values, one at a time, under `shape`.
 /// Returns (per-step ops, cumulative ops, live subs at the end).
 fn grow(n: usize, batched: bool) -> (Vec<Ops>, Ops, usize) {
-    let dir = FixtureDirectory::new();
-    let mut router = Router::new(
-        DiscoveryKinds::default(),
-        RuleRegistry::default_widen_only(),
-    );
+    let dir = FixtureRoutingFacts::new();
+    let mut router = Router::new(RuleRegistry::default_widen_only());
     let mut per_step = Vec::new();
     let mut total = Ops::default();
 
@@ -213,11 +210,8 @@ fn resolver_fan_out_and_a_pre_batched_filter_compile_to_the_same_plan() {
 #[test]
 fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
     const N: usize = 8;
-    let dir = FixtureDirectory::new();
-    let mut router = Router::new(
-        DiscoveryKinds::default(),
-        RuleRegistry::default_widen_only(),
-    );
+    let dir = FixtureRoutingFacts::new();
+    let mut router = Router::new(RuleRegistry::default_widen_only());
     let mut total = Ops::default();
 
     for step in 1..=N {
@@ -280,11 +274,8 @@ fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
 /// two unmergeable filters simply get two tokens.
 #[test]
 fn limited_identical_except_authors_atoms_each_reach_the_wire() {
-    let dir = FixtureDirectory::new();
-    let mut router = Router::new(
-        DiscoveryKinds::default(),
-        RuleRegistry::default_widen_only(),
-    );
+    let dir = FixtureRoutingFacts::new();
+    let mut router = Router::new(RuleRegistry::default_widen_only());
 
     let limited = |author: &str| ContextualAtom {
         filter: ConcreteFilter {
@@ -362,11 +353,8 @@ fn limited_identical_except_authors_atoms_each_reach_the_wire() {
 /// merges them into one REQ carrying both authors — no loss.
 #[test]
 fn unlimited_identical_except_authors_atoms_merge_instead_of_colliding() {
-    let dir = FixtureDirectory::new();
-    let mut router = Router::new(
-        DiscoveryKinds::default(),
-        RuleRegistry::default_widen_only(),
-    );
+    let dir = FixtureRoutingFacts::new();
+    let mut router = Router::new(RuleRegistry::default_widen_only());
 
     let unlimited = |author: &str| ContextualAtom {
         filter: ConcreteFilter {

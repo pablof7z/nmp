@@ -87,7 +87,7 @@ impl LiveWire {
 /// Open `count` mutually unmergeable watches, then connect the relay without
 /// resolving any document.
 fn core_watching(count: u16) -> (EngineCore<MemoryStore>, LiveWire) {
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let mut wire = LiveWire::default();
     for index in 0..count {
         let effects = core.handle(EngineMsg::Subscribe(limited_pinned_query(30_000 + index)));

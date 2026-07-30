@@ -5,16 +5,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::facts::{LanedRelay, PubkeyHex, RelayUrl};
+use crate::facts::{LanedRelay, PublicKey, RelayUrl};
 
 /// Input: authors, each with an ordered candidate relay list (lane-priority
-/// order, `build_candidates`) — the author's OWN relays only (`Nip65Write` ∪
-/// `Hint`/`Provenance` extras), per `routing-and-ownership.md` §9-decision-3.
-/// Indexer/app/fallback relays are never members of `candidates`: they are
-/// additive lanes applied OUTSIDE the solve, in `Router::compile`, and never
-/// count toward `k` (`routing-build-plan.md` Unit B).
+/// order, `build_candidates`) — authoritative outbound facts plus projected
+/// hint/provenance evidence. Operator policy is applied outside the solve.
 pub struct CoverageInput {
-    pub candidates: BTreeMap<PubkeyHex, Vec<LanedRelay>>,
+    pub candidates: BTreeMap<PublicKey, Vec<LanedRelay>>,
     pub k: usize,
     pub cap: usize,
 }
@@ -26,9 +23,9 @@ pub struct Coverage {
     /// Never an accumulated union; `|selected| <= cap` always.
     pub selected: BTreeSet<RelayUrl>,
     /// Each author -> the relays covering it.
-    pub assignment: BTreeMap<PubkeyHex, BTreeSet<RelayUrl>>,
+    pub assignment: BTreeMap<PublicKey, BTreeSet<RelayUrl>>,
     /// Authors that did not reach `k`.
-    pub shortfall: BTreeMap<PubkeyHex, Shortfall>,
+    pub shortfall: BTreeMap<PublicKey, Shortfall>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,24 +49,24 @@ pub enum ShortfallReason {
 /// Greedy, deterministic capped k-cover (M2 plan §3).
 pub fn solve(input: &CoverageInput) -> Coverage {
     let mut selected: BTreeSet<RelayUrl> = BTreeSet::new();
-    let mut assignment: BTreeMap<PubkeyHex, BTreeSet<RelayUrl>> = input
+    let mut assignment: BTreeMap<PublicKey, BTreeSet<RelayUrl>> = input
         .candidates
         .keys()
-        .map(|a| (a.clone(), BTreeSet::new()))
+        .map(|a| (*a, BTreeSet::new()))
         .collect();
 
     // Each author's ceiling clamps k to however many distinct relays they
     // actually list.
-    let ceilings: BTreeMap<PubkeyHex, usize> = input
+    let ceilings: BTreeMap<PublicKey, usize> = input
         .candidates
         .iter()
         .map(|(a, list)| {
             let distinct: BTreeSet<&RelayUrl> = list.iter().map(|lr| &lr.url).collect();
-            (a.clone(), distinct.len().min(input.k))
+            (*a, distinct.len().min(input.k))
         })
         .collect();
 
-    let mut need: BTreeMap<PubkeyHex, usize> = ceilings.clone();
+    let mut need: BTreeMap<PublicKey, usize> = ceilings.clone();
 
     loop {
         if selected.len() >= input.cap {
@@ -148,7 +145,7 @@ pub fn solve(input: &CoverageInput) -> Coverage {
             ShortfallReason::CapExhausted
         };
         shortfall.insert(
-            author.clone(),
+            *author,
             Shortfall {
                 requested_k: input.k,
                 achieved,
@@ -166,25 +163,28 @@ pub fn solve(input: &CoverageInput) -> Coverage {
 
 #[cfg(test)]
 mod tests {
+    use nostr::Keys;
+
     use super::*;
     use crate::facts::{test_relay, Lane};
 
-    fn pk(c: char) -> PubkeyHex {
-        c.to_string().repeat(64)
+    fn authors(count: usize) -> Vec<PublicKey> {
+        (0..count).map(|_| Keys::generate().public_key()).collect()
     }
 
     fn write_list(urls: &[usize]) -> Vec<LanedRelay> {
         urls.iter()
-            .map(|&n| LanedRelay::new(test_relay(n), Lane::Nip65Write))
+            .map(|&n| LanedRelay::new(test_relay(n), Lane::AuthorOutbound))
             .collect()
     }
 
     #[test]
     fn heavy_overlap_picks_minimal_two_relays() {
+        let authors = authors(3);
         let candidates = BTreeMap::from([
-            (pk('a'), write_list(&[0, 1, 2])),
-            (pk('b'), write_list(&[0, 1, 2])),
-            (pk('c'), write_list(&[0, 1, 2])),
+            (authors[0], write_list(&[0, 1, 2])),
+            (authors[1], write_list(&[0, 1, 2])),
+            (authors[2], write_list(&[0, 1, 2])),
         ]);
         let cov = solve(&CoverageInput {
             candidates,
@@ -193,19 +193,17 @@ mod tests {
         });
         assert_eq!(cov.selected.len(), 2);
         assert!(cov.shortfall.is_empty());
-        for a in [pk('a'), pk('b'), pk('c')] {
+        for a in authors {
             assert_eq!(cov.assignment[&a].len(), 2);
         }
     }
 
-    fn pk_n(i: usize) -> PubkeyHex {
-        format!("{i:064}")
-    }
-
     #[test]
     fn disjoint_mailboxes_capped_reports_shortfall() {
-        let candidates: BTreeMap<PubkeyHex, Vec<LanedRelay>> = (0..10)
-            .map(|i| (pk_n(i), write_list(&[i * 2, i * 2 + 1])))
+        let candidates: BTreeMap<PublicKey, Vec<LanedRelay>> = authors(10)
+            .into_iter()
+            .enumerate()
+            .map(|(i, author)| (author, write_list(&[i * 2, i * 2 + 1])))
             .collect();
         let cov = solve(&CoverageInput {
             candidates,
@@ -221,52 +219,53 @@ mod tests {
 
     #[test]
     fn one_prolific_author_capped_at_k() {
-        let candidates = BTreeMap::from([(pk('a'), write_list(&(0..50).collect::<Vec<_>>()))]);
+        let author = authors(1)[0];
+        let candidates = BTreeMap::from([(author, write_list(&(0..50).collect::<Vec<_>>()))]);
         let cov = solve(&CoverageInput {
             candidates,
             k: 2,
             cap: 100,
         });
         assert_eq!(cov.selected.len(), 2);
-        assert_eq!(cov.assignment[&pk('a')].len(), 2);
+        assert_eq!(cov.assignment[&author].len(), 2);
     }
 
     #[test]
     fn author_with_one_relay_clamps_k() {
-        let candidates = BTreeMap::from([(pk('a'), write_list(&[0]))]);
+        let author = authors(1)[0];
+        let candidates = BTreeMap::from([(author, write_list(&[0]))]);
         let cov = solve(&CoverageInput {
             candidates,
             k: 2,
             cap: 10,
         });
-        assert_eq!(cov.assignment[&pk('a')].len(), 1);
+        assert_eq!(cov.assignment[&author].len(), 1);
         assert_eq!(
-            cov.shortfall[&pk('a')].reason,
+            cov.shortfall[&author].reason,
             ShortfallReason::FewerCandidatesThanK
         );
     }
 
     #[test]
     fn author_with_no_relays_is_no_candidates() {
-        let candidates: BTreeMap<PubkeyHex, Vec<LanedRelay>> =
-            BTreeMap::from([(pk('a'), Vec::new())]);
+        let author = authors(1)[0];
+        let candidates: BTreeMap<PublicKey, Vec<LanedRelay>> =
+            BTreeMap::from([(author, Vec::new())]);
         let cov = solve(&CoverageInput {
             candidates,
             k: 2,
             cap: 10,
         });
-        assert!(cov.assignment[&pk('a')].is_empty());
-        assert_eq!(
-            cov.shortfall[&pk('a')].reason,
-            ShortfallReason::NoCandidates
-        );
+        assert!(cov.assignment[&author].is_empty());
+        assert_eq!(cov.shortfall[&author].reason, ShortfallReason::NoCandidates);
     }
 
     #[test]
     fn deterministic_ties_yield_same_plan_every_run() {
+        let authors = authors(2);
         let candidates = BTreeMap::from([
-            (pk('a'), write_list(&[5, 3])),
-            (pk('b'), write_list(&[5, 3])),
+            (authors[0], write_list(&[5, 3])),
+            (authors[1], write_list(&[5, 3])),
         ]);
         let input = || CoverageInput {
             candidates: candidates.clone(),

@@ -7,10 +7,6 @@ publish.workspace = true
 
 [dependencies]
 nostr.workspace = true
-nmp.workspace = true
 nmp-grammar.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
-nostr-relay-builder = "0.45.0-alpha.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

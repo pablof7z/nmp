@@ -22,8 +22,8 @@ use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, RelaySessionKey, SourceAuthority,
 };
 use nmp_router::{
-    AdvertisedRelayLimits, CompileBudget, DiscoveryKinds, FixtureDirectory, RelayUrl, Router,
-    RuleRegistry, WireOp,
+    AdvertisedRelayLimits, CompileBudget, FixtureRoutingFacts, RelayUrl, Router, RuleRegistry,
+    WireOp,
 };
 use nmp_store::coverage_key;
 
@@ -91,10 +91,7 @@ fn budget(max_subscriptions: Option<usize>) -> CompileBudget {
 }
 
 fn router() -> Router {
-    Router::new(
-        DiscoveryKinds::default(),
-        RuleRegistry::default_widen_only(),
-    )
+    Router::new(RuleRegistry::default_widen_only())
 }
 
 fn live_subs(router: &Router) -> usize {
@@ -109,7 +106,7 @@ fn live_subs(router: &Router) -> usize {
 /// number.
 #[test]
 fn an_unadvertised_relay_carries_every_subscription() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     let demand = unmergeable(30);
 
@@ -140,7 +137,7 @@ fn an_unadvertised_relay_carries_every_subscription() {
 /// one outcome this must never be.
 #[test]
 fn an_advertised_budget_refuses_the_excess_and_says_so() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     let demand = unmergeable(5);
 
@@ -179,7 +176,7 @@ fn an_advertised_budget_refuses_the_excess_and_says_so() {
 /// survived must — the plan and the delta agree.
 #[test]
 fn only_the_surviving_subscriptions_reach_the_wire() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
 
     let delta = r.compile(&unmergeable(5), &dir, budget(Some(2)));
@@ -199,7 +196,7 @@ fn only_the_surviving_subscriptions_reach_the_wire() {
 /// refused demand for another every recompile.
 #[test]
 fn a_bound_budget_does_not_churn_what_it_already_serves() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     let first = unmergeable(3);
     r.compile(&first, &dir, budget(Some(2)));
@@ -240,7 +237,7 @@ fn a_bound_budget_does_not_churn_what_it_already_serves() {
 /// same as it is with no budget at all.
 #[test]
 fn a_bound_budget_is_idempotent_across_recompiles() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     let demand = unmergeable(5);
     r.compile(&demand, &dir, budget(Some(2)));
@@ -254,7 +251,7 @@ fn a_bound_budget_is_idempotent_across_recompiles() {
 /// was 300 subscriptions and a budget would have dropped 280 of them.
 #[test]
 fn a_collapsed_catalog_of_three_hundred_stays_inside_a_budget_of_twenty() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
 
     r.compile(&collapsing(300), &dir, budget(Some(20)));
@@ -273,7 +270,7 @@ fn a_collapsed_catalog_of_three_hundred_stays_inside_a_budget_of_twenty() {
 /// ever remove, never rearrange.
 #[test]
 fn twenty_and_two_hundred_plan_the_same_realistic_catalog() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let demand = collapsing(300);
 
     let mut small = router();
@@ -300,7 +297,7 @@ fn twenty_and_two_hundred_plan_the_same_realistic_catalog() {
 /// is absent from the plan by construction.
 #[test]
 fn a_budget_of_zero_refuses_the_whole_session() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     let demand = unmergeable(3);
 
@@ -324,7 +321,7 @@ fn a_budget_of_zero_refuses_the_whole_session() {
 /// nothing would have noticed.
 #[test]
 fn a_subscription_id_length_below_ours_is_reported() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     let limits = |max_subid_length| {
         CompileBudget::with_relay_cap(RELAY_CAP).advertising(
@@ -364,7 +361,7 @@ fn a_subscription_id_length_below_ours_is_reported() {
 /// input is identity instability (`identity-grouping-and-limits.md` §6).
 #[test]
 fn advertised_limits_never_move_an_established_wire_id() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     let demand = collapsing(3);
 
@@ -408,7 +405,7 @@ fn advertised_limits_never_move_an_established_wire_id() {
 /// `limited` stop being limited and reach the wire.
 #[test]
 fn relaxing_the_budget_re_admits_the_refused_demand() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     let demand = unmergeable(5);
 
@@ -426,7 +423,7 @@ fn relaxing_the_budget_re_admits_the_refused_demand() {
 /// keeps saying exactly that.
 #[test]
 fn a_bare_relay_cap_is_still_a_whole_budget() {
-    let dir = FixtureDirectory::new();
+    let dir = FixtureRoutingFacts::new();
     let mut r = router();
     r.compile(&unmergeable(4), &dir, RELAY_CAP);
     assert_eq!(live_subs(&r), 4);

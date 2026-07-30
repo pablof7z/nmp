@@ -60,8 +60,8 @@ use nostr::{
 };
 
 use nmp_grammar::{
-    fold_byte, AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash,
-    Durability, Filter, Freshness, Identity, RelaySessionKey, RoutingEvidence, SourceAuthority,
+    fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash,
+    Durability, Freshness, Identity, RelaySessionKey, RoutingEvidence, SourceAuthority,
     WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
@@ -69,9 +69,8 @@ use nmp_resolver::{
     LocalAcceptResult, QueryHandle, RelayIngestError,
 };
 use nmp_router::{
-    AdvertisedRelayLimits, CompileBudget, DiscoveryKinds, Lane, LanedRelay, PubkeyHex,
-    RelayDirectory, RelayListKnowledge, RelayPlan, Router, RuleRegistry, SubId, WireDelta, WireOp,
-    WireReq,
+    AdvertisedRelayLimits, AuthorRouteState, AuthorRoutes, CompileBudget, RelayPlan, Router,
+    RoutingFacts, RuleRegistry, SubId, WireDelta, WireOp, WireReq,
 };
 use nmp_signer::SignerError;
 use nmp_store::{
@@ -107,6 +106,148 @@ const NIP77_LIVE_ROLE: u8 = 0x71;
 const NIP77_NEG_ROLE: u8 = 0x72;
 const NIP77_MISSING_ROLE: u8 = 0x73;
 const NIP77_FALLBACK_ROLE: u8 = 0x74;
+
+/// The engine's private, in-memory implementation of the router's read-only
+/// neutral fact view. There is no persistence door for `authors`, so
+/// session-derived absence necessarily returns to `Unknown` on restart.
+pub(crate) struct RoutingFactStore {
+    authors: BTreeMap<PublicKey, AuthorRouteState>,
+    operator_app: Vec<RelayUrl>,
+    operator_fallback: Vec<RelayUrl>,
+}
+
+impl RoutingFactStore {
+    pub(crate) fn new(
+        operator_app: impl IntoIterator<Item = RelayUrl>,
+        operator_fallback: impl IntoIterator<Item = RelayUrl>,
+    ) -> Self {
+        Self {
+            authors: BTreeMap::new(),
+            operator_app: operator_app.into_iter().collect(),
+            operator_fallback: operator_fallback.into_iter().collect(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn writer(&mut self) -> AuthorRouteWriter<'_> {
+        AuthorRouteWriter { facts: self }
+    }
+
+    pub(crate) fn from_fixture(fixture: nmp_router::FixtureRoutingFacts) -> Self {
+        let (authors, operator_app, operator_fallback) = fixture.into_parts();
+        Self {
+            authors,
+            operator_app,
+            operator_fallback,
+        }
+    }
+}
+
+impl Default for RoutingFactStore {
+    fn default() -> Self {
+        Self::new([], [])
+    }
+}
+
+impl RoutingFacts for RoutingFactStore {
+    fn author_routes(&self, author: &PublicKey) -> AuthorRouteState {
+        self.authors.get(author).cloned().unwrap_or_default()
+    }
+
+    fn operator_app_relays(&self) -> Vec<RelayUrl> {
+        self.operator_app.clone()
+    }
+
+    fn operator_fallback_relays(&self) -> Vec<RelayUrl> {
+        self.operator_fallback.clone()
+    }
+}
+
+/// The only values accepted by the private author-route mutation door.
+/// `Unknown` is intentionally absent: it is solely cold-start state.
+#[allow(dead_code)]
+pub(crate) enum AuthorRouteReplacement {
+    Present(AuthorRoutes),
+    Absent,
+}
+
+/// Borrowed, non-cloneable writer capability. One call replaces the complete
+/// directional fact, so no observer can see a mixed old/new pair.
+#[allow(dead_code)]
+pub(crate) struct AuthorRouteWriter<'a> {
+    facts: &'a mut RoutingFactStore,
+}
+
+impl AuthorRouteWriter<'_> {
+    #[allow(dead_code)]
+    pub(crate) fn replace(&mut self, author: PublicKey, replacement: AuthorRouteReplacement) {
+        let state = match replacement {
+            AuthorRouteReplacement::Present(routes) => AuthorRouteState::Present(routes),
+            AuthorRouteReplacement::Absent => AuthorRouteState::Absent,
+        };
+        self.facts.authors.insert(author, state);
+    }
+}
+
+#[cfg(test)]
+mod routing_fact_store_tests {
+    use super::*;
+    use nostr::Keys;
+
+    #[test]
+    fn one_write_replaces_both_directions_atomically() {
+        let author = Keys::generate().public_key();
+        let old_outbound = RelayUrl::parse("wss://old-outbound.example").unwrap();
+        let old_inbound = RelayUrl::parse("wss://old-inbound.example").unwrap();
+        let new_outbound = RelayUrl::parse("wss://new-outbound.example").unwrap();
+        let new_inbound = RelayUrl::parse("wss://new-inbound.example").unwrap();
+        let mut facts = RoutingFactStore::default();
+
+        facts.writer().replace(
+            author,
+            AuthorRouteReplacement::Present(AuthorRoutes::new([old_outbound], [old_inbound])),
+        );
+        facts.writer().replace(
+            author,
+            AuthorRouteReplacement::Present(AuthorRoutes::new(
+                [new_outbound.clone()],
+                [new_inbound.clone()],
+            )),
+        );
+
+        let AuthorRouteState::Present(routes) = facts.author_routes(&author) else {
+            panic!("replacement must remain positive knowledge");
+        };
+        assert_eq!(routes.outbound(), &BTreeSet::from([new_outbound]));
+        assert_eq!(routes.inbound(), &BTreeSet::from([new_inbound]));
+    }
+
+    #[test]
+    fn absence_is_memory_only_and_a_later_positive_record_wins() {
+        let author = Keys::generate().public_key();
+        let relay = RelayUrl::parse("wss://later-positive.example").unwrap();
+        let mut facts = RoutingFactStore::default();
+
+        facts
+            .writer()
+            .replace(author, AuthorRouteReplacement::Absent);
+        assert_eq!(facts.author_routes(&author), AuthorRouteState::Absent);
+
+        facts.writer().replace(
+            author,
+            AuthorRouteReplacement::Present(AuthorRoutes::new([relay.clone()], [])),
+        );
+        assert_eq!(
+            facts.author_routes(&author),
+            AuthorRouteState::Present(AuthorRoutes::new([relay], []))
+        );
+        assert_eq!(
+            RoutingFactStore::default().author_routes(&author),
+            AuthorRouteState::Unknown,
+            "a fresh process cannot inherit session-derived absence"
+        );
+    }
+}
 
 /// Derive the wire id for one NIP-77 role subscription, in the ENGINE's own
 /// per-connection wire-string namespace.
@@ -220,15 +361,6 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
     }
 }
 
-/// NIP-65 Relay List Metadata — the kind the self-bootstrapping outbox (M5)
-/// auto-discovers for any author the current demand references but whose
-/// write relays the directory doesn't know yet (see [`EngineCore::
-/// sync_discovery`]). Already a member of `nmp_router::DiscoveryKinds`'s
-/// default set, so the router routes this atom to the configured indexers
-/// with NO router-side changes of its own -- the same `build_candidates`
-/// eligibility check that already applies to kind:3/kind:0/kind:10050.
-const NIP65_RELAY_LIST_KIND: u16 = 10_002;
-
 pub use admission::RelayAdmissionPolicy;
 use attribution::{
     AttributionSendId, AttributionState, CompletedAttribution, CoveragePoison, EventFailureTarget,
@@ -242,7 +374,7 @@ pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 use observation::{ActiveRequestEvidence, ObservationExecutionState, PendingRequestEvidence};
 pub use observation::{
-    ObservationEvidence, ObservationFact, ResolutionCause, ResolvedBindingValue,
+    ObservationEvidence, ObservationFact, RequestTerminal, ResolutionCause, ResolvedBindingValue,
 };
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
@@ -706,6 +838,12 @@ pub enum Effect {
         invalidated: Vec<EventId>,
         published: Vec<CommittedObservationPublication>,
     },
+    /// The complete current set of public keys whose neutral author-route
+    /// provider is still needed. Most are `Unknown`; zero-destination writes
+    /// also retain settled zero-route contributors so a later positive
+    /// replacement can unpark them. This is a need declaration, never a
+    /// subscription; optional protocol assembly owns any exact query it opens.
+    AuthorRouteNeedsChanged(BTreeSet<PublicKey>),
     /// -> `Pool::send` per (relay, current handle).
     Wire(WireDelta),
     /// Reconnect: resend the current wire subs on the NEW generation of
@@ -1104,7 +1242,7 @@ struct PendingWrite {
     /// nothing, and an acked lane is terminal and untouched by any later
     /// resolution.
     durable_routes: BTreeSet<RelayUrl>,
-    /// False while resolution still holds unknowns. The queue rewriter
+    /// False while resolution still holds provider needs. The queue rewriter
     /// re-executes exactly the intents for which this is false, so a
     /// retired `Auto` costs nothing at every later moment.
     ///
@@ -1115,11 +1253,13 @@ struct PendingWrite {
     /// The park reason last emitted for this intent, so the routing park is
     /// idempotent across ticks and re-emitted only when it actually changes.
     route_detail: Option<String>,
-    /// The authors this intent's last resolution was still missing. Unioned
-    /// into `sync_discovery`'s needed set; re-derived on every resolution,
-    /// never persisted and never recovered — a crash simply re-resolves and
-    /// re-declares.
-    route_unknowns: BTreeSet<PubkeyHex>,
+    /// The authors whose route provider this intent's last resolution still
+    /// needs. This includes ordinary `Unknown` inputs and, when the complete
+    /// answer has zero destinations, settled zero-route inputs that must keep
+    /// discovery alive for a later positive replacement. Unioned into the
+    /// protocol-neutral needs set; re-derived on every resolution, never
+    /// persisted and never recovered.
+    route_needs: BTreeSet<PublicKey>,
 }
 
 /// A live, EngineCore-owned negentropy reconciliation in progress for
@@ -1213,7 +1353,7 @@ enum AuthSessionPhase {
 pub struct EngineCore<S: EventStore> {
     resolver: ResolverEngine<S>,
     router: Router,
-    directory: Box<dyn RelayDirectory>,
+    routing_facts: RoutingFactStore,
     cap: usize,
     handles: HashMap<HandleId, HandleState>,
     histories: HashMap<HistorySessionId, HistoryState>,
@@ -1386,60 +1526,6 @@ pub struct EngineCore<S: EventStore> {
     /// fetches and ordinary unlimited backlog fallbacks. The typed value
     /// determines the exact EOSE consequence; no boolean lifecycle flag.
     pending_backfills: HashMap<SubId, TemporaryReq>,
-    /// The self-bootstrapping outbox (M5): an internal, engine-owned
-    /// resolver subscription discovering kind:10002 for exactly the authors
-    /// current demand references but whose write relays are still unknown
-    /// (see [`Self::sync_discovery`]). `None` when no author currently needs
-    /// discovering. The app never sees this handle or this atom -- it rides
-    /// the SAME demand/atom/router machinery every other subscription does,
-    /// never a parallel subscription system.
-    discovery_handle: Option<QueryHandle>,
-    /// The exact author set `discovery_handle` (if any) is currently open
-    /// for -- compared against the freshly-computed "needed" set on every
-    /// `sync_discovery` call so the subscription is only replaced when the
-    /// set actually changes, not on every recompile.
-    discovery_authors: BTreeSet<PubkeyHex>,
-    /// Which relays have reached end-of-stored-events on a relay-list atom
-    /// covering each author, this session.
-    ///
-    /// The raw material for the ONE transition that mints
-    /// [`RelayListKnowledge::KnownAbsent`]: when every configured indexer has
-    /// EOSE'd for an author and no kind:10002 ever arrived, the engine holds
-    /// a positive, relay-attested fact -- "these sources have nothing" --
-    /// and caches it as a directory answer. Not a timeout, not a retry
-    /// budget, not a heuristic (`knowledge-and-settlement.md` §2).
-    ///
-    /// Session-scoped and never persisted, exactly like the absence it
-    /// derives: a restart re-probes rather than betting against the author's
-    /// own future publication.
-    relay_list_eose: BTreeMap<PubkeyHex, BTreeSet<RelayUrl>>,
-    /// The outstanding relay-list QUESTIONS: "this exact request, on this
-    /// exact relay, asks whether these authors have a kind:10002, and has not
-    /// been answered yet".
-    ///
-    /// Recorded at SEND time, from the filter that actually went on the wire,
-    /// and deliberately NOT read back off the router plan (#1019). The plan
-    /// describes what this engine is asking *now*; a question is about what it
-    /// asked *then*, and the two diverge constantly:
-    ///
-    /// - widening a discovery filter mints a new descriptor hash, so an
-    ///   in-flight REQ's answer names a [`SubId`] ordinary coalescing has
-    ///   already rewritten away;
-    /// - coalescing merges the discovery atom into a wider req (a
-    ///   `kinds:{3,10002}` req is routine), so "is this the relay-list req?"
-    ///   was never an equality test on `kinds`;
-    /// - on a NIP-77 relay the plan's req is never sent as an ordinary REQ at
-    ///   all — it becomes a `limit:0` barrier plus a negentropy session, and
-    ///   the answer arrives as NEG-DONE rather than as EOSE.
-    ///
-    /// [`SubId`] already embeds `(RelayUrl, hash, AccessContext)`, so this map
-    /// is relay- and session-scoped without a compound key. A question is
-    /// discharged by exactly one terminal signal for that request (EOSE, or
-    /// negentropy completion, deferred to its backfill's EOSE when
-    /// reconciliation proved ids were missing), and forgotten when the request
-    /// leaves the wire unanswered — an abandoned question settles NOTHING,
-    /// because "nowhere to ask" must never read as "asked, nothing there".
-    relay_list_asks: BTreeMap<SubId, BTreeSet<PubkeyHex>>,
     /// The diagnostic surface's own counter (M5 plan §1.2 step 1) — events
     /// actually RECEIVED, per SESSION per kind. Bumped in the
     /// `RelayMessage::Event` arms of `on_relay_frame`/`on_relay_frames`;
@@ -1462,17 +1548,15 @@ pub struct EngineCore<S: EventStore> {
     /// `Self::on_event_handoff`.
     attempt_correlations: HashMap<AttemptCorrelation, AttemptCorrelationTarget>,
     /// The provenance-aware relay admission policy for DISCOVERED relays
-    /// (issue #121). Applied in [`Self::ingest_relay_list_winner`], the one
-    /// choke point where a kind:10002 winner's relays become routable lanes.
+    /// (issue #121). Protocol components consult it before replacing neutral
+    /// author routes.
     /// Defaults to the secure policy (reject every discovered private/
     /// loopback/onion host); production threads the operator's opt-in local
     /// allowlist via [`Self::with_relay_admission`].
     admission: RelayAdmissionPolicy,
-    /// Monotonic count of DISCOVERED relay-lane rejections by `admission`
-    /// before they could become router candidates (issues #121/#11).
-    /// Kind:10002 is counted PER LANE: write and read sets are filtered
-    /// separately, so one hostile event naming `N` rejected hosts bumps this
-    /// by up to `2N`. Selector-projected facts count once when a rejected
+    /// Monotonic count of discovered route rejections by `admission` before
+    /// they could become router candidates (issues #121/#11).
+    /// Selector-projected facts count once when a rejected
     /// `(selection, evidence)` first enters current demand, not again on an
     /// unchanged recompile. Surfaced in
     /// [`DiagnosticsSnapshot::discovered_private_relays_rejected`]; the
@@ -1545,14 +1629,32 @@ struct AttemptCorrelationTarget {
 struct AttemptCorrelationExhausted;
 
 impl<S: EventStore> EngineCore<S> {
-    pub fn new(store: S, directory: Box<dyn RelayDirectory>, cap: usize) -> Self {
+    pub fn new(store: S, cap: usize) -> Self {
+        Self::new_with_routing_facts(store, RoutingFactStore::default(), cap)
+    }
+
+    /// Construct a headless reducer over a static fact snapshot.
+    ///
+    /// This exists for deterministic falsifiers. Production assembly owns
+    /// the private mutable fact store and uses [`Self::new`].
+    #[doc(hidden)]
+    pub fn new_with_fixture_routing_facts(
+        store: S,
+        facts: nmp_router::FixtureRoutingFacts,
+        cap: usize,
+    ) -> Self {
+        Self::new_with_routing_facts(store, RoutingFactStore::from_fixture(facts), cap)
+    }
+
+    pub(crate) fn new_with_routing_facts(
+        store: S,
+        routing_facts: RoutingFactStore,
+        cap: usize,
+    ) -> Self {
         Self {
             resolver: ResolverEngine::new(store),
-            router: Router::new(
-                DiscoveryKinds::default(),
-                RuleRegistry::default_widen_only(),
-            ),
-            directory,
+            router: Router::new(RuleRegistry::default_widen_only()),
+            routing_facts,
             cap,
             handles: HashMap::new(),
             histories: HashMap::new(),
@@ -1589,10 +1691,6 @@ impl<S: EventStore> EngineCore<S> {
             pending_neg_handoffs: HashMap::new(),
             neg_sessions: HashMap::new(),
             pending_backfills: HashMap::new(),
-            discovery_handle: None,
-            discovery_authors: BTreeSet::new(),
-            relay_list_eose: BTreeMap::new(),
-            relay_list_asks: BTreeMap::new(),
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
@@ -1614,6 +1712,28 @@ impl<S: EventStore> EngineCore<S> {
             #[cfg(test)]
             history_affected_row_queries: Cell::new(0),
         }
+    }
+
+    /// The sole neutral author-route mutation door. Replacement and the
+    /// resulting Auto-write wake happen in one reducer turn.
+    #[allow(dead_code)]
+    pub(crate) fn replace_author_routes(
+        &mut self,
+        author: PublicKey,
+        replacement: AuthorRouteReplacement,
+        effects: &mut Vec<Effect>,
+    ) {
+        let before = self.routing_facts.author_routes(&author);
+        self.routing_facts.writer().replace(author, replacement);
+        if self.routing_facts.author_routes(&author) != before {
+            self.recompile(effects);
+            self.rewrite_open_routes(effects);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn admits_discovered_route(&self, relay: &RelayUrl) -> bool {
+        self.admission.admits_discovered(relay)
     }
 
     /// Thread the operator's discovered-relay admission policy through
@@ -2470,52 +2590,6 @@ fn effective_row_limit(root_atoms: &BTreeSet<ConcreteFilter>) -> Option<usize> {
 fn nip01_newest_first(a: (u64, &EventId), b: (u64, &EventId)) -> std::cmp::Ordering {
     b.0.cmp(&a.0)
         .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
-}
-
-/// Parse NIP-65 `r` tags off a kind:10002 event into its WRITE relay set
-/// (lane `Nip65Write`): an absent marker or an explicit `"write"` marker is
-/// a write relay; an explicit `"read"` marker is excluded. Mirrors
-/// `nmp-demo`'s former one-shot bootstrap parse exactly (the same NIP-65
-/// semantics), now run reactively per event instead of once up front.
-fn parse_nip65_write_relays(event: &nostr::Event) -> Vec<LanedRelay> {
-    event
-        .tags
-        .iter()
-        .filter_map(|t| {
-            let s = t.as_slice();
-            if s.first().map(String::as_str) != Some("r") {
-                return None;
-            }
-            let url = RelayUrl::parse(s.get(1)?).ok()?;
-            match s.get(2).map(String::as_str) {
-                Some("read") => None,
-                _ => Some(LanedRelay::new(url, Lane::Nip65Write)),
-            }
-        })
-        .collect()
-}
-
-/// Parse NIP-65 `r` tags off a kind:10002 event into its READ relay set
-/// (lane `Nip65Read`): the mirror of `parse_nip65_write_relays` -- an
-/// absent marker or an explicit `"read"` marker is a read relay; an
-/// explicit `"write"` marker is excluded (`routing-and-ownership.md` §2.4 --
-/// an unmarked `r` tag counts as BOTH read and write, per NIP-65).
-fn parse_nip65_read_relays(event: &nostr::Event) -> Vec<LanedRelay> {
-    event
-        .tags
-        .iter()
-        .filter_map(|t| {
-            let s = t.as_slice();
-            if s.first().map(String::as_str) != Some("r") {
-                return None;
-            }
-            let url = RelayUrl::parse(s.get(1)?).ok()?;
-            match s.get(2).map(String::as_str) {
-                Some("write") => None,
-                _ => Some(LanedRelay::new(url, Lane::Nip65Read)),
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

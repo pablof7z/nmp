@@ -38,7 +38,7 @@ use nmp_grammar::{
 };
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, MemoryStore,
     RedbStore, RedbStoreResetError, RelayObserved, WriteDurability,
@@ -127,7 +127,8 @@ fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
         listener.local_addr().expect("capture relay address")
     ))
     .expect("parse capture relay URL");
-    let author = Keys::generate().public_key().to_hex();
+    let author_key = Keys::generate().public_key();
+    let author = author_key.to_hex();
     let selection = Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Literal(BTreeSet::from([author.clone()]))),
@@ -155,8 +156,8 @@ fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
             ),
         )])
         .expect("seed stale coverage");
-    let directory = FixtureDirectory::new().with_write(author, std::iter::once(relay.clone()));
-    let (engine_thread, handle) = EngineThread::spawn(
+    let directory = FixtureRoutingFacts::new().with_outbound_routes(author_key, [relay.clone()]);
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         store,
         directory,
         10,
@@ -208,7 +209,6 @@ fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
     let store = RedbStore::open(&path).unwrap();
     let (engine_thread, handle) = EngineThread::spawn(
         store,
-        FixtureDirectory::new(),
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
@@ -335,11 +335,11 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         .await
         .expect("seed b's post into relay_a");
 
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [url.clone()])
-        .with_write(b.public_key().to_hex(), [url.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [url.clone()])
+        .with_outbound_routes(b.public_key(), [url.clone()]);
 
-    let (engine_thread, handle) = EngineThread::spawn(
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         MemoryStore::new(),
         dir,
         10,
@@ -514,7 +514,6 @@ fn process_cpu_time() -> Duration {
 fn no_deadlines_blocks_indefinitely() {
     let (engine_thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
@@ -743,11 +742,11 @@ fn neg_liveness_deadline_does_not_busy_spin() {
     let stub = thread::spawn(move || run_uncooperative_neg_relay(listener, seed, frames_tx));
 
     let url = RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("parse stub relay url");
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [url.clone()])
-        .with_write(b.public_key().to_hex(), [url]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [url.clone()])
+        .with_outbound_routes(b.public_key(), [url]);
 
-    let (engine_thread, handle) = EngineThread::spawn(
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         MemoryStore::new(),
         dir,
         10,
@@ -862,8 +861,8 @@ async fn expiring_event_retracts_with_no_further_input() {
     relay.run().await.expect("run relay");
     let url = RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [url.clone()]);
-    let (engine_thread, handle) = EngineThread::spawn(
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [url.clone()]);
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         MemoryStore::new(),
         dir,
         10,
@@ -930,8 +929,8 @@ async fn earlier_expiration_from_ingest_rearms() {
     relay.run().await.expect("run relay");
     let url = RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [url.clone()]);
-    let (engine_thread, handle) = EngineThread::spawn(
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [url.clone()]);
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         MemoryStore::new(),
         dir,
         10,
@@ -1043,8 +1042,8 @@ fn boot_catches_up_past_due_expiry() {
 
     // ---- "restart": reopen the SAME file, spawn a fresh engine thread ----
     let store = RedbStore::open(&db_path).expect("reopen redb store (boot phase)");
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0]);
-    let (engine_thread, handle) = EngineThread::spawn(
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0]);
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         store,
         dir,
         10,
@@ -1173,7 +1172,6 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     let keys = Keys::generate();
     let (thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
@@ -1262,7 +1260,6 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
         CorrelationToken::try_from("runtime-retry-isolation").expect("bounded fixture token");
     let (thread, handle) = EngineThread::spawn(
         MemoryStore::new(),
-        FixtureDirectory::new(),
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
@@ -1385,7 +1382,6 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
     };
     let (thread, handle) = EngineThread::spawn(
         RedbStore::open(&path).unwrap(),
-        FixtureDirectory::new(),
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),

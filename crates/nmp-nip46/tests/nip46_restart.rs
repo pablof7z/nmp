@@ -14,7 +14,7 @@ use nmp::mechanism::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, R
 use nmp_grammar::{Binding, Durability, Filter, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_nip46::Nip46Signer;
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, RedbStore, RelayObserved, SigState};
 use nmp_transport::PoolConfig;
 use nostr::nips::nip44;
@@ -308,8 +308,9 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
     let path = tmp.path().join("nip46-restart.redb");
     let (signer_relay, remote, user) = spawn_signer_relay(false, None);
     let (write_relay, published) = spawn_write_relay();
-    let directory =
-        || FixtureDirectory::new().with_write(user.public_key().to_hex(), [write_relay.clone()]);
+    let directory = || {
+        FixtureRoutingFacts::new().with_outbound_routes(user.public_key(), [write_relay.clone()])
+    };
     let unsigned = UnsignedEvent::new(
         user.public_key(),
         Timestamp::from(1_700_000_046),
@@ -326,7 +327,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
     );
 
     let receipt_id = {
-        let (engine, handle) = EngineThread::spawn(
+        let (engine, handle) = EngineThread::spawn_with_fixture_routing_facts(
             RedbStore::open(&path).unwrap(),
             directory(),
             10,
@@ -365,7 +366,7 @@ fn offline_accept_restart_real_bunker_reattach_publish_and_ack() {
     );
     drop(store);
 
-    let (engine, handle) = EngineThread::spawn(
+    let (engine, handle) = EngineThread::spawn_with_fixture_routing_facts(
         RedbStore::open(&path).unwrap(),
         directory(),
         10,
@@ -462,7 +463,6 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
 
     let (engine, handle) = EngineThread::spawn(
         store,
-        FixtureDirectory::new(),
         10,
         PoolConfig::default(),
         RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
@@ -542,8 +542,9 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
     let user = Keys::generate();
     let (signer_relay, seen) = spawn_multi_session_signer_relay(remote.clone(), user.clone());
     let (write_relay, published) = spawn_write_relay();
-    let directory =
-        || FixtureDirectory::new().with_write(user.public_key().to_hex(), [write_relay.clone()]);
+    let directory = || {
+        FixtureRoutingFacts::new().with_outbound_routes(user.public_key(), [write_relay.clone()])
+    };
     let unsigned = UnsignedEvent::new(
         user.public_key(),
         Timestamp::from(1_700_000_060),
@@ -575,7 +576,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
 
     // Phase 1: the durable write is accepted while no signer is attached.
     let receipt_id = {
-        let (engine, handle) = EngineThread::spawn(
+        let (engine, handle) = EngineThread::spawn_with_fixture_routing_facts(
             RedbStore::open(&path).unwrap(),
             directory(),
             10,
@@ -620,7 +621,7 @@ fn checkpoint_restore_reattaches_durable_write_without_repairing() {
 
     // Phase 2: close/reopen in a fresh engine and reattach the parked
     // receipt -- still no signer attached.
-    let (engine, handle) = EngineThread::spawn(
+    let (engine, handle) = EngineThread::spawn_with_fixture_routing_facts(
         RedbStore::open(&path).unwrap(),
         directory(),
         10,

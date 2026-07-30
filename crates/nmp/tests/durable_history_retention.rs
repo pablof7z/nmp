@@ -11,7 +11,6 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, SourceAuthority,
 };
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
 use nmp_store::{coverage_key, CoverageInterval, EventStore, RedbStore, RelayObserved};
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, Filter, Keys, Kind, RelayUrl, Timestamp};
@@ -110,7 +109,6 @@ fn bounded_runtime_working_sets_do_not_delete_default_durable_history() {
         let store = RedbStore::open(&path).expect("ordinary engine startup");
         let (engine_thread, handle) = EngineThread::spawn(
             store,
-            FixtureDirectory::new(),
             10,
             PoolConfig::default(),
             RelayAdmissionPolicy::default(),

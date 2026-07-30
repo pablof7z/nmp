@@ -36,15 +36,11 @@ pub(super) const EMPTY_EXPLICIT_ROUTE: &str =
 /// (`docs/internals/routing/outbox.md` §6.2).
 const COVERAGE_MIN: usize = 2;
 
-/// Which half of a contributing author's NIP-65 list an outbox derivation
-/// wants. The author fans out to their own WRITE relays; a p-tagged
-/// recipient is reached at their INBOX, which is their READ relays and never
-/// their write set (`crates/nmp-router/src/facts.rs`'s `read_relays` doc
-/// states this as the contract).
+/// Which neutral direction one contributing public key uses.
 #[derive(Debug, Clone, Copy)]
-enum RelayRole {
-    Write,
-    Read,
+enum RouteDirection {
+    Outbound,
+    Inbound,
 }
 
 /// One execution of a routing strategy: what it can reach RIGHT NOW, what it
@@ -63,11 +59,12 @@ pub(super) struct RouteAnswer {
     /// durable revision union by the caller, so re-running a resolution that
     /// learned nothing costs an empty diff and mints no lane.
     pub(super) relays: BTreeSet<RelayUrl>,
-    /// The authors whose relay lists are still `Unknown`. These are the
-    /// declared NEEDS: stateless, re-derived every pass, and unioned into
-    /// `sync_discovery`'s needed set so ten parked writes wanting one
-    /// recipient cost one discovery entry.
-    pub(super) unknown_authors: BTreeSet<PubkeyHex>,
+    /// The public keys whose neutral author-route provider must remain live.
+    /// Usually these are `Unknown`; a zero-destination answer also retains
+    /// its settled contributors because a later positive replacement is the
+    /// only fact that can unpark it. These stateless declared needs are
+    /// re-derived every pass and unioned across all parked writes.
+    pub(super) author_route_needs: BTreeSet<PublicKey>,
     /// True iff nothing is left to learn, so re-executing is pointless and
     /// the `Auto` retires.
     pub(super) complete: bool,
@@ -82,7 +79,7 @@ pub(super) struct RouteAnswer {
 /// against is frozen for the life of the intent — which is the other half of
 /// why retirement is reachable at all (the answer cannot be reopened by a tag
 /// that was never in the event).
-fn p_tagged_authors(event: &SignedEvent) -> BTreeSet<PubkeyHex> {
+fn p_tagged_authors(event: &SignedEvent) -> BTreeSet<PublicKey> {
     event
         .tags
         .iter()
@@ -91,7 +88,7 @@ fn p_tagged_authors(event: &SignedEvent) -> BTreeSet<PubkeyHex> {
             let ("p", Some(value)) = (slice.first()?.as_str(), slice.get(1)) else {
                 return None;
             };
-            PublicKey::parse(value).ok().map(|pk| pk.to_hex())
+            PublicKey::parse(value).ok()
         })
         .collect()
 }
@@ -99,10 +96,10 @@ fn p_tagged_authors(event: &SignedEvent) -> BTreeSet<PubkeyHex> {
 /// The park reason for a resolution still holding unknowns. Names WHO is
 /// missing, because "stuck because X" is the only thing an app or a person
 /// can act on, and a bare "stuck" is barely better than losing the write.
-fn unresolved_detail(unknown: &BTreeSet<PubkeyHex>) -> String {
-    let mut names = unknown.iter().cloned().collect::<Vec<_>>();
+fn unresolved_detail(unknown: &BTreeSet<PublicKey>) -> String {
+    let mut names = unknown.iter().map(PublicKey::to_hex).collect::<Vec<_>>();
     names.sort();
-    format!("no relay list known yet for {}", names.join(", "))
+    format!("author routes are Unknown for {}", names.join(", "))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1089,7 +1086,7 @@ impl<S: EventStore> EngineCore<S> {
                     durable_routes: BTreeSet::new(),
                     route_complete: false,
                     route_detail: None,
-                    route_unknowns: BTreeSet::new(),
+                    route_needs: BTreeSet::new(),
                 },
             );
             self.intent_receipts.insert(intent.intent_id, id);
@@ -1164,7 +1161,7 @@ impl<S: EventStore> EngineCore<S> {
                     // from the journal, they were simply re-derived by the
                     // resolution above. That is what makes a crash cost a
                     // declared need nothing.
-                    pending.route_unknowns = answer.unknown_authors;
+                    pending.route_needs = answer.author_route_needs;
                     pending.route_detail = answer.detail;
                 }
             }
@@ -2111,7 +2108,7 @@ impl<S: EventStore> EngineCore<S> {
                 durable_routes: BTreeSet::new(),
                 route_complete: false,
                 route_detail: None,
-                route_unknowns: BTreeSet::new(),
+                route_needs: BTreeSet::new(),
             },
         );
         // `intent_id` is `None` only for Ephemeral, which never owns a
@@ -2671,7 +2668,7 @@ impl<S: EventStore> EngineCore<S> {
             .entry(event.id)
             .or_default()
             .insert(id);
-        let needs_before = self.route_unknown_authors();
+        let needs_before = self.author_route_needs();
         self.apply_route_answer(id, intent_id, answer, effects);
         self.resync_route_needs(needs_before, effects);
     }
@@ -2908,7 +2905,7 @@ impl<S: EventStore> EngineCore<S> {
     /// Execute a routing STRATEGY against what the engine knows right now.
     ///
     /// This runs on the SEND path — first attempt, boot recovery, engine
-    /// tick, relay-list ingest — never at compose time, so a write that parks
+    /// tick, author-route replacement — never at compose time, so a write that parks
     /// while offline is resolved against the directory as it stands when it
     /// finally goes out, not as it stood when the app called `publish`.
     ///
@@ -2921,13 +2918,10 @@ impl<S: EventStore> EngineCore<S> {
     /// it.
     ///
     /// `Auto` runs the built-in outbox derivation
-    /// (`docs/internals/routing/outbox.md` §4): the author's own NIP-65
-    /// WRITE relays, the operator's app relays (every kind, every author,
-    /// always, additive), and each p-tagged recipient's NIP-65 READ relays —
-    /// their inbox, never their write set. Each contributing author is
-    /// consulted through the directory's three-valued answer, so a settled
-    /// `KnownAbsent` contributes nothing and BLOCKS nothing while an
-    /// `Unknown` keeps the obligation alive and declares the need.
+    /// (`docs/internals/routing/outbox.md` §4): the event author's neutral
+    /// outbound relays, operator app relays, and every tagged public key's
+    /// neutral inbound relays. A settled `Absent` contributes nothing and
+    /// blocks nothing; `Unknown` keeps the obligation live.
     ///
     /// `Explicit` never consults the directory at all: the answer is exactly
     /// the relays the caller named, nothing here adds to them, and it has no
@@ -2949,7 +2943,7 @@ impl<S: EventStore> EngineCore<S> {
                 // Verbatim execution reads nothing, so nothing can still be
                 // unlearned. An accepted `Explicit` is complete the instant
                 // it resolves, before any relay is contacted.
-                unknown_authors: BTreeSet::new(),
+                author_route_needs: BTreeSet::new(),
                 complete: !relays.is_empty(),
                 detail: relays.is_empty().then(|| EMPTY_EXPLICIT_ROUTE.to_string()),
             },
@@ -2966,12 +2960,14 @@ impl<S: EventStore> EngineCore<S> {
         //    its author has, and one relay of my own is a fact about where I
         //    publish rather than a deficit to repair — so the author's own
         //    thinness never arms the top-up below.
-        let author = event.pubkey.to_hex();
-        self.contribute(&author, RelayRole::Write, &mut answer);
+        let author = event.pubkey;
+        self.contribute(&author, RouteDirection::Outbound, &mut answer);
 
         // 2. app relays: every kind, every author, always, additive, and
         //    never counted toward the coverage minimum.
-        answer.relays.extend(self.directory.app_relays());
+        answer
+            .relays
+            .extend(self.routing_facts.operator_app_relays());
 
         // 3. each p-tagged recipient's INBOX (read relays, never write).
         let recipients = p_tagged_authors(event);
@@ -2981,7 +2977,7 @@ impl<S: EventStore> EngineCore<S> {
             // topping up on ignorance would widen every route the first time
             // it runs and then never narrow it. An unknown keeps the
             // resolution open, and the top-up is decided again when it lands.
-            if let Some(reach) = self.contribute(recipient, RelayRole::Read, &mut answer) {
+            if let Some(reach) = self.contribute(recipient, RouteDirection::Inbound, &mut answer) {
                 thin_recipient |= reach < COVERAGE_MIN;
             }
         }
@@ -2991,11 +2987,13 @@ impl<S: EventStore> EngineCore<S> {
         // coverage falls under the 2-relay minimum AND no app relay is
         // configured (`app_relays` suppresses fallback entirely, without
         // itself counting as coverage). The failure this closes is a reply to
-        // someone whose kind:10002 lists exactly one relay reaching nowhere
+        // someone whose inbound route fact names exactly one relay reaching nowhere
         // else when that relay is down; the addressee is who the minimum is
         // about.
-        if thin_recipient && self.directory.app_relays().is_empty() {
-            answer.relays.extend(self.directory.fallback_relays());
+        if thin_recipient && self.routing_facts.operator_app_relays().is_empty() {
+            answer
+                .relays
+                .extend(self.routing_facts.operator_fallback_relays());
         }
 
         if answer.relays.is_empty() {
@@ -3004,25 +3002,25 @@ impl<S: EventStore> EngineCore<S> {
             // "we know where this goes" — and the difference is load-bearing:
             // a retired route is never re-executed, so calling this complete
             // would strand the write permanently the moment its author's
-            // relay list settled absent, which is the very defect this design
+            // author routes settled absent, which is the very defect this design
             // exists to remove.
             //
             // Every contributing author is therefore still declared as a
             // need, settled or not: with nothing else to go on, the author's
-            // (or a recipient's) relay list appearing later is the ONLY thing
+            // (or a tagged key's) routes appearing later is the ONLY thing
             // that can unpark this write, so discovery must keep covering
             // them rather than tearing down on a settlement that produced no
             // destination. Nothing auto-abandons.
             answer.detail = Some(self.no_destination_detail(&author, &recipients));
-            answer.unknown_authors.insert(author);
-            answer.unknown_authors.extend(recipients);
+            answer.author_route_needs.insert(author);
+            answer.author_route_needs.extend(recipients);
             answer.complete = false;
             return answer;
         }
 
-        answer.complete = answer.unknown_authors.is_empty();
+        answer.complete = answer.author_route_needs.is_empty();
         if !answer.complete {
-            answer.detail = Some(unresolved_detail(&answer.unknown_authors));
+            answer.detail = Some(unresolved_detail(&answer.author_route_needs));
         }
         answer
     }
@@ -3036,27 +3034,27 @@ impl<S: EventStore> EngineCore<S> {
     /// unknown recipient has no coverage to be short of yet.
     fn contribute(
         &self,
-        author: &PubkeyHex,
-        role: RelayRole,
+        author: &PublicKey,
+        direction: RouteDirection,
         answer: &mut RouteAnswer,
     ) -> Option<usize> {
-        match self.directory.relay_list_knowledge(author) {
-            RelayListKnowledge::Known => {
-                let laned = match role {
-                    RelayRole::Write => self.directory.write_relays(author),
-                    RelayRole::Read => self.directory.read_relays(author),
+        match self.routing_facts.author_routes(author) {
+            AuthorRouteState::Present(routes) => {
+                let relays = match direction {
+                    RouteDirection::Outbound => routes.outbound(),
+                    RouteDirection::Inbound => routes.inbound(),
                 };
-                answer.relays.extend(laned.iter().map(|lr| lr.url.clone()));
-                Some(laned.len())
+                answer.relays.extend(relays.iter().cloned());
+                Some(relays.len())
             }
             // Settled: this input is RESOLVED, contributing nothing. It does
             // not block retirement -- that is exactly what makes the owner's
             // three-p-tag example reachable.
-            RelayListKnowledge::KnownAbsent => Some(0),
+            AuthorRouteState::Absent => Some(0),
             // Not looked up to completion. Declare the need and keep the
-            // obligation alive; the engine folds it into `sync_discovery`.
-            RelayListKnowledge::Unknown => {
-                answer.unknown_authors.insert(author.clone());
+            // obligation alive; the engine emits it as a neutral route need.
+            AuthorRouteState::Unknown => {
+                answer.author_route_needs.insert(*author);
                 None
             }
         }
@@ -3069,56 +3067,62 @@ impl<S: EventStore> EngineCore<S> {
     /// "Stuck" and "stuck because X" are different messages and only the
     /// second one can be acted on — and here every clause doubles as a way to
     /// fix it, because configuring any single one of them would have produced
-    /// a route. It also keeps the two shapes of nothing apart: a relay list
-    /// that discovery settled as ABSENT is a final answer, while one nobody
-    /// has finished looking up is merely young, and an operator reading
+    /// a route. It also keeps the two shapes of nothing apart: an author fact
+    /// that a protocol coordinator settled as ABSENT is a final answer,
+    /// while one nobody has finished looking up is merely young, and an operator reading
     /// "absent" knows waiting will not help.
     fn no_destination_detail(
         &self,
-        author: &PubkeyHex,
-        recipients: &BTreeSet<PubkeyHex>,
+        author: &PublicKey,
+        recipients: &BTreeSet<PublicKey>,
     ) -> String {
-        let mut parts = vec![self.exhausted_source(author, RelayRole::Write)];
+        let mut parts = vec![self.exhausted_source(author, RouteDirection::Outbound)];
         parts.extend(
             recipients
                 .iter()
-                .map(|recipient| self.exhausted_source(recipient, RelayRole::Read)),
+                .map(|recipient| self.exhausted_source(recipient, RouteDirection::Inbound)),
         );
-        if self.directory.app_relays().is_empty() {
+        if self.routing_facts.operator_app_relays().is_empty() {
             parts.push("no app relays are configured".to_string());
         }
-        if self.directory.fallback_relays().is_empty() {
+        if self.routing_facts.operator_fallback_relays().is_empty() {
             parts.push("no fallback relays are configured".to_string());
         }
         format!("no destination could be determined: {}", parts.join("; "))
     }
 
     /// One contributing author's clause of [`Self::no_destination_detail`].
-    fn exhausted_source(&self, author: &PubkeyHex, role: RelayRole) -> String {
-        match self.directory.relay_list_knowledge(author) {
-            RelayListKnowledge::Known => match role {
-                RelayRole::Write => format!("the relay list for {author} names no write relay"),
-                RelayRole::Read => format!("the relay list for {author} names no read relay"),
+    fn exhausted_source(&self, author: &PublicKey, direction: RouteDirection) -> String {
+        let state = self.routing_facts.author_routes(author);
+        let author = author.to_hex();
+        match state {
+            AuthorRouteState::Present(_) => match direction {
+                RouteDirection::Outbound => {
+                    format!("Present outbound routes for {author} are empty")
+                }
+                RouteDirection::Inbound => {
+                    format!("Present inbound routes for {author} are empty")
+                }
             },
-            RelayListKnowledge::KnownAbsent => format!("no relay list exists for {author}"),
-            RelayListKnowledge::Unknown => format!("no relay list known yet for {author}"),
+            AuthorRouteState::Absent => format!("author routes are Absent for {author}"),
+            AuthorRouteState::Unknown => format!("author routes are Unknown for {author}"),
         }
     }
 
-    /// Every author the OPEN intents are still missing a relay list for —
-    /// the write plane's contribution to `sync_discovery`'s needed set.
+    /// Every public key the open intents still need neutral author routes for.
     ///
-    /// Read straight off reducer memory (`route_unknowns`, refreshed by the
+    /// Read straight off reducer memory (`route_needs`, refreshed by the
     /// last resolution of each intent), so a discovery pass costs no store
     /// read and N intents wanting the same author collapse to one entry by
-    /// set union. Nothing here is recovered from the journal: a restart
+    /// set union. An optional protocol assembly may turn this set into an
+    /// exact query. Nothing here is recovered from the journal: a restart
     /// re-resolves every open intent and re-declares whatever is still
-    /// missing, which is why declared needs have no durability story to lose.
-    pub(super) fn route_unknown_authors(&self) -> BTreeSet<PubkeyHex> {
+    /// needed, which is why declared needs have no durability story to lose.
+    pub(super) fn author_route_needs(&self) -> BTreeSet<PublicKey> {
         self.pending
             .values()
             .filter(|pending| !pending.route_complete)
-            .flat_map(|pending| pending.route_unknowns.iter().cloned())
+            .flat_map(|pending| pending.route_needs.iter().copied())
             .collect()
     }
 
@@ -3214,7 +3218,7 @@ impl<S: EventStore> EngineCore<S> {
                 pending.durable_routes != union || pending.route_complete != answer.complete;
             pending.durable_routes = union.clone();
             pending.route_complete = answer.complete;
-            pending.route_unknowns = answer.unknown_authors.clone();
+            pending.route_needs = answer.author_route_needs.clone();
             changed
         };
 
@@ -3282,13 +3286,10 @@ impl<S: EventStore> EngineCore<S> {
     /// Moment 3/4 of the lifecycle (`resolution-lifecycle.md` §5): re-execute
     /// every intent whose routing is not yet complete.
     ///
-    /// Called from the engine tick (the safety net — a kind:10002 ingested
-    /// for a completely unrelated reason is consulted with no wiring between
-    /// the read path and the write path) and immediately after a relay-list
-    /// ingest or a discovery settlement (the latency path — a parked write
-    /// unparks within the same ingestion turn rather than waiting for a
-    /// tick). The two overlap by design; because resolution is
-    /// diff-and-append, running "too often" is free.
+    /// Called from the engine tick as a safety net and immediately after a
+    /// private author-route replacement as the latency path. The two overlap
+    /// by design; because resolution is diff-and-append, running "too often"
+    /// is free.
     pub(super) fn rewrite_open_routes(&mut self, effects: &mut Vec<Effect>) {
         let open = self
             .pending
@@ -3301,7 +3302,7 @@ impl<S: EventStore> EngineCore<S> {
         if open.is_empty() {
             return;
         }
-        let before = self.route_unknown_authors();
+        let before = self.author_route_needs();
         for id in open {
             self.rewrite_route(id, effects);
             self.close_if_all_lanes_terminal(id);
@@ -3309,23 +3310,18 @@ impl<S: EventStore> EngineCore<S> {
         self.resync_route_needs(before, effects);
     }
 
-    /// Put the write plane's declared needs in front of the query system when
-    /// -- and only when -- they actually changed.
+    /// Publish a changed neutral author-route need set.
     ///
-    /// A need is not a subscription: it is an entry in the set
-    /// `sync_discovery` already computes, so publishing the change is just a
-    /// recompile. That is the whole of "resolvers declare needs and the
-    /// ENGINE drives the query": there is no other door here for a routing
-    /// strategy to reach the network through, and nothing for one to misuse.
-    /// Recompiling only on a real change keeps a tick that learned nothing
-    /// free.
+    /// A need is not a subscription. Optional protocol assembly reads this
+    /// neutral set and owns any exact query it opens.
     pub(super) fn resync_route_needs(
         &mut self,
-        before: BTreeSet<PubkeyHex>,
+        before: BTreeSet<PublicKey>,
         effects: &mut Vec<Effect>,
     ) {
-        if self.route_unknown_authors() != before {
-            self.recompile(effects);
+        let current = self.author_route_needs();
+        if current != before {
+            effects.push(Effect::AuthorRouteNeedsChanged(current));
         }
     }
 

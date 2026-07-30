@@ -90,12 +90,7 @@ impl<S: EventStore> EngineCore<S> {
         #[cfg(test)]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
-        let mut demand = self.wire_demand();
-        self.sync_discovery(&demand, effects);
-        // `sync_discovery` may replace the internal discovery handle. Re-read
-        // the immutable handle union so that new/withdrawn discovery work is
-        // reflected in this same compile.
-        demand = self.wire_demand();
+        let demand = self.wire_demand();
         self.attribution.observe_demand(demand.iter());
         // Finding E3 (epic #507): prune `shape_by_key` against the SAME
         // `demand` just observed above, plus every key still `absorbed` by
@@ -107,11 +102,9 @@ impl<S: EventStore> EngineCore<S> {
         self.attribution.prune_shapes(demand.iter());
         let admitted_demand = self.admit_projected_routing_evidence(&demand);
         let previous_plan = self.router.plan().clone();
-        let wire_delta: WireDelta = self.router.compile(
-            &admitted_demand,
-            self.directory.as_ref(),
-            self.compile_budget(),
-        );
+        let wire_delta: WireDelta =
+            self.router
+                .compile(&admitted_demand, &self.routing_facts, self.compile_budget());
         let planned = &self.router.plan().reqs;
         // NIP-11 evidence is retained for any URL that appears as SOME
         // planned session's relay (#8): the document is per-URL evidence,
@@ -262,9 +255,9 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// The exact atom union currently owned by handles whose immutable
-    /// opening-time freshness decision is `Live`, plus the engine's ordinary
-    /// internal discovery handle. Suppressed handles still own their graph
-    /// and cache projection, but are absent from this wire truth.
+    /// opening-time freshness decision is `Live`. Suppressed handles still
+    /// own their graph and cache projection, but are absent from this wire
+    /// truth.
     pub(super) fn wire_demand(&self) -> BTreeSet<ContextualAtom> {
         let ordinary = self
             .handles
@@ -277,11 +270,7 @@ impl<S: EventStore> EngineCore<S> {
             .filter(|state| state.acquisition.contributes_wire())
             .flat_map(|state| state.handle_ids.iter().copied())
             .flat_map(|id| self.resolver.subtree_atoms(id));
-        let discovery = self
-            .discovery_handle
-            .iter()
-            .flat_map(|handle| self.resolver.subtree_atoms(handle.id()));
-        ordinary.chain(history).chain(discovery).collect()
+        ordinary.chain(history).collect()
     }
 
     /// Compile an isolated plan through the same router/directory/admission/
@@ -307,15 +296,12 @@ impl<S: EventStore> EngineCore<S> {
                 atom
             })
             .collect();
-        let mut router = Router::new(
-            DiscoveryKinds::default(),
-            RuleRegistry::default_widen_only(),
-        );
+        let mut router = Router::new(RuleRegistry::default_widen_only());
         // The SAME budget the live recompile plans within, deliberately.
         // A shadow plan feeds `plan_is_fresh_for`, which refuses to call a
         // `limited` atom fresh -- so an unbudgeted shadow would call an atom
         // fresh that the live plan had refused to request at all.
-        let _ = router.compile(&admitted, self.directory.as_ref(), self.compile_budget());
+        let _ = router.compile(&admitted, &self.routing_facts, self.compile_budget());
         router.plan().clone()
     }
 
@@ -386,7 +372,7 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Gate every network-sourced selector hint/provenance URL before it
     /// can become a router candidate. Operator-configured lanes remain
-    /// trusted and bypass this path, matching kind:10002 admission policy.
+    /// trusted and bypass this path, matching discovered-route admission.
     pub(super) fn admit_projected_routing_evidence(
         &mut self,
         demand: &BTreeSet<ContextualAtom>,
@@ -417,337 +403,20 @@ impl<S: EventStore> EngineCore<S> {
         admitted
     }
 
-    /// The self-bootstrapping outbox (M5, `docs/known-gaps.md`'s
-    /// "RelayDirectory" gap): keep an internal kind:10002 discovery
-    /// subscription open covering EVERY author current demand has EVER
-    /// referenced whose write relays `self.directory` didn't know yet at the
-    /// time -- never a permanent/whole-graph scan (still bounded by "every
-    /// author this session has actually demanded content for"). Called at
-    /// the top of every `recompile` (i.e. on every subscribe/unsubscribe/
-    /// re-root/ingest).
-    ///
-    /// WIDEN-ONLY (`docs/known-gaps.md`'s kind:10002 over-fetch finding: 7112
-    /// events received against a 39-author resolved set, root-caused to THIS
-    /// function -- see the finding's investigation notes): a newly-demanded
-    /// author with unknown relays widens the subscription; an author whose
-    /// relays just became known is deliberately left IN the filter rather
-    /// than dropped. Reopening on every shrink was the actual bug -- an
-    /// author leaving `needed` the moment their kind:10002 resolves used to
-    /// tear down and reopen the ENTIRE subscription (dropping that one
-    /// author from a fresh, differently-shaped filter), and to a NIP-01
-    /// relay an overwriting Req on an already-open sub-id is
-    /// indistinguishable from a brand-new subscription: it replies with a
-    /// full EOSE replay of every event still matching the new filter. Over N
-    /// authors resolving one at a time that is a triangular-number amount of
-    /// redelivered events (N+(N-1)+...+1), not O(N) -- exactly the
-    /// mechanism behind the 7112-for-39 finding. Leaving a resolved author
-    /// in the filter a while longer is widen-safe (matches(wider) ⊇
-    /// matches(narrower), the same proof obligation `nmp_router::coalesce`'s
-    /// union rule already carries) -- it can only mean a few extra,
-    /// already-known kind:10002 deliveries for that author, never a
-    /// structural over-fetch. The subscription is only ever torn down when
-    /// `needed` goes fully empty (every demanded author has resolved, or
-    /// none are demanded at all) -- at that point there is nothing left this
-    /// discovery sub is for, so it closes rather than idling forever.
-    ///
-    /// Deliberately reuses the ordinary resolver subscribe/unsubscribe
-    /// machinery rather than hand-rolling a parallel subscription system:
-    /// the discovery atom this produces (`kinds:[10002], authors:{covered}`)
-    /// is just another entry in `resolver.active_demand()`, so the router's
-    /// EXISTING discovery-kind eligibility is what routes it to the
-    /// configured indexers -- no router-side change was needed for that half
-    /// at all. A content atom for an author with no known write relays
-    /// simply routes nowhere in the meantime (never an indexer fallback --
-    /// "indexers are never a content fallback").
-    pub(super) fn sync_discovery(
-        &mut self,
-        wire_demand: &BTreeSet<ContextualAtom>,
-        effects: &mut Vec<Effect>,
-    ) {
-        // `needed = f(wire_demand) ∪ route_unknowns`
-        // (`docs/internals/routing/knowledge-and-settlement.md` §5). The
-        // write plane contributes the authors its parked routes are still
-        // missing; it does NOT open anything of its own. Route unknowns are
-        // re-derived from the open intents on every pass, so they are
-        // stateless, survive a crash for free (boot re-resolves every open
-        // intent and re-declares every live need), and N intents wanting the
-        // same author's relay list union down to one entry.
-        let needed: BTreeSet<PubkeyHex> = wire_demand
-            .iter()
-            .cloned()
-            .filter_map(|atom| atom.filter.authors)
-            .flatten()
-            .chain(self.route_unknown_authors())
-            // NOT `write_relays(..).is_empty()`: that collapses "known,
-            // declares zero write relays" into the same signal as "never
-            // resolved", which kept a discovery subscription open FOREVER
-            // for an author who genuinely has no write relays (ledger #20).
-            // `relay_list_knowledge` distinguishes three ways; only a
-            // genuinely `Unknown` author still needs discovery -- a settled
-            // `KnownAbsent` leaves the set exactly as a `Known` one does,
-            // which is what lets the discovery sub tear down (§4).
-            .filter(|author| {
-                self.directory.relay_list_knowledge(author) == RelayListKnowledge::Unknown
-            })
-            .collect();
-
-        if needed.is_empty() {
-            if self.discovery_handle.is_none() && self.discovery_authors.is_empty() {
-                return; // already closed -- nothing to do.
-            }
-            // Every previously-needed author has resolved (or nothing was
-            // ever demanded): nothing left for this sub to cover, so close
-            // it. Its `Drop` impl only ENQUEUES the withdrawal; there is
-            // nothing to replace it with, so flush explicitly.
-            self.discovery_handle = None;
-            self.discovery_authors = BTreeSet::new();
-            let _ = self.resolver.poll_pending_drops();
-            return;
-        }
-
-        if needed.is_subset(&self.discovery_authors) {
-            // Nothing NEW to cover -- leave the existing subscription
-            // exactly as-is, even though it may now be wider than strictly
-            // required (see this fn's doc: that's the whole point).
-            return;
-        }
-
-        // Widen: union in whatever's newly needed and reopen with the
-        // WIDENED set. Its `Drop` impl only ENQUEUES the old withdrawal;
-        // `resolver.subscribe`'s own drain-on-entry flushes it before
-        // building the new atom.
-        self.discovery_authors = self.discovery_authors.union(&needed).cloned().collect();
-        self.discovery_handle = None;
-        let query = LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])),
-            authors: Some(Binding::Literal(self.discovery_authors.clone())),
-            ..Filter::default()
-        });
-        // Building the internal discovery subscription can read the store.
-        // On a persistence failure (issue #122) degrade to read-only and
-        // open no discovery sub rather than panic.
-        match self.resolver.subscribe(query) {
-            Ok((handle, _delta)) => self.discovery_handle = Some(handle),
-            Err(e) => self.degrade_store(e, effects),
-        }
-    }
-
-    /// Record the relay-list QUESTION `filter` asks, if it asks one, so that
-    /// the answer can be recognised however long afterwards it arrives
-    /// (#1019). Called from the single send-time door every outgoing REQ
-    /// passes through, plus [`Self::open_neg_session`] for the negentropy
-    /// namespace, which does not.
-    ///
-    /// Three conditions, each of which was a real defect on its own:
-    ///
-    /// - `kinds` must CONTAIN kind:10002, never equal `{10002}`. Coalescing
-    ///   legitimately folds the discovery atom into a wider req -- a
-    ///   `kinds:{3,10002}` req is what the very first discovery pass actually
-    ///   sends -- and an equality test silently declines to settle off it.
-    /// - `authors` must be present, because a question with no subject is not
-    ///   a question about anybody's relay list.
-    /// - `limit` must be absent. A `limit:0` request is the NIP-77 handoff's
-    ///   barrier: the relay sends nothing and then EOSEs, so its EOSE attests
-    ///   NOTHING about whether a kind:10002 exists. Same reasoning that
-    ///   poisons a limited request's coverage attribution (ruling §3), for
-    ///   the same reason.
-    pub(super) fn note_relay_list_ask(&mut self, sub_id: &SubId, filter: &ConcreteFilter) {
-        if filter.limit.is_some() {
-            return;
-        }
-        let asks_relay_list = filter
-            .kinds
-            .as_ref()
-            .is_some_and(|kinds| kinds.contains(&NIP65_RELAY_LIST_KIND));
-        if !asks_relay_list {
-            return;
-        }
-        let Some(authors) = filter.authors.clone() else {
-            return;
-        };
-        self.relay_list_asks.insert(sub_id.clone(), authors);
-    }
-
-    /// Forget an outstanding relay-list question whose request is leaving the
-    /// wire unanswered. Deliberately settles NOTHING: a withdrawn question has
-    /// been answered by nobody, and crediting the relay for it would be the
-    /// exact fail-open ("nowhere to ask" read as "asked, nothing there") that
-    /// [`Self::settle_relay_list_eose`] exists to refuse. The author stays
-    /// `Unknown`, so `sync_discovery` keeps declaring the need and the next
-    /// planned request re-asks it.
-    pub(super) fn forget_relay_list_ask(&mut self, sub_id: &SubId) {
-        self.relay_list_asks.remove(sub_id);
-    }
-
-    /// One exact request is abandoned: it may no longer earn coverage, and it
-    /// may no longer answer a relay-list question. Those are the same fact --
-    /// "nothing this request has left to say can be trusted or awaited" -- so
-    /// they retire together through one door rather than separately at fifteen
-    /// call sites, which is how the settlement half came to be forgotten in
-    /// the first place (#1019).
-    ///
-    /// Note what this is NOT: a plan-level `WireOp::Close` does not come
-    /// through here, and must not. Ordinary coalescing withdraws and re-mints
-    /// discovery reqs constantly while the relay's answer to the old one is
-    /// still in flight; forgetting the question at that point is exactly the
-    /// defect. A question outlives its plan entry and dies only when its
-    /// request is genuinely abandoned or its session drops.
+    /// One exact request is abandoned. It may no longer earn coverage or
+    /// produce a settlement fact.
     pub(super) fn abandon_sub(&mut self, sub_id: &SubId) {
         self.attribution.discard_sub(sub_id);
-        self.forget_relay_list_ask(sub_id);
+        self.active_request_evidence
+            .retain(|_, request| request.sub_id != *sub_id);
     }
 
-    /// A session dropped (disconnect, or a pool generation bump). Every
-    /// request on it is dead: the reconnect replays the plan and asks again.
+    /// A session dropped. Every attributed request on it is dead; replay
+    /// creates fresh request revisions after reconnect.
     pub(super) fn abandon_session_subs(&mut self, session: &RelaySessionKey) {
         self.attribution.clear_session(session);
-        self.relay_list_asks
-            .retain(|sub_id, _| sub_id.0 != session.relay || sub_id.2 != session.access);
-    }
-
-    /// Record that `relay` has finished answering the relay-list question
-    /// `sub_id` asked, and settle every absence that completes.
-    ///
-    /// When every indexer the engine queries for an author's relay list has
-    /// finished and no kind:10002 arrived, the engine holds a POSITIVE fact —
-    /// these sources have nothing — which is the definition of `KnownAbsent`
-    /// (`docs/internals/routing/knowledge-and-settlement.md` §2).
-    ///
-    /// Two boundaries are deliberate and load-bearing:
-    ///
-    /// - **Absence is derived exactly once, here, and read afterwards as an
-    ///   ordinary directory answer.** Resolvers never see EOSE,
-    ///   `SourceStatus`, or `reconciled_through`; threading read-side
-    ///   acquisition evidence into resolution would make every resolver
-    ///   re-derive the same epistemic judgment and possibly disagree.
-    /// - **Sources that never finish never settle.** With zero indexers
-    ///   configured nothing here can ever fire, so every `Auto` with an
-    ///   unknown input parks forever. That is fail-closed and correct: an
-    ///   engine with no discovery sources CANNOT know, and treating "nowhere
-    ///   to ask" as "asked, nothing there" would silently under-route every
-    ///   write on a misconfigured app.
-    ///
-    /// Returns true iff at least one author actually transitioned to
-    /// `KnownAbsent`, so the caller can wake the routes that were waiting on
-    /// exactly that.
-    pub(super) fn discharge_relay_list_ask(&mut self, sub_id: &SubId) -> bool {
-        // What this answer answers is read off the QUESTION recorded when the
-        // request was sent, and NOT off the router plan.
-        //
-        // The plan describes what this engine is asking NOW, and that is a
-        // different thing from what it asked THEN in three routine ways
-        // (#1019): coalescing rewrites a discovery req's descriptor hash the
-        // moment the filter widens, so an in-flight answer names a `SubId`
-        // the plan no longer holds; coalescing also merges the discovery atom
-        // into a `kinds:{3,10002}` req that no equality test on `kinds` will
-        // ever recognise; and against a NIP-77 relay the plan's req is never
-        // sent as an ordinary REQ at all. Reading the plan therefore declined
-        // to settle in every one of those cases, silently, and a write parked
-        // on that author's relay list stayed parked forever.
-        //
-        // The relay is read off the SubId rather than the delivering session
-        // for the same reason: it is the relay the question was ASKED of.
-        let Some(authors) = self.relay_list_asks.remove(sub_id) else {
-            return false;
-        };
-        let relay = sub_id.0.clone();
-        // Sources are the CONFIGURED indexers -- the only relays a
-        // discovery-kind atom is ever routed to. Nothing settles without
-        // them, by design.
-        let indexers = self.directory.indexers();
-        if indexers.is_empty() {
-            return false;
-        }
-        let mut newly_settled = false;
-        for author in authors {
-            let seen = self.relay_list_eose.entry(author.clone()).or_default();
-            seen.insert(relay.clone());
-            if !indexers.iter().all(|indexer| seen.contains(indexer)) {
-                // One source still unfinished is not a settlement.
-                continue;
-            }
-            if self.directory.relay_list_knowledge(&author) != RelayListKnowledge::Unknown {
-                continue; // already Known, or already settled absent.
-            }
-            // A settlement pass never downgrades an author whose real
-            // kind:10002 has already been ingested -- the directory door
-            // owns that check too, so an event arriving in the same turn as
-            // the answer wins.
-            self.directory.settle_relay_list_absent(author);
-            newly_settled = true;
-        }
-        newly_settled
-    }
-
-    /// After ingesting a possible kind:10002 event for `author`, re-read the
-    /// store's CURRENT winning relay-list event for them -- never trust the
-    /// just-arrived frame directly. `EventStore::query` only ever returns
-    /// the current replaceable-event winner (`nmp-store`'s own contract), so
-    /// this is correct regardless of cross-relay arrival order: a stale/
-    /// older copy that already lost the replaceable race at `insert` time
-    /// can never overwrite the directory with worse data than what the
-    /// store itself considers authoritative.
-    pub(super) fn ingest_relay_list_winner(
-        &mut self,
-        author: nostr::PublicKey,
-        effects: &mut Vec<Effect>,
-    ) -> bool {
-        let filter = ConcreteFilter {
-            kinds: Some(BTreeSet::from([NIP65_RELAY_LIST_KIND])),
-            authors: Some(BTreeSet::from([author.to_hex()])),
-            ..ConcreteFilter::default()
-        };
-        // Re-reading the store's current relay-list winner can fail on I/O
-        // (issue #122): degrade to read-only rather than panic. The
-        // directory simply isn't updated for this author on this frame.
-        let winner = match self.resolver.store().query(&filter.to_nostr()) {
-            Ok(rows) => rows.into_iter().next(),
-            Err(e) => {
-                self.degrade_store(e, effects);
-                return false;
-            }
-        };
-        let Some(winner) = winner else {
-            return false;
-        };
-        // Relay admission (issue #121): these relays are DISCOVERED — parsed
-        // straight off a network-sourced (validly-signed, but untrusted-
-        // content) kind:10002. Gate them on host classification + the
-        // operator's opt-in local allowlist BEFORE they become routable
-        // `Nip65Write`/`Nip65Read` lanes. A rejected relay never enters the
-        // directory, so it never becomes a router candidate and never reaches
-        // `pool.ensure_open` — the SSRF / forced-Tor path is closed
-        // structurally, not filtered downstream.
-        //
-        // FORWARD GUARD: this is currently the SOLE network-discovery path
-        // into the relay directory. ANY future network-sourced relay ingest —
-        // a kind:10050 DM-inbox list, nprofile/nevent relay hints, a
-        // provenance "seen here" lane, etc. — MUST route its parsed relays
-        // through `self.admission.filter_discovered(..)` before calling
-        // `directory.ingest_*`, or the structural exclusion proven here is
-        // silently lost for that new source. Discovery is untrusted;
-        // operator config (the `LiveDirectory` builder lanes) is not and is
-        // deliberately NOT gated here.
-        let (write_relays, write_rejected) = self
-            .admission
-            .filter_discovered(parse_nip65_write_relays(&winner.event));
-        let (read_relays, read_rejected) = self
-            .admission
-            .filter_discovered(parse_nip65_read_relays(&winner.event));
-        self.discovered_private_relays_rejected = self
-            .discovered_private_relays_rejected
-            .saturating_add(write_rejected + read_rejected);
-        let author = author.to_hex();
-        let before_known = self.directory.relay_list_knowledge(&author);
-        let before_write = self.directory.write_relays(&author);
-        let before_read = self.directory.read_relays(&author);
-        self.directory
-            .ingest_write_relays(author.clone(), write_relays);
-        self.directory
-            .ingest_read_relays(author.clone(), read_relays);
-        before_known != self.directory.relay_list_knowledge(&author)
-            || before_write != self.directory.write_relays(&author)
-            || before_read != self.directory.read_relays(&author)
+        self.active_request_evidence
+            .retain(|_, request| request.session != *session);
     }
 
     /// Start the gap-free NIP-77 handoff (#563). This function can only be
@@ -1021,20 +690,33 @@ impl<S: EventStore> EngineCore<S> {
 
         let neg_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
 
-        // The negentropy namespace is the ONLY door a discovery filter reaches
-        // a NIP-77 relay through -- the plan's ordinary REQ was replaced by a
-        // `limit:0` barrier that attests nothing, so unless the relay-list
-        // question is re-asked here it can never be answered on this path at
-        // all (#1019). `record_send` below is `AttributionState`'s own door,
-        // not `record_observed_request`, so it does not pass the ask ledger.
-        self.note_relay_list_ask(&neg_sub_id, &neg_filter);
-        let attribution_send = self.attribution.record_send(
-            &RelaySessionKey::public(probed.url().clone()),
+        let public_session = RelaySessionKey::public(probed.url().clone());
+        let attribution_send = self.record_observed_request(
+            &public_session,
             &neg_sub_id,
             &neg_filter,
             absorbed.clone(),
+            false,
             EventFailureTarget::ThisSend,
         );
+        // NEG-OPEN has no asynchronous REQ-handoff callback. Reaching this
+        // door already proves the exact current connected generation: it is
+        // opened synchronously from that generation's live-candidate EOSE.
+        // Activate the same generic request-evidence record here so NEG-DONE
+        // can settle the actual sent question, not the limit:0 barrier.
+        let handle = self
+            .slot_to_relay
+            .values()
+            .find_map(|(handle, session)| (session == &public_session).then_some(*handle))
+            .expect("a candidate EOSE can open NEG only on its current connected session");
+        effects.extend(self.on_wire_request_handoff(
+            &public_session,
+            &neg_sub_id,
+            neg_filter.hash(),
+            Some(handle),
+            true,
+            None,
+        ));
         self.neg_sessions.insert(
             neg_sub_id.clone(),
             NegSession {
@@ -1119,22 +801,17 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::NegClose(relay.clone(), sub_id.clone()));
 
         if need_ids.is_empty() {
-            self.credit_neg_coverage(&sub_id, attribution_send, completed_at, &relay, effects);
-            // Reconciliation proving there is nothing left to fetch is this
-            // path's ANSWER to the relay-list question, and the only one it
-            // ever gets: against a NIP-77 relay the discovery filter never
-            // rides an ordinary REQ, so no EOSE for it will ever arrive
-            // (#1019). Discharged BEFORE the request is abandoned -- an
-            // answered question and an abandoned one are opposite verdicts
-            // and the order between them is the whole difference.
-            let settled = self.discharge_relay_list_ask(&sub_id);
-            self.abandon_sub(&sub_id);
-            if settled {
-                // Absence settling is as much a knowledge change as a fact
-                // arriving, so the routes waiting on exactly this wake in
-                // this same turn rather than on some later tick.
-                self.rewrite_open_routes(effects);
+            if self.credit_neg_coverage(&sub_id, attribution_send, completed_at, &relay, effects) {
+                self.emit_request_settled(
+                    attribution_send,
+                    completed_at,
+                    RequestTerminal::Nip77,
+                    effects,
+                );
+            } else {
+                self.retire_request_evidence(attribution_send);
             }
+            self.abandon_sub(&sub_id);
         } else {
             let backfill = ConcreteFilter {
                 ids: Some(need_ids.iter().map(|id| id.to_hex()).collect()),
@@ -1149,18 +826,6 @@ impl<S: EventStore> EngineCore<S> {
             // unlocks `sub_id`'s credit at EOSE).
             let backfill_sub =
                 self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_MISSING_ROLE, &backfill);
-            // Reconciliation proved ids are still missing, and one of them may
-            // BE the kind:10002 this question is about -- so the answer is not
-            // in yet. Move the question onto the backfill request rather than
-            // discharging it here; its own EOSE lands after those events are
-            // ingested (EVENT precedes EOSE, NIP-01), by which point an author
-            // whose list did arrive reads `Known` and only a genuine absence
-            // settles. This mirrors exactly why coverage credit is deferred to
-            // the same EOSE. The backfill filter is ids-only, so
-            // `record_observed_request` below records no question of its own.
-            if let Some(authors) = self.relay_list_asks.remove(&sub_id) {
-                self.relay_list_asks.insert(backfill_sub.clone(), authors);
-            }
             self.pending_backfills.insert(
                 backfill_sub.clone(),
                 TemporaryReq::MissingIds {
@@ -1203,7 +868,7 @@ impl<S: EventStore> EngineCore<S> {
         completed_at: Timestamp,
         relay: &RelayUrl,
         effects: &mut Vec<Effect>,
-    ) {
+    ) -> bool {
         // Negentropy sessions are opened exclusively on the Public session
         // (#8), so their credit resolves through the same Public-session
         // attribution key `open_neg_session` recorded under.
@@ -1213,11 +878,11 @@ impl<S: EventStore> EngineCore<S> {
             attribution_send,
             completed_at,
         );
-        if let Some(completed) = attributed {
-            self.persist_attributed_completion(completed, relay, effects);
-        }
+        let settled = attributed
+            .is_some_and(|completed| self.persist_attributed_completion(completed, relay, effects));
         self.refresh_all_handle_evidence(effects);
         self.refresh_all_history_evidence(effects);
+        settled
     }
 
     /// The one facts-before-claims persistence door shared by ordinary EOSE
@@ -1230,19 +895,19 @@ impl<S: EventStore> EngineCore<S> {
         mut completed: CompletedAttribution,
         relay: &RelayUrl,
         effects: &mut Vec<Effect>,
-    ) {
+    ) -> bool {
         let Some(claims) = completed.eligible_claims().map(|claims| claims.to_vec()) else {
-            return;
+            return false;
         };
         if claims.is_empty() {
-            return;
+            return true;
         }
 
         let mut batch = Vec::with_capacity(claims.len());
         for (key, interval) in &claims {
             let Some(atom) = self.attribution.shape_of(*key) else {
                 completed.poison(CoveragePoison::MissingShape);
-                return;
+                return false;
             };
             batch.push((atom, relay.clone(), *interval));
         }
@@ -1250,12 +915,13 @@ impl<S: EventStore> EngineCore<S> {
         if let Err(error) = self.resolver.store_mut().record_coverage(&batch) {
             completed.poison(CoveragePoison::CoverageCommitFailed);
             self.degrade_store(error, effects);
-            return;
+            return false;
         }
 
         for (key, interval) in claims {
             effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
         }
+        true
     }
 
     /// Start one unlimited one-shot backlog REQ under a role-separated id.
@@ -1413,10 +1079,8 @@ impl<S: EventStore> EngineCore<S> {
 
     /// The one shared refresh-vs-apply decision behind every committed-
     /// mutation door, generalized with two force flags for callers that hold
-    /// extra evidence the resolver's `delta` cannot see. Relay ingest is the
-    /// only such caller today: an NIP-65 directory winner can change the
-    /// capped source plan even when the resolver's own demand shape is
-    /// unchanged (`force_recompile`), and a locally-pending write getting
+    /// extra evidence the resolver's `delta` cannot see. A locally-pending
+    /// write getting
     /// satisfied by a verified relay copy needs every handle re-read even
     /// when neither demand nor directory changed (`force_broad_refresh`,
     /// folded together with `force_recompile` since a directory change also

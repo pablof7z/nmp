@@ -6,7 +6,7 @@ use nmp::mechanism::core::{
 };
 use nmp_grammar::{Binding, Filter};
 use nmp_resolver::LiveQuery;
-use nmp_router::{FixtureDirectory, SubId, WireOp};
+use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
 use nostr::{Event, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
@@ -52,9 +52,10 @@ fn seeded(count: usize) -> (EngineCore<MemoryStore>, Keys, RelayUrl, Vec<Event>)
             )
             .unwrap();
     }
-    let directory = FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay.clone()]);
+    let directory =
+        FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay.clone()]);
     (
-        EngineCore::new(store, Box::new(directory), 10),
+        EngineCore::new_with_fixture_routing_facts(store, directory, 10),
         keys,
         relay,
         events,
@@ -375,8 +376,9 @@ fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
             )
             .unwrap();
     }
-    let directory = FixtureDirectory::new().with_write(keys.public_key().to_hex(), [relay.clone()]);
-    let mut core = EngineCore::new(store, Box::new(directory), 10);
+    let directory =
+        FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, directory, 10);
 
     let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 1000)));
     let id = open(&opened);

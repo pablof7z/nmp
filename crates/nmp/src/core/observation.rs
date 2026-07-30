@@ -25,6 +25,13 @@ pub enum ResolutionCause {
     DependencyChanged,
 }
 
+/// The protocol-neutral terminal that settled one actually-sent request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestTerminal {
+    Eose,
+    Nip77,
+}
+
 /// One exact value already resolved by the query graph.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResolvedBindingValue {
@@ -71,7 +78,7 @@ pub enum ObservationFact {
         filter: ConcreteFilter,
         replay: bool,
     },
-    RelayEose {
+    RequestSettled {
         path: String,
         filter_revision: u64,
         relay: RelayUrl,
@@ -79,6 +86,7 @@ pub enum ObservationFact {
         transport_generation: u64,
         request_revision: u64,
         observed_at: Timestamp,
+        terminal: RequestTerminal,
     },
     RelayClosed {
         path: String,
@@ -246,9 +254,6 @@ impl<S: EventStore> EngineCore<S> {
     ) -> AttributionSendId {
         // Every outgoing REQ this engine ever places -- planned, replayed,
         // NIP-77 live candidate, backlog and backfill alike -- passes through
-        // here, which is why the relay-list QUESTION is recorded here too
-        // (#1019) rather than off the plan the answer will outlive.
-        self.note_relay_list_ask(sub_id, filter);
         let send = self.attribution.record_send(
             session,
             sub_id,
@@ -281,7 +286,12 @@ impl<S: EventStore> EngineCore<S> {
         send
     }
 
-    pub(crate) fn on_wire_request_handoff(
+    /// Runtime/mechanism acknowledgement for one attempted REQ handoff.
+    ///
+    /// Public only through the doc-hidden mechanism surface so headless
+    /// reducer falsifiers can drive the same acceptance edge as the runtime.
+    #[doc(hidden)]
+    pub fn on_wire_request_handoff(
         &mut self,
         session: &RelaySessionKey,
         sub_id: &SubId,
@@ -358,10 +368,11 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
-    pub(super) fn emit_request_eose(
+    pub(super) fn emit_request_settled(
         &mut self,
         send: AttributionSendId,
         observed_at: Timestamp,
+        terminal: RequestTerminal,
         effects: &mut Vec<Effect>,
     ) {
         let Some(request) = self.active_request_evidence.remove(&send.revision()) else {
@@ -370,7 +381,7 @@ impl<S: EventStore> EngineCore<S> {
         for (id, path, filter_revision) in request.targets {
             self.emit_observation_fact(
                 id,
-                ObservationFact::RelayEose {
+                ObservationFact::RequestSettled {
                     path,
                     filter_revision,
                     relay: request.session.relay.clone(),
@@ -378,10 +389,21 @@ impl<S: EventStore> EngineCore<S> {
                     transport_generation: request.handle.generation,
                     request_revision: request.request_revision,
                     observed_at,
+                    terminal,
                 },
                 effects,
             );
         }
+    }
+
+    /// Retire an actually-finished request whose local facts-before-claims
+    /// transaction could not establish trustworthy settlement evidence.
+    ///
+    /// The terminal wire frame still ends this exact request, but exposing
+    /// it as [`ObservationFact::RequestSettled`] would let protocol
+    /// consumers derive absence from a locally incomplete view.
+    pub(super) fn retire_request_evidence(&mut self, send: AttributionSendId) {
+        self.active_request_evidence.remove(&send.revision());
     }
 
     pub(super) fn close_requests_for_session(
@@ -618,7 +640,7 @@ mod tests {
     use crate::core::EngineMsg;
     use nmp_grammar::{Binding, Demand, Derived, Filter, Selector};
     use nmp_resolver::LiveQuery;
-    use nmp_router::FixtureDirectory;
+    use nmp_router::FixtureRoutingFacts;
     use nmp_store::{MemoryStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -681,12 +703,12 @@ mod tests {
                 )
                 .unwrap();
         }
-        let directory = FixtureDirectory::new()
-            .with_write(account_a.public_key().to_hex(), [relay.clone()])
-            .with_write(account_b.public_key().to_hex(), [relay.clone()])
-            .with_write(followed_a.public_key().to_hex(), [relay.clone()])
-            .with_write(followed_b.public_key().to_hex(), [relay.clone()]);
-        let mut core = EngineCore::new(store, Box::new(directory), 20);
+        let directory = FixtureRoutingFacts::new()
+            .with_outbound_routes(account_a.public_key(), [relay.clone()])
+            .with_outbound_routes(account_b.public_key(), [relay.clone()])
+            .with_outbound_routes(followed_a.public_key(), [relay.clone()])
+            .with_outbound_routes(followed_b.public_key(), [relay.clone()]);
+        let mut core = EngineCore::new_with_fixture_routing_facts(store, directory, 20);
         core.handle(EngineMsg::SetActivePubkey(Some(account_a.public_key())));
 
         let opened = core.handle(EngineMsg::Subscribe(articles_by_follows()));

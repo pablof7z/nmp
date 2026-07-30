@@ -17,9 +17,8 @@
 use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
-use nmp_router::{
-    test_relay, DiscoveryKinds, FixtureDirectory, PubkeyHex, RelayUrl, Router, RuleRegistry,
-};
+use nmp_router::{test_relay, FixtureRoutingFacts, PublicKey, RelayUrl, Router, RuleRegistry};
+use nostr::{Keys, SecretKey};
 
 const NUM_AUTHORS: usize = 300;
 const POOL_SIZE: usize = 15;
@@ -34,8 +33,11 @@ const NUM_BIG_RELAYS: usize = 3;
 const MAX_SUBS_PER_RELAY: usize = 20;
 const MAX_FILTER_AUTHORS: usize = 1_000;
 
-fn author_hex(i: usize) -> PubkeyHex {
-    format!("{i:064}")
+fn author(i: usize) -> PublicKey {
+    let mut bytes = [0u8; 32];
+    bytes[0] = 1;
+    bytes[24..].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+    Keys::new(SecretKey::from_slice(&bytes).unwrap()).public_key()
 }
 
 /// A small, deterministic (no external RNG dependency) "realistic"
@@ -45,13 +47,13 @@ fn author_hex(i: usize) -> PubkeyHex {
 /// the remaining smaller relays (`step=7` is coprime with
 /// `POOL_SIZE - NUM_BIG_RELAYS = 12`, so it cycles through every small
 /// relay index over 300 authors rather than degenerating to a few).
-fn realistic_directory() -> FixtureDirectory {
-    let mut dir = FixtureDirectory::new();
+fn realistic_directory() -> FixtureRoutingFacts {
+    let mut dir = FixtureRoutingFacts::new();
     let small_pool = POOL_SIZE - NUM_BIG_RELAYS;
     for i in 0..NUM_AUTHORS {
         let big = i % NUM_BIG_RELAYS;
         let small = NUM_BIG_RELAYS + (i * 7) % small_pool;
-        dir = dir.with_write(author_hex(i), [test_relay(big), test_relay(small)]);
+        dir = dir.with_author_routes(author(i), [test_relay(big), test_relay(small)], []);
     }
     dir
 }
@@ -61,7 +63,7 @@ fn falsifier_demand() -> BTreeSet<ContextualAtom> {
         .map(|i| ContextualAtom {
             filter: ConcreteFilter {
                 kinds: Some(BTreeSet::from([1u16])),
-                authors: Some(BTreeSet::from([author_hex(i)])),
+                authors: Some(BTreeSet::from([author(i).to_hex()])),
                 ..ConcreteFilter::default()
             },
             source: SourceAuthority::AuthorOutboxes,
@@ -114,11 +116,10 @@ fn print_measurement(label: &str, m: &Measurement) {
 fn kill_measurement_dedup_only_within_relay_limits() {
     let dir = realistic_directory();
     let demand = falsifier_demand();
-    let discovery = DiscoveryKinds::default();
     let cap = POOL_SIZE;
 
     // ---- Tier 1: dedup-only floor (registry EMPTY) ----------------------
-    let mut router_dedup_only = Router::new(discovery.clone(), RuleRegistry::dedup_only());
+    let mut router_dedup_only = Router::new(RuleRegistry::dedup_only());
     router_dedup_only.compile(&demand, &dir, cap);
     let m_dedup = measure(&router_dedup_only);
     print_measurement("dedup-only floor", &m_dedup);
@@ -133,7 +134,7 @@ fn kill_measurement_dedup_only_within_relay_limits() {
     );
 
     // ---- Tier 2: with the union rule -------------------------------------
-    let mut router_with_union = Router::new(discovery, RuleRegistry::default_widen_only());
+    let mut router_with_union = Router::new(RuleRegistry::default_widen_only());
     router_with_union.compile(&demand, &dir, cap);
     let m_union = measure(&router_with_union);
     print_measurement("with StructuralUnion", &m_union);

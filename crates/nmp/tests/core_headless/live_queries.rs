@@ -6,7 +6,7 @@ use super::*;
 fn subscribe_opens_wire_for_resolved_demand() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
     let effects = core.handle(EngineMsg::Subscribe(literal_query(
@@ -23,9 +23,9 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay0.clone()])
-        .with_write(b.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay0.clone()])
+        .with_outbound_routes(b.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
     connect(&mut core, 0, &relay0);
@@ -122,7 +122,7 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
     let start = Instant::now();
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -222,7 +222,7 @@ fn apply_deltas(current: &mut BTreeSet<nostr::EventId>, batch: &[RowDelta]) {
 fn limited_handle_projects_only_the_n_newest_of_m_matches() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -280,9 +280,9 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay0.clone()])
-        .with_write(b.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay0.clone()])
+        .with_outbound_routes(b.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -331,7 +331,7 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
 fn newer_event_evicts_oldest_of_top_n_via_delta() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -410,7 +410,7 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
 fn retracting_top_n_member_pulls_in_next_newest() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -492,7 +492,7 @@ fn retracting_top_n_member_pulls_in_next_newest() {
 fn unlimited_handle_projects_every_match() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -534,7 +534,7 @@ fn unlimited_handle_projects_every_match() {
 fn eose_records_coverage_watermark_and_non_eose_does_not() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -595,10 +595,9 @@ fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let filter = cf(&[1], &[&a.public_key().to_hex()]);
-    // A directory fact so the Public-sourced atom (classify() sends
-    // `Public` straight to the pinned/directory lookup, never the outbox
-    // solver) actually routes somewhere.
-    let dir = FixtureDirectory::new().with_group_host(filter.clone(), relay0.clone());
+    // Operator policy gives this public atom a route without changing its
+    // declared source authority.
+    let dir = FixtureRoutingFacts::new().with_operator_app([relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -656,7 +655,8 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     let a = Keys::generate();
     let relay_other = RelayUrl::parse("wss://other.example.com").unwrap();
     let relay_pinned = RelayUrl::parse("wss://pinned.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay_other.clone()]);
+    let dir =
+        FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay_other.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay_other);
     connect(&mut core, 1, &relay_pinned);
@@ -793,7 +793,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     let a = Keys::generate();
     let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
     let relay2 = RelayUrl::parse("wss://relay2.example.com").unwrap();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     connect(&mut core, 0, &relay1);
     connect(&mut core, 1, &relay2);
 
@@ -911,9 +911,9 @@ fn eose_overwrite_race_credits_only_the_intersection() {
     let a = Keys::generate();
     let e_key = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay0.clone()])
-        .with_write(e_key.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay0.clone()])
+        .with_outbound_routes(e_key.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -992,7 +992,7 @@ fn eose_overwrite_race_credits_only_the_intersection() {
 fn limited_fetch_never_records_coverage() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -1045,7 +1045,7 @@ fn limited_fetch_never_records_coverage() {
 fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -1127,7 +1127,7 @@ fn evidence_from(effects: &[Effect], id: HandleId) -> Option<&AcquisitionEvidenc
 
 #[test]
 fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let unresolved = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([9999u16])),
         authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
@@ -1151,7 +1151,7 @@ fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
 fn resolved_atom_without_a_planned_relay_reports_no_planned_source() {
     let a = Keys::generate();
     let atom = cf(&[9999], &[&a.public_key().to_hex()]);
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
 
     let effects = core.handle(EngineMsg::Subscribe(literal_query(
         &[9999],
@@ -1176,7 +1176,7 @@ fn resolved_atom_without_a_planned_relay_reports_no_planned_source() {
 fn equal_evidence_on_reconnect_does_not_spuriously_emit_rows() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://stable-evidence.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
@@ -1219,10 +1219,10 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
     let r1 = RelayUrl::parse("wss://r1.example.com").unwrap();
     let r2 = RelayUrl::parse("wss://r2.example.com").unwrap();
     let r3 = RelayUrl::parse("wss://r3.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [r2.clone(), r3.clone()])
-        .with_write(b.public_key().to_hex(), [r1.clone(), r2.clone()]);
-    let mut core = EngineCore::new(MemoryStore::new(), Box::new(dir), 2);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [r2.clone(), r3.clone()])
+        .with_outbound_routes(b.public_key(), [r1.clone(), r2.clone()]);
+    let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 2);
 
     let effects = core.handle(EngineMsg::Subscribe(literal_query(
         &[9999],
@@ -1292,8 +1292,8 @@ fn per_source_evidence_reflects_each_relays_own_proof_independently() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay0.clone(), relay1.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay0.clone(), relay1.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
@@ -1367,9 +1367,9 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
     // hosts `b`'s kind:1 posts (the outer/root atom, once `a` follows `b`).
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay0.clone()])
-        .with_write(b.public_key().to_hex(), [relay1.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay0.clone()])
+        .with_outbound_routes(b.public_key(), [relay1.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
@@ -1488,7 +1488,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
 fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
@@ -1551,7 +1551,7 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
 fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
     let effects = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -1641,7 +1641,7 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
 fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -1682,7 +1682,7 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
     // setup keeps re-issuing EnsureRelay exactly as before -- the fix must
     // not touch that path at all.
     let mut core_transient =
-        new_core(FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay.clone()]));
+        new_core(FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]));
     let _ = core_transient.handle(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
@@ -1716,9 +1716,9 @@ fn set_active_pubkey_reroots_and_recompiles() {
     let b = Keys::generate();
     let relay_a = RelayUrl::parse("wss://relay-a.example.com").unwrap();
     let relay_b = RelayUrl::parse("wss://relay-b.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay_a.clone()])
-        .with_write(b.public_key().to_hex(), [relay_b.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay_a.clone()])
+        .with_outbound_routes(b.public_key(), [relay_b.clone()]);
     let mut core = new_core(dir);
 
     let whoami = LiveQuery::from_filter(Filter {

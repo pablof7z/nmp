@@ -1133,12 +1133,6 @@ impl<S: EventStore> EngineCore<S> {
         let phase_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let phase_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
-        let relay_list_authors: Vec<_> = events
-            .iter()
-            .filter_map(|(event, _, _, _)| {
-                (event.kind == nostr::Kind::RelayList).then_some(event.pubkey)
-            })
-            .collect();
         let event_failure_attributions: Vec<_> = events
             .iter()
             .filter_map(|(_, _, _, attribution)| attribution.clone())
@@ -1226,26 +1220,10 @@ impl<S: EventStore> EngineCore<S> {
                         self.on_signed(receipt_id, canonical, effects);
                     }
                 }
-                let mut directory_changed = false;
-                for author in relay_list_authors {
-                    directory_changed |= self.ingest_relay_list_winner(author, effects);
-                }
-                if directory_changed {
-                    // Resolution moment FOUR: a relay list arriving for ANY
-                    // reason -- someone opened a profile, a feed hydrated, a
-                    // parked write's own declared need finally answered --
-                    // wakes every open route in the SAME ingestion turn,
-                    // rather than waiting for the next tick. There is no
-                    // wiring between the read path and the write path here
-                    // beyond "the directory learned something".
-                    self.rewrite_open_routes(effects);
-                }
-
-                // Ordinary committed rows do not change the active demand or
-                // router plan. Avoid rebuilding it on every EVENT batch; a
-                // resolver atom delta or an actual NIP-65 directory change is
-                // the evidence that routing may differ.
-                if !(demand_changed || directory_changed) {
+                // Ordinary committed rows do not change neutral routing
+                // facts. Protocol components observe them through ordinary
+                // query rows and own any fact replacement.
+                if !demand_changed {
                     // Event counters are diagnostics facts even when the
                     // demand/router plan is unchanged. Preserve the prior
                     // observable update without paying a full router compile.
@@ -1265,20 +1243,20 @@ impl<S: EventStore> EngineCore<S> {
                 #[cfg(feature = "bench-instrumentation")]
                 let phase_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
 
-                // A demand/directory change may alter the capped source plan
+                // A demand change may alter the capped source plan
                 // and therefore evidence for otherwise-unrelated handles;
                 // keep that path broad. The dominant ordinary-ingest path is
                 // exact: refresh only subscriptions whose root filter matches
                 // a changed row (or whose shared projection shape changed).
-                // `directory_changed`/`satisfied_pending` are relay-only
+                // `satisfied_pending` is relay-only
                 // evidence the resolver's own `delta` never carries, so they
                 // ride in as explicit force flags on the SAME shared apply
                 // `apply_committed_mutation` uses for every other committed-
                 // mutation door, instead of re-deciding refresh-vs-apply here.
                 self.apply_committed_mutation_with(
                     ingest.committed,
-                    directory_changed,
-                    directory_changed || satisfied_pending,
+                    false,
+                    satisfied_pending,
                     effects,
                 );
                 #[cfg(feature = "bench-instrumentation")]
@@ -1512,32 +1490,26 @@ impl<S: EventStore> EngineCore<S> {
                     .attribution
                     .attribute_eose_detailed(&session, wire_id, self.clock);
                 let completed_send = completed.as_ref().map(CompletedAttribution::send_id);
-                // Absence settlement reads the SAME EOSE frame the coverage
-                // watermark does, on the SAME resolved subscription id -- the
-                // discovery subscription is just another entry in
-                // `active_demand()`, so nothing parallel exists here for the
-                // write plane to have opened. It deliberately does NOT ride
-                // the attributed coverage keys: those credit backlog
-                // watermarks and can legitimately be empty for a
-                // subscription this EOSE really does end. What the EOSE
-                // answers is looked up in the send-time question ledger, not
-                // in the current plan (#1019).
-                let settled_any = resolved
+                // A `limit:0` live-first EOSE is only the barrier that opens
+                // NIP-77. It terminally answers neither the original
+                // question nor its reconciliation, so exposing it as
+                // `RequestSettled` would let a protocol consumer derive
+                // absence before NEG (and any missing-id backfill) finished.
+                let opens_neg = resolved
                     .as_ref()
-                    .is_some_and(|sub_id| self.discharge_relay_list_ask(sub_id));
-                if let Some(completed) = completed {
-                    self.persist_attributed_completion(completed, &session.relay, &mut effects);
-                }
-                if settled_any {
-                    // Resolution moment FOUR, in its other form: a need
-                    // SETTLING is as much a knowledge change as a fact
-                    // arriving. An outbox whose last unknown recipient just
-                    // turned out to have no relay list retires within this
-                    // same ingestion turn instead of waiting for a tick.
-                    self.rewrite_open_routes(&mut effects);
-                }
-                if let Some(send) = completed_send {
-                    self.emit_request_eose(send, self.clock, &mut effects);
+                    .is_some_and(|sub_id| self.pending_neg_handoffs.contains_key(sub_id));
+                let settled = completed.is_some_and(|completed| {
+                    self.persist_attributed_completion(completed, &session.relay, &mut effects)
+                });
+                if let Some(send) = completed_send.filter(|_| !opens_neg && settled) {
+                    self.emit_request_settled(
+                        send,
+                        self.clock,
+                        RequestTerminal::Eose,
+                        &mut effects,
+                    );
+                } else if let Some(send) = completed_send.filter(|_| !opens_neg) {
+                    self.retire_request_evidence(send);
                 }
                 // A watermark advancing can flip a handle's
                 // AcquisitionEvidence (a source's `reconciled_through`) even
@@ -1578,13 +1550,22 @@ impl<S: EventStore> EngineCore<S> {
                                 completed_at,
                                 ..
                             } => {
-                                self.credit_neg_coverage(
+                                if self.credit_neg_coverage(
                                     &neg_sub_id,
                                     attribution_send,
                                     completed_at,
                                     &session.relay,
                                     &mut effects,
-                                );
+                                ) {
+                                    self.emit_request_settled(
+                                        attribution_send,
+                                        completed_at,
+                                        RequestTerminal::Nip77,
+                                        &mut effects,
+                                    );
+                                } else {
+                                    self.retire_request_evidence(attribution_send);
+                                }
                                 self.abandon_sub(&neg_sub_id);
                             }
                             TemporaryReq::Backlog { .. } => {}

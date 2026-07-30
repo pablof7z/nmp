@@ -37,7 +37,7 @@ use nmp_grammar::{
 use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::filter::MatchEventOptions;
@@ -783,9 +783,9 @@ async fn watermark_cold_start_offline() {
     // to be dead, url) but is never queried in phase 1 -- its shape has no
     // coverage row anywhere, which is exactly what makes it the "no row =
     // Unknown" control case in phase 2.
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [url.clone()])
-        .with_write(b.public_key().to_hex(), [url.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [url.clone()])
+        .with_outbound_routes(b.public_key(), [url.clone()]);
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let db_path = tempdir.path().join("cold_start.redb");
@@ -793,7 +793,7 @@ async fn watermark_cold_start_offline() {
     // ---- Phase 1: online -------------------------------------------------
     {
         let store = RedbStore::open(&db_path).expect("open redb store (phase 1)");
-        let (engine_thread, handle) = EngineThread::spawn(
+        let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
             store,
             dir.clone(),
             10,
@@ -829,7 +829,7 @@ async fn watermark_cold_start_offline() {
     // ---- Phase 2: cold, offline restart on the SAME redb file ------------
     {
         let store = RedbStore::open(&db_path).expect("reopen redb store (phase 2, offline)");
-        let (engine_thread, handle) = EngineThread::spawn(
+        let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
             store,
             dir.clone(),
             10,
@@ -946,10 +946,10 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
         .await
         .expect("seed into relay_2");
 
-    let dir =
-        FixtureDirectory::new().with_write(a.public_key().to_hex(), [url_1.clone(), url_2.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [url_1.clone(), url_2.clone()]);
 
-    let (engine_thread, handle) = EngineThread::spawn(
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         nmp_store::MemoryStore::new(),
         dir,
         10,
@@ -1024,10 +1024,10 @@ fn write_ack_per_relay_over_real_relays() {
     let relay_bad = AuthRequiredRelay::spawn(a.public_key(), [], AuthRelayWriteOutcome::Reject, 0);
     let url_bad = relay_bad.url();
 
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [url_ok.clone(), url_bad.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [url_ok.clone(), url_bad.clone()]);
 
-    let (engine_thread, handle) = EngineThread::spawn(
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         nmp_store::MemoryStore::new(),
         dir,
         10,
@@ -1165,8 +1165,8 @@ fn auth_policy_denial_keeps_real_relay_work_parked() {
     let a = Keys::generate();
     let relay = AuthRequiredRelay::spawn(a.public_key(), [], AuthRelayWriteOutcome::Ack, 0);
     let url = relay.url();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [url.clone()]);
-    let (engine_thread, handle) = EngineThread::spawn(
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [url.clone()]);
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         nmp_store::MemoryStore::new(),
         dir,
         10,
@@ -1220,8 +1220,8 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
     let a = Keys::generate();
     let relay = AuthRequiredRelay::spawn(a.public_key(), [], AuthRelayWriteOutcome::Ack, 1);
     let url = relay.url();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [url.clone()]);
-    let (engine_thread, handle) = EngineThread::spawn(
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [url.clone()]);
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         nmp_store::MemoryStore::new(),
         dir,
         10,
@@ -1374,12 +1374,12 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     );
     let url = relay.url();
 
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [url.clone()])
-        .with_write(b.public_key().to_hex(), [url.clone()])
-        .with_write(c.public_key().to_hex(), [url.clone()]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [url.clone()])
+        .with_outbound_routes(b.public_key(), [url.clone()])
+        .with_outbound_routes(c.public_key(), [url.clone()]);
 
-    let (engine_thread, handle) = EngineThread::spawn(
+    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
         nmp_store::MemoryStore::new(),
         dir,
         10,

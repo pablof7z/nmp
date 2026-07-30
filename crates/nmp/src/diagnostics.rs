@@ -527,7 +527,7 @@ mod tests {
                 subid_length_limit: Some(32),
                 subid_length_rejects_our_ids: true,
                 authors_served: 1,
-                by_lane: vec![(Lane::AppRelay, 2)],
+                by_lane: vec![(Lane::OperatorApp, 2)],
                 filters: vec!["{\"kinds\":[9999]}".to_string()],
                 events_by_kind: vec![(9999, 3)],
                 coverage: vec![
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(row.subid_length_limit, Some(32));
         assert!(row.subid_length_rejects_our_ids);
         assert_eq!(row.authors_served, 1);
-        assert_eq!(row.by_lane, vec![(Lane::AppRelay, 2)]);
+        assert_eq!(row.by_lane, vec![(Lane::OperatorApp, 2)]);
         assert_eq!(row.filters, vec!["{\"kinds\":[9999]}".to_string()]);
         assert_eq!(row.events_by_kind, vec![(9999, 3)]);
         assert_eq!(row.coverage.len(), 2);

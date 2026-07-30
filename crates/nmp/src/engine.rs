@@ -1,5 +1,5 @@
 //! [`Engine`] -- the one supported construction call plus the two nouns
-//! (canonical-facade-52-plan.md §1). Owns config -> store/directory
+//! (canonical-facade-52-plan.md §1). Owns config -> store/routing-fact
 //! selection and the router cap both `nmp-ffi` and `nmp-demo` used to
 //! duplicate by hand.
 //!
@@ -40,7 +40,9 @@ use nostr::RelayUrl;
 use nostr::{EventId, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
-use crate::config::{build_admission_policy, build_directory, EngineConfig};
+#[cfg(feature = "nip65")]
+use crate::config::build_nip65_sources;
+use crate::config::{build_admission_policy, build_routing_facts, EngineConfig};
 use crate::error::EngineError;
 use crate::relay_information::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
@@ -277,11 +279,11 @@ impl Engine {
         }
     }
 
-    /// The ONE construction call: config -> store/directory selection,
-    /// router cap, everything `nmp-ffi::facade::build_directory` and
+    /// The ONE construction call: config -> store/routing-fact selection,
+    /// router cap, everything `nmp-ffi` and
     /// `nmp-demo`'s hand-rolled assembly used to duplicate independently.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
-        let directory = build_directory(&config)?;
+        let routing_facts = build_routing_facts(&config)?;
         let admission = build_admission_policy(&config);
         // #20: one effective ceiling is threaded to both the whole-demand
         // compiler and transport. EngineThread normalizes legacy zero to the
@@ -293,6 +295,8 @@ impl Engine {
 
         let runtime_config = RuntimeConfig {
             max_auth_capabilities: config.max_auth_capabilities,
+            #[cfg(feature = "nip65")]
+            nip65_sources: build_nip65_sources(&config)?,
         };
         let (engine_thread, handle) = match &config.store_path {
             Some(path) => {
@@ -306,9 +310,9 @@ impl Engine {
                         reason: error.to_string(),
                     },
                 })?;
-                EngineThread::spawn_with_runtime_config(
+                EngineThread::spawn_with_routing_facts_and_runtime_config(
                     store,
-                    directory,
+                    routing_facts,
                     config.max_relays,
                     pool_config,
                     admission,
@@ -318,9 +322,9 @@ impl Engine {
             }
             None => {
                 let store = MemoryStore::new();
-                EngineThread::spawn_with_runtime_config(
+                EngineThread::spawn_with_routing_facts_and_runtime_config(
                     store,
-                    directory,
+                    routing_facts,
                     config.max_relays,
                     pool_config,
                     admission,
@@ -340,7 +344,7 @@ impl Engine {
     }
 
     /// #52 Q3's unstable escape hatch: construct directly from an
-    /// already-built store/directory pair, bypassing `EngineConfig`
+    /// already-built store, bypassing `EngineConfig`
     /// entirely. `#[doc(hidden)]` and gated behind the `unstable-mechanism`
     /// feature -- the ONLY sanctioned way to inject a store (needed by
     /// `nmp-bdd`, which spawns the real `EngineThread` against scripted
@@ -353,20 +357,88 @@ impl Engine {
     /// (Unit A0), same as every other entry point.
     #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
-    pub fn from_parts<S, D>(
+    pub fn from_parts<S>(
         store: S,
-        directory: D,
         cap: usize,
         pool_config: PoolConfig,
         admission: crate::core::RelayAdmissionPolicy,
     ) -> Result<Self, EngineError>
     where
         S: nmp_store::EventStore + Send + 'static,
-        D: nmp_router::RelayDirectory + Send + 'static,
     {
-        let (engine_thread, handle) =
-            EngineThread::spawn(store, directory, cap, pool_config, admission)
-                .map_err(EngineError::from_start_error)?;
+        let (engine_thread, handle) = EngineThread::spawn(store, cap, pool_config, admission)
+            .map_err(EngineError::from_start_error)?;
+        Ok(Self {
+            inner: Mutex::new(Some(Inner {
+                handle,
+                engine_thread,
+                active_pubkey: None,
+            })),
+        })
+    }
+
+    /// Static-fact variant of [`Self::from_parts`] for deterministic
+    /// in-workspace falsifiers such as the scripted BDD harness.
+    #[cfg(feature = "unstable-mechanism")]
+    #[doc(hidden)]
+    pub fn from_parts_with_fixture_routing_facts<S>(
+        store: S,
+        facts: nmp_router::FixtureRoutingFacts,
+        cap: usize,
+        pool_config: PoolConfig,
+        admission: crate::core::RelayAdmissionPolicy,
+    ) -> Result<Self, EngineError>
+    where
+        S: nmp_store::EventStore + Send + 'static,
+    {
+        let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
+            store,
+            facts,
+            cap,
+            pool_config,
+            admission,
+        )
+        .map_err(EngineError::from_start_error)?;
+        Ok(Self {
+            inner: Mutex::new(Some(Inner {
+                handle,
+                engine_thread,
+                active_pubkey: None,
+            })),
+        })
+    }
+
+    /// Feature-on scripted-harness variant that also supplies the exact
+    /// operator sources owned by the concrete NIP-65 assembly.
+    ///
+    /// This remains a static-fixture/test door: applications use
+    /// [`Self::new`] and [`EngineConfig`].
+    #[cfg(all(feature = "unstable-mechanism", feature = "nip65"))]
+    #[doc(hidden)]
+    pub fn from_parts_with_fixture_routing_facts_and_nip65_sources<S>(
+        store: S,
+        facts: nmp_router::FixtureRoutingFacts,
+        nip65_sources: Vec<RelayUrl>,
+        cap: usize,
+        pool_config: PoolConfig,
+        admission: crate::core::RelayAdmissionPolicy,
+    ) -> Result<Self, EngineError>
+    where
+        S: nmp_store::EventStore + Send + 'static,
+    {
+        let runtime_config = RuntimeConfig {
+            max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
+            nip65_sources,
+        };
+        let (engine_thread, handle) = EngineThread::spawn_with_routing_facts_and_runtime_config(
+            store,
+            crate::core::RoutingFactStore::from_fixture(facts),
+            cap,
+            pool_config,
+            admission,
+            runtime_config,
+        )
+        .map_err(EngineError::from_start_error)?;
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
@@ -1107,9 +1179,10 @@ mod tests {
         let mut found = false;
         let mut execution = Vec::new();
         while (!found
-            || !execution
-                .iter()
-                .any(|fact: &crate::ObservationEvidence| fact.kind == "relay_eose"))
+            || !execution.iter().any(|fact: &crate::ObservationEvidence| {
+                fact.kind == "request_settled"
+                    && evidence_attribute(fact, "terminal") == Some("eose")
+            }))
             && Instant::now() < deadline
         {
             if let Ok(frame) = subscription.recv_timeout(Duration::from_millis(250)) {
@@ -1160,8 +1233,9 @@ mod tests {
         );
         assert!(
             execution.iter().any(|fact| {
-                fact.kind == "relay_eose"
+                fact.kind == "request_settled"
                     && fact.path.as_deref() == Some("$")
+                    && evidence_attribute(fact, "terminal") == Some("eose")
                     && requests.contains(&(
                         fact.revision.expect("EOSE filter revision"),
                         evidence_attribute(fact, "transport_generation")
@@ -1365,7 +1439,6 @@ mod tests {
         let store = RedbStore::open(&path).expect("store must open");
         let engine = Engine::from_parts(
             store,
-            nmp_router::FixtureDirectory::new(),
             10,
             PoolConfig::default(),
             crate::core::RelayAdmissionPolicy::default(),
@@ -1382,7 +1455,6 @@ mod tests {
         let store = RedbStore::open(&path).expect("store must reopen");
         let failure = Engine::from_parts(
             store,
-            nmp_router::FixtureDirectory::new(),
             usize::MAX,
             PoolConfig {
                 max_relays: usize::MAX,
@@ -1958,7 +2030,7 @@ mod tests {
 
     /// `EngineConfig::default()` (no `store_path`) must select the
     /// in-memory store and construct cleanly with no network at all -- no
-    /// indexer/app/fallback relay configured.
+    /// operator app/fallback relay configured.
     #[test]
     fn config_with_no_store_path_selects_memory_store() {
         let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");

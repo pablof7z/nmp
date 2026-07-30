@@ -5,23 +5,20 @@
 //! Flow:
 //! 1. Parse an npub/hex pubkey (default: a well-known active npub) and
 //!    optional `--nsec`/`--secs`.
-//! 2. Construct `nmp::Engine::new` with ONLY the two hardcoded operator
-//!    indexer relays configured -- no write relay pre-resolved for anyone.
+//! 2. Construct `nmp::Engine::new` with the optional NIP-65 assembly and ONLY
+//!    two operator-selected exact sources -- no author route pre-resolved.
 //!    Set the active account to `target` and `observe` the $myFollows
 //!    `LiveQuery` (kind:1 authored by whoever the target's kind:3 currently
 //!    names, reactively).
-//! 3. The ENGINE ITSELF (M5's self-bootstrapping outbox --
-//!    `nmp_engine::core::EngineCore`'s internal kind:10002 auto-discovery,
-//!    reached here only through the `nmp` facade) notices the target -- and,
-//!    as its kind:3 resolves, every follow -- has no known write relays yet,
-//!    opens its OWN discovery reads against the two indexers, and re-routes
+//! 3. The feature-gated NIP-65 facade notices the target -- and, as its
+//!    kind:3 resolves, every follow -- has no known outbound routes yet,
+//!    opens an ordinary exact-source query and re-routes
 //!    each author's kind:1 atom to their real write relay the moment that
 //!    author's relay list arrives. This app never resolves a single relay
 //!    itself, and never touches a mechanism crate (`nmp-store`/`nmp-router`/
 //!    `nmp-transport`/`nmp-resolver`) directly: it only configures the two
-//!    indexers through `nmp::EngineConfig` and subscribes (no bootstrap
-//!    phase, no pre-resolution -- see `docs/known-gaps.md`'s former
-//!    "RelayDirectory" gap).
+//!    sources through `nmp::EngineConfig` and subscribes (no bootstrap phase
+//!    and no pre-resolution).
 //! 4. Print every row as it streams in, plus whatever diagnostic the facade
 //!    surface actually exposes (see the running summary for what that is and
 //!    is not).
@@ -44,10 +41,9 @@ use nostr::Keys;
 /// a read-only run against it reliably has live data to show.
 const DEFAULT_NPUB: &str = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
 
-/// The two operator indexer relays this demo configures `nmp::EngineConfig`
-/// with -- the entire relay fact set it ever supplies. Every author's write
-/// relays, including the target's own, are discovered live by the engine
-/// from here on (see the module doc).
+/// The two operator-selected NIP-65 sources this demo configures. Every
+/// author's outbound routes, including the target's own, are learned live by
+/// the optional facade assembly (see the module doc).
 const INDEXER_RELAYS: [&str; 2] = ["wss://purplepag.es", "wss://relay.primal.net"];
 
 struct Args {

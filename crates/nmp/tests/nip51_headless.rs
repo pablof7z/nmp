@@ -7,12 +7,12 @@
 use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::ContextualAtom;
 use nmp_resolver::LiveQuery;
-use nmp_router::FixtureDirectory;
+use nmp_router::FixtureRoutingFacts;
 use nmp_store::MemoryStore;
 use nostr::{Keys, RelayUrl};
 
-fn new_core(dir: FixtureDirectory) -> EngineCore<MemoryStore> {
-    EngineCore::new(MemoryStore::new(), Box::new(dir), 10)
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
+    EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10)
 }
 
 fn kind_10009_atoms(atoms: &std::collections::BTreeSet<ContextualAtom>) -> usize {
@@ -24,7 +24,7 @@ fn kind_10009_atoms(atoms: &std::collections::BTreeSet<ContextualAtom>) -> usize
 
 #[test]
 fn signed_out_active_account_demand_resolves_to_zero_atoms() {
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery(
         nmp_nip51::active_account_demand(),
     )));
@@ -40,7 +40,7 @@ fn signed_out_active_account_demand_resolves_to_zero_atoms() {
 fn signing_in_reconstructs_the_active_account_kind_10009_demand() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay-a.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
 
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery(
@@ -61,9 +61,9 @@ fn rerooting_to_a_different_account_replaces_the_kind_10009_atom_not_adds_a_seco
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay-a.example.com").unwrap();
-    let dir = FixtureDirectory::new()
-        .with_write(a.public_key().to_hex(), [relay.clone()])
-        .with_write(b.public_key().to_hex(), [relay]);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay]);
     let mut core = new_core(dir);
 
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery(

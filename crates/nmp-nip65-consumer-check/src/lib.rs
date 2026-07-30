@@ -4,22 +4,20 @@
 //! publishing the operation ever requires `nmp-grammar` or a transport/store
 //! mechanism crate, this crate stops compiling.
 
-use nmp::{Engine, PublicKey, ReceiptStream, RelayUrl};
-use nmp_nip65::{
-    publish_relay_list_bootstrap, BootstrapRelayList, BootstrapRelayListError, RelayListEntry,
-    RelayUsage,
-};
+use nmp::nip65::Nip65Operations;
+use nmp::{Engine, EngineError, PublicKey, ReceiptStream, RelayUrl};
+use nmp_nip65::{BootstrapRelayList, BootstrapRelayListError, RelayListEntry, RelayUsage};
 
 pub fn bootstrap_new_account(
     engine: &Engine,
     author: PublicKey,
     bootstrap_relay: RelayUrl,
     outbox_relay: RelayUrl,
-) -> Result<ReceiptStream, BootstrapRelayListError> {
+) -> Result<Result<ReceiptStream, EngineError>, BootstrapRelayListError> {
     let request = BootstrapRelayList::new(
         author,
         vec![bootstrap_relay],
         vec![RelayListEntry::new(outbox_relay, RelayUsage::ReadWrite)],
     )?;
-    publish_relay_list_bootstrap(engine, request)
+    Ok(engine.publish_relay_list_bootstrap(request))
 }

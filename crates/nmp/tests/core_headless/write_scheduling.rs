@@ -11,7 +11,7 @@ use super::*;
 fn enqueue_is_not_converged() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
-    let dir = FixtureDirectory::new().with_write(a.public_key().to_hex(), [relay0.clone()]);
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
     connect_signer(&mut core, 0, &relay0, a.public_key());
@@ -117,7 +117,7 @@ fn ordinary_author_relay_without_auth_challenge_publishes_and_acks() {
         slot: 0,
         generation: 1,
     };
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let (receipt, event, offline) = publish_explicit(&mut core, &author, [relay.clone()]);
     assert!(!offline
         .iter()
@@ -158,7 +158,7 @@ fn challenged_author_relay_suppresses_event_until_exact_auth_ready() {
         slot: 0,
         generation: 1,
     };
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let owned = core.handle(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
         author.public_key(),
@@ -223,7 +223,7 @@ fn auth_required_session_reconnect_cannot_publish_before_fresh_generation_auth()
         slot: 0,
         generation: 2,
     };
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let subscribed = core.handle(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
         author.public_key(),
@@ -282,7 +282,7 @@ fn stale_auth_probe_release_after_reconnect_cannot_wake_current_generation() {
         slot: 0,
         generation: 2,
     };
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     let subscribed = core.handle(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
         author.public_key(),
@@ -328,11 +328,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
     let path = dir.path().join("auth-wait.redb");
 
     let (intent, event) = {
-        let mut core = EngineCore::new(
-            RedbStore::open(&path).unwrap(),
-            Box::new(FixtureDirectory::new()),
-            10,
-        );
+        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
         let (receipt, event, offline) = publish_explicit(&mut core, &author, [relay.clone()]);
         let session = signer_session(&relay, event.pubkey);
         assert!(
@@ -353,11 +349,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         assert!(store.recover_attempts(intent).unwrap().is_empty());
         drop(store);
 
-        let mut core = EngineCore::new(
-            RedbStore::open(&path).unwrap(),
-            Box::new(FixtureDirectory::new()),
-            10,
-        );
+        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
         core.recover_on_boot();
         let recovered = core.reattach_receipt(receipt);
         assert!(recovered.is_attached());
@@ -528,7 +520,7 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
     let relay = RelayUrl::parse("wss://auth-reconnect.example").unwrap();
     let session = signer_session(&relay, author.public_key());
 
-    let mut core = EngineCore::new(MemoryStore::new(), Box::new(FixtureDirectory::new()), 10);
+    let mut core = EngineCore::new(MemoryStore::new(), 10);
     let (_receipt, event, _) = publish_explicit(&mut core, &author, [relay.clone()]);
 
     // First generation: connect, release the bounded AUTH-discovery probe,
@@ -630,11 +622,7 @@ fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
     let path = dir.path().join("auth-boot.redb");
 
     let event = {
-        let mut core = EngineCore::new(
-            RedbStore::open(&path).unwrap(),
-            Box::new(FixtureDirectory::new()),
-            10,
-        );
+        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
         let (_receipt, event, _) = publish_explicit(&mut core, &author, [relay.clone()]);
         connect_signer(&mut core, 0, &relay, author.public_key());
         let connected = release_author_probe(
@@ -667,11 +655,7 @@ fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
     };
 
     // Fresh process: recover from the persisted store, then connect.
-    let mut core = EngineCore::new(
-        RedbStore::open(&path).unwrap(),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
     let recovery = core.recover_on_boot();
     assert!(
         recovery
@@ -715,11 +699,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
     let path = dir.path().join("retry-receipt-restart.redb");
 
     let (receipt, retry_at) = {
-        let mut core = EngineCore::new(
-            RedbStore::open(&path).unwrap(),
-            Box::new(FixtureDirectory::new()),
-            10,
-        );
+        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
         connect_signer(&mut core, 0, &auth, author.public_key());
         connect_signer(&mut core, 1, &retry, author.public_key());
         connect_signer(&mut core, 2, &ambiguous, author.public_key());
@@ -811,11 +791,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         (receipt, retry_at)
     };
 
-    let mut recovered = EngineCore::new(
-        RedbStore::open(&path).unwrap(),
-        Box::new(FixtureDirectory::new()),
-        10,
-    );
+    let mut recovered = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
     recovered.recover_on_boot();
     let replay = recovered.reattach_receipt(receipt);
     assert!(replay.is_attached());
@@ -856,7 +832,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
 fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://transient-retry.example").unwrap();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
     let (receipt, event, first) = publish_explicit(&mut core, &author, [relay.clone()]);
@@ -924,7 +900,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
 fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://paused-retry.example").unwrap();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     connect_signer(&mut core, 0, &relay, author.public_key());
     authenticate_signer(&mut core, 0, &relay, &author);
 
@@ -1001,7 +977,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
     let author = Keys::generate();
     let early = RelayUrl::parse("wss://a-early-page.example").unwrap();
     let late = RelayUrl::parse("wss://z-late-page.example").unwrap();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     for (slot, relay) in [&early, &late].into_iter().enumerate() {
         connect_signer(&mut core, slot as u32, relay, author.public_key());
         authenticate_signer(&mut core, slot as u32, relay, &author);
@@ -1148,7 +1124,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
         .map(|i| RelayUrl::parse(&format!("wss://cap-{i:02}.example")).unwrap())
         .collect::<Vec<_>>();
     relays.sort();
-    let mut core = new_core(FixtureDirectory::new());
+    let mut core = new_core(FixtureRoutingFacts::new());
     for (slot, relay) in relays.iter().enumerate() {
         connect_signer(&mut core, slot as u32, relay, author.public_key());
         authenticate_signer(&mut core, slot as u32, relay, &author);
