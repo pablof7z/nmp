@@ -107,11 +107,11 @@ let preview = NMPDemand(
 
 - `live` serves cached rows immediately and keeps ordinary remote acquisition
   open until the handle is dropped.
-- `maxAge(seconds:)` checks existing coverage once when the handle opens. Every
-  currently assigned relay for every atom in the query subtree must cover the
-  requested floor and be recent enough. If so, this handle opens no wire work;
-  otherwise it becomes ordinary `live` and its EOSE/NEG completion refreshes
-  coverage.
+- `maxAge(seconds:)` checks existing coverage once when its exact Demand
+  boundary opens. Every currently assigned relay for every atom owned by that
+  boundary must cover the requested floor and be recent enough. If so, that
+  boundary opens no wire work; otherwise it becomes ordinary `live` and its
+  EOSE/NEG completion refreshes coverage.
 - `cacheOnly` always opens zero wire work, with or without cached rows or
   coverage.
 
@@ -127,8 +127,11 @@ wall clock when the relay check completes, so a future-dated event cannot fake
 a recent check.
 
 The choice belongs to the component or app observation that owns the handle.
-Equal `live`, `maxAge`, and `cacheOnly` demands may share graph/cache state, but
-one handle's policy never opens, closes, or lends evidence to another.
+Every `Derived.inner` demand makes the same choice independently from its
+parent. Equal root `live`, `maxAge`, and `cacheOnly` demands may share
+graph/cache state, but one handle or nested boundary never opens, closes, or
+lends evidence to another. A cache-only child can therefore remain local
+under a live parent, and a live child still acquires under a cache-only parent.
 
 A coverage-satisfied `maxAge` handle freezes its acquisition decision and
 evidence boundary, not its row set:

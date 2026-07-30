@@ -981,18 +981,25 @@ struct HandleState {
     execution: ObservationExecutionState,
 }
 
-/// The immutable opening-time result of one handle's freshness policy.
-/// Lifecycle ownership is represented by variants, never a teardown bool:
-/// only `Live` contributes atoms to the router; a coverage-satisfied handle
-/// retains the exact plan that justified suppression so its evidence remains
-/// scoped and inspectable without a mid-handle re-evaluation loop.
-enum HandleAcquisition {
+/// The immutable opening-time result of every Demand boundary in one
+/// observation handle. The vector follows the resolver's stable structural
+/// Demand order (root first), so reactive value changes update the atoms
+/// without overwriting which boundary owns which policy decision.
+struct HandleAcquisition {
+    scopes: Vec<ScopeAcquisition>,
+}
+
+/// One Demand boundary's freshness decision. Lifecycle ownership is
+/// represented by variants, never a teardown bool: only `Live` contributes
+/// that boundary's current atoms to the router; a coverage-satisfied scope
+/// retains the exact plan that justified suppression.
+enum ScopeAcquisition {
     Live,
     CoverageSatisfied(RelayPlan),
     CacheOnly(RelayPlan),
 }
 
-impl HandleAcquisition {
+impl ScopeAcquisition {
     fn contributes_wire(&self) -> bool {
         matches!(self, Self::Live)
     }
@@ -1002,6 +1009,12 @@ impl HandleAcquisition {
             Self::CoverageSatisfied(plan) | Self::CacheOnly(plan) => Some(plan),
             Self::Live => None,
         }
+    }
+}
+
+impl HandleAcquisition {
+    fn root(&self) -> Option<&ScopeAcquisition> {
+        self.scopes.first()
     }
 }
 

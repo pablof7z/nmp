@@ -9,11 +9,15 @@ after the original milestones. These are agreed target contracts, not claims
 about current code:
 
 - **Full Demand identity and scoped acquisition evidence are built
-  end-to-end (#49/#714).** Rust, FFI, Swift, and Kotlin carry
+  end-to-end (#49/#714/#1106).** Rust, FFI, Swift, and Kotlin carry
   `selection + source authority + access context + cache + freshness`, including
   an independently declared complete demand at every `Derived.inner`.
   Context participates in graph/wire/coverage/evidence identity; native
   conversion has no filter-shaped fallback that can reapply defaults.
+  Runtime cache projection and opening-time freshness are enforced at each
+  exact Demand boundary: Strict pinned provenance is filtered before an
+  interior limit, Live/MaxAge/CacheOnly participation is independent across
+  parent and child, and evidence cannot borrow another boundary's plan.
   Query snapshots carry compact per-current-plan source facts and explicit
   shortfalls, including populated `AwaitingAuth`, `AuthDenied`, and `Error`
   states. Diagnostics retains exact per-session/filter intervals as a distinct
