@@ -24,8 +24,8 @@ data class KindCount(val kind: UShort, val count: ULong) {
     }
 }
 
-/** One (lane, count) pair -- how many of a relay's wire subs trace to each
- * routing lane (NIP-65 write, hint, indexer discovery, ...). */
+/** One (lane, count) pair -- how many of a relay's wire subscriptions trace
+ * to each neutral routing source (author outbound, hint, operator app, ...). */
 data class LaneCount(val lane: String, val count: UInt) {
     companion object {
         fun from(ffi: FfiLaneCount): LaneCount = LaneCount(ffi.lane, ffi.count)

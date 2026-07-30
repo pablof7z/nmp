@@ -5412,7 +5412,7 @@ record Record {
             type_: UInt64,
             default: None,
             docstring: Some(
-                "DISCOVERED relays rejected by the SSRF admission policy before they\ncould become routable lanes (issue #121): a network-sourced kind:10002\nnaming a loopback/RFC-1918/link-local/`.onion` host the operator never\nopted in. Counted PER LANE (write + read parse of one event), so a\nsingle hostile event naming `N` rejected hosts bumps this by up to\n`2N` — a rejection-event tally, not a distinct-host count.",
+                "Network-derived relays rejected by the SSRF admission policy before\nthey could become neutral route facts (issue #121): a\nloopback/RFC-1918/link-local/`.onion` host the operator never opted\nin. Counted per directional admission, so one provider update naming\n`N` rejected hosts can bump this by up to `2N` — a rejection-event\ntally, not a distinct-host count.",
             ),
         },
         Field {
@@ -6766,21 +6766,13 @@ record Record {
             ),
         },
         Field {
-            name: "indexer_relays",
-            type_: Sequence {
-                inner_type: String,
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
             name: "app_relays",
             type_: Sequence {
                 inner_type: String,
             },
             default: None,
             docstring: Some(
-                "Operator app relay set (`Lane::AppRelay`). Default empty.",
+                "Operator app relay set (`Lane::OperatorApp`). Default empty.",
             ),
         },
         Field {
@@ -6790,7 +6782,7 @@ record Record {
             },
             default: None,
             docstring: Some(
-                "Operator fallback relay set (`Lane::Fallback`). Default empty.",
+                "Operator fallback relay set (`Lane::OperatorFallback`). Default empty.",
             ),
         },
         Field {
@@ -6802,7 +6794,7 @@ record Record {
                 EmptySequence,
             ),
             docstring: Some(
-                "Local/private relay HOSTS the operator explicitly opts into despite\nthe SSRF admission policy (issue #121). A DISCOVERED (network-sourced\nkind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`\nhost is rejected by default; listing its host here (e.g. `\"127.0.0.1\"`\nor `\"localhost\"`) re-admits discovered relays on that exact host.\nHost-only match (port- and path-insensitive). Default empty.\n\n`default = []` keeps this field OPTIONAL for existing foreign-language\ncallers — adding it must not break records constructed before #121.",
+                "Local/private relay HOSTS the operator explicitly opts into despite\nthe SSRF admission policy (issue #121). A network-derived relay on a\nloopback / RFC-1918 / link-local / `.onion` host is rejected by\ndefault; listing its host here (e.g. `\"127.0.0.1\"` or `\"localhost\"`)\nre-admits derived relays on that exact host.\nHost-only match (port- and path-insensitive). Default empty.\n\n`default = []` keeps this field OPTIONAL for existing foreign-language\ncallers — adding it must not break records constructed before #121.",
             ),
         },
         Field {
@@ -6835,7 +6827,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "Construction config for [`NmpEngine::new`]. See the module doc: the only\nrelay facts a caller ever supplies are the three operator-configured\nlanes -- `indexer_relays`, `app_relays`, `fallback_relays`\n(`routing-and-ownership.md` §2.1) -- everything else is discovered live.",
+        "Construction config for [`NmpEngine::new`].\n\nThis core native assembly accepts only neutral operator app/fallback\npolicy. It exposes no discovery-source setting and no mutable author-route\nmap: without a separately assembled route provider, `Auto` remains\nroute-waiting until operator policy supplies a destination.",
     ),
 }
 

@@ -11,9 +11,9 @@ import NMPFFI
 public enum NMPSourceAuthority: Sendable, Hashable {
     case authorOutboxes
     case `public`
-    /// Ask ONLY this relay set, on the wire, full stop -- never author-
-    /// outbox/directory/app/fallback/indexer routing, regardless of whether
-    /// the selection is author-bearing. Must be nonempty:
+    /// Ask ONLY this relay set, on the wire, full stop -- never neutral
+    /// author facts, hints, provenance, or operator policy, regardless of
+    /// whether the selection is author-bearing. Must be nonempty:
     /// `NMPEngine.observe(_ demand:)` throws `NMPError.emptyPinnedRelaySet`
     /// if it is not.
     case pinned(Set<String>)

@@ -21688,7 +21688,7 @@ reexport nmp::Lane => nmp_router::facts::Lane
               "kind": "plain"
             }
           },
-          "name": "Nip65Write",
+          "name": "AuthorOutbound",
           "visibility": "default"
         },
         {
@@ -21721,7 +21721,7 @@ reexport nmp::Lane => nmp_router::facts::Lane
               "kind": "plain"
             }
           },
-          "name": "UserConfigured",
+          "name": "OperatorApp",
           "visibility": "default"
         },
         {
@@ -21732,7 +21732,7 @@ reexport nmp::Lane => nmp_router::facts::Lane
               "kind": "plain"
             }
           },
-          "name": "IndexerDiscovery",
+          "name": "OperatorFallback",
           "visibility": "default"
         },
         {
@@ -21743,62 +21743,7 @@ reexport nmp::Lane => nmp_router::facts::Lane
               "kind": "plain"
             }
           },
-          "name": "GroupHost",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "DmInbox",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "Nip65Read",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "AppRelay",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "Fallback",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "ExplicitPinned",
+          "name": "Exact",
           "visibility": "default"
         }
       ]

@@ -69,10 +69,10 @@ pub enum RouteResolution {
 `&Event`, so preview and send share one derivation and cannot drift
 (`preview-and-observability.md` §2). `RouteNeed` is a full `Filter`, not a
 `{author, kind}` pair, so future resolvers are not forced into
-relay-list-shaped needs. `RouteContext` exposes the directory's three-valued
-knowledge (`Known` / `KnownAbsent` / `Unknown`) and a
+relay-list-shaped needs. `RouteContext` exposes the neutral author fact's
+three-valued knowledge (`Present` / `Absent` / `Unknown`) and a
 `NeedState::{Pending, Settled}` per prior need — `Settled` means the
-discovery sources reached EOSE, so a miss is definitive absence
+exact protocol sources settled, so a miss is definitive absence
 (`knowledge-and-settlement.md`).
 
 Resolvers are pure functions of `(subject, ctx)`. They hold no state between
@@ -119,10 +119,11 @@ an oversight — it is §6.
 
 ## 4. Resolvers declare needs; the ENGINE drives the query — DESIGNED
 
-A resolver that lacks knowledge (a recipient's kind:10050, a relay list) does
-not fetch it. It returns the need, and the engine folds it into the existing
-discovery machinery. This was settled in two steps, and both of Pablo's
-statements matter because the second corrects an over-reading of the first.
+A resolver that lacks knowledge does not fetch it. It returns a neutral need.
+The generic engine deduplicates and emits those needs; an optional protocol
+assembly may bind them to an ordinary exact-source query. This was settled in
+two steps, and both of Pablo's statements matter because the second corrects
+an over-reading of the first.
 
 First, resolvers genuinely do need the network:
 
@@ -132,28 +133,21 @@ Then, when that was misread as "the crate performs its own querying":
 
 > Yes, of course I didn't mean that nip17 should introduce a separate querying approach, parallel to the existing querying system! I meant that any routing crate should use the querying system to retrieve the data they need!
 
-The querying system's own contract already forbids the alternative.
-`sync_discovery` — the engine-owned internal kind:10002 discovery
-subscription — documents itself (`crates/nmp/src/core/query.rs:449-457`):
+The shipped NIP-65 implementation is the concrete proof. Core emits
+`AuthorRouteNeedsChanged`; the feature-gated facade owns one ordinary
+kind:10002 `LiveQuery` pinned to its operator-selected sources. Its rows and
+generic `RequestSettled` evidence feed the engine's one private neutral
+replacement door. Core and router contain no kind, tag-marker, winner, or
+source-selection knowledge.
 
-> Deliberately reuses the ordinary resolver subscribe/unsubscribe
-> machinery rather than hand-rolling a parallel subscription system:
-> the discovery atom this produces (`kinds:[10002], authors:{covered}`)
-> is just another entry in `resolver.active_demand()`, so the router's
-> EXISTING discovery-kind eligibility is what routes it to the
-> configured indexers -- no router-side change was needed for that half
-> at all.
-
-Route needs simply widen that mechanism's needed set:
-`needed = f(wire_demand) ∪ route_needs`. Three properties make declared
-needs strictly better than resolver-driven fetching, and each is a failure
-mode avoided:
+Three properties make declared needs strictly better than resolver-driven
+fetching, and each is a failure mode avoided:
 
 - **Statelessness survives crashes.** Needs are re-derived from the intent on
   every drain. A resolver holding an in-flight fetch across a crash would
   need its own durability story; a declared need has none to lose.
 - **Dedup across intents is free.** Ten parked DMs to one recipient
-  contribute one entry to the discovery set. Ten resolver-owned fetches are
+  contribute one entry to the neutral need set. Ten resolver-owned fetches are
   ten subscriptions — exactly the fan-out pathology the subscription plane
   spent a week killing (`docs/internals/subscriptions/identity-grouping-and-limits.md` §3.4).
 - **One subscription system.** Every REQ the engine emits flows through the
@@ -163,19 +157,14 @@ mode avoided:
 
 ---
 
-## 5. Dependency direction — DESIGNED, with BUILT precedent
+## 5. Dependency direction — BUILT
 
-Crates that ship resolvers must read engine-adjacent state shapes
-(`RouteContext`, directory knowledge), so they depend on `nmp`. That is the
-`nmp-nip65` direction, already shipped: `crates/nmp-nip65/Cargo.toml`
-declares `nmp.workspace = true`, and `nmp` does not depend back — no cycle.
-
-Pure schema crates that only compose events stay engine-free: `nmp-nipc7`
-depends on `nostr` alone (`crates/nmp-nipc7/Cargo.toml`), `nmp-nip22` on
-`nostr` + `nmp-grammar` (`crates/nmp-nip22/Cargo.toml`). The dividing line is
-lookups: a crate that must READ state to compute routing (`nip17`, a future
-wiki crate) takes the `nmp` edge; a crate that owns only event shape returns
-builders and takes none.
+Protocol crates stay engine-free. `nmp-nip65` owns composition, demand,
+canonical-winner selection, marker parsing, and coordinator state over
+`nostr + nmp-grammar`; it has no dependency on `nmp`. The optional
+`nmp/nip65` facade depends toward that pure crate and binds its values to the
+ordinary engine doors. Disabling the feature removes that dependency and all
+coordinator symbols while the generic engine/router continue to compile.
 
 `nmp-nip29` needs neither a resolver nor the `nmp` edge: a group's host is
 not derivable from the event (`h` carries the group id, never the relay), so

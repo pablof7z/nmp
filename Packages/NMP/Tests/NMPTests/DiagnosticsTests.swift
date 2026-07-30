@@ -62,14 +62,14 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertNil(snapshot.transportDegraded)
     }
 
-    /// Subscribing to a literal-author query with NO write relay known for
-    /// that author (no indexer, no fixture) leaves the router with nowhere
-    /// to route the atom -- proving the ABSENCE case: the snapshot must
+    /// Subscribing to a literal-author query with no author route or
+    /// operator policy leaves the router with nowhere to route the atom.
+    /// The snapshot must
     /// report zero relays (never a fabricated one) AND must count the
     /// author as genuinely uncovered, both real numbers read off the
     /// running engine.
     func testObserveDiagnosticsNeverFabricatesARelayForAnUnroutableAuthor() async throws {
-        let engine = try NMPEngine(config: NMPConfig(indexerRelays: []))
+        let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
         let hexPubkey = String(repeating: "a", count: 64)

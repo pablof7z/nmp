@@ -20,7 +20,7 @@ idiom this module now BUILDS (it was PLANNED-shape only until this PR).
 ```kotlin
 import com.nmp.sdk.*
 
-NMPEngine(NMPConfig(indexerRelays = listOf("wss://purplepag.es"))).use { nmp ->
+NMPEngine(NMPConfig(appRelays = listOf("wss://purplepag.es"))).use { nmp ->
     nmp.setActiveAccount(pubkey)
     val rows: Flow<RowBatch> = nmp.observe(followFeed)
     // caller applies stateIn(scope, WhileSubscribed()) for a hot, shared,

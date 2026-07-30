@@ -31,10 +31,9 @@ final class AppModel {
     /// never wrapped in a second NMP-owned container.
     let engine: NMPEngine
 
-    /// EXACTLY two indexer relays (VISION/M5 plan §3/§0): the app supplies
-    /// no other relay fact. The engine self-discovers every author's real
-    /// write relays from these two alone.
-    static let indexerRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
+    /// EXACTLY two operator-provided app relays. The native core package has
+    /// no protocol provider and therefore learns no author routes implicitly.
+    static let appRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
 
     private(set) var accounts: [Account] = []
     private(set) var activePubkey: String?
@@ -45,7 +44,7 @@ final class AppModel {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         let storePath = caches?.appendingPathComponent("nmp-falsifier-store.sqlite").path
         engine = try NMPEngine(
-            config: NMPConfig(storePath: storePath, indexerRelays: Self.indexerRelays)
+            config: NMPConfig(storePath: storePath, appRelays: Self.appRelays)
         )
     }
 

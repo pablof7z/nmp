@@ -1,19 +1,12 @@
-// The bounded LIVE test (M4 plan §8 step D "Green", updated for M5's
-// self-bootstrapping outbox): proves the whole Swift -> NMPFFI ->
+// The bounded LIVE test proves the whole Swift -> NMPFFI ->
 // nmp-engine -> real-relay path end to end, using ONLY the public `NMP`
 // surface (no raw websocket code in this file). Every network wait is
 // bounded (~15s) so this can never hang a CI run.
 //
-// ARCHITECTURE NOTE (M5): the engine now self-navigates outbox routing from
-// the configured indexer relays alone. `nmp-router` still routes DISCOVERY
-// kinds (0/3/10002) to the indexers automatically, but `nmp-engine`'s own
-// `EngineCore` ALSO watches active content demand for authors whose write
-// relays are still unknown and opens its own internal kind:10002 discovery
-// reads against those same indexers -- so a kind:1 query, even one whose
-// authors are a *derived* binding ("my follows' notes"), resolves who the
-// authors are AND discovers where they write, entirely on its own. There is
-// no bootstrap phase and no pre-resolved write-relay map anymore
-// (`NMPConfig` no longer has a `writeRelays` field at all).
+// This core native package deliberately assembles no author-route provider.
+// These live checks therefore configure explicit operator app policy and
+// prove that ordinary and derived demands still work without an implicit
+// discovery query or a protocol-specific router lane.
 import Foundation
 import XCTest
 @testable import NMP
@@ -25,18 +18,14 @@ final class LiveRelayTests: XCTestCase {
     /// re-root reads onto an account this process holds no key for (read-
     /// only browsing is legal; see `NMPEngine.setActiveAccount`'s doc).
     static let fiatjafHex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
-    static let indexerRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
+    static let operatorRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
 
-    /// THE headline live proof: construct the engine from ONLY the two
-    /// operator indexer relays (no write-relay map -- there is no such
-    /// field anymore), add a read-only account for fiatjaf, and observe the
-    /// reactive follow-feed (kind:1 authored by whoever his kind:3
-    /// currently names). This app never resolves a single relay itself --
-    /// the engine discovers fiatjaf's own write relays live (via its
-    /// internal kind:10002 auto-discovery) and re-routes the content atom
-    /// to them on its own.
-    func testFollowFeedResolvesFromIndexerRelaysAlone() async throws {
-        let engine = try NMPEngine(config: NMPConfig(indexerRelays: Self.indexerRelays))
+    /// Construct the engine with two operator app relays, add a read-only
+    /// account for fiatjaf, and observe the reactive follow-feed (kind:1
+    /// authored by whoever his kind:3 currently names). Both the inner and
+    /// projected demands use only the explicit neutral operator policy.
+    func testFollowFeedUsesOperatorAppRelays() async throws {
+        let engine = try NMPEngine(config: NMPConfig(appRelays: Self.operatorRelays))
         defer { engine.shutdown() }
 
         try engine.setActiveAccount(Self.fiatjafHex)
@@ -58,10 +47,10 @@ final class LiveRelayTests: XCTestCase {
 
         guard let rows else {
             throw XCTSkip(
-                "Observed no follow-feed rows within 30s from \(Self.indexerRelays) alone -- "
-                    + "the indexers, or fiatjaf's follows' write relays, may be unreachable "
-                    + "from this test environment. Package build + construction tests still "
-                    + "pass independently of this network condition."
+                "Observed no follow-feed rows within 30s from \(Self.operatorRelays) -- "
+                    + "the operator relays may be unreachable from this test environment. "
+                    + "Package build + construction tests still pass independently of this "
+                    + "network condition."
             )
         }
 
@@ -82,7 +71,7 @@ final class LiveRelayTests: XCTestCase {
     /// iterators are alive; it never assumes a later snapshot must retain a
     /// relay session that has since left the plan.
     func testDiagnosticsSnapshotShowsRealEventsByKindForTheFollowFeed() async throws {
-        let engine = try NMPEngine(config: NMPConfig(indexerRelays: Self.indexerRelays))
+        let engine = try NMPEngine(config: NMPConfig(appRelays: Self.operatorRelays))
         defer { engine.shutdown() }
 
         try engine.setActiveAccount(Self.fiatjafHex)
@@ -119,7 +108,7 @@ final class LiveRelayTests: XCTestCase {
 
         guard let rows = outcome.rows else {
             throw XCTSkip(
-                "Observed no follow-feed rows within 30s from \(Self.indexerRelays) alone -- "
+                "Observed no follow-feed rows within 30s from \(Self.operatorRelays) -- "
                     + "diagnostics has nothing real to report in this test environment."
             )
         }
@@ -222,11 +211,10 @@ final class LiveRelayTests: XCTestCase {
         )
     }
 
-    /// The same self-bootstrapping proof for a LITERAL author set (no
-    /// derived binding involved at all): fiatjaf's own kind:1 notes, from a
-    /// fresh engine configured with ONLY the indexer relays.
-    func testAuthorsOwnNotesArriveWithNoWriteRelayConfigured() async throws {
-        let engine = try NMPEngine(config: NMPConfig(indexerRelays: Self.indexerRelays))
+    /// The same operator-policy proof for a literal author set (no derived
+    /// binding involved at all): fiatjaf's own kind:1 notes.
+    func testAuthorsOwnNotesArriveThroughOperatorAppRelays() async throws {
+        let engine = try NMPEngine(config: NMPConfig(appRelays: Self.operatorRelays))
         defer { engine.shutdown() }
 
         let notesFilter = NMPFilter(kinds: [1], authors: .literal([Self.fiatjafHex]), limit: 20)
@@ -236,9 +224,8 @@ final class LiveRelayTests: XCTestCase {
 
         guard let rows else {
             throw XCTSkip(
-                "Observed no kind:1 notes for fiatjaf within 30s from \(Self.indexerRelays) "
-                    + "alone -- his resolved write relays may be unreachable from this test "
-                    + "environment."
+                "Observed no kind:1 notes for fiatjaf within 30s from \(Self.operatorRelays) "
+                    + "-- the operator relays may be unreachable from this test environment."
             )
         }
 

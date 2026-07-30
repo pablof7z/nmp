@@ -50,32 +50,28 @@ func rethrowCheckpointFailureAfterRollback(
     throw persistenceError
 }
 
-/// Construction config for `NMPEngine`. The only relay facts this app ever
-/// supplies are the three operator-configured lanes -- `indexerRelays`,
-/// `appRelays`, `fallbackRelays` (`routing-and-ownership.md` §2.1): the
-/// engine self-navigates outbox routing from there on its own (M5's
-/// self-bootstrapping outbox -- it discovers each author's NIP-65 write
-/// relays live via its own internal kind:10002 reads against
-/// `indexerRelays`, and re-routes content atoms to them as they resolve).
-/// No pre-resolved write-relay map is needed or accepted -- see `nmp-ffi`'s
-/// own `NmpEngineConfig` doc.
+/// Construction config for `NMPEngine`.
+///
+/// This core native package accepts only neutral operator app/fallback
+/// policy. It exposes no discovery-source setting and no mutable author-route
+/// map: without a separately assembled route provider, `Auto` remains
+/// route-waiting until operator policy supplies a destination.
 public struct NMPConfig: Sendable {
     /// `nil` -> in-memory store (nothing survives a restart). A path ->
     /// a persistent store reopened at that path across launches.
     public var storePath: String?
-    public var indexerRelays: [String]
-    /// Operator app relay set (`Lane::AppRelay`) -- every kind, every
+    /// Operator app relay set (`Lane::OperatorApp`) -- every kind, every
     /// author, always, additive. Default empty.
     public var appRelays: [String]
-    /// Operator fallback relay set (`Lane::Fallback`) -- tops up authors
+    /// Operator fallback relay set (`Lane::OperatorFallback`) -- tops up authors
     /// under the 2-relay-min, suppressed when `appRelays` is non-empty.
     /// Default empty.
     public var fallbackRelays: [String]
     /// Local/private relay HOSTS the operator explicitly opts into despite
-    /// the SSRF admission policy (issue #121). A DISCOVERED (network-sourced
-    /// kind:10002) relay on a loopback / RFC-1918 / link-local / `.onion`
-    /// host is rejected by default; listing its host here (e.g. `"127.0.0.1"`
-    /// or `"localhost"`) re-admits discovered relays on that exact host.
+    /// the SSRF admission policy (issue #121). A network-derived relay on a
+    /// loopback / RFC-1918 / link-local / `.onion` host is rejected by
+    /// default; listing its host here (e.g. `"127.0.0.1"` or `"localhost"`)
+    /// re-admits derived relays on that exact host.
     /// Host-only match (port- and path-insensitive). Default empty.
     public var allowedLocalRelayHosts: [String]
     /// The one whole-engine relay ceiling. It bounds the complete compiled
@@ -92,7 +88,6 @@ public struct NMPConfig: Sendable {
 
     public init(
         storePath: String? = nil,
-        indexerRelays: [String] = [],
         appRelays: [String] = [],
         fallbackRelays: [String] = [],
         allowedLocalRelayHosts: [String] = [],
@@ -100,7 +95,6 @@ public struct NMPConfig: Sendable {
         maxAuthCapabilities: UInt32 = 64
     ) {
         self.storePath = storePath
-        self.indexerRelays = indexerRelays
         self.appRelays = appRelays
         self.fallbackRelays = fallbackRelays
         self.allowedLocalRelayHosts = allowedLocalRelayHosts
@@ -111,7 +105,6 @@ public struct NMPConfig: Sendable {
     func toFfi() -> NmpEngineConfig {
         NmpEngineConfig(
             storePath: storePath,
-            indexerRelays: indexerRelays,
             appRelays: appRelays,
             fallbackRelays: fallbackRelays,
             allowedLocalRelayHosts: allowedLocalRelayHosts,
