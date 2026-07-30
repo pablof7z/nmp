@@ -39,6 +39,7 @@ jobs:
             scripts/install-surface-tools.sh \
             scripts/lib/require-commands.sh \
             scripts/regenerate-surface-snapshots.sh \
+            scripts/run-surface-regeneration-governance.sh \
             scripts/test-install-surface-tools.sh \
             scripts/test-surface-governance.sh \
             tools/surface-toolchain.env \
