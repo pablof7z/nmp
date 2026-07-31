@@ -72,6 +72,38 @@ fn outbound_facts_form_coverage_routes() {
 }
 
 #[test]
+fn feasible_two_source_author_coverage_stays_under_the_whole_demand_cap() {
+    for (author_count, cap) in [(5, 10), (50, 15)] {
+        let authors: Vec<_> = (0..author_count).map(|_| author()).collect();
+        let relays = [test_relay(0), test_relay(1)];
+        let facts = FixtureRoutingFacts::shared_pool_mailboxes(&authors, &relays);
+        let mut router = router();
+
+        router.compile(&BTreeSet::from([outbox(1, &authors)]), &facts, cap);
+
+        assert!(
+            router.plan().reqs.len() <= cap,
+            "{} authors planned {} relay sessions above cap {cap}",
+            authors.len(),
+            router.plan().reqs.len()
+        );
+        for relay in relays.iter().cloned() {
+            let planned_authors: BTreeSet<_> = router.plan().reqs[&session(relay)]
+                .iter()
+                .filter_map(|request| request.filter.authors.as_ref())
+                .flatten()
+                .cloned()
+                .collect();
+            assert_eq!(
+                planned_authors,
+                authors.iter().map(PublicKey::to_hex).collect(),
+                "every author needs the second feasible coverage source"
+            );
+        }
+    }
+}
+
+#[test]
 fn coverage_respects_whole_demand_cap() {
     let authors: Vec<_> = (0..10).map(|_| author()).collect();
     let facts = FixtureRoutingFacts::disjoint_mailboxes(&authors);

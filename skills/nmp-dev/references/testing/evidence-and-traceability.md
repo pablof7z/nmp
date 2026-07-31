@@ -38,10 +38,49 @@ Examples:
 # nmp:evidence=rust:nmp::accepted_write_survives_reopen
 # nmp:evidence=swift:NmpTests::receipt_reconstructs_after_restart
 # nmp:evidence=parity:nmp-parity::nip22_comment_bytes
-# nmp:evidence=script:scripts/check-schema-ownership.sh
+# nmp:evidence=script:repository::scripts/check-schema-ownership.sh
 ```
 
-Prefer stable test names over line numbers. Evidence locators must be greppable and kept current when tests move or are renamed.
+Every kind uses the same `<kind>:<owner>::<target>` grammar. Preserve native
+owner case. A script owner is exactly `repository`, and its target is a real,
+slash-qualified executable repository path. Rust property/model proofs remain
+kind `rust`; there is no duplicate `property` spelling.
+
+Prefer stable test names over line numbers. Evidence locators resolve
+fail-closed to one executable proof, not an arbitrary same-named production
+function. Every non-live locator must map to a required deterministic CI lane.
+`live` names a job in an explicit bounded opt-in workflow and may supplement,
+but never replace, deterministic correctness evidence.
+
+The resolver counts enabled executable structure, not nearby text. A Rust proof
+uses an explicitly supported test-harness attribute, or is an enabled top-level
+`#[test]` function declaration inside the real `proptest` dependency's macro.
+The macro must be reached through its exact crate path or supported import;
+local `macro_rules!` shadows and token-bearing lookalike macros do not qualify.
+Ignored, conditionally compiled, or lookalike attributes do not qualify. A
+Swift proof is a discoverable `test*` method inside an enabled `XCTestCase` or
+an enabled declaration carrying exact `@Test`; Kotlin likewise requires exact
+enabled `@Test`. Source comments, strings, bare native helpers, `@NotATest`,
+and disabled tests never qualify.
+
+Deterministic lane resolution parses workflow YAML and inspects commands only
+from enabled, failure-propagating `jobs.*.steps[*].run` entries on the
+repository push/pull-request path, with the package path or package argument
+that owns the proof. Comments, environment notes, manual-only workflows,
+ignored failures, masked/dead shell commands, and other scalar lookalikes do
+not create a lane. Disabling shell errexit or following the proof command with
+any later command can mask failure and is rejected: the proof must be the
+terminal command in its shell or subshell context. The step must name its proof
+tool directly — `cargo`, `swift`, the repository-owned Gradle wrapper, or the
+exact repository script path — with no environment prefix, and a non-Bash
+`shell:` carries no lane claim. Live evidence additionally requires
+`on.workflow_dispatch`, the exact enabled target under `jobs`, a positive
+`timeout-minutes`, and an enabled executable run step.
+
+All corpus and evidence paths must resolve to repository-owned regular files
+through repository-owned directories. Symlink-backed feature files, workflow
+YAML, executable scripts, or source trees fail closed even when their external
+targets contain otherwise valid proof.
 
 ## One scenario, several proofs
 
@@ -159,10 +198,11 @@ The scenario describes the intended current contract and a current defect contra
 ```text
 # nmp:status=known-violation
 # nmp:issue=#456
-# nmp:evidence=rust:nmp::repro_duplicate_ack_after_restart
 ```
 
-The reproducer may intentionally fail or be encoded as a test of current known behavior in a quarantined lane. The issue owns the repair work; the feature owns the intended behavior.
+The issue must exist, be readable, and remain open. Missing, inaccessible, or
+closed issue state is a traceability failure, never an assumed gap. The issue
+owns the repair work; the feature owns the intended behavior.
 
 ## Avoid duplicate truth
 
@@ -179,7 +219,8 @@ Do not copy the full issue plan into the feature file. Do not copy all scenario 
 
 ## Acceptance-specific rules
 
-An `@acceptance` scenario is evidence only when:
+An `@acceptance` scenario is eligible only when it is `built`, has at least one
+`rust:nmp::<test>` facade proof, and:
 
 - it drives the canonical `nmp` facade;
 - setup controls the environment without performing the behavior under test;
@@ -190,20 +231,39 @@ An `@acceptance` scenario is evidence only when:
 
 Direct dependencies on mechanism crates require a narrow, documented fixture reason. They must not be used to drive or inspect the claimed public behavior.
 
+The repository validator enforces eligibility; #1077 owns the single
+supported-facade execution target. The transitional `nmp-bdd` mechanism runner
+skips governed files and is not acceptance evidence.
+
 ## Traceability checks to automate
 
-Add or preserve a repository check that verifies:
+`tools/behavior-traceability` is the runner-independent repository check. It
+parses canonical files with Gherkin 0.14 and verifies:
 
-- every scenario has one unique `nmp:id`;
-- every scenario has one valid status;
+- every governed-file scenario has one unique `nmp:id` and valid status;
 - every `built` scenario has evidence and a falsifier;
 - every `specified` scenario has a gap and issue;
 - every `known-violation` scenario has an issue;
 - every `@acceptance` scenario is `built`;
-- evidence locators resolve to known files/tests where mechanically possible;
+- evidence locators resolve uniquely and map to the correct CI lane;
 - no ID is duplicated;
 - all feature files parse;
-- no ambiguous `@wip` or `@designed` status remains.
+- governed files inherit no `@wip`, `@designed`, or `@requires-*`;
+- referenced issues are readable and open;
+- explicit base and head exist, and added/changed/moved behavior is governed.
+
+Governance is incremental without a manifest: once any scenario in a file has
+metadata, the whole file is governed. Unchanged ungoverned legacy may remain,
+but an ungoverned legacy file cannot be changed, moved, or deleted, and a
+missing base never turns change detection into success. Govern legacy in one
+traceable change before deleting it in a later change.
+
+The validator is a detached Cargo workspace with its own committed lock and
+explicit targets. CI invokes its exact manifest with `--locked` from a neutral
+temporary working directory and Cargo home. A protected workflow step resolves
+only the sorted, deduplicated issue-number/state snapshot; the head-built
+checker receives that narrow file and no GitHub token. Missing, extra, closed,
+or unreadable issue state fails closed.
 
 The linter checks bookkeeping. It does not establish semantic truth; review and falsification do that.
 
