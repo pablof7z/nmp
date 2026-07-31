@@ -41,15 +41,6 @@
         "signer-provider"
       ]
     },
-    "protocol-provider": {
-      "description": "A reviewed protocol runtime provider over neutral mechanisms.",
-      "may_reach": [
-        "generic-value",
-        "generic-mechanism",
-        "pure-protocol",
-        "protocol-provider"
-      ]
-    },
     "facade": {
       "description": "The supported facade assembles mechanisms and optional protocols.",
       "may_reach": "*"
@@ -68,10 +59,6 @@
       "stop_at_roles": [
         "facade"
       ]
-    },
-    "protocol-projection": {
-      "description": "A separately selectable protocol projection consumes its provider and SDK.",
-      "may_reach": "*"
     },
     "application": {
       "description": "Downstream examples and compile-only consumers assemble public surfaces.",
@@ -96,8 +83,6 @@
       "nmp-local-signer": "signer-provider",
       "nmp-content": "pure-extension",
       "nmp-nip02": "protocol-service",
-      "nmp-nip46": "protocol-provider",
-      "nmp-nip46-ffi": "protocol-projection",
       "nmp-nip65-consumer-check": "application",
       "nmp-ffi": "sdk",
       "nmp-consumer-check": "application",

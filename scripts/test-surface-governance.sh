@@ -569,52 +569,6 @@ rm "$repo/docs/surface/components/beta/uniffi.txt"
 commit_case "$repo" beta-retired
 expect_fail "new record cannot begin retired" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
-# The historical catalog bootstrap shape is exact: regular legacy base,
-# exactly two active records, then steady-state transition rules take over.
-bootstrap_repo() {
-  local repo=$1
-  new_repo "$repo"
-  rm -r "$repo/docs/surface/components"
-  rm -r "$repo/tools/surface-component-catalog"
-  printf 'legacy core snapshot\n' > "$repo/docs/surface/nmp-ffi-component.txt"
-  commit_case "$repo" legacy-base
-}
-
-repo="$TMP/bootstrap-valid"; bootstrap_repo "$repo"
-base=$(git -C "$repo" rev-parse HEAD)
-rm "$repo/docs/surface/nmp-ffi-component.txt"
-mkdir -p "$repo/docs/surface/components"
-printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
-descriptor "$repo" nmp-core nmp-core
-descriptor "$repo" nmp-nip46 nmp-nip46
-commit_case "$repo" exact-bootstrap
-expect_pass "exact two-record bootstrap" "$CATALOG_BIN" transition \
-  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
-
-repo="$TMP/bootstrap-extra"; bootstrap_repo "$repo"
-base=$(git -C "$repo" rev-parse HEAD)
-rm "$repo/docs/surface/nmp-ffi-component.txt"
-mkdir -p "$repo/docs/surface/components"
-printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
-descriptor "$repo" nmp-core nmp-core
-descriptor "$repo" nmp-nip46 nmp-nip46
-descriptor "$repo" premature premature
-commit_case "$repo" extra-bootstrap-record
-expect_fail "bootstrap extra record" "$CATALOG_BIN" transition \
-  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
-
-repo="$TMP/bootstrap-missing-legacy"; new_repo "$repo"
-rm -r "$repo/docs/surface/components"
-commit_case "$repo" catalog-absent
-base=$(git -C "$repo" rev-parse HEAD)
-mkdir -p "$repo/docs/surface/components"
-printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
-descriptor "$repo" nmp-core nmp-core
-descriptor "$repo" nmp-nip46 nmp-nip46
-commit_case "$repo" bootstrap-without-legacy
-expect_fail "bootstrap missing legacy snapshot" "$CATALOG_BIN" transition \
-  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
-
 if grep -R -Fq 'SURFACE_OWNER_BOOTSTRAP' \
   "$ROOT/scripts/check-surface-governance.sh" \
   "$ROOT/scripts/run-surface-regeneration-governance.sh"; then

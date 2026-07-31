@@ -144,16 +144,11 @@ proves its workflow and invoked scripts are byte-identical to the base. Issue
 #81 must require both stable checks: `surface-governance` and
 `surface-regeneration`.
 
-The component-catalog introduction is an explicit two-phase bootstrap. While
-the base has the legacy aggregate snapshot and no catalog tool, credential-free
-ordinary CI runs the complete proposed catalog/checker/regenerator and requires
-the exact two-record `nmp-core` + `nmp-nip46` transition. The existing
-base-trusted target checker necessarily rejects replacement of its own program,
-so only the repository owner's protected update procedure can land that exact
-reviewed bootstrap. Once the catalog tool is on the default branch, both
-workflows always extract the program from the base. The completed bootstrap's
-environment signal and proposed-head copy fallback are deleted; absence of any
-base governance artifact fails closed instead of executing proposed code.
+Both workflows always extract the catalog/checker/regenerator program from the
+base. The base-trusted target checker necessarily rejects replacement of its
+own program, so only the repository owner's protected update procedure can land
+a change to it. Absence of any base governance artifact fails closed instead of
+executing proposed code.
 
 The bootstrap checkpoint intentionally contains no fabricated change-log
 entry. The real PR number/URL, independent reviewer, and signoff can only be

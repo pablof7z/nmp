@@ -14,9 +14,6 @@ members = [
     "crates/nmp-signer",
     # Explicit in-process local-key provider used by `nmp::Engine::add_account`.
     "crates/nmp-local-signer",
-    # Optional NIP-46 signer provider (#877). Core signer/runtime crates depend
-    # only on `nmp-signer`; bunker/session/transport machinery lives here.
-    "crates/nmp-nip46",
     # #827: the M3 engine (reducer `core`, async `runtime`, `outbox` write
     # plane, `negentropy` reconciler) is no longer a separate crate -- it is
     # folded into `crates/nmp` as private/doc-hidden modules behind the one
@@ -25,9 +22,6 @@ members = [
     "crates/nmp-consumer-check",
     "crates/nmp-demo",
     "crates/nmp-ffi",
-    # Optional native NIP-46 provider component (#877). It consumes the core
-    # signer's opaque mailbox but owns every protocol-specific FFI symbol.
-    "crates/nmp-nip46-ffi",
     "crates/nmp-bdd",
     "crates/nmp-parity",
     "crates/nmp-nip51",
@@ -90,10 +84,8 @@ nmp-transport = { path = "crates/nmp-transport" }
 nmp-executor = { path = "crates/nmp-executor" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-local-signer = { path = "crates/nmp-local-signer" }
-nmp-nip46 = { path = "crates/nmp-nip46" }
 nmp = { path = "crates/nmp" }
 nmp-ffi = { path = "crates/nmp-ffi" }
-nmp-nip46-ffi = { path = "crates/nmp-nip46-ffi" }
 nmp-bdd = { path = "crates/nmp-bdd" }
 nmp-nip51 = { path = "crates/nmp-nip51" }
 nmp-nip02 = { path = "crates/nmp-nip02" }

@@ -93,93 +93,27 @@ about current code:
   before receipt emission and replays with the same source/reason. `Sent` is
   never emitted for queue acceptance, ambiguity, or an ephemeral handoff with
   no outbox fact.
-- **The optional NIP-46 provider and governed sign-only paths are built; standard platform vault providers are not.**
-  A current NIP-46 client now owns its independent signer-relay connection,
-  NIP-42 AUTH, exact request correlation, `auth_url`, `switch_relays`, distinct
-  communication/user keys, NIP-44 crypto, and frozen-event validation. Missing
-  capabilities remain durable `AwaitingCapability`; a real redb close/reopen
-  proof reconnects a bunker, promotes the exact frozen event, publishes, and
-  receives a relay ACK. The protocol-neutral signer contract now lives in
-  dependency-free `nmp-signer`; the explicit local-key implementation lives in
-  `nmp-local-signer`, while the concrete remote protocol, relay/session, and
-  checkpoint implementation lives in selectable `nmp-nip46`. Core FFI/Swift/
-  Kotlin expose only one opaque signer mailbox. Separate NIP-46 FFI,
-  `Packages/NMPNip46`, and Kotlin `:nip46` components project Primal discovery,
-  one-click launch, package-filtered Android discovery, and an exact
-  URI/package handoff contract. Deleting those provider packages leaves core
-  and an unrelated external signer buildable. Supported native release builders
-  fix the core-only or matched core/provider Cargo roots, use an isolated
-  reusable target per package set, freeze the resolution after a locked fetch,
-  and hold a per-build authorization only inside the managed Cargo subprocess.
-  Before that authorization is revoked, the managed builder copies the exact
-  outputs into a fresh artifact snapshot; Swift/Kotlin packaging reads only
-  that snapshot, never the mutable Cargo target. Before exposing the snapshot,
-  the builder extracts UniFFI's compiled metadata from the provider library
-  and first requires positive metadata for both the core mailbox and provider
-  proof. It then audits every callable namespace in that library, permits only
-  the exact outward-only core source
-  `nmp_ffi::NmpEngine::signer_mailbox`, and requires exactly one other entry
-  carrying the core mailbox, with the compatibility proof in that
-  constructor's inputs. No namespace is exempt: a linked crate that claims
-  `nmp_ffi` is audited by callable shape like every other crate. The mailbox
-  has private fields and its Rust constructor is crate-private, so even a
-  linked namespace impostor cannot mint a mailbox for its allowlisted return;
-  only the real core `NmpEngine` can vend one. UniFFI derives the audit label
-  and no-mangle scaffolding symbol from the same module/type/function tuple,
-  so a linked crate forging that exact return label collides with core at link
-  time; the audit independently requires exactly one such source. This audits
-  the same compiled authority bindgen consumes, independent of source
-  location, claimed crate/module namespace, macro expansion, aliases, records,
-  or other Rust spelling. It cannot prove the meaning of a raw integer that
-  unsafe Rust later reinterprets as a mailbox pointer; such a `u64`/raw-handle
-  escape remains outside the audit's guarantee and is not a supported entry
-  shape.
-  `build.rs` canonicalizes both
-  the component root and its actual `OUT_DIR`, then requires the exact
-  `<target>/release/build/nmp-ffi-*/out` layout, so nested targets, `..`
-  escapes, and custom profile directories cannot inherit the authorization.
-  Only within that fixed shape does the deterministic
-  component identity self-derive and hash Cargo's exact resolved unit graph
-  (package roots/edges, transitive features, profiles, and targets), every
-  governed core/fixture input, and compiler/build inputs. An ad-hoc release
-  invocation cannot accidentally write or replace a package input; concurrent
-  managed builds of one package set refuse with a specific lock error rather
-  than rotating each other's authorization. The kernel-held lock remains owned
-  by any surviving Cargo/rustc descendants after a killed shell and releases
-  automatically when the last holder exits; stale lock-file bytes alone never
-  block a later build. Debug/IDE builds remain available
-  but are not packaging inputs. External path patches
-  that cannot be reproduced from the repository are refused. Swift and Kotlin
-  compare the embedded identities before requesting the opaque mailbox, and a
-  mismatch is a typed construction failure before any external Rust object
-  crosses the component seam (#952). The build authorization is a working-
-  discipline guard against accidental artifact substitution, not a secret
-  against a caller deliberately forging the marker or reading/replaying the
-  in-flight token; the native identity comparison is the runtime authority.
-  The managed builder never returns or prints that token. Supported builders always use the exact release
-  profile; custom/bench release-class builds are intentionally not a supported
-  packaging path and fail without that builder authorization. The Android AAR
-  work in #831 still owns
-  publishing that same identity in provenance/Gradle metadata and
-  emulator-qualifying a deliberately mismatched pair; the native check remains
-  the final authority when packaging metadata is stale or tampered.
-  Connections own scoped
-  registrations, so a stale session cannot detach its replacement, and
-  close/drop deterministically finishes only that session. An explicitly
-  insecure SDK-owned plaintext file checkpoint now provides opt-in
-  personal/development autologin (#197), while
-  remaining distinct from the secure-provider contract. Still open under
-  #47/#51: explicit per-write identity override, standard Keychain/Keystore
-  providers and automatic secure-vault restore, NIP-55 execution/Android AAR
-  integration, and permanent signer connection/correlation counters in engine
-  diagnostics. The existing NIP-46 teardown, foreign-capability mailbox,
-  pull-delivery, and process-global-runtime corrections remain separately
-  tracked by #770/#783/#784/#871; this ownership split does not claim them.
-  The governed component catalog and distinct snapshots cover both core
-  `nmp-ffi` and the separately selectable `nmp-nip46-ffi` provider namespace.
-  This is catalog/snapshot truth, not an independent-publication claim: #831
-  still owns Android packaging and qualification.
-  The sign-only operation now projects across Rust, FFI, Swift, and Kotlin:
+- **The governed sign-only path is built; NMP ships no remote-signer provider and no standard platform vault providers.**
+  The protocol-neutral signer contract lives in dependency-free `nmp-signer`,
+  and the explicit local-key implementation lives in `nmp-local-signer`. NMP
+  contains no NIP-46 implementation: the crates, the separate provider FFI
+  artifact, and the Swift/Kotlin provider packages were deleted with the
+  per-family native-artifact mandate
+  ([#824](https://github.com/pablof7z/nmp/issues/824)). Its private relay pool
+  was the load-bearing consequence of that removed artifact boundary;
+  [#1169](https://github.com/pablof7z/nmp/issues/1169) owns the collapsed
+  engine-routed shape it returns in, as an ordinary Cargo-feature-selected
+  family inside the one native library. An app may still supply any remote
+  signer through the ordinary `SigningCapability` door; missing capabilities
+  remain durable `AwaitingCapability`, and a real redb close/reopen proof
+  promotes the exact frozen event, publishes, and receives a relay ACK.
+  An explicitly insecure SDK-owned plaintext file checkpoint provides opt-in
+  personal/development autologin (#197), while remaining distinct from the
+  secure-provider contract. Still open under #47/#51: explicit per-write
+  identity override, standard Keychain/Keystore providers and automatic
+  secure-vault restore, NIP-55 execution/Android AAR integration, and permanent
+  signer connection/correlation counters in engine diagnostics.
+  The sign-only operation projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no
   store/outbox/publication residue. NIP-07 origin prompts and browser
@@ -404,10 +338,12 @@ about current code:
   whenever either baseline moves, and rejects historical log edits/deletions.
   Hand-written Swift/Kotlin public wrapper paths and their consumer-visible
   package/build/settings manifests are governed directly even when generated
-  snapshots do not move. Per-component parity cannot be masked by vocabulary
-  in another component. Declared Swift/Kotlin package roots and UniFFI
-  namespaces are stable, while a valid active component can move Cargo package
-  or build owner through the same governed regeneration. The catalog checks
+  snapshots do not move. Declared Swift/Kotlin package roots and UniFFI
+  namespaces are stable, while a valid active record can move Cargo package
+  or build owner through the same governed regeneration. `nmp-core` is the one
+  active record: NMP ships one native library, and unselected families are
+  physically absent from it by Cargo feature selection rather than by being
+  linked separately (#824). The catalog checks
   package/library names against the exact manifest; the extractor refuses
   undeclared or duplicate compiled namespaces. Catalog-order and reverse-order
   regeneration must produce byte-identical facade and component snapshots.
@@ -444,7 +380,7 @@ about current code:
   - **Portable packed tag/string arenas CLOSED (#170); device verification pending.** Immutable event codec v4 keeps the 158-byte fixed header, then stores cumulative tag ends, one four-byte atom descriptor per element, a dense arena, and directly addressable content. Descriptors inline zero-to-three-byte UTF-8, point to shortest-form LEB-length UTF-8 cells, or point to raw 32-byte canonical lowercase-hex identities; borrowed tag iteration returns text/raw views, and each query prepares raw wanted values once for binary search, so rejected candidates neither allocate nor hex-encode. Full validation rejects overflow, gaps, overlap, unused arena tails, non-zero reserved/padding bits, overlong LEB, invalid UTF-8, empty tags, representation aliases, truncation, and trailing bytes. The encoder makes two classification passes but allocates only the final value; materialization alone recreates exact lowercase hex strings for returned rows. Unchanged local/provenance sidecars retain codec v3, composite displaced rows move to v4, and the whole crash-atomic store bundle moves to rejecting epoch v5: any v4 event/displaced table aborts open before one v5 table is created, with no compatibility path. On the preserved 1,114-event corpus (2,543 tags, 5,085 atoms; 2,535 inline and 1,348 raw32), immutable values are 881,779→837,122 bytes (-5.064%) and the events table is 890,691→846,034 stored bytes (-5.014%). Five identical paired event-only redb builds measured 2,670,592→2,584,576 compacted bytes (-3.221%); full-store compacted file size is deliberately not claimed because redb 4.1 compaction is bimodal under layout entropy. A tag-heavy NIP-29 falsifier is 1,487→959 bytes (-35.51%). Alternating same-session real imports measured median 34.97 ms for v3 versus 34.01 ms for v4, while the codec itself encoded all 1,114 events in 0.187 ms; paired room/member/global queries remained within run noise and exact results were unchanged. End-to-end device room-open remains pending.
   - **Parallel verification + single-writer batch ingest CLOSED (#151); one table bundle per governed batch CLOSED (#164); device verification pending.** Transport workers still feed one pool-global verified-id/signature cache, but the translator now drains bursts of up to 128 frames and runs first-seen schnorr verification concurrently on native targets (the same code has a sequential wasm fallback); known ids remain cheap signature comparisons. The runtime preserves frame order while coalescing queued frames into one resolver call. `EventStore::insert_batch` runs the exact governed insert state machine in input order inside one redb write transaction and commits once, including event rows, every ordered/tag/expiry/address index, kind:5 effects, provenance adoption, and delivery satisfaction; any persistence error aborts the whole batch. The v3 writer opens that transaction's canonical/index/delivery tables once and reuses the bundle for every event rather than reopening every table per row. The resolver reacts once to the combined insert/remove set and the engine recompiles/refreshes once per burst. Both backends share contract tests for input-order supersession/provenance equivalence. On the same 1,114-event corpus, one current-schema release import measured 22.575 ms versus the prior 29.8 ms all-event batch; batch size 128 measured 76.3 ms versus 103.2 ms. The checked-in `ingest_bench` also measures exact duplicate replay and physical file growth. This isolated the store transaction cost; the persistent-worker and end-to-end measurements it originally left open are superseded by #168 below.
 - **Parse-once typed relay ingest and persistent bounded verification CLOSED (#168); device verification pending.** The websocket boundary now parses each text frame exactly once into a typed `RelayMessage`; EVENT payloads move immediately into `Arc<Event>`, and verifier workers plus the engine share that allocation until the engine unwraps it for binary persistence, so the old `Value -> event JSON -> Event -> original frame parse` chain, production first-seen deep clone, and transport's direct `serde_json` dependency are gone. Native verification uses a fixed persistent worker set with one reusable secp context and one bounded queue per worker; wasm keeps the same ordered API with deterministic sequential verification. Crypto runs outside `PoolInner`; every payload recomputes its event id exactly once before identical unknown `(id, signature)` pairs may share signature work, preventing same-batch or cached-id admission of mutated content/tags/time/kind. Generation planning applies same-batch reconnect transitions in FIFO order and the real state is rechecked after verification, so close/reopen cannot admit stale work; cache capacity is explicit. A failed verifier lane rejects its affected task, surfaces engine diagnostics without falsely incrementing relay-misbehavior, and is replaced before future batches. Worker-to-translator and pool-to-engine queues are bounded; engine transactions are independently capped at 128 frames; an applied acknowledgement prevents another relay batch from entering the engine until resolver/store effects finish. Shutdown disconnects an event-driven cancellation channel, releasing a bridge waiting for ack and any blocked bounded producer without polling; immediate durable-send failures resolve locally rather than re-entering the engine's own queue. Tests pin mixed-frame order including EVENT-before-EOSE, same-batch reconnect, stale generations, mutated/invalid/mismatched signatures, cache eviction, worker replacement, transaction caps, backpressure cancellation, shutdown behavior, and real relay reconnects. A checked release rerun over the preserved 1,114-event corpus measured 2.307 ms for single relay-message parse plus shared allocation, 6.752 ms for the honest full first-seen path (event-id recomputation plus persistent-worker signature verification), and 3.272 ms for known-redelivery event-id recomputation plus signature checks. The typed resolver-to-governed-redb harness measured 40.373 ms on the hardened tree versus 46.140 ms on the prior PR head in the same session; an earlier lower-I/O run measured 18.712 ms, exposing filesystem variance but no regression from this hardening. The direct wasm compile remains blocked before NMP code by the workspace's existing `getrandom`, `ring`, and `secp256k1-sys` target configuration; the source keeps a thread/channel-free wasm branch. End-to-end device room-open verification remains pending.
-- **Transport/verifier OS-thread ownership CLOSED (#442, #446); native observation and internal adapter admission REPLACED by pull-based handles and async tasks (#680, #704).** Every engine owns exactly two persistent native verifier workers (one on wasm's sequential path), one transport translator, one relay-retirement reaper, and two shared async-runtime workers; there is no blocking-adapter pool or pool reaper. `max_relays` bounds demanded live relay workers plus an equal charged retirement allowance. **#680 removed the one-OS-thread-per-observation bridge and the app-visible native-task ceiling entirely:** row, window, diagnostics, follow, receipt, and follow-action streams are waker-driven async pull handles (`ObservationHandle::next()`) over engine-owned bounded mailboxes, so NMP OS-thread count is independent of live-observation count. **#762 closes the foreign-completion cancellation edge for delta rows:** Swift and Kotlin synchronously claim a private FFI pull ticket before awaiting; commit runs only after generated completion returns, while abort/drop restores the exact retained delta and keeps at most one composed mailbox successor. `max_native_tasks`/`maxNativeTasks`/`ExecutorSaturated`/the native-task census/idle-barrier are gone from Rust, FFI, Swift, and Kotlin. Receipt/follow-action live facts use a fixed 32-item FIFO: overflow retains the prefix, prunes the stalled sink, and reports typed lag; receipt reattachment traverses deterministic durable pages of at most 32 facts using an identity-stable continuation bounded by relay fan-out, then atomically joins live work after a caught-up check. The cursor records consumed per-lane fact identities rather than a numeric offset into mutable reconstructed history, so a durable fact added between pages is delivered exactly once even when it sorts before already-consumed facts from another relay. Every live receipt delivery also has a private registration identity tied to the consumer FIFO's close/drop hook, so cancellation removes the exact sink without waiting for another status from a potentially permanently parked receipt. This bounds live delivery, **not** total persisted attempt history: durable receipt/attempt retention and GC remain open under #46, and replay currently reconstructs that retained canonical history before selecting each delivery page. **#704 removes the remaining internal admission concept:** NIP-11, signer, AUTH, follow-action, and NIP-46 logical work runs as async tasks; signer/AUTH completion doors are waker-and-condvar primitives whose enum lifecycles make cancellation, resolution, and receiver ownership mutually explicit; no logical wait holds a scheduler permit or worker thread, and no operation exposes `ThreadUnavailable`/`WaiterSaturated` because an internal scheduler is occupied. An admitted NIP-11 acquisition does hold one of 8 private physical network/body permits until completion; excess callers await that bound cancellably in their own futures. NIP-46 sessions share async execution while retaining only bounded per-session transport workers required to preserve distinct NIP-42 transport identity. Foreign completions whose contract permits blocking run on fresh per-operation threads rather than an admitted internal pool. Falsifiers cover a 1,000-handle thread-scaling proof (0 thread growth); a 64+-observation dense-composition proof; cancellation/shutdown wake-to-`None`; normal Swift loop-exit teardown; concurrent-`next()` misuse; fixed-size receipt lag followed by finite durable replay; mutation-between-pages exactly-once delivery; 128 close/drop reattachments on a permanently parked receipt with zero retained delivery registrations; dense mixed observe/NIP-11/sign/follow load without capacity refusal; 1/10/50/100 NIP-46 sessions with zero executor-thread growth; typed one-shot completion ownership; and public-surface absence of the deleted capacity vocabulary. `docs/design/async-observation-handles.md` and `docs/design/internal-executor-elimination.md` record the replacement architecture; `native-task-executor.md` is retained as the superseded record.
+- **Transport/verifier OS-thread ownership CLOSED (#442, #446); native observation and internal adapter admission REPLACED by pull-based handles and async tasks (#680, #704).** Every engine owns exactly two persistent native verifier workers (one on wasm's sequential path), one transport translator, one relay-retirement reaper, and two shared async-runtime workers; there is no blocking-adapter pool or pool reaper. `max_relays` bounds demanded live relay workers plus an equal charged retirement allowance. **#680 removed the one-OS-thread-per-observation bridge and the app-visible native-task ceiling entirely:** row, window, diagnostics, follow, receipt, and follow-action streams are waker-driven async pull handles (`ObservationHandle::next()`) over engine-owned bounded mailboxes, so NMP OS-thread count is independent of live-observation count. **#762 closes the foreign-completion cancellation edge for delta rows:** Swift and Kotlin synchronously claim a private FFI pull ticket before awaiting; commit runs only after generated completion returns, while abort/drop restores the exact retained delta and keeps at most one composed mailbox successor. `max_native_tasks`/`maxNativeTasks`/`ExecutorSaturated`/the native-task census/idle-barrier are gone from Rust, FFI, Swift, and Kotlin. Receipt/follow-action live facts use a fixed 32-item FIFO: overflow retains the prefix, prunes the stalled sink, and reports typed lag; receipt reattachment traverses deterministic durable pages of at most 32 facts using an identity-stable continuation bounded by relay fan-out, then atomically joins live work after a caught-up check. The cursor records consumed per-lane fact identities rather than a numeric offset into mutable reconstructed history, so a durable fact added between pages is delivered exactly once even when it sorts before already-consumed facts from another relay. Every live receipt delivery also has a private registration identity tied to the consumer FIFO's close/drop hook, so cancellation removes the exact sink without waiting for another status from a potentially permanently parked receipt. This bounds live delivery, **not** total persisted attempt history: durable receipt/attempt retention and GC remain open under #46, and replay currently reconstructs that retained canonical history before selecting each delivery page. **#704 removes the remaining internal admission concept:** NIP-11, signer, AUTH, and follow-action logical work runs as async tasks; signer/AUTH completion doors are waker-and-condvar primitives whose enum lifecycles make cancellation, resolution, and receiver ownership mutually explicit; no logical wait holds a scheduler permit or worker thread, and no operation exposes `ThreadUnavailable`/`WaiterSaturated` because an internal scheduler is occupied. An admitted NIP-11 acquisition does hold one of 8 private physical network/body permits until completion; excess callers await that bound cancellably in their own futures. Foreign completions whose contract permits blocking run on fresh per-operation threads rather than an admitted internal pool. Falsifiers cover a 1,000-handle thread-scaling proof (0 thread growth); a 64+-observation dense-composition proof; cancellation/shutdown wake-to-`None`; normal Swift loop-exit teardown; concurrent-`next()` misuse; fixed-size receipt lag followed by finite durable replay; mutation-between-pages exactly-once delivery; 128 close/drop reattachments on a permanently parked receipt with zero retained delivery registrations; dense mixed observe/NIP-11/sign/follow load without capacity refusal; typed one-shot completion ownership; and public-surface absence of the deleted capacity vocabulary. `docs/design/async-observation-handles.md` and `docs/design/internal-executor-elimination.md` record the replacement architecture; `native-task-executor.md` is retained as the superseded record.
 - **Suspend/resume transparency (#4): transport-internal hardening + clock audit done; physical-device evidence pending.** iOS kills sockets when the app backgrounds; the requirement is that the engine make resume fully transparent (reconnect, replay, repair coverage) with zero app code, per the M4 kill condition against scene-phase/app-lifecycle machinery. `crates/nmp-transport/src/keepalive.rs`'s `SuspendGapDetector` (paired with `apply_resume_gap`, threaded through `pool/worker.rs`'s connected loop) detects a large gap between consecutive worker-loop iterations using a wall-clock (`SystemTime`) reading rather than `Instant` — Apple's `Instant` is `CLOCK_UPTIME_RAW` and does not advance across device sleep, so it cannot observe the gap at all, let alone measure it. On detection, an otherwise-`Idle` keepalive verdict is upgraded to an immediate ping (never double-pinging a ping already awaiting its pong), cutting the worst-case dead-socket detection window from the ~60s idle+pong keepalive cycle alone. A clock audit of every other suspension-spanning wait in transport/engine (reconnect backoff, the keepalive FSM's own idle/pong `Instant` math, the 250ms NIP-11 capability-decision grace, the NIP-11 acquisition path's `SystemTime`-based freshness/deadline math, and the engine's `next_deadline()`/`duration_until`) found no additional concrete bug: engine-level deadlines are already wall-clock (`nostr::Timestamp`) and already floor a past-due post-suspend deadline to an immediate tick, and every other `Instant`-based wait is a short, self-consistent relative timer inside a thread that is itself frozen for the same suspended interval, so it simply resumes correctly rather than drifting. **What remains open, and can only be closed by a human with a physical device:** the on-device pass itself — feed live, background 10+ minutes (verified dead socket), foreground, confirm the feed catches up and `DiagnosticsView` shows re-established wire subs plus repaired coverage, with zero app code. Runbook: `docs/plans/M5-ios-falsifier-plan.md` §6.1. Negentropy-under-long-suspension is verified observationally in that same pass (the reconnect-repair mechanism itself is already covered by #563); this is deliberately not a separate Rust falsifier, since the suspension-specific factors (stale TLS sessions, a changed network path, actual OS backgrounding kill semantics) are not reproducible in a simulator or a headless test.
 
 ## Real but non-blocking for the falsifier (feeds, not DMs)
@@ -526,7 +462,7 @@ about current code:
 
 ## Security hardening deferred
 
-- **Secret zeroization is deliberately bounded, not system-wide.** `LocalKeySigner` has one fixed-allocation canonical zeroizing secret owner (moving the signer relocates only a pointer) and constructs only operation-scoped wiping BIP-340/NIP-44 owners, including padded/decrypted plaintext and hash/cipher state; it retains no `nostr::Keys`/`SecretKey`/`Keypair`, whose pinned upstream erasure is only `non_secure_erase` (#765). NIP-46 URI/session secrets use redacted debug output and zeroizing memory, and the durable event/delivery store persists only the expected pubkey plus an opaque identity reference. This claims nothing about OS-locked memory, register erasure, or dependency-internal stack frames. NIP-46 *transport*-key copies are a separate residual owned by #766. Owner: security/signing workstream (#47).
+- **Secret zeroization is deliberately bounded, not system-wide.** `LocalKeySigner` has one fixed-allocation canonical zeroizing secret owner (moving the signer relocates only a pointer) and constructs only operation-scoped wiping BIP-340/NIP-44 owners, including padded/decrypted plaintext and hash/cipher state; it retains no `nostr::Keys`/`SecretKey`/`Keypair`, whose pinned upstream erasure is only `non_secure_erase` (#765). The durable event/delivery store persists only the expected pubkey plus an opaque identity reference. This claims nothing about OS-locked memory, register erasure, or dependency-internal stack frames. Owner: security/signing workstream (#47).
 
 ## Protocol modules
 

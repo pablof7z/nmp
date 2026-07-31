@@ -30,17 +30,12 @@ set -euo pipefail
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-CRATE=${NMP_FFI_CRATE:-nmp-ffi}
-LIB_STEM=${NMP_FFI_LIB_STEM:-nmp_ffi}
-BINDGEN_NAME=${NMP_UNIFFI_BINDGEN_BIN:-uniffi-bindgen}
-GEN_DIR=${NMP_KOTLIN_GEN_DIR:-gen-kotlin}
-KOTLIN_PKG_DIR=${NMP_KOTLIN_MODULE_DIR:-Packages/NMPKotlin}
-
-# See the Swift builder's matching rule: provider and core native libraries
-# that exchange an external UniFFI object must come from one Cargo
-# feature-resolution unit. Provider wrappers pass both package names; a
-# core-only build retains the one-package default.
-read -r -a CARGO_PACKAGE_NAMES <<< "${NMP_FFI_CARGO_PACKAGES:-$CRATE}"
+# NMP ships one native library, so these are constants rather than knobs.
+CRATE=nmp-ffi
+LIB_STEM=nmp_ffi
+BINDGEN_NAME=uniffi-bindgen
+GEN_DIR=gen-kotlin
+KOTLIN_PKG_DIR=Packages/NMPKotlin
 
 case "$(uname -s)" in
   Darwin) LIB_EXT=dylib ;;
@@ -54,9 +49,7 @@ esac
 LIB_NAME="lib$LIB_STEM.$LIB_EXT"
 
 # Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
-# script runs Cargo at the repository root. Treat it as a BASE only: the
-# managed builder uses a package-set-specific cache and returns a fresh sealed
-# artifact snapshot. Packaging never reads the reusable Cargo target itself.
+# script runs Cargo at the repository root, so make it absolute first.
 TARGET_DIR_VALUE=${CARGO_TARGET_DIR:-target}
 if [[ "$TARGET_DIR_VALUE" == /* ]]; then
   TARGET_DIR="$TARGET_DIR_VALUE"
@@ -68,28 +61,20 @@ if [[ -z "$HOST_TARGET" ]]; then
   echo "error: rustc -vV did not report a host target" >&2
   exit 1
 fi
-echo "== 1. cargo build (isolated release, host triple) =="
+echo "== 1. cargo build (release, host triple) =="
 cargo fetch --locked
-COMPONENT_ARTIFACT_DIR=$(
-  "$REPO_ROOT/scripts/build-component-release.sh" \
-    "$TARGET_DIR" "${CARGO_PACKAGE_NAMES[*]}" "$HOST_TARGET"
-)
-cleanup_component_artifacts() {
-  if [[ -n "${COMPONENT_ARTIFACT_DIR:-}" && -d "$COMPONENT_ARTIFACT_DIR" ]]; then
-    chmod -R u+w "$COMPONENT_ARTIFACT_DIR" 2>/dev/null || true
-    rm -r "$COMPONENT_ARTIFACT_DIR"
-  fi
-}
-trap cleanup_component_artifacts EXIT
+CARGO_TARGET_DIR="$TARGET_DIR" \
+  cargo build --frozen -p "$CRATE" --release --target "$HOST_TARGET"
+RELEASE_DIR="$TARGET_DIR/$HOST_TARGET/release"
 
-HOST_LIB="$COMPONENT_ARTIFACT_DIR/$LIB_NAME"
+HOST_LIB="$RELEASE_DIR/$LIB_NAME"
 if [[ ! -f "$HOST_LIB" ]]; then
-  echo "error: expected $HOST_LIB in the sealed component snapshot -- check nmp-ffi's [lib] crate-type includes cdylib" >&2
+  echo "error: expected $HOST_LIB -- check nmp-ffi's [lib] crate-type includes cdylib" >&2
   exit 1
 fi
-BINDGEN="$COMPONENT_ARTIFACT_DIR/$BINDGEN_NAME"
+BINDGEN="$RELEASE_DIR/$BINDGEN_NAME"
 if [[ ! -x "$BINDGEN" ]]; then
-  echo "error: expected executable $BINDGEN in the sealed component snapshot" >&2
+  echo "error: expected executable $BINDGEN under $RELEASE_DIR" >&2
   exit 1
 fi
 

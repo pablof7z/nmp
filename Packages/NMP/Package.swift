@@ -34,9 +34,6 @@ let package = Package(
     ],
     products: [
         .library(name: "NMP", targets: ["NMP"]),
-        // Protocol-neutral SPI consumed by separately selectable native
-        // provider packages such as NMPNip46. Apps continue to import NMP.
-        .library(name: "NMPComponentCore", targets: ["NMPFFI"]),
         .library(name: "NMPContent", targets: ["NMPContent"]),
         .library(name: "NMPUI", targets: ["NMPUI"]),
     ],

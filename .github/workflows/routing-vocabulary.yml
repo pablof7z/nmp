@@ -16,7 +16,7 @@
 # runs two repository shell scripts over repository content, uses no secret,
 # makes no pull_request_target trust decision, and executes no PR-provided
 # code. Same reasoning and same shape as dependency-direction.yml (#922),
-# macos-qualification.yml and nip46-provider.yml. Triggers are identical to
+# and macos-qualification.yml. Triggers are identical to
 # the architecture-gates ones, so the gate runs on every pull request and on
 # every push to master exactly as it would have there.
 

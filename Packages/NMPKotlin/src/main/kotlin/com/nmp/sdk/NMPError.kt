@@ -85,16 +85,6 @@ sealed class NMPError(message: String) : Exception(message) {
         NMPError("retained evidence for receipt $receiptId became unavailable during replay")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
-    /** A separately packaged native component was built against a different
-     * core Rust object contract. Refused before an external object pointer
-     * crosses the component boundary (#952). */
-    data class NativeComponentMismatch(
-        val component: String,
-        val expectedCoreIdentity: String,
-        val actualCoreIdentity: String,
-    ) : NMPError(
-        "native component $component requires core $expectedCoreIdentity, loaded $actualCoreIdentity",
-    )
     /** `decodeNostrEntity`'s input was not valid bech32, had an
      * unrecognized HRP prefix, or had a malformed inner TLV payload (#116). */
     data class InvalidNostrEntity(val reason: String) : NMPError("invalid nostr entity: $reason")

@@ -21,18 +21,13 @@ xcuserdata/
 # Packages/NMP/README.md (#18) and the `swift-package` CI job, which proves
 # this exact path from a fresh checkout on every push.
 /gen
-/gen-nip46
 /Packages/NMP/NMP.xcframework
 /Packages/NMP/Sources/NMPFFI
-/Packages/NMPNip46/NMPNip46.xcframework
-/Packages/NMPNip46/Sources/NMPNip46FFI
 
 # SwiftPM's own build cache (`swift build`/`swift test` output) -- always
 # regenerated, never committed, same as /target above.
 /Packages/NMP/.build
 /Packages/NMP/.swiftpm
-/Packages/NMPNip46/.build
-/Packages/NMPNip46/.swiftpm
 
 # M5 falsifier app -- xcodegen-generated project (memory:
 # xcodegen-pbxproj-churn -- xcodegen churns pbxproj UUIDs on every regen, so
@@ -62,12 +57,8 @@ xcuserdata/
 # before `./gradlew test` works; see Packages/NMPKotlin/README.md and the
 # `kotlin-package` CI job.
 /gen-kotlin
-/gen-kotlin-nip46
 /Packages/NMPKotlin/src/main/kotlin/uniffi
 /Packages/NMPKotlin/src/main/resources
-/Packages/NMPKotlin/nip46/src/main/kotlin/uniffi
-/Packages/NMPKotlin/nip46/src/main/resources
 /Packages/NMPKotlin/build/
-/Packages/NMPKotlin/nip46/build/
 /Packages/NMPKotlin/.gradle/
 tmp

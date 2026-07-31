@@ -15,14 +15,9 @@
 #               of readable epochs. SCHEMA_VERSION refuses any store that is
 #               not exactly current, and no pre-current decoder exists.
 #   *_old       English in local names ("older before newer"), not a surface.
-#   compat*     UniFFI ABI metadata between core and provider components
-#               (nmp-nip46-ffi) -- build-time type identity, not versioning.
-#   legacy*     one-way import of FOREIGN material. `nmp-nip46-ffi`'s
-#               brownfield door (#571) reads a pre-NMP client's own persisted
-#               session parts. The rule bans compatibility with OUR OWN
-#               retired surface; it does not ban reading someone else's bytes
-#               once, on the way in. NMP's own retired NIP-46 connect shape
-#               was deleted outright rather than kept behind a second branch.
+#   legacy*     one-way import of FOREIGN material. The rule bans
+#               compatibility with OUR OWN retired surface; it does not ban
+#               reading someone else's bytes once, on the way in.
 #
 # Distinguishing those cases needs judgement, so review owns them. This gate
 # owns the part that does not: a declared deprecation.

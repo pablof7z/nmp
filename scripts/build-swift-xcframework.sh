@@ -64,30 +64,15 @@ fi
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-CRATE=${NMP_FFI_CRATE:-nmp-ffi}
-LIB_STEM=${NMP_FFI_LIB_STEM:-nmp_ffi}
-BINDGEN_BIN=${NMP_UNIFFI_BINDGEN_BIN:-uniffi-bindgen}
-GEN_DIR=${NMP_SWIFT_GEN_DIR:-"$REPO_ROOT/gen"}
-SWIFT_PACKAGE_DIR=${NMP_SWIFT_PACKAGE_DIR:-"$REPO_ROOT/Packages/NMP"}
-SWIFT_FFI_TARGET=${NMP_SWIFT_FFI_TARGET:-NMPFFI}
-XCFRAMEWORK_NAME=${NMP_SWIFT_XCFRAMEWORK_NAME:-NMP.xcframework}
-EXTERNAL_SWIFT_MODULE=${NMP_SWIFT_EXTERNAL_MODULE:-}
+# NMP ships one native library, so these are constants rather than knobs.
+CRATE=nmp-ffi
+LIB_STEM=nmp_ffi
+BINDGEN_BIN=uniffi-bindgen
+GEN_DIR="$REPO_ROOT/gen"
+SWIFT_PACKAGE_DIR="$REPO_ROOT/Packages/NMP"
+SWIFT_FFI_TARGET=NMPFFI
 LIB_NAME="lib$LIB_STEM.a"
-XCFRAMEWORK_OUT="$SWIFT_PACKAGE_DIR/$XCFRAMEWORK_NAME"
-PAIRED_NIP46=${NMP_SWIFT_PAIRED_NIP46:-0}
-
-# A provider staticlib and the core staticlib must be produced by one Cargo
-# feature-resolution unit. Otherwise each archive can carry a differently
-# hashed copy of the external core UniFFI object, and linking both components
-# either duplicates every core C symbol or crosses incompatible Rust types.
-# Core-only callers keep the one-package default; provider wrappers opt into
-# the exact core + provider package set and refresh both artifacts.
-read -r -a CARGO_PACKAGE_NAMES <<< "${NMP_FFI_CARGO_PACKAGES:-$CRATE}"
-if [[ "$PAIRED_NIP46" == 1 &&
-      "${CARGO_PACKAGE_NAMES[*]}" != "nmp-ffi nmp-nip46-ffi" ]]; then
-  echo "error: paired NIP-46 packaging requires the exact nmp-ffi nmp-nip46-ffi package set" >&2
-  exit 2
-fi
+XCFRAMEWORK_OUT="$SWIFT_PACKAGE_DIR/NMP.xcframework"
 
 DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
@@ -103,9 +88,7 @@ MACOS_CFLAGS="${CFLAGS:+$CFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
 MACOS_CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
 
 # Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
-# script runs Cargo at the repository root. Treat it as a BASE only: the
-# managed builder reuses a package-set cache but returns a fresh sealed
-# artifact snapshot for each target. Packaging never reads that cache.
+# script runs Cargo at the repository root, so make it absolute first.
 TARGET_DIR_VALUE=${CARGO_TARGET_DIR:-target}
 if [[ "$TARGET_DIR_VALUE" == /* ]]; then
   TARGET_DIR="$TARGET_DIR_VALUE"
@@ -114,52 +97,38 @@ else
 fi
 
 build_target() {
-  "$REPO_ROOT/scripts/build-component-release.sh" \
-    "$TARGET_DIR" "${CARGO_PACKAGE_NAMES[*]}" "$1"
+  CARGO_TARGET_DIR="$TARGET_DIR" \
+    cargo build --frozen -p "$CRATE" --release --target "$1" 1>&2
+  printf '%s\n' "$TARGET_DIR/$1/release"
 }
 
 build_target_without_macos() {
-  env -u MACOSX_DEPLOYMENT_TARGET \
-    "$REPO_ROOT/scripts/build-component-release.sh" \
-    "$TARGET_DIR" "${CARGO_PACKAGE_NAMES[*]}" "$1"
+  env -u MACOSX_DEPLOYMENT_TARGET bash -c \
+    'CARGO_TARGET_DIR="$1" cargo build --frozen -p "$2" --release --target "$3" 1>&2' \
+    _ "$TARGET_DIR" "$CRATE" "$1"
+  printf '%s\n' "$TARGET_DIR/$1/release"
 }
 
-echo "== 1. cargo build (isolated release) =="
+echo "== 1. cargo build (release) =="
 cargo fetch --locked
 if [[ "$MODE" != macos ]]; then
-  SIM_ARM_COMPONENT_ARTIFACT_DIR=$(build_target_without_macos "$SIM_ARM_TARGET")
-  SIM_X86_COMPONENT_ARTIFACT_DIR=$(build_target_without_macos "$SIM_X86_TARGET")
+  SIM_ARM_RELEASE_DIR=$(build_target_without_macos "$SIM_ARM_TARGET")
+  SIM_X86_RELEASE_DIR=$(build_target_without_macos "$SIM_X86_TARGET")
 fi
-MACOS_COMPONENT_ARTIFACT_DIR=$(
+MACOS_RELEASE_DIR=$(
   MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
   CFLAGS="$MACOS_CFLAGS" \
   CXXFLAGS="$MACOS_CXXFLAGS" \
     build_target "$MACOS_TARGET"
 )
 if [[ "$MODE" == all ]]; then
-  DEVICE_COMPONENT_ARTIFACT_DIR=$(build_target_without_macos "$DEVICE_TARGET")
+  DEVICE_RELEASE_DIR=$(build_target_without_macos "$DEVICE_TARGET")
 fi
 
-cleanup_component_artifacts() {
-  local directory
-  for directory in \
-    "${SIM_ARM_COMPONENT_ARTIFACT_DIR:-}" \
-    "${SIM_X86_COMPONENT_ARTIFACT_DIR:-}" \
-    "${MACOS_COMPONENT_ARTIFACT_DIR:-}" \
-    "${DEVICE_COMPONENT_ARTIFACT_DIR:-}"
-  do
-    if [[ -n "$directory" && -d "$directory" ]]; then
-      chmod -R u+w "$directory" 2>/dev/null || true
-      rm -r "$directory"
-    fi
-  done
-}
-trap cleanup_component_artifacts EXIT
-
-SIM_ARM_LIB="${SIM_ARM_COMPONENT_ARTIFACT_DIR:-}/$LIB_NAME"
-SIM_X86_LIB="${SIM_X86_COMPONENT_ARTIFACT_DIR:-}/$LIB_NAME"
-MACOS_LIB="$MACOS_COMPONENT_ARTIFACT_DIR/$LIB_NAME"
-DEVICE_LIB="${DEVICE_COMPONENT_ARTIFACT_DIR:-}/$LIB_NAME"
+SIM_ARM_LIB="${SIM_ARM_RELEASE_DIR:-}/$LIB_NAME"
+SIM_X86_LIB="${SIM_X86_RELEASE_DIR:-}/$LIB_NAME"
+MACOS_LIB="$MACOS_RELEASE_DIR/$LIB_NAME"
+DEVICE_LIB="${DEVICE_RELEASE_DIR:-}/$LIB_NAME"
 
 echo "== 1b. verify macOS deployment target ($MACOS_DEPLOYMENT_TARGET) =="
 "$DEPLOYMENT_CHECKER" "$MACOS_LIB"
@@ -196,17 +165,7 @@ cp "$GEN_DIR/${LIB_STEM}FFI.modulemap" "$HEADERS_DIR/module.modulemap"
 SWIFT_SOURCES_DIR="$SWIFT_PACKAGE_DIR/Sources/$SWIFT_FFI_TARGET"
 mkdir -p "$SWIFT_SOURCES_DIR"
 SWIFT_SOURCE="$SWIFT_SOURCES_DIR/$LIB_STEM.swift"
-if [[ -n "$EXTERNAL_SWIFT_MODULE" ]]; then
-  GENERATED_SOURCE="$GEN_DIR/$LIB_STEM.swift"
-  TEMP_SOURCE="$SWIFT_SOURCE.tmp"
-  awk -v module="$EXTERNAL_SWIFT_MODULE" '
-    { print }
-    $0 == "import Foundation" { print "import " module }
-  ' "$GENERATED_SOURCE" > "$TEMP_SOURCE"
-  mv "$TEMP_SOURCE" "$SWIFT_SOURCE"
-else
-  cp "$GEN_DIR/$LIB_STEM.swift" "$SWIFT_SOURCE"
-fi
+cp "$GEN_DIR/$LIB_STEM.swift" "$SWIFT_SOURCE"
 
 echo "== 4. xcodebuild -create-xcframework =="
 mkdir -p "$(dirname "$XCFRAMEWORK_OUT")"
@@ -232,85 +191,6 @@ fi
 xcodebuild -create-xcframework \
   "${XCFRAMEWORK_ARGS[@]}" \
   -output "$XCFRAMEWORK_OUT"
-
-if [[ "$PAIRED_NIP46" == 1 ]]; then
-  PAIRED_CRATE=nmp-nip46-ffi
-  PAIRED_LIB_STEM=nmp_nip46_ffi
-  PAIRED_LIB_NAME="lib$PAIRED_LIB_STEM.a"
-  PAIRED_GEN_DIR="$REPO_ROOT/gen-nip46"
-  PAIRED_SWIFT_PACKAGE_DIR="$REPO_ROOT/Packages/NMPNip46"
-  PAIRED_SWIFT_SOURCE_DIR="$PAIRED_SWIFT_PACKAGE_DIR/Sources/NMPNip46FFI"
-  PAIRED_XCFRAMEWORK_OUT="$PAIRED_SWIFT_PACKAGE_DIR/NMPNip46.xcframework"
-  PAIRED_MACOS_LIB="$MACOS_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME"
-
-  echo "== 5. verify paired provider macOS deployment target ($MACOS_DEPLOYMENT_TARGET) =="
-  "$DEPLOYMENT_CHECKER" "$PAIRED_MACOS_LIB"
-
-  if [[ "$MODE" != macos ]]; then
-    echo "== 6. lipo the paired provider simulator arches =="
-    PAIRED_FAT_SIM_DIR="$TARGET_DIR/ios-sim-fat-nip46"
-    mkdir -p "$PAIRED_FAT_SIM_DIR"
-    PAIRED_FAT_SIM_LIB="$PAIRED_FAT_SIM_DIR/$PAIRED_LIB_NAME"
-    lipo -create \
-      "$SIM_ARM_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME" \
-      "$SIM_X86_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME" \
-      -output "$PAIRED_FAT_SIM_LIB"
-    lipo -info "$PAIRED_FAT_SIM_LIB"
-    PAIRED_BINDGEN_LIB="$SIM_ARM_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME"
-  else
-    echo "== 6. paired provider simulator lipo skipped (macOS only) =="
-    PAIRED_BINDGEN_LIB="$PAIRED_MACOS_LIB"
-  fi
-
-  echo "== 7. paired provider uniffi-bindgen -> Swift bindings =="
-  mkdir -p "$PAIRED_GEN_DIR"
-  env -u MACOSX_DEPLOYMENT_TARGET \
-    cargo run --locked -p "$PAIRED_CRATE" --bin nmp-nip46-uniffi-bindgen -- generate \
-    --library "$PAIRED_BINDGEN_LIB" \
-    --language swift \
-    --out-dir "$PAIRED_GEN_DIR"
-
-  PAIRED_HEADERS_DIR="$TARGET_DIR/ios-nip46-ffi-headers"
-  rm -rf "$PAIRED_HEADERS_DIR"
-  mkdir -p "$PAIRED_HEADERS_DIR"
-  cp "$PAIRED_GEN_DIR/${PAIRED_LIB_STEM}FFI.h" "$PAIRED_HEADERS_DIR/"
-  cp "$PAIRED_GEN_DIR/${PAIRED_LIB_STEM}FFI.modulemap" \
-    "$PAIRED_HEADERS_DIR/module.modulemap"
-
-  mkdir -p "$PAIRED_SWIFT_SOURCE_DIR"
-  awk '
-    { print }
-    $0 == "import Foundation" { print "import NMPFFI" }
-  ' "$PAIRED_GEN_DIR/$PAIRED_LIB_STEM.swift" \
-    > "$PAIRED_SWIFT_SOURCE_DIR/$PAIRED_LIB_STEM.swift.tmp"
-  mv "$PAIRED_SWIFT_SOURCE_DIR/$PAIRED_LIB_STEM.swift.tmp" \
-    "$PAIRED_SWIFT_SOURCE_DIR/$PAIRED_LIB_STEM.swift"
-
-  echo "== 8. paired provider xcodebuild -create-xcframework =="
-  rm -rf "$PAIRED_XCFRAMEWORK_OUT"
-  PAIRED_XCFRAMEWORK_ARGS=(-library "$PAIRED_MACOS_LIB" -headers "$PAIRED_HEADERS_DIR")
-  PAIRED_SLICES=macos-arm64
-  if [[ "$MODE" != macos ]]; then
-    PAIRED_XCFRAMEWORK_ARGS=(
-      -library "$PAIRED_FAT_SIM_LIB" -headers "$PAIRED_HEADERS_DIR"
-      "${PAIRED_XCFRAMEWORK_ARGS[@]}"
-    )
-    PAIRED_SLICES="ios-simulator + $PAIRED_SLICES"
-  fi
-  if [[ "$MODE" == all ]]; then
-    PAIRED_XCFRAMEWORK_ARGS=(
-      -library "$DEVICE_COMPONENT_ARTIFACT_DIR/$PAIRED_LIB_NAME"
-      -headers "$PAIRED_HEADERS_DIR"
-      "${PAIRED_XCFRAMEWORK_ARGS[@]}"
-    )
-    PAIRED_SLICES="ios-device + $PAIRED_SLICES"
-  fi
-
-  xcodebuild -create-xcframework \
-    "${PAIRED_XCFRAMEWORK_ARGS[@]}" \
-    -output "$PAIRED_XCFRAMEWORK_OUT"
-  echo "paired provider xcframework: $PAIRED_XCFRAMEWORK_OUT ($PAIRED_SLICES)"
-fi
 
 echo "== done =="
 echo "Cargo target directory:    $TARGET_DIR"

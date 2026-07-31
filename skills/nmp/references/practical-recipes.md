@@ -155,18 +155,3 @@ Goal: render immediately while keeping work and UI bounded.
 - Do not keep overlapping pagination observations forever. When expanding a time window, overlap long enough to avoid a visual hole, dedupe by event id, then cancel the superseded observation.
 - Treat `LocalLimit` or another shortfall as evidence that NMP could not cover the complete demand under current limits, not as an empty or complete result.
 
-## NIP-46 signer handoff
-
-Goal: connect a remote signer without treating OS launch as readiness.
-
-1. Create an invitation and derive/cache its signer-specific URI or Android handoff while the invitation is still live. Invitation connection consumes it, so materializing the handoff afterward fails. Then begin `connectNip46`, start state observation, and only then launch the cached handoff.
-2. On iOS, query only declared schemes. On Android, use the exact package from `androidHandoff` and launch explicitly to that package.
-3. Observe connection states and wait for `ready`; a successful `open`/`startActivity` is only handoff evidence.
-4. Activate `ready`'s user pubkey with `setActiveAccount` before publishing an
-   unsigned write that uses the active-account contract. Signer registration
-   does not select the active account.
-5. NIP-46 connection has no capacity or thread refusal; a genuine relay/session setup failure returns a typed `NMPNip46Failure`/`Nip46Error` with no returned handle. After a handle exists, inner session/relay failure arrives as streamed `failed(reason)`/`Failed` followed by closure; do not relabel it as a timeout or reconstruct a typed error from the reason.
-6. Keep the exact returned connection as the ownership token and close it deterministically. Closing an older replaced registration must not detach a newer one.
-7. Never log invitation secrets, bunker credentials, or full handoff URIs.
-
-Amber is catalogued as NIP-55-only, not a NIP-46 target. The current Kotlin artifact is desktop JVM plumbing, not a complete Android AAR or NIP-55 execution layer. It ships no Android build/test command, ABI/minSdk packaging contract, secure NIP-46 credential vault, or automatic signer reconnection. The connection exposes no reusable invitation credential; on restart the host must already own protected bunker/reconnect material or perform a fresh handoff, wait for `ready`, and reactivate the account.

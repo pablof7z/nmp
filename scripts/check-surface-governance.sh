@@ -70,7 +70,7 @@ EXPECTED_PROJECTIONS=$(projection_set)
 transition_mode=$(
   "$CATALOG_BIN" transition "$ROOT" "$BASE_REF" "$HEAD_REF" "$PR_NUMBER" "$PR_URL"
 )
-[[ $transition_mode == bootstrap || $transition_mode == steady ]] ||
+[[ $transition_mode == steady ]] ||
   fail "component catalog returned an unknown transition mode: $transition_mode"
 
 [[ -f "$MIGRATION_CHECK" ]] ||
