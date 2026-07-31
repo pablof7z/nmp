@@ -28,6 +28,7 @@ use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{
     EngineThread, FifoReceiver, FifoTryRecvError, ReceiptReattachment, RowsReceiver,
 };
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, Selector, SourceAuthority,
@@ -36,7 +37,6 @@ use nmp_grammar::{
     CorrelationToken, Durability, Identity, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_local_signer::LocalKeySigner;
-use nmp_resolver::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, MemoryStore,
@@ -113,7 +113,7 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
 }
 
 fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
-    LiveQuery(
+    LiveQuery::single(
         Demand::new(
             Filter {
                 kinds: Some(BTreeSet::from([1u16])),
@@ -191,7 +191,7 @@ fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
     let mut demand = Demand::from_filter(selection);
     demand.freshness = Freshness::MaxAge { seconds: 1 };
     let (_query, _rows) = handle
-        .subscribe(LiveQuery(demand))
+        .subscribe(LiveQuery::single(demand))
         .expect("subscribe through runtime product path");
 
     let deadline = Instant::now() + Duration::from_secs(5);

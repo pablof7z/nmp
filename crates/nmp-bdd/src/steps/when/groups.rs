@@ -2,7 +2,7 @@
 //!
 //! Every write below goes through the REAL product door -- the
 //! `GroupOperations` extension trait on a live `nmp::Engine` -- and every read
-//! through `LiveQuery(group.demand(filter))` and the ordinary subscription
+//! through `LiveQuery::single(group.demand(filter))` and the ordinary subscription
 //! call. The harness reimplements neither, because both are the thing under
 //! test.
 //!

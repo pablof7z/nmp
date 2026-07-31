@@ -10,9 +10,9 @@
 use std::collections::BTreeSet;
 
 use nmp::mechanism::core::{Effect, EngineCore, EngineMsg};
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
 use nmp_resolver::testkit::{kind1, kind3};
-use nmp_resolver::LiveQuery;
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::MemoryStore;
 use nmp_transport::{RelayFrame, RelayHandle};

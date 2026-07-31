@@ -19,7 +19,7 @@
 //! second write lifecycle that was the opposite of this).
 //!
 //! There is deliberately no read verb here. Reads go through the one read
-//! door: `engine.observe(LiveQuery(group.demand(filter)), None)`.
+//! door: `engine.observe(LiveQuery::single(group.demand(filter)), None)`.
 
 use nmp_grammar::{EventBuilder, WriteIntent};
 use nmp_nip29::{Group, GroupContextError};
@@ -370,7 +370,7 @@ mod tests {
             ..Filter::default()
         });
         let subscription = engine
-            .observe(nmp_resolver::LiveQuery(demand), None)
+            .observe(nmp_grammar::LiveQuery::single(demand), None)
             .expect("a group demand is an ordinary live query");
         drop(subscription);
         engine.shutdown();

@@ -215,7 +215,7 @@ impl<S: EventStore> EngineCore<S> {
                     phase: AuthSessionPhase::Error,
                 },
             );
-            self.refresh_all_handles(&mut effects);
+            self.refresh_all_observations(&mut effects);
             return effects;
         };
         if challenge.is_empty() {
@@ -230,7 +230,7 @@ impl<S: EventStore> EngineCore<S> {
                     phase: AuthSessionPhase::Error,
                 },
             );
-            self.refresh_all_handles(&mut effects);
+            self.refresh_all_observations(&mut effects);
             return effects;
         }
         let Some(token) = self.mint_auth_operation(&epoch) else {
@@ -245,7 +245,7 @@ impl<S: EventStore> EngineCore<S> {
                     phase: AuthSessionPhase::Error,
                 },
             );
-            self.refresh_all_handles(&mut effects);
+            self.refresh_all_observations(&mut effects);
             return effects;
         };
         self.auth_sessions.insert(
@@ -266,7 +266,7 @@ impl<S: EventStore> EngineCore<S> {
             expected_pubkey,
             challenge,
         }));
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         effects
     }
 
@@ -303,7 +303,7 @@ impl<S: EventStore> EngineCore<S> {
                 phase: AuthSessionPhase::Denied,
             },
         );
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         effects
     }
 
@@ -416,7 +416,7 @@ impl<S: EventStore> EngineCore<S> {
                         let Some(next) = last.as_secs().checked_add(1) else {
                             state.phase = AuthSessionPhase::Error;
                             self.auth_sessions.insert(session, state);
-                            self.refresh_all_handles(&mut effects);
+                            self.refresh_all_observations(&mut effects);
                             return effects;
                         };
                         next.max(clock)
@@ -426,13 +426,13 @@ impl<S: EventStore> EngineCore<S> {
                 let Some(maximum) = clock.checked_add(AUTH_MAX_FUTURE_SECS) else {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);
-                    self.refresh_all_handles(&mut effects);
+                    self.refresh_all_observations(&mut effects);
                     return effects;
                 };
                 if minimum > maximum {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);
-                    self.refresh_all_handles(&mut effects);
+                    self.refresh_all_observations(&mut effects);
                     return effects;
                 }
                 let created_at = Timestamp::from(minimum);
@@ -445,7 +445,7 @@ impl<S: EventStore> EngineCore<S> {
                 let Some(sign_token) = self.mint_auth_operation(&state.epoch) else {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);
-                    self.refresh_all_handles(&mut effects);
+                    self.refresh_all_observations(&mut effects);
                     return effects;
                 };
                 state.last_created_at = Some(created_at);
@@ -473,7 +473,7 @@ impl<S: EventStore> EngineCore<S> {
         if let Some((source, reason)) = denial {
             self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
         }
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         effects
     }
 
@@ -559,7 +559,7 @@ impl<S: EventStore> EngineCore<S> {
                 let Some(send_token) = self.mint_auth_operation(&state.epoch) else {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);
-                    self.refresh_all_handles(&mut effects);
+                    self.refresh_all_observations(&mut effects);
                     return effects;
                 };
                 state.phase = AuthSessionPhase::AwaitingSend {
@@ -588,7 +588,7 @@ impl<S: EventStore> EngineCore<S> {
         if let Some((source, reason)) = denial {
             self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
         }
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         effects
     }
 
@@ -674,7 +674,7 @@ impl<S: EventStore> EngineCore<S> {
             AuthSendOutcome::Unavailable => state.phase = AuthSessionPhase::Error,
         }
         self.auth_sessions.insert(session, state);
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         effects
     }
 
@@ -703,7 +703,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.auth_sessions.insert(session, state);
             }
         }
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         effects
     }
 
@@ -849,7 +849,7 @@ impl<S: EventStore> EngineCore<S> {
         // (`Connecting` -> `Requesting`) with no coverage/row change at all
         // -- refresh so that becomes observable via `EmitRows`, same as an
         // EOSE-driven watermark advance below.
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
         effects.extend(self.wake_relay_lanes(&session, false));
         if open_failure_cleared {
@@ -936,7 +936,7 @@ impl<S: EventStore> EngineCore<S> {
             // subscriber -- the same pair `on_relay_connected` runs when a
             // relay coming online changes a handle's evidence with no row
             // change at all.
-            self.refresh_all_handles(&mut effects);
+            self.refresh_all_observations(&mut effects);
             self.refresh_all_histories(&mut effects);
         }
         if self.connected_relays.contains(&public_session)
@@ -1099,7 +1099,7 @@ impl<S: EventStore> EngineCore<S> {
         }
         // Same reasoning as `on_relay_connected`: a link-status flip alone
         // must become observable via `EmitRows`.
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
         effects.extend(self.schedule_ready(self.clock));
         effects
@@ -1138,7 +1138,7 @@ impl<S: EventStore> EngineCore<S> {
                 message,
                 &mut effects,
             );
-            self.refresh_all_handles(&mut effects);
+            self.refresh_all_observations(&mut effects);
             return effects;
         }
 
@@ -1163,7 +1163,7 @@ impl<S: EventStore> EngineCore<S> {
         }
         self.auth_sessions.insert(session.clone(), state);
         effects.extend(self.wake_relay_lanes(session, true));
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
         effects
     }
@@ -1638,7 +1638,7 @@ impl<S: EventStore> EngineCore<S> {
                 // rows, so retain every complete projection and refresh only
                 // its evidence; an incomplete projection falls back to the
                 // full row oracle inside these helpers.
-                self.refresh_all_handle_evidence(&mut effects);
+                self.refresh_all_observation_evidence(&mut effects);
                 self.refresh_all_history_evidence(&mut effects);
                 // Same watermark advance can also flip the diagnostic
                 // surface's own per-(filter, relay) coverage even though

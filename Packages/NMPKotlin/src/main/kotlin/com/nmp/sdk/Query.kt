@@ -47,13 +47,15 @@ import uniffi.nmp_ffi.NmpRowStream
 fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> =
     rowFlow { nmpRethrowing { engine.observe(filter.toFfi(), null) } }
 
-/** #107: the explicit-`NMPDemand` entry point -- the constructor to reach
- * for once [observeQuery]'s implicit `AuthorOutboxes`/`Public` default
+/** #1108: the explicit-`NMPLiveQuery` entry point -- the constructor to
+ * reach for once [observeQuery]'s implicit `AuthorOutboxes`/`Public` default
  * isn't enough: declaring `NMPSourceAuthority.Pinned` wire authority, a
- * non-default `NMPAccessContext`, or a non-`Agnostic` `NMPCacheMode`. Same
- * pull-loop/accumulation/teardown shape as the `NMPFilter` overload above. */
-fun observeQuery(engine: NmpEngineInterface, demand: NMPDemand): Flow<RowBatch> =
-    rowFlow { nmpRethrowing { engine.observeDemand(demand.toFfi(), null) } }
+ * non-default `NMPAccessContext`, a non-`Agnostic` `NMPCacheMode`, SEVERAL
+ * independent demand branches, or a bound on their merged row union. Every
+ * branch is observed through this ONE stream. Same pull-loop/accumulation/
+ * teardown shape as the `NMPFilter` overload above. */
+fun observeQuery(engine: NmpEngineInterface, query: NMPLiveQuery): Flow<RowBatch> =
+    rowFlow { nmpRethrowing { engine.observeQuery(query.toFfi(), null) } }
 
 /** Shared pull loop for the unbounded (delta-folding) row observations.
  * `open` is the ONE difference between the `NMPFilter` and `NMPDemand` entry
@@ -80,7 +82,7 @@ private fun rowFlow(open: () -> NmpRowStream): Flow<RowBatch> =
                 val frame = nextCommittedRowFrame(handle) ?: break
                 for (delta in frame.deltas) applyRowDelta(order, byId, delta)
                 val snapshot = order.mapNotNull { byId[it] }
-                emit(RowBatch(snapshot, AcquisitionEvidence.from(frame.evidence)))
+                emit(RowBatch(snapshot, frame.evidence.map { AcquisitionEvidence.from(it) }))
             }
         } finally {
             handle.cancel()
