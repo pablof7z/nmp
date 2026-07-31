@@ -75,9 +75,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel as cb;
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_network_policy::DestinationPolicy;
-use nmp_grammar::LiveQuery;
 use nmp_router::{SubId, WireDelta, WireOp, WireReq};
 use nmp_signer::{
     PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
@@ -99,8 +99,8 @@ pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, AuthSendCompletion, DiagnosticsSnapshot, Effect, EngineCore,
     EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId,
-    ObservationEvidence, ObservationId, PublishError, ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row,
-    RowDelta,
+    ObservationEvidence, ObservationId, PublishError, ReattachOutcome, ReceiptId,
+    RelayAdmissionPolicy, Row, RowDelta,
 };
 use crate::delivery::{CancelWriteError, CancelWriteOutcome, WriteStatus};
 use crate::relay_information_service::{
@@ -157,7 +157,11 @@ impl nmp_transport::PoolEventSink for EnginePoolSink {
 /// rebased onto the receiver's previous batch + the query's latest per-source
 /// acquisition evidence (see [`RowsReceiver`] and the module doc's "One
 /// reducer-to-runtime delivery path" note).
-pub type RowsMsg = (Vec<RowDelta>, Vec<AcquisitionEvidence>, Vec<ObservationEvidence>);
+pub type RowsMsg = (
+    Vec<RowDelta>,
+    Vec<AcquisitionEvidence>,
+    Vec<ObservationEvidence>,
+);
 pub type HistoryMsg = HistoryBatch;
 
 /// Receiver for one bounded, latest-wins history stream.

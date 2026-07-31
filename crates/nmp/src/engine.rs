@@ -32,8 +32,8 @@ use crate::runtime::{
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
     SignEventOperation, SignerRegistration,
 };
-use nmp_grammar::WriteIntent;
 use nmp_grammar::LiveQuery;
+use nmp_grammar::WriteIntent;
 use nmp_store::{MemoryStore, RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;

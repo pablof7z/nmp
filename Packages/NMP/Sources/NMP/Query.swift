@@ -39,12 +39,13 @@ public struct NMPQuery: AsyncSequence, Sendable {
         }
     }
 
-    /// #107: the explicit-`FfiDemand` entry point -- same handle/coalescing
-    /// shape as the `FfiFilter` initializer above, just a different
-    /// `NmpEngineProtocol` verb underneath.
-    init(engine: NmpEngineProtocol, demand: FfiDemand, window: FfiWindow?) throws {
+    /// #1108: the explicit-`FfiLiveQuery` entry point -- same handle and
+    /// coalescing shape as the `FfiFilter` initializer above, just a
+    /// different `NmpEngineProtocol` verb underneath. Every branch of the
+    /// live query is observed through this ONE handle.
+    init(engine: NmpEngineProtocol, liveQuery: FfiLiveQuery, window: FfiWindow?) throws {
         self.handle = try nmpRethrowing {
-            try engine.observeDemand(query: demand, window: window)
+            try engine.observeQuery(query: liveQuery, window: window)
         }
     }
 
@@ -133,7 +134,7 @@ final class RowAccumulator: @unchecked Sendable {
             byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
             return RowBatch(
                 rows: rows,
-                evidence: AcquisitionEvidence(frame.evidence),
+                evidence: frame.evidence.map(AcquisitionEvidence.init),
                 load: WindowLoad(window.load)
             )
         }
@@ -161,7 +162,7 @@ final class RowAccumulator: @unchecked Sendable {
         let snapshot = order.compactMap { byId[$0] }
         return RowBatch(
             rows: snapshot,
-            evidence: AcquisitionEvidence(frame.evidence),
+            evidence: frame.evidence.map(AcquisitionEvidence.init),
             load: nil
         )
     }

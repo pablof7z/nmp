@@ -884,7 +884,10 @@ mod history_mutation_tests {
         assert!(!staged
             .iter()
             .any(|effect| matches!(effect, Effect::EmitHistory(..) | Effect::EmitRows(..))));
-        assert_eq!(core.observations[&ordinary_id].last_rows, ordinary_prior_rows);
+        assert_eq!(
+            core.observations[&ordinary_id].last_rows,
+            ordinary_prior_rows
+        );
         assert_eq!(
             core.observations[&ordinary_id].last_evidence,
             ordinary_prior_evidence
@@ -928,8 +931,7 @@ mod history_mutation_tests {
         assert_eq!(delivered[0].load, WindowLoad::Requesting);
         assert_eq!(delivered[1].load, WindowLoad::Returned { added: 3 });
         assert_eq!(
-            delivered[1]
-                .evidence[0]
+            delivered[1].evidence[0]
                 .shortfall
                 .iter()
                 .filter(|fact| matches!(fact, ShortfallFact::NoPlannedSource { .. }))

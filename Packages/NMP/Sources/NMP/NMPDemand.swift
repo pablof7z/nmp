@@ -163,3 +163,51 @@ extension NMPDemand {
         )
     }
 }
+
+/// One live-query declaration (#1108): one or more complete, independent
+/// `NMPDemand` branches observed through ONE lifecycle, plus the optional
+/// bound on their merged row union.
+///
+/// Some correct reads need several branches whose results form one semantic
+/// query and whose host-scoped values must not cross between them. Flattening
+/// two hosts into one `.pinned([a, b])` produces a confidently wrong
+/// cross-product; handing an app a list of demands makes the app own the
+/// aggregate observation. This is neither: it is one read noun.
+///
+/// The Rust constructor canonicalizes the branches -- sorted, exact
+/// duplicates collapsed -- so permuted or repeated input yields the same
+/// observation and the same per-branch evidence order.
+public struct NMPLiveQuery: Sendable, Hashable {
+    /// The demand branches. Must be nonempty and at most `maxBranches`;
+    /// both are typed refusals at `observe`, never silent truncation.
+    public var branches: [NMPDemand]
+    /// Bound on the MERGED row union, applied after branch rows are merged by
+    /// event id -- never `N` rows per branch. Distinct from a branch's own
+    /// `NMPFilter.limit`, which bounds only that branch's selection.
+    public var aggregateResultLimit: UInt32?
+
+    public init(branches: [NMPDemand], aggregateResultLimit: UInt32? = nil) {
+        self.branches = branches
+        self.aggregateResultLimit = aggregateResultLimit
+    }
+
+    /// The hard ceiling on branches in one observation. Exceeding it refuses
+    /// the whole declaration.
+    public static var maxBranches: UInt32 { maxQueryBranches() }
+}
+
+extension NMPLiveQuery {
+    func toFfi() -> FfiLiveQuery {
+        FfiLiveQuery(
+            branches: branches.map { $0.toFfi() },
+            aggregateResultLimit: aggregateResultLimit
+        )
+    }
+
+    init(_ ffi: FfiLiveQuery) {
+        self.init(
+            branches: ffi.branches.map(NMPDemand.init),
+            aggregateResultLimit: ffi.aggregateResultLimit
+        )
+    }
+}

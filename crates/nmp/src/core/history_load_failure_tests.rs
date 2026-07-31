@@ -559,8 +559,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
     // A short local page is `Returned { added }`, never a synthetic "end":
     // there is no Complete/End variant, and the per-source evidence below
     // carries the real reason the page was short.
-    assert!(returned
-        .evidence[0]
+    assert!(returned.evidence[0]
         .shortfall
         .iter()
         .any(|fact| { matches!(fact, ShortfallFact::LocalLimit { .. }) }));

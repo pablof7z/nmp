@@ -5,6 +5,12 @@
 
 use super::*;
 
+/// One observation's merged current row set plus its per-BRANCH acquisition
+/// evidence, indexed by canonical branch order (#1108). This is the internal
+/// snapshot `refresh_observation` diffs against the observation's own last
+/// delivered state; it is never handed to a caller or an effect directly.
+type ObservationProjection = (BTreeMap<EventId, Row>, Vec<AcquisitionEvidence>);
+
 impl<S: EventStore> EngineCore<S> {
     /// Mint a NIP-77 role wire id nobody has ever been handed before (#932).
     ///
@@ -1750,7 +1756,7 @@ impl<S: EventStore> EngineCore<S> {
     fn observation_rows_and_evidence(
         &self,
         id: ObservationId,
-    ) -> Result<Option<(BTreeMap<EventId, Row>, Vec<AcquisitionEvidence>)>, PersistenceError> {
+    ) -> Result<Option<ObservationProjection>, PersistenceError> {
         let Some(state) = self.observations.get(&id) else {
             return Ok(None);
         };

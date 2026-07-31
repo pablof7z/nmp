@@ -775,7 +775,7 @@ private final class DiagnosticsRaceState: @unchecked Sendable {
             )
         ],
         window: nil,
-        evidence: FfiAcquisitionEvidence(sources: [], shortfall: [])
+        evidence: [FfiAcquisitionEvidence(sources: [], shortfall: [])]
     )
 }
 

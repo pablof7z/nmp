@@ -556,20 +556,14 @@ fn ffi_status_name(status: FfiSourceStatus) -> String {
 /// Normalize one observation's PER-BRANCH evidence (#1108) into the
 /// order-insensitive shape the direct/FFI oracle compares. Branch order is
 /// preserved: entry `i` on one side must equal entry `i` on the other.
-fn normalize_direct_evidence(
-    evidence: Vec<AcquisitionEvidence>,
-    relay: &str,
-) -> Vec<NormEvidence> {
+fn normalize_direct_evidence(evidence: Vec<AcquisitionEvidence>, relay: &str) -> Vec<NormEvidence> {
     evidence
         .into_iter()
         .map(|branch| normalize_direct_branch_evidence(branch, relay))
         .collect()
 }
 
-fn normalize_ffi_evidence(
-    evidence: Vec<FfiAcquisitionEvidence>,
-    relay: &str,
-) -> Vec<NormEvidence> {
+fn normalize_ffi_evidence(evidence: Vec<FfiAcquisitionEvidence>, relay: &str) -> Vec<NormEvidence> {
     evidence
         .into_iter()
         .map(|branch| normalize_ffi_branch_evidence(branch, relay))

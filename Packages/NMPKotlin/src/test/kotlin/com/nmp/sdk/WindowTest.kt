@@ -83,7 +83,7 @@ class WindowTest {
 
     @Test
     fun rowBatchLoadIsNullForUnboundedObservations() {
-        val unbounded = RowBatch(emptyList(), AcquisitionEvidence(emptyList(), emptyList()))
+        val unbounded = RowBatch(emptyList(), listOf(AcquisitionEvidence(emptyList(), emptyList())))
         assertNull(unbounded.load)
     }
 
@@ -172,7 +172,7 @@ class WindowTest {
         FfiFrame(
             deltas = deltas,
             window = FfiWindowContents(rows = rows, load = load),
-            evidence = emptyEvidence,
+            evidence = listOf(emptyEvidence),
         )
 
     private fun ffiRow(id: String, createdAt: ULong) =

@@ -24,17 +24,17 @@ use crate::auth::{
     FfiAccountRegistration, FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration,
 };
 use crate::convert::{
-    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, live_query_from_ffi,
-    diagnostics_snapshot_to_ffi, filter_from_ffi, frame_to_ffi, parse_pubkey,
-    relay_information_error_kind, sign_event_failure, sign_event_request_from_ffi,
-    sign_event_start_error, signed_event_to_ffi, window_from_ffi, write_intent_from_ffi,
-    write_status_to_ffi, FfiError, FfiRequestRowsError, FfiRowPullError, WriteStatusRef,
+    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, diagnostics_snapshot_to_ffi,
+    filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_pubkey, relay_information_error_kind,
+    sign_event_failure, sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi,
+    window_from_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError,
+    FfiRowPullError, WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::signer::FfiSignerMailbox;
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiLiveQuery,
-    FfiDiagnosticsSnapshot, FfiFilter, FfiFrame, FfiReceiptReattachment, FfiRelayInformation,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
+    FfiFilter, FfiFrame, FfiLiveQuery, FfiReceiptReattachment, FfiRelayInformation,
     FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
     FfiRelayInformationLimitations, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent,
     FfiWindow, FfiWriteIntent, FfiWriteStatus,
@@ -1251,9 +1251,9 @@ mod tests {
     use super::*;
     use crate::types::{
         FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter, FfiFrame,
-        FfiLiveQuery,
-        FfiIdentity, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest, FfiSourceAuthority,
-        FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+        FfiIdentity, FfiLiveQuery, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest,
+        FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting,
+        FfiWriteStatus,
     };
     use redb::ReadableTable;
     use std::collections::BTreeSet;

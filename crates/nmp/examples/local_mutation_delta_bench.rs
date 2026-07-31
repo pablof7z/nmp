@@ -16,10 +16,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
-use nmp_grammar::{Binding, Filter, IndexedTagName};
-use nmp_grammar::LiveQuery;
 use nmp::mechanism::core::ObservationId;
+use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
+use nmp_grammar::LiveQuery;
+use nmp_grammar::{Binding, Filter, IndexedTagName};
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     sentinel_signature, AcceptWrite, IntentSigState, RedbStore, RelayObserved, WriteDurability,

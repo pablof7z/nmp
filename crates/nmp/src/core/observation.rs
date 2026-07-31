@@ -180,7 +180,6 @@ pub(super) struct LiveWireRequest {
 }
 
 impl ObservationExecutionState {
-
     pub(super) fn request_targets(
         &self,
         absorbed: &std::collections::BTreeSet<nmp_store::CoverageKey>,
@@ -731,8 +730,8 @@ fn issue(next_sequence: &mut u64, branch: usize, fact: ObservationFact) -> Obser
 mod tests {
     use super::*;
     use crate::core::EngineMsg;
-    use nmp_grammar::{Binding, Demand, Derived, Filter, Selector};
     use nmp_grammar::LiveQuery;
+    use nmp_grammar::{Binding, Demand, Derived, Filter, Selector};
     use nmp_router::FixtureRoutingFacts;
     use nmp_store::{MemoryStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};

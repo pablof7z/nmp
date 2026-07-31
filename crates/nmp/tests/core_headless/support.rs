@@ -13,18 +13,17 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{
-    ObservationId,
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
-    ObservationFact, ReceiptId, RequestTerminal, RowDelta, ShortfallFact, SourceEvidence,
-    SourceStatus,
+    ObservationFact, ObservationId, ReceiptId, RequestTerminal, RowDelta, ShortfallFact,
+    SourceEvidence, SourceStatus,
 };
 use nmp::mechanism::delivery::{RetryCause, WriteStatus};
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, Identity,
     RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
-use nmp_grammar::LiveQuery;
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,

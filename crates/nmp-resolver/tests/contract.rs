@@ -411,8 +411,7 @@ fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
     let b = Keys::generate();
     let c = Keys::generate();
     let d = Keys::generate();
-    let (_handle, _open_delta) =
-        h.subscribe(Demand::from_filter(bounded_recent_authors_filter(2)));
+    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(bounded_recent_authors_filter(2)));
 
     let event_a = kind1(&a, "oldest", 100);
     let event_b = kind1(&b, "middle", 200);
@@ -1345,12 +1344,10 @@ fn different_selectors_share_identical_inner_wire_atom() {
     let mut h = Harness::new();
     let author = Keys::generate();
     h.set_active(Some(author.public_key()));
-    let (_e_handle, first) = h.subscribe(Demand::from_filter(projected_tag_filter(
-        10_003, "e", 'e',
-    )));
-    let (_a_handle, second) = h.subscribe(Demand::from_filter(projected_tag_filter(
-        10_003, "a", 'a',
-    )));
+    let (_e_handle, first) =
+        h.subscribe(Demand::from_filter(projected_tag_filter(10_003, "e", 'e')));
+    let (_a_handle, second) =
+        h.subscribe(Demand::from_filter(projected_tag_filter(10_003, "a", 'a')));
     let inner = cf_kinds_authors(&[10_003], &[&author.public_key().to_hex()]);
 
     assert!(first.opened().iter().any(|atom| atom.filter == inner));

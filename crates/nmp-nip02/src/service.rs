@@ -111,10 +111,7 @@ impl Accumulator {
 /// failed source makes the whole projection unavailable, and every branch
 /// must have proven something before it reads Ready. No branch's proof ever
 /// stands in for another's.
-fn availability(
-    active: Option<PublicKey>,
-    evidence: &[AcquisitionEvidence],
-) -> FollowAvailability {
+fn availability(active: Option<PublicKey>, evidence: &[AcquisitionEvidence]) -> FollowAvailability {
     if active.is_none() {
         return FollowAvailability::SignedOut;
     }
@@ -300,7 +297,8 @@ pub fn observe_following(
     target: PublicKey,
 ) -> Result<FollowObservation, nmp::EngineError> {
     let runtime = engine.adapter_runtime()?;
-    let subscription = engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None)?;
+    let subscription =
+        engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None)?;
     let cancel = subscription.cancel_handle();
     let latest = Arc::new(LatestSlot::default());
     let producer = latest.clone();
@@ -367,7 +365,8 @@ pub fn observe_following_async(
     engine: Arc<Engine>,
     target: PublicKey,
 ) -> Result<AsyncFollowObservation, nmp::EngineError> {
-    let subscription = engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None)?;
+    let subscription =
+        engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None)?;
     Ok(AsyncFollowObservation {
         subscription,
         engine,

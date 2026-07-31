@@ -1176,7 +1176,10 @@ mod affected_handle_invalidation_tests {
         let mut core = EngineCore::new(MemoryStore::new(), 20);
         let subscribed = core.handle(EngineMsg::Subscribe(unlimited_room_query(28)));
         let handle = subscribed_handle(&subscribed);
-        core.observations.get_mut(&handle).unwrap().projection_complete = false;
+        core.observations
+            .get_mut(&handle)
+            .unwrap()
+            .projection_complete = false;
 
         let first = room_event(&keys, 28, 0, 10);
         core.projection_store_queries.set(0);
@@ -1299,7 +1302,10 @@ mod affected_handle_invalidation_tests {
     #[test]
     fn resolver_internal_handle_is_filtered_before_any_projection_read() {
         let mut core = EngineCore::new(MemoryStore::new(), 20);
-        let (internal, _delta) = core.resolver.subscribe(room_query(1).branches()[0].clone()).unwrap();
+        let (internal, _delta) = core
+            .resolver
+            .subscribe(room_query(1).branches()[0].clone())
+            .unwrap();
         core.projection_store_queries.set(0);
 
         let mut effects = Vec::new();
@@ -1516,7 +1522,10 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        core.observations.get_mut(&live_id).unwrap().projection_complete = false;
+        core.observations
+            .get_mut(&live_id)
+            .unwrap()
+            .projection_complete = false;
         core.histories
             .get_mut(&history_id)
             .unwrap()

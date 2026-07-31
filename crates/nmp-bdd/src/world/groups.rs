@@ -35,8 +35,8 @@ use nostr::{Event, EventId, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 
 use nmp::nip29::{Group, GroupContextError};
 use nmp::{Engine, GroupPublishError, GroupReceipts};
-use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 use nmp_grammar::LiveQuery;
+use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 
 use super::budgets::EVENTUALLY;
 use super::observe::{FeedState, ReceiptState};

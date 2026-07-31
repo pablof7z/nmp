@@ -11,9 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, IndexedTagName, SourceAuthority};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
-use nmp_grammar::LiveQuery;
 use nmp_router::RelayUrl;
 
 /// NIP-29 group admins -- the inner query's kind: which groups name me.

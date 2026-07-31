@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{HistoryQuery, RelayAdmissionPolicy, RowDelta};
 use nmp::mechanism::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
-use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 use nmp_grammar::LiveQuery;
+use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};

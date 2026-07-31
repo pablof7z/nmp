@@ -1219,9 +1219,7 @@ pub fn live_query_from_ffi(query: FfiLiveQuery) -> Result<nmp::LiveQuery, FfiErr
         .into_iter()
         .map(|branch| demand_from_ffi(branch).map(nmp::LiveQuery::single))
         .collect::<Result<Vec<_>, _>>()?;
-    let aggregate_result_limit = query
-        .aggregate_result_limit
-        .map(|limit| limit as usize);
+    let aggregate_result_limit = query.aggregate_result_limit.map(|limit| limit as usize);
     nmp::LiveQuery::union(branches, aggregate_result_limit).map_err(FfiError::from)
 }
 

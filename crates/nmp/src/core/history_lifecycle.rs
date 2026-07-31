@@ -549,10 +549,12 @@ impl<S: EventStore> EngineCore<S> {
         let Some(state) = self.histories.get(&id) else {
             return Vec::new();
         };
-        let needs_live = state
-            .acquisitions_by_branch
-            .iter()
-            .any(|acquisition| !matches!(acquisition.root(), Some(ScopeAcquisition::CoverageSatisfied(_)) | Some(ScopeAcquisition::CacheOnly(_))));
+        let needs_live = state.acquisitions_by_branch.iter().any(|acquisition| {
+            !matches!(
+                acquisition.root(),
+                Some(ScopeAcquisition::CoverageSatisfied(_)) | Some(ScopeAcquisition::CacheOnly(_))
+            )
+        });
         let live = needs_live.then(|| self.shadow_plan_for(self.wire_demand()));
         state
             .acquisitions_by_branch
@@ -780,8 +782,7 @@ impl<S: EventStore> EngineCore<S> {
                         .saturating_add(rows.len() as u64),
                 );
                 for stored in rows {
-                    let sources: BTreeSet<RelayUrl> =
-                        stored.provenance.seen.into_keys().collect();
+                    let sources: BTreeSet<RelayUrl> = stored.provenance.seen.into_keys().collect();
                     match by_id.entry(stored.event.id) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
                             entry.insert(Row {
@@ -886,8 +887,7 @@ impl<S: EventStore> EngineCore<S> {
                         .saturating_add(rows.len() as u64),
                 );
                 for stored in rows {
-                    let sources: BTreeSet<RelayUrl> =
-                        stored.provenance.seen.into_keys().collect();
+                    let sources: BTreeSet<RelayUrl> = stored.provenance.seen.into_keys().collect();
                     match candidates.entry(stored.event.id) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
                             entry.insert(Row {

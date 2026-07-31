@@ -28,6 +28,7 @@ use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{
     EngineThread, FifoReceiver, FifoTryRecvError, ReceiptReattachment, RowsReceiver,
 };
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, Selector, SourceAuthority,
@@ -36,7 +37,6 @@ use nmp_grammar::{
     CorrelationToken, Durability, Identity, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_local_signer::LocalKeySigner;
-use nmp_grammar::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, MemoryStore,

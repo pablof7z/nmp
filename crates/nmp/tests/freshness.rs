@@ -1,16 +1,15 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp::mechanism::core::{
-    ObservationId,
-    AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, RowDelta, ShortfallFact,
-    SourceStatus,
+    AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, ObservationId, RowDelta,
+    ShortfallFact, SourceStatus,
 };
 use nmp_grammar::Derived;
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
     RelaySessionKey, Selector, SourceAuthority,
 };
-use nmp_grammar::LiveQuery;
 use nmp_router::{FixtureRoutingFacts, WireOp};
 use nmp_store::{CoverageInterval, EventStore, MemoryStore, RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};

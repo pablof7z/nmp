@@ -31,13 +31,13 @@ use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, RowsReceiver};
 use nmp::{Engine, EngineConfig};
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField, Selector,
     SetAlgebra, SetOp, SourceAuthority,
 };
 use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
-use nmp_grammar::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nmp_transport::PoolConfig;
@@ -1550,7 +1550,9 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
 
     handle.set_active_account(Some(a.public_key()));
     let (_qh, rows_rx) = handle
-        .subscribe(LiveQuery::single(follows_minus_mutes_demand(a.public_key())))
+        .subscribe(LiveQuery::single(follows_minus_mutes_demand(
+            a.public_key(),
+        )))
         .expect("test subscription construction");
 
     // Publish a's contact list naming BOTH b and c.
