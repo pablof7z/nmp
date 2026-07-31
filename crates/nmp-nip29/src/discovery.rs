@@ -65,7 +65,7 @@ const SUBJECT_TAG: char = 'p';
 /// be exactly the silent repin `nmp_grammar::Derived` forbids.
 #[must_use]
 pub fn groups_where_at(host: &RelayUrl, predicate: Binding) -> Demand {
-    pinned_at(
+    pinned_public_at(
         host,
         Filter {
             kinds: Some(BTreeSet::from([
@@ -103,7 +103,7 @@ pub fn admin_list_includes_at(host: &RelayUrl, subjects: Binding) -> Binding {
 
 fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
     Binding::Derived(Box::new(Derived {
-        inner: pinned_at(
+        inner: pinned_public_at(
             host,
             Filter {
                 kinds: Some(BTreeSet::from([kind])),
@@ -124,7 +124,7 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 /// is never `AuthorOutboxes`. The caller-suppliable relay SET is validated
 /// once, where it enters -- `nmp::nip29::on` -- and the nonempty scope proves
 /// every host handed down here.
-fn pinned_at(host: &RelayUrl, selection: Filter) -> Demand {
+pub(crate) fn pinned_public_at(host: &RelayUrl, selection: Filter) -> Demand {
     Demand::new(
         selection,
         SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
@@ -133,7 +133,7 @@ fn pinned_at(host: &RelayUrl, selection: Filter) -> Demand {
     .expect("a singleton pinned relay set with a non-outbox source is always constructible")
 }
 
-pub(crate) fn join_key() -> IndexedTagName {
+fn join_key() -> IndexedTagName {
     IndexedTagName::new(JOIN_KEY_TAG).expect("'d' is a single ASCII letter")
 }
 
