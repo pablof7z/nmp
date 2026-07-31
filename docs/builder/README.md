@@ -12,7 +12,7 @@ of work:
 2. a **write intent** describing a publication obligation.
 
 NMP owns the canonical store, dependency resolution, relay planning, sync,
-signing orchestration, durable outbox, receipts, and diagnostics. Your app keeps
+signing orchestration, durable delivery, receipts, and diagnostics. Your app keeps
 its architecture, state, screens, account UX, ordering, formatting, and product
 policy.
 

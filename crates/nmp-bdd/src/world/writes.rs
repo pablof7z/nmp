@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use nostr::{Event, EventId, JsonUtil, Tag, Timestamp};
 
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use super::budgets::{EVENTUALLY, NEVER};

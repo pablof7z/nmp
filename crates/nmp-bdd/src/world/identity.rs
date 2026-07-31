@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use nostr::PublicKey;
 
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::ReceiptReattachment;
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 

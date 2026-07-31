@@ -123,7 +123,7 @@ retry eligibility, and other real deadlines. It sleeps until the earliest
 deadline, has explicit concurrency limits, and contains no fixed-rate poll loop
 or per-intent thread.
 
-Fairness policy must prevent one relay, query, or outbox lane from permanently
+Fairness policy must prevent one relay, query, or delivery lane from permanently
 starving unrelated work. The precise algorithm is provisional; starvation and
 queue pressure must be measurable.
 

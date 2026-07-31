@@ -36,7 +36,7 @@
 
 - Immutable composition stages:
 - Module-owned validation failures:
-- Core acceptance/signing/outbox path:
+- Core acceptance/signing/delivery path:
 - Receipt/restart behavior:
 
 ## Projection

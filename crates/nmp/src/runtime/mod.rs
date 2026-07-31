@@ -102,7 +102,7 @@ use crate::core::{
     ObservationEvidence, PublishError, ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row,
     RowDelta,
 };
-use crate::outbox::{CancelWriteError, CancelWriteOutcome, WriteStatus};
+use crate::delivery::{CancelWriteError, CancelWriteOutcome, WriteStatus};
 use crate::relay_information_service::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
     RelayInformationSnapshot,
@@ -905,7 +905,7 @@ enum Cmd {
     AuthTaskCompleted(auth::AuthTaskCompletion),
     AuthTaskReleased(auth::AuthTaskReleaseToken),
     /// Sign one exact event through the active account's registered
-    /// capability without entering the write/store/outbox reducer.
+    /// capability without entering the write/store/delivery reducer.
     SignEvent {
         unsigned: UnsignedEvent,
         completion: SignEventCompletion,
@@ -951,7 +951,7 @@ struct SignerRegistry {
 
 /// Typed outcome vocabulary for the governed sign-only operation. This is
 /// deliberately separate from write receipts: signing here never accepts a
-/// write intent, mutates canonical storage, creates an outbox lane, or
+/// write intent, mutates canonical storage, creates a delivery lane, or
 /// publishes to a relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignEventError {
@@ -3283,7 +3283,7 @@ mod relay_worker_reconciliation_tests {
 
     /// Exact read reconciliation must not evict a worker owned only by a
     /// durable write lane. A socket is shared transport state: releasing it
-    /// from the router plan is safe only after every nonterminal outbox lane
+    /// from the router plan is safe only after every nonterminal delivery lane
     /// for that relay is also gone.
     #[test]
     fn durable_write_lane_retains_worker_without_read_demand() {
@@ -6359,7 +6359,7 @@ impl Handle {
     }
 
     /// Ask the currently active registered signer to sign one exact event,
-    /// without accepting a write or touching the canonical store/outbox. A
+    /// without accepting a write or touching the canonical store/delivery state. A
     /// pending remote operation is cancellable through the returned handle and
     /// engine shutdown; #704 removed the admission slot — nothing is refused.
     pub fn sign_event(

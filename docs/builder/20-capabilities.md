@@ -33,7 +33,7 @@ The unsigned value names the active account explicitly. NMP refuses a missing
 active signer or author mismatch, freezes the exact body, routes only to the
 registered capability, and validates the returned body, author, id, and
 signature. Success returns a signed event value only. It does not create a
-write intent, canonical row, receipt, outbox work, relay plan, or publication.
+write intent, canonical row, receipt, delivery work, relay plan, or publication.
 
 Origin allowlists, user prompts, and browser networking are app policy. If the
 host later decides to publish, it submits the already-signed event through the
@@ -73,7 +73,7 @@ become `AwaitingSigner`; that is a receipt/capability fact.
 
 ## Secret material boundary
 
-The durable event/outbox store persists obligations, identity references,
+The durable event/delivery store persists obligations, identity references,
 frozen bodies, validated signatures, and receipt facts. It does not persist raw
 nsecs, bunker credentials, hardware secrets, or bearer tokens.
 
@@ -85,7 +85,7 @@ For a personal or development app that explicitly accepts plaintext sandbox
 storage, Swift and Kotlin also expose `NMPInsecureFileAccountStore`. Passing it
 to engine construction makes `addAccount` checkpoint the validated key and
 reattach it on the next construction. The checkpoint is separate from the
-canonical event/outbox store, never appears in snapshots or diagnostics, and
+canonical event/delivery store, never appears in snapshots or diagnostics, and
 must be cleared before engine shutdown to sign out. Its name is literal: it is
 not Keychain, Keystore, encrypted, hardware-backed, or a substitute for the
 standard secure providers tracked by #47.
@@ -122,7 +122,7 @@ the shared cache, or grants protocol-host authority to an arbitrary relay.
 
 - One signer request is owned by the provider adapter and correlated once.
 - Provider connection/AUTH recovery belongs to that adapter.
-- The durable outbox owns publication attempts after signing.
+- Durable delivery owns publication attempts after signing.
 - The engine's one deadline scheduler owns wakeups and concurrency.
 
 No layer starts a polling timer or secretly buffers another layer's durable

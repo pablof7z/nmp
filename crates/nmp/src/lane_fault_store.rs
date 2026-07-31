@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex};
 
 use nmp_grammar::ContextualAtom;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AuthDenial,
-    CancelEphemeralOutcome, CloseIntentOutcome, CompensateOutcome, CompensationReason,
-    CoverageInterval, CoverageKey, EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId,
-    LaneDeadline, LaneKey, PersistenceError, PersistenceFault, PostHandoffState, PromoteOutcome,
-    RecoveredAttempt, RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
-    RecoveredRouteRevision, RelayObserved, RetractReason, StoredEvent, TransientCause,
+    AcceptOutcome, AcceptWrite, AuthDenial, CancelEphemeralOutcome, CloseIntentOutcome,
+    CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey, DeliveryAttempt,
+    DeliveryAttemptDetails, DeliveryAttemptHandoff, DeliveryAttemptOutcome, DeliveryDeadline,
+    DeliveryIntent, DeliveryLane, DeliveryLaneKey, DeliveryPostHandoffState, DeliveryReceipt,
+    DeliveryRouteRevision, DeliveryTransientCause, EventStore, GcReport, GcRetentionSet,
+    InsertOutcome, IntentId, PersistenceError, PersistenceFault, PromoteOutcome, RelayObserved,
+    RetractReason, StoredEvent,
 };
 use nostr::{Event, Event as SignedEvent, EventId, PublicKey, RelayUrl, Timestamp};
 
@@ -24,7 +25,7 @@ use nostr::{Event, Event as SignedEvent, EventId, PublicKey, RelayUrl, Timestamp
 /// Which durable lane door is currently refusing, and how it classifies its
 /// refusal. Both classifications matter: `Io` is `DurabilityOutcome::Unknown`
 /// (the transition may have landed) while `Invariant` is `Absent` (the
-/// post-commit decode path at `outbox_ops.rs`), and #1000's stuck-forever
+/// post-commit decode path at `delivery_ops.rs`), and #1000's stuck-forever
 /// shape is reachable through either.
 #[derive(Default)]
 pub(crate) struct LaneFaultState {
@@ -102,121 +103,121 @@ impl<S: EventStore> FaultyLaneStore<S> {
 }
 
 impl<S: EventStore> EventStore for FaultyLaneStore<S> {
-    fn bootstrap_outbox_lanes(
+    fn bootstrap_delivery_lanes(
         &mut self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
+    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
         if let Some(error) = self.faults.take_bootstrap_failure() {
             return Err(error);
         }
-        self.inner.bootstrap_outbox_lanes(intent_id)
+        self.inner.bootstrap_delivery_lanes(intent_id)
     }
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
         if let Some(error) = self.faults.take_route_revision_failure() {
             return Err(error);
         }
         self.inner.recover_route_revisions(intent_id)
     }
 
-    fn recover_outbox_lanes(
+    fn recover_delivery_lanes(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
-        self.inner.recover_outbox_lanes(intent_id)
+    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
+        self.inner.recover_delivery_lanes(intent_id)
     }
-    fn due_outbox_deadlines(
+    fn due_delivery_deadlines(
         &self,
         now: Timestamp,
         limit: usize,
-    ) -> Result<Vec<LaneDeadline>, PersistenceError> {
-        self.inner.due_outbox_deadlines(now, limit)
+    ) -> Result<Vec<DeliveryDeadline>, PersistenceError> {
+        self.inner.due_delivery_deadlines(now, limit)
     }
-    fn next_outbox_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_outbox_deadline()
+    fn next_delivery_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        self.inner.next_delivery_deadline()
     }
     fn set_lane_waiting(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         revision: u64,
         auth: bool,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         self.inner.set_lane_waiting(key, revision, auth)
     }
     fn set_lane_eligible(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         revision: u64,
         since: Timestamp,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         self.inner.set_lane_eligible(key, revision, since)
     }
     fn set_lane_transient(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         revision: u64,
         ordinal: u64,
         eligible_at: Timestamp,
-        cause: TransientCause,
+        cause: DeliveryTransientCause,
         raw_reason: Option<String>,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         self.inner
             .set_lane_transient(key, revision, ordinal, eligible_at, cause, raw_reason)
     }
     #[allow(clippy::too_many_arguments)]
     fn suspend_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         revision: u64,
         ordinal: u64,
         at: Timestamp,
-        cause: TransientCause,
+        cause: DeliveryTransientCause,
         raw_reason: Option<String>,
         auth: bool,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         self.inner
             .suspend_lane_attempt(key, revision, ordinal, at, cause, raw_reason, auth)
     }
     fn start_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         revision: u64,
         event: SignedEvent,
         started_at: Timestamp,
-    ) -> Result<(RecoveredAttempt, RecoveredLane), PersistenceError> {
+    ) -> Result<(DeliveryAttempt, DeliveryLane), PersistenceError> {
         self.inner
             .start_lane_attempt(key, revision, event, started_at)
     }
     fn record_lane_handoff(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         revision: u64,
         ordinal: u64,
-        detail: AttemptHandoffDetail,
-        next: PostHandoffState,
-    ) -> Result<RecoveredLane, PersistenceError> {
+        detail: DeliveryAttemptHandoff,
+        next: DeliveryPostHandoffState,
+    ) -> Result<DeliveryLane, PersistenceError> {
         self.inner
             .record_lane_handoff(key, revision, ordinal, detail, next)
     }
     fn finish_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         revision: u64,
         ordinal: u64,
-        outcome: AttemptOutcome,
+        outcome: DeliveryAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
     }
     fn deny_lane_auth(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         revision: u64,
         denial: AuthDenial,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         if let Some(error) = self.faults.take_auth_denial_failure() {
             return Err(error);
         }
@@ -225,7 +226,7 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     fn recover_attempt_details(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredAttemptDetails>, PersistenceError> {
+    ) -> Result<Vec<DeliveryAttemptDetails>, PersistenceError> {
         self.inner.recover_attempt_details(intent_id)
     }
     fn close_terminal_intent(
@@ -302,13 +303,13 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
-        self.inner.recover_outbox()
+    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
+        self.inner.recover_delivery()
     }
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
+    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
@@ -318,13 +319,13 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+    ) -> Result<DeliveryRouteRevision, PersistenceError> {
         self.inner.record_route_revision(intent_id, relays)
     }
     fn recover_attempts(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
     fn accept_ephemeral(

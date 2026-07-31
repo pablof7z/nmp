@@ -508,8 +508,8 @@ mod relay_session_key_tests {
 mod durable_retry_policy_tests {
     use super::*;
 
-    fn key() -> LaneKey {
-        LaneKey {
+    fn key() -> DeliveryLaneKey {
+        DeliveryLaneKey {
             intent_id: IntentId(42),
             relay: RelayUrl::parse("wss://retry-policy.example").unwrap(),
         }
@@ -524,11 +524,11 @@ mod durable_retry_policy_tests {
         );
         assert_eq!(
             classify_relay_ack(false, "rate-limited: slow down"),
-            RelayAckClass::Transient(TransientCause::RelayRateLimited)
+            RelayAckClass::Transient(DeliveryTransientCause::RelayRateLimited)
         );
         assert_eq!(
             classify_relay_ack(false, "error: temporary relay failure"),
-            RelayAckClass::Transient(TransientCause::RelayError)
+            RelayAckClass::Transient(DeliveryTransientCause::RelayError)
         );
         assert_eq!(
             classify_relay_ack(false, "auth-required: authenticate"),
@@ -574,7 +574,7 @@ mod durable_retry_policy_tests {
         assert_ne!(
             retry_delay_secs(&key, 1),
             retry_delay_secs(
-                &LaneKey {
+                &DeliveryLaneKey {
                     intent_id: IntentId(43),
                     relay: key.relay,
                 },

@@ -41,25 +41,9 @@ pub(super) fn record_to_stored_event(record: &StoredEventRecord) -> StoredEvent 
     }
 }
 
-/// Encode `se` as a self-contained portable `OUTBOX_DISPLACED` snapshot.
+/// Encode `se` as a self-contained portable `DELIVERY_DISPLACED` snapshot.
 pub(super) fn encode_stored_event(se: &StoredEvent) -> Vec<u8> {
     binary_event::encode(se).expect("redb: encode portable stored event")
-}
-
-/// Materialize one self-contained portable `OUTBOX_DISPLACED` value — the
-/// read-side counterpart of [`encode_stored_event`]. Fallible (#790): these
-/// bytes come off disk, so a truncated or schema-incompatible snapshot is a
-/// typed refusal, never a panic in the embedding host.
-pub(super) fn try_decode_stored_event(bytes: &[u8]) -> Result<StoredEvent, PersistenceError> {
-    binary_event::decode(bytes).map_err(|error| {
-        PersistenceError::invariant(format!("decode portable stored event: {error:?}"))
-    })
-}
-
-pub(super) fn try_decode_stored_event_record(
-    bytes: &[u8],
-) -> Result<StoredEventRecord, PersistenceError> {
-    Ok(stored_event_to_record(&try_decode_stored_event(bytes)?))
 }
 
 pub(super) fn encode_stored_event_record(record: &StoredEventRecord) -> Vec<u8> {

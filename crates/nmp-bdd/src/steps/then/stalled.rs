@@ -209,7 +209,7 @@ async fn no_conclusion_from_age(w: &mut NmpWorld) {
     );
     let failed = w.receipt_never(|seen| {
         seen.iter()
-            .any(|status| matches!(status, nmp::mechanism::outbox::WriteStatus::Failed(_)))
+            .any(|status| matches!(status, nmp::mechanism::delivery::WriteStatus::Failed(_)))
     });
     assert!(
         failed,
@@ -225,8 +225,8 @@ async fn nothing_abandoned_it(w: &mut NmpWorld) {
         seen.iter().any(|status| {
             matches!(
                 status,
-                nmp::mechanism::outbox::WriteStatus::Failed(_)
-                    | nmp::mechanism::outbox::WriteStatus::Cancelled
+                nmp::mechanism::delivery::WriteStatus::Failed(_)
+                    | nmp::mechanism::delivery::WriteStatus::Cancelled
             )
         })
     });
@@ -296,7 +296,7 @@ async fn nothing_durable_was_recorded(w: &mut NmpWorld) {
     assert!(
         !after
             .iter()
-            .any(|status| matches!(status, nmp::mechanism::outbox::WriteStatus::Acked(_))),
+            .any(|status| matches!(status, nmp::mechanism::delivery::WriteStatus::Acked(_))),
         "a read cannot have delivered anything; receipt showed {after:?}"
     );
     w.read_stalled_writes();

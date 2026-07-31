@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{RelayAdmissionPolicy, RowDelta};
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
 use nmp_grammar::{Binding, Durability, Filter, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_nip46::Nip46Signer;

@@ -11487,7 +11487,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]\nand the `Attached` reattachment, #680). It\nexposes the stable store-issued receipt id via [`Self::id`] and delivers\nordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite\nFIFO that reports typed lag. Receipt facts are durable: the persisted\noutbox/redb store is the source of truth, so a dropped or lagged stream can\nbe reattached and traverse retained facts through finite pages.",
+        "The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]\nand the `Attached` reattachment, #680). It\nexposes the stable store-issued receipt id via [`Self::id`] and delivers\nordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite\nFIFO that reports typed lag. Receipt facts are durable: the persisted\ndurable-delivery Redb store is the source of truth, so a dropped or lagged stream can\nbe reattached and traverse retained facts through finite pages.",
     ),
 }
 

@@ -57,7 +57,7 @@ fn assert_refuses_without_mutation(path: &std::path::Path, what: &str) {
 /// before choosing the deliberate discard. Calling this file a cache would
 /// hide the accepted-but-unpublished obligations that recreation destroys.
 #[test]
-fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_outbox_loss() {
+fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_delivery_loss() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unsupported-schema-cost.redb");
     drop(RedbStore::open(&path).unwrap());
@@ -93,7 +93,7 @@ fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_outbox_los
     for required in [
         "discard and recreate this store to continue",
         "NMP can reacquire the relay-backed read cache",
-        "durable write outbox",
+        "durable delivery state",
         "accepted but unpublished writes",
         "receipts",
         "correlation tokens",
@@ -389,9 +389,9 @@ fn accepted_signed(
 /// Relay URLs deliberately share textual prefixes, and intent 1 coexists
 /// with prefix-adversarial ids 10/100.
 #[test]
-fn outbox_ranges_visit_only_target_intent_and_exact_relay_rows() {
+fn delivery_ranges_visit_only_target_intent_and_exact_relay_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("outbox-ranges.redb");
+    let path = dir.path().join("delivery-ranges.redb");
     let mut store = RedbStore::open(&path).expect("open redb store");
     let keys = nostr::Keys::generate();
     let short = RelayUrl::parse("wss://prefix.example/x").unwrap();
@@ -405,7 +405,7 @@ fn outbox_ranges_visit_only_target_intent_and_exact_relay_rows() {
     store
         .record_route_revision(target, BTreeSet::from([short.clone()]))
         .unwrap();
-    let lanes = store.bootstrap_outbox_lanes(target).unwrap();
+    let lanes = store.bootstrap_delivery_lanes(target).unwrap();
     let short_lane = lanes
         .iter()
         .find(|lane| lane.key.relay == short)
@@ -436,7 +436,7 @@ fn outbox_ranges_visit_only_target_intent_and_exact_relay_rows() {
             &short_lane.key,
             short_lane.revision,
             1,
-            AttemptOutcome::GaveUp,
+            DeliveryAttemptOutcome::GaveUp,
             Timestamp::from(1_003u64),
         )
         .unwrap();
@@ -463,7 +463,7 @@ fn outbox_ranges_visit_only_target_intent_and_exact_relay_rows() {
         store
             .record_route_revision(intent, BTreeSet::from([relay.clone()]))
             .unwrap();
-        let noise_lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+        let noise_lane = store.bootstrap_delivery_lanes(intent).unwrap().remove(0);
         let noise_lane = store
             .set_lane_eligible(
                 &noise_lane.key,
@@ -481,12 +481,12 @@ fn outbox_ranges_visit_only_target_intent_and_exact_relay_rows() {
             .unwrap();
     }
 
-    store.reset_outbox_range_rows();
+    store.reset_delivery_range_rows();
     let attempts = store.recover_attempts(target).unwrap();
     let revisions = store.recover_route_revisions(target).unwrap();
     assert_eq!(attempts.len(), 2);
     assert_eq!(revisions.len(), 2);
-    assert_eq!(store.outbox_range_rows(), (2, 2));
+    assert_eq!(store.delivery_range_rows(), (2, 2));
 }
 
 /// The durable-key falsifier for this fix: `coverage_row_key` must
@@ -1461,10 +1461,10 @@ fn query_newest_ids_preserves_provisional_suppression() {
             )
             .unwrap();
     }
-    let claim_key = id_tombstone_key(&hidden.id, &hidden.pubkey);
+    let claim_key = delivery_codec::id_claim_key(&hidden.id, &hidden.pubkey);
     let write_txn = store.db.begin_write().unwrap();
     {
-        let mut claims = write_txn.open_table(OUTBOX_SUPPRESS_BY_ID).unwrap();
+        let mut claims = write_txn.open_table(DELIVERY_SUPPRESS_BY_ID).unwrap();
         add_claimant_in_txn(&mut claims, &claim_key, IntentId(1)).unwrap();
     }
     write_txn.commit().unwrap();

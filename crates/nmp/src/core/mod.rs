@@ -1,5 +1,5 @@
 //! The PURE synchronous reducer (plan §2 position 1, §3.4). `EngineCore`
-//! owns the M1 resolver `Engine<S>`, the M2 `Router`, the write-outbox
+//! owns the M1 resolver `Engine<S>`, the M2 `Router`, the write-delivery
 //! state, and the coverage-attribution bookkeeping (`attribution.rs`,
 //! `evidence.rs`). Its entire surface is:
 //!
@@ -74,12 +74,13 @@ use nmp_router::{
 };
 use nmp_signer::SignerError;
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome,
-    AuthDenial as StoredAuthDenial, AuthDenialSource as StoredAuthDenialSource,
-    CancelEphemeralOutcome, CloseIntentOutcome, CompensateOutcome, CoverageKey, DeadlineKind,
-    DurabilityOutcome, EventStore, HandoffEvidence, InFlightPhase, IntentId, IntentSigState,
-    LaneKey, LaneState, LaneTerminalOutcome, PersistenceError, PostHandoffState, PromoteOutcome,
-    ReceiptState, RecoveredLane, RelayObserved, TransientCause, WriteDurability,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AuthDenial as StoredAuthDenial,
+    AuthDenialSource as StoredAuthDenialSource, CancelEphemeralOutcome, CloseIntentOutcome,
+    CompensateOutcome, CoverageKey, DeliveryAttemptHandoff, DeliveryAttemptOutcome,
+    DeliveryDeadlineKind, DeliveryInFlightPhase, DeliveryLane, DeliveryLaneKey, DeliveryLaneState,
+    DeliveryPostHandoffState, DeliveryTerminalOutcome, DeliveryTransientCause, DurabilityOutcome,
+    EventStore, HandoffEvidence, IntentId, IntentSigState, PersistenceError, PromoteOutcome,
+    ReceiptState, RelayObserved, WriteDurability,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -87,10 +88,10 @@ use nmp_transport::{
     RelayHandle as TransportRelayHandle, RelayHealth,
 };
 
-use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
-use crate::outbox::{
+use crate::delivery::{
     AuthDenialSource, CancelWriteError, CancelWriteOutcome, RetryCause, WriteStatus,
 };
+use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
 use crate::relay_information_service::RelayInformationCapabilityEvidence;
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
@@ -314,7 +315,7 @@ const AUTH_SEQUENCE_SENTINEL: u64 = u64::MAX;
 const MAX_GLOBAL_ATTEMPTS: usize = 32;
 const DEADLINE_READ_BATCH: usize = 1_024;
 
-fn retry_delay_secs(key: &LaneKey, ordinal: u64) -> u64 {
+fn retry_delay_secs(key: &DeliveryLaneKey, ordinal: u64) -> u64 {
     let exponent = ordinal.saturating_sub(1).min(63) as u32;
     let base = RETRY_INITIAL_SECS
         .checked_shl(exponent)
@@ -342,7 +343,7 @@ fn retry_delay_secs(key: &LaneKey, ordinal: u64) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RelayAckClass {
     Acked,
-    Transient(TransientCause),
+    Transient(DeliveryTransientCause),
     WaitingAuth,
     Rejected,
 }
@@ -356,8 +357,8 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
     };
     match prefix {
         "duplicate" => RelayAckClass::Acked,
-        "rate-limited" => RelayAckClass::Transient(TransientCause::RelayRateLimited),
-        "error" => RelayAckClass::Transient(TransientCause::RelayError),
+        "rate-limited" => RelayAckClass::Transient(DeliveryTransientCause::RelayRateLimited),
+        "error" => RelayAckClass::Transient(DeliveryTransientCause::RelayError),
         "auth-required" => RelayAckClass::WaitingAuth,
         "invalid" | "pow" | "blocked" | "restricted" | "mute" => RelayAckClass::Rejected,
         _ => RelayAckClass::Rejected,
@@ -919,7 +920,7 @@ pub enum Effect {
     /// `SignerAttached` event, closing that cross-thread ordering race.
     RearmSignerIfAvailable(PublicKey),
     RequestDecrypt(EventId, PublicKey, String),
-    /// Outbox: publish `event` to `relay` (plan §3.4's "`Effect::Wire`
+    /// Delivery: publish `event` to `relay` (plan §3.4's "`Effect::Wire`
     /// publish REQ/EVENT per relay", re-cut as its OWN effect rather than a
     /// `nmp_router::WireOp` variant — `WireOp`/`WireDelta` are read-
     /// subscription vocabulary owned by `nmp-router`, out of this builder's
@@ -1106,7 +1107,7 @@ struct LaneWorkerProjection {
 }
 
 impl LaneWorkerProjection {
-    fn from_recovered(lanes: &[RecoveredLane]) -> Self {
+    fn from_recovered(lanes: &[DeliveryLane]) -> Self {
         let mut projection = Self::default();
         for lane in lanes {
             projection.apply(lane);
@@ -1116,11 +1117,11 @@ impl LaneWorkerProjection {
 
     /// Apply one exact committed post-state. Returns whether this relay was
     /// newly learned as a persisted lane and therefore needs reverse indexing.
-    fn apply(&mut self, lane: &RecoveredLane) -> bool {
+    fn apply(&mut self, lane: &DeliveryLane) -> bool {
         let relay = lane.key.relay.clone();
         let newly_persisted = self.persisted.insert(relay.clone());
         self.uncertain.remove(&relay);
-        if matches!(lane.state, LaneState::Terminal { .. }) {
+        if matches!(lane.state, DeliveryLaneState::Terminal { .. }) {
             self.nonterminal.remove(&relay);
         } else {
             self.nonterminal.insert(relay);
@@ -1205,7 +1206,7 @@ struct PendingWrite {
     intent_id: Option<IntentId>,
     /// The instant this obligation was accepted -- the exact value written
     /// to `AcceptWrite::accepted_at` and replayed by
-    /// `RecoveredIntent::accepted_at`, so it is one durable fact rather than
+    /// `DeliveryIntent::accepted_at`, so it is one durable fact rather than
     /// a process-local stopwatch. `stalled_writes` projects it verbatim;
     /// nothing here ever turns it into a duration, because a duration frozen
     /// into a snapshot goes stale the moment the snapshot stops being
@@ -1438,7 +1439,7 @@ pub struct EngineCore<S: EventStore> {
     /// half of the namespace. Store-issued durable ids occupy the lower half
     /// and advance independently, so reattachment can never alias one.
     next_unaccepted_receipt: Option<u64>,
-    /// Write outbox (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
+    /// Durable delivery (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
     /// `ReceiptId` from `Publish` through to the last terminal per-relay
     /// status; `event_to_receipt` lets an inbound `OK` frame (keyed by
     /// `EventId` on the wire) find its receipt.
@@ -1456,7 +1457,7 @@ pub struct EngineCore<S: EventStore> {
     /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
     /// finding E5): `receipt_for_intent` used to be a full linear scan of
     /// `pending`, run once per due deadline in
-    /// `consume_due_outbox_deadlines`. Maintained at every real
+    /// `consume_due_delivery_deadlines`. Maintained at every real
     /// `pending.insert`/`pending.remove` (never at `fail_and_compensate`'s
     /// transient remove-then-reinsert, which never changes which intent a
     /// receipt owns). This mirrors `pending` exactly and needs no separate
@@ -1465,10 +1466,10 @@ pub struct EngineCore<S: EventStore> {
     intent_receipts: HashMap<IntentId, ReceiptId>,
     /// Relay -> receipts with a lane on that relay (epic #507 finding E5).
     /// A narrowing INDEX only, never a second source of truth: the store's
-    /// `OUTBOX_LANES` table stays authoritative (its keys are intent-first,
+    /// `DELIVERY_LANES` table stays authoritative (its keys are intent-first,
     /// and `close_terminal_intent` deliberately never deletes a closed
     /// intent's own terminal lane rows -- both `MemoryStore` and `RedbStore`
-    /// only drop `OUTBOX_INTENTS`/the deadline indexes there, per that
+    /// only drop `DELIVERY_INTENTS`/the deadline indexes there, per that
     /// door's own doc comment: "Receipts and all route/attempt/detail
     /// evidence are retained" -- so a durable relay-scoped secondary table
     /// would still index retained garbage and would need transactional
@@ -1479,14 +1480,14 @@ pub struct EngineCore<S: EventStore> {
     /// answers. `wake_relay_lanes` uses this to avoid re-reading every
     /// outstanding write's lanes on every relay connect/disconnect/auth
     /// event -- it only narrows WHICH intents to re-read via
-    /// `recover_outbox_lanes`, the store read itself remains the truth.
+    /// `recover_delivery_lanes`, the store read itself remains the truth.
     /// Kept in lockstep with each `PendingWrite::lane_projection.persisted`
     /// set by the one projection door; cleaned by walking that exact set on
     /// a real removal.
     receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
     /// Safety valve for `receipts_by_lane_relay` (epic #507 finding E5): set
     /// to true the moment ANY path could have created/learned lanes but the
-    /// index could not record them (a `bootstrap_outbox_lanes` or
+    /// index could not record them (a `bootstrap_delivery_lanes` or
     /// `recover_route_revisions` error during `recover_on_boot`/`on_signed`).
     /// `recover_on_boot` resets it to false at the start of its one-shot,
     /// deterministic rebuild -- the same moment `pending` itself is rebuilt
@@ -1642,7 +1643,7 @@ struct AttemptCorrelationTarget {
     /// only ever trusted from the exact session the write published on.
     session: RelaySessionKey,
     /// Durable/AtMostOnce correlations identify the exact persisted lane
-    /// ordinal. Ephemeral correlations have no outbox row.
+    /// ordinal. Ephemeral correlations have no delivery row.
     lane: Option<(IntentId, u64)>,
 }
 
@@ -2111,7 +2112,7 @@ impl<S: EventStore> EngineCore<S> {
     /// longer than [`NEG_LIVENESS_DEADLINE_SECS`] against `now` is
     /// abandoned in favor of a plain REQ for the same (unfloored/unlimited)
     /// filter. The same tick first consumes every due durable-lane retry/ACK
-    /// deadline through the one outbox scheduler.
+    /// deadline through the one delivery scheduler.
     ///
     /// `runtime::engine_loop` (§3.3, #39) is what actually drives this on
     /// its own now: it arms `cmd_rx.recv_timeout` off [`Self::next_deadline`]
@@ -2136,7 +2137,7 @@ impl<S: EventStore> EngineCore<S> {
         // because resolution is diff-and-append it costs an empty diff when
         // nothing was learned.
         self.rewrite_open_routes(&mut effects);
-        effects.extend(self.consume_due_outbox_deadlines(now));
+        effects.extend(self.consume_due_delivery_deadlines(now));
 
         // NIP-40 expiry (retraction-and-negative-deltas.md §3.2). The
         // deadline-armed runtime driver above dispatches this tick at the
@@ -2229,11 +2230,17 @@ impl<S: EventStore> EngineCore<S> {
                     .map(|handoff| handoff.started_at + NEG_LIVENESS_DEADLINE_SECS),
             )
             .min();
-        let outbox = (!self.retry_scheduler_blocked)
-            .then(|| self.resolver.store().next_outbox_deadline().ok().flatten())
+        let delivery = (!self.retry_scheduler_blocked)
+            .then(|| {
+                self.resolver
+                    .store()
+                    .next_delivery_deadline()
+                    .ok()
+                    .flatten()
+            })
             .flatten();
         // Lane-bootstrap retries carry their own capped backoff, so unlike
-        // the outbox deadline they are NOT suppressed by
+        // the delivery deadline they are NOT suppressed by
         // `retry_scheduler_blocked`: a failed bootstrap has no durable
         // deadline row to rearm it, and suppressing it here would leave the
         // intent's conservative retention with no way out (#1000).
@@ -2242,14 +2249,14 @@ impl<S: EventStore> EngineCore<S> {
             .values()
             .map(|retry| retry.due)
             .min();
-        [expiry, neg_liveness, outbox, bootstrap]
+        [expiry, neg_liveness, delivery, bootstrap]
             .into_iter()
             .flatten()
             .min()
     }
 
     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
-        // A prior persistence failure suppresses a due outbox deadline only
+        // A prior persistence failure suppresses a due delivery deadline only
         // until real work arrives. Re-expose it after this message so the
         // runtime immediately drives a fresh Tick instead of either spinning
         // on the failed transition or suppressing retry forever.

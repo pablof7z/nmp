@@ -6,7 +6,7 @@
 //! for this codebase: dropping the whole reducer/store and reopening the
 //! real redb file, no sleeps or polling. `nmp-store`'s
 //! `redb_store::crash_atomicity_tests` module covers the literal
-//! SIGABRT-mid-transaction proof that the `OUTBOX_CORRELATIONS` row commits
+//! SIGABRT-mid-transaction proof that the `DELIVERY_CORRELATIONS` row commits
 //! or rolls back atomically with the receipt it names; this file covers the
 //! engine-level replay/reattachment contract across each named boundary.
 
@@ -16,7 +16,7 @@ use nmp::mechanism::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp_grammar::{
     AccessContext, CorrelationToken, Durability, Identity, RelaySessionKey, WriteIntent,
     WritePayload, WriteRouting,
