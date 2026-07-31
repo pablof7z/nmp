@@ -26,12 +26,21 @@
 //! relay-signed, so two relays hosting the same `h` id are two independent
 //! groups with the same name. Membership evidence observed at relay A must
 //! constrain the listing at relay A and never at relay B. Every constructor
-//! in this module therefore takes exactly ONE host and stamps
-//! `SourceAuthority::Pinned({host})` explicitly on the demand it builds AND
-//! on every inner demand it nests -- at depth 1, 2, or deeper. Nothing here
-//! ever inherits an outer demand's source, and nothing here ever rewrites the
-//! authority of a binding the CALLER supplied (a `$myFollows`-shaped kind:3
-//! lookup keeps its own `AuthorOutboxes`).
+//! in this module therefore takes exactly ONE host and stamps BOTH
+//! host-scoping axes -- `SourceAuthority::Pinned({host})` for the wire and
+//! `CacheMode::Strict` for the local cache -- explicitly on the demand it
+//! builds AND on every inner demand it nests, at depth 1, 2, or deeper.
+//!
+//! Pinning alone is NOT sufficient, and assuming otherwise is the mistake this
+//! module was shipped with: `Pinned` scopes only which relays are ASKED, while
+//! `CacheMode` governs which locally cached rows may ANSWER, and the grammar's
+//! `Agnostic` default ignores provenance entirely. The two axes are
+//! independent and NIP-29 needs both.
+//!
+//! Nothing here ever inherits an outer demand's source or cache mode, and
+//! nothing here ever rewrites the authority of a binding the CALLER supplied
+//! (a `$myFollows`-shaped kind:3 lookup keeps its own `AuthorOutboxes` and its
+//! own cache mode).
 //!
 //! Assembling one branch per host into a single live query is the facade's
 //! job (`nmp::nip29`), not this crate's: this crate is engine-free and mints
@@ -40,7 +49,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, Demand, Derived, Filter, IndexedTagName, Selector, SourceAuthority,
+    AccessContext, Binding, CacheMode, Demand, Derived, Filter, IndexedTagName, Selector,
+    SourceAuthority,
 };
 use nostr::RelayUrl;
 
@@ -116,8 +126,36 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 }
 
 /// The one place a NIP-29-owned demand acquires its authority: pinned to
-/// EXACTLY one host, public access, and the grammar's own cache/freshness
-/// defaults. Called at every nesting level rather than once at the top.
+/// EXACTLY one host, public access, and `CacheMode::Strict`. Called at every
+/// nesting level rather than once at the top.
+///
+/// # Both axes, because one is not enough
+///
+/// `SourceAuthority::Pinned` and `CacheMode` are ORTHOGONAL, and NIP-29 needs
+/// both pointed at the same host. `Pinned` scopes only the WIRE request: which
+/// relays are asked. Which locally CACHED rows may answer is governed
+/// separately by `CacheMode`, and the grammar's default `Agnostic` means
+/// "serve every matching cached row regardless of provenance".
+///
+/// Defaulting therefore produced a real cross-host leak, not a theoretical
+/// one. Two relays hosting the same group id are two independent groups; host
+/// A's and host B's evidence lookups differ ONLY in their pinned set, so the
+/// moment host A's kind:39002 row landed in the shared store, host B's
+/// structurally-identical lookup resolved against it and reported a member
+/// nothing at host B ever supported. The scope was honoured on the wire and
+/// silently violated in cache. `Strict` closes it: a cached row answers a
+/// branch only when its own provenance names that branch's host.
+///
+/// The consequence is intended, and is the same statement of per-relay
+/// authority: a row that no host in this branch served does not appear in this
+/// branch. For the relay-signed discovery kinds nothing else is even possible
+/// -- an app never authors a 39000/39001/39002. For group CONTENT it means a
+/// just-published event surfaces under a host once that host has actually
+/// carried it, rather than appearing under every host on the strength of a
+/// local write no relay has accepted. Partial publication -- accepted by A,
+/// rejected by B -- is routine in NIP-29, and showing the event under B
+/// anyway would be exactly the confidently-wrong answer this door exists to
+/// prevent.
 ///
 /// Infallible for the same reason the deleted single-host door was, and for
 /// that reason ONLY: a one-element pinned set cannot be empty, and the source
@@ -125,12 +163,14 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 /// once, where it enters -- `nmp::nip29::on` -- and the nonempty scope proves
 /// every host handed down here.
 pub(crate) fn pinned_public_at(host: &RelayUrl, selection: Filter) -> Demand {
-    Demand::new(
+    let mut demand = Demand::new(
         selection,
         SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
         AccessContext::Public,
     )
-    .expect("a singleton pinned relay set with a non-outbox source is always constructible")
+    .expect("a singleton pinned relay set with a non-outbox source is always constructible");
+    demand.cache = CacheMode::Strict;
+    demand
 }
 
 fn join_key() -> IndexedTagName {
@@ -205,21 +245,40 @@ mod tests {
         );
         assert_eq!(derived.inner.source, pinned([host(2)]));
         assert_eq!(derived.inner.access, AccessContext::Public);
-        assert_eq!(derived.inner.cache, CacheMode::Agnostic);
+        assert_eq!(derived.inner.cache, CacheMode::Strict);
         assert_eq!(derived.inner.freshness, Freshness::Live);
     }
 
-    /// Every level a NIP-29 constructor OWNS is stamped with the exact host;
-    /// nothing relies on inheritance. See the facade's own depth-2 falsifier
-    /// for the full-graph version of this property.
+    /// Every level a NIP-29 constructor OWNS is stamped with the exact host on
+    /// BOTH host-scoping axes; nothing relies on inheritance or on a default.
+    ///
+    /// The cache half is not decoration. `Pinned` scopes the wire only, so a
+    /// demand that pins the host but leaves `CacheMode::Agnostic` is answered
+    /// by any cached row regardless of which relay served it -- host A's
+    /// member-list row then answers host B's structurally-identical lookup and
+    /// the listing reports a member nothing at B supports. The wire-level
+    /// falsifier in `crates/nmp/tests/group_publication_door.rs` caught that
+    /// leak in the running engine; this assertion is its structural twin, so a
+    /// regression fails in the unit suite rather than only under two live
+    /// relays.
     #[test]
-    fn every_nip29_owned_level_is_pinned_to_the_exact_host() {
+    fn every_nip29_owned_level_scopes_both_the_wire_and_the_cache_to_the_exact_host() {
         let demand = groups_where_at(
             &host(3),
             member_list_includes_at(&host(3), Binding::Reactive(IdentityField::ActivePubkey)),
         );
         assert_eq!(demand.source, pinned([host(3)]));
+        assert_eq!(
+            demand.cache,
+            CacheMode::Strict,
+            "the listing must not accept a cached row another host served"
+        );
         let inner = &derived(demand.selection.tags.get(&join_key()).expect("d is bound")).inner;
         assert_eq!(inner.source, pinned([host(3)]));
+        assert_eq!(
+            inner.cache,
+            CacheMode::Strict,
+            "the nested evidence lookup is where the cross-host leak actually happened"
+        );
     }
 }

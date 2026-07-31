@@ -512,33 +512,23 @@ async fn publish_signed_delivers_the_callers_exact_pre_signed_bytes_to_every_hos
 /// evidence answer for host B's -- host B's row must not appear, because
 /// nothing observed AT host B supports it.
 ///
-/// KNOWN GAP as of this file's landing on `agent/1033-relay-scope`: this
-/// test is RED against the current `crates/nmp-nip29/src/discovery.rs`.
-/// Root-caused: `pinned_public_at` builds every `Pinned`-sourced NIP-29
-/// demand (the outer listing AND every nested evidence lookup) WITHOUT
-/// setting `cache = CacheMode::Strict`, so it keeps `nmp_grammar::Demand`'s
-/// default, `CacheMode::Agnostic` ("serve every matching cached row
-/// regardless of provenance"). `SourceAuthority::Pinned` alone only scopes
-/// the WIRE request; local-cache resolution of the `#d` `Derived` binding is
-/// governed by `CacheMode` (`crates/nmp-resolver/src/engine.rs`'s
-/// `projection_input_events` / `crates/nmp-grammar`'s `CacheMode` doc), and
-/// Agnostic ignores provenance entirely. Once host A's own kind:39002 event
-/// lands in the shared local store, host B's structurally-identical inner
-/// evidence lookup (same kind, same `#p`, different `Pinned` host) resolves
-/// against that SAME locally-cached row and answers non-empty for host B
-/// too -- exactly the cross-host leak this design exists to prevent, but at
-/// the cache layer rather than the graph-shape layer. This crate's own
-/// sibling convention for a demand pinned to a single host in exactly this
-/// way already sets `cache = CacheMode::Strict` explicitly
-/// (`crates/nmp/tests/live_query_union.rs`'s `host_branch` fixture), which
-/// is the established pattern `pinned_public_at` does not yet follow.
-/// Verified: temporarily adding `demand.cache = CacheMode::Strict;` to
-/// `pinned_public_at` turns this test green immediately (host B's outer
-/// branch resolves zero atoms and never even sends its `#d` REQ). That
-/// one-line fix belongs to `crates/nmp-nip29/src/discovery.rs`, which is out
-/// of this file's exclusive ownership (#1033 Lane E owns only this test
-/// file) -- reported for the owner to land alongside the rest of
-/// `crates/nmp-nip29/src/*`.
+/// This test found a real defect when it landed, and the defect is fixed.
+/// `pinned_public_at` used to build every `Pinned`-sourced NIP-29 demand (the
+/// outer listing AND every nested evidence lookup) leaving
+/// `nmp_grammar::Demand`'s default `CacheMode::Agnostic` -- "serve every
+/// matching cached row regardless of provenance".
+/// `SourceAuthority::Pinned` alone scopes only the WIRE request; which locally
+/// cached rows may ANSWER is governed independently by `CacheMode`. So once
+/// host A's own kind:39002 event landed in the shared store, host B's
+/// structurally-identical inner evidence lookup (same kind, same `#p`,
+/// different `Pinned` host) resolved against that SAME cached row and answered
+/// non-empty for host B -- the cross-host leak this design exists to prevent,
+/// at the cache layer rather than the graph-shape layer.
+///
+/// `pinned_public_at` now sets `cache = CacheMode::Strict` at every level it
+/// builds, so a cached row answers a branch only when its own provenance names
+/// that branch's host. Host B's outer branch resolves zero atoms and never
+/// sends its `#d` REQ.
 ///
 /// This is not a re-check of `scope_stamps_exact_hosts_on_every_nested_nip29_demand`
 /// (which pins the graph SHAPE): it proves that if the shape regressed --

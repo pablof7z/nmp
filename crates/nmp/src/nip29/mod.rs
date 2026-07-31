@@ -181,7 +181,7 @@ use crate::LiveQuery;
 mod tests {
     use super::*;
     use nmp_grammar::{
-        AccessContext, Binding, Derived, IdentityField, IndexedTagName, SourceAuthority,
+        AccessContext, Binding, CacheMode, Derived, IdentityField, IndexedTagName, SourceAuthority,
     };
 
     fn host(n: u16) -> RelayUrl {
@@ -237,6 +237,7 @@ mod tests {
                 pinned(expected.clone()),
                 "depth 0 (the listing) must be pinned to {expected} alone"
             );
+            assert_eq!(outer.cache, CacheMode::Strict);
             assert_eq!(outer.access, AccessContext::Public);
 
             let inner = &derived(
@@ -252,6 +253,12 @@ mod tests {
                 pinned(expected.clone()),
                 "depth 1 (the member-list evidence) must be pinned to {expected} alone, \
                  not inherited and not cross-hosted"
+            );
+            assert_eq!(
+                inner.cache,
+                CacheMode::Strict,
+                "depth 1 must also refuse a cached row {expected} never served -- Pinned \
+                 scopes the wire, CacheMode scopes the cache, and both must name this host"
             );
             assert_eq!(inner.access, AccessContext::Public);
             assert_eq!(
