@@ -6,13 +6,17 @@
 use super::*;
 
 impl<S: EventStore> EngineCore<S> {
-    pub(super) fn on_subscribe_history(&mut self, query: HistoryQuery) -> Vec<Effect> {
+    pub(crate) fn open_history_observation(
+        &mut self,
+        query: HistoryQuery,
+    ) -> ObservationOpen<HistorySessionId, HistoryBatch> {
         let mut effects = Vec::new();
         let (handle, _) = match self.resolver.subscribe(query.initial_demand()) {
             Ok(value) => value,
             Err(error) => {
+                let reason = format!("canonical history resolution failed: {error}");
                 self.degrade_store(error, &mut effects);
-                return effects;
+                return ObservationOpen::Refused { reason, effects };
             }
         };
         let handle_id = handle.id();
@@ -40,11 +44,45 @@ impl<S: EventStore> EngineCore<S> {
             },
         );
 
+        // As with ordinary observations, canonical materialization is the
+        // transaction's fallible gate. It runs before router compilation, so
+        // refusal cannot create a speculative relay plan or perturb a sibling
+        // observer. The just-created resolver/session owner is then removed
+        // inside this same reducer turn.
+        let current = match self.history_rows_for(id) {
+            Ok(current) => current,
+            Err(error) => {
+                let reason = format!("canonical history projection failed: {error}");
+                self.history_by_handle.remove(&handle_id);
+                drop(self.histories.remove(&id));
+                let _ = self.resolver.unsubscribe(handle_id);
+                self.degrade_store(error, &mut effects);
+                return ObservationOpen::Refused { reason, effects };
+            }
+        };
+
         self.recompile(&mut effects);
         self.refresh_all_handles(&mut effects);
         self.refresh_all_histories_except(id, &mut effects);
-        self.refresh_history(id, WindowLoad::Idle, &mut effects);
-        effects
+        let evidence = self.history_evidence_for(id);
+        let seed = self
+            .apply_history_projection(id, current, evidence, WindowLoad::Idle)
+            .expect("a new history session has no prior projection and always yields one seed");
+        ObservationOpen::Opened { id, seed, effects }
+    }
+
+    pub(super) fn on_subscribe_history(&mut self, query: HistoryQuery) -> Vec<Effect> {
+        match self.open_history_observation(query) {
+            ObservationOpen::Opened {
+                id,
+                seed,
+                mut effects,
+            } => {
+                effects.push(Effect::EmitHistory(id, seed));
+                effects
+            }
+            ObservationOpen::Refused { effects, .. } => effects,
+        }
     }
 
     pub(super) fn on_unsubscribe_history(&mut self, id: HistorySessionId) -> Vec<Effect> {
@@ -609,6 +647,20 @@ impl<S: EventStore> EngineCore<S> {
                 return None;
             }
         };
+        let len = current.len();
+        if let Some(batch) = self.apply_history_projection(id, current, evidence, load) {
+            effects.push(Effect::EmitHistory(id, batch));
+        }
+        Some(len)
+    }
+
+    fn apply_history_projection(
+        &mut self,
+        id: HistorySessionId,
+        current: BTreeMap<EventId, Row>,
+        evidence: AcquisitionEvidence,
+        load: WindowLoad,
+    ) -> Option<HistoryBatch> {
         let state = self.histories.get_mut(&id)?;
         let current_rows = current.clone();
         let current_order = current_rows
@@ -640,12 +692,11 @@ impl<S: EventStore> EngineCore<S> {
         state.order = current_order;
         state.last_evidence = Some(evidence);
         state.projection_complete = true;
-        let len = state.last_rows.len();
         if changed {
-            let batch = self.history_batch(id, deltas, load);
-            effects.push(Effect::EmitHistory(id, batch));
+            Some(self.history_batch(id, deltas, load))
+        } else {
+            None
         }
-        Some(len)
     }
 
     fn refresh_history_evidence(&mut self, id: HistorySessionId, effects: &mut Vec<Effect>) {
@@ -681,6 +732,15 @@ impl<S: EventStore> EngineCore<S> {
         &self,
         id: HistorySessionId,
     ) -> Result<(BTreeMap<EventId, Row>, AcquisitionEvidence), PersistenceError> {
+        let rows = self.history_rows_for(id)?;
+        let evidence = self.history_evidence_for(id);
+        Ok((rows, evidence))
+    }
+
+    pub(super) fn history_rows_for(
+        &self,
+        id: HistorySessionId,
+    ) -> Result<BTreeMap<EventId, Row>, PersistenceError> {
         let state = self
             .histories
             .get(&id)
@@ -741,8 +801,7 @@ impl<S: EventStore> EngineCore<S> {
                 .collect();
             by_id.retain(|event_id, _| keep.contains(event_id));
         }
-        let evidence = self.history_evidence_for(id);
-        Ok((by_id, evidence))
+        Ok(by_id)
     }
 
     /// Every active acquisition atom owned by one coordinated history
