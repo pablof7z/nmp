@@ -24,9 +24,10 @@
 // any second projection of a NIP-51 Simple-groups entry -- `NIP51.kt` keeps
 // that one shape.
 //
-// Deleted in this change, no alias: `groupDiscoveryDemand(host)` and
-// `Group`'s single-host constructor. A group can live on more than one
-// relay; the single-host door is gone, not deprecated.
+// Deleted in this change, no alias: the old single-host discovery-demand
+// free function pinned to one relay, and `Group`'s single-host constructor.
+// A group can live on more than one relay; the single-host door is gone,
+// not deprecated.
 
 package com.nmp.sdk
 
