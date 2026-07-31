@@ -11,15 +11,16 @@
 //!
 //! Two things here are deliberate and worth stating out loud:
 //!
-//! - **Writes go through the real product door.** `group.publish(&engine, ..)`
-//!   -- the `GroupOperations` extension trait on a live `nmp::Engine`, not a
-//!   hand-built `WriteIntent`. That is the whole point of the feature under
-//!   test, so the harness must not reimplement it.
+//! - **Writes go through the real product door.** `group.publish(&engine,
+//!   author, ..)` -- an INHERENT method on `nip29::Group`, not a hand-built
+//!   `WriteIntent`. That is the whole point of the feature under test, so the
+//!   harness must not reimplement it.
 //! - **Reads go through the same subscription call every other read in this
 //!   suite uses** (`Handle::subscribe`, which `Engine::observe` is a thin
-//!   wrapper over), fed by `LiveQuery::single(group.demand(filter))`. There is no
-//!   group-shaped read door to call, which IS the contract; the group only
-//!   mints the demand.
+//!   wrapper over), fed by `group.read(filter)` -- one ordinary `LiveQuery`
+//!   already assembled from one branch per host. There is no group-shaped
+//!   read door to call, which IS the contract; the group only mints the
+//!   query.
 //!
 //! Two siblings carry the rest. [`super::group_fixtures`] owns the event a
 //! scenario hands the door -- unsigned draft, already-signed event, and the
@@ -31,10 +32,10 @@ use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use nostr::{Event, EventId, Keys, Kind, Tag, Timestamp, UnsignedEvent};
+use nostr::{Event, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
-use nmp::nip29::{Group, GroupContextError};
-use nmp::{Engine, GroupPublishError, GroupReceipts};
+use nmp::nip29::{self, Group, GroupContextError, GroupPublishError, GroupReceipts};
+use nmp::Engine;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 
@@ -194,10 +195,20 @@ impl NmpWorld {
             .unwrap_or_else(|| panic!("nmp-bdd: no group {id:?} was staged"))
             .clone();
         let host = self.relay_url(&relay);
-        let group = Group::new(host, id.clone());
+        let scope =
+            nip29::on([host]).expect("nmp-bdd: a single staged host is always a nonempty scope");
+        let group = scope.group(id.clone());
         self.group_values.insert(id.clone(), group.clone());
         *self.group_builds.entry(id).or_default() += 1;
         group
+    }
+
+    /// The currently logged-in account's public key -- the `author` every
+    /// group write now freezes explicitly (#878, #1033). Every group scenario
+    /// backgrounds `Given I am logged in as "<hex>"`, so this always resolves
+    /// through the one canonical [`super::ME`] identity.
+    pub fn me_pubkey(&mut self) -> PublicKey {
+        self.person(super::ME).public_key()
     }
 
     /// How many times a `nip29::Group` was CONSTRUCTED for `group_id`.
@@ -240,13 +251,17 @@ impl NmpWorld {
     /// `When I observe a live query built from the group's demand for that
     /// filter` (and its siblings).
     ///
-    /// `LiveQuery::single(group.demand(filter))` handed to the SAME subscription call
-    /// every other read in this suite uses. No group-shaped read verb is
-    /// called here because none exists, which is the contract.
+    /// `group.read(filter)` -- already the one ordinary `LiveQuery`, one
+    /// branch per host in the group's scope -- handed to the SAME
+    /// subscription call every other read in this suite uses. No
+    /// group-shaped read verb is called here because none exists, which is
+    /// the contract.
     pub async fn observe_group_demand(&mut self, group_id: Option<&str>, filter: Filter) {
         self.ensure_started().await;
         let group = self.group_value(group_id);
-        let query = LiveQuery::single(group.demand(filter));
+        let query = group
+            .read(filter)
+            .expect("nmp-bdd: a single-host group read declares exactly one branch");
         let (handle, rx) = self
             .handle()
             .subscribe(query)

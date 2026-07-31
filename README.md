@@ -112,14 +112,20 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   fan-out policy; exact kind:0/NIP-23 codecs belong to their own optional
   protocol owners ([#561](https://github.com/pablof7z/nmp/issues/561), corrected
   by [#879](https://github.com/pablof7z/nmp/issues/879))
-- 🧪 NIP-29 groups — direct Rust now exposes `nmp_nip29::Group` plus
-  `nmp::GroupOperations`: one identity mints host-pinned read demands and
-  publishes any `EventBuilder` through the ordinary engine lifecycle after
-  adding `h` and selecting the group host. The former kind:9 composer/content
-  catalog remains removed because C7 owns chat and `q` replies. Native Group
-  publication is not projected through FFI or Swift yet; [#1015](https://github.com/pablof7z/nmp/issues/1015)
-  tracks that explicit gap. This does not claim a Kotlin or Android Group
-  surface.
+- 🧪 NIP-29 groups — a group can live on more than one relay, so Rust and FFI
+  now expose `nmp::nip29::on(hosts)` returning a `RelayScope` (fallible — an
+  app-supplied relay set can be empty), narrowed to one `Group` via
+  `.group(id)` ([#1033](https://github.com/pablof7z/nmp/issues/1033);
+  superseded the single-host `Group::new(host, id)` door with no alias). Every
+  group write mints the ordinary `WriteIntent` and routes `Explicit` to the
+  whole scope; every group read is one ordinary `LiveQuery`
+  (`Single`/`Union` of per-host branches). Discovery is evidence-scoped —
+  `nip29::member_list_includes`/`admin_list_includes` return a composable
+  `GroupPredicate` over observed kind:39002/39001 rows, never claiming exact
+  membership/admin state. The former kind:9 composer/content catalog remains
+  removed because C7 owns chat and `q` replies. Swift/Kotlin native
+  projection of this surface is not yet built. This does not claim a Kotlin
+  or Android Group surface.
 - 🧪 NIP-51 lists — decode/reading only today; list **editing** is deliberately gated on [#50](https://github.com/pablof7z/nmp/issues/50)
 - 🧪 Blossom (BUD-11) media/blob — `nmp-blossom` ships kind:24242-authorized, sha256-verified blob upload plus mirror/delete/list, each with its own bound authorization ([#216](https://github.com/pablof7z/nmp/issues/216) epic, closes [#545](https://github.com/pablof7z/nmp/issues/545)/[#551](https://github.com/pablof7z/nmp/issues/551), [#552](https://github.com/pablof7z/nmp/pull/552)/[#557](https://github.com/pablof7z/nmp/pull/557)) — and **projected through FFI to Swift and Kotlin** ([#555](https://github.com/pablof7z/nmp/issues/555) closes, [#560](https://github.com/pablof7z/nmp/pull/560) merged): a native app can call upload/mirror/delete/list from Rust, Swift, or Kotlin today, each with typed error taxonomies and no collapsed variants. Upload durability is currently **app-owned** (a standalone async call, not yet a persisted/retried engine obligation) — an engine-integrated durable-upload upgrade is tracked as an explicit additive follow-up ([#562](https://github.com/pablof7z/nmp/issues/562)), not a silent gap.
 - ✅ NIP-68 picture events — `nmp-nip68` builds an unsigned kind:20 draft with `imeta` images minted only from a verified, content-addressed Blossom `BlobDescriptor`, plus a tolerant decoder that surfaces a missing sha256 as recorded diagnostics rather than trusting it ([#558](https://github.com/pablof7z/nmp/issues/558) closes, [#566](https://github.com/pablof7z/nmp/pull/566) merged). `build_picture` now takes an explicit `created_at` instead of sampling the clock — a determinism/FFI-parity fix ([#568](https://github.com/pablof7z/nmp/pull/568)). Engine-free, signing-free, first-cut tags only (`title`/`imeta`/`content-warning`/`t`); FFI/Swift/Kotlin projection is a separate later unit.

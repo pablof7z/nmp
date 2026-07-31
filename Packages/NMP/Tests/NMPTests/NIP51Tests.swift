@@ -41,14 +41,18 @@ final class NIP51Tests: XCTestCase {
     /// Browsing a group takes a host the app explicitly supplies; the parsed
     /// value never becomes routing authority on its own.
     ///
-    /// #858's Swift falsifier too: the selected `SimpleGroupEntry` feeds
-    /// NIP-29's host-pinned discovery constructor directly, with no
-    /// NIP-29-owned copy of the NIP-51 value in between.
+    /// #858's Swift falsifier too, updated for #1033: the selected
+    /// `SimpleGroupEntry` feeds NIP-29's host-scoped door
+    /// (`NMPRelayScope.on`/`.group`) directly, with no NIP-29-owned copy of
+    /// the NIP-51 value in between.
     func testGroupBrowsingStillTakesAnExplicitlySuppliedHost() throws {
         let list = NMP.parseSimpleGroupsListTolerant(fabricatedRow(kind: 10009))
         let selected = list.items[0]
-        let demand = try NMP.groupDiscoveryDemand(host: selected.hostRelay)
-        XCTAssertEqual(demand.selection.kinds, [39000])
+        let scope = try NMPRelayScope.on([selected.hostRelay])
+        let group = scope.group(selected.groupId)
+        let query = try group.read(NMPFilter(kinds: [39000]))
+        XCTAssertEqual(query.branches.count, 1)
+        XCTAssertEqual(query.branches[0].selection.kinds, [39000])
 
         XCTAssertEqual(selected.groupId, "group-a")
     }

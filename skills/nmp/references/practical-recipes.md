@@ -52,34 +52,54 @@ This deliberately avoids a magic `loadProfileAndPosts` noun. NMP exposes composa
 
 ## NIP-29 group discovery and schema-owned timelines
 
-Goal: discover groups on one host without letting NIP-29 invent a content
-catalog it does not own.
+Goal: discover groups on one or more relays without letting NIP-29 invent a
+content catalog it does not own.
 
-The live read shape is:
+A group can live on more than one relay, so the app names its relay set once
+and narrows it to a group:
 
 ```text
-groupDiscoveryDemand(host)
-engine.observe(discoveryDemand)
+let scope = nip29::on(hosts)?          // RelayScopeError::EmptyRelaySet if empty
+let group = scope.group(groupId)       // same hosts, narrowed to one group
 
-# For content, the app selects its enabled schema kinds and builds an ordinary
-# h-scoped demand with SourceAuthority.pinned(host).
+engine.observe(scope.groups_where(&predicate)?, None)?   // discovery
+engine.observe(group.read(contentFilter)?, None)?         // this group's content
 ```
+
+Both `observe` calls take one ordinary `LiveQuery` -- `Single` for one host,
+`Union` of complete per-host branches for more -- never a per-host list the
+app merges itself.
 
 Rules:
 
-- Treat `(host, groupId)` as the group identity. Do not union events with the same group id from another relay.
-- The discovery helper returns pinned read authority.
+- Treat `(host, groupId)` as the group IDENTITY *within a branch*: two relays
+  hosting the same group id are two independent groups with the same name.
+  Do not union events with the same group id from different relays; NMP keeps
+  each relay's evidence separate on purpose.
+- Every discovery/read branch carries pinned read authority to exactly its own
+  host, stamped explicitly rather than inherited -- resolving evidence at one
+  relay while listing at another would be a confidently wrong answer.
+- Discovery is evidence-scoped: `nip29::member_list_includes`/
+  `admin_list_includes` build a composable `GroupPredicate`
+  (`union`/`intersect`/`minus`) over observed kind:39002/39001 rows. Absence
+  from a list is never proof of non-membership/non-admin.
 - Content kinds are selected by their real schema owners/app composition;
   NIP-29 has no fixed `[9,30315]` catalog.
 - Sort the accumulated rows in the app. Preserve each row's source proof and the query evidence.
-- Direct Rust holds a `nip29::Group` for the room's whole lifetime and
-  publishes through it: `group.publish(&engine, builder)` appends the one `h`
-  row before signing and routes explicitly to the host. It emits no
-  `previous`, and a draft that arrives carrying `h` or `previous` is a typed
-  refusal.
-- The app never names the host on a write, never spells a routing value, and
-  never touches `h`. Do not hand-assemble a group write from raw tags plus a
-  routing value.
+- Direct Rust holds a `Group` for the room's whole lifetime and publishes
+  through it: `group.publish(&engine, author, builder)` appends the one `h`
+  row before signing and routes `Explicit` to every host in the scope. It
+  emits no `previous`, and a draft that arrives carrying `h` or `previous` is
+  a typed refusal.
+- The app never names a host on a write, never spells a routing value, and
+  never touches `h` -- the relay set is named once, at the scope, not per
+  operation. Do not hand-assemble a group write from raw tags plus a routing
+  value.
+- Every NIP-29 demand is `CacheMode::Strict`, not just pinned: a just-published
+  message appears under a host once *that host* ACKs it, not immediately
+  across the whole scope. Do not build UI that assumes simultaneous cross-host
+  appearance -- per-host, on that host's own acceptance, is the correct and
+  intentional behavior.
 
 For rich rendering, use Swift `NMPContent` resources or Kotlin `NMPContentClient(engine).session(...) -> NostrContentSession` for only a bounded visible-plus-prefetch window keyed by stable event id. Session policy limits are per session, not engine-global. Enforce a separate aggregate app permit pool before claiming a distinct target: use the reference-demand plan's `1 + helpers.count` as that target's query cost (one canonical query plus its helper queries), and cap the number of open row sessions independently. `claim(referenceID:)` in Swift / `claim(referenceId)` in Kotlin accepts an occurrence id from that session's parsed document and may return `nil`/`null`; it is not a row id or target key. Record the permits with the claim, then cancel/close claims and release their permits before stopping/closing the row's session on eviction.
 

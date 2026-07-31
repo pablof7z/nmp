@@ -125,17 +125,25 @@ about current code:
   general protocol-composer catalog: modules claim only exact NIP-defined
   schemas, while typed contextual operations may add their own tags and route
   facts to foreign-schema builders. No kind:1-first core catalog exists.
-- **NIP-29 Group publication is built for direct Rust; native publication
-  remains absent ([#1015](https://github.com/pablof7z/nmp/issues/1015)).**
-  `nmp_nip29::Group` owns `(host, group_id)`, mints host-pinned read demands,
-  appends exactly one `h` to an app-selected `EventBuilder`, and returns an
-  engine-routable explicit-host intent. `nmp::GroupOperations` sends that
-  intent through the ordinary `Engine::publish` lifecycle and also exposes
-  NIP-29-owned join/leave/moderation operations. FFI and Swift still expose
-  only read-only `groupDiscoveryDemand`; they must not hand-roll `h`, routing,
-  signing, or receipt behavior while [#1015](https://github.com/pablof7z/nmp/issues/1015)
-  is open. No Kotlin or Android Group projection is claimed. The obsolete
-  kind:9 composer and `[9,30315]` content catalog remain deleted:
+- **NIP-29 Group publication is multi-relay and built for direct Rust and
+  FFI; Swift/Kotlin native projection is the remaining piece
+  ([#1033](https://github.com/pablof7z/nmp/issues/1033), superseding
+  [#1015](https://github.com/pablof7z/nmp/issues/1015)).** A group can live on
+  more than one relay at once, so the single-host `Group::new(host, group_id)`
+  door is gone, no alias: `nmp::nip29::on(hosts)` names a caller-supplied relay
+  SET (fallible — `RelayScopeError::EmptyRelaySet` — where the deleted
+  one-element door was not), returning a `RelayScope` narrowed to one `Group`
+  via `.group(id)`. Every group write routes `WriteRouting::Explicit(all scope
+  hosts)`; every group read is one ordinary `LiveQuery` (`Single` for one host,
+  `Union` of complete singleton-host branches for more, consuming #1108) —
+  never a per-host list the app merges. Discovery is evidence-scoped:
+  `nip29::member_list_includes`/`admin_list_includes` return a composable
+  `GroupPredicate` (`union`/`intersect`/`minus`) over kind:39002/39001
+  evidence, never claiming exact membership/admin state. FFI projects the full
+  `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate` read-and-write surface, not
+  only discovery. Swift and Kotlin do not yet project this shape; until they
+  do, they must not hand-roll `h`, routing, signing, or receipt behavior. The
+  obsolete kind:9 composer and `[9,30315]` content catalog remain deleted:
   `nmp-nipc7` independently owns kind:9 and `q` replies, while
   mention/notification policy remains client-owned. `previous` remains omitted
   until a host-scoped, group-scoped, author-aware live-window capability can

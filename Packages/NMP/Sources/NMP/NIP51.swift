@@ -8,8 +8,8 @@
 // one is reintroduced.
 //
 // Reading kind:10009 stays the ordinary demand/observation noun
-// (`activeAccountDemand()`, below). Browsing a NIP-29 group still takes a
-// host the app explicitly chose -- see `groupDiscoveryDemand(host:)`.
+// (`activeAccountDemand()`, below). Browsing a NIP-29 group still takes an
+// explicit, caller-supplied relay set -- see `NMPRelayScope.on(_:)`.
 //
 // `SimpleGroupsList` is also the ONE native shape a decoded kind:10009 list
 // takes (#858). The NIP-29-facing wrapper family that used to sit beside it
@@ -22,8 +22,8 @@ import NMPFFI
 /// optional display name.
 ///
 /// `hostRelay` is a canonically spelled *observed* string. It is not a
-/// routing permission: passing it to `groupDiscoveryDemand(host:)` is the
-/// app's own explicit decision, and that function parses it like any other
+/// routing permission: passing it to `NMPRelayScope.on(_:)` is the app's own
+/// explicit decision, and that constructor parses it like any other
 /// caller-supplied host.
 public struct SimpleGroupEntry: Sendable, Hashable {
     public let groupId: String
