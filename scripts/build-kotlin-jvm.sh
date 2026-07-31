@@ -30,11 +30,12 @@ set -euo pipefail
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-CRATE=${NMP_FFI_CRATE:-nmp-ffi}
-LIB_STEM=${NMP_FFI_LIB_STEM:-nmp_ffi}
-BINDGEN_NAME=${NMP_UNIFFI_BINDGEN_BIN:-uniffi-bindgen}
-GEN_DIR=${NMP_KOTLIN_GEN_DIR:-gen-kotlin}
-KOTLIN_PKG_DIR=${NMP_KOTLIN_MODULE_DIR:-Packages/NMPKotlin}
+# NMP ships one native library, so these are constants rather than knobs.
+CRATE=nmp-ffi
+LIB_STEM=nmp_ffi
+BINDGEN_NAME=uniffi-bindgen
+GEN_DIR=gen-kotlin
+KOTLIN_PKG_DIR=Packages/NMPKotlin
 
 case "$(uname -s)" in
   Darwin) LIB_EXT=dylib ;;
