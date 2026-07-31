@@ -18,7 +18,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{Binding, ConcreteFilter, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_resolver::testkit::{kind1, kind3, Harness};
-use nmp_resolver::LiveQuery;
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, EventId, Keys};
 
@@ -62,7 +61,7 @@ fn differential_oracle_identical_delivery() {
 
     let mut h = Harness::new();
     h.set_active(Some(me.public_key()));
-    let (_handle, _open_delta) = h.subscribe(LiveQuery::from_filter(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(my_follows_filter()));
     let follow_pks: Vec<_> = follows.iter().map(|k| k.public_key()).collect();
     h.deliver(vec![kind3(&me, &follow_pks, 100)]);
 

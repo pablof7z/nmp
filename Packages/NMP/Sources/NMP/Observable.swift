@@ -11,10 +11,11 @@ import Observation
 @Observable
 public final class NMPQuerySnapshot {
     public private(set) var rows: [Row] = []
-    /// `nil` until the first real query batch arrives. An empty evidence
-    /// value is not manufactured here: the engine always reports an explicit
-    /// shortfall when no source/demand fact exists.
-    public private(set) var evidence: AcquisitionEvidence?
+    /// Empty until the first real query batch arrives, then ONE entry per
+    /// canonical query branch (#1108). An evidence value is not manufactured
+    /// here: the engine always reports an explicit shortfall when no
+    /// source/demand fact exists.
+    public private(set) var evidence: [AcquisitionEvidence] = []
 
     // Not observable UI state (hence `@ObservationIgnored`), and
     // `nonisolated(unsafe)` so the (nonisolated) `deinit` can cancel it: the

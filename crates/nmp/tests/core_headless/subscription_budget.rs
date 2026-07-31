@@ -22,7 +22,7 @@ fn relay() -> RelayUrl {
 /// the predicate, so two of these never merge — the honest way to hold
 /// several concurrent subscriptions open against one relay.
 fn limited_pinned_query(kind: u16) -> LiveQuery {
-    LiveQuery(
+    LiveQuery::single(
         nmp_grammar::Demand::new(
             Filter {
                 kinds: Some(BTreeSet::from([kind])),
@@ -158,16 +158,16 @@ fn refused_demand_reaches_the_app_as_an_explicit_local_limit() {
         Some(advertising(Some(2), None)),
     ));
 
-    let limited: Vec<&AcquisitionEvidence> = effects
+    let limited: Vec<&[AcquisitionEvidence]> = effects
         .iter()
         .filter_map(|effect| match effect {
-            Effect::EmitRows(_, _, evidence) => Some(evidence),
+            Effect::EmitRows(_, _, evidence) => Some(evidence.as_slice()),
             _ => None,
         })
         .filter(|evidence| {
             evidence
-                .shortfall
                 .iter()
+                .flat_map(|branch| branch.shortfall.iter())
                 .any(|fact| matches!(fact, ShortfallFact::LocalLimit { .. }))
         })
         .collect();

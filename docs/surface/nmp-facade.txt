@@ -25,6 +25,7 @@ pub use nmp::IndexedTagName
 pub use nmp::Kind
 pub use nmp::Lane
 pub use nmp::LiveQuery
+pub use nmp::LiveQueryError
 pub use nmp::NostrEntity
 pub use nmp::NostrEntityError
 pub use nmp::PendingSignerResolveError
@@ -243,6 +244,7 @@ pub nmp::EngineError::StoreResetFailed
 pub nmp::EngineError::StoreResetFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreStillOpen
 pub nmp::EngineError::StoreStillOpen::path: alloc::string::String
+pub nmp::EngineError::WindowAggregateResultLimit
 pub nmp::EngineError::WindowInitialExceedsMax
 pub nmp::EngineError::WindowInitialExceedsMax::initial: usize
 pub nmp::EngineError::WindowInitialExceedsMax::max: usize
@@ -837,7 +839,7 @@ pub fn nmp::Engine::add_auth_policy<P>(&self, nostr::key::public_key::PublicKey,
 pub fn nmp::Engine::add_signer<Sig>(&self, Sig) -> core::result::Result<nmp::SignerRegistration, nmp::EngineError> where Sig: nmp_signer::capability::SigningCapability + core::marker::Send + 'static
 pub fn nmp::Engine::cancel(&self, nmp::ReceiptId) -> core::result::Result<nmp::CancelWriteOutcome, nmp::CancelWriteError>
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
-pub fn nmp::Engine::observe(&self, nmp_resolver::engine::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
+pub fn nmp::Engine::observe(&self, nmp_grammar::live_query::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
 pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteStatus>, nmp::EngineError>
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::ReceiptStream, nmp::EngineError>
@@ -897,7 +899,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::FilterCoverageEntry
 impl core::panic::unwind_safe::UnwindSafe for nmp::FilterCoverageEntry
 pub struct nmp::Frame
 pub nmp::Frame::deltas: alloc::vec::Vec<nmp::RowDelta>
-pub nmp::Frame::evidence: nmp::AcquisitionEvidence
+pub nmp::Frame::evidence: alloc::vec::Vec<nmp::AcquisitionEvidence>
 pub nmp::Frame::execution: alloc::vec::Vec<nmp::ObservationEvidence>
 pub nmp::Frame::window: core::option::Option<nmp::WindowContents>
 impl core::clone::Clone for nmp::Frame
@@ -925,6 +927,7 @@ impl !core::panic::unwind_safe::RefUnwindSafe for nmp::ObservationCancel
 impl !core::panic::unwind_safe::UnwindSafe for nmp::ObservationCancel
 pub struct nmp::ObservationEvidence
 pub nmp::ObservationEvidence::attributes: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub nmp::ObservationEvidence::branch: core::option::Option<usize>
 pub nmp::ObservationEvidence::fingerprint: core::option::Option<alloc::string::String>
 pub nmp::ObservationEvidence::kind: &'static str
 pub nmp::ObservationEvidence::path: core::option::Option<alloc::string::String>
@@ -21801,7 +21804,7 @@ reexport nmp::Lane => nmp_router::facts::Lane
   "name": "Lane",
   "visibility": "public"
 }
-reexport nmp::LiveQuery => nmp_resolver::engine::LiveQuery
+reexport nmp::LiveQuery => nmp_grammar::live_query::LiveQuery
 {
   "attrs": [],
   "inherent_impls": [
@@ -21813,6 +21816,76 @@ reexport nmp::LiveQuery => nmp_resolver::engine::LiveQuery
       "items": [
         {
           "attrs": [],
+          "inner": {
+            "assoc_const": {
+              "default_unstable": null,
+              "type": {
+                "primitive": "usize"
+              },
+              "value": "64"
+            }
+          },
+          "name": "MAX_BRANCHES",
+          "visibility": "public"
+        },
+        {
+          "attrs": [
+            {
+              "must_use": {
+                "reason": null
+              }
+            }
+          ],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "branch",
+                    {
+                      "resolved_path": {
+                        "args": null,
+                        "path": "Demand",
+                        "resolved_item": {
+                          "definition": {
+                            "previously_defined": "nmp_grammar::descriptor::Demand"
+                          },
+                          "path": "nmp_grammar::descriptor::Demand"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "generic": "Self"
+                }
+              }
+            }
+          },
+          "name": "single",
+          "visibility": "public"
+        },
+        {
+          "attrs": [
+            {
+              "must_use": {
+                "reason": null
+              }
+            }
+          ],
           "inner": {
             "function": {
               "default_unstable": null,
@@ -21854,6 +21927,397 @@ reexport nmp::LiveQuery => nmp_resolver::engine::LiveQuery
           },
           "name": "from_filter",
           "visibility": "public"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [
+                  {
+                    "kind": {
+                      "type": {
+                        "bounds": [
+                          {
+                            "trait_bound": {
+                              "generic_params": [],
+                              "modifier": "none",
+                              "trait": {
+                                "args": {
+                                  "angle_bracketed": {
+                                    "args": [],
+                                    "constraints": [
+                                      {
+                                        "args": null,
+                                        "binding": {
+                                          "equality": {
+                                            "type": {
+                                              "resolved_path": {
+                                                "args": null,
+                                                "path": "LiveQuery",
+                                                "resolved_item": {
+                                                  "definition": {
+                                                    "recursive_item": "nmp_grammar::live_query::LiveQuery"
+                                                  },
+                                                  "path": "nmp_grammar::live_query::LiveQuery"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "name": "Item"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "path": "IntoIterator",
+                                "resolved_item": {
+                                  "path": "core::iter::traits::collect::IntoIterator"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "default": null,
+                        "is_synthetic": true
+                      }
+                    },
+                    "name": "impl IntoIterator<Item = LiveQuery>"
+                  }
+                ],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "branches",
+                    {
+                      "impl_trait": [
+                        {
+                          "trait_bound": {
+                            "generic_params": [],
+                            "modifier": "none",
+                            "trait": {
+                              "args": {
+                                "angle_bracketed": {
+                                  "args": [],
+                                  "constraints": [
+                                    {
+                                      "args": null,
+                                      "binding": {
+                                        "equality": {
+                                          "type": {
+                                            "resolved_path": {
+                                              "args": null,
+                                              "path": "LiveQuery",
+                                              "resolved_item": {
+                                                "definition": {
+                                                  "recursive_item": "nmp_grammar::live_query::LiveQuery"
+                                                },
+                                                "path": "nmp_grammar::live_query::LiveQuery"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "Item"
+                                    }
+                                  ]
+                                }
+                              },
+                              "path": "IntoIterator",
+                              "resolved_item": {
+                                "path": "core::iter::traits::collect::IntoIterator"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  [
+                    "aggregate_result_limit",
+                    {
+                      "resolved_path": {
+                        "args": {
+                          "angle_bracketed": {
+                            "args": [
+                              {
+                                "type": {
+                                  "primitive": "usize"
+                                }
+                              }
+                            ],
+                            "constraints": []
+                          }
+                        },
+                        "path": "Option",
+                        "resolved_item": {
+                          "path": "core::option::Option"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "generic": "Self"
+                            }
+                          },
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "LiveQueryError",
+                                "resolved_item": {
+                                  "definition": {
+                                    "attrs": [],
+                                    "inner": {
+                                      "enum": {
+                                        "generics": {
+                                          "params": [],
+                                          "where_predicates": []
+                                        },
+                                        "has_stripped_variants": false,
+                                        "variants": [
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "variant": {
+                                                "discriminant": null,
+                                                "kind": "plain"
+                                              }
+                                            },
+                                            "name": "EmptyUnion",
+                                            "visibility": "default"
+                                          },
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "variant": {
+                                                "discriminant": null,
+                                                "kind": "plain"
+                                              }
+                                            },
+                                            "name": "AggregateResultLimitZero",
+                                            "visibility": "default"
+                                          },
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "variant": {
+                                                "discriminant": null,
+                                                "kind": "plain"
+                                              }
+                                            },
+                                            "name": "NestedAggregateResultLimit",
+                                            "visibility": "default"
+                                          },
+                                          {
+                                            "attrs": [],
+                                            "inner": {
+                                              "variant": {
+                                                "discriminant": null,
+                                                "kind": {
+                                                  "struct": {
+                                                    "fields": [
+                                                      {
+                                                        "attrs": [],
+                                                        "inner": {
+                                                          "struct_field": {
+                                                            "primitive": "usize"
+                                                          }
+                                                        },
+                                                        "name": "requested",
+                                                        "visibility": "default"
+                                                      },
+                                                      {
+                                                        "attrs": [],
+                                                        "inner": {
+                                                          "struct_field": {
+                                                            "primitive": "usize"
+                                                          }
+                                                        },
+                                                        "name": "maximum",
+                                                        "visibility": "default"
+                                                      }
+                                                    ],
+                                                    "has_stripped_fields": false
+                                                  }
+                                                }
+                                              }
+                                            },
+                                            "name": "TooManyQueryBranches",
+                                            "visibility": "default"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "name": "LiveQueryError",
+                                    "visibility": "public"
+                                  },
+                                  "path": "nmp_grammar::live_query::LiveQueryError"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Result",
+                    "resolved_item": {
+                      "path": "core::result::Result"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "union",
+          "visibility": "public"
+        },
+        {
+          "attrs": [
+            {
+              "must_use": {
+                "reason": null
+              }
+            }
+          ],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "borrowed_ref": {
+                    "is_mutable": false,
+                    "lifetime": null,
+                    "type": {
+                      "slice": {
+                        "resolved_path": {
+                          "args": null,
+                          "path": "Demand",
+                          "resolved_item": {
+                            "definition": {
+                              "previously_defined": "nmp_grammar::descriptor::Demand"
+                            },
+                            "path": "nmp_grammar::descriptor::Demand"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "branches",
+          "visibility": "public"
+        },
+        {
+          "attrs": [
+            {
+              "must_use": {
+                "reason": null
+              }
+            }
+          ],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": true,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "primitive": "usize"
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Option",
+                    "resolved_item": {
+                      "path": "core::option::Option"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "aggregate_result_limit",
+          "visibility": "public"
         }
       ]
     }
@@ -21865,32 +22329,19 @@ reexport nmp::LiveQuery => nmp_resolver::engine::LiveQuery
         "where_predicates": []
       },
       "kind": {
-        "tuple": [
-          {
-            "attrs": [],
-            "inner": {
-              "struct_field": {
-                "resolved_path": {
-                  "args": null,
-                  "path": "nmp_grammar::Demand",
-                  "resolved_item": {
-                    "definition": {
-                      "previously_defined": "nmp_grammar::descriptor::Demand"
-                    },
-                    "path": "nmp_grammar::descriptor::Demand"
-                  }
-                }
-              }
-            },
-            "name": "0",
-            "visibility": "public"
-          }
-        ]
+        "plain": {
+          "fields": [],
+          "has_stripped_fields": true
+        }
       }
     }
   },
   "name": "LiveQuery",
   "visibility": "public"
+}
+reexport nmp::LiveQueryError => nmp_grammar::live_query::LiveQueryError
+{
+  "previously_defined": "nmp_grammar::live_query::LiveQueryError"
 }
 reexport nmp::NostrEntity => nmp_grammar::nip19::NostrEntity
 {

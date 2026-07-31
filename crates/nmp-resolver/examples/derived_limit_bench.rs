@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use nmp_grammar::{Binding, Demand, Derived, Filter, IndexedTagName, Selector};
-use nmp_resolver::{Engine, LiveQuery};
+use nmp_resolver::Engine;
 use nmp_store::RedbStore;
 
-fn profile_query(room: &str, limit: usize) -> LiveQuery {
+fn profile_query(room: &str, limit: usize) -> Demand {
     let inner = Filter {
         kinds: Some(BTreeSet::from([9u16])),
         tags: BTreeMap::from([(
@@ -23,7 +23,7 @@ fn profile_query(room: &str, limit: usize) -> LiveQuery {
         limit: Some(limit),
         ..Filter::default()
     };
-    LiveQuery::from_filter(Filter {
+    Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([0u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
             inner: Demand::from_filter(inner),

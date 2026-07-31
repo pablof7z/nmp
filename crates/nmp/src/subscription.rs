@@ -129,8 +129,13 @@ pub struct Frame {
     /// never redeliver the full set (the O(rows²) redelivery class), so this
     /// is always `None` for them.
     pub window: Option<WindowContents>,
-    /// The query's scoped, per-source acquisition evidence.
-    pub evidence: AcquisitionEvidence,
+    /// This observation's scoped acquisition evidence, ONE entry per
+    /// canonical query branch in branch order (#1108). A single-branch live
+    /// query carries exactly one entry. Branch identity is never erased and
+    /// nothing here is a global completeness verdict: two branches that
+    /// resolved the same value keep separate entries, and one branch's
+    /// shortfall is never masked by a sibling's proof.
+    pub evidence: Vec<AcquisitionEvidence>,
     /// Ordered execution facts for this exact observation. These are emitted
     /// by the resolver/reducer/runtime owners, never inferred from global
     /// diagnostics. A bounded slow-consumer loss appears as an explicit

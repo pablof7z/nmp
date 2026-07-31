@@ -118,6 +118,32 @@ sealed class NMPError(message: String) : Exception(message) {
     object WindowSelectionHasLimit :
         NMPError("windowed selection must not also declare a limit")
 
+    /** A windowed `observe` was given a live query that already declares an
+     * aggregate result limit (#1108) -- the window and the aggregate bound
+     * would be two competing owners of the merged row count. */
+    object WindowAggregateResultLimit :
+        NMPError("a windowed observation must not also declare an aggregate result limit")
+
+    /** A live query was declared with no demand branches at all (#1108). */
+    object EmptyQueryUnion :
+        NMPError("a live query must declare at least one demand branch")
+
+    /** A live query declared an aggregate result limit of zero (#1108): a
+     * query that may never contain a row is not a bound. */
+    object AggregateResultLimitZero :
+        NMPError("an aggregate result limit of zero can never contain a row")
+
+    /** A nested live-query branch carried its own aggregate result limit
+     * (#1108). Branches flatten into one canonical set, so an inner bound has
+     * no surviving scope and accepting it would silently discard it. */
+    object NestedAggregateResultLimit :
+        NMPError("a nested live-query branch must not declare its own aggregate result limit")
+
+    /** A live query declared more branches than the supported hard ceiling
+     * (#1108). The whole declaration is refused; no subset is installed. */
+    data class TooManyQueryBranches(val requested: ULong, val maximum: ULong) :
+        NMPError("a live query supports at most $maximum demand branches; $requested were declared")
+
     data class RelayInformationUnavailable(val kind: RelayInformationErrorKind) :
         NMPError("relay information unavailable: ${kind.describe()}")
 
@@ -178,6 +204,12 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.WindowInitialExceedsMax ->
                     WindowInitialExceedsMax(ffi.initial, ffi.max)
                 is FfiException.WindowSelectionHasLimit -> WindowSelectionHasLimit
+                is FfiException.WindowAggregateResultLimit -> WindowAggregateResultLimit
+                is FfiException.EmptyQueryUnion -> EmptyQueryUnion
+                is FfiException.AggregateResultLimitZero -> AggregateResultLimitZero
+                is FfiException.NestedAggregateResultLimit -> NestedAggregateResultLimit
+                is FfiException.TooManyQueryBranches ->
+                    TooManyQueryBranches(ffi.requested, ffi.maximum)
                 is FfiException.RelayInformationUnavailable ->
                     RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
                 is FfiException.InvalidCorrelationToken ->

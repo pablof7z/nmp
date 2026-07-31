@@ -375,10 +375,25 @@ public final class NMPEngine: Sendable {
     /// the constructor to reach for once `observe(_ filter:)`'s implicit
     /// `AuthorOutboxes`/`Public` default isn't enough: declaring `.pinned`
     /// wire authority, a non-default `NMPAccessContext`, or a non-
-    /// `.agnostic` `NMPCacheMode`. Same deinit-tied teardown and same
-    /// optional `window` policy as the `NMPFilter` overload.
+    /// `.agnostic` `NMPCacheMode`. One demand is one branch, so this is
+    /// exactly `observe(NMPLiveQuery(branches: [demand]))`.
     public func observe(_ demand: NMPDemand, window: Window? = nil) throws -> NMPQuery {
-        try NMPQuery(engine: ffi, demand: demand.toFfi(), window: window?.toFfi())
+        try observe(NMPLiveQuery(branches: [demand]), window: window)
+    }
+
+    /// Open a live, detachable query over several independent `NMPDemand`
+    /// branches (#1108). The branches are observed through ONE handle: rows
+    /// are unioned by event id with provenance merged, every batch carries
+    /// one evidence entry per canonical branch, and one teardown withdraws
+    /// every branch exactly once.
+    ///
+    /// Throws `NMPError.emptyQueryUnion`, `.aggregateResultLimitZero`,
+    /// `.nestedAggregateResultLimit` or `.tooManyQueryBranches` for a
+    /// declaration that can never be observed, and
+    /// `.windowAggregateResultLimit` when a window and an aggregate result
+    /// limit would both own the merged row count.
+    public func observe(_ query: NMPLiveQuery, window: Window? = nil) throws -> NMPQuery {
+        try NMPQuery(engine: ffi, liveQuery: query.toFfi(), window: window?.toFfi())
     }
 
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,

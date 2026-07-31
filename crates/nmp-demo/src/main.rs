@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn follow_feed_query_is_kind1_derived_from_active_pubkeys_kind3_contacts() {
-        let LiveQuery(demand) = build_follow_feed_query();
+        let demand = build_follow_feed_query().branches()[0].clone();
         let filter = demand.selection;
         assert_eq!(filter.kinds, Some(BTreeSet::from([1u16])));
         assert_eq!(demand.source, nmp::SourceAuthority::AuthorOutboxes);

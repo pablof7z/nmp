@@ -6,12 +6,12 @@
 
 use std::collections::BTreeSet;
 
-use nmp_resolver::{HandleId, LiveQuery};
+use nmp_grammar::LiveQuery;
 use nostr::{PublicKey, RelayUrl};
 
 use crate::core::{
     AuthorRouteReplacement, Effect, EngineCore, EngineMsg, ObservationEvidence, ObservationFact,
-    RowDelta,
+    ObservationId, RowDelta,
 };
 use crate::{Engine, EngineError, ReceiptStream};
 
@@ -39,7 +39,7 @@ impl Nip65Operations for Engine {
 
 pub(crate) struct RuntimeAssembly {
     coordinator: nmp_nip65::Nip65Coordinator,
-    handle: Option<HandleId>,
+    handle: Option<ObservationId>,
     revision: u64,
 }
 
@@ -69,7 +69,7 @@ impl RuntimeAssembly {
             return effects;
         };
         self.revision = query.revision;
-        effects.extend(core.handle(EngineMsg::Subscribe(LiveQuery(query.demand))));
+        effects.extend(core.handle(EngineMsg::Subscribe(LiveQuery::single(query.demand))));
         self.handle = effects.iter().find_map(|effect| match effect {
             Effect::EmitRows(handle, ..) => Some(*handle),
             _ => None,
@@ -80,7 +80,7 @@ impl RuntimeAssembly {
     pub(crate) fn consume_rows<S: nmp_store::EventStore>(
         &mut self,
         core: &mut EngineCore<S>,
-        handle: HandleId,
+        handle: ObservationId,
         rows: &[RowDelta],
     ) -> Option<Vec<Effect>> {
         if self.handle != Some(handle) {
@@ -107,7 +107,7 @@ impl RuntimeAssembly {
     pub(crate) fn consume_evidence<S: nmp_store::EventStore>(
         &mut self,
         core: &mut EngineCore<S>,
-        handle: HandleId,
+        handle: ObservationId,
         evidence: &[ObservationEvidence],
     ) -> Option<Vec<Effect>> {
         if self.handle != Some(handle) {
