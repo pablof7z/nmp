@@ -25,15 +25,21 @@ ordinary `WriteIntent`; FFI, Swift, and Kotlin expose matching engine-free
 `publish` door and receipt lifecycle. There is no `Engine.commentIntent`,
 `CommentIntent` wrapper, or NIP-22-specific composed-publication overload.
 
-NIP-29 Group publication is currently a direct-Rust surface.
-`nmp_nip29::Group` mints the host-pinned read demand and the complete
-explicit-host `WriteIntent`; `nmp::GroupOperations` submits that value through
-the ordinary `Engine::publish` lifecycle. No FFI or Swift Group publication
-door exists yet—only read-only `groupDiscoveryDemand`. Issue
-[#1015](https://github.com/pablof7z/nmp/issues/1015) owns that projection, and
-native apps must not reproduce `h`, host routing, signing, or receipt
-choreography while it is absent. This record makes no Kotlin or Android Group
-support claim.
+NIP-29 Group publication is a Rust-and-FFI surface, multi-relay
+([#1033](https://github.com/pablof7z/nmp/issues/1033); superseded the
+single-host `group_discovery_demand`/`Group::new(host, id)` door with no
+alias). `nmp::nip29::on(hosts)` names a caller-supplied relay set — fallible,
+since an app-supplied set can be empty — and returns a `RelayScope` narrowed
+to one `Group` via `.group(id)`. `Group`'s inherent `publish`/`publish_signed`
+and named operations mint the ordinary opaque `WriteIntent` and submit it
+through the existing `Engine::publish` lifecycle; every write routes
+`WriteRouting::Explicit` to the whole scope, never one host. Reads mint one
+ordinary `LiveQuery` per group or discovery predicate, never a group-specific
+observe door. `nmp-ffi` projects the full `FfiRelayScope`/`FfiGroup`/
+`FfiGroupPredicate` read-and-write surface. Swift and Kotlin do not yet
+project it; native apps must not reproduce `h`, host routing, signing, or
+receipt choreography while that projection is absent. This record makes no
+Kotlin or Android Group support claim.
 
 `nmp-ffi` is a projection of that facade. The repository uses UniFFI proc
 macros and extracts component metadata from a compiled library; there is no UDL

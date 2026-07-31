@@ -175,24 +175,19 @@ grep -qF 'scope_stamps_exact_hosts_on_every_nested_nip29_demand' \
   fail "the recursive per-host source-stamping falsifier is missing"
 
 # The tombstones themselves. #977 deleted `contextualize_group_event` and
-# `GroupPublication` outright -- no alias, no deprecation window
-# (`docs/internals/conventions/no-backwards-compatibility.md`) -- so neither
-# spelling may return anywhere a caller could reach, including in a test that
-# asserts one stays gone.
-#
-# #1033 retires `group_discovery_demand`/`groupDiscoveryDemand` and their
-# `pinned_demand` helper the same way, but that tombstone is NOT added here
-# yet: it is still reachable today from committed prose this lane does not
-# own (Swift/Kotlin's still-live single-host projection pending Lane B, and
-# doc comments in crates/nmp-ffi/src/nip29.rs, crates/nmp-ffi/src/nip51.rs and
-# crates/nmp/tests/group_publication_door.rs). Land it once those spellings
-# are actually gone, not before -- a tombstone that fails on sight of code
-# nobody has migrated yet only teaches people to ignore a red gate.
-tombstones=$(grep -RInE 'contextualize_group_event|GroupPublication' \
+# `GroupPublication` outright, and #1033 deletes `group_discovery_demand` and
+# its `pinned_demand` helper the same way -- no alias, no deprecation window
+# (`docs/internals/conventions/no-backwards-compatibility.md`) -- so none of
+# these spellings may return anywhere a caller could reach, including in a
+# test that asserts one stays gone. (`docs/surface-change-log.md` and
+# `docs/surface/*` are append-only surface history and are deliberately not
+# scanned: they record withdrawn spellings as facts of the past.)
+tombstones=$(grep -RInE \
+  'contextualize_group_event|GroupPublication|group_discovery_demand|groupDiscoveryDemand|pinned_demand' \
   crates/ Packages/ skills/ || true)
 if [[ -n $tombstones ]]; then
   printf '%s\n' "$tombstones"
-  fail "a deleted NIP-29 publication spelling reappeared"
+  fail "a deleted NIP-29 publication/discovery spelling reappeared"
 fi
 
 # The overclaiming spellings `member_is`/`admin_is` must never exist: they
