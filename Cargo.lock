@@ -2118,7 +2118,6 @@ version = "0.1.0"
 name = "nmp-ffi"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "nmp",
  "nmp-asset",
  "nmp-blossom",
@@ -2201,47 +2200,6 @@ version = "0.1.0"
 dependencies = [
  "nmp-grammar",
  "nostr 0.44.4",
-]
-
-[[package]]
-name = "nmp-nip46"
-version = "0.1.0"
-dependencies = [
- "nmp",
- "nmp-executor",
- "nmp-grammar",
- "nmp-network-policy",
- "nmp-resolver",
- "nmp-router",
- "nmp-signer",
- "nmp-store",
- "nmp-transport",
- "nostr 0.44.4",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tungstenite 0.29.0",
- "url",
- "zeroize",
-]
-
-[[package]]
-name = "nmp-nip46-ffi"
-version = "0.1.0"
-dependencies = [
- "camino",
- "nmp",
- "nmp-ffi",
- "nmp-nip46",
- "nostr 0.44.4",
- "tempfile",
- "tokio",
- "tungstenite 0.29.0",
- "uniffi",
- "uniffi_bindgen",
- "uniffi_meta",
- "url",
 ]
 
 [[package]]

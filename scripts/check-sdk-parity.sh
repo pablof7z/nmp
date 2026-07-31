@@ -172,8 +172,7 @@ extract_sdk_words() {
     }
     find "$ROOT/$root" -type f -name "*.$extension" \
       -not -path '*/uniffi/*' \
-      -not -path '*/NMPFFI/*' \
-      -not -path '*/NMPNip46FFI/*' >> "$files"
+      -not -path '*/NMPFFI/*' >> "$files"
   done < "$roots_file"
   LC_ALL=C sort -u "$files" -o "$files"
   [[ -s "$files" ]] || {

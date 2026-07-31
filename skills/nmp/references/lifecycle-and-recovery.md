@@ -8,13 +8,12 @@
 | Swift query/diagnostics/follow observation | feature model or scoped task | `cancel` or release owner | observation is eager |
 | Kotlin query/diagnostics flow | collection scope | cancel collector; share deliberately | every unshared collection subscribes |
 | Content session/claim | content feature owner | Swift claim `cancel`, then session `stop`; Kotlin claim/session `close` | nested references remain live while claimed |
-| NIP-46 connection | account/sign-in owner | close exact connection | OS handoff is not readiness |
 | Receipt consumption task/collector | delivery/activity owner | cancel app task/collector | public `Receipt` has no detach handle; cancellation stops app consumption, not the underlying receipt bridge or write |
 | Durable receipt id | app durable state | explicit retention policy | required because receipt enumeration is absent |
 
 ## Construction and observation failures
 
-Observers, actions, signers, and NIP-46 sessions run as async tasks on one shared engine-owned runtime. No OS thread is consumed per observation or session while waiting, and there is no public capacity refusal; private NIP-11/NIP-46 bounds backpressure producers. `EngineStartFailed` means the engine itself could not be constructed. `ObservationUnavailable` means only that store degradation prevented an ordinary or windowed observation's initial canonical projection from opening; relay connection/worker failure remains acquisition evidence.
+Observers, actions, and signers run as async tasks on one shared engine-owned runtime. No OS thread is consumed per observation while waiting, and there is no public capacity refusal; private NIP-11 bounds backpressure producers. `EngineStartFailed` means the engine itself could not be constructed. `ObservationUnavailable` means only that store degradation prevented an ordinary or windowed observation's initial canonical projection from opening; relay connection/worker failure remains acquisition evidence.
 
 Handle each failure at the operation that owns it. Engine construction is the throwing creation call. For a live observe the failure surfaces where observation starts: for Swift the throwing creation call, and for Kotlin `observe(...)` returns a cold `Flow`, so it surfaces when collection starts, not when the flow value is created.
 
@@ -22,11 +21,11 @@ Handle each failure at the operation that owns it. Engine construction is the th
 2. Present a bounded operational failure or retry affordance appropriate to the feature.
 3. Tear down any earlier sibling resources created by the same feature attempt.
 4. Record the component/reason without secrets.
-5. Respect each public ownership shape: query/NIP-02 observation and direct NIP-46 setup return no handle on error, while `set_following` always returns a `FollowAction` and reports any genuine terminal failure through its status.
+5. Respect each public ownership shape: query/NIP-02 observation returns no handle on error, while `set_following` always returns a `FollowAction` and reports any genuine terminal failure through its status.
 
-Direct Rust `Engine::new` can return `EngineError::EngineStartFailed`. An ordinary or windowed `Engine::observe` can return `EngineError::ObservationUnavailable` only for initial canonical-projection setup failure after store degradation; relay opens do not feed this error. `set_following` returns `FollowAction`, not `Result`; it has no capacity or thread refusal, and a genuine terminal failure reads from `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant. Direct `Nip46Invitation::connect*` and `Nip46Signer::connect_bunker*` return a `Nip46Error` for genuine setup failures, without a signer handle.
+Direct Rust `Engine::new` can return `EngineError::EngineStartFailed`. An ordinary or windowed `Engine::observe` can return `EngineError::ObservationUnavailable` only for initial canonical-projection setup failure after store degradation; relay opens do not feed this error. `set_following` returns `FollowAction`, not `Result`; it has no capacity or thread refusal, and a genuine terminal failure reads from `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant.
 
-Swift NIP-46 connection methods are throwing and Kotlin normalizes synchronous raw exceptions through `nmpRethrowing`. Derive/cache any URI or Android handoff value before invitation connection consumes the invitation; then connect, observe state, and launch the cached handoff. NIP-46 connection has no capacity or thread refusal; a genuine relay/session setup failure returns a typed `Nip46Error`/`NMPNip46Failure` without a handle. If a connection handle returns and inner session/relay setup later fails, consume the immediate streamed `failed(reason)`/`Failed` and closure; do not parse the reason into a typed error or call it a readiness timeout.
+Kotlin normalizes synchronous raw exceptions through `nmpRethrowing`.
 
 Native tracked publish starts the receipt bridge as async work on the shared runtime before calling core acceptance. NIP-22 returns an ordinary `WriteIntent` and follows that generic path, with no composed carrier or second lifecycle. The live NIP-29 path additionally establishes the bridge before taking its opaque intent, but that extra noun and lifecycle are an unsound defect pending #838, not an accepted pattern. There is no capacity or thread refusal on either live path, so a returned receipt handle reflects an accepted obligation. After a successful return, persist the id promptly: process loss before app persistence remains unrecoverable because receipt enumeration is absent.
 
@@ -46,7 +45,7 @@ An in-progress relay reconciliation is connection-local. A replacement connectio
 ## Process restart sequence
 
 1. Recreate the engine over the same persistent store.
-2. Restore signer capability from app-owned secure storage, or explicitly opt into the insecure development store for local keys. Swift/Kotlin ship no secure NIP-46 credential vault or automatic remote-signer reconnection; reconnect from host-retained protected material or perform a fresh handoff.
+2. Restore signer capability from app-owned secure storage, or explicitly opt into the insecure development store for local keys. NMP ships no remote-signer provider and no secure remote-signer credential vault.
 3. Add/select the intended active account.
 4. Recreate current feature demands from app state. NMP restores cached facts but does not invent app queries.
 5. Reattach retained receipt ids and fold replayed/current facts.
@@ -84,11 +83,10 @@ Do not delete the canonical store merely to sign out unless the product explicit
 `resetPersistentStore` is an offline filesystem operation:
 
 1. Cancel query, diagnostics, content, following, and receipt observers.
-2. Close NIP-46 connections.
-3. Shut down and release every engine using the path.
-4. Call reset for that store path.
-5. Separately clear account/signer persistence if the requested operation is full logout/erase.
-6. Construct a new engine only after reset completes.
+2. Shut down and release every engine using the path.
+3. Call reset for that store path.
+4. Separately clear account/signer persistence if the requested operation is full logout/erase.
+5. Construct a new engine only after reset completes.
 
 Reset is not a repair loop for a live engine. It erases canonical events, pending writes, receipts, coverage, and evidence, but not a separately configured account checkpoint.
 

@@ -44,36 +44,6 @@ The composer returns the ordinary `WriteIntent`. It does not live on
 `NMPEngine`, introduce a `CommentIntent` wrapper, or add another publication
 lifecycle.
 
-NIP-46 is deliberately not linked or nameable from this core package. Apps
-that need it add the sibling `Packages/NMPNip46` product and import
-`NMPNip46`; that package consumes the core engine's opaque signer mailbox and
-contributes an ordinary signer without creating another engine lifecycle:
-
-```swift
-// Host Info.plist: LSApplicationQueriesSchemes = ["primalconnect"]
-import NMPNip46
-
-guard let primal = NMPNip46SignerDiscovery.installed().first(where: { $0.id == "primal" })
-else { throw NMPError.invalidSigner("Primal is not installed") }
-let connection = try await nmp.oneClickConnectNip46(
-    signer: primal,
-    relays: ["wss://relay.example"],
-    metadata: .init(name: "My App")
-)
-defer { connection.close() }
-for await state in connection.states {
-    if case .ready(let pubkey) = state { /* now attached to this engine */ break }
-}
-```
-
-The optional provider starts the relay listener before opening Primal. OS handoff success
-does not mean connected; `.ready` follows only after the NIP-46 handshake and
-engine attachment. Generic `nostrconnect://` invitations and pasted
-`bunker://` tokens use `nip46Invitation` / `connectNip46` directly. Unrelated
-signer protocols are absent from this component's catalog.
-`close()` is idempotent; it detaches only that exact session and finishes the
-state stream. Dropping the last connection reference has the same effect.
-
 For a personal app that explicitly prefers autologin over Keychain, NMP also
 ships a deliberately plaintext file provider:
 
@@ -134,19 +104,6 @@ public UniFFI surface (new/changed exported types or methods) -- the
 generated bindings and the compiled staticlib both need to stay in sync
 with the Rust source.
 
-The optional signer component has its own corresponding build:
-
-```sh
-scripts/build-swift-nip46-xcframework.sh --sim-only
-swift test --package-path Packages/NMPNip46
-```
-
-The provider builder refreshes both XCFrameworks from one Cargo resolution so
-the external mailbox has one exact native type identity. The provider verifies
-that identity against the loaded core before requesting the mailbox and throws
-the typed `NMPError.nativeComponentMismatch` on skew. Run the core builder alone
-only for a core-only artifact.
-
-CI proves the core-only and selected-provider paths from clean checkouts in
-`.github/workflows/ci.yml` and `.github/workflows/nip46-provider.yml`; missing
-generated bindings or binary artifacts fail loudly.
+CI proves the package builds from a clean checkout in
+`.github/workflows/ci.yml`; missing generated bindings or binary artifacts fail
+loudly.

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 SCRIPT=$(cd "$(dirname "$0")" && pwd)/build-kotlin-jvm.sh
-COMPONENT_BUILDER=$(cd "$(dirname "$0")" && pwd)/build-component-release.sh
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -12,7 +11,6 @@ mkdir -p "$REPO/scripts" "$BIN"
 REPO=$(cd "$REPO" && pwd -P)
 BIN=$(cd "$BIN" && pwd -P)
 cp "$SCRIPT" "$REPO/scripts/"
-cp "$COMPONENT_BUILDER" "$REPO/scripts/"
 chmod +x "$REPO/scripts/"*.sh
 git -C "$REPO" init -q
 
@@ -138,9 +136,9 @@ assert_outputs() {
   local generated="$REPO/Packages/NMPKotlin/src/main/kotlin/uniffi/nmp_ffi/nmp_ffi.kt"
   local resource="$REPO/Packages/NMPKotlin/src/main/resources/linux-x86-64/libnmp_ffi.so"
   assert_contains \
-    "generated from $target_dir/nmp-component-artifacts/core/$HOST_TARGET." \
+    "generated from $target_dir/$HOST_TARGET/release/" \
     "$generated"
-  assert_contains "$target_dir/nmp-component-build/core" "$resource"
+  assert_contains "$target_dir" "$resource"
 }
 
 HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
@@ -150,7 +148,7 @@ HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
 default_log="$TMP/default.log"
 run_script "$default_log"
 assert_single_plan "$default_log"
-assert_contains "$REPO/target/nmp-component-artifacts/core/$HOST_TARGET." "$default_log"
+assert_contains "$REPO/target/$HOST_TARGET/release/" "$default_log"
 assert_outputs "$REPO/target"
 echo 'ok - default target directory remains repository-local'
 
@@ -161,7 +159,7 @@ absolute_target="$TMP/shared-cache"
 rm -rf "$REPO/target" "$REPO/Packages" "$REPO/gen-kotlin"
 run_script "$absolute_log" "$absolute_target"
 assert_single_plan "$absolute_log"
-assert_contains "$absolute_target/nmp-component-artifacts/core/$HOST_TARGET." "$absolute_log"
+assert_contains "$absolute_target/$HOST_TARGET/release/" "$absolute_log"
 ! grep -Fq "$REPO/target/release" "$absolute_log"
 [[ ! -e $REPO/target ]]
 assert_outputs "$absolute_target"
@@ -175,7 +173,7 @@ relative_target="$REPO/$relative_value"
 rm -rf "$REPO/target" "$REPO/Packages" "$REPO/gen-kotlin" "$relative_target"
 run_script "$relative_log" "$relative_value"
 assert_single_plan "$relative_log"
-assert_contains "$relative_target/nmp-component-artifacts/core/$HOST_TARGET." "$relative_log"
+assert_contains "$relative_target/$HOST_TARGET/release/" "$relative_log"
 ! grep -Fq "$REPO/target/release" "$relative_log"
 [[ ! -e $REPO/target ]]
 assert_outputs "$relative_target"
@@ -193,7 +191,7 @@ if run_failure \
   exit 1
 fi
 assert_contains \
-  "component-build: expected a release library for nmp_ffi under $missing_library_target/nmp-component-build/core/$HOST_TARGET/release" \
+  "error: expected $missing_library_target/$HOST_TARGET/release/libnmp_ffi." \
   "$missing_library_output"
 [[ $(grep -c '^cargo build ' "$missing_library_log") -eq 1 ]]
 ! grep -q '^bindgen ' "$missing_library_log"
@@ -209,11 +207,9 @@ if run_failure \
 fi
 assert_contains "error: expected executable" "$missing_bindgen_output"
 assert_contains \
-  "$missing_bindgen_target/nmp-component-artifacts/core/$HOST_TARGET." \
+  "$missing_bindgen_target/$HOST_TARGET/release/" \
   "$missing_bindgen_output"
-assert_contains \
-  "/uniffi-bindgen in the sealed component snapshot" \
-  "$missing_bindgen_output"
+assert_contains "/uniffi-bindgen under" "$missing_bindgen_output"
 [[ $(grep -c '^cargo build ' "$missing_bindgen_log") -eq 1 ]]
 ! grep -q '^bindgen ' "$missing_bindgen_log"
 echo 'ok - missing release artifacts fail early with resolved-path diagnostics'
