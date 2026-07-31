@@ -1,15 +1,17 @@
 schema = 1
 key = "nmp-nip46"
-state = "active"
+state = "retired"
 uniffi_namespace = "nmp_nip46_ffi"
 artifact_owner = "nmp-nip46"
-
-ffi_package = "nmp-nip46-ffi"
-ffi_manifest = "crates/nmp-nip46-ffi/Cargo.toml"
-library_stem = "nmp_nip46_ffi"
-ffi_sources = ["crates/nmp-nip46-ffi/src"]
-
-swift_manifests = ["Packages/NMPNip46/Package.swift"]
-swift_sources = ["Packages/NMPNip46/Sources/NMPNip46"]
-kotlin_manifests = ["Packages/NMPKotlin/nip46/build.gradle.kts"]
-kotlin_sources = ["Packages/NMPKotlin/nip46/src/main/kotlin"]
+reserved_ffi_package = "nmp-nip46-ffi"
+reserved_library_stem = "nmp_nip46_ffi"
+retired_by_pr = 1171
+retired_by_url = "https://github.com/pablof7z/nmp/pull/1171"
+removed_paths = [
+  "Packages/NMPKotlin/nip46/build.gradle.kts",
+  "Packages/NMPKotlin/nip46/src/main/kotlin",
+  "Packages/NMPNip46/Package.swift",
+  "Packages/NMPNip46/Sources/NMPNip46",
+  "crates/nmp-nip46-ffi/Cargo.toml",
+  "crates/nmp-nip46-ffi/src",
+]
