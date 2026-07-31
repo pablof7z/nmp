@@ -54,9 +54,9 @@ fn parse_host(host: String) -> Result<RelayUrl, FfiError> {
 /// opaque handle, and never asked for again (`nmp::nip29::RelayScope`
 /// mirror). `hosts` crosses the boundary as raw strings, unlike the
 /// direct-Rust `on`'s `RelayUrl`s: fallibility (an empty set, or a host that
-/// does not parse) is restored HERE, exactly like the deleted single-host
-/// `group_discovery_demand` door's own doc described for the widening from
-/// one host to a caller-supplied set.
+/// does not parse) is restored HERE, because the boundary widens from one
+/// host to a caller-supplied set and a set can be empty where a single host
+/// could not be.
 #[derive(Debug, uniffi::Object)]
 pub struct FfiRelayScope {
     inner: RelayScope,

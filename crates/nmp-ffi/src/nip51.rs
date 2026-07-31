@@ -67,7 +67,7 @@ pub fn active_account_demand() -> FfiDemand {
 /// The result preserves malformed-item and private-content evidence, and
 /// grants NO signature, canonical-store, provenance, routing, or mutation
 /// authority. To discover NIP-29 groups the app still passes an explicit host
-/// of its own choosing to `group_discovery_demand`; nothing here authorizes a
+/// set of its own choosing to `FfiRelayScope::on`; nothing here authorizes a
 /// host or invents a fixed group-content catalog on the app's behalf.
 #[uniffi::export]
 pub fn parse_simple_groups_list_tolerant(row: FfiRow) -> FfiSimpleGroupsList {
@@ -136,7 +136,7 @@ mod tests {
     /// harvested from parser output by the boundary itself.
     ///
     /// #1033's FFI falsifier too (successor to #858's, updated for the
-    /// `group_discovery_demand` -> `FfiRelayScope`/`FfiGroup` projection):
+    /// `FfiRelayScope`/`FfiGroup` projection):
     /// the SELECTED entry's `host_relay` AND `group_id` both feed NIP-29's
     /// host-pinned constructors directly, field for field, with no
     /// intermediate NIP-29-owned copy of the NIP-51 value in between.
