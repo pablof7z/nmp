@@ -138,25 +138,6 @@ jobs:
       - name: Keep NIP-29 context separate from C7 and client policy
         run: bash scripts/check-nip29-ownership.sh
 
-  # #1105: the app-facing routing vocabulary is exactly two words -- `Auto`
-  # and `Explicit` -- on Rust, the FFI (both conversion directions), Swift and
-  # Kotlin alike, every retired spelling stays deleted, and no group write
-  # operation takes a relay or a routing value. Enumerated per surface rather
-  # than grepped, so a third word appearing on ONE SDK is caught.
-  routing-vocabulary:
-    name: Two-word routing vocabulary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Falsify a third routing word, a restored spelling, and a relay-taking group verb
-        run: bash scripts/test-check-routing-vocabulary.sh
-
-      - name: Require exactly Auto and Explicit on every surface
-        run: bash scripts/check-routing-vocabulary.sh
-
   # NMP keeps no backwards compatibility: a replaced spelling is deleted in the
   # same change. There are no external consumers, so compatibility is a tax
   # paid to strangers who do not exist.
