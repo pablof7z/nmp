@@ -1,9 +1,10 @@
 ---
 title: Routing facts and protocol ownership
 status: built
-date: 2026-07-29
+date: 2026-07-31
 issues:
   - 870
+  - 922
 ---
 
 # Routing facts and protocol ownership
@@ -103,3 +104,31 @@ returns to `Unknown` after restart.
 - Core-only builds can exclude protocol dependencies and symbols.
 - Native protocol publication remains separate packaging work; the Rust
   boundary does not justify bundling protocol symbols into the core artifacts.
+
+## Resolved package-graph boundary
+
+For code that already has a separate Cargo package, dependency direction is a
+resolved-graph property rather than voluntary registration.
+`scripts/check-dependency-direction.sh` resolves the locked, all-features
+normal/build graph and applies the single positive role policy in
+`scripts/dependency-direction-policy.json`. It walks through unclassified
+intermediaries, rejects unknown `nmp`/`nmp-*` workspace packages, and reports a
+deterministic canonical shortest path to each forbidden classified target.
+Optional dependencies are therefore visible even when their features are not
+default; dev-only verification assembly is outside this shipped graph. The
+`Resolved dependency direction` job in
+`.github/workflows/dependency-direction.yml` runs it, and
+`scripts/test-dependency-direction.sh`, on every pull request.
+
+Family rules automatically classify separately packaged protocol crates.
+`nmp-nip29` is mechanically proved to receive `pure-protocol` from the
+`nmp-nip*` family rule, not from an exact exception. The allowed and forbidden
+targets then come from that role's `may_reach` policy, so adding a new target
+role cannot make it implicitly reachable.
+
+This is deliberately a package-graph claim only. The temporary
+`nmp-nip02 -> nmp` facade stop does not prove that the facade capability is
+bounded; #1143 owns that narrower surface and removal of the stop. Code still
+fused into the `nmp` package is not separated by this graph; #1142 owns that
+package split. Cross-SDK surface and protocol behavior remain outside this
+mechanism.

@@ -1,0 +1,40 @@
+# #922: dependency direction read from Cargo's resolved, locked, all-features
+# normal/build graph.
+#
+# Enumeration comes from the graph itself, so a new workspace package is
+# checked with no action by its author: an unclassified `nmp`/`nmp-*` package
+# fails closed, and a forbidden edge fails whether it is direct, transitive
+# through an unclassified intermediary, or reachable only under a non-default
+# feature. This is the property `nmp-audit` did not have (#859) -- it
+# discovered crates only through their voluntary dependency on it.
+#
+# This is its own workflow file because .github/workflows/architecture-gates.yml
+# is an exact protected path of the surface-governance migration policy
+# (scripts/check-surface-migration-authorization.py), and this gate needs
+# neither that file's owner authorization nor any secret: it runs one repo
+# script over repo content and executes no PR-provided code.
+
+name: Dependency direction
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  dependency-direction:
+    name: Resolved dependency direction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select the repository Rust toolchain
+        run: rustup show
+
+      - name: Refuse forbidden edges in the resolved workspace graph
+        run: bash scripts/check-dependency-direction.sh
+
+      - name: Falsify the graph, classification, and wrapper behaviour
+        run: bash scripts/test-dependency-direction.sh
