@@ -1,9 +1,9 @@
 # BDD in NMP: readable contracts over the supported facade
 
 - **Date:** 2026-07-11
-- **Status:** CURRENT PRACTICE + TARGET CONTRACT. Existing untagged scenarios
-  describe built behavior. `@wip` scenarios record promoted obligations whose
-  public mechanism is not built.
+- **Status:** CURRENT PRACTICE + TARGET CONTRACT. Governed scenarios carry
+  explicit `nmp:status`, evidence, and falsifier/issue metadata. Unchanged
+  ungoverned files are temporary migration debt, not implicit built claims.
 - **Grounding:** `docs/VISION.md`, `docs/bug-class-ledger.md`, and the four
   detailed contracts under `docs/design/`.
 
@@ -23,9 +23,10 @@ behavior:
   happened;
 - reconstruction/restart proves what was actually durable.
 
-The current BDD harness exercises the real Rust runtime against scripted local
-relays. Swift and Kotlin falsifiers remain necessary where the native reactive
-or secure-provider boundary is part of the contract.
+The transitional BDD harness exercises the real Rust runtime against scripted
+local relays. It is mechanism evidence, not facade acceptance. Swift and Kotlin
+falsifiers remain necessary where the native reactive or secure-provider
+boundary is part of the contract.
 
 ## 2. Vocabulary and bias control
 
@@ -79,15 +80,48 @@ scenarios use per-planned-source evidence.
 Timing belongs to bounded test helpers, not prose. Production behavior contains
 no sleep-and-check polling.
 
-## 4. Tooling and suite structure
+## 4. Canonical corpus, governance, and transitional execution
 
-The suite uses `cucumber` with plain `.feature` files and one fresh `NmpWorld`
-per scenario. It runs the real `EngineThread` against scripted in-process
-relays. Because `EngineThread` deliberately requires explicit lifecycle
-ownership, dropping a world shuts down its handle and joins its engine before
-the next scenario starts; a thread-census regression test prevents detached
-engine graphs from accumulating across the suite. Existing crate-level
-mechanism tests remain in place.
+Canonical English lives only under `features/<behavioral-domain>/`. Executable
+proof stays with the narrow contract owner and is connected by metadata; crate
+structure never owns or duplicates the English specification.
+
+`tools/behavior-traceability` parses every feature through the Gherkin 0.14 AST.
+It uses AST hierarchy, positions, and spans for Feature/Rule/Scenario meaning,
+and reads only the adjacent `# nmp:*` comment block from source. Indentation and
+whitespace after `#` do not change that lexical boundary; the transitional
+runner uses the same conservative whole-file sentinel. It validates
+status, evidence, issues, inherited tags, and explicit base/head diffs without
+depending on `nmp-bdd`, so governance survives that runner's retirement.
+The checker is a detached Cargo workspace with its own lockfile and explicit
+targets. CI builds it from a neutral temporary directory and Cargo home; root
+workspace dependencies and repository Cargo configuration cannot enter its
+executable graph. A protected credentialed step resolves only the exact
+deduplicated issue-number/state snapshot, then the head-built checker runs
+without a GitHub token.
+Rust locators do not trust source-file syntax. After that credential boundary,
+the checker runs pinned Cargo metadata and `cargo test --no-run` from a neutral
+directory with isolated Cargo home/target state, exact workspace package IDs,
+bounded process groups, and bounded output. It accepts only unique,
+non-ignored names reported by normal libtest harnesses; dead or feature-gated
+files, other packages, custom harnesses, failed builds/lists, and ambiguous
+names cannot become evidence. Build scripts, proc macros, and harness
+initialization therefore run only inside this credential-free bounded phase.
+Executable evidence maps only to a closed proof-step grammar: one whole `run`
+command on a known hosted-runner family, under the runner's ordinary Bash, that
+names its proof tool directly — `cargo`, `swift`, the repository-owned Gradle
+wrapper, or the exact repository script path. Setup steps, wrappers, shell
+control flow, environment prefixes, substitutions, backgrounding, and any
+trailing command are not proof: the proof must be the terminal command in its
+shell context, and a step that disables errexit or follows the proof with
+anything else is rejected. A non-Bash `shell:` carries no lane claim at all.
+
+This grammar decides *whether a required lane runs the named proof*, not
+whether that lane's shell can be subverted from inside the workflow that owns
+it. `.github/workflows/ci.yml` is an owner-protected path of the
+surface-governance migration policy, so a pull request cannot introduce a
+command shadow there without owner authorization; that protection, not this
+grammar, is what keeps the mapped lane honest.
 
 ```text
 features/
@@ -107,23 +141,36 @@ crates/nmp-bdd/
   src/steps/{given,when}.rs
   src/steps/then/  # {feed,receipts,routing,wire,budget}.rs
   tests/bdd.rs
+tools/behavior-traceability/
+  Cargo.lock        # detached checker dependency closure
+  src/              # AST, metadata, locators, issue state, explicit git diff
 ```
 
 Every file in `crates/nmp-bdd` stays under 600 lines
 (`scripts/check-bdd-file-length.sh`); each module's own doc comment says what
 it owns and why that is the boundary.
 
-Tags carry meaning:
+Every governed scenario has:
 
-- `@ledger-N`: maps the scenario to bug-class ledger entry N.
-- `@must-never`: stages a forbidden runtime consequence.
-- `@wip`: promoted target behavior that the runner intentionally excludes
-  until its owning implementation issue lands.
-- `@live`: bounded real-network proof, excluded from the default deterministic
-  suite.
+- one stable `nmp:id`;
+- exactly one `nmp:status=built|specified|known-violation`;
+- ordered, repeatable, distinct evidence plus one falsifier when built;
+- a typed gap and open issue when specified;
+- an open issue when known-violation.
 
-The step catalog is closed and reviewed. A new behavior may add a reusable step
-in the same implementation PR; scenarios do not invent ad hoc synonyms.
+Once any scenario in a file has `nmp:*` metadata, every scenario in that file
+is governed. Added, changed, moved, or deleted behavior must be governed;
+unchanged legacy files may remain temporarily. An ungoverned legacy file must
+first become governed in a traceable change before a later deletion. A governed
+file rejects `@wip`, `@designed`, and `@requires-*` inherited through Feature,
+Rule, Scenario, or Examples tags. `@ledger-N` and `@must-never` retain their
+behavioral meaning; `@acceptance` is a built facade-capstone selector, not
+lifecycle state.
+
+The transitional `nmp-bdd` runner skips every scenario in a governed file.
+Ungoverned legacy retains its old `@wip`/`@designed`/`@live` filter while
+migration proceeds. #1077 owns the one supported-facade acceptance target;
+this mechanism runner never impersonates it.
 
 ## 5. Current executable scope
 
@@ -187,8 +234,9 @@ prose beyond what their assertions prove.
 - Explicit destructive reset clears cache, pending writes, receipts, evidence,
   and capabilities before another untrusted local user enters.
 
-The corresponding `@wip` feature files are durable acceptance targets, not
-claims of current build status.
+These targets use `nmp:status=specified`, a typed gap, and an open issue until
+their implementation and evidence are ready. They are not current build
+claims.
 
 ## 7. Scenario style
 
@@ -200,14 +248,16 @@ claims of current build status.
 - A cap scenario must allow explicit shortfall when its objective cannot be
   satisfied. Never assert "at least two" and "under cap" as simultaneously
   guaranteed for impossible inputs.
-- A current scenario must pass before merge. A target scenario stays `@wip`
-  until its implementation and supported-facade falsifier land together.
+- A built scenario's evidence must pass before merge and fail under its named
+  product falsifier. A target stays `specified` with an open issue until its
+  implementation and sufficient evidence land together.
 - When behavior changes, update the scenario, ledger, canonical design doc,
   platform projections, and builder guidance in the same governed change.
 
 ## 8. Completion discipline
 
-Removing `@wip` is a proof promotion. The owning PR must identify:
+Changing `nmp:status=specified|known-violation` to `built` is a proof promotion.
+The owning PR must identify:
 
 1. the structural mechanism that excludes the bug;
 2. the deterministic BDD scenario;
@@ -217,5 +267,6 @@ Removing `@wip` is a proof promotion. The owning PR must identify:
 6. native Swift/Kotlin falsification where the platform boundary participates.
 
 Passing prose is not proof. Passing one platform is not a cross-platform
-contract. A public behavior becomes `BUILT` only when the supported facade and
-required projections agree.
+contract. A public behavior becomes `built` only when its mapped evidence and
+required projections agree. `@acceptance` additionally requires a
+`rust:nmp::<test>` facade proof and will execute only in the #1077 target.

@@ -322,19 +322,6 @@ Feature: One subscription per relay, not one per thing you asked about
     And relay "hub" was never asked to close a "d" subscription
     And every "d" value I watch is covered by some subscription on relay "hub"
 
-  # nmp:id=ROUTING-SUBSCRIPTIONCOLLAPSE-020
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::unchanged_same_generation_req_is_suppressed_and_reconnect_replays_once
-  # nmp:falsifier=forcing the exact accepted-request predicate false makes the independent relay witness observe a byte-identical duplicate
-  Scenario: Nothing already asked for is asked for again
-    # `EngineCore` owns the exact accepted request on one transport generation.
-    # A byte-identical request therefore mints neither another request
-    # incarnation nor another wire frame. A changed filter remains a real
-    # replacement, and a fresh generation receives the current request once.
-    When I watch for notes tagged "p" as "alice"
-    And I watch for notes tagged "p" as "bob"
-    Then relay "hub" was never asked for the same thing twice
-
   @wip
   Scenario: A catalog already on disk opens as one subscription immediately
     # Genuine gap in the HARNESS, not merely in the engine, and scoped out

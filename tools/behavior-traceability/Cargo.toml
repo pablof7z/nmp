@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "nmp-behavior-traceability"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Repository-owned behavioral status and evidence traceability validator."
+
+[lib]
+name = "nmp_behavior_traceability"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nmp-behavior-traceability"
+path = "src/main.rs"
+test = true
+bench = false
+
+[dependencies]
+cargo_metadata = "0.19"
+gherkin = "=0.14.0"
+libc = "0.2"
+serde_json = "1"
+serde_yaml_ng = "0.10"
+tempfile = "3"
+toml = "0.8"
