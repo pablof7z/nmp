@@ -121,7 +121,7 @@ impl GroupPredicate {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, BTreeMap};
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use nmp_grammar::{

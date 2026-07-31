@@ -253,10 +253,7 @@ mod tests {
     #[test]
     fn publication_never_synthesizes_previous() {
         let built = contextualize(GROUP, EventBuilder::new(Kind::from(30023u16))).unwrap();
-        assert_eq!(
-            rows(&built),
-            vec![vec!["h".to_string(), GROUP.to_string()]]
-        );
+        assert_eq!(rows(&built), vec![vec!["h".to_string(), GROUP.to_string()]]);
     }
 
     #[test]
@@ -322,10 +319,7 @@ mod tests {
             }
         );
         let said = error.to_string();
-        assert!(
-            said.contains("darkroom") && said.contains(GROUP),
-            "{said}"
-        );
+        assert!(said.contains("darkroom") && said.contains(GROUP), "{said}");
     }
 
     #[test]

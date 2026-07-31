@@ -163,7 +163,10 @@ mod tests {
 
     #[test]
     fn a_listing_branch_selects_exactly_the_three_nip29_group_kinds() {
-        let demand = groups_where_at(&host(1), Binding::Literal(BTreeSet::from(["x".to_string()])));
+        let demand = groups_where_at(
+            &host(1),
+            Binding::Literal(BTreeSet::from(["x".to_string()])),
+        );
         assert_eq!(
             demand.selection.kinds,
             Some(BTreeSet::from([39000u16, 39001, 39002]))
@@ -175,10 +178,8 @@ mod tests {
 
     #[test]
     fn member_evidence_is_kind_39002_over_p_projected_through_d() {
-        let binding = member_list_includes_at(
-            &host(1),
-            Binding::Reactive(IdentityField::ActivePubkey),
-        );
+        let binding =
+            member_list_includes_at(&host(1), Binding::Reactive(IdentityField::ActivePubkey));
         let derived = derived(&binding);
         assert_eq!(derived.project, Selector::Tag("d".to_string()));
         assert_eq!(

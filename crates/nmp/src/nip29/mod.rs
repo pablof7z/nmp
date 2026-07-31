@@ -225,8 +225,7 @@ mod tests {
     #[test]
     fn scope_stamps_exact_hosts_on_every_nested_nip29_demand() {
         let scope = on([host(1), host(2)]).expect("two hosts");
-        let predicate =
-            member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
+        let predicate = member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
         let branches = scope.listing_branches(&predicate);
         let d = IndexedTagName::new('d').expect("d is a single ASCII letter");
 
@@ -283,5 +282,33 @@ mod tests {
                 ])))
             );
         }
+    }
+
+    /// Multi-relay reads are ONE ordinary live query with one complete
+    /// singleton-host branch per host -- never `Pinned({A, B})`, never a
+    /// `Vec<Demand>` the app has to merge, never a NIP-29 observe door.
+    #[test]
+    fn a_multi_host_read_is_one_live_query_with_one_branch_per_host() {
+        let scope = on([host(1), host(2)]).expect("two hosts");
+        let query = scope
+            .group("photographers")
+            .read(nmp_grammar::Filter::default())
+            .expect("a two-host group read declares two branches");
+        assert_eq!(query.branches().len(), 2);
+        for (branch, expected) in query.branches().iter().zip([host(1), host(2)]) {
+            assert_eq!(branch.source, pinned(expected));
+        }
+        assert_eq!(query.aggregate_result_limit(), None);
+    }
+
+    #[test]
+    fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
+        let scope = on([host(1), host(2)]).expect("two hosts");
+        let query = scope
+            .groups_where(&member_list_includes(Binding::Reactive(
+                IdentityField::ActivePubkey,
+            )))
+            .expect("a two-host listing declares two branches");
+        assert_eq!(query.branches().len(), 2);
     }
 }

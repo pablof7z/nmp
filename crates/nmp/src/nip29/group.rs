@@ -145,7 +145,10 @@ impl Group {
         let contextualized = nmp_nip29::contextualize(&self.id, builder)?;
         self.through_the_one_door(
             engine,
-            self.intent(WritePayload::Event(contextualized), Identity::Explicit(author)),
+            self.intent(
+                WritePayload::Event(contextualized),
+                Identity::Explicit(author),
+            ),
         )
     }
 
