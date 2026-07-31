@@ -754,6 +754,8 @@ fn run_worker(
                         }
                         let base = retry_in.expect("retry_in set above for non-permanent");
                         let delay = backoff::jittered(base, url.as_str(), reconnect_jitter_max);
+                        #[cfg(feature = "bench-instrumentation")]
+                        let delay = super::control_reconnect_delay(&url, delay);
                         attempt = attempt.wrapping_add(1);
                         if !wait_before_reconnect(
                             &command_rx,
@@ -798,6 +800,8 @@ fn run_worker(
                 }
                 let base = retry_in.expect("retry_in set above for non-permanent");
                 let delay = backoff::jittered(base, url.as_str(), reconnect_jitter_max);
+                #[cfg(feature = "bench-instrumentation")]
+                let delay = super::control_reconnect_delay(&url, delay);
                 attempt = attempt.wrapping_add(1);
                 if !wait_before_reconnect(
                     &command_rx,
