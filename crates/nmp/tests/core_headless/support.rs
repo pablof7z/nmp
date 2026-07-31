@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{
+    ObservationId,
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
     ObservationFact, ReceiptId, RequestTerminal, RowDelta, ShortfallFact, SourceEvidence,
@@ -23,7 +24,7 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, Identity,
     RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
-use nmp_resolver::{HandleId, LiveQuery};
+use nmp_grammar::LiveQuery;
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
@@ -773,7 +774,7 @@ fn signer_session(relay: &RelayUrl, signer: nostr::PublicKey) -> RelaySessionKey
 }
 
 fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16) -> LiveQuery {
-    LiveQuery(
+    LiveQuery::single(
         nmp_grammar::Demand::new(
             Filter {
                 kinds: Some(BTreeSet::from([kind])),
@@ -786,7 +787,7 @@ fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16)
     )
 }
 
-fn subscribed_handle(effects: &[Effect]) -> HandleId {
+fn subscribed_handle(effects: &[Effect]) -> ObservationId {
     effects
         .iter()
         .find_map(|effect| match effect {

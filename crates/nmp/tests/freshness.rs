@@ -1,6 +1,7 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp::mechanism::core::{
+    ObservationId,
     AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, RowDelta, ShortfallFact,
     SourceStatus,
 };
@@ -9,7 +10,7 @@ use nmp_grammar::{
     AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
     RelaySessionKey, Selector, SourceAuthority,
 };
-use nmp_resolver::{HandleId, LiveQuery};
+use nmp_grammar::LiveQuery;
 use nmp_router::{FixtureRoutingFacts, WireOp};
 use nmp_store::{CoverageInterval, EventStore, MemoryStore, RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
@@ -69,7 +70,7 @@ fn atom(keys: &Keys, source: SourceAuthority) -> ContextualAtom {
 fn query(keys: &Keys, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::from_filter(filter(keys));
     demand.freshness = freshness;
-    LiveQuery(demand)
+    LiveQuery::single(demand)
 }
 
 fn nested_query(
@@ -101,7 +102,7 @@ fn nested_query(
     )
     .unwrap();
     outer.freshness = outer_freshness;
-    LiveQuery(outer)
+    LiveQuery::single(outer)
 }
 
 fn pinned_query(keys: &Keys, relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
@@ -112,7 +113,7 @@ fn pinned_query(keys: &Keys, relay: &RelayUrl, freshness: Freshness) -> LiveQuer
     )
     .unwrap();
     demand.freshness = freshness;
-    LiveQuery(demand)
+    LiveQuery::single(demand)
 }
 
 fn seeded_nested_store(keys: &Keys, inner_relay: &RelayUrl) -> MemoryStore {
@@ -216,7 +217,7 @@ fn wire_id(effects: &[Effect]) -> String {
         .unwrap()
 }
 
-fn initial(effects: &[Effect]) -> (HandleId, Vec<RowDelta>, AcquisitionEvidence) {
+fn initial(effects: &[Effect]) -> (ObservationId, Vec<RowDelta>, Vec<AcquisitionEvidence>) {
     effects
         .iter()
         .find_map(|effect| match effect {
@@ -270,10 +271,10 @@ fn fresh_cached_profile_uses_coverage_and_zero_wire() {
     assert!(rows
         .iter()
         .any(|row| matches!(row, RowDelta::Added(row) if row.event.id == profile.id)));
-    assert_eq!(evidence.sources.len(), 1);
-    assert_eq!(evidence.sources[0].relay, relay);
+    assert_eq!(evidence[0].sources.len(), 1);
+    assert_eq!(evidence[0].sources[0].relay, relay);
     assert_eq!(
-        evidence.sources[0].reconciled_through,
+        evidence[0].sources[0].reconciled_through,
         Some(Timestamp::from(96_400u64))
     );
     let aged = core.handle(EngineMsg::Tick(Timestamp::from(200_000u64)));
@@ -318,7 +319,7 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
         rows.is_empty(),
         "absence is fresh when its question is covered"
     );
-    assert_eq!(evidence.sources.len(), 1);
+    assert_eq!(evidence[0].sources.len(), 1);
 }
 
 #[test]
@@ -334,8 +335,8 @@ fn cache_only_does_not_borrow_live_sibling_wire_or_evidence() {
     let cached = subscribe(&mut core, query(&keys, Freshness::CacheOnly));
     let (cached_id, _, evidence) = initial(&cached);
     assert_eq!(reqs(&cached), 0);
-    assert!(evidence.sources.is_empty());
-    assert_eq!(evidence.shortfall.len(), 1);
+    assert!(evidence[0].sources.is_empty());
+    assert_eq!(evidence[0].shortfall.len(), 1);
     assert_eq!(closes(&core.handle(EngineMsg::Unsubscribe(cached_id))), 0);
     assert_eq!(closes(&core.handle(EngineMsg::Unsubscribe(live_id))), 1);
 }
@@ -367,7 +368,7 @@ fn cache_only_never_opens_wire_with_populated_cache_and_coverage() {
         .iter()
         .any(|row| matches!(row, RowDelta::Added(row) if row.event.id == cached.id)));
     assert!(
-        evidence.sources.is_empty(),
+        evidence[0].sources.is_empty(),
         "CacheOnly claims no acquisition"
     );
 }
@@ -407,7 +408,7 @@ fn nested_cache_only_opens_no_inner_wire_under_live_outer() {
     );
     let (_, _, evidence) = initial(&effects);
     assert_eq!(
-        evidence
+        evidence[0]
             .sources
             .iter()
             .map(|source| source.relay.clone())
@@ -416,7 +417,7 @@ fn nested_cache_only_opens_no_inner_wire_under_live_outer() {
         "CacheOnly inner evidence must not borrow the outer Live plan"
     );
     assert_eq!(
-        evidence.shortfall,
+        evidence[0].shortfall,
         vec![ShortfallFact::NoPlannedSource {
             atom: concrete(&keys),
         }],
@@ -472,7 +473,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
     root.cache = CacheMode::Strict;
     root.freshness = Freshness::CacheOnly;
     let mut core = EngineCore::new(store, 10);
-    let effects = subscribe(&mut core, LiveQuery(root));
+    let effects = subscribe(&mut core, LiveQuery::single(root));
     let (_, rows, _) = initial(&effects);
 
     assert!(
@@ -553,7 +554,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
         "fresh inner coverage suppresses only the nested request"
     );
     let (_, _, fresh_evidence) = initial(&fresh_effects);
-    let inner_evidence = fresh_evidence
+    let inner_evidence = fresh_evidence[0]
         .sources
         .iter()
         .find(|source| source.relay == inner_relay)
@@ -564,7 +565,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
         "the nested source exposes only its own fresh durable watermark"
     );
     assert_eq!(inner_evidence.status, SourceStatus::Connecting);
-    let outer_evidence = fresh_evidence
+    let outer_evidence = fresh_evidence[0]
         .sources
         .iter()
         .find(|source| source.relay == outer_relay)
@@ -575,7 +576,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
     );
     assert_eq!(outer_evidence.status, SourceStatus::Connecting);
     assert!(
-        fresh_evidence.shortfall.is_empty(),
+        fresh_evidence[0].shortfall.is_empty(),
         "both Demand boundaries have an honest source"
     );
 
@@ -603,8 +604,8 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
         )]),
         "the independent live sibling starts with exactly its own wire request"
     );
-    assert_eq!(sibling_evidence.sources.len(), 1);
-    assert_eq!(sibling_evidence.sources[0].relay, sibling_relay);
+    assert_eq!(sibling_evidence[0].sources.len(), 1);
+    assert_eq!(sibling_evidence[0].sources[0].relay, sibling_relay);
     let stale_effects = subscribe(
         &mut stale,
         nested_query(
@@ -688,19 +689,19 @@ fn nested_max_age_scoped_coverage_survives_redb_restart() {
     );
     let (_, _, evidence) = initial(&effects);
     assert_eq!(
-        evidence.sources.len(),
+        evidence[0].sources.len(),
         1,
         "only the nested source owns persisted coverage"
     );
-    assert_eq!(evidence.sources[0].relay, inner_relay);
+    assert_eq!(evidence[0].sources[0].relay, inner_relay);
     assert_eq!(
-        evidence.sources[0].reconciled_through,
+        evidence[0].sources[0].reconciled_through,
         Some(Timestamp::from(99_000u64)),
         "the reopened snapshot retains the nested durable watermark"
     );
-    assert_eq!(evidence.sources[0].status, SourceStatus::Connecting);
+    assert_eq!(evidence[0].sources[0].status, SourceStatus::Connecting);
     assert_eq!(
-        evidence.shortfall,
+        evidence[0].shortfall,
         vec![ShortfallFact::NoPlannedSource {
             atom: ConcreteFilter {
                 kinds: Some(BTreeSet::from([7u16])),
@@ -791,8 +792,8 @@ fn max_age_requires_fresh_coverage_from_every_assigned_outbox() {
     );
     let (_, _, evidence) = initial(&complete_effects);
     assert_eq!(reqs(&complete_effects), 0);
-    assert_eq!(evidence.sources.len(), 2);
-    assert!(evidence
+    assert_eq!(evidence[0].sources.len(), 2);
+    assert!(evidence[0]
         .sources
         .iter()
         .all(|source| source.reconciled_through == Some(Timestamp::from(99_000u64))));
@@ -861,11 +862,11 @@ fn pinned_strict_max_age_uses_pinned_scope_for_coverage_and_rows() {
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
     let mut core = EngineCore::new(store, 10);
     tick(&mut core, 100_000);
-    let effects = subscribe(&mut core, LiveQuery(demand));
+    let effects = subscribe(&mut core, LiveQuery::single(demand));
     let (_, rows, evidence) = initial(&effects);
     assert_eq!(reqs(&effects), 0);
     assert!(rows.is_empty(), "Strict excludes non-pinned provenance");
-    assert_eq!(evidence.sources[0].relay, pinned);
+    assert_eq!(evidence[0].sources[0].relay, pinned);
 }
 
 #[test]

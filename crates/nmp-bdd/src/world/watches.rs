@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use nostr::{Tag, Timestamp};
 
-use nmp_resolver::LiveQuery;
+use nmp_grammar::LiveQuery;
 use nmp_router::RelayUrl;
 
 use nmp_test_support::relays::WireRecord;

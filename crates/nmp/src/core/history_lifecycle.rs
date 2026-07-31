@@ -8,27 +8,45 @@ use super::*;
 impl<S: EventStore> EngineCore<S> {
     pub(super) fn on_subscribe_history(&mut self, query: HistoryQuery) -> Vec<Effect> {
         let mut effects = Vec::new();
-        let (handle, _) = match self.resolver.subscribe(query.initial_demand()) {
-            Ok(value) => value,
-            Err(error) => {
-                self.degrade_store(error, &mut effects);
-                return effects;
+        // Every branch's live-top acquisition opens before the session
+        // exists. A failure part-way through withdraws what was already
+        // opened: a window is installed whole or not at all.
+        let mut handles = Vec::new();
+        for branch in query.initial_demands() {
+            match self.resolver.subscribe(branch) {
+                Ok((handle, _)) => handles.push(handle),
+                Err(error) => {
+                    for handle in handles {
+                        let _ = self.resolver.unsubscribe(handle.id());
+                    }
+                    self.degrade_store(error, &mut effects);
+                    return effects;
+                }
             }
-        };
-        let handle_id = handle.id();
-        let acquisition = self.decide_handle_acquisition(handle_id, handle.freshness());
+        }
+        let acquisitions_by_branch = handles
+            .iter()
+            .map(|handle| self.decide_handle_acquisition(handle.id(), handle.freshness()))
+            .collect();
         let id = HistorySessionId(self.next_history_id);
         self.next_history_id = self.next_history_id.wrapping_add(1).max(1);
-        self.history_by_handle.insert(handle_id, id);
+        let live_handle_ids: Vec<HandleId> = handles.iter().map(|handle| handle.id()).collect();
+        let mut branch_of = BTreeMap::new();
+        for (index, handle) in handles.iter().enumerate() {
+            self.history_by_handle.insert(handle.id(), id);
+            branch_of.insert(handle.id(), index);
+        }
+        let handle_ids = live_handle_ids.iter().copied().collect();
         self.histories.insert(
             id,
             HistoryState {
                 target_rows: query.page_size(),
                 query,
-                acquisition,
-                handles: vec![handle],
-                handle_ids: BTreeSet::from([handle_id]),
-                live_handle_id: handle_id,
+                acquisitions_by_branch,
+                handles,
+                handle_ids,
+                live_handle_ids,
+                branch_of,
                 acquisitions: BTreeMap::new(),
                 acquired_tie_seconds: BTreeSet::new(),
                 last_rows: BTreeMap::new(),
@@ -41,7 +59,7 @@ impl<S: EventStore> EngineCore<S> {
         );
 
         self.recompile(&mut effects);
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories_except(id, &mut effects);
         self.refresh_history(id, WindowLoad::Idle, &mut effects);
         effects
@@ -57,7 +75,7 @@ impl<S: EventStore> EngineCore<S> {
         }
         let mut effects = Vec::new();
         self.recompile(&mut effects);
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
         effects
     }
@@ -217,32 +235,33 @@ impl<S: EventStore> EngineCore<S> {
             });
         }
 
-        // Each opened acquisition is tagged with its kind for the #486
-        // supersede-close: `Some(second)` for the tie-second REQ, `None` for
-        // the older-range REQ.
-        let mut opened: Vec<(QueryHandle, Option<u64>)> = Vec::new();
+        // Each opened acquisition is tagged with its canonical branch and its
+        // kind for the #486 supersede-close: `Some(second)` for the
+        // tie-second REQ, `None` for the older-range REQ. EVERY branch gets
+        // its own tie/older acquisition — the window boundary is global, but
+        // the selection that must be re-asked at it is per branch.
+        let mut opened: Vec<(usize, QueryHandle, Option<u64>)> = Vec::new();
         let boundary_second = boundary.created_at.as_secs();
+        let mut staged: Vec<(usize, nmp_grammar::Demand, Option<u64>)> = Vec::new();
         if needs_tie {
-            if let Some(tie) = query.tie_second_demand(boundary_second) {
-                match self.resolver.subscribe(tie) {
-                    Ok((handle, _)) => opened.push((handle, Some(boundary_second))),
-                    Err(error) => {
-                        self.degrade_store(error, &mut effects);
-                        effects.extend(self.on_rollback_history_load(id));
-                        effects.push(Effect::HistoryLoadResult(
-                            id,
-                            Err(HistoryAdvanceError::StoreUnavailable),
-                        ));
-                        return effects;
-                    }
-                }
-            }
+            staged.extend(
+                query
+                    .tie_second_demands(boundary_second)
+                    .into_iter()
+                    .map(|(branch, demand)| (branch, demand, Some(boundary_second))),
+            );
         }
-        if let Some(older) = query.older_demand(boundary_second, needed) {
-            match self.resolver.subscribe(older) {
-                Ok((handle, _)) => opened.push((handle, None)),
+        staged.extend(
+            query
+                .older_demands(boundary_second, needed)
+                .into_iter()
+                .map(|(branch, demand)| (branch, demand, None)),
+        );
+        for (branch, demand, kind) in staged {
+            match self.resolver.subscribe(demand) {
+                Ok((handle, _)) => opened.push((branch, handle, kind)),
                 Err(error) => {
-                    for (handle, _) in opened {
+                    for (_, handle, _) in opened {
                         let _ = self.resolver.unsubscribe(handle.id());
                     }
                     self.degrade_store(error, &mut effects);
@@ -264,11 +283,12 @@ impl<S: EventStore> EngineCore<S> {
             if needs_tie {
                 state.acquired_tie_seconds.insert(boundary_second);
             }
-            for (handle, kind) in opened {
+            for (branch, handle, kind) in opened {
                 let handle_id = handle.id();
                 state.handle_ids.insert(handle_id);
                 state.handles.push(handle);
                 state.acquisitions.insert(handle_id, kind);
+                state.branch_of.insert(handle_id, branch);
                 self.history_by_handle.insert(handle_id, id);
                 state
                     .pending_load
@@ -281,9 +301,9 @@ impl<S: EventStore> EngineCore<S> {
 
         // Build the prospective plan without touching live router,
         // attribution, diagnostics, other projections, or delivery.
-        let shadow_plan = self.history_shadow_plan(id);
+        let shadow_plans = self.history_shadow_plans(id);
         let requesting = self.history_batch(id, Vec::new(), WindowLoad::Requesting);
-        let added = match self.advance_history_projection(id, boundary, old_len, &shadow_plan) {
+        let added = match self.advance_history_projection(id, boundary, old_len, &shadow_plans) {
             Ok((batch, added)) => {
                 let added_row_ids = batch
                     .deltas
@@ -397,7 +417,7 @@ impl<S: EventStore> EngineCore<S> {
                 .iter()
                 .copied()
                 .collect();
-            let live = state.live_handle_id;
+            let live: BTreeSet<HandleId> = state.live_handle_ids.iter().copied().collect();
             let boundary_second = self
                 .window_boundary(id)
                 .map(|cursor| cursor.created_at.as_secs());
@@ -409,7 +429,7 @@ impl<S: EventStore> EngineCore<S> {
                 .acquisitions
                 .iter()
                 .filter(|(handle, kind)| {
-                    if **handle == live || current.contains(handle) {
+                    if live.contains(handle) || current.contains(handle) {
                         return false;
                     }
                     // Keep the tie REQ whose second is still the boundary.
@@ -433,12 +453,13 @@ impl<S: EventStore> EngineCore<S> {
             for handle_id in &superseded {
                 state.handle_ids.remove(handle_id);
                 state.acquisitions.remove(handle_id);
+                state.branch_of.remove(handle_id);
             }
         }
 
         let mut effects = Vec::new();
         self.recompile(&mut effects);
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories_except(id, &mut effects);
 
         let (made_progress, target, len, has_boundary) = {
@@ -500,6 +521,7 @@ impl<S: EventStore> EngineCore<S> {
         state
             .acquisitions
             .retain(|handle, _| !opened.contains(handle));
+        state.branch_of.retain(|handle, _| !opened.contains(handle));
         if let Some(second) = pending.acquired_tie_second {
             state.acquired_tie_seconds.remove(&second);
         }
@@ -523,16 +545,42 @@ impl<S: EventStore> EngineCore<S> {
     /// window of an already-live descriptor, so every discovery dependency
     /// is already represented by the initial session; shadow planning never
     /// needs to mutate the widen-only discovery subscription.
-    pub(super) fn history_shadow_plan(&self, id: HistorySessionId) -> RelayPlan {
-        match self
-            .histories
-            .get(&id)
-            .and_then(|state| state.acquisition.root())
-        {
-            Some(ScopeAcquisition::CoverageSatisfied(plan))
-            | Some(ScopeAcquisition::CacheOnly(plan)) => plan.clone(),
-            Some(ScopeAcquisition::Live) | None => self.shadow_plan_for(self.wire_demand()),
+    pub(super) fn history_shadow_plans(&self, id: HistorySessionId) -> Vec<RelayPlan> {
+        let Some(state) = self.histories.get(&id) else {
+            return Vec::new();
+        };
+        let needs_live = state
+            .acquisitions_by_branch
+            .iter()
+            .any(|acquisition| !matches!(acquisition.root(), Some(ScopeAcquisition::CoverageSatisfied(_)) | Some(ScopeAcquisition::CacheOnly(_))));
+        let live = needs_live.then(|| self.shadow_plan_for(self.wire_demand()));
+        state
+            .acquisitions_by_branch
+            .iter()
+            .map(|acquisition| match acquisition.root() {
+                Some(ScopeAcquisition::CoverageSatisfied(plan))
+                | Some(ScopeAcquisition::CacheOnly(plan)) => plan.clone(),
+                _ => live
+                    .clone()
+                    .expect("a branch that contributes wire work computed the live shadow plan"),
+            })
+            .collect()
+    }
+
+    /// Every resolver handle this session holds open, grouped by canonical
+    /// branch: branch `i`'s live-top acquisition plus whatever tie-second and
+    /// older-range acquisitions are currently open for that same branch.
+    fn history_handles_by_branch(&self, id: HistorySessionId) -> Vec<Vec<HandleId>> {
+        let Some(state) = self.histories.get(&id) else {
+            return Vec::new();
+        };
+        let mut grouped = vec![Vec::new(); state.live_handle_ids.len()];
+        for (handle, branch) in &state.branch_of {
+            if let Some(slot) = grouped.get_mut(*branch) {
+                slot.push(*handle);
+            }
         }
+        grouped
     }
 
     pub(super) fn refresh_all_histories(&mut self, effects: &mut Vec<Effect>) {
@@ -669,65 +717,87 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::EmitHistory(id, batch));
     }
 
-    fn history_evidence_for(&self, id: HistorySessionId) -> AcquisitionEvidence {
-        let state = self
-            .histories
-            .get(&id)
-            .expect("history evidence requires a live session");
-        self.acquisition_evidence_for_scopes(self.history_demand_scopes(id), &state.acquisition)
+    /// One acquisition-evidence entry per canonical branch, in branch order.
+    /// A branch's evidence is computed only from ITS OWN handles and its own
+    /// opening-time policy decision; no branch's proof can stand in for
+    /// another's, and nothing is rolled up into a window-global verdict.
+    fn history_evidence_for(&self, id: HistorySessionId) -> Vec<AcquisitionEvidence> {
+        let Some(state) = self.histories.get(&id) else {
+            return Vec::new();
+        };
+        self.history_handles_by_branch(id)
+            .into_iter()
+            .enumerate()
+            .map(|(branch, handles)| {
+                self.acquisition_evidence_for_scopes(
+                    self.history_branch_demand_scopes(&handles),
+                    &state.acquisitions_by_branch[branch],
+                )
+            })
+            .collect()
     }
 
     pub(super) fn history_rows_and_evidence_for(
         &self,
         id: HistorySessionId,
-    ) -> Result<(BTreeMap<EventId, Row>, AcquisitionEvidence), PersistenceError> {
+    ) -> Result<(BTreeMap<EventId, Row>, Vec<AcquisitionEvidence>), PersistenceError> {
         let state = self
             .histories
             .get(&id)
             .expect("history projection requires a live session");
-        let primary = *state
-            .handle_ids
-            .first()
-            .expect("history session always owns its initial resolver handle");
-        let root_atoms = self.resolver.root_atoms(primary);
-        let pinned_relays = match (
-            state.query.live_query().0.cache,
-            &state.query.live_query().0.source,
-        ) {
-            (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays),
-            _ => None,
-        };
-        let mut by_id = BTreeMap::new();
-        for mut atom in root_atoms {
-            atom.limit = None;
-            #[cfg(test)]
-            self.history_store_queries
-                .set(self.history_store_queries.get().saturating_add(1));
-            let filter = atom.to_nostr();
-            let rows = match pinned_relays {
-                Some(relays) => self.resolver.store().query_newest_observed_by(
-                    &filter,
-                    relays,
-                    state.target_rows,
-                )?,
-                None => self
-                    .resolver
-                    .store()
-                    .query_newest(&filter, state.target_rows)?,
+        let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
+        for (branch, live) in state.live_handle_ids.iter().enumerate() {
+            let declaration = &state.query.live_query().branches()[branch];
+            let pinned_relays = match (declaration.cache, &declaration.source) {
+                (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays),
+                _ => None,
             };
-            #[cfg(test)]
-            self.history_rows_examined.set(
-                self.history_rows_examined
-                    .get()
-                    .saturating_add(rows.len() as u64),
-            );
-            for stored in rows {
-                by_id.entry(stored.event.id).or_insert_with(|| Row {
-                    event: stored.event,
-                    sources: stored.provenance.seen.into_keys().collect(),
-                });
+            for mut atom in self.resolver.root_atoms(*live) {
+                atom.limit = None;
+                #[cfg(test)]
+                self.history_store_queries
+                    .set(self.history_store_queries.get().saturating_add(1));
+                let filter = atom.to_nostr();
+                // Taking the window target from EVERY branch is exact: a row
+                // outside one branch's newest `target_rows` already has that
+                // many newer witnesses in that same branch, so it can never
+                // belong to the global newest `target_rows` either.
+                let rows = match pinned_relays {
+                    Some(relays) => self.resolver.store().query_newest_observed_by(
+                        &filter,
+                        relays,
+                        state.target_rows,
+                    )?,
+                    None => self
+                        .resolver
+                        .store()
+                        .query_newest(&filter, state.target_rows)?,
+                };
+                #[cfg(test)]
+                self.history_rows_examined.set(
+                    self.history_rows_examined
+                        .get()
+                        .saturating_add(rows.len() as u64),
+                );
+                for stored in rows {
+                    let sources: BTreeSet<RelayUrl> =
+                        stored.provenance.seen.into_keys().collect();
+                    match by_id.entry(stored.event.id) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(Row {
+                                event: stored.event,
+                                sources,
+                            });
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().sources.extend(sources);
+                        }
+                    }
+                }
             }
         }
+        // The window bound applies ONCE to the merged union, in canonical
+        // newest-first order — never `target_rows` per branch.
         if by_id.len() > state.target_rows {
             let mut ordered: Vec<_> = by_id
                 .iter()
@@ -745,32 +815,18 @@ impl<S: EventStore> EngineCore<S> {
         Ok((by_id, evidence))
     }
 
-    /// Every active acquisition atom owned by one coordinated history
-    /// partition: initial bounded root, exact unbounded tie seconds, bounded
-    /// older ranges, and every interior Derived dependency. Set union keeps
-    /// shared atoms deduplicated while preserving distinct scoped windows.
-    pub(super) fn history_subtree_atoms(&self, id: HistorySessionId) -> BTreeSet<ContextualAtom> {
-        self.histories
-            .get(&id)
-            .into_iter()
-            .flat_map(|state| state.handle_ids.iter().copied())
-            .flat_map(|handle| self.resolver.subtree_atoms(handle))
-            .collect()
-    }
-
-    /// Union every active history partition by structural Demand boundary.
-    /// History handles are time-window variants of one descriptor, so their
-    /// graph shape and opening-time policy vector are identical while their
-    /// current root atoms differ.
-    fn history_demand_scopes(
+    /// Union ONE branch's active history partitions by structural Demand
+    /// boundary. A branch's history handles are time-window variants of that
+    /// branch's one descriptor, so their graph shape and opening-time policy
+    /// vector are identical while their current root atoms differ. Handles
+    /// from a DIFFERENT branch are never combined here — that is exactly the
+    /// cross-branch contamination this issue exists to prevent.
+    fn history_branch_demand_scopes(
         &self,
-        id: HistorySessionId,
+        handles: &[HandleId],
     ) -> Vec<(BTreeSet<ContextualAtom>, Freshness)> {
-        let Some(state) = self.histories.get(&id) else {
-            return Vec::new();
-        };
         let mut combined: Vec<(BTreeSet<ContextualAtom>, Freshness)> = Vec::new();
-        for handle in &state.handle_ids {
+        for handle in handles {
             for (index, (atoms, freshness)) in
                 self.resolver.demand_scopes(*handle).into_iter().enumerate()
             {
@@ -793,56 +849,61 @@ impl<S: EventStore> EngineCore<S> {
         id: HistorySessionId,
         before: nmp_store::EventCursor,
         old_len: usize,
-        plan: &RelayPlan,
+        plans: &[RelayPlan],
     ) -> Result<(HistoryBatch, usize), PersistenceError> {
         let state = self
             .histories
             .get(&id)
             .expect("history advance requires a live session");
-        let primary = *state
-            .handle_ids
-            .first()
-            .expect("history session always owns its initial resolver handle");
-        let root_atoms = self.resolver.root_atoms(primary);
-        let subtree_atoms = self.history_subtree_atoms(id);
         let needed = state.target_rows.saturating_sub(state.last_rows.len());
-        let pinned_relays = match (
-            state.query.live_query().0.cache,
-            &state.query.live_query().0.source,
-        ) {
-            (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays),
-            _ => None,
-        };
         let mut candidates = BTreeMap::<EventId, Row>::new();
-        for mut atom in root_atoms {
-            atom.limit = None;
-            #[cfg(test)]
-            self.history_store_queries
-                .set(self.history_store_queries.get().saturating_add(1));
-            let filter = atom.to_nostr();
-            let rows = match pinned_relays {
-                Some(relays) => self
-                    .resolver
-                    .store()
-                    .query_newest_before_observed_by(&filter, relays, before, needed)?,
-                None => self
-                    .resolver
-                    .store()
-                    .query_newest_before(&filter, before, needed)?,
+        for (branch, live) in state.live_handle_ids.iter().enumerate() {
+            let declaration = &state.query.live_query().branches()[branch];
+            let pinned_relays = match (declaration.cache, &declaration.source) {
+                (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays),
+                _ => None,
             };
-            #[cfg(test)]
-            self.history_rows_examined.set(
-                self.history_rows_examined
-                    .get()
-                    .saturating_add(rows.len() as u64),
-            );
-            for stored in rows {
-                candidates.entry(stored.event.id).or_insert_with(|| Row {
-                    event: stored.event,
-                    sources: stored.provenance.seen.into_keys().collect(),
-                });
+            for mut atom in self.resolver.root_atoms(*live) {
+                atom.limit = None;
+                #[cfg(test)]
+                self.history_store_queries
+                    .set(self.history_store_queries.get().saturating_add(1));
+                let filter = atom.to_nostr();
+                let rows = match pinned_relays {
+                    Some(relays) => self
+                        .resolver
+                        .store()
+                        .query_newest_before_observed_by(&filter, relays, before, needed)?,
+                    None => self
+                        .resolver
+                        .store()
+                        .query_newest_before(&filter, before, needed)?,
+                };
+                #[cfg(test)]
+                self.history_rows_examined.set(
+                    self.history_rows_examined
+                        .get()
+                        .saturating_add(rows.len() as u64),
+                );
+                for stored in rows {
+                    let sources: BTreeSet<RelayUrl> =
+                        stored.provenance.seen.into_keys().collect();
+                    match candidates.entry(stored.event.id) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(Row {
+                                event: stored.event,
+                                sources,
+                            });
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().sources.extend(sources);
+                        }
+                    }
+                }
             }
         }
+        // The advance chunk is global: `needed` MORE rows across the merged
+        // union, never `needed` per branch.
         let mut ordered: Vec<Row> = candidates.into_values().collect();
         ordered.sort_by(|a, b| {
             nip01_newest_first(
@@ -852,14 +913,25 @@ impl<S: EventStore> EngineCore<S> {
         });
         ordered.truncate(needed);
         let auth_status = self.auth_status_map();
-        let evidence = evidence::acquisition_evidence(
-            &subtree_atoms,
-            plan,
-            self.resolver.store(),
-            &self.connected_relays,
-            &auth_status,
-            &self.ever_connected_relays,
-        );
+        let evidence: Vec<AcquisitionEvidence> = self
+            .history_handles_by_branch(id)
+            .into_iter()
+            .enumerate()
+            .map(|(branch, handles)| {
+                let subtree_atoms: BTreeSet<ContextualAtom> = handles
+                    .iter()
+                    .flat_map(|handle| self.resolver.subtree_atoms(*handle))
+                    .collect();
+                evidence::acquisition_evidence(
+                    &subtree_atoms,
+                    plans.get(branch).unwrap_or(&RelayPlan::default()),
+                    self.resolver.store(),
+                    &self.connected_relays,
+                    &auth_status,
+                    &self.ever_connected_relays,
+                )
+            })
+            .collect();
 
         let state = self
             .histories
@@ -897,7 +969,14 @@ impl<S: EventStore> EngineCore<S> {
         let Some(state) = self.histories.get(&id) else {
             return true;
         };
-        let Some(primary) = state.handle_ids.first().copied() else {
+        // The incremental algebra below is proven for a single-branch
+        // window. A composed window must re-derive the union and its global
+        // bound across every branch, so it keeps the full-refresh oracle
+        // until its own algebra is proven independently.
+        if state.live_handle_ids.len() != 1 {
+            return false;
+        }
+        let Some(primary) = state.live_handle_ids.first().copied() else {
             return false;
         };
         let root_atoms = self.resolver.root_atoms(primary);
@@ -922,10 +1001,8 @@ impl<S: EventStore> EngineCore<S> {
                 .iter()
                 .any(|filter| filter.match_event(event, MatchEventOptions::new()))
         };
-        let pinned_relays = match (
-            state.query.live_query().0.cache,
-            &state.query.live_query().0.source,
-        ) {
+        let declaration = &state.query.live_query().branches()[0];
+        let pinned_relays = match (declaration.cache, &declaration.source) {
             (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays.clone()),
             _ => None,
         };

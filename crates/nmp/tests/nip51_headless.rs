@@ -6,7 +6,7 @@
 
 use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::ContextualAtom;
-use nmp_resolver::LiveQuery;
+use nmp_grammar::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::MemoryStore;
 use nostr::{Keys, RelayUrl};
@@ -25,7 +25,7 @@ fn kind_10009_atoms(atoms: &std::collections::BTreeSet<ContextualAtom>) -> usize
 #[test]
 fn signed_out_active_account_demand_resolves_to_zero_atoms() {
     let mut core = new_core(FixtureRoutingFacts::new());
-    let _ = core.handle(EngineMsg::Subscribe(LiveQuery(
+    let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
         nmp_nip51::active_account_demand(),
     )));
     assert_eq!(
@@ -43,7 +43,7 @@ fn signing_in_reconstructs_the_active_account_kind_10009_demand() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
 
-    let _ = core.handle(EngineMsg::Subscribe(LiveQuery(
+    let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
         nmp_nip51::active_account_demand(),
     )));
     assert_eq!(kind_10009_atoms(&core.active_demand()), 0);
@@ -66,7 +66,7 @@ fn rerooting_to_a_different_account_replaces_the_kind_10009_atom_not_adds_a_seco
         .with_outbound_routes(b.public_key(), [relay]);
     let mut core = new_core(dir);
 
-    let _ = core.handle(EngineMsg::Subscribe(LiveQuery(
+    let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
         nmp_nip51::active_account_demand(),
     )));
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));

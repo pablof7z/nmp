@@ -248,7 +248,7 @@ struct HistorySnapshot {
     acquired_tie_seconds: BTreeSet<u64>,
     last_rows: BTreeMap<EventId, Row>,
     order: BTreeSet<(Reverse<u64>, EventId)>,
-    last_evidence: Option<AcquisitionEvidence>,
+    last_evidence: Option<Vec<AcquisitionEvidence>>,
     projection_complete: bool,
     load: WindowLoad,
     handle_ids: BTreeSet<HandleId>,
@@ -560,11 +560,11 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
     // there is no Complete/End variant, and the per-source evidence below
     // carries the real reason the page was short.
     assert!(returned
-        .evidence
+        .evidence[0]
         .shortfall
         .iter()
         .any(|fact| { matches!(fact, ShortfallFact::LocalLimit { .. }) }));
-    assert!(returned.evidence.sources.iter().any(|source| {
+    assert!(returned.evidence[0].sources.iter().any(|source| {
         source.relay == selected.relay && source.status == SourceStatus::Disconnected
     }));
 }

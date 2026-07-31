@@ -37,7 +37,7 @@ use nmp_grammar::{
 };
 use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
-use nmp_resolver::LiveQuery;
+use nmp_grammar::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nmp_transport::PoolConfig;
@@ -90,7 +90,7 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
 fn wait_for_rows(
     rx: &RowsReceiver,
     timeout: Duration,
-    pred: impl Fn(&[nostr::Event], &AcquisitionEvidence) -> bool,
+    pred: impl Fn(&[nostr::Event], &[AcquisitionEvidence]) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     let mut current: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
@@ -150,10 +150,13 @@ fn wait_for_status(
 /// `evidence` -- test-fixture convenience mirroring `core_headless.rs`'s
 /// identically-named helper.
 fn source_for<'a>(
-    evidence: &'a AcquisitionEvidence,
+    evidence: &'a [AcquisitionEvidence],
     relay: &RelayUrl,
 ) -> Option<&'a nmp::mechanism::core::SourceEvidence> {
-    evidence.sources.iter().find(|s| &s.relay == relay)
+    evidence
+        .iter()
+        .flat_map(|branch| branch.sources.iter())
+        .find(|s| &s.relay == relay)
 }
 
 fn spawn_relay(port: u16) -> LocalRelay {
@@ -685,7 +688,7 @@ fn authenticated_demand(selection: Filter, pubkey: nostr::PublicKey) -> Demand {
 }
 
 fn authenticated_literal_kind1(pubkey: nostr::PublicKey) -> LiveQuery {
-    LiveQuery(authenticated_demand(
+    LiveQuery::single(authenticated_demand(
         Filter {
             kinds: Some(BTreeSet::from([1u16])),
             authors: Some(Binding::Literal(BTreeSet::from([pubkey.to_hex()]))),
@@ -823,7 +826,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
     })
     .expect("open supported public Engine");
     let subscription = engine
-        .observe(LiveQuery(outer), None)
+        .observe(LiveQuery::single(outer), None)
         .expect("open public observation");
     let expected = BTreeSet::from([outer_older.id, outer_shared.id]);
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1547,7 +1550,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
 
     handle.set_active_account(Some(a.public_key()));
     let (_qh, rows_rx) = handle
-        .subscribe(LiveQuery(follows_minus_mutes_demand(a.public_key())))
+        .subscribe(LiveQuery::single(follows_minus_mutes_demand(a.public_key())))
         .expect("test subscription construction");
 
     // Publish a's contact list naming BOTH b and c.

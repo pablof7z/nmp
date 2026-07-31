@@ -7,7 +7,7 @@
 //! traffic:
 //!
 //! - a read [`Demand`], which the app takes through the ordinary one read
-//!   door (`engine.observe(LiveQuery(group.demand(filter)), None)`). There is
+//!   door (`engine.observe(LiveQuery::single(group.demand(filter)), None)`). There is
 //!   deliberately no `Group::observe`: a second door onto the same mechanism
 //!   is exactly the shape #838 deleted on the write side.
 //! - a [`WriteIntent`], carrying the `h` row this crate owns and
@@ -144,7 +144,7 @@ impl Group {
     /// #838 removed.
     ///
     /// Hand the result to the one read door:
-    /// `engine.observe(LiveQuery(group.demand(filter)), None)`.
+    /// `engine.observe(LiveQuery::single(group.demand(filter)), None)`.
     pub fn demand(&self, selection: Filter) -> Demand {
         let mut selection = selection;
         selection.tags.insert(

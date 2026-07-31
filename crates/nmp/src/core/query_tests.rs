@@ -57,7 +57,7 @@ mod affected_handle_invalidation_tests {
         }
     }
 
-    fn subscribed_handle(effects: &[Effect]) -> HandleId {
+    fn subscribed_handle(effects: &[Effect]) -> ObservationId {
         effects
             .iter()
             .find_map(|effect| match effect {
@@ -77,8 +77,9 @@ mod affected_handle_invalidation_tests {
             .collect()
     }
 
-    fn assert_remembered_rows_match_oracle(core: &EngineCore<MemoryStore>, id: HandleId) {
-        let (oracle, _) = core.rows_and_evidence_for(id).unwrap();
+    fn assert_remembered_rows_match_oracle(core: &EngineCore<MemoryStore>, id: ObservationId) {
+        let branch = core.observations[&id].branches[0];
+        let (oracle, _) = core.rows_and_evidence_for(branch).unwrap();
         let oracle: BTreeMap<_, _> = oracle
             .into_iter()
             .map(|(event_id, row)| {
@@ -91,7 +92,7 @@ mod affected_handle_invalidation_tests {
                 )
             })
             .collect();
-        assert_eq!(core.handles[&id].last_rows, oracle);
+        assert_eq!(core.observations[&id].last_rows, oracle);
     }
 
     #[test]
@@ -515,7 +516,7 @@ mod affected_handle_invalidation_tests {
             core.apply_committed_mutation(accepted.committed, &mut effects);
         } else {
             core.recompile(&mut effects);
-            core.refresh_all_handles(&mut effects);
+            core.refresh_all_observations(&mut effects);
         }
         (intent_id, pending)
     }
@@ -540,7 +541,7 @@ mod affected_handle_invalidation_tests {
             core.apply_committed_mutation(committed, &mut effects);
         } else {
             core.recompile(&mut effects);
-            core.refresh_all_handles(&mut effects);
+            core.refresh_all_observations(&mut effects);
         }
     }
 
@@ -557,7 +558,7 @@ mod affected_handle_invalidation_tests {
             core.apply_committed_mutation(committed, &mut effects);
         } else {
             core.recompile(&mut effects);
-            core.refresh_all_handles(&mut effects);
+            core.refresh_all_observations(&mut effects);
         }
     }
 
@@ -606,8 +607,8 @@ mod affected_handle_invalidation_tests {
             assert_remembered_rows_match_oracle(direct, direct_handle);
             assert_remembered_rows_match_oracle(oracle, oracle_handle);
             assert_eq!(
-                direct.handles[&direct_handle].last_rows,
-                oracle.handles[&oracle_handle].last_rows
+                direct.observations[&direct_handle].last_rows,
+                oracle.observations[&oracle_handle].last_rows
             );
         };
         assert_same(&direct, &oracle);
@@ -669,7 +670,7 @@ mod affected_handle_invalidation_tests {
         apply_local_differential_expiry(&mut direct, Timestamp::from(100u64), true);
         apply_local_differential_expiry(&mut oracle, Timestamp::from(100u64), false);
         assert_same(&direct, &oracle);
-        assert!(!direct.handles[&direct_handle]
+        assert!(!direct.observations[&direct_handle]
             .last_rows
             .contains_key(&expiring.id));
     }
@@ -1072,12 +1073,12 @@ mod affected_handle_invalidation_tests {
         let keys = Keys::generate();
         let pinned = RelayUrl::parse("wss://strict-pinned.example").unwrap();
         let other = RelayUrl::parse("wss://strict-other.example").unwrap();
-        let LiveQuery(mut demand) = room_query(25);
+        let mut demand = room_query(25).branches()[0].clone();
         demand.source = SourceAuthority::Pinned(BTreeSet::from([pinned.clone()]));
         demand.cache = CacheMode::Strict;
 
         let mut core = EngineCore::new(MemoryStore::new(), 20);
-        core.handle(EngineMsg::Subscribe(LiveQuery(demand)));
+        core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
 
         let event = room_event(&keys, 25, 0, 10);
         core.projection_store_queries.set(0);
@@ -1175,7 +1176,7 @@ mod affected_handle_invalidation_tests {
         let mut core = EngineCore::new(MemoryStore::new(), 20);
         let subscribed = core.handle(EngineMsg::Subscribe(unlimited_room_query(28)));
         let handle = subscribed_handle(&subscribed);
-        core.handles.get_mut(&handle).unwrap().projection_complete = false;
+        core.observations.get_mut(&handle).unwrap().projection_complete = false;
 
         let first = room_event(&keys, 28, 0, 10);
         core.projection_store_queries.set(0);
@@ -1188,7 +1189,7 @@ mod affected_handle_invalidation_tests {
             &mut effects,
         );
         assert_eq!(core.projection_store_queries.get(), 1);
-        assert!(core.handles[&handle].projection_complete);
+        assert!(core.observations[&handle].projection_complete);
 
         let second = room_event(&keys, 28, 1, 20);
         core.projection_store_queries.set(0);
@@ -1287,7 +1288,7 @@ mod affected_handle_invalidation_tests {
             }
 
             assert_remembered_rows_match_oracle(&core, handle);
-            let remembered = &core.handles[&handle].last_rows;
+            let remembered = &core.observations[&handle].last_rows;
             assert_eq!(app_rows.len(), remembered.len());
             for (event_id, row) in &app_rows {
                 assert_eq!(row.sources, remembered[event_id].sources);
@@ -1298,11 +1299,11 @@ mod affected_handle_invalidation_tests {
     #[test]
     fn resolver_internal_handle_is_filtered_before_any_projection_read() {
         let mut core = EngineCore::new(MemoryStore::new(), 20);
-        let (internal, _delta) = core.resolver.subscribe(room_query(1)).unwrap();
+        let (internal, _delta) = core.resolver.subscribe(room_query(1).branches()[0].clone()).unwrap();
         core.projection_store_queries.set(0);
 
         let mut effects = Vec::new();
-        core.refresh_handles([internal.id()], &mut effects);
+        core.refresh_observations_of_branches([internal.id()], &mut effects);
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert!(effects.is_empty());
@@ -1368,7 +1369,7 @@ mod coverage_evidence_refresh_tests {
     use super::*;
 
     fn pinned_query(relay: &RelayUrl) -> LiveQuery {
-        LiveQuery(
+        LiveQuery::single(
             nmp_grammar::Demand::new(
                 Filter {
                     kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
@@ -1460,7 +1461,7 @@ mod coverage_evidence_refresh_tests {
             .expect("coverage advance emits live evidence");
         assert!(deltas.is_empty());
         assert_eq!(
-            evidence.sources[0].reconciled_through,
+            evidence[0].sources[0].reconciled_through,
             Some(Timestamp::from(101u64))
         );
     }
@@ -1515,7 +1516,7 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        core.handles.get_mut(&live_id).unwrap().projection_complete = false;
+        core.observations.get_mut(&live_id).unwrap().projection_complete = false;
         core.histories
             .get_mut(&history_id)
             .unwrap()
@@ -1524,12 +1525,12 @@ mod coverage_evidence_refresh_tests {
         core.history_store_queries.set(0);
 
         let mut effects = Vec::new();
-        core.refresh_all_handle_evidence(&mut effects);
+        core.refresh_all_observation_evidence(&mut effects);
         core.refresh_all_history_evidence(&mut effects);
 
         assert_eq!(core.projection_store_queries.get(), 1);
         assert_eq!(core.history_store_queries.get(), 1);
-        assert!(core.handles[&live_id].projection_complete);
+        assert!(core.observations[&live_id].projection_complete);
         assert!(core.histories[&history_id].projection_complete);
     }
 }

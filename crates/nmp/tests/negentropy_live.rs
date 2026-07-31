@@ -23,7 +23,7 @@ use nmp::mechanism::core::RowDelta;
 use nmp::mechanism::runtime::{EngineThread, RowsReceiver};
 use nmp_grammar::{Binding, Filter};
 use nmp_local_signer::LocalKeySigner;
-use nmp_resolver::LiveQuery;
+use nmp_grammar::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::MemoryStore;
 use nmp_transport::PoolConfig;
@@ -64,7 +64,7 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 fn wait_for_rows(
     rx: &RowsReceiver,
     timeout: Duration,
-    pred: impl Fn(&[nostr::Event], &nmp::mechanism::core::AcquisitionEvidence) -> bool,
+    pred: impl Fn(&[nostr::Event], &[nmp::mechanism::core::AcquisitionEvidence]) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     let mut current: BTreeMap<EventId, nostr::Event> = BTreeMap::new();
@@ -192,7 +192,7 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
     assert!(
         wait_for_rows(&b_rows_rx, Duration::from_secs(15), |rows, evidence| {
             rows.iter().any(|r| r.id.to_hex() == b_post.id.to_hex())
-                && evidence
+                && evidence[0]
                     .sources
                     .iter()
                     .any(|s| s.reconciled_through.is_some())

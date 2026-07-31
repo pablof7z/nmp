@@ -27,51 +27,104 @@ impl<S: EventStore> EngineCore<S> {
 
     // ---- subscribe / unsubscribe / re-root ------------------------------
 
+    /// Open ONE observation over every canonical branch of `query` (#1108).
+    ///
+    /// The open is all-or-nothing: if any branch fails to build its graph,
+    /// every branch already opened is withdrawn again before returning, so a
+    /// refused observation leaves no retained graph, atom or wire ownership
+    /// and no mailbox to deliver into. On success the branches share one
+    /// projection, one evidence vector in canonical branch order, and one
+    /// cancellation.
     pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
         let mut effects = Vec::new();
         // Graph construction can read the store (a `Derived` binding resolves
         // its inner query). On a persistence failure (issue #122) degrade to
-        // read-only and install NO handle rather than panic — the observer
-        // simply receives no rows.
-        let (qh, _delta) = match self.resolver.subscribe(query) {
-            Ok(v) => v,
-            Err(e) => {
-                self.degrade_store(e, &mut effects);
-                return effects;
+        // read-only and install NO observation rather than panic — the
+        // observer simply receives no rows.
+        let mut opened: Vec<QueryHandle> = Vec::new();
+        for branch in query.branches() {
+            match self.resolver.subscribe(branch.clone()) {
+                Ok((handle, _delta)) => opened.push(handle),
+                Err(error) => {
+                    for handle in opened {
+                        let _ = self.resolver.unsubscribe(handle.id());
+                    }
+                    self.degrade_store(error, &mut effects);
+                    return effects;
+                }
             }
-        };
-        let id = qh.id();
-        let acquisition = self.decide_handle_acquisition(id, qh.freshness());
-        self.handles.insert(
-            id,
-            HandleState {
-                _handle: qh,
-                acquisition,
+        }
+
+        let observation = ObservationId(self.next_observation_id);
+        self.next_observation_id = self.next_observation_id.wrapping_add(1);
+        let branches: Vec<HandleId> = opened.iter().map(|handle| handle.id()).collect();
+        for (index, handle) in opened.into_iter().enumerate() {
+            let id = handle.id();
+            let acquisition = self.decide_handle_acquisition(id, handle.freshness());
+            self.handles.insert(
+                id,
+                BranchState {
+                    _handle: handle,
+                    acquisition,
+                    observation,
+                    index,
+                    execution: ObservationExecutionState::default(),
+                },
+            );
+        }
+        self.observations.insert(
+            observation,
+            ObservationState {
+                branches: branches.clone(),
+                aggregate_result_limit: query.aggregate_result_limit(),
                 last_rows: BTreeMap::new(),
                 last_evidence: None,
                 projection_complete: false,
-                execution: ObservationExecutionState::default(),
+                next_sequence: 0,
             },
         );
-        self.reconcile_observation_resolution(id, ResolutionCause::Initial, &mut effects);
+        for branch in &branches {
+            self.reconcile_observation_resolution(*branch, ResolutionCause::Initial, &mut effects);
+        }
         self.recompile(&mut effects);
         // A wire-contributing query can change the capped greedy source plan
         // for every existing query. A suppressed query leaves that plan
         // untouched but still needs its initial cache/evidence frame.
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
         effects
     }
 
-    pub(super) fn on_unsubscribe(&mut self, id: HandleId) -> Vec<Effect> {
+    /// Withdraw one observation and every branch it still owns.
+    ///
+    /// Each branch is released exactly once. Graph nodes and atoms are
+    /// refcounted by the resolver, so a branch whose acquisition identity is
+    /// still claimed by an unrelated observation stays live: closing this
+    /// observation withdraws only what nothing else still owns.
+    pub(super) fn on_unsubscribe(&mut self, id: ObservationId) -> Vec<Effect> {
         let mut effects = Vec::new();
-        self.emit_observation_fact(id, ObservationFact::Withdrawn, &mut effects);
-        let _delta = self.resolver.unsubscribe(id);
-        self.handles.remove(&id);
+        let Some(state) = self.observations.remove(&id) else {
+            return effects;
+        };
+        // The terminal fact is issued from the observation's own sequence
+        // before its branches disappear, so a consumer sees an ordered trace
+        // that ends in exactly one `Withdrawn`.
+        effects.push(Effect::EmitObservationEvidence(
+            id,
+            vec![ObservationEvidence {
+                sequence: state.next_sequence.saturating_add(1),
+                branch: None,
+                fact: ObservationFact::Withdrawn,
+            }],
+        ));
+        for branch in state.branches {
+            let _delta = self.resolver.unsubscribe(branch);
+            self.handles.remove(&branch);
+        }
         self.recompile(&mut effects);
         // Removing one query can free capped-plan capacity and therefore
         // change the planned sources of every surviving handle.
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
         effects
     }
@@ -272,7 +325,14 @@ impl<S: EventStore> EngineCore<S> {
                     .histories
                     .get(&self.history_by_handle[&id])
                     .expect("history handle maps to a live session");
-                self.wire_atoms_for_handle(id, &state.acquisition)
+                // A window handle contributes wire work under ITS OWN
+                // branch's opening-time decision, never a sibling branch's.
+                let branch = state.branch_of.get(&id).copied().unwrap_or_default();
+                state
+                    .acquisitions_by_branch
+                    .get(branch)
+                    .map(|acquisition| self.wire_atoms_for_handle(id, acquisition))
+                    .unwrap_or_default()
             });
         ordinary.chain(history).collect()
     }
@@ -984,7 +1044,7 @@ impl<S: EventStore> EngineCore<S> {
         );
         let settled = attributed
             .is_some_and(|completed| self.persist_attributed_completion(completed, relay, effects));
-        self.refresh_all_handle_evidence(effects);
+        self.refresh_all_observation_evidence(effects);
         self.refresh_all_history_evidence(effects);
         settled
     }
@@ -1132,35 +1192,50 @@ impl<S: EventStore> EngineCore<S> {
         );
     }
 
-    pub(super) fn refresh_all_handles(&mut self, effects: &mut Vec<Effect>) {
-        let ids: Vec<HandleId> = self.handles.keys().copied().collect();
-        self.refresh_handles(ids, effects);
+    pub(super) fn refresh_all_observations(&mut self, effects: &mut Vec<Effect>) {
+        let ids: Vec<ObservationId> = self.observations.keys().copied().collect();
+        for id in ids {
+            self.refresh_observation(id, effects);
+        }
     }
 
     /// Refresh only acquisition evidence after a coverage-only mutation.
     /// Coverage cannot change canonical rows, so a complete projection can
     /// retain its remembered row set and avoid reopening the store's event
     /// indexes. An incomplete projection still falls back to the full oracle.
-    pub(super) fn refresh_all_handle_evidence(&mut self, effects: &mut Vec<Effect>) {
-        let ids: Vec<HandleId> = self.handles.keys().copied().collect();
+    pub(super) fn refresh_all_observation_evidence(&mut self, effects: &mut Vec<Effect>) {
+        let ids: Vec<ObservationId> = self.observations.keys().copied().collect();
         for id in ids {
-            self.refresh_handle_evidence(id, effects);
+            self.refresh_observation_evidence(id, effects);
         }
     }
 
-    pub(super) fn refresh_handles(
+    /// Refresh every observation that owns at least one of these BRANCH
+    /// handles through the full oracle, exactly once each. One reactive
+    /// change touching several branches of the same observation therefore
+    /// produces ONE frame, never one frame per affected branch.
+    ///
+    /// The production committed-mutation path reaches the same observations
+    /// through [`Self::apply_committed_row_changes`], which prefers the exact
+    /// incremental algebra; this is the forced-full-refresh comparison lane.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn refresh_observations_of_branches(
         &mut self,
-        ids: impl IntoIterator<Item = HandleId>,
+        branches: impl IntoIterator<Item = HandleId>,
         effects: &mut Vec<Effect>,
     ) {
+        // The resolver also owns internal handles (notably the
+        // self-bootstrap discovery query). They participate in graph
+        // invalidation but belong to no observation here, so they are
+        // filtered out before any store read is opened.
+        let mut ids: Vec<ObservationId> = branches
+            .into_iter()
+            .filter_map(|branch| self.handles.get(&branch).map(|state| state.observation))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
         for id in ids {
-            // The resolver also owns internal handles (notably the
-            // self-bootstrap discovery query). They participate in graph
-            // invalidation but have no app projection state here. Reject
-            // them before `refresh_handle` opens any store read.
-            if self.handles.contains_key(&id) {
-                self.refresh_handle(id, effects);
-            }
+            self.refresh_observation(id, effects);
         }
     }
 
@@ -1247,7 +1322,7 @@ impl<S: EventStore> EngineCore<S> {
         #[cfg(feature = "bench-instrumentation")]
         let phase_started = std::time::Instant::now();
         if demand_changed || force_broad_refresh {
-            self.refresh_all_handles(effects);
+            self.refresh_all_observations(effects);
         } else {
             self.apply_committed_row_changes(affected.iter().copied(), &row_changes, effects);
         }
@@ -1280,45 +1355,64 @@ impl<S: EventStore> EngineCore<S> {
     /// existing full-refresh oracle until their incremental algebra is proven.
     pub(super) fn apply_committed_row_changes(
         &mut self,
-        ids: impl IntoIterator<Item = HandleId>,
+        branches: impl IntoIterator<Item = HandleId>,
         changes: &CommittedRowChanges,
         effects: &mut Vec<Effect>,
     ) {
+        let mut ids: Vec<ObservationId> = branches
+            .into_iter()
+            .filter_map(|branch| self.handles.get(&branch).map(|state| state.observation))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
         for id in ids {
-            if !self.handles.contains_key(&id) {
-                continue;
-            }
             if !self.try_apply_committed_row_changes(id, changes, effects) {
-                self.refresh_handle(id, effects);
+                self.refresh_observation(id, effects);
             }
         }
     }
 
     /// Returns `true` when the handle was fully and exactly handled without a
     /// store read (including the no-visible-change case), `false` when the
-    /// caller must fall back to `refresh_handle`.
+    /// caller must fall back to `refresh_observation`.
     pub(super) fn try_apply_committed_row_changes(
         &mut self,
-        id: HandleId,
+        id: ObservationId,
         changes: &CommittedRowChanges,
         effects: &mut Vec<Effect>,
     ) -> bool {
-        let root_atoms = self.resolver.root_atoms(id);
+        let Some(observation) = self.observations.get(&id) else {
+            return true;
+        };
+        // The incremental algebra below is proven for a single-branch
+        // observation with no aggregate bound. A composed observation has to
+        // re-derive the union and its global bound across every branch, so it
+        // keeps the full-refresh oracle until its own algebra is proven
+        // independently -- exactly as multi-root and Strict projections do.
+        if observation.branches.len() != 1 || observation.aggregate_result_limit.is_some() {
+            return false;
+        }
+        let branch = observation.branches[0];
+        let root_atoms = self.resolver.root_atoms(branch);
         // One currently-resolved root atom is not enough to prove this is
         // an ordinary projection: a Derived/SetOp query can momentarily
         // resolve to one root while still owning interior dependency atoms.
         // Keep those shapes on the full-refresh oracle until their
         // incremental algebra is proven independently.
-        if root_atoms.len() != 1 || self.resolver.subtree_atoms(id).len() != 1 {
+        if root_atoms.len() != 1 || self.resolver.subtree_atoms(branch).len() != 1 {
             return false;
         }
         let atom = root_atoms
             .first()
             .expect("one-root projection has one concrete atom");
-        let Some(state) = self.handles.get(&id) else {
+        let Some(branch_state) = self.handles.get(&branch) else {
             return true;
         };
-        if state._handle.cache() == CacheMode::Strict
+        let state = self
+            .observations
+            .get(&id)
+            .expect("observation was read at the top of this function");
+        if branch_state._handle.cache() == CacheMode::Strict
             || state.last_evidence.is_none()
             || !state.projection_complete
         {
@@ -1346,9 +1440,9 @@ impl<S: EventStore> EngineCore<S> {
         // a full store replay for O(history) memory/time inside the engine.
         if row_limit.is_none() {
             let state = self
-                .handles
+                .observations
                 .get_mut(&id)
-                .expect("handle remained live during synchronous projection");
+                .expect("observation remained live during synchronous projection");
             let evidence = state
                 .last_evidence
                 .clone()
@@ -1515,46 +1609,46 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         let state = self
-            .handles
+            .observations
             .get_mut(&id)
-            .expect("handle remained live during synchronous projection");
+            .expect("observation remained live during synchronous projection");
         state.last_rows = current;
         effects.push(Effect::EmitRows(id, delta, evidence));
         true
     }
 
-    /// Recompute `id`'s current row set + acquisition evidence; emit
-    /// `Effect::EmitRows` only if either
-    /// changed since the last refresh -- and, when something DID change, the
-    /// row payload is ALWAYS just the incremental added/sources-grew/removed
-    /// delta against `state.last_rows`, never the full current set (see
+    /// Recompute ONE observation's merged row set + per-branch acquisition
+    /// evidence and emit `Effect::EmitRows` only if either actually changed.
+    ///
+    /// Every branch is recomputed inside this ONE pass, so a reactive change
+    /// touching several branches lands as one atomic transition: the app
+    /// never sees a frame in which one branch has already re-rooted and
+    /// another has not. Rows are unioned by event id with provenance merged,
+    /// then the declared aggregate result limit is applied ONCE to that union
+    /// (never per branch), and the delta is diffed against the observation's
+    /// own last delivered state -- never the full current set (see
     /// `RowDelta`'s doc: this is what keeps a long-running subscription's
-    /// total delivered row volume ~O(distinct rows) instead of O(rows²)).
+    /// total delivered row volume ~O(distinct rows) instead of O(rows squared)).
     /// Evidence can change with no row change at all (a watermark advancing,
-    /// or a source's link status flipping) -- that case still emits,
-    /// carrying an EMPTY row delta alongside the new evidence. #105:
-    /// per-id provenance growth is detected the SAME way -- a plain value
-    /// compare of `state.last_rows`'s remembered source set against this
-    /// recompute's -- so a lifecycle-driven recompute of some OTHER
-    /// handle's query (`refresh_all_handles`, e.g. on ANY subscribe/
-    /// unsubscribe) can never spuriously emit a `SourcesGrew` for a row
-    /// whose provenance did not actually change.
-    pub(super) fn refresh_handle(&mut self, id: HandleId, effects: &mut Vec<Effect>) {
-        // A read failure while snapshotting this handle's rows (issue #122)
-        // degrades to read-only: leave the handle's LAST delivered rows
-        // untouched (never fabricate a phantom retraction from a failed
-        // read) and surface the degrade on diagnostics instead of panicking.
-        let (current, evidence) = match self.rows_and_evidence_for(id) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(state) = self.handles.get_mut(&id) {
+    /// or a source's link status flipping) -- that case still emits, carrying
+    /// an EMPTY row delta alongside the new evidence.
+    pub(super) fn refresh_observation(&mut self, id: ObservationId, effects: &mut Vec<Effect>) {
+        // A read failure while snapshotting any branch (issue #122) degrades
+        // to read-only: leave the observation's LAST delivered rows untouched
+        // (never fabricate a phantom retraction from a failed read) and
+        // surface the degrade on diagnostics instead of panicking.
+        let (current, evidence) = match self.observation_rows_and_evidence(id) {
+            Ok(Some(value)) => value,
+            Ok(None) => return,
+            Err(error) => {
+                if let Some(state) = self.observations.get_mut(&id) {
                     state.projection_complete = false;
                 }
-                self.degrade_store(e, effects);
+                self.degrade_store(error, effects);
                 return;
             }
         };
-        let Some(state) = self.handles.get_mut(&id) else {
+        let Some(state) = self.observations.get_mut(&id) else {
             return;
         };
         let current_rows: BTreeMap<EventId, RememberedRow> = current
@@ -1596,17 +1690,17 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::EmitRows(id, delta, evidence));
     }
 
-    fn refresh_handle_evidence(&mut self, id: HandleId, effects: &mut Vec<Effect>) {
-        let Some(state) = self.handles.get(&id) else {
+    fn refresh_observation_evidence(&mut self, id: ObservationId, effects: &mut Vec<Effect>) {
+        let Some(state) = self.observations.get(&id) else {
             return;
         };
         if !state.projection_complete {
-            self.refresh_handle(id, effects);
+            self.refresh_observation(id, effects);
             return;
         }
 
-        let evidence = self.handle_evidence_for(id);
-        let Some(state) = self.handles.get_mut(&id) else {
+        let evidence = self.observation_evidence_for(id);
+        let Some(state) = self.observations.get_mut(&id) else {
             return;
         };
         if state.last_evidence.as_ref() == Some(&evidence) {
@@ -1616,7 +1710,27 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::EmitRows(id, Vec::new(), evidence));
     }
 
-    fn handle_evidence_for(&self, id: HandleId) -> AcquisitionEvidence {
+    /// One acquisition-evidence entry per canonical branch, in branch order.
+    ///
+    /// Branch identity is never erased: two branches that resolved the same
+    /// scalar value keep separate entries, and a branch whose sources are all
+    /// unreachable reports its own shortfall without any sibling's proof
+    /// masking it. Nothing here is rolled up into a query-global verdict.
+    fn observation_evidence_for(&self, id: ObservationId) -> Vec<AcquisitionEvidence> {
+        let Some(state) = self.observations.get(&id) else {
+            return vec![AcquisitionEvidence {
+                sources: Vec::new(),
+                shortfall: vec![ShortfallFact::NoResolvedDemand],
+            }];
+        };
+        state
+            .branches
+            .iter()
+            .map(|branch| self.branch_evidence_for(*branch))
+            .collect()
+    }
+
+    fn branch_evidence_for(&self, id: HandleId) -> AcquisitionEvidence {
         let Some(state) = self.handles.get(&id) else {
             return AcquisitionEvidence {
                 sources: Vec::new(),
@@ -1626,8 +1740,58 @@ impl<S: EventStore> EngineCore<S> {
         self.acquisition_evidence_for_scopes(self.resolver.demand_scopes(id), &state.acquisition)
     }
 
+    /// The observation's merged current row set plus its per-branch evidence.
+    ///
+    /// Branch rows are unioned by EVENT ID -- the one row-identity the store
+    /// and the app already share -- with provenance merged, so a row admitted
+    /// by two branches appears once carrying both branches' sources. No
+    /// protocol coordinate or resolved scalar ever replaces event-id union
+    /// semantics. `Ok(None)` means the observation was withdrawn concurrently.
+    fn observation_rows_and_evidence(
+        &self,
+        id: ObservationId,
+    ) -> Result<Option<(BTreeMap<EventId, Row>, Vec<AcquisitionEvidence>)>, PersistenceError> {
+        let Some(state) = self.observations.get(&id) else {
+            return Ok(None);
+        };
+        let branches = state.branches.clone();
+        let aggregate_result_limit = state.aggregate_result_limit;
+        let mut union: BTreeMap<EventId, Row> = BTreeMap::new();
+        let mut evidence = Vec::with_capacity(branches.len());
+        for branch in &branches {
+            let (rows, branch_evidence) = self.rows_and_evidence_for(*branch)?;
+            for (event_id, row) in rows {
+                match union.entry(event_id) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(row);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().sources.extend(row.sources);
+                    }
+                }
+            }
+            evidence.push(branch_evidence);
+        }
+        // The declared aggregate bound applies to the MERGED union, once, in
+        // NIP-01 canonical newest-first order -- never N rows per branch
+        // presented as one N-row result.
+        if let Some(limit) = aggregate_result_limit {
+            if union.len() > limit {
+                let mut ordered: Vec<(u64, EventId)> = union
+                    .iter()
+                    .map(|(event_id, row)| (row.event.created_at.as_secs(), *event_id))
+                    .collect();
+                ordered.sort_by(|a, b| nip01_newest_first((a.0, &a.1), (b.0, &b.1)));
+                let keep: BTreeSet<EventId> =
+                    ordered.into_iter().take(limit).map(|(_, id)| id).collect();
+                union.retain(|event_id, _| keep.contains(event_id));
+            }
+        }
+        Ok(Some((union, evidence)))
+    }
+
     /// The query's current matching row set (by id) + its
-    /// [`AcquisitionEvidence`] -- an internal snapshot `refresh_handle`
+    /// [`AcquisitionEvidence`] -- an internal snapshot `refresh_observation`
     /// diffs against the handle's own remembered `last_rows` to compute the
     /// outgoing delta. This snapshot itself is never handed to a caller/
     /// effect directly.
@@ -1647,7 +1811,7 @@ impl<S: EventStore> EngineCore<S> {
     /// because a row outside one atom's top N already has N newer witnesses
     /// in that same atom. The final merged/deduped set is still capped ONCE,
     /// per NIP-01 per-subscription `limit` (see [`effective_row_limit`]).
-    /// Because `refresh_handle` diffs THIS truncated snapshot against
+    /// Because `refresh_observation` diffs THIS truncated snapshot against
     /// `last_rows`, the top-N is maintained reactively for free: a newer
     /// match entering the top-N evicts the oldest (Added(new)+Removed(oldest),
     /// never exceeding N), and retracting a top-N member pulls the next-newest
@@ -1737,7 +1901,7 @@ impl<S: EventStore> EngineCore<S> {
         // Applied authoritatively to the merged/deduped set in NIP-01
         // canonical newest-first order. Each root atom was only pre-bounded
         // above; this final pass preserves the per-subscription (not
-        // per-atom) contract. `refresh_handle`'s diff then maintains the
+        // per-atom) contract. `refresh_observation`'s diff then maintains the
         // top-N reactively. No-op when there is no limit or the set fits.
         if let Some(limit) = row_limit {
             if by_id.len() > limit {
@@ -1751,7 +1915,7 @@ impl<S: EventStore> EngineCore<S> {
                 by_id.retain(|event_id, _| keep.contains(event_id));
             }
         }
-        let evidence = self.handle_evidence_for(id);
+        let evidence = self.branch_evidence_for(id);
         Ok((by_id, evidence))
     }
 }

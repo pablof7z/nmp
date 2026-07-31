@@ -11,9 +11,15 @@ use super::{AttributionSendId, Effect, EngineCore, EventFailureTarget};
 /// Ordered execution evidence for one live observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationEvidence {
-    /// Monotonic within this observation. Sequence numbers are assigned by
-    /// the reducer that owns the observation, never by a delivery adapter.
+    /// Monotonic within this OBSERVATION, across all of its branches.
+    /// Sequence numbers are assigned by the reducer that owns the
+    /// observation, never by a delivery adapter and never per branch.
     pub sequence: u64,
+    /// Which canonical branch produced this fact, or `None` for a fact that
+    /// belongs to the observation as a whole (withdrawal, mailbox overflow).
+    /// Two branches can resolve identical values at identical paths; without
+    /// this, their traces would be indistinguishable.
+    pub branch: Option<usize>,
     pub fact: ObservationFact,
 }
 
@@ -134,9 +140,11 @@ pub(super) enum RememberedResolution {
     },
 }
 
+/// One BRANCH's remembered resolution state. Sequence numbers live on the
+/// owning observation, not here: the app receives one ordered trace for the
+/// whole live query, not one per branch.
 #[derive(Debug, Default)]
 pub(super) struct ObservationExecutionState {
-    next_sequence: u64,
     nodes: BTreeMap<String, RememberedResolution>,
 }
 
@@ -172,13 +180,6 @@ pub(super) struct LiveWireRequest {
 }
 
 impl ObservationExecutionState {
-    fn issue(&mut self, fact: ObservationFact) -> ObservationEvidence {
-        self.next_sequence = self.next_sequence.saturating_add(1);
-        ObservationEvidence {
-            sequence: self.next_sequence,
-            fact,
-        }
-    }
 
     pub(super) fn request_targets(
         &self,
@@ -520,6 +521,18 @@ impl<S: EventStore> EngineCore<S> {
         effects: &mut Vec<Effect>,
     ) {
         let snapshot = self.resolver.resolution_snapshot(id);
+        let Some(&BranchOwner {
+            observation,
+            index: branch,
+        }) = self.branch_owner(id).as_ref()
+        else {
+            return;
+        };
+        let mut next_sequence = self
+            .observations
+            .get(&observation)
+            .map(|state| state.next_sequence)
+            .unwrap_or_default();
         let Some(state) = self.handles.get_mut(&id) else {
             return;
         };
@@ -555,14 +568,18 @@ impl<S: EventStore> EngineCore<S> {
                         },
                     );
                     if changed {
-                        evidence.push(state.execution.issue(ObservationFact::ReactiveInput {
-                            path: node.path,
-                            field,
-                            revision,
-                            values,
-                            fingerprint,
-                            cause,
-                        }));
+                        evidence.push(issue(
+                            &mut next_sequence,
+                            branch,
+                            ObservationFact::ReactiveInput {
+                                path: node.path,
+                                field,
+                                revision,
+                                values,
+                                fingerprint,
+                                cause,
+                            },
+                        ));
                     }
                 }
                 ResolutionNodeKind::Derived { values } | ResolutionNodeKind::SetOp { values } => {
@@ -594,13 +611,17 @@ impl<S: EventStore> EngineCore<S> {
                         },
                     );
                     if changed {
-                        evidence.push(state.execution.issue(ObservationFact::DerivedSet {
-                            path: node.path,
-                            revision,
-                            values,
-                            fingerprint,
-                            cause,
-                        }));
+                        evidence.push(issue(
+                            &mut next_sequence,
+                            branch,
+                            ObservationFact::DerivedSet {
+                                path: node.path,
+                                revision,
+                                values,
+                                fingerprint,
+                                cause,
+                            },
+                        ));
                     }
                 }
                 ResolutionNodeKind::Filter { atoms } => {
@@ -634,34 +655,75 @@ impl<S: EventStore> EngineCore<S> {
                         },
                     );
                     if changed {
-                        evidence.push(state.execution.issue(ObservationFact::ConcreteFilter {
-                            path: node.path,
-                            revision,
-                            filters,
-                            fingerprint,
-                            cause,
-                        }));
+                        evidence.push(issue(
+                            &mut next_sequence,
+                            branch,
+                            ObservationFact::ConcreteFilter {
+                                path: node.path,
+                                revision,
+                                filters,
+                                fingerprint,
+                                cause,
+                            },
+                        ));
                     }
                 }
             }
         }
         if !evidence.is_empty() {
-            effects.push(Effect::EmitObservationEvidence(id, evidence));
+            if let Some(state) = self.observations.get_mut(&observation) {
+                state.next_sequence = next_sequence;
+            }
+            effects.push(Effect::EmitObservationEvidence(observation, evidence));
         }
     }
 
+    /// Issue one branch-scoped execution fact into its OBSERVATION's ordered
+    /// trace. Facts about an engine-internal handle that belongs to no
+    /// observation are dropped, exactly as their row emits already are.
     pub(super) fn emit_observation_fact(
         &mut self,
         id: HandleId,
         fact: ObservationFact,
         effects: &mut Vec<Effect>,
     ) {
-        if let Some(state) = self.handles.get_mut(&id) {
-            effects.push(Effect::EmitObservationEvidence(
-                id,
-                vec![state.execution.issue(fact)],
-            ));
-        }
+        let Some(BranchOwner { observation, index }) = self.branch_owner(id) else {
+            return;
+        };
+        let Some(state) = self.observations.get_mut(&observation) else {
+            return;
+        };
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let evidence = ObservationEvidence {
+            sequence: state.next_sequence,
+            branch: Some(index),
+            fact,
+        };
+        effects.push(Effect::EmitObservationEvidence(observation, vec![evidence]));
+    }
+
+    /// Which observation and canonical branch index a resolver handle serves.
+    pub(super) fn branch_owner(&self, id: HandleId) -> Option<BranchOwner> {
+        self.handles.get(&id).map(|state| BranchOwner {
+            observation: state.observation,
+            index: state.index,
+        })
+    }
+}
+
+/// The observation and canonical branch index one resolver handle serves.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BranchOwner {
+    pub(super) observation: super::ObservationId,
+    pub(super) index: usize,
+}
+
+fn issue(next_sequence: &mut u64, branch: usize, fact: ObservationFact) -> ObservationEvidence {
+    *next_sequence = next_sequence.saturating_add(1);
+    ObservationEvidence {
+        sequence: *next_sequence,
+        branch: Some(branch),
+        fact,
     }
 }
 
@@ -670,7 +732,7 @@ mod tests {
     use super::*;
     use crate::core::EngineMsg;
     use nmp_grammar::{Binding, Demand, Derived, Filter, Selector};
-    use nmp_resolver::LiveQuery;
+    use nmp_grammar::LiveQuery;
     use nmp_router::FixtureRoutingFacts;
     use nmp_store::{MemoryStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};

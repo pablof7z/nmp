@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
-use nmp_resolver::LiveQuery;
+use nmp_grammar::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::{RelayFrame, RelayHandle};

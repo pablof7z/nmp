@@ -13,7 +13,6 @@ use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, ReceiptReattachment, RowsReceiver};
 use nmp_grammar::{Binding, Durability, Filter, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_nip46::Nip46Signer;
-use nmp_resolver::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, RedbStore, RelayObserved, SigState};
 use nmp_transport::PoolConfig;
@@ -470,7 +469,7 @@ fn mutated_real_bunker_response_retracts_pending_and_restores_replaceable_predec
     .expect("test engine thread construction");
     handle.set_active_account(Some(user.public_key()));
     let (query_handle, rows) = handle
-        .subscribe(LiveQuery::from_filter(Filter {
+        .subscribe(nmp::LiveQuery::from_filter(Filter {
             kinds: Some(BTreeSet::from([Kind::Metadata.as_u16()])),
             authors: Some(Binding::Literal(BTreeSet::from([user
                 .public_key()

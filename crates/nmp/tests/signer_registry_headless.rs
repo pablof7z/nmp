@@ -26,7 +26,7 @@ use nmp::mechanism::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, 
 use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
-use nmp_resolver::LiveQuery;
+use nmp_grammar::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
 use nmp_signer::{
     SignerError, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,

@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
 use nmp_grammar::{Binding, Filter, IndexedTagName};
-use nmp_resolver::{HandleId, LiveQuery};
+use nmp_grammar::LiveQuery;
+use nmp::mechanism::core::ObservationId;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -154,7 +155,7 @@ fn scenario_event(
         .unwrap()
 }
 
-fn initial_snapshot(effects: Vec<Effect>) -> (HandleId, usize) {
+fn initial_snapshot(effects: Vec<Effect>) -> (ObservationId, usize) {
     effects
         .into_iter()
         .find_map(|effect| match effect {

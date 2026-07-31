@@ -158,26 +158,6 @@ use crate::graph::{
 };
 use crate::types::{Element, FieldSlot, NodeId, ParentLink, ResolvedSet};
 
-/// The declaration value of a live query: a full [`Demand`] (#106) --
-/// `selection + source + access + cache + freshness`, not a bare `Filter`. Two `Demand`s
-/// with the same `Filter` but different `source`/`access` are DIFFERENT
-/// subscriptions with distinct atom/wire/coverage identity (bug-class ledger
-/// #18). The root `cache` and `freshness` fields do not participate in that
-/// identity (see [`AcquisitionKey`]) because they are per-handle policies.
-/// Nested Demand fields remain inside `selection` and are enforced at their
-/// exact `Derived` boundary.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LiveQuery(pub Demand);
-
-impl LiveQuery {
-    /// Convenience constructor applying `Demand`'s static default
-    /// (`Demand::from_filter`) to a bare `Filter` -- the common case,
-    /// unchanged in outward behavior from M1's `LiveQuery(Filter)`.
-    pub fn from_filter(selection: Filter) -> Self {
-        Self(Demand::from_filter(selection))
-    }
-}
-
 /// The root-policy-free portion of a [`Demand`] that determines graph/atom/
 /// wire/coverage sharing (#106, atlas's resolver-threading forward-note): two
 /// Demands differing only in root `cache` or `freshness` dedup onto the same
@@ -545,13 +525,13 @@ impl<S: EventStore> Engine<S> {
 
     pub fn subscribe(
         &mut self,
-        q: LiveQuery,
+        branch: Demand,
     ) -> Result<(QueryHandle, DemandDelta), PersistenceError> {
         let drop_delta = self.drain_pending_drops();
         let handle_id = self.alloc_handle();
-        let key = AcquisitionKey::from(&q.0);
-        let cache = q.0.cache;
-        let freshness = q.0.freshness;
+        let key = AcquisitionKey::from(&branch);
+        let cache = branch.cache;
+        let freshness = branch.freshness;
 
         if let Some(&root) = self.descriptor_to_root.get(&key) {
             // Identical cache-free acquisition identity already has a
@@ -580,8 +560,9 @@ impl<S: EventStore> Engine<S> {
             return Ok((handle, merge_deltas(drop_delta, acc.into_delta())));
         }
 
-        let (source, access) = q.0.atom_context();
-        let root = self.build_filter_node(&q.0.selection, source, access, ParentLink::Root, 0)?;
+        let (source, access) = branch.atom_context();
+        let root =
+            self.build_filter_node(&branch.selection, source, access, ParentLink::Root, 0)?;
         self.descriptor_to_root.insert(key.clone(), root);
         self.graph_entries.insert(
             root,

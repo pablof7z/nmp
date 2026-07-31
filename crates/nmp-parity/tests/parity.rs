@@ -330,7 +330,8 @@ struct HandoffBaseline {
 #[derive(Debug, PartialEq, Eq)]
 struct ScenarioOutcome {
     rows: Vec<NormRow>,
-    evidence: NormEvidence,
+    /// Per-BRANCH evidence in canonical branch order (#1108).
+    evidence: Vec<NormEvidence>,
     receipts: Vec<NormStatus>,
     diagnostics: NormDiagnostics,
 }
@@ -380,7 +381,7 @@ struct FollowScenarioOutcome {
 // Swift and Kotlin wrappers use, so the direct/FFI oracle exercises it too.
 fn bridge_rows(
     stream: &Arc<NmpRowStream>,
-) -> mpsc::Receiver<(Vec<FfiRowDelta>, FfiAcquisitionEvidence)> {
+) -> mpsc::Receiver<(Vec<FfiRowDelta>, Vec<FfiAcquisitionEvidence>)> {
     let (tx, rx) = mpsc::channel();
     let stream = Arc::clone(stream);
     tokio::spawn(async move {
@@ -552,7 +553,30 @@ fn ffi_status_name(status: FfiSourceStatus) -> String {
     }
 }
 
-fn normalize_direct_evidence(evidence: AcquisitionEvidence, relay: &str) -> NormEvidence {
+/// Normalize one observation's PER-BRANCH evidence (#1108) into the
+/// order-insensitive shape the direct/FFI oracle compares. Branch order is
+/// preserved: entry `i` on one side must equal entry `i` on the other.
+fn normalize_direct_evidence(
+    evidence: Vec<AcquisitionEvidence>,
+    relay: &str,
+) -> Vec<NormEvidence> {
+    evidence
+        .into_iter()
+        .map(|branch| normalize_direct_branch_evidence(branch, relay))
+        .collect()
+}
+
+fn normalize_ffi_evidence(
+    evidence: Vec<FfiAcquisitionEvidence>,
+    relay: &str,
+) -> Vec<NormEvidence> {
+    evidence
+        .into_iter()
+        .map(|branch| normalize_ffi_branch_evidence(branch, relay))
+        .collect()
+}
+
+fn normalize_direct_branch_evidence(evidence: AcquisitionEvidence, relay: &str) -> NormEvidence {
     let mut sources = evidence
         .sources
         .into_iter()
@@ -580,7 +604,7 @@ fn normalize_direct_evidence(evidence: AcquisitionEvidence, relay: &str) -> Norm
     NormEvidence { sources, shortfall }
 }
 
-fn normalize_ffi_evidence(evidence: FfiAcquisitionEvidence, relay: &str) -> NormEvidence {
+fn normalize_ffi_branch_evidence(evidence: FfiAcquisitionEvidence, relay: &str) -> NormEvidence {
     let mut sources = evidence
         .sources
         .into_iter()
@@ -1206,15 +1230,16 @@ fn wait_for_ffi_handoff_quiescence(
     }
 }
 
-fn expected_limited_evidence() -> NormEvidence {
-    NormEvidence {
+fn expected_limited_evidence() -> Vec<NormEvidence> {
+    // One branch, so exactly one evidence entry (#1108).
+    vec![NormEvidence {
         sources: vec![NormSource {
             relay: "<loopback-relay>".to_string(),
             reconciled_through: None,
             status: "requesting".to_string(),
         }],
         shortfall: vec![],
-    }
+    }]
 }
 
 fn collect_direct_receipts(rx: FifoReceiver<WriteStatus>, relay: &str) -> Vec<NormStatus> {

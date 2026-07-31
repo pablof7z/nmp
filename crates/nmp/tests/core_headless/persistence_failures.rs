@@ -437,11 +437,11 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         kinds: Some(BTreeSet::from([1u16])),
         ..Filter::default()
     };
-    let public_query = LiveQuery(
+    let public_query = LiveQuery::single(
         nmp_grammar::Demand::new(selection.clone(), source.clone(), AccessContext::Public)
             .expect("public pinned demand"),
     );
-    let protected_query = LiveQuery(
+    let protected_query = LiveQuery::single(
         nmp_grammar::Demand::new(
             selection,
             source.clone(),

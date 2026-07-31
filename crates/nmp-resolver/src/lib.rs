@@ -18,7 +18,7 @@
 //!   traversal).
 //! - `engine` — `Engine<S: EventStore>`: construction, incremental
 //!   recompute, identity re-root, subscribe/unsubscribe, and the public
-//!   API surface (`LiveQuery`, `HandleId`, `QueryHandle`, `Metrics`,
+//!   API surface (`HandleId`, `QueryHandle`, `Metrics`,
 //!   `GraphSnapshot`).
 
 mod eval;
@@ -32,6 +32,6 @@ pub mod testkit;
 
 pub use engine::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine, GraphNodeInfo,
-    GraphSnapshot, HandleId, LiveQuery, LocalAcceptResult, Metrics, QueryHandle, RelayIngestError,
+    GraphSnapshot, HandleId, LocalAcceptResult, Metrics, QueryHandle, RelayIngestError,
     RelayIngestResult, ResolutionNodeKind, ResolutionNodeSnapshot, ResolvedValue,
 };

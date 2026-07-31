@@ -106,18 +106,29 @@ impl Accumulator {
     }
 }
 
-fn availability(active: Option<PublicKey>, evidence: &AcquisitionEvidence) -> FollowAvailability {
+/// This service observes ONE branch, but reads its frame's per-branch
+/// evidence as the slice it is: a branch that reports a hard shortfall or a
+/// failed source makes the whole projection unavailable, and every branch
+/// must have proven something before it reads Ready. No branch's proof ever
+/// stands in for another's.
+fn availability(
+    active: Option<PublicKey>,
+    evidence: &[AcquisitionEvidence],
+) -> FollowAvailability {
     if active.is_none() {
         return FollowAvailability::SignedOut;
     }
 
-    let hard_shortfall = evidence.shortfall.iter().any(|fact| {
+    let shortfall = || evidence.iter().flat_map(|branch| branch.shortfall.iter());
+    let sources = || evidence.iter().flat_map(|branch| branch.sources.iter());
+
+    let hard_shortfall = shortfall().any(|fact| {
         matches!(
             fact,
             ShortfallFact::NoPlannedSource { .. } | ShortfallFact::LocalLimit { .. }
         )
     });
-    let hard_source_failure = evidence.sources.iter().any(|source| {
+    let hard_source_failure = sources().any(|source| {
         matches!(
             source.status,
             SourceStatus::AuthDenied | SourceStatus::Error
@@ -127,26 +138,17 @@ fn availability(active: Option<PublicKey>, evidence: &AcquisitionEvidence) -> Fo
         return FollowAvailability::SourceUnavailable;
     }
 
-    if evidence.sources.is_empty()
-        || evidence
-            .sources
-            .iter()
-            .any(|source| source.reconciled_through.is_none())
-    {
+    if sources().next().is_none() || sources().any(|source| source.reconciled_through.is_none()) {
         return FollowAvailability::Acquiring;
     }
 
-    if evidence
-        .sources
-        .iter()
-        .any(|source| source.status == SourceStatus::Disconnected)
-    {
+    if sources().any(|source| source.status == SourceStatus::Disconnected) {
         return FollowAvailability::CachedOnly;
     }
 
-    if evidence.sources.iter().all(|source| {
+    if sources().all(|source| {
         source.status == SourceStatus::Requesting && source.reconciled_through.is_some()
-    }) && evidence.shortfall.is_empty()
+    }) && shortfall().next().is_none()
     {
         FollowAvailability::Ready
     } else {
@@ -158,7 +160,7 @@ fn project(
     active: Option<PublicKey>,
     target: PublicKey,
     accumulator: &Accumulator,
-    evidence: &AcquisitionEvidence,
+    evidence: &[AcquisitionEvidence],
 ) -> FollowSnapshot {
     let evidence_availability = availability(active, evidence);
     let base = active.and_then(|pubkey| accumulator.base_for(pubkey));
@@ -298,7 +300,7 @@ pub fn observe_following(
     target: PublicKey,
 ) -> Result<FollowObservation, nmp::EngineError> {
     let runtime = engine.adapter_runtime()?;
-    let subscription = engine.observe_async(nmp::LiveQuery(active_account_demand()), None)?;
+    let subscription = engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None)?;
     let cancel = subscription.cancel_handle();
     let latest = Arc::new(LatestSlot::default());
     let producer = latest.clone();
@@ -365,7 +367,7 @@ pub fn observe_following_async(
     engine: Arc<Engine>,
     target: PublicKey,
 ) -> Result<AsyncFollowObservation, nmp::EngineError> {
-    let subscription = engine.observe_async(nmp::LiveQuery(active_account_demand()), None)?;
+    let subscription = engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None)?;
     Ok(AsyncFollowObservation {
         subscription,
         engine,
@@ -510,7 +512,7 @@ fn prepare_set_following_with_timeout(
             };
 
             let subscription =
-                match engine.observe_async(nmp::LiveQuery(active_account_demand()), None) {
+                match engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None) {
                     Ok(subscription) => subscription,
                     Err(error) => {
                         tx.send(FollowActionStatus::Failed(engine_failure(error)));
@@ -708,7 +710,12 @@ mod tests {
             shortfall: vec![],
         };
 
-        let snapshot = project(Some(author), target, &Accumulator::default(), &evidence);
+        let snapshot = project(
+            Some(author),
+            target,
+            &Accumulator::default(),
+            std::slice::from_ref(&evidence),
+        );
         assert_eq!(snapshot.relationship, FollowRelationship::NotFollowing);
         assert_eq!(snapshot.availability, FollowAvailability::NoContactList);
         assert_eq!(snapshot.base_event_id, None);

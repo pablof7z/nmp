@@ -70,6 +70,11 @@ pub enum EngineError {
     /// selection that already carries a NIP-01 `limit` (#485). A window and a
     /// `limit` would be two competing owners of row membership.
     WindowSelectionHasLimit,
+    /// A windowed [`Engine::observe`](crate::Engine::observe) was given a
+    /// live query that already declares an aggregate result limit (#1108).
+    /// The window and the aggregate bound would be two competing owners of
+    /// the same merged row-membership count.
+    WindowAggregateResultLimit,
     /// The upper-half namespace reserved for failures rejected before
     /// durable acceptance has been completely consumed.
     ReceiptCorrelationIdExhausted,
@@ -112,6 +117,10 @@ impl std::fmt::Display for EngineError {
             Self::WindowSelectionHasLimit => {
                 write!(f, "a windowed selection must not also declare a limit")
             }
+            Self::WindowAggregateResultLimit => write!(
+                f,
+                "a windowed observation must not also declare an aggregate result limit"
+            ),
             Self::ReceiptCorrelationIdExhausted => {
                 write!(f, "receipt correlation id namespace exhausted")
             }
