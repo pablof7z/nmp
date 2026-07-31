@@ -219,10 +219,10 @@ fn exact_policy_denial_commits_before_emit_and_replays_the_same_terminal_fact() 
         .intent_id
         .unwrap();
     assert!(matches!(
-        fixture.core.resolver.store().recover_outbox_lanes(intent).unwrap()[0].state,
-        LaneState::Terminal {
+        fixture.core.resolver.store().recover_delivery_lanes(intent).unwrap()[0].state,
+        DeliveryLaneState::Terminal {
             ordinal: 0,
-            outcome: LaneTerminalOutcome::AuthDenied(StoredAuthDenial {
+            outcome: DeliveryTerminalOutcome::AuthDenied(StoredAuthDenial {
                 source: StoredAuthDenialSource::Policy,
                 ref reason,
             }),
@@ -282,10 +282,10 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
             .core
             .resolver
             .store()
-            .recover_outbox_lanes(intent)
+            .recover_delivery_lanes(intent)
             .unwrap()[0]
             .state,
-        LaneState::WaitingAuth
+        DeliveryLaneState::WaitingAuth
     ));
 
     let token = token.unwrap();
@@ -327,11 +327,11 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
             .core
             .resolver
             .store()
-            .recover_outbox_lanes(intent)
+            .recover_delivery_lanes(intent)
             .unwrap()[0]
             .state,
-        LaneState::Terminal {
-            outcome: LaneTerminalOutcome::AuthDenied(_),
+        DeliveryLaneState::Terminal {
+            outcome: DeliveryTerminalOutcome::AuthDenied(_),
             ..
         }
     ));
@@ -414,10 +414,10 @@ fn auth_error_unavailable_and_subscription_closed_never_terminalize_a_write() {
                 .core
                 .resolver
                 .store()
-                .recover_outbox_lanes(intent)
+                .recover_delivery_lanes(intent)
                 .unwrap()[0]
                 .state,
-            LaneState::WaitingAuth
+            DeliveryLaneState::WaitingAuth
         );
     }
 
@@ -442,10 +442,10 @@ fn auth_error_unavailable_and_subscription_closed_never_terminalize_a_write() {
             .core
             .resolver
             .store()
-            .recover_outbox_lanes(intent)
+            .recover_delivery_lanes(intent)
             .unwrap()[0]
             .state,
-        LaneState::WaitingAuth
+        DeliveryLaneState::WaitingAuth
     );
 
     let (_, policy) = closed.challenge("after closure");
@@ -551,10 +551,10 @@ fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
     assert_eq!(
         core.resolver
             .store()
-            .recover_outbox_lanes(bob_intent)
+            .recover_delivery_lanes(bob_intent)
             .unwrap()[0]
             .state,
-        LaneState::WaitingAuth
+        DeliveryLaneState::WaitingAuth
     );
 
     let bob_released = core.handle(EngineMsg::AuthProbeReleased(

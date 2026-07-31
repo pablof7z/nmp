@@ -10,15 +10,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_grammar::{
+    AccessContext, ConcreteFilter, ContextualAtom, CorrelationToken, SourceAuthority,
+};
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
 use serde_json::{json, Value};
 
 use crate::{
-    coverage_key, sentinel_signature, AcceptOutcome, AcceptWrite, AttemptHandoffDetail,
-    AttemptOutcome, CoverageInterval, EventStore, GcRetentionSet, HandoffEvidence, InsertOutcome,
-    IntentId, IntentSigState, LaneKey, MemoryStore, PostHandoffState, RedbStore, RefuseReason,
-    RelayObserved, StoredEvent, TransientCause, WriteDurability,
+    coverage_key, sentinel_signature, AcceptOutcome, AcceptWrite, CoverageInterval,
+    DeliveryAttemptHandoff, DeliveryAttemptOutcome, DeliveryLaneKey, DeliveryPostHandoffState,
+    DeliveryTransientCause, EventStore, GcRetentionSet, HandoffEvidence, InsertOutcome, IntentId,
+    IntentSigState, MemoryStore, RedbStore, RefuseReason, RelayObserved, StoredEvent,
+    WriteDurability,
 };
 
 const ALICE_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -38,6 +41,7 @@ struct Checkpoint {
 struct OracleContext {
     receipt_ids: Vec<u64>,
     intent_ids: Vec<IntentId>,
+    correlations: Vec<String>,
     coverage: Vec<(ContextualAtom, RelayUrl)>,
 }
 
@@ -58,6 +62,10 @@ struct TraceFixture {
     publish_signed: Event,
     publish_frozen: Event,
     cancel_frozen: Event,
+    edge_signed: Event,
+    edge_frozen: Event,
+    superseded_old_frozen: Event,
+    superseding_new_frozen: Event,
 }
 
 impl TraceFixture {
@@ -66,6 +74,12 @@ impl TraceFixture {
         let future_target = regular(alice, "arrives after deletion", 170);
         let (publish_signed, publish_frozen) = signed_and_frozen(bob, "publish with retry", 220);
         let (_, cancel_frozen) = signed_and_frozen(bob, "cancel before signing", 230);
+        let (edge_signed, edge_frozen) =
+            signed_and_frozen(bob, "terminal delivery edge cases", 270);
+        let superseded_old_frozen =
+            frozen_from(replaceable(bob, "superseded pending metadata", 280));
+        let superseding_new_frozen =
+            frozen_from(replaceable(bob, "superseding pending metadata", 281));
         Self {
             duplicate: regular(alice, "duplicate provenance", 100),
             old_replaceable: replaceable(alice, "old metadata", 110),
@@ -82,6 +96,10 @@ impl TraceFixture {
             publish_signed,
             publish_frozen,
             cancel_frozen,
+            edge_signed,
+            edge_frozen,
+            superseded_old_frozen,
+            superseding_new_frozen,
         }
     }
 }
@@ -90,7 +108,7 @@ enum Harness {
     Memory(Box<MemoryStore>),
     Redb {
         path: PathBuf,
-        store: Option<RedbStore>,
+        store: Option<Box<RedbStore>>,
     },
 }
 
@@ -103,14 +121,14 @@ impl Harness {
         let store = RedbStore::open(&path).expect("open oracle Redb store");
         Self::Redb {
             path,
-            store: Some(store),
+            store: Some(Box::new(store)),
         }
     }
 
     fn store(&mut self) -> &mut dyn EventStore {
         match self {
             Self::Memory(store) => store.as_mut(),
-            Self::Redb { store, .. } => store.as_mut().expect("Redb harness store is open"),
+            Self::Redb { store, .. } => store.as_deref_mut().expect("Redb harness store is open"),
         }
     }
 
@@ -125,12 +143,14 @@ impl Harness {
 
         if let Self::Redb { path, store } = self {
             let recovery_before = normalized_recovery_state(
-                store.as_ref().expect("Redb harness store is open"),
+                store.as_deref().expect("Redb harness store is open"),
                 context,
             );
             drop(store.take());
-            *store = Some(RedbStore::open(path).expect("reopen oracle Redb store"));
-            let reopened = store.as_ref().expect("reopened Redb harness store");
+            *store = Some(Box::new(
+                RedbStore::open(path).expect("reopen oracle Redb store"),
+            ));
+            let reopened = store.as_deref().expect("reopened Redb harness store");
             let after = normalized_state(reopened, context, alice, primary_relay);
             assert_eq!(
                 after, before,
@@ -203,7 +223,12 @@ fn expiring(keys: &Keys, content: &str, created_at: u64, expiration: u64) -> Eve
 
 fn signed_and_frozen(keys: &Keys, content: &str, created_at: u64) -> (Event, Event) {
     let signed = regular(keys, content, created_at);
-    let frozen = Event::new(
+    let frozen = frozen_from(signed.clone());
+    (signed, frozen)
+}
+
+fn frozen_from(signed: Event) -> Event {
+    Event::new(
         signed.id,
         signed.pubkey,
         signed.created_at,
@@ -211,11 +236,19 @@ fn signed_and_frozen(keys: &Keys, content: &str, created_at: u64) -> (Event, Eve
         signed.tags.clone(),
         signed.content.clone(),
         sentinel_signature(),
-    );
-    (signed, frozen)
+    )
 }
 
 fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
+    accept_correlated(frozen, keys, accepted_at, None)
+}
+
+fn accept_correlated(
+    frozen: Event,
+    keys: &Keys,
+    accepted_at: u64,
+    correlation: Option<&str>,
+) -> AcceptWrite {
     AcceptWrite {
         frozen,
         replaceable_base: None,
@@ -226,7 +259,7 @@ fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
         routing: "semantic-oracle-route".into(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
-        correlation: None,
+        correlation: correlation.map(|token| CorrelationToken::try_from(token).unwrap()),
     }
 }
 
@@ -355,7 +388,17 @@ fn normalized_state(
                 "routes": format!("{:?}", store.recover_route_revisions(*intent_id).expect("routes")),
                 "attempts": format!("{:?}", store.recover_attempts(*intent_id).expect("attempts")),
                 "details": format!("{:?}", store.recover_attempt_details(*intent_id).expect("attempt details")),
-                "lanes": format!("{:?}", store.recover_outbox_lanes(*intent_id).expect("lanes")),
+                "lanes": format!("{:?}", store.recover_delivery_lanes(*intent_id).expect("lanes")),
+            })
+        })
+        .collect::<Vec<_>>();
+    let correlations = context
+        .correlations
+        .iter()
+        .map(|token| {
+            json!({
+                "token": token,
+                "receipt_id": store.lookup_correlation(token).expect("correlation lookup"),
             })
         })
         .collect::<Vec<_>>();
@@ -372,8 +415,9 @@ fn normalized_state(
         },
         "coverage": coverage,
         "receipts": receipts,
+        "correlations": correlations,
         "delivery": delivery,
-        "deadlines": format!("{:?}", store.due_outbox_deadlines(Timestamp::from(u64::MAX), 1_000).expect("deadlines")),
+        "deadlines": format!("{:?}", store.due_delivery_deadlines(Timestamp::from(u64::MAX), 1_000).expect("deadlines")),
         "next_expiration": store.next_expiration().map(|value| value.as_secs()),
     });
     serde_json::to_string(&state).expect("serialize normalized oracle state")
@@ -381,8 +425,8 @@ fn normalized_state(
 
 fn normalized_recovery_state(store: &dyn EventStore, context: &OracleContext) -> String {
     let intents = store
-        .recover_outbox()
-        .expect("crash-oracle recover_outbox")
+        .recover_delivery()
+        .expect("crash-oracle recover_delivery")
         .into_iter()
         .map(|intent| {
             json!({
@@ -411,8 +455,22 @@ fn normalized_recovery_state(store: &dyn EventStore, context: &OracleContext) ->
             )
         })
         .collect::<Vec<_>>();
-    serde_json::to_string(&json!({"open_intents": intents, "receipts": receipts}))
-        .expect("serialize recovery state")
+    let correlations = context
+        .correlations
+        .iter()
+        .map(|token| {
+            json!({
+                "token": token,
+                "receipt_id": store.lookup_correlation(token).expect("recovery correlation lookup"),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&json!({
+        "open_intents": intents,
+        "receipts": receipts,
+        "correlations": correlations,
+    }))
+    .expect("serialize recovery state")
 }
 
 /// Stable semantic digest used by every process-death failpoint. Individual
@@ -428,8 +486,8 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
             .expect("crash-oracle ordered query"),
     );
     let intents = store
-        .recover_outbox()
-        .expect("crash-oracle recover_outbox")
+        .recover_delivery()
+        .expect("crash-oracle recover_delivery")
         .into_iter()
         .map(|intent| {
             json!({
@@ -442,7 +500,7 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
                 "routes": format!("{:?}", store.recover_route_revisions(intent.intent_id).expect("crash-oracle routes")),
                 "attempts": format!("{:?}", store.recover_attempts(intent.intent_id).expect("crash-oracle attempts")),
                 "details": format!("{:?}", store.recover_attempt_details(intent.intent_id).expect("crash-oracle details")),
-                "lanes": format!("{:?}", store.recover_outbox_lanes(intent.intent_id).expect("crash-oracle lanes")),
+                "lanes": format!("{:?}", store.recover_delivery_lanes(intent.intent_id).expect("crash-oracle lanes")),
             })
         })
         .collect::<Vec<_>>();
@@ -450,7 +508,7 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
         "events": rows,
         "ordered": ordered,
         "open_intents": intents,
-        "deadlines": format!("{:?}", store.due_outbox_deadlines(Timestamp::from(u64::MAX), 1_024).expect("crash-oracle deadlines")),
+        "deadlines": format!("{:?}", store.due_delivery_deadlines(Timestamp::from(u64::MAX), 1_024).expect("crash-oracle deadlines")),
         "next_expiration": store.next_expiration().map(|value| value.as_secs()),
     }))
     .expect("serialize crash-oracle state");
@@ -476,6 +534,9 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     let primary = relay("wss://oracle-primary.example");
     let secondary = relay("wss://oracle-secondary.example");
     let publish = relay("wss://oracle-publish.example");
+    let unknown_relay = relay("wss://oracle-unknown.example");
+    let gave_up_relay = relay("wss://oracle-gave-up.example");
+    let interrupted_relay = relay("wss://oracle-interrupted.example");
     let atom = coverage_atom(&coverage_author);
     let max_atom = coverage_atom(&max_coverage_author);
     let mut context = OracleContext {
@@ -822,6 +883,304 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &primary,
     );
 
+    let superseded = harness
+        .store()
+        .accept_write(accept(fixture.superseded_old_frozen.clone(), &bob, 280))
+        .unwrap();
+    let superseded_intent = superseded
+        .journaled_intent_id()
+        .expect("superseded candidate intent");
+    context.intent_ids.push(superseded_intent);
+    context.receipt_ids.push(
+        superseded
+            .journaled_receipt_id()
+            .expect("superseded receipt"),
+    );
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "replaceable delivery accepted",
+        &alice,
+        &primary,
+    );
+
+    let superseding = harness
+        .store()
+        .accept_write(accept(fixture.superseding_new_frozen.clone(), &bob, 281))
+        .unwrap();
+    let superseding_intent = superseding
+        .journaled_intent_id()
+        .expect("superseding intent");
+    match &superseding {
+        AcceptOutcome::Superseded { retired, .. } => {
+            assert!(
+                retired
+                    .iter()
+                    .any(|retired| retired.intent_id == superseded_intent),
+                "newer unattempted replacement retires the older delivery obligation"
+            );
+        }
+        other => panic!("expected superseding acceptance, got {other:?}"),
+    }
+    context.intent_ids.push(superseding_intent);
+    context.receipt_ids.push(
+        superseding
+            .journaled_receipt_id()
+            .expect("superseding receipt"),
+    );
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "replaceable delivery superseded",
+        &alice,
+        &primary,
+    );
+    assert!(matches!(
+        harness
+            .store()
+            .compensate_write(superseding_intent)
+            .unwrap(),
+        crate::CompensateOutcome::Compensated { .. }
+    ));
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "superseding delivery compensated",
+        &alice,
+        &primary,
+    );
+
+    let edge_correlation = "semantic-oracle-terminal-edges";
+    let edge = harness
+        .store()
+        .accept_write(accept_correlated(
+            fixture.edge_frozen.clone(),
+            &bob,
+            290,
+            Some(edge_correlation),
+        ))
+        .unwrap();
+    let edge_intent = edge.journaled_intent_id().expect("edge intent");
+    let edge_receipt = edge.journaled_receipt_id().expect("edge receipt");
+    context.intent_ids.push(edge_intent);
+    context.receipt_ids.push(edge_receipt);
+    context.correlations.push(edge_correlation.to_owned());
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "correlated multi-relay delivery accepted",
+        &alice,
+        &primary,
+    );
+    harness
+        .store()
+        .promote_signed(edge_intent, fixture.edge_signed.sig)
+        .unwrap();
+    harness
+        .store()
+        .record_route_revision(
+            edge_intent,
+            BTreeSet::from([
+                unknown_relay.clone(),
+                gave_up_relay.clone(),
+                interrupted_relay.clone(),
+            ]),
+        )
+        .unwrap();
+    harness
+        .store()
+        .bootstrap_delivery_lanes(edge_intent)
+        .unwrap();
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "correlated multi-relay lanes durable",
+        &alice,
+        &primary,
+    );
+
+    let edge_lanes = harness.store().recover_delivery_lanes(edge_intent).unwrap();
+    let unknown_key = DeliveryLaneKey {
+        intent_id: edge_intent,
+        relay: unknown_relay,
+    };
+    let unknown_lane = edge_lanes
+        .iter()
+        .find(|lane| lane.key == unknown_key)
+        .expect("unknown lane");
+    let unknown_lane = harness
+        .store()
+        .set_lane_eligible(&unknown_key, unknown_lane.revision, Timestamp::from(291))
+        .unwrap();
+    let (unknown_attempt, unknown_lane) = harness
+        .store()
+        .start_lane_attempt(
+            &unknown_key,
+            unknown_lane.revision,
+            fixture.edge_signed.clone(),
+            Timestamp::from(292),
+        )
+        .unwrap();
+    harness
+        .store()
+        .record_lane_handoff(
+            &unknown_key,
+            unknown_lane.revision,
+            unknown_attempt.ordinal,
+            DeliveryAttemptHandoff {
+                at: Timestamp::from(293),
+                result: HandoffEvidence::Ambiguous,
+            },
+            DeliveryPostHandoffState::Terminal {
+                outcome: DeliveryAttemptOutcome::OutcomeUnknown,
+                finished_at: Timestamp::from(293),
+            },
+        )
+        .unwrap();
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "ambiguous handoff became outcome unknown",
+        &alice,
+        &primary,
+    );
+
+    let gave_up_key = DeliveryLaneKey {
+        intent_id: edge_intent,
+        relay: gave_up_relay,
+    };
+    let gave_up_lane = edge_lanes
+        .iter()
+        .find(|lane| lane.key == gave_up_key)
+        .expect("gave-up lane");
+    let gave_up_lane = harness
+        .store()
+        .set_lane_eligible(&gave_up_key, gave_up_lane.revision, Timestamp::from(294))
+        .unwrap();
+    let (gave_up_attempt, gave_up_lane) = harness
+        .store()
+        .start_lane_attempt(
+            &gave_up_key,
+            gave_up_lane.revision,
+            fixture.edge_signed.clone(),
+            Timestamp::from(295),
+        )
+        .unwrap();
+    harness
+        .store()
+        .finish_lane_attempt(
+            &gave_up_key,
+            gave_up_lane.revision,
+            gave_up_attempt.ordinal,
+            DeliveryAttemptOutcome::GaveUp,
+            Timestamp::from(296),
+        )
+        .unwrap();
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "delivery attempt gave up",
+        &alice,
+        &primary,
+    );
+
+    let interrupted_key = DeliveryLaneKey {
+        intent_id: edge_intent,
+        relay: interrupted_relay,
+    };
+    let interrupted_lane = edge_lanes
+        .iter()
+        .find(|lane| lane.key == interrupted_key)
+        .expect("interrupted lane");
+    let interrupted_lane = harness
+        .store()
+        .set_lane_eligible(
+            &interrupted_key,
+            interrupted_lane.revision,
+            Timestamp::from(297),
+        )
+        .unwrap();
+    let (interrupted_attempt, interrupted_lane) = harness
+        .store()
+        .start_lane_attempt(
+            &interrupted_key,
+            interrupted_lane.revision,
+            fixture.edge_signed.clone(),
+            Timestamp::from(298),
+        )
+        .unwrap();
+    let interrupted_lane = harness
+        .store()
+        .suspend_lane_attempt(
+            &interrupted_key,
+            interrupted_lane.revision,
+            interrupted_attempt.ordinal,
+            Timestamp::from(299),
+            DeliveryTransientCause::Interrupted,
+            Some("oracle process interruption".into()),
+            false,
+        )
+        .unwrap();
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "in-flight delivery interrupted",
+        &alice,
+        &primary,
+    );
+    let interrupted_lane = harness
+        .store()
+        .set_lane_eligible(
+            &interrupted_key,
+            interrupted_lane.revision,
+            Timestamp::from(300),
+        )
+        .unwrap();
+    let (rejection_attempt, rejection_lane) = harness
+        .store()
+        .start_lane_attempt(
+            &interrupted_key,
+            interrupted_lane.revision,
+            fixture.edge_signed.clone(),
+            Timestamp::from(301),
+        )
+        .unwrap();
+    harness
+        .store()
+        .finish_lane_attempt(
+            &interrupted_key,
+            rejection_lane.revision,
+            rejection_attempt.ordinal,
+            DeliveryAttemptOutcome::Rejected("oracle relay rejected".into()),
+            Timestamp::from(302),
+        )
+        .unwrap();
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "retry ended in relay rejection",
+        &alice,
+        &primary,
+    );
+    harness.store().close_terminal_intent(edge_intent).unwrap();
+    record(
+        &mut harness,
+        &context,
+        &mut checkpoints,
+        "multi-relay terminal obligation closed",
+        &alice,
+        &primary,
+    );
+
     harness
         .store()
         .record_route_revision(publish_intent, BTreeSet::from([publish.clone()]))
@@ -836,7 +1195,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     );
     harness
         .store()
-        .bootstrap_outbox_lanes(publish_intent)
+        .bootstrap_delivery_lanes(publish_intent)
         .unwrap();
     record(
         &mut harness,
@@ -847,7 +1206,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &primary,
     );
 
-    let lane_key = LaneKey {
+    let lane_key = DeliveryLaneKey {
         intent_id: publish_intent,
         relay: publish,
     };
@@ -886,13 +1245,13 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &lane_key,
             lane.revision,
             attempt.ordinal,
-            AttemptHandoffDetail {
+            DeliveryAttemptHandoff {
                 at: Timestamp::from(242),
                 result: HandoffEvidence::Ambiguous,
             },
-            PostHandoffState::Transient {
+            DeliveryPostHandoffState::Transient {
                 eligible_at: Timestamp::from(250),
-                cause: TransientCause::ConnectionLost,
+                cause: DeliveryTransientCause::ConnectionLost,
                 raw_reason: Some("oracle retry".into()),
             },
         )
@@ -908,7 +1267,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
 
     let retry_lane = harness
         .store()
-        .recover_outbox_lanes(publish_intent)
+        .recover_delivery_lanes(publish_intent)
         .unwrap()
         .remove(0);
     let retry_lane = harness
@@ -941,11 +1300,11 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &lane_key,
             retry_lane.revision,
             retry.ordinal,
-            AttemptHandoffDetail {
+            DeliveryAttemptHandoff {
                 at: Timestamp::from(252),
                 result: HandoffEvidence::Written,
             },
-            PostHandoffState::AwaitingAck {
+            DeliveryPostHandoffState::AwaitingAck {
                 deadline: Timestamp::from(260),
             },
         )
@@ -965,7 +1324,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &lane_key,
             awaiting_ack.revision,
             retry.ordinal,
-            AttemptOutcome::Acked,
+            DeliveryAttemptOutcome::Acked,
             Timestamp::from(253),
         )
         .unwrap();

@@ -37,7 +37,7 @@ The standard Keychain-backed signer provider remains tracked work. The app owns
 identity policy and may attach remote/hardware/custom providers. For explicit
 personal/development opt-in, `NMPInsecureFileAccountStore(fileURL:)` provides
 plaintext app-sandbox autologin without placing secret material in the Rust
-event/outbox store; pass it to `NMPEngine` and call
+event/delivery store; pass it to `NMPEngine` and call
 `clearPersistedAccount()` before destroying the live signer on sign-out.
 
 For the currently built local remote-signer path, add `primalconnect` to the

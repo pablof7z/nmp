@@ -18,7 +18,7 @@ use nmp::mechanism::core::{
     ObservationFact, ReceiptId, RequestTerminal, RowDelta, ShortfallFact, SourceEvidence,
     SourceStatus,
 };
-use nmp::mechanism::outbox::{RetryCause, WriteStatus};
+use nmp::mechanism::delivery::{RetryCause, WriteStatus};
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, Identity,
     RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
@@ -26,11 +26,11 @@ use nmp_grammar::{
 use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AttemptOutcome, CancelEphemeralOutcome, CompensateOutcome,
-    CompensationReason, CoverageInterval, CoverageKey, DurabilityOutcome, EventStore, GcReport,
+    AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
+    CoverageInterval, CoverageKey, DeliveryAttempt, DeliveryAttemptOutcome, DeliveryIntent,
+    DeliveryReceipt, DeliveryRouteRevision, DurabilityOutcome, EventStore, GcReport,
     GcRetentionSet, InsertOutcome, MemoryStore, PersistenceError, PersistenceFault, PromoteOutcome,
-    RecoveredAttempt, RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RedbStore,
-    RelayObserved, RetractReason, StoredEvent,
+    RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -121,84 +121,84 @@ struct FailOnceCompensationStore {
 
 macro_rules! delegate_lane_methods {
     ($inner:ident) => {
-        fn bootstrap_outbox_lanes(
+        fn bootstrap_delivery_lanes(
             &mut self,
             intent_id: nmp_store::IntentId,
-        ) -> Result<Vec<nmp_store::RecoveredLane>, PersistenceError> {
-            self.$inner.bootstrap_outbox_lanes(intent_id)
+        ) -> Result<Vec<nmp_store::DeliveryLane>, PersistenceError> {
+            self.$inner.bootstrap_delivery_lanes(intent_id)
         }
-        fn recover_outbox_lanes(
+        fn recover_delivery_lanes(
             &self,
             intent_id: nmp_store::IntentId,
-        ) -> Result<Vec<nmp_store::RecoveredLane>, PersistenceError> {
-            self.$inner.recover_outbox_lanes(intent_id)
+        ) -> Result<Vec<nmp_store::DeliveryLane>, PersistenceError> {
+            self.$inner.recover_delivery_lanes(intent_id)
         }
-        fn due_outbox_deadlines(
+        fn due_delivery_deadlines(
             &self,
             now: Timestamp,
             limit: usize,
-        ) -> Result<Vec<nmp_store::LaneDeadline>, PersistenceError> {
-            self.$inner.due_outbox_deadlines(now, limit)
+        ) -> Result<Vec<nmp_store::DeliveryDeadline>, PersistenceError> {
+            self.$inner.due_delivery_deadlines(now, limit)
         }
-        fn next_outbox_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-            self.$inner.next_outbox_deadline()
+        fn next_delivery_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+            self.$inner.next_delivery_deadline()
         }
         fn set_lane_waiting(
             &mut self,
-            key: &nmp_store::LaneKey,
+            key: &nmp_store::DeliveryLaneKey,
             revision: u64,
             auth: bool,
-        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+        ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
             self.$inner.set_lane_waiting(key, revision, auth)
         }
         fn set_lane_eligible(
             &mut self,
-            key: &nmp_store::LaneKey,
+            key: &nmp_store::DeliveryLaneKey,
             revision: u64,
             since: Timestamp,
-        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+        ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
             self.$inner.set_lane_eligible(key, revision, since)
         }
         fn set_lane_transient(
             &mut self,
-            key: &nmp_store::LaneKey,
+            key: &nmp_store::DeliveryLaneKey,
             revision: u64,
             ordinal: u64,
             eligible_at: Timestamp,
-            cause: nmp_store::TransientCause,
+            cause: nmp_store::DeliveryTransientCause,
             raw_reason: Option<String>,
-        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+        ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
             self.$inner
                 .set_lane_transient(key, revision, ordinal, eligible_at, cause, raw_reason)
         }
         fn suspend_lane_attempt(
             &mut self,
-            key: &nmp_store::LaneKey,
+            key: &nmp_store::DeliveryLaneKey,
             revision: u64,
             ordinal: u64,
             at: Timestamp,
-            cause: nmp_store::TransientCause,
+            cause: nmp_store::DeliveryTransientCause,
             raw_reason: Option<String>,
             auth: bool,
-        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+        ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
             self.$inner
                 .suspend_lane_attempt(key, revision, ordinal, at, cause, raw_reason, auth)
         }
         fn record_lane_handoff(
             &mut self,
-            key: &nmp_store::LaneKey,
+            key: &nmp_store::DeliveryLaneKey,
             revision: u64,
             ordinal: u64,
-            detail: nmp_store::AttemptHandoffDetail,
-            next: nmp_store::PostHandoffState,
-        ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+            detail: nmp_store::DeliveryAttemptHandoff,
+            next: nmp_store::DeliveryPostHandoffState,
+        ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
             self.$inner
                 .record_lane_handoff(key, revision, ordinal, detail, next)
         }
         fn recover_attempt_details(
             &self,
             intent_id: nmp_store::IntentId,
-        ) -> Result<Vec<nmp_store::RecoveredAttemptDetails>, PersistenceError> {
+        ) -> Result<Vec<nmp_store::DeliveryAttemptDetails>, PersistenceError> {
             self.$inner.recover_attempt_details(intent_id)
         }
         fn close_terminal_intent(
@@ -310,13 +310,13 @@ impl EventStore for FailOnceCompensationStore {
     fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
         self.inner.mark_ephemeral_signed(receipt_id)
     }
-    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
-        self.inner.recover_outbox()
+    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
+        self.inner.recover_delivery()
     }
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
+    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
@@ -326,40 +326,40 @@ impl EventStore for FailOnceCompensationStore {
         &mut self,
         intent_id: nmp_store::IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+    ) -> Result<DeliveryRouteRevision, PersistenceError> {
         self.inner.record_route_revision(intent_id, relays)
     }
     fn recover_route_revisions(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
     fn recover_attempts(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
     delegate_lane_methods!(inner);
     fn start_lane_attempt(
         &mut self,
-        key: &nmp_store::LaneKey,
+        key: &nmp_store::DeliveryLaneKey,
         revision: u64,
         event: nostr::Event,
         started_at: Timestamp,
-    ) -> Result<(RecoveredAttempt, nmp_store::RecoveredLane), PersistenceError> {
+    ) -> Result<(DeliveryAttempt, nmp_store::DeliveryLane), PersistenceError> {
         self.inner
             .start_lane_attempt(key, revision, event, started_at)
     }
     fn finish_lane_attempt(
         &mut self,
-        key: &nmp_store::LaneKey,
+        key: &nmp_store::DeliveryLaneKey,
         revision: u64,
         ordinal: u64,
-        outcome: AttemptOutcome,
+        outcome: DeliveryAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
         if self.fail_next_attempt_finish {
             self.fail_next_attempt_finish = false;
             return Err(PersistenceError::invariant(
@@ -460,13 +460,13 @@ impl EventStore for SharedFailStartStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
-        self.inner.recover_outbox()
+    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
+        self.inner.recover_delivery()
     }
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
+    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
@@ -476,29 +476,29 @@ impl EventStore for SharedFailStartStore {
         &mut self,
         intent_id: nmp_store::IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+    ) -> Result<DeliveryRouteRevision, PersistenceError> {
         self.inner.record_route_revision(intent_id, relays)
     }
     fn recover_route_revisions(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
     fn recover_attempts(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
     delegate_lane_methods!(inner);
     fn start_lane_attempt(
         &mut self,
-        key: &nmp_store::LaneKey,
+        key: &nmp_store::DeliveryLaneKey,
         revision: u64,
         event: nostr::Event,
         started_at: Timestamp,
-    ) -> Result<(RecoveredAttempt, nmp_store::RecoveredLane), PersistenceError> {
+    ) -> Result<(DeliveryAttempt, nmp_store::DeliveryLane), PersistenceError> {
         if self.failed_relays.contains(&key.relay) {
             return Err(PersistenceError::invariant(
                 "injected attempt start failure",
@@ -509,12 +509,12 @@ impl EventStore for SharedFailStartStore {
     }
     fn finish_lane_attempt(
         &mut self,
-        key: &nmp_store::LaneKey,
+        key: &nmp_store::DeliveryLaneKey,
         revision: u64,
         ordinal: u64,
-        outcome: AttemptOutcome,
+        outcome: DeliveryAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
     }
@@ -619,13 +619,13 @@ impl EventStore for RedbFailStartStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
-        self.inner.recover_outbox()
+    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
+        self.inner.recover_delivery()
     }
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
+    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
@@ -635,7 +635,7 @@ impl EventStore for RedbFailStartStore {
         &mut self,
         intent_id: nmp_store::IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+    ) -> Result<DeliveryRouteRevision, PersistenceError> {
         if self.fail_route_revisions {
             return Err(PersistenceError::invariant(
                 "injected route revision failure",
@@ -646,23 +646,23 @@ impl EventStore for RedbFailStartStore {
     fn recover_route_revisions(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
     fn recover_attempts(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
     delegate_lane_methods!(inner);
     fn start_lane_attempt(
         &mut self,
-        key: &nmp_store::LaneKey,
+        key: &nmp_store::DeliveryLaneKey,
         revision: u64,
         event: nostr::Event,
         started_at: Timestamp,
-    ) -> Result<(RecoveredAttempt, nmp_store::RecoveredLane), PersistenceError> {
+    ) -> Result<(DeliveryAttempt, nmp_store::DeliveryLane), PersistenceError> {
         if self.failed_relays.contains(&key.relay) {
             return Err(PersistenceError::invariant(
                 "injected attempt start failure",
@@ -673,12 +673,12 @@ impl EventStore for RedbFailStartStore {
     }
     fn finish_lane_attempt(
         &mut self,
-        key: &nmp_store::LaneKey,
+        key: &nmp_store::DeliveryLaneKey,
         revision: u64,
         ordinal: u64,
-        outcome: AttemptOutcome,
+        outcome: DeliveryAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<nmp_store::RecoveredLane, PersistenceError> {
+    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
     }

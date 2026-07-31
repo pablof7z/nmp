@@ -655,7 +655,7 @@ impl Drop for NmpDiagnosticsStream {
 /// exposes the stable store-issued receipt id via [`Self::id`] and delivers
 /// ordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite
 /// FIFO that reports typed lag. Receipt facts are durable: the persisted
-/// outbox/redb store is the source of truth, so a dropped or lagged stream can
+/// durable-delivery Redb store is the source of truth, so a dropped or lagged stream can
 /// be reattached and traverse retained facts through finite pages.
 #[derive(uniffi::Object)]
 pub struct NmpReceiptStream {
@@ -891,6 +891,7 @@ mod tests {
         FfiIdentity, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest, FfiSourceAuthority,
         FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
     };
+    use redb::ReadableTable;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -1916,14 +1917,24 @@ mod tests {
         };
 
         // Overwrite the receipt's own durable row with undecodable bytes.
-        const RECEIPTS: redb::TableDefinition<&str, &str> =
-            redb::TableDefinition::new("outbox_receipts");
+        const RECEIPTS: redb::TableDefinition<&[u8; 8], &[u8]> =
+            redb::TableDefinition::new("delivery_receipts_v1");
         let db = redb::Database::open(&path).expect("redb: reopen for corruption");
         let tx = db.begin_write().expect("redb: begin_write");
         {
-            let mut table = tx.open_table(RECEIPTS).expect("redb: open outbox_receipts");
+            let mut table = tx
+                .open_table(RECEIPTS)
+                .expect("redb: open delivery_receipts_v1");
+            let key = receipt_id.to_be_bytes();
+            let mut value = table
+                .get(&key)
+                .expect("redb: read retained receipt")
+                .expect("retained receipt row")
+                .value()
+                .to_vec();
+            value[4] = 200;
             table
-                .insert(format!("{receipt_id:020}").as_str(), "{")
+                .insert(&key, value.as_slice())
                 .expect("redb: write corrupt receipt bytes");
         }
         tx.commit().expect("redb: commit corruption");

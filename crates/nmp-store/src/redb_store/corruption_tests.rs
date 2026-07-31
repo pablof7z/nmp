@@ -149,6 +149,51 @@ fn str_table_digest(
         .collect()
 }
 
+fn rewrite_fixed_row<const N: usize>(
+    fixture: &Fixture,
+    table: TableDefinition<&'static [u8; N], &'static [u8]>,
+    key: &[u8; N],
+    value: &[u8],
+) {
+    let db = fixture.raw();
+    let write_txn = db.begin_write().expect("raw begin_write");
+    {
+        let mut open = write_txn.open_table(table).expect("raw open_table");
+        open.insert(key, value).expect("raw insert");
+    }
+    write_txn.commit().expect("raw commit");
+}
+
+fn first_fixed_key<const N: usize>(
+    fixture: &Fixture,
+    table: TableDefinition<&'static [u8; N], &'static [u8]>,
+) -> [u8; N] {
+    let db = fixture.raw();
+    let read_txn = db.begin_read().expect("raw begin_read");
+    let open = read_txn.open_table(table).expect("raw open_table");
+    let (key, _value) = open
+        .first()
+        .expect("raw first")
+        .expect("table has at least one row");
+    *key.value()
+}
+
+fn fixed_table_digest<const N: usize>(
+    fixture: &Fixture,
+    table: TableDefinition<&'static [u8; N], &'static [u8]>,
+) -> Vec<([u8; N], Vec<u8>)> {
+    let db = fixture.raw();
+    let read_txn = db.begin_read().expect("raw begin_read");
+    let open = read_txn.open_table(table).expect("raw open_table");
+    open.iter()
+        .expect("raw iter")
+        .map(|entry| {
+            let (key, value) = entry.expect("raw entry");
+            (*key.value(), value.value().to_vec())
+        })
+        .collect()
+}
+
 /// Assert the shape every #790 door must answer with: an `Err` (not a
 /// panic, not an empty success) classified as an invariant violation whose
 /// durability claim — nothing committed — is actually true, because the
@@ -177,17 +222,14 @@ fn assert_typed_refusal<T: std::fmt::Debug>(
     error
 }
 
-// ---------------------------------------------------------------- outbox
+// -------------------------------------------------------------- delivery
 
 /// #909: the complete bootstrap return value must be decoded before commit.
 ///
-/// The orphan's storage key sits inside the target intent prefix but names no
-/// routed relay, while its JSON carries a different intent. The former
-/// implementation never touched that row while staging, committed both valid
-/// lanes, then found the mismatch in its fallible post-commit recovery call
-/// and returned `Invariant/Absent`. The fixed door refuses against the same
-/// write transaction, leaving the raw corrupt fixture byte-identical across
-/// two fresh opens.
+/// A malformed existing lane must be decoded before bootstrap stages or
+/// commits anything. The fixed door refuses against the same write
+/// transaction, leaving the raw corrupt fixture byte-identical across two
+/// fresh opens.
 #[test]
 fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
     let fixture = Fixture::new();
@@ -211,44 +253,28 @@ fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
                 ]),
             )
             .expect("record two routed relays");
+        store
+            .bootstrap_delivery_lanes(intent)
+            .expect("bootstrap initial lanes");
         intent
     };
 
-    let orphan_relay = RelayUrl::parse("wss://z.orphan-prefix.example").unwrap();
-    let storage_key = lane_key(&LaneKey {
-        intent_id: intent,
-        relay: orphan_relay.clone(),
-    });
-    let mismatched = RecoveredLane {
-        version: 1,
-        key: LaneKey {
-            intent_id: IntentId(intent.0 + 1_000),
-            relay: orphan_relay,
-        },
-        revision: 1,
-        last_ordinal: 0,
-        state: LaneState::WaitingConnection,
-    };
-    rewrite_str_row(
-        &fixture,
-        OUTBOX_LANES,
-        &storage_key,
-        &encode_json(&mismatched, "mismatched lane").unwrap(),
-    );
-    let before = str_table_digest(&fixture, OUTBOX_LANES);
+    let storage_key = first_fixed_key(&fixture, DELIVERY_LANES);
+    rewrite_fixed_row(&fixture, DELIVERY_LANES, &storage_key, b"NMPL-truncated");
+    let before = fixed_table_digest(&fixture, DELIVERY_LANES);
 
     for reopen in 1..=2 {
         let mut store = fixture.open();
-        let error = assert_typed_refusal("bootstrap_outbox_lanes", || {
-            store.bootstrap_outbox_lanes(intent)
+        let error = assert_typed_refusal("bootstrap_delivery_lanes", || {
+            store.bootstrap_delivery_lanes(intent)
         });
         assert!(
-            error.message().contains("key does not match value"),
-            "reopen {reopen}: exact seeded mismatch must remain visible: {error}"
+            error.message().contains("lane"),
+            "reopen {reopen}: exact seeded corruption must remain visible: {error}"
         );
         drop(store);
         assert_eq!(
-            str_table_digest(&fixture, OUTBOX_LANES),
+            fixed_table_digest(&fixture, DELIVERY_LANES),
             before,
             "reopen {reopen}: Absent must mean no valid lane was committed"
         );
@@ -257,7 +283,7 @@ fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
 
 /// The highest-value single conversion in #790: boot-time journal replay.
 #[test]
-fn recover_outbox_reports_a_corrupt_intent_row() {
+fn recover_delivery_reports_a_corrupt_intent_row() {
     let fixture = Fixture::new();
     let keys = keys();
     let signed = note(&keys, "corrupt-intent", 1_000);
@@ -267,13 +293,13 @@ fn recover_outbox_reports_a_corrupt_intent_row() {
             .accept_write(accept_of(frozen_from(&signed)))
             .expect("accept_write");
     }
-    let key = first_str_key(&fixture, OUTBOX_INTENTS);
-    rewrite_str_row(&fixture, OUTBOX_INTENTS, &key, "{ not json");
+    let key = first_fixed_key(&fixture, DELIVERY_INTENTS);
+    rewrite_fixed_row(&fixture, DELIVERY_INTENTS, &key, b"NMPI-truncated");
 
     let store = fixture.open();
-    let error = assert_typed_refusal("recover_outbox", || store.recover_outbox());
+    let error = assert_typed_refusal("recover_delivery", || store.recover_delivery());
     assert!(
-        error.message().contains("decode outbox intent"),
+        error.message().contains("intent"),
         "the error must name the row it failed on: {error}"
     );
 }
@@ -281,7 +307,7 @@ fn recover_outbox_reports_a_corrupt_intent_row() {
 /// The journal row itself decodes; the frozen event it carries does not.
 /// Distinct from the row-level failure above and separately reachable.
 #[test]
-fn recover_outbox_reports_a_corrupt_frozen_event() {
+fn recover_delivery_reports_a_corrupt_frozen_event() {
     let fixture = Fixture::new();
     let keys = keys();
     let signed = note(&keys, "corrupt-frozen", 1_000);
@@ -291,47 +317,29 @@ fn recover_outbox_reports_a_corrupt_frozen_event() {
             .accept_write(accept_of(frozen_from(&signed)))
             .expect("accept_write");
     }
-    let key = first_str_key(&fixture, OUTBOX_INTENTS);
-    let intact = str_table_digest(&fixture, OUTBOX_INTENTS);
-    let mut record: serde_json::Value =
-        serde_json::from_str(&intact[0].1).expect("intent row is json");
-    record["frozen_json"] = serde_json::Value::String("{ not an event".to_owned());
-    rewrite_str_row(&fixture, OUTBOX_INTENTS, &key, &record.to_string());
+    let key = first_fixed_key(&fixture, DELIVERY_INTENTS);
+    let intact = fixed_table_digest(&fixture, DELIVERY_INTENTS);
+    let mut record = intact[0].1.clone();
+    // Intent envelope (8) + receipt id (8) + event byte length (4).
+    record[20] ^= 0xff;
+    rewrite_fixed_row(&fixture, DELIVERY_INTENTS, &key, &record);
 
     let store = fixture.open();
-    let error = assert_typed_refusal("recover_outbox", || store.recover_outbox());
+    let error = assert_typed_refusal("recover_delivery", || store.recover_delivery());
     assert!(
-        error.message().contains("decode frozen event"),
+        error.message().contains("intent"),
         "the error must name the frozen event: {error}"
-    );
-}
-
-/// A journal key that is not an id at all. The old code parsed this with
-/// `.expect`, so a single unparsable key aborted the host at boot.
-#[test]
-fn recover_outbox_reports_an_unparsable_intent_key() {
-    let fixture = Fixture::new();
-    {
-        let _store = fixture.open();
-    }
-    rewrite_str_row(&fixture, OUTBOX_INTENTS, "not-an-intent-id", "{}");
-
-    let store = fixture.open();
-    let error = assert_typed_refusal("recover_outbox", || store.recover_outbox());
-    assert!(
-        error.message().contains("decode outbox intent key"),
-        "the error must name the key: {error}"
     );
 }
 
 /// An empty journal and an unreadable journal are different facts, and the
 /// engine's boot path branches on exactly this distinction.
 #[test]
-fn an_empty_outbox_stays_distinguishable_from_an_unreadable_one() {
+fn an_empty_delivery_store_stays_distinguishable_from_an_unreadable_one() {
     let fixture = Fixture::new();
     let store = fixture.open();
     assert_eq!(
-        store.recover_outbox().expect("healthy recover_outbox"),
+        store.recover_delivery().expect("healthy recover_delivery"),
         Vec::new()
     );
 }
@@ -339,7 +347,7 @@ fn an_empty_outbox_stays_distinguishable_from_an_unreadable_one() {
 /// The displaced predecessor snapshot is a separate binary value with its
 /// own decoder; corrupting it must not be reported as "nothing displaced".
 #[test]
-fn recover_outbox_reports_a_corrupt_displaced_snapshot() {
+fn recover_delivery_reports_a_corrupt_displaced_snapshot() {
     let fixture = Fixture::new();
     let keys = keys();
     let first = EventBuilder::new(Kind::Metadata, "first")
@@ -364,7 +372,7 @@ fn recover_outbox_reports_a_corrupt_displaced_snapshot() {
         let db = fixture.raw();
         let read_txn = db.begin_read().expect("raw begin_read");
         let open = read_txn
-            .open_table(OUTBOX_DISPLACED)
+            .open_table(DELIVERY_DISPLACED)
             .expect("raw open displaced");
         let (key, _value) = open
             .first()
@@ -377,18 +385,18 @@ fn recover_outbox_reports_a_corrupt_displaced_snapshot() {
         let write_txn = db.begin_write().expect("raw begin_write");
         {
             let mut open = write_txn
-                .open_table(OUTBOX_DISPLACED)
+                .open_table(DELIVERY_DISPLACED)
                 .expect("raw open displaced");
-            open.insert(displaced_key.as_str(), b"NMPC-truncated".as_slice())
+            open.insert(&displaced_key, b"NMPC-truncated".as_slice())
                 .expect("raw insert");
         }
         write_txn.commit().expect("raw commit");
     }
 
     let store = fixture.open();
-    let error = assert_typed_refusal("recover_outbox", || store.recover_outbox());
+    let error = assert_typed_refusal("recover_delivery", || store.recover_delivery());
     assert!(
-        error.message().contains("decode portable stored event"),
+        error.message().contains("displaced event"),
         "the error must name the displaced snapshot: {error}"
     );
 }
@@ -409,8 +417,8 @@ fn reattach_receipt_reports_a_corrupt_receipt_row() {
             .journaled_receipt_id()
             .expect("accepted write journals a receipt")
     };
-    let key = first_str_key(&fixture, OUTBOX_RECEIPTS);
-    rewrite_str_row(&fixture, OUTBOX_RECEIPTS, &key, "{ not json");
+    let key = first_fixed_key(&fixture, DELIVERY_RECEIPTS);
+    rewrite_fixed_row(&fixture, DELIVERY_RECEIPTS, &key, b"NMPR-truncated");
 
     let store = fixture.open();
     assert_typed_refusal("reattach_receipt", || store.reattach_receipt(receipt_id));
@@ -444,9 +452,9 @@ fn promote_reports_a_corrupt_kind5_claim_record() {
             .journaled_intent_id()
             .expect("accepted deletion journals an intent")
     };
-    let key = first_str_key(&fixture, OUTBOX_KIND5_CLAIMS);
-    rewrite_str_row(&fixture, OUTBOX_KIND5_CLAIMS, &key, "{ not a claim list");
-    let before = str_table_digest(&fixture, OUTBOX_INTENTS);
+    let key = first_fixed_key(&fixture, DELIVERY_KIND5_CLAIMS);
+    rewrite_fixed_row(&fixture, DELIVERY_KIND5_CLAIMS, &key, b"NMPK-truncated");
+    let before = fixed_table_digest(&fixture, DELIVERY_INTENTS);
 
     {
         let mut store = fixture.open();
@@ -455,7 +463,7 @@ fn promote_reports_a_corrupt_kind5_claim_record() {
         });
     }
     assert_eq!(
-        str_table_digest(&fixture, OUTBOX_INTENTS),
+        fixed_table_digest(&fixture, DELIVERY_INTENTS),
         before,
         "a refused promotion commits none of its own journal transition"
     );
@@ -480,13 +488,8 @@ fn accept_reports_a_corrupt_suppression_claimant_set() {
             .accept_write(accept_of(frozen_from(&deletion)))
             .expect("accept deletion");
     }
-    let key = first_str_key(&fixture, OUTBOX_SUPPRESS_BY_ID);
-    rewrite_str_row(
-        &fixture,
-        OUTBOX_SUPPRESS_BY_ID,
-        &key,
-        "{ not a claimant set",
-    );
+    let key = first_fixed_key(&fixture, DELIVERY_SUPPRESS_BY_ID);
+    rewrite_fixed_row(&fixture, DELIVERY_SUPPRESS_BY_ID, &key, b"NMPS-truncated");
 
     let mut store = fixture.open();
     let second = EventBuilder::new(Kind::EventDeletion, "")
@@ -953,7 +956,10 @@ fn a_healthy_store_answers_every_hardened_door() {
             .len(),
         events.len()
     );
-    assert!(store.recover_outbox().expect("recover_outbox").is_empty());
+    assert!(store
+        .recover_delivery()
+        .expect("recover_delivery")
+        .is_empty());
     assert!(
         store
             .get_coverage(

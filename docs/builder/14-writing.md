@@ -151,7 +151,7 @@ them into `published = true` or claim convergence over unknowable relays.
 
 Durable receipt history remains addressable after the delivery obligation is
 terminal. Recovery of open work and retention of terminal receipt facts are
-separate concerns; closing an outbox lane must not erase the only reattachment
+separate concerns; closing a delivery lane must not erase the only reattachment
 record.
 
 ## Durability classes
@@ -190,11 +190,11 @@ The names may change. These distinctions may not collapse.
 |---|---|
 | Socket connection | transport reconnects the socket |
 | One remote signing request | signer adapter owns correlation and its connection/AUTH |
-| One `(intent, relay)` delivery lane | durable outbox owns attempts and eligibility |
+| One `(intent, relay)` delivery lane | durable delivery owns attempts and eligibility |
 | Time and concurrency | one engine deadline scheduler wakes eligible work |
 
 Transport does not hide durable EVENT frames in an independent buffer. The
-outbox persists `attemptStarted` before dispatch, exact signed bytes, ordinal,
+delivery persists `attemptStarted` before dispatch, exact signed bytes, ordinal,
 outcome, and next eligibility. Restart resumes from those facts without polling.
 
 Offline or AUTH-blocked time does not consume an attempt. Route discovery may

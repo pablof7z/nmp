@@ -23,8 +23,7 @@ const GROUP_STATE_KINDS: [u16; 3] = [39_000, 39_001, 39_002];
 
 /// The `$myFollows` shape ("my follows' notes") -- the one feed shape the
 /// starter catalog names (approach doc §2.4). Identical in structure to
-/// `nmp-engine`'s own `runtime_integration.rs`/`self_bootstrap_outbox.rs`
-/// fixture query.
+/// `nmp`'s runtime-integration fixture query.
 pub fn my_follows_query() -> LiveQuery {
     LiveQuery::from_filter(Filter {
         kinds: Some(std::collections::BTreeSet::from([1u16])),

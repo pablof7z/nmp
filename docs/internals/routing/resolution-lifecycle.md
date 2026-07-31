@@ -76,7 +76,7 @@ set grows.
 What this buys, for free, from structures that already exist:
 
 - **Re-spawn suppression** (§6): the lane key is `(intent_id, relay)`
-  (`LaneKey`, `crates/nmp-store/src/lib.rs:1106-1109`). Re-executing a
+  (`DeliveryLaneKey`, `crates/nmp-store/src/lib.rs:1106-1109`). Re-executing a
   resolver that reports an already-known relay collides with the existing lane
   and creates nothing. An acked lane is terminal and untouched.
 - **One receipt per intent, always** (§6): child intents would each mint a
@@ -93,7 +93,7 @@ rather than an architecture.
 
 **The append-only per-intent route log.**
 `record_route_revision`/`recover_route_revisions`
-(`crates/nmp-store/src/redb_store/outbox_ops.rs:141,211`) maintain an
+(`crates/nmp-store/src/redb_store/delivery_ops.rs:141,211`) maintain an
 append-only, ordinal-numbered log of resolved relay sets per intent.
 `record_route_revision` refuses to write for an intent that is not open, scans
 the intent's existing revisions to compute `last_ordinal + 1`, and commits the
@@ -105,7 +105,7 @@ committed, is history.
 against the directory at that moment
 (`crates/nmp/src/core/write.rs:2223-2247`), emits
 `WriteStatus::Routed(relays)` (`:2247`), records the revision (`:2296`), and
-bootstraps lanes from it (`bootstrap_outbox_lanes`, `:2308`). Note what order
+bootstraps lanes from it (`bootstrap_delivery_lanes`, `:2308`). Note what order
 that implies: the revision commit is the durable fact, and lanes are derived
 from it — exactly the discipline the rewriter generalizes.
 
@@ -174,7 +174,7 @@ for the same intent.
 
 **One receipt per intent, always.** The app called `publish` once; it holds
 one receipt; every per-relay fact (`Sent`, `Acked`, `Rejected`,
-`RetryEligible`, `GaveUp`, `OutcomeUnknown` — `crates/nmp/src/outbox/mod.rs:32`
+`RetryEligible`, `GaveUp`, `OutcomeUnknown` — `crates/nmp/src/delivery/mod.rs:54`
 onward) streams through that one receipt as lanes progress. Incremental
 routing changes how many lanes a receipt fans out to over time; it never
 changes how many receipts exist. An app that wants "partially sent" reads the
@@ -210,7 +210,7 @@ Pablo, ruling on whether a routed-but-undelivered write is "done":
 > 3. yeah, once we know "this event goes in relay 1, 2 and 3" it's been routed; it might have not been published and it sits on the publishing queue, but it's been routed. Whether you consider that "done" it depends on your position; it's done in terms of routing.
 
 The receipt surfaces the two axes without conflating them. Master's
-`WriteStatus::Routed(BTreeSet<RelayUrl>)` (`crates/nmp/src/outbox/mod.rs:51`)
+`WriteStatus::Routed(BTreeSet<RelayUrl>)` (`crates/nmp/src/delivery/mod.rs:123`)
 becomes:
 
 ```rust
@@ -294,7 +294,7 @@ Under this design that arm is unrepresentable. "No relays known" is not an
 error — it is an `Auto` with unknowns, which is the *normal initial state* of
 the queue rewriter. The intent parks as `AwaitingRoute { detail }` (a
 retained, replayed-on-reattach receipt state — the routing sibling of
-`AwaitingCapability`'s durable park, `crates/nmp/src/outbox/mod.rs:41-49`),
+`AwaitingCapability`'s durable park, `crates/nmp/src/delivery/mod.rs:72`),
 its needs are declared (`knowledge-and-settlement.md` §6), and moments 3/4
 re-resolve it when knowledge arrives. Failure remains possible — an `Explicit`
 to an unreachable relay still fails per-lane, and a permanently unsatisfiable

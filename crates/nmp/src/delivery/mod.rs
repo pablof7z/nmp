@@ -1,4 +1,4 @@
-//! The write-intent/receipt plane (plan §3.4 "write outbox"). HARVEST
+//! The durable-delivery write-intent/receipt plane. HARVEST
 //! target: `crates/nmp-core/src/publish/engine/{types,mod}.rs`,
 //! `kernel/publish_engine_terminals.rs` in the old repo — the per-relay
 //! terminal model (`TerminalOutcome`, accepted/failed split) and the
@@ -165,7 +165,7 @@ pub enum WriteStatus {
         observed_at: Timestamp,
     },
     /// Transport proved socket write + flush for this persisted relay attempt.
-    /// An ephemeral write has no outbox attempt and therefore cannot mint this
+    /// An ephemeral write has no delivery attempt and therefore cannot mint this
     /// durable receipt fact.
     Sent {
         relay: RelayUrl,
@@ -176,7 +176,7 @@ pub enum WriteStatus {
     Rejected(RelayUrl, String),
     GaveUp(RelayUrl),
     /// The relay remains an owned, nonterminal delivery lane, but the
-    /// durable `AttemptOutcome::Started` fact could not be committed. No
+    /// durable `DeliveryAttemptOutcome::Started` fact could not be committed. No
     /// wire EVENT was emitted. Recovery rediscovers the exact URL from its
     /// committed route revision; the engine's single lane scheduler owns when
     /// an in-process retry occurs.
