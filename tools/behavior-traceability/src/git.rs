@@ -135,14 +135,14 @@ fn reject_changed_legacy(
     head: &Corpus,
     head_features: &Path,
 ) -> Result<(), TraceError> {
-    let base_files = fingerprints_by_file(base, base_features)?;
+    let base_legacy_files = legacy_fingerprints_by_file(base, base_features)?;
     let head_files = fingerprints_by_file(head, head_features)?;
     for (file, fingerprints) in &head_files {
         let absolute = head_features.join(file);
         if head.governed_files.contains(&absolute) {
             continue;
         }
-        match base_files.get(file) {
+        match base_legacy_files.get(file) {
             Some(previous) if previous == fingerprints => {}
             Some(_) => {
                 return Err(TraceError(format!(
@@ -158,15 +158,38 @@ fn reject_changed_legacy(
             }
         }
     }
+    for file in base_legacy_files.keys() {
+        if !head_files.contains_key(file) {
+            return Err(TraceError(format!(
+                "deleted ungoverned behavior file `{}` needs complete scenario metadata before removal",
+                Path::new("features").join(file).display()
+            )));
+        }
+    }
     Ok(())
+}
+
+fn legacy_fingerprints_by_file(
+    corpus: &Corpus,
+    features_dir: &Path,
+) -> Result<BTreeMap<PathBuf, Vec<String>>, TraceError> {
+    fingerprints_by_file_where(corpus, features_dir, |record| record.metadata.is_none())
 }
 
 fn fingerprints_by_file(
     corpus: &Corpus,
     features_dir: &Path,
 ) -> Result<BTreeMap<PathBuf, Vec<String>>, TraceError> {
+    fingerprints_by_file_where(corpus, features_dir, |_| true)
+}
+
+fn fingerprints_by_file_where(
+    corpus: &Corpus,
+    features_dir: &Path,
+    include: impl Fn(&crate::model::ScenarioRecord) -> bool,
+) -> Result<BTreeMap<PathBuf, Vec<String>>, TraceError> {
     let mut files: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
-    for record in &corpus.records {
+    for record in corpus.records.iter().filter(|record| include(record)) {
         let relative = record.file.strip_prefix(features_dir).map_err(|_| {
             TraceError(format!(
                 "scenario path {} escapes canonical feature root {}",
@@ -239,6 +262,72 @@ mod tests {
                 .unwrap_err()
                 .0
                 .contains("added or moved")
+        );
+    }
+
+    #[test]
+    fn a_governed_scenario_can_split_out_only_if_legacy_siblings_are_unchanged() {
+        let base_temp = tempdir().unwrap();
+        let head_temp = tempdir().unwrap();
+        let base_features = base_temp.path().join("features");
+        let head_features = head_temp.path().join("features");
+        fs::create_dir_all(&base_features).unwrap();
+        fs::create_dir_all(&head_features).unwrap();
+        fs::write(
+            base_features.join("mixed.feature"),
+            "Feature: mixed\n  # nmp:id=MIXED-SPLIT-001\n  # nmp:status=specified\n  # nmp:gap=fixture\n  # nmp:issue=#12\n  Scenario: governed\n    Given governed truth\n\n  Scenario: legacy\n    Given legacy truth\n",
+        )
+        .unwrap();
+        fs::write(
+            head_features.join("mixed.feature"),
+            "Feature: mixed\n  Scenario: legacy\n    Given legacy truth\n",
+        )
+        .unwrap();
+        fs::write(
+            head_features.join("governed.feature"),
+            "Feature: governed\n  # nmp:id=MIXED-SPLIT-001\n  # nmp:status=specified\n  # nmp:gap=fixture\n  # nmp:issue=#12\n  Scenario: governed\n    Given governed truth\n",
+        )
+        .unwrap();
+
+        let base = corpus::load(&base_features).unwrap();
+        let head = corpus::load(&head_features).unwrap();
+        reject_changed_legacy(&base, &base_features, &head, &head_features).unwrap();
+
+        fs::write(
+            head_features.join("mixed.feature"),
+            "Feature: mixed\n  Scenario: legacy changed\n    Given different truth\n",
+        )
+        .unwrap();
+        let changed = corpus::load(&head_features).unwrap();
+        assert!(
+            reject_changed_legacy(&base, &base_features, &changed, &head_features)
+                .unwrap_err()
+                .0
+                .contains("changed behavior")
+        );
+    }
+
+    #[test]
+    fn deleted_legacy_behavior_fails_closed() {
+        let base_temp = tempdir().unwrap();
+        let head_temp = tempdir().unwrap();
+        let base_features = base_temp.path().join("features");
+        let head_features = head_temp.path().join("features");
+        fs::create_dir_all(base_features.join("domain")).unwrap();
+        fs::create_dir_all(head_features.join("domain")).unwrap();
+        fs::write(
+            base_features.join("domain/deleted.feature"),
+            "Feature: legacy\n  Scenario: deleted\n    Given durable meaning\n",
+        )
+        .unwrap();
+
+        let base = corpus::load(&base_features).unwrap();
+        let head = corpus::load(&head_features).unwrap();
+        assert!(
+            reject_changed_legacy(&base, &base_features, &head, &head_features)
+                .unwrap_err()
+                .0
+                .contains("deleted ungoverned behavior")
         );
     }
 

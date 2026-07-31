@@ -52,6 +52,33 @@ function. Every non-live locator must map to a required deterministic CI lane.
 `live` names a job in an explicit bounded opt-in workflow and may supplement,
 but never replace, deterministic correctness evidence.
 
+The resolver counts enabled executable structure, not nearby text. A Rust proof
+uses an explicitly supported test-harness attribute, or is an enabled top-level
+`#[test]` function declaration inside the real `proptest` dependency's macro.
+The macro must be reached through its exact crate path or supported import;
+local `macro_rules!` shadows and token-bearing lookalike macros do not qualify.
+Ignored, conditionally compiled, or lookalike attributes do not qualify. A
+Swift proof is a discoverable `test*` method inside an enabled `XCTestCase` or
+an enabled declaration carrying exact `@Test`; Kotlin likewise requires exact
+enabled `@Test`. Source comments, strings, bare native helpers, `@NotATest`,
+and disabled tests never qualify.
+
+Deterministic lane resolution parses workflow YAML and inspects commands only
+from enabled, failure-propagating `jobs.*.steps[*].run` entries on the
+repository push/pull-request path, with the package path or package argument
+that owns the proof. Comments, environment notes, manual-only workflows,
+ignored failures, masked/dead shell commands, and other scalar lookalikes do
+not create a lane. Disabling shell errexit or following the proof command with
+any later command can mask failure and is rejected: the proof must be the
+terminal command in its shell or subshell context. Live evidence additionally
+requires `on.workflow_dispatch`, the exact enabled target under `jobs`, a
+positive `timeout-minutes`, and an enabled executable run step.
+
+All corpus and evidence paths must resolve to repository-owned regular files
+through repository-owned directories. Symlink-backed feature files, workflow
+YAML, executable scripts, or source trees fail closed even when their external
+targets contain otherwise valid proof.
+
 ## One scenario, several proofs
 
 Some claims require multiple layers:
@@ -224,7 +251,9 @@ parses canonical files with Gherkin 0.14 and verifies:
 
 Governance is incremental without a manifest: once any scenario in a file has
 metadata, the whole file is governed. Unchanged ungoverned legacy may remain,
-but a missing base never turns change detection into success.
+but an ungoverned legacy file cannot be changed, moved, or deleted, and a
+missing base never turns change detection into success. Govern legacy in one
+traceable change before deleting it in a later change.
 
 The validator is a detached Cargo workspace with its own committed lock and
 explicit targets. CI invokes its exact manifest with `--locked` from a neutral

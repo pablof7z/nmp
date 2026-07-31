@@ -127,7 +127,10 @@ require_text "$MACOS_WORKFLOW" "      - name: Build the Swift package"
 require_text "$MACOS_WORKFLOW" "      - name: Test the Swift package"
 require_text "$MACOS_WORKFLOW" "        run: swift build"
 require_text "$MACOS_WORKFLOW" "working-directory: Packages/NMP"
-swift_test_count=$(grep -F -c "        run: swift test" "$MACOS_WORKFLOW" || true)
+swift_test_count=$(
+  grep -F -c "        run: /usr/bin/xcrun --run swift test" \
+    "$MACOS_WORKFLOW" || true
+)
 [[ "$swift_test_count" -eq 2 ]] ||
   fail "expected Swift tests for core and NIP-46, found $swift_test_count"
 

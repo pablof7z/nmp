@@ -88,7 +88,9 @@ structure never owns or duplicates the English specification.
 
 `tools/behavior-traceability` parses every feature through the Gherkin 0.14 AST.
 It uses AST hierarchy, positions, and spans for Feature/Rule/Scenario meaning,
-and reads only the adjacent `# nmp:*` comment block from source. It validates
+and reads only the adjacent `# nmp:*` comment block from source. Indentation and
+whitespace after `#` do not change that lexical boundary; the transitional
+runner uses the same conservative whole-file sentinel. It validates
 status, evidence, issues, inherited tags, and explicit base/head diffs without
 depending on `nmp-bdd`, so governance survives that runner's retirement.
 The checker is a detached Cargo workspace with its own lockfile and explicit
@@ -97,6 +99,22 @@ workspace dependencies and repository Cargo configuration cannot enter its
 executable graph. A protected credentialed step resolves only the exact
 deduplicated issue-number/state snapshot, then the head-built checker runs
 without a GitHub token.
+Rust locators do not trust source-file syntax. After that credential boundary,
+the checker runs pinned Cargo metadata and `cargo test --no-run` from a neutral
+directory with isolated Cargo home/target state, exact workspace package IDs,
+bounded process groups, and bounded output. It accepts only unique,
+non-ignored names reported by normal libtest harnesses; dead or feature-gated
+files, other packages, custom harnesses, failed builds/lists, and ambiguous
+names cannot become evidence. Build scripts, proc macros, and harness
+initialization therefore run only inside this credential-free bounded phase.
+Executable evidence maps only to a closed proof-step grammar: one explicit
+`run` command under `/bin/bash --noprofile --norc -p -e -o pipefail {0}` on a
+known hosted-runner family. Privileged, profile-free Bash ignores inherited
+functions and `BASH_ENV`; the command must then name the hosted Cargo path,
+system `xcrun`, or the exact repository-owned Gradle/script path. Setup,
+wrappers, shell control flow, PATH lookup, aliases, functions, substitutions,
+and trailing commands are not proof. This is a provenance boundary, not a
+list of suspicious spellings.
 
 ```text
 features/
@@ -134,11 +152,13 @@ Every governed scenario has:
 - an open issue when known-violation.
 
 Once any scenario in a file has `nmp:*` metadata, every scenario in that file
-is governed. Added, changed, or moved behavior must be governed; unchanged
-legacy files may remain temporarily. A governed file rejects `@wip`,
-`@designed`, and `@requires-*` inherited through Feature, Rule, Scenario, or
-Examples tags. `@ledger-N` and `@must-never` retain their behavioral meaning;
-`@acceptance` is a built facade-capstone selector, not lifecycle state.
+is governed. Added, changed, moved, or deleted behavior must be governed;
+unchanged legacy files may remain temporarily. An ungoverned legacy file must
+first become governed in a traceable change before a later deletion. A governed
+file rejects `@wip`, `@designed`, and `@requires-*` inherited through Feature,
+Rule, Scenario, or Examples tags. `@ledger-N` and `@must-never` retain their
+behavioral meaning; `@acceptance` is a built facade-capstone selector, not
+lifecycle state.
 
 The transitional `nmp-bdd` runner skips every scenario in a governed file.
 Ungoverned legacy retains its old `@wip`/`@designed`/`@live` filter while

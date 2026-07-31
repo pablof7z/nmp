@@ -14,11 +14,12 @@ pub mod steps;
 /// must not execute.
 ///
 /// The detached traceability tool owns Gherkin parsing and metadata validity.
-/// This legacy runner needs only a fail-closed sentinel: any source line that
-/// starts with `# nmp:` after indentation removes the entire file from this
-/// mechanism suite. Invalid or misplaced metadata is therefore skipped here
-/// and rejected by the independent traceability lane instead of accidentally
-/// becoming executable truth.
+/// This legacy runner needs only a fail-closed sentinel: any comment whose
+/// payload starts with `nmp:` after arbitrary indentation and comment
+/// whitespace removes the entire file from this mechanism suite. Invalid or
+/// misplaced metadata is therefore skipped here and rejected by the
+/// independent traceability lane instead of accidentally becoming executable
+/// truth.
 pub fn governed_feature_paths(features_dir: &Path) -> io::Result<BTreeSet<PathBuf>> {
     let mut pending = vec![features_dir.to_path_buf()];
     let mut governed = BTreeSet::new();
@@ -31,16 +32,19 @@ pub fn governed_feature_paths(features_dir: &Path) -> io::Result<BTreeSet<PathBu
                 pending.push(path);
             } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "feature") {
                 let source = fs::read_to_string(&path)?;
-                if source
-                    .lines()
-                    .any(|line| line.trim_start().starts_with("# nmp:"))
-                {
+                if source.lines().any(has_metadata_sentinel) {
                     governed.insert(path.canonicalize()?);
                 }
             }
         }
     }
     Ok(governed)
+}
+
+fn has_metadata_sentinel(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix('#')
+        .is_some_and(|comment| comment.trim_start().starts_with("nmp:"))
 }
 
 /// Does this step sentence say the scenario crosses a process boundary?
@@ -70,10 +74,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let governed = temp.path().join("governed.feature");
         let incomplete = temp.path().join("incomplete.feature");
+        let whitespace = temp.path().join("whitespace.feature");
         let legacy = temp.path().join("legacy.feature");
         fs::write(
             &governed,
             "Feature: governed\n  # nmp:id=RUNNER-SKIP-001\n  Scenario: one\n    Given truth\n\n  Scenario: two\n    Given truth\n",
+        )
+        .unwrap();
+        fs::write(
+            &whitespace,
+            "Feature: whitespace\n\t#    nmp:id=RUNNER-SKIP-002\n  Scenario: one\n    Given truth\n\n  Scenario: two\n    Given truth\n",
         )
         .unwrap();
         fs::write(
@@ -92,7 +102,8 @@ mod tests {
             paths,
             BTreeSet::from([
                 governed.canonicalize().unwrap(),
-                incomplete.canonicalize().unwrap()
+                incomplete.canonicalize().unwrap(),
+                whitespace.canonicalize().unwrap()
             ])
         );
         assert!(!paths.contains(&legacy.canonicalize().unwrap()));

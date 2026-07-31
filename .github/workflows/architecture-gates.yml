@@ -267,10 +267,13 @@ jobs:
           TRACE_CARGO_HOME: ${{ runner.temp }}/nmp-behavior-cargo-home
           TRACE_TARGET_DIR: ${{ runner.temp }}/nmp-behavior-target
         working-directory: ${{ runner.temp }}
-        run: >-
-          CARGO_HOME="$TRACE_CARGO_HOME"
-          CARGO_TARGET_DIR="$TRACE_TARGET_DIR"
-          cargo "+$TRACE_TOOLCHAIN" test --locked --manifest-path "$TRACE_MANIFEST"
+        run: |
+          set -euo pipefail
+          [[ -z ${GH_TOKEN:-} && -z ${GITHUB_TOKEN:-} ]]
+          CARGO_HOME="$TRACE_CARGO_HOME" \
+          CARGO_TARGET_DIR="$TRACE_TARGET_DIR" \
+            cargo "+$TRACE_TOOLCHAIN" test --locked \
+              --manifest-path "$TRACE_MANIFEST"
 
       - name: Validate canonical behavior against explicit base and head trees
         env:

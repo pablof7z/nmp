@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use gherkin::{Feature, GherkinEnv, Rule, Scenario};
+use gherkin::{Background, Examples, Feature, GherkinEnv, Rule, Scenario, Step};
 
 use crate::model::{Gap, Metadata, ScenarioRecord, Status, TraceError};
 
@@ -93,14 +93,26 @@ impl RawMetadata {
 }
 
 pub(crate) fn load(features_dir: &Path) -> Result<Corpus, TraceError> {
-    if !features_dir.is_dir() {
+    let root_metadata = fs::symlink_metadata(features_dir).map_err(|error| {
+        TraceError(format!(
+            "canonical feature root is unreadable: {}: {error}",
+            features_dir.display()
+        ))
+    })?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return Err(TraceError(format!(
-            "canonical feature root is unreadable: {}",
+            "canonical feature root must be a repository-owned directory, not a symlink: {}",
             features_dir.display()
         )));
     }
+    let canonical_root = fs::canonicalize(features_dir).map_err(|error| {
+        TraceError(format!(
+            "cannot canonicalize feature root {}: {error}",
+            features_dir.display()
+        ))
+    })?;
     let mut paths = Vec::new();
-    collect_feature_paths(features_dir, &mut paths)?;
+    collect_feature_paths(&canonical_root, features_dir, &mut paths)?;
     paths.sort();
 
     let mut records = Vec::new();
@@ -135,7 +147,11 @@ pub(crate) fn load(features_dir: &Path) -> Result<Corpus, TraceError> {
     })
 }
 
-fn collect_feature_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), TraceError> {
+fn collect_feature_paths(
+    canonical_root: &Path,
+    dir: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), TraceError> {
     for entry in fs::read_dir(dir)
         .map_err(|error| TraceError(format!("cannot enumerate {}: {error}", dir.display())))?
     {
@@ -149,10 +165,34 @@ fn collect_feature_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), Tra
         let file_type = entry
             .file_type()
             .map_err(|error| TraceError(format!("cannot inspect {}: {error}", path.display())))?;
+        if file_type.is_symlink() {
+            return Err(TraceError(format!(
+                "feature corpus path {} is symlink-backed instead of repository-owned",
+                path.display()
+            )));
+        }
+        let canonical_path = fs::canonicalize(&path).map_err(|error| {
+            TraceError(format!(
+                "cannot canonicalize feature corpus path {}: {error}",
+                path.display()
+            ))
+        })?;
+        if !canonical_path.starts_with(canonical_root) {
+            return Err(TraceError(format!(
+                "feature corpus path {} escapes canonical feature root {}",
+                path.display(),
+                canonical_root.display()
+            )));
+        }
         if file_type.is_dir() {
-            collect_feature_paths(&path, paths)?;
+            collect_feature_paths(canonical_root, &path, paths)?;
         } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "feature") {
             paths.push(path);
+        } else if path.extension().is_some_and(|ext| ext == "feature") {
+            return Err(TraceError(format!(
+                "feature corpus path {} is not a repository-owned regular file",
+                path.display()
+            )));
         }
     }
     Ok(())
@@ -210,19 +250,20 @@ fn record(
 
     let rule_name = rule.map(|rule| rule.name.as_str()).unwrap_or("");
     let rule_description = rule.and_then(|rule| rule.description.as_deref());
-    let rule_background = rule.and_then(|rule| rule.background.as_ref());
+    let rule_keyword = rule.map(|rule| rule.keyword.as_str()).unwrap_or("");
+    let rule_background = semantic_background(rule.and_then(|rule| rule.background.as_ref()));
     let fingerprint = format!(
         "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        feature.keyword,
         feature.name,
         feature.description,
-        feature.background,
+        semantic_background(feature.background.as_ref()),
+        rule_keyword,
         rule_name,
         rule_description,
         rule_background,
-        scenario.keyword,
-        scenario.name,
+        semantic_scenario(scenario),
         effective_tags,
-        scenario
     );
     Ok((
         ScenarioRecord {
@@ -236,6 +277,60 @@ fn record(
         },
         attached_offsets,
     ))
+}
+
+fn semantic_background(background: Option<&Background>) -> Option<String> {
+    background.map(|background| {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}",
+            background.keyword,
+            background.name,
+            background.description,
+            semantic_steps(&background.steps)
+        )
+    })
+}
+
+fn semantic_scenario(scenario: &Scenario) -> String {
+    format!(
+        "{:?}|{:?}|{:?}|{:?}|{:?}",
+        scenario.keyword,
+        scenario.name,
+        scenario.description,
+        semantic_steps(&scenario.steps),
+        scenario
+            .examples
+            .iter()
+            .map(semantic_examples)
+            .collect::<Vec<_>>()
+    )
+}
+
+fn semantic_examples(examples: &Examples) -> String {
+    format!(
+        "{:?}|{:?}|{:?}|{:?}|{:?}",
+        examples.keyword,
+        examples.name,
+        examples.description,
+        examples.table.as_ref().map(|table| &table.rows),
+        examples.tags
+    )
+}
+
+fn semantic_steps(steps: &[Step]) -> Vec<String> {
+    steps
+        .iter()
+        .map(|step| {
+            format!(
+                "{:?}|{:?}|{:?}|{:?}|{:?}",
+                step.keyword,
+                step.ty,
+                step.value,
+                step.docstring,
+                step.table.as_ref().map(|table| &table.rows)
+            )
+        })
+        .collect()
 }
 
 fn metadata_before_span(source: &str, scenario_start: usize) -> Result<RawMetadata, TraceError> {
@@ -258,9 +353,8 @@ fn metadata_before_span(source: &str, scenario_start: usize) -> Result<RawMetada
         if trimmed.is_empty() || trimmed.starts_with('@') {
             continue;
         }
-        if let Some(comment) = trimmed.strip_prefix('#') {
-            let comment = comment.trim();
-            if let Some(value) = comment.strip_prefix("nmp:") {
+        if trimmed.starts_with('#') {
+            if let Some(value) = metadata_line_value(line) {
                 metadata_lines.push((offset, value.trim().to_owned()));
             }
             continue;
@@ -304,13 +398,22 @@ fn source_lines(source: &str) -> Vec<(usize, &str)> {
 fn metadata_source_offsets(source: &str) -> BTreeSet<usize> {
     source_lines(source)
         .into_iter()
-        .filter_map(|(offset, line)| line.trim_start().starts_with("# nmp:").then_some(offset))
+        .filter_map(|(offset, line)| metadata_line_value(line).map(|_| offset))
         .collect()
+}
+
+fn metadata_line_value(line: &str) -> Option<&str> {
+    line.trim_start()
+        .strip_prefix('#')?
+        .trim_start()
+        .strip_prefix("nmp:")
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     use tempfile::tempdir;
 
@@ -395,6 +498,19 @@ Feature: span truth
                 "directive `{directive}` unexpectedly attached metadata: {error}"
             );
         }
+    }
+
+    #[test]
+    fn metadata_comment_whitespace_has_one_lexical_boundary() {
+        let corpus = load_one(
+            "Feature: whitespace\n  #    nmp:id=WHITESPACE-METADATA-001\n\t#\tnmp:status=specified\n  #  nmp:gap=fixture\n  #     nmp:issue=#12\n  Scenario: governed\n    Given truth\n",
+        )
+        .unwrap();
+        assert_eq!(
+            corpus.records[0].metadata.as_ref().unwrap().id,
+            "WHITESPACE-METADATA-001"
+        );
+        assert_eq!(corpus.governed_files.len(), 1);
     }
 
     #[test]
@@ -498,6 +614,24 @@ Feature: incremental governance
         assert_eq!(corpus.governed_files.len(), 1);
         assert!(corpus.records[0].metadata.is_some());
         assert!(corpus.records[1].metadata.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_backed_feature_is_not_repository_owned_corpus() {
+        let repository = tempdir().unwrap();
+        let external = tempdir().unwrap();
+        let features = repository.path().join("features");
+        fs::create_dir(&features).unwrap();
+        let external_feature = external.path().join("borrowed.feature");
+        fs::write(
+            &external_feature,
+            "Feature: external\n  Scenario: borrowed\n    Given external truth\n",
+        )
+        .unwrap();
+        symlink(&external_feature, features.join("borrowed.feature")).unwrap();
+
+        assert!(load(&features).unwrap_err().0.contains("symlink"));
     }
 
     #[test]

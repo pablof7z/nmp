@@ -144,8 +144,9 @@ Ask of every `Given`:
 
 Every governed scenario uses a structured comment block immediately above it.
 Once one scenario in a file carries `nmp:*`, the whole file is governed. New,
-changed, or moved behavior must be governed; unchanged ungoverned legacy is
-temporary migration debt.
+changed, moved, or deleted behavior must be governed; unchanged ungoverned
+legacy is temporary migration debt. An ungoverned legacy file cannot disappear
+directly: govern it first so a later deletion has a traceable identity.
 
 ```gherkin
 # nmp:id=ROUTING-DISCOVERY-003

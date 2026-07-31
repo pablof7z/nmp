@@ -16,6 +16,7 @@ pub(crate) fn validate(
             "traceability check is vacuous: no governed feature file exists".into(),
         ));
     }
+    require_complete_governed_files(corpus)?;
     let resolver = EvidenceResolver::new(root)?;
     let mut ids: BTreeMap<&str, &ScenarioRecord> = BTreeMap::new();
     let mut required_issues = BTreeSet::new();
@@ -24,12 +25,10 @@ pub(crate) fn validate(
         if !governed {
             continue;
         }
-        let metadata = record.metadata.as_ref().ok_or_else(|| {
-            at(
-                record,
-                "every scenario in a governed file needs complete nmp metadata",
-            )
-        })?;
+        let metadata = record
+            .metadata
+            .as_ref()
+            .expect("governed file completeness was checked");
         validate_id(record, &metadata.id)?;
         register_id(&mut ids, record)?;
         validate_tags(record)?;
@@ -51,6 +50,20 @@ pub(crate) fn validate(
         }
     }
     issues.verify_exact(&required_issues)?;
+    Ok(())
+}
+
+fn require_complete_governed_files(corpus: &Corpus) -> Result<(), TraceError> {
+    if let Some(record) = corpus
+        .records
+        .iter()
+        .find(|record| corpus.governed_files.contains(&record.file) && record.metadata.is_none())
+    {
+        return Err(at(
+            record,
+            "every scenario in a governed file needs complete nmp metadata",
+        ));
+    }
     Ok(())
 }
 
@@ -290,6 +303,25 @@ mod tests {
         let mut violation = record(Status::KnownViolation);
         violation.metadata.as_mut().unwrap().issue = Some(1);
         assert!(validate_shape(&violation).is_ok());
+    }
+
+    #[test]
+    fn a_file_cannot_mix_governed_and_legacy_scenarios() {
+        let governed = record(Status::Built);
+        let mut legacy = governed.clone();
+        legacy.line = 9;
+        legacy.name = "legacy sibling".into();
+        legacy.metadata = None;
+        legacy.raw_metadata_present = false;
+        let corpus = Corpus {
+            records: vec![governed, legacy],
+            governed_files: BTreeSet::from([PathBuf::from("features/test.feature")]),
+        };
+
+        assert!(require_complete_governed_files(&corpus)
+            .unwrap_err()
+            .0
+            .contains("every scenario in a governed file"));
     }
 
     #[test]
