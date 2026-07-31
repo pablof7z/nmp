@@ -160,7 +160,7 @@ grep -qF 'pub fn publish_signed(' crates/nmp/src/nip29/group.rs ||
 grep -qF 'draft_kind_and_schema_survive_except_for_appended_h' \
   crates/nmp-nip29/src/context.rs ||
   fail "draft schema preservation falsifier is missing"
-grep -qF 'publication_never_synthesizes_previous' crates/nmp-nip29/src/context.rs ||
+grep -qF 'the_unsigned_door_never_invents_a_previous_tag' crates/nmp-nip29/src/context.rs ||
   fail "no-previous falsifier is missing"
 
 # The two falsifiers #1033 exists to prove, required by name so a rename
