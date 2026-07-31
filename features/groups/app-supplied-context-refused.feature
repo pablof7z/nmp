@@ -52,10 +52,10 @@ Feature: The h and previous tags belong to the group, not to the caller
     And relay "wss://relay.groups.example" received no event
 
   @nip29
-  Scenario: The group never mints a previous tag of its own
+  Scenario: The unsigned group-publication door never invents a previous tag
     When I publish an event of kind 9 with content "first light" through the group
     Then the delivered event carries no previous tag
-    And no surface anywhere can mint a previous tag for a group publication
+    And the unsigned group-publication door never invents or accepts a caller-supplied previous tag
 
   @nip29
   Scenario: A refused publication is distinguishable from a rejected one
