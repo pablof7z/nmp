@@ -724,6 +724,8 @@ impl<S: EventStore> EngineCore<S> {
             self.slot_to_relay.get(&handle.slot),
             Some((current, current_session)) if *current == handle && *current_session == session
         );
+        let same_wire_generation =
+            same_physical_session || self.session_has_live_generation(&session, handle);
         let open_failure_cleared = self.relay_open_failures.remove(&session).is_some();
         if let Some((_, displaced_session)) = self.slot_to_relay.get(&handle.slot).cloned() {
             if displaced_session != session {
@@ -737,12 +739,14 @@ impl<S: EventStore> EngineCore<S> {
                 self.auth_probe_sessions.remove(&displaced_session);
             }
         }
-        // A fresh connection generation is NEVER pre-authorized (#8): any
-        // AUTH readiness earned by an earlier generation of this session
-        // died with that socket. Only the AUTH reducer's own ready
-        // transition (`finish_auth_ok`, on the exact-generation OK) re-arms
-        // it once this generation's handshake completes.
-        self.invalidate_auth_epoch(&session, false, &mut effects);
+        // A fresh PROTECTED connection generation is NEVER pre-authorized
+        // (#8): any AUTH readiness earned by an earlier generation died with
+        // that socket. Public sessions own no AUTH epoch; invalidating one
+        // here would erase an initial REQ already accepted by this exact
+        // still-dialing handle, then manufacture a duplicate replay (#1075).
+        if session.access != AccessContext::Public {
+            self.invalidate_auth_epoch(&session, false, &mut effects);
+        }
         self.slot_to_relay
             .insert(handle.slot, (handle, session.clone()));
         // A connection can also exist solely for a compiled/persisted write
@@ -766,11 +770,17 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         // Reconnect (new generation): clear stale attribution, then rebuild
-        // every currently-planned REQ for this session. A behaviorally-proven
+        // every currently-planned REQ for this session. The first Connected
+        // callback may follow a REQ that the runtime already accepted on this
+        // exact handle; that is not a reconnect and must not erase or resend
+        // the accepted subscription.
+        if session.access == AccessContext::Public && !same_wire_generation {
+            self.abandon_session_subs(&session);
+        }
+        // A behaviorally-proven
         // broad Public request repeats the same live-first NIP-77 handoff as
         // an ordinary recompile; it must never regress to reconcile-first or
         // silently change strategy on reconnect (#563).
-        self.abandon_session_subs(&session);
         // ONLY a Public session replays its planned REQs at connect time. A
         // protected session's REQs park until the AUTH reducer's ready
         // transition (`finish_auth_ok`) proves THIS generation completed
@@ -780,17 +790,22 @@ impl<S: EventStore> EngineCore<S> {
         if session.access == AccessContext::Public {
             if let Some(reqs) = planned_read_reqs.as_ref() {
                 // A new websocket generation has no live subscriptions even
-                // if the previous generation's preamble still names them.
-                // `Replay` below resets the runtime preamble first; the
-                // live-first candidates are appended afterward.
-                self.active_nip77_live
-                    .retain(|plan_sub_id, _| plan_sub_id.0 != session.relay);
-                self.pending_neg_handoffs
-                    .retain(|_, handoff| handoff.probed.url() != &session.relay);
+                // if the previous generation's accepted-wire owner map still
+                // names them. Fresh-generation teardown above retires that
+                // state before this replay is built.
+                if !same_wire_generation {
+                    self.active_nip77_live
+                        .retain(|plan_sub_id, _| plan_sub_id.0 != session.relay);
+                    self.pending_neg_handoffs
+                        .retain(|_, handoff| handoff.probed.url() != &session.relay);
+                }
 
                 let mut plain_reqs = Vec::new();
                 let mut handoffs = Vec::new();
                 for req in reqs {
+                    if self.wire_request_is_live(&session, &req.sub_id, &req.filter, handle) {
+                        continue;
+                    }
                     if req.filter.limit.is_none() {
                         if let Some(probed) = self.prober.probed(&session.relay) {
                             handoffs.push((
@@ -812,9 +827,9 @@ impl<S: EventStore> EngineCore<S> {
                     );
                     plain_reqs.push(req.clone());
                 }
-                // Even an empty plain set is meaningful: clear stale
-                // reconnect-preamble entries before adding candidate live
-                // REQs through `Effect::Wire` below.
+                // Keep the replay boundary even when every planned request is
+                // already live on this exact handle. The runtime preserves
+                // its empty NMP reconnect preamble without resending anything.
                 effects.push(Effect::Replay(session.clone(), plain_reqs));
                 for (probed, sub_id, filter, absorbed) in handoffs {
                     self.begin_neg_handoff(probed, sub_id, None, filter, absorbed, &mut effects);
@@ -1013,11 +1028,10 @@ impl<S: EventStore> EngineCore<S> {
                 self.pending_neg_handoffs
                     .retain(|sub_id, _| sub_id.0 != session.relay);
 
-                // One-shot repair REQs live in the runtime preamble even
-                // though the router never planned them. Remove their
-                // reducer state and their preamble entries together. The
-                // socket is already gone, so the CLOSE is bookkeeping for
-                // the next generation rather than a wire expectation.
+                // One-shot repair REQs are reducer-owned even though the
+                // router never planned them. Remove their state when the
+                // socket generation dies. The socket is already gone, so the
+                // CLOSE is bookkeeping rather than a wire expectation.
                 let stale_temporary: Vec<SubId> = self
                     .pending_backfills
                     .keys()

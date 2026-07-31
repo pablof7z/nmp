@@ -41,18 +41,16 @@
 //! finite FIFO actually accepted, so a lag recovery can resume without
 //! replaying facts already delivered to that consumer.
 //!
-//! ## Reconnect-preamble bookkeeping
+//! ## One public-read replay owner
 //!
-//! `nmp_transport::Pool::set_reconnect_preamble` replaces the ENTIRE preamble
-//! for a relay worker on every call ("last call wins" — see that method's
-//! doc). `EngineCore`'s `Effect::Wire`/`Effect::Replay` are deltas/snapshots
-//! of the CURRENT demand, not the preamble text itself, so this module keeps
-//! its own per-SESSION `SubId -> wire REQ text` map (`Preambles`) and
-//! re-derives the full preamble string list on every touch — see
-//! `apply_wire_delta`/`apply_replay`. PROTECTED (`AccessContext::Nip42`)
-//! sessions are the exception (#8): they never store a preamble at all — a
-//! reconnected protected socket is unauthenticated until its own AUTH
-//! completes, so nothing may auto-replay on it.
+//! `EngineCore` is the sole owner of live public REQ state and replays the
+//! current plan exactly once from `RelayConnected`. This runtime therefore
+//! keeps the transport reconnect preamble empty for NMP read sessions. A
+//! second automatic owner here would race the reducer's generation-aware
+//! replay and make an unchanged `(session, sub-id, filter)` reach the relay
+//! two or three times. An independently owned signer-provider transport may
+//! retain its own reconnect preamble; this rule does not alter that separate
+//! capability contract.
 
 mod auth;
 mod clock;
@@ -2913,7 +2911,6 @@ mod relay_worker_reconciliation_tests {
         let mut rows = HashMap::new();
         let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
-        let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -2968,7 +2965,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -2976,7 +2972,6 @@ mod relay_worker_reconciliation_tests {
             .live_session_handle(&session)
             .expect("ordinary effect dispatch opens the protected worker");
         assert_eq!(pool.live_session_handle(&session), Some(first_transport));
-        assert!(!preambles.contains_key(&session));
 
         let second = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 2)));
         let second_id = second
@@ -2993,13 +2988,11 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
         assert_eq!(pool.live_session_handle(&session), Some(first_transport));
         assert_eq!(pool.admission_rejections(), 0);
-        assert!(!preambles.contains_key(&session));
 
         let newest_only = core.handle(EngineMsg::Unsubscribe(first_id));
         dispatch_core_effects(
@@ -3009,7 +3002,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3023,7 +3015,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3045,7 +3036,6 @@ mod relay_worker_reconciliation_tests {
         let mut rows = HashMap::new();
         let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
-        let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, inbox_rx) = mpsc::channel();
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -3092,7 +3082,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3110,7 +3099,7 @@ mod relay_worker_reconciliation_tests {
             "one refusal creates exactly one retry edge"
         );
 
-        retry_required_relay_workers(&core, &pool, &mut preambles);
+        retry_required_relay_workers(&core, &pool);
         let handle = pool
             .live_session_handle(&session)
             .expect("bounded retry opens the still-owned session");
@@ -3140,7 +3129,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3207,7 +3195,6 @@ mod relay_worker_reconciliation_tests {
         let mut rows = HashMap::new();
         let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
-        let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -3249,7 +3236,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3263,7 +3249,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3280,7 +3265,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3349,7 +3333,6 @@ mod relay_worker_reconciliation_tests {
         let mut rows = HashMap::new();
         let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
-        let mut preambles = Preambles::new();
         let registry = SignerRegistry::default();
         let (self_inbox, _inbox_rx) = mpsc::channel();
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -3383,7 +3366,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3396,7 +3378,6 @@ mod relay_worker_reconciliation_tests {
             &mut rows,
             &mut histories,
             &mut diagnostics,
-            &mut preambles,
             &registry,
             dispatch_runtime,
         );
@@ -3829,17 +3810,6 @@ fn relay_frame_needs_wall_clock(frame: &RelayFrame) -> bool {
     )
 }
 
-/// Per-SESSION reconnect-preamble bookkeeping: the full set of currently-live
-/// REQ wire texts, keyed by `SubId` so `WireOp::Req`/`Close` can update it
-/// incrementally (module doc: `Pool::set_reconnect_preamble` replaces the
-/// WHOLE preamble on every call, so this module must always hand it the
-/// complete current set, not a delta). PROTECTED sessions never own an entry
-/// here (#8): their REQs must never auto-replay on reconnect — a fresh
-/// generation is unauthenticated until its own AUTH completes, and the
-/// engine re-issues `Effect::Replay` itself when the AUTH reducer reaches
-/// Ready for that exact generation (`finish_auth_ok` in `core/mod.rs`).
-type Preambles = HashMap<RelaySessionKey, HashMap<SubId, String>>;
-
 #[derive(Clone, Copy)]
 struct DispatchRuntime<'a> {
     self_inbox: &'a Sender<Cmd>,
@@ -4006,7 +3976,6 @@ fn engine_loop<S>(
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
-    let mut preambles: Preambles = Preambles::new();
     let mut registry = SignerRegistry::default();
     let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
     let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
@@ -4041,7 +4010,6 @@ fn engine_loop<S>(
         &mut row_channels,
         &mut history_channels,
         &mut diag_channels,
-        &mut preambles,
         &registry,
         dispatch_runtime,
     );
@@ -4083,7 +4051,6 @@ fn engine_loop<S>(
                             &mut row_channels,
                             &mut history_channels,
                             &mut diag_channels,
-                            &mut preambles,
                             &registry,
                             dispatch_runtime,
                         );
@@ -4101,7 +4068,6 @@ fn engine_loop<S>(
                             &mut row_channels,
                             &mut history_channels,
                             &mut diag_channels,
-                            &mut preambles,
                             &registry,
                             dispatch_runtime,
                         );
@@ -4271,7 +4237,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -4291,7 +4256,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4309,7 +4273,6 @@ fn engine_loop<S>(
                                     &mut row_channels,
                                     &mut history_channels,
                                     &mut diag_channels,
-                                    &mut preambles,
                                     &registry,
                                     dispatch_runtime,
                                 );
@@ -4331,7 +4294,6 @@ fn engine_loop<S>(
                                         &mut row_channels,
                                         &mut history_channels,
                                         &mut diag_channels,
-                                        &mut preambles,
                                         &registry,
                                         dispatch_runtime,
                                     );
@@ -4352,7 +4314,6 @@ fn engine_loop<S>(
                                     &mut row_channels,
                                     &mut history_channels,
                                     &mut diag_channels,
-                                    &mut preambles,
                                     &registry,
                                     dispatch_runtime,
                                 );
@@ -4369,7 +4330,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4382,7 +4342,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4433,7 +4392,6 @@ fn engine_loop<S>(
                             &mut row_channels,
                             &mut history_channels,
                             &mut diag_channels,
-                            &mut preambles,
                             &registry,
                             dispatch_runtime,
                         );
@@ -4467,7 +4425,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4514,7 +4471,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4544,7 +4500,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4563,7 +4518,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -4779,7 +4733,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -4803,7 +4756,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -4846,7 +4798,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -4880,7 +4831,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4893,7 +4843,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -4917,7 +4866,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4938,7 +4886,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -4951,7 +4898,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -4978,7 +4924,6 @@ fn engine_loop<S>(
                             &mut row_channels,
                             &mut history_channels,
                             &mut diag_channels,
-                            &mut preambles,
                             &registry,
                             dispatch_runtime,
                         );
@@ -5004,7 +4949,6 @@ fn engine_loop<S>(
                             &mut row_channels,
                             &mut history_channels,
                             &mut diag_channels,
-                            &mut preambles,
                             &registry,
                             dispatch_runtime,
                         );
@@ -5025,7 +4969,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -5040,13 +4983,12 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
             }
             Cmd::RelayWorkerRetired => {
-                retry_required_relay_workers(&core, &pool, &mut preambles);
+                retry_required_relay_workers(&core, &pool);
             }
             Cmd::Engine(EngineMsg::RelayFrame(handle, session, frame)) => {
                 if relay_frame_needs_wall_clock(&frame)
@@ -5060,7 +5002,6 @@ fn engine_loop<S>(
                         &mut row_channels,
                         &mut history_channels,
                         &mut diag_channels,
-                        &mut preambles,
                         &registry,
                         dispatch_runtime,
                     );
@@ -5073,7 +5014,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -5087,7 +5027,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -5108,7 +5047,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -5126,7 +5064,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -5140,7 +5077,6 @@ fn engine_loop<S>(
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
-                    &mut preambles,
                     &registry,
                     dispatch_runtime,
                 );
@@ -5175,7 +5111,6 @@ fn reduce_and_dispatch_committed_observations<S: EventStore>(
     row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
-    preambles: &mut Preambles,
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
@@ -5204,7 +5139,6 @@ fn reduce_and_dispatch_committed_observations<S: EventStore>(
             row_channels,
             history_channels,
             diag_channels,
-            preambles,
             registry,
             runtime,
         );
@@ -5224,7 +5158,6 @@ fn reduce_and_dispatch_committed_observations<S: EventStore>(
             row_channels,
             history_channels,
             diag_channels,
-            preambles,
             registry,
             runtime,
         );
@@ -5239,7 +5172,6 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
     row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
-    preambles: &mut Preambles,
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
@@ -5263,7 +5195,6 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
         row_channels,
         history_channels,
         diag_channels,
-        preambles,
         registry,
         runtime,
     );
@@ -5287,7 +5218,6 @@ fn dispatch_core_effects<S: EventStore>(
     row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
-    preambles: &mut Preambles,
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
@@ -5297,7 +5227,6 @@ fn dispatch_core_effects<S: EventStore>(
                 let _ = runtime.self_inbox.send(Cmd::Engine(msg));
             }
         }
-        preambles.retain(|session, _| required.all.contains(session));
     }
 
     dispatch_effects(
@@ -5307,7 +5236,6 @@ fn dispatch_core_effects<S: EventStore>(
         row_channels,
         history_channels,
         diag_channels,
-        preambles,
         registry,
         runtime,
     );
@@ -5322,7 +5250,6 @@ fn dispatch_relay_open_failure(
     row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
-    preambles: &mut Preambles,
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
@@ -5335,7 +5262,6 @@ fn dispatch_relay_open_failure(
                 row_channels,
                 history_channels,
                 diag_channels,
-                preambles,
                 registry,
                 runtime,
             );
@@ -5352,7 +5278,6 @@ fn dispatch_relay_open_failure(
                 row_channels,
                 history_channels,
                 diag_channels,
-                preambles,
                 registry,
                 runtime,
             );
@@ -5373,7 +5298,6 @@ fn dispatch_relay_open_failure(
                 row_channels,
                 history_channels,
                 diag_channels,
-                preambles,
                 registry,
                 runtime,
             );
@@ -5404,11 +5328,12 @@ fn dispatch_relay_open_failure(
 ///
 /// A protected write is a durable obligation, so it may time-share the SAME
 /// relay's one slot by releasing that relay's Public worker first. The
-/// reducer still owns both demands: the Public reconnect preamble remains in
-/// `preambles`, the synchronous disconnect fact is fed back through the
-/// ordinary engine inbox, and once the write lane becomes terminal exact
-/// worker reconciliation retires the protected worker. The ensuing
-/// `RelayWorkerRetired` retry restores the still-required Public session.
+/// reducer still owns both demands: its Public read plan remains current, the
+/// synchronous disconnect fact is fed back through the ordinary engine
+/// inbox, and once the write lane becomes terminal exact worker
+/// reconciliation retires the protected worker. The ensuing
+/// `RelayWorkerRetired` retry restores the still-required Public session,
+/// whose Connected transition replays the plan once.
 ///
 /// This never exceeds the configured worker/thread envelope, never merges
 /// access contexts onto one socket, and never evicts a different relay.
@@ -5438,18 +5363,11 @@ fn ensure_write_effect_session(
 }
 
 /// Retry the exact currently-owned relay-session set once after an actual
-/// worker join releases retirement capacity. Public read sessions replay the
-/// full preamble retained even when their first spawn was refused;
-/// write-only and PROTECTED sessions need only be opened, after which the
-/// ordinary Connected (and, for protected, the AUTH reducer's ready
-/// transition on the exact AUTH OK) path advances
-/// them — a protected session's reconnect must never auto-send REQs (#8),
-/// so its fresh worker gets an explicitly EMPTY reconnect preamble.
-fn retry_required_relay_workers<S: EventStore>(
-    core: &EngineCore<S>,
-    pool: &Pool,
-    preambles: &mut Preambles,
-) {
+/// worker join releases retirement capacity. The ordinary Connected path
+/// advances public reads; protected reads park until the exact AUTH OK.
+/// Every NMP read worker keeps an empty transport preamble because reducer
+/// replay is the single generation-aware owner.
+fn retry_required_relay_workers<S: EventStore>(core: &EngineCore<S>, pool: &Pool) {
     let Some(required) = core.relay_worker_requirements() else {
         return;
     };
@@ -5472,18 +5390,7 @@ fn retry_required_relay_workers<S: EventStore>(
         let Ok(handle) = pool.ensure_session(&session) else {
             continue;
         };
-        if session.access != nmp_grammar::AccessContext::Public {
-            pool.set_reconnect_preamble(handle, Vec::new());
-            continue;
-        }
-        let Some(entry) = preambles.get(&session) else {
-            continue;
-        };
-        let frames: Vec<_> = entry.values().cloned().collect();
-        for frame in &frames {
-            let _ = pool.send(handle, WireFrame::Text(frame.clone()));
-        }
-        pool.set_reconnect_preamble(handle, frames);
+        pool.set_reconnect_preamble(handle, Vec::new());
     }
 }
 
@@ -5498,7 +5405,6 @@ fn dispatch_effects(
     row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
-    preambles: &mut Preambles,
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
@@ -5510,7 +5416,6 @@ fn dispatch_effects(
             row_channels,
             history_channels,
             diag_channels,
-            preambles,
             registry,
             runtime,
         );
@@ -5528,7 +5433,6 @@ fn dispatch_effect(
     row_channels: &mut HashMap<HandleId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
-    preambles: &mut Preambles,
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
@@ -5544,7 +5448,6 @@ fn dispatch_effect(
                     row_channels,
                     history_channels,
                     diag_channels,
-                    preambles,
                     registry,
                     runtime,
                 );
@@ -5563,7 +5466,7 @@ fn dispatch_effect(
             crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
         }
         Effect::Wire(delta) => {
-            let reports = apply_wire_delta(&delta, pool, preambles);
+            let reports = apply_wire_delta(&delta, pool);
             for report in reports {
                 let evidence = core.on_wire_request_handoff(
                     &report.session,
@@ -5580,14 +5483,13 @@ fn dispatch_effect(
                     row_channels,
                     history_channels,
                     diag_channels,
-                    preambles,
                     registry,
                     runtime,
                 );
             }
         }
         Effect::Replay(session, reqs) => {
-            let reports = apply_replay(&session, reqs, pool, preambles);
+            let reports = apply_replay(&session, reqs, pool);
             for report in reports {
                 let evidence = core.on_wire_request_handoff(
                     &report.session,
@@ -5604,7 +5506,6 @@ fn dispatch_effect(
                     row_channels,
                     history_channels,
                     diag_channels,
-                    preambles,
                     registry,
                     runtime,
                 );
@@ -5671,7 +5572,6 @@ fn dispatch_effect(
                     row_channels,
                     history_channels,
                     diag_channels,
-                    preambles,
                     registry,
                     runtime,
                 );
@@ -5692,7 +5592,6 @@ fn dispatch_effect(
                     row_channels,
                     history_channels,
                     diag_channels,
-                    preambles,
                     registry,
                     runtime,
                 );
@@ -5798,7 +5697,6 @@ fn dispatch_effect(
                     row_channels,
                     history_channels,
                     diag_channels,
-                    preambles,
                     registry,
                     runtime,
                 );
@@ -5825,7 +5723,6 @@ fn dispatch_effect(
                     row_channels,
                     history_channels,
                     diag_channels,
-                    preambles,
                     registry,
                     runtime,
                 );
@@ -5958,21 +5855,17 @@ fn neg_close_frame_text(sub_id: &SubId) -> String {
     .as_json()
 }
 
-/// `Effect::Wire`'s per-session ops -> wire frames + reconnect-preamble
-/// upkeep. `ensure_session` is idempotent for an already-live slot (ships
+/// `Effect::Wire`'s per-session ops -> wire frames. `ensure_session` is
+/// idempotent for an already-live slot (ships
 /// the frame onto whichever generation is current, queuing it if the socket
 /// is still dialing) and transparently reopens a previously-closed one, so
 /// there is no separate "is this session already open" bookkeeping to keep
 /// here.
 ///
-/// PROTECTED sessions take a stricter path (#8): their frames are sent
-/// directly (the reducer only ever emits protected ops AFTER the exact
-/// current generation's AUTH reached Ready via `finish_auth_ok` on its
-/// exact AUTH OK), but NO reconnect preamble
-/// is ever stored for them — a fresh generation is unauthenticated until
-/// its own AUTH completes, so the pool must never auto-replay a protected
-/// REQ, and this module keeps no `preambles` entry that
-/// `retry_required_relay_workers` could accidentally resend.
+/// The transport reconnect preamble stays empty for both Public and
+/// PROTECTED sessions. Public replay belongs to `EngineCore`; protected REQs
+/// additionally cannot replay before the fresh generation reaches AUTH
+/// Ready (#8).
 struct RequestHandoffReport {
     session: RelaySessionKey,
     sub_id: SubId,
@@ -5982,11 +5875,7 @@ struct RequestHandoffReport {
     reason: Option<String>,
 }
 
-fn apply_wire_delta(
-    delta: &WireDelta,
-    pool: &Pool,
-    preambles: &mut Preambles,
-) -> Vec<RequestHandoffReport> {
+fn apply_wire_delta(delta: &WireDelta, pool: &Pool) -> Vec<RequestHandoffReport> {
     let mut reports = Vec::new();
     for (session, ops) in &delta.ops {
         let has_req = ops.iter().any(|op| matches!(op, WireOp::Req(..)));
@@ -5998,38 +5887,12 @@ fn apply_wire_delta(
             // withdrew every subscription on that connection.
             pool.live_session_handle(session)
         };
-        if session.access != nmp_grammar::AccessContext::Public {
-            for op in ops {
-                let text = match op {
-                    WireOp::Req(sub_id, filter) => req_frame_text(sub_id, filter),
-                    WireOp::Close(sub_id) => close_frame_text(sub_id),
-                };
-                let accepted =
-                    handle.is_some_and(|handle| pool.send(handle, WireFrame::Text(text)));
-                if let WireOp::Req(sub_id, filter) = op {
-                    reports.push(RequestHandoffReport {
-                        session: session.clone(),
-                        sub_id: sub_id.clone(),
-                        filter_hash: filter.hash(),
-                        handle,
-                        accepted,
-                        reason: (!accepted).then(|| "transport send refused REQ".to_string()),
-                    });
-                }
-            }
-            if let Some(handle) = handle {
-                pool.set_reconnect_preamble(handle, Vec::new());
-            }
-            preambles.remove(session);
-            continue;
-        }
-        let entry = preambles.entry(session.clone()).or_default();
         for op in ops {
             match op {
                 WireOp::Req(sub_id, filter) => {
                     let text = req_frame_text(sub_id, filter);
-                    let accepted = handle
-                        .is_some_and(|handle| pool.send(handle, WireFrame::Text(text.clone())));
+                    let accepted =
+                        handle.is_some_and(|handle| pool.send(handle, WireFrame::Text(text)));
                     reports.push(RequestHandoffReport {
                         session: session.clone(),
                         sub_id: sub_id.clone(),
@@ -6038,48 +5901,33 @@ fn apply_wire_delta(
                         accepted,
                         reason: (!accepted).then(|| "transport send refused REQ".to_string()),
                     });
-                    entry.insert(sub_id.clone(), text);
                 }
                 WireOp::Close(sub_id) => {
                     let text = close_frame_text(sub_id);
                     if let Some(handle) = handle {
                         let _ = pool.send(handle, WireFrame::Text(text));
                     }
-                    entry.remove(sub_id);
                 }
             }
         }
-        let frames: Vec<String> = entry.values().cloned().collect();
-        let empty = frames.is_empty();
         if let Some(handle) = handle {
-            pool.set_reconnect_preamble(handle, frames);
-        }
-        if empty {
-            preambles.remove(session);
+            pool.set_reconnect_preamble(handle, Vec::new());
         }
     }
     reports
 }
 
-/// `Effect::Replay`: `reqs` is `EngineCore`'s full CURRENT req list for
-/// `session` at the moment it observed `RelayConnected` (`core/mod.rs`'s
-/// `on_relay_connected`) or — for a protected session — the AUTH reducer's
-/// ready transition (`finish_auth_ok`) -- an authoritative snapshot, not a
-/// delta, so the
-/// preamble entry for this session is rebuilt from scratch rather than
-/// patched. Resending these as fresh REQ frames on the just-connected handle
-/// is what makes reconnection replay observable even on the very first
-/// `Connected` for a session (before any preamble could have existed yet);
-/// on a later automatic reconnect the pool's own preamble mechanism will
-/// typically have already replayed them, and resending here is a harmless,
-/// idempotent overwrite (NIP-01: a REQ with an existing sub-id replaces that
-/// sub). A PROTECTED session's replay sends directly and stores NO preamble
-/// (#8) — the same never-auto-replay rule as `apply_wire_delta`.
+/// `Effect::Replay`: for a Public session, `reqs` is `EngineCore`'s current
+/// plan minus requests already accepted on this exact transport handle. For a
+/// protected session it is the full plan released by the AUTH reducer's ready
+/// transition (`finish_auth_ok`). Sending these on the exact connected handle
+/// is the sole replay owner. No transport preamble is installed, so the same
+/// generation cannot receive an automatic copy; protected sessions retain the
+/// same empty-preamble rule (#8).
 fn apply_replay(
     session: &RelaySessionKey,
     reqs: Vec<WireReq>,
     pool: &Pool,
-    preambles: &mut Preambles,
 ) -> Vec<RequestHandoffReport> {
     let Ok(handle) = pool.ensure_session(session) else {
         return reqs
@@ -6095,28 +5943,9 @@ fn apply_replay(
             .collect();
     };
     let mut reports = Vec::new();
-    if session.access != nmp_grammar::AccessContext::Public {
-        for req in &reqs {
-            let text = req_frame_text(&req.sub_id, &req.filter);
-            let accepted = pool.send(handle, WireFrame::Text(text));
-            reports.push(RequestHandoffReport {
-                session: session.clone(),
-                sub_id: req.sub_id.clone(),
-                filter_hash: req.filter.hash(),
-                handle: Some(handle),
-                accepted,
-                reason: (!accepted).then(|| "transport send refused replay REQ".to_string()),
-            });
-        }
-        pool.set_reconnect_preamble(handle, Vec::new());
-        preambles.remove(session);
-        return reports;
-    }
-    let entry = preambles.entry(session.clone()).or_default();
-    entry.clear();
     for req in &reqs {
         let text = req_frame_text(&req.sub_id, &req.filter);
-        let accepted = pool.send(handle, WireFrame::Text(text.clone()));
+        let accepted = pool.send(handle, WireFrame::Text(text));
         reports.push(RequestHandoffReport {
             session: session.clone(),
             sub_id: req.sub_id.clone(),
@@ -6125,10 +5954,8 @@ fn apply_replay(
             accepted,
             reason: (!accepted).then(|| "transport send refused replay REQ".to_string()),
         });
-        entry.insert(req.sub_id.clone(), text);
     }
-    let frames: Vec<String> = entry.values().cloned().collect();
-    pool.set_reconnect_preamble(handle, frames);
+    pool.set_reconnect_preamble(handle, Vec::new());
     reports
 }
 
