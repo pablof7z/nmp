@@ -114,7 +114,7 @@ mod groups;
 mod identity;
 #[cfg(test)]
 mod identity_tests;
-mod observe;
+pub(crate) mod observe;
 mod outbox;
 mod provenance;
 mod queries;

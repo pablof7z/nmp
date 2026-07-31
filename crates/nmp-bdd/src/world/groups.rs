@@ -17,7 +17,7 @@
 //!   test, so the harness must not reimplement it.
 //! - **Reads go through the same subscription call every other read in this
 //!   suite uses** (`Handle::subscribe`, which `Engine::observe` is a thin
-//!   wrapper over), fed by `LiveQuery(group.demand(filter))`. There is no
+//!   wrapper over), fed by `LiveQuery::single(group.demand(filter))`. There is no
 //!   group-shaped read door to call, which IS the contract; the group only
 //!   mints the demand.
 //!
@@ -35,8 +35,8 @@ use nostr::{Event, EventId, Keys, Kind, Tag, Timestamp, UnsignedEvent};
 
 use nmp::nip29::{Group, GroupContextError};
 use nmp::{Engine, GroupPublishError, GroupReceipts};
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
-use nmp_resolver::LiveQuery;
 
 use super::budgets::EVENTUALLY;
 use super::observe::{FeedState, ReceiptState};
@@ -240,13 +240,13 @@ impl NmpWorld {
     /// `When I observe a live query built from the group's demand for that
     /// filter` (and its siblings).
     ///
-    /// `LiveQuery(group.demand(filter))` handed to the SAME subscription call
+    /// `LiveQuery::single(group.demand(filter))` handed to the SAME subscription call
     /// every other read in this suite uses. No group-shaped read verb is
     /// called here because none exists, which is the contract.
     pub async fn observe_group_demand(&mut self, group_id: Option<&str>, filter: Filter) {
         self.ensure_started().await;
         let group = self.group_value(group_id);
-        let query = LiveQuery(group.demand(filter));
+        let query = LiveQuery::single(group.demand(filter));
         let (handle, rx) = self
             .handle()
             .subscribe(query)
@@ -299,7 +299,7 @@ impl NmpWorld {
         .expect("nmp-bdd: a pinned id demand is constructible");
         let (handle, rx) = self
             .handle()
-            .subscribe(LiveQuery(demand))
+            .subscribe(LiveQuery::single(demand))
             .expect("nmp-bdd: id subscription construction");
         self.feed = Some(FeedState::new(handle, rx));
     }

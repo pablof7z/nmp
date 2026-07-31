@@ -174,7 +174,12 @@ data class AcquisitionEvidence(
  * Window.kt) plus the query's current scoped acquisition evidence. */
 data class RowBatch(
     val rows: List<Row>,
-    val evidence: AcquisitionEvidence,
+    /** This observation's acquisition evidence, ONE entry per canonical query
+     * branch in branch order (#1108). A single-branch live query carries
+     * exactly one entry. Branch identity is never erased: two branches that
+     * resolved the same value keep separate entries, and one branch's
+     * shortfall is never masked by a sibling's proof. */
+    val evidence: List<AcquisitionEvidence>,
     /** Mechanical growth state of the observation's expandable window --
      * a fact, never a completeness claim. `null` iff the observation is
      * unbounded (no window, hence no growth state to report). */

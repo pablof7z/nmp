@@ -85,8 +85,8 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         }
         let acquired = await waitForBatch(queryProbe, timeoutSeconds: 8) { batch in
             batch.load == .idle
-                && batch.evidence.shortfall.isEmpty
-                && batch.evidence.sources.contains {
+                && batch.evidence.allSatisfy { $0.shortfall.isEmpty }
+                && batch.evidence.flatMap(\.sources).contains {
                     isSameRelay($0.relay, relay.relayURL)
                 }
         }

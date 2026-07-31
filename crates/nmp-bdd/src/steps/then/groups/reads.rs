@@ -1,5 +1,6 @@
 //! The one read door: an app-chosen selection, pinned and h-scoped.
 
+use crate::world::observe::branch_sources;
 use cucumber::then;
 
 use crate::world::parse_kind_list;
@@ -237,10 +238,7 @@ async fn diagnostics_attribute_no_directory_fact(w: &mut NmpWorld) {
 async fn per_source_evidence_for(w: &mut NmpWorld, relay: String) {
     let url = w.relay_url(&relay);
     let reported = w.feed_eventually(move |_, evidence| {
-        evidence
-            .sources
-            .iter()
-            .any(|source| source.relay.to_string() == url.to_string())
+        branch_sources(evidence).any(|source| source.relay.to_string() == url.to_string())
     });
     assert!(
         reported,
@@ -251,11 +249,8 @@ async fn per_source_evidence_for(w: &mut NmpWorld, relay: String) {
 #[then(regex = r#"^the acquisition evidence reports the host as unreachable$"#)]
 async fn evidence_reports_unreachable(w: &mut NmpWorld) {
     let reported = w.feed_eventually(|_, evidence| {
-        !evidence.sources.is_empty()
-            && evidence
-                .sources
-                .iter()
-                .all(|source| source.reconciled_through.is_none())
+        branch_sources(evidence).next().is_some()
+            && branch_sources(evidence).all(|source| source.reconciled_through.is_none())
     });
     assert!(
         reported,

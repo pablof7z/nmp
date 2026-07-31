@@ -44,14 +44,14 @@ enum PendingTransition {
 
 struct PendingRows {
     by_id: BTreeMap<EventId, PendingTransition>,
-    evidence: AcquisitionEvidence,
+    evidence: Vec<AcquisitionEvidence>,
     execution: VecDeque<ObservationEvidence>,
 }
 
 const EXECUTION_EVIDENCE_CAPACITY: usize = 256;
 
 impl PendingRows {
-    fn new(evidence: AcquisitionEvidence) -> Self {
+    fn new(evidence: Vec<AcquisitionEvidence>) -> Self {
         Self {
             by_id: BTreeMap::new(),
             evidence,
@@ -92,6 +92,7 @@ impl PendingRows {
             dropped = dropped.saturating_add(1);
         }
         self.execution.push_front(ObservationEvidence {
+            branch: None,
             sequence: last,
             fact: ObservationFact::Overflow {
                 first_sequence: first,
@@ -187,7 +188,7 @@ pub(crate) struct RowsSender {
     /// Execution-only facts can arrive after the receiver consumed the latest
     /// row batch. Retaining this snapshot prevents those facts from replacing
     /// real acquisition evidence with `AcquisitionEvidence::default()`.
-    last_evidence: Mutex<AcquisitionEvidence>,
+    last_evidence: Mutex<Vec<AcquisitionEvidence>>,
 }
 
 /// The single-consumer half of an ordinary live-query stream.
@@ -213,7 +214,7 @@ pub(crate) fn rows_channel() -> (RowsSender, RowsReceiver) {
     (
         RowsSender {
             pending: sender,
-            last_evidence: Mutex::new(AcquisitionEvidence::default()),
+            last_evidence: Mutex::new(Vec::new()),
         },
         RowsReceiver {
             pending: receiver,
@@ -341,14 +342,14 @@ mod tests {
         }
     }
 
-    fn latest_evidence() -> AcquisitionEvidence {
-        AcquisitionEvidence {
+    fn latest_evidence() -> Vec<AcquisitionEvidence> {
+        vec![AcquisitionEvidence {
             sources: Vec::new(),
             shortfall: vec![ShortfallFact::NoResolvedDemand],
-        }
+        }]
     }
 
-    fn send_rows(tx: &RowsSender, deltas: Vec<RowDelta>, evidence: AcquisitionEvidence) {
+    fn send_rows(tx: &RowsSender, deltas: Vec<RowDelta>, evidence: Vec<AcquisitionEvidence>) {
         tx.send((deltas, evidence, Vec::new()));
     }
 
@@ -364,7 +365,7 @@ mod tests {
         send_rows(
             &tx,
             vec![RowDelta::Added(expected.clone())],
-            AcquisitionEvidence::default(),
+            vec![AcquisitionEvidence::default()],
         );
         let mut delivered = BTreeMap::new();
         apply(&mut delivered, &rx.recv().unwrap().0);
@@ -373,7 +374,7 @@ mod tests {
             send_rows(
                 &tx,
                 vec![RowDelta::Removed(id)],
-                AcquisitionEvidence::default(),
+                vec![AcquisitionEvidence::default()],
             );
             expected.sources = [RelayUrl::parse(&format!("wss://r{update}.example")).unwrap()]
                 .into_iter()
@@ -381,7 +382,7 @@ mod tests {
             send_rows(
                 &tx,
                 vec![RowDelta::Added(expected.clone())],
-                AcquisitionEvidence::default(),
+                vec![AcquisitionEvidence::default()],
             );
         }
 
@@ -400,7 +401,7 @@ mod tests {
         send_rows(
             &tx,
             vec![RowDelta::Added(added.clone())],
-            AcquisitionEvidence::default(),
+            vec![AcquisitionEvidence::default()],
         );
         let evidence = latest_evidence();
         send_rows(
@@ -425,7 +426,7 @@ mod tests {
         send_rows(
             &tx,
             vec![RowDelta::Added(initial)],
-            AcquisitionEvidence::default(),
+            vec![AcquisitionEvidence::default()],
         );
         rx.recv().unwrap();
         send_rows(
@@ -434,7 +435,7 @@ mod tests {
                 id,
                 sources: [a.clone()].into_iter().collect(),
             }],
-            AcquisitionEvidence::default(),
+            vec![AcquisitionEvidence::default()],
         );
         let expected: BTreeSet<_> = [a, b].into_iter().collect();
         send_rows(
@@ -464,7 +465,7 @@ mod tests {
         send_rows(
             &tx,
             vec![RowDelta::Added(initial)],
-            AcquisitionEvidence::default(),
+            vec![AcquisitionEvidence::default()],
         );
         let mut delivered = BTreeMap::new();
         apply(&mut delivered, &rx.recv().unwrap().0);
@@ -472,7 +473,7 @@ mod tests {
         send_rows(
             &tx,
             vec![RowDelta::Removed(id)],
-            AcquisitionEvidence::default(),
+            vec![AcquisitionEvidence::default()],
         );
         let evidence = latest_evidence();
         send_rows(
@@ -501,7 +502,7 @@ mod tests {
         send_rows(
             &tx,
             vec![RowDelta::Added(added)],
-            AcquisitionEvidence::default(),
+            vec![AcquisitionEvidence::default()],
         );
         drop(tx);
         assert_eq!(rx.recv().unwrap().0.len(), 1);
@@ -518,6 +519,7 @@ mod tests {
         tx.send_evidence(
             (1..=300)
                 .map(|sequence| ObservationEvidence {
+                    branch: Some(0),
                     sequence,
                     fact: ObservationFact::Withdrawn,
                 })
@@ -530,6 +532,7 @@ mod tests {
             &execution[0],
             ObservationEvidence {
                 sequence: 45,
+                branch: None,
                 fact: ObservationFact::Overflow {
                     first_sequence: 1,
                     last_sequence: 45,
@@ -549,6 +552,7 @@ mod tests {
         assert_eq!(rx.recv().unwrap().1, evidence);
 
         tx.send_evidence(vec![ObservationEvidence {
+            branch: Some(0),
             sequence: 1,
             fact: ObservationFact::Withdrawn,
         }]);

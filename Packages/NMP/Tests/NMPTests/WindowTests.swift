@@ -36,21 +36,21 @@ final class WindowTests: XCTestCase {
             FfiFrame(
                 deltas: [],
                 window: FfiWindowContents(rows: [a], load: .idle),
-                evidence: Self.emptyEvidence
+                evidence: [Self.emptyEvidence]
             )
         )
         let second = accumulator.fold(
             FfiFrame(
                 deltas: [],
                 window: FfiWindowContents(rows: [a, b], load: .returned(added: 1)),
-                evidence: Self.emptyEvidence
+                evidence: [Self.emptyEvidence]
             )
         )
         let third = accumulator.fold(
             FfiFrame(
                 deltas: [],
                 window: FfiWindowContents(rows: [c, a], load: .requesting),
-                evidence: Self.emptyEvidence
+                evidence: [Self.emptyEvidence]
             )
         )
 
@@ -74,7 +74,7 @@ final class WindowTests: XCTestCase {
             FfiFrame(
                 deltas: [.added(row: a), .added(row: b)],
                 window: nil,
-                evidence: Self.emptyEvidence
+                evidence: [Self.emptyEvidence]
             )
         )
         let second = accumulator.fold(
@@ -84,7 +84,7 @@ final class WindowTests: XCTestCase {
                     .sourcesGrew(id: "b", sources: ["wss://r0.example", "wss://r1.example"]),
                 ],
                 window: nil,
-                evidence: Self.emptyEvidence
+                evidence: [Self.emptyEvidence]
             )
         )
 

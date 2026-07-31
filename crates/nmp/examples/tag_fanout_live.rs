@@ -64,7 +64,7 @@ fn author_query(relay: &RelayUrl, i: usize) -> LiveQuery {
 }
 
 fn pinned(relay: &RelayUrl, filter: Filter) -> LiveQuery {
-    LiveQuery(
+    LiveQuery::single(
         Demand::new(
             filter,
             SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),

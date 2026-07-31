@@ -2892,6 +2892,59 @@ enum Enum {
             ),
         },
         Variant {
+            name: "WindowAggregateResultLimit",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A windowed observe was declared over a live query that already carries\nan aggregate result limit (#1108) -- the window and the aggregate bound\nwould be two competing owners of the merged row count\n(`nmp::EngineError::WindowAggregateResultLimit` mirror).",
+            ),
+        },
+        Variant {
+            name: "EmptyQueryUnion",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A live query was declared with no demand branches at all (#1108)\n(`nmp::LiveQueryError::EmptyUnion` mirror).",
+            ),
+        },
+        Variant {
+            name: "AggregateResultLimitZero",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A live query declared an aggregate result limit of zero (#1108): a\nquery that may never contain a row is not a bound\n(`nmp::LiveQueryError::AggregateResultLimitZero` mirror).",
+            ),
+        },
+        Variant {
+            name: "NestedAggregateResultLimit",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A nested live-query branch carried its own aggregate result limit\n(#1108). Branches flatten into ONE canonical set, so an inner bound has\nno surviving scope and accepting it would silently discard it\n(`nmp::LiveQueryError::NestedAggregateResultLimit` mirror).",
+            ),
+        },
+        Variant {
+            name: "TooManyQueryBranches",
+            discr: None,
+            fields: [
+                Field {
+                    name: "requested",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "maximum",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A live query declared more branches than the supported hard ceiling\n(#1108). The whole declaration is refused; no subset is installed\n(`nmp::LiveQueryError::TooManyQueryBranches` mirror).",
+            ),
+        },
+        Variant {
             name: "RelayInformationUnavailable",
             discr: None,
             fields: [
@@ -5892,12 +5945,16 @@ record Record {
         },
         Field {
             name: "evidence",
-            type_: Record {
-                module_path: "nmp_ffi",
-                name: "FfiAcquisitionEvidence",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiAcquisitionEvidence",
+                },
             },
             default: None,
-            docstring: None,
+            docstring: Some(
+                "This observation's acquisition evidence, ONE entry per canonical query\nbranch in branch order (#1108). A single-branch live query carries\nexactly one entry. Branch identity is never erased and nothing here is\na global completeness verdict.",
+            ),
         },
     ],
     docstring: Some(
@@ -5948,6 +6005,40 @@ record Record {
     ],
     docstring: Some(
         "One lane's wire-req count within a relay's diagnostics (M5 plan §1.1;\n`nmp::Lane` mirror, rendered as a string -- see\n`convert::lane_to_ffi_string`).",
+    ),
+}
+
+record Record {
+    name: "FfiLiveQuery",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "branches",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiDemand",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "The demand branches. Must be nonempty and at most\n`MAX_QUERY_BRANCHES`; both are typed refusals, never truncation.",
+            ),
+        },
+        Field {
+            name: "aggregate_result_limit",
+            type_: Optional {
+                inner_type: UInt32,
+            },
+            default: None,
+            docstring: Some(
+                "Bound on the MERGED row union, never N rows per branch. Zero is a\ntyped refusal.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "One live-query declaration (`nmp::LiveQuery` mirror, #1108): one or more\ncomplete, independent [`FfiDemand`] branches observed through ONE\nlifecycle, plus the optional bound on their merged row union.\n\nBranches are canonicalized by the Rust constructor -- sorted, duplicates\ncollapsed -- so permuted or repeated input produces the same observation\nand the same per-branch evidence order. `aggregate_result_limit` bounds\nthe union AFTER branch rows are merged by event id; it is NOT a branch's\nown `FfiFilter::limit`, which bounds only that branch's selection.",
     ),
 }
 
@@ -7755,6 +7846,34 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_group_discovery_demand",
     checksum: Some(
         49815,
+    ),
+}
+
+function Function {
+    name: "max_query_branches",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [],
+    return_type: Some(
+        UInt32,
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_max_query_branches",
+        is_async: false,
+        arguments: [],
+        return_type: Some(
+            UInt32,
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "The hard ceiling on branches in one observation (`nmp::LiveQuery::\nMAX_BRANCHES` mirror). Exceeding it refuses the whole declaration.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_max_query_branches",
+    checksum: Some(
+        25911,
     ),
 }
 
@@ -10235,94 +10354,6 @@ object Object {
             ),
         },
         Method {
-            name: "observe_demand",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "query",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiDemand",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "window",
-                    type_: Optional {
-                        inner_type: Enum {
-                            module_path: "nmp_ffi",
-                            name: "FfiWindow",
-                        },
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "NmpRowStream",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_observe_demand",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "query",
-                        type_: RustBuffer(
-                            Some(
-                                ExternalFfiMetadata {
-                                    name: "FfiDemand",
-                                    module_path: "nmp_ffi",
-                                },
-                            ),
-                        ),
-                    },
-                    FfiArgument {
-                        name: "window",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "NmpRowStream",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Open a live subscription over an explicit [`FfiDemand`] (#107) --\nthe constructor an app reaches for once [`Self::observe`]'s bare\n`FfiFilter` (which always takes `Demand::from_filter`'s static\ndefault) isn't enough: declaring `Pinned` wire authority, a non-\ndefault `AccessContext`, or a non-`Agnostic` `CacheMode`. Same\npull-based/cancel/window shape as `observe` in every other respect\n(see that method's doc for the `window` policy).",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_demand",
-            checksum: Some(
-                62514,
-            ),
-        },
-        Method {
             name: "observe_diagnostics",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -10430,6 +10461,94 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_following",
             checksum: Some(
                 13924,
+            ),
+        },
+        Method {
+            name: "observe_query",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "query",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiLiveQuery",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "window",
+                    type_: Optional {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiWindow",
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpRowStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_observe_query",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "query",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiLiveQuery",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "window",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpRowStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Open a live subscription over an explicit [`FfiLiveQuery`] (#1108) --\nthe constructor an app reaches for once [`Self::observe`]'s bare\n[`FfiFilter`] (which always takes `Demand::from_filter`'s static\ndefault, one branch) isn't enough: declaring `Pinned` wire authority,\na non-default `AccessContext`, a non-`Agnostic` `CacheMode`, SEVERAL\nindependent demand branches, or a bound on their merged row union.\n\nBranches are observed through this ONE subscription: rows are unioned\nby event id with provenance merged, each frame carries one evidence\nentry per canonical branch, and one cancellation withdraws every\nbranch exactly once. Same pull-based/cancel/window shape as `observe`\nin every other respect (see that method's doc for the `window`\npolicy); a window and an `aggregate_result_limit` are two owners of\nrow membership and fail closed with\n[`FfiError::WindowAggregateResultLimit`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_query",
+            checksum: Some(
+                19151,
             ),
         },
         Method {

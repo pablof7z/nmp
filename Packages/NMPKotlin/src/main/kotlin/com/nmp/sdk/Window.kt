@@ -173,7 +173,7 @@ internal fun windowRowBatch(frame: FfiFrame): RowBatch {
         }
     return RowBatch(
         rows = contents.rows.map { Row.from(it) },
-        evidence = AcquisitionEvidence.from(frame.evidence),
+        evidence = frame.evidence.map { AcquisitionEvidence.from(it) },
         load = WindowLoad.from(contents.load),
     )
 }

@@ -19,6 +19,7 @@ mod concrete;
 mod demand;
 mod descriptor;
 mod indexed_tag_name;
+mod live_query;
 mod nip19;
 pub mod relay;
 mod selector;
@@ -34,6 +35,7 @@ pub use descriptor::{
     AccessContext, CacheMode, Demand, DemandError, Freshness, RelaySessionKey, SourceAuthority,
 };
 pub use indexed_tag_name::IndexedTagName;
+pub use live_query::{LiveQuery, LiveQueryError};
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};
 pub use selector::{IdentityField, Selector};
 pub use write::{

@@ -83,7 +83,7 @@ fn group_state_of_my_admin_groups(relays: &[RelayUrl]) -> LiveQuery {
         )]),
         ..Filter::default()
     };
-    LiveQuery(
+    LiveQuery::single(
         nmp_grammar::Demand::new(
             outer,
             SourceAuthority::Pinned(pinned),
@@ -766,7 +766,7 @@ fn posts_by_my_follows(relays: &[RelayUrl]) -> LiveQuery {
         }))),
         ..Filter::default()
     };
-    LiveQuery(
+    LiveQuery::single(
         nmp_grammar::Demand::new(
             outer,
             SourceAuthority::Pinned(pinned),

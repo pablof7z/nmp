@@ -503,7 +503,7 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
     let baseline_plan = core.router.plan().clone();
     let baseline_compiles = core.router_compiles.get();
     let baseline_projection = {
-        let state = &core.handles[&existing_id];
+        let state = &core.observations[&existing_id];
         (
             state.last_rows.clone(),
             state.last_evidence.clone(),
@@ -532,7 +532,7 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
         baseline_compiles,
         "the fallible canonical gate must run before speculative recompile"
     );
-    let state = &core.handles[&existing_id];
+    let state = &core.observations[&existing_id];
     assert_eq!(
         (
             state.last_rows.clone(),
@@ -621,7 +621,7 @@ struct HistorySnapshot {
     acquired_tie_seconds: BTreeSet<u64>,
     last_rows: BTreeMap<EventId, Row>,
     order: BTreeSet<(Reverse<u64>, EventId)>,
-    last_evidence: Option<AcquisitionEvidence>,
+    last_evidence: Option<Vec<AcquisitionEvidence>>,
     projection_complete: bool,
     load: WindowLoad,
     handle_ids: BTreeSet<HandleId>,
@@ -932,12 +932,11 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
     // A short local page is `Returned { added }`, never a synthetic "end":
     // there is no Complete/End variant, and the per-source evidence below
     // carries the real reason the page was short.
-    assert!(returned
-        .evidence
+    assert!(returned.evidence[0]
         .shortfall
         .iter()
         .any(|fact| { matches!(fact, ShortfallFact::LocalLimit { .. }) }));
-    assert!(returned.evidence.sources.iter().any(|source| {
+    assert!(returned.evidence[0].sources.iter().any(|source| {
         source.relay == selected.relay && source.status == SourceStatus::Disconnected
     }));
 }

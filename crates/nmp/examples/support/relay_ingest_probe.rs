@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{HistoryQuery, RelayAdmissionPolicy, RowDelta};
 use nmp::mechanism::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
-use nmp_resolver::LiveQuery;
 use nmp_store::{EventStore, MemoryStore, RedbStore};
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -748,7 +748,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
         )?
     };
-    let live_query = LiveQuery(demand);
+    let live_query = LiveQuery::single(demand);
     let rows = match config.visible_limit {
         Some(limit) => {
             let (_, rows) =
@@ -865,8 +865,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             Ok((deltas, evidence, _execution)) => {
                 accepted_quiet_since = None;
                 observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
-                all_sources_reconciled = evidence.sources.len() == config.relays
-                    && evidence
+                all_sources_reconciled = evidence[0].sources.len() == config.relays
+                    && evidence[0]
                         .sources
                         .iter()
                         .all(|source| source.reconciled_through.is_some());
