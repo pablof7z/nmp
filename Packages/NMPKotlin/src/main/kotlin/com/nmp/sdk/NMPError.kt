@@ -179,6 +179,52 @@ sealed class NMPError(message: String) : Exception(message) {
                 "its precondition, never as a payload",
         )
 
+    /** #1033: `NMPRelayScope.on`/`FfiRelayScope.on` was given an empty relay
+     * set -- a group must be hosted somewhere. */
+    object EmptyRelayScope :
+        NMPError("RelayScope.on requires a nonempty relay set -- a group must be hosted somewhere")
+
+    /** #1033: an event builder handed to `NMPGroup.publish` already carried
+     * its own `h` tag. The retained group id is the sole semantic source of
+     * that tag; a caller-supplied one is refused before any write reaches
+     * the door. */
+    object GroupCallerSuppliedContext :
+        NMPError(
+            "a group write must not carry its own h tag; the group's retained id is the sole " +
+                "source of that tag",
+        )
+
+    /** #1033: a read selection handed to `NMPGroup.read` already constrained
+     * `#h`. The retained group id is the sole semantic source of that row. */
+    object GroupCallerSuppliedContextConstraint :
+        NMPError(
+            "a group read selection must not already constrain #h; the group's retained id is " +
+                "the sole source of that row",
+        )
+
+    /** #1033: a read selection handed to `NMPGroup.read` already declared a
+     * `since`/`until`/`limit` timeline bound the group door itself owns. */
+    object GroupCallerSuppliedTimeline :
+        NMPError(
+            "a group read selection must not already declare since/until/limit; the group door " +
+                "owns that bound",
+        )
+
+    /** #1033: `NMPGroup.validateContext`/`publishSigned` was given an event
+     * carrying no `h` tag naming any group at all. */
+    data class GroupContextMissing(val expected: String) :
+        NMPError("event carries no h tag; expected group $expected")
+
+    /** #1033: an already-signed event's `h` tag names a different group than
+     * the one it was handed to. */
+    data class GroupContextMismatched(val found: String, val expected: String) :
+        NMPError("event's h tag $found does not match expected group $expected")
+
+    /** #1033: an already-signed event carried more than one distinct `h`
+     * tag, so which group it belongs to is ambiguous. */
+    data class GroupContextAmbiguous(val expected: String) :
+        NMPError("event carries more than one distinct h tag; expected exactly group $expected")
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -226,6 +272,15 @@ sealed class NMPError(message: String) : Exception(message) {
                     InvalidCorrelationToken(ffi.got, ffi.reason)
                 is FfiException.InvalidNip73Target -> InvalidNip73Target(ffi.reason)
                 is FfiException.ReplaceableEditHasNoWireForm -> ReplaceableEditHasNoWireForm
+                is FfiException.EmptyRelayScope -> EmptyRelayScope
+                is FfiException.GroupCallerSuppliedContext -> GroupCallerSuppliedContext
+                is FfiException.GroupCallerSuppliedContextConstraint ->
+                    GroupCallerSuppliedContextConstraint
+                is FfiException.GroupCallerSuppliedTimeline -> GroupCallerSuppliedTimeline
+                is FfiException.GroupContextMissing -> GroupContextMissing(ffi.expected)
+                is FfiException.GroupContextMismatched ->
+                    GroupContextMismatched(ffi.found, ffi.expected)
+                is FfiException.GroupContextAmbiguous -> GroupContextAmbiguous(ffi.expected)
             }
     }
 }

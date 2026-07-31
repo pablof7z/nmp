@@ -129,6 +129,29 @@ public enum NMPError: Error, Sendable, Equatable {
     /// (`follow`/`unfollow`), never as a payload a native caller could
     /// reassemble without the guard.
     case replaceableEditHasNoWireForm
+    /// #1033: `NMPRelayScope.on`/`FfiRelayScope.on` was given an empty
+    /// relay set -- a group must be hosted somewhere.
+    case emptyRelayScope
+    /// #1033: an event builder handed to `NMPGroup.publish` already carried
+    /// its own `h` tag. The retained group id is the sole semantic source of
+    /// that tag; a caller-supplied one is refused before any write reaches
+    /// the door.
+    case groupCallerSuppliedContext
+    /// #1033: a read selection handed to `NMPGroup.read` already constrained
+    /// `#h`. The retained group id is the sole semantic source of that row.
+    case groupCallerSuppliedContextConstraint
+    /// #1033: a read selection handed to `NMPGroup.read` already declared a
+    /// `since`/`until`/`limit` timeline bound the group door itself owns.
+    case groupCallerSuppliedTimeline
+    /// #1033: `NMPGroup.validateContext`/`publishSigned` was given an event
+    /// carrying no `h` tag naming any group at all.
+    case groupContextMissing(expected: String)
+    /// #1033: an already-signed event's `h` tag names a different group
+    /// than the one it was handed to.
+    case groupContextMismatched(found: String, expected: String)
+    /// #1033: an already-signed event carried more than one distinct `h`
+    /// tag, so which group it belongs to is ambiguous.
+    case groupContextAmbiguous(expected: String)
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -182,6 +205,16 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidNip73Target(let reason):
             self = .invalidNip73Target(reason: reason)
         case .ReplaceableEditHasNoWireForm: self = .replaceableEditHasNoWireForm
+        case .EmptyRelayScope: self = .emptyRelayScope
+        case .GroupCallerSuppliedContext: self = .groupCallerSuppliedContext
+        case .GroupCallerSuppliedContextConstraint:
+            self = .groupCallerSuppliedContextConstraint
+        case .GroupCallerSuppliedTimeline: self = .groupCallerSuppliedTimeline
+        case .GroupContextMissing(let expected): self = .groupContextMissing(expected: expected)
+        case .GroupContextMismatched(let found, let expected):
+            self = .groupContextMismatched(found: found, expected: expected)
+        case .GroupContextAmbiguous(let expected):
+            self = .groupContextAmbiguous(expected: expected)
         }
     }
 }
@@ -286,6 +319,20 @@ extension NMPError: LocalizedError {
             "Invalid NIP-73 target: \(reason)"
         case .replaceableEditHasNoWireForm:
             "A replaceable edit crosses this boundary only inside the semantic method that owns its precondition, never as a payload"
+        case .emptyRelayScope:
+            "RelayScope.on requires a nonempty relay set -- a group must be hosted somewhere"
+        case .groupCallerSuppliedContext:
+            "A group write must not carry its own h tag; the group's retained id is the sole source of that tag"
+        case .groupCallerSuppliedContextConstraint:
+            "A group read selection must not already constrain #h; the group's retained id is the sole source of that row"
+        case .groupCallerSuppliedTimeline:
+            "A group read selection must not already declare since/until/limit; the group door owns that bound"
+        case .groupContextMissing(let expected):
+            "Event carries no h tag; expected group \(expected.debugDescription)"
+        case .groupContextMismatched(let found, let expected):
+            "Event's h tag \(found.debugDescription) does not match expected group \(expected.debugDescription)"
+        case .groupContextAmbiguous(let expected):
+            "Event carries more than one distinct h tag; expected exactly group \(expected.debugDescription)"
         }
     }
 }
