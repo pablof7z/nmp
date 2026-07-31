@@ -73,6 +73,22 @@ elif command == "plan-localization":
         "schema": 1,
         "symbols": ["nmp_component_interface_fixture"],
     }), end="")
+elif command == "plan-authoritative-callables":
+    artifact = pathlib.Path(options["--artifact"])
+    namespace = (
+        "nmp_ffi"
+        if options["--component-key"] == "nmp-core"
+        else "nmp_nip46_ffi"
+    )
+    callable_name = namespace + "_fixture_call"
+    pathlib.Path(options["--out"]).write_bytes(callable_name.encode() + b"\0")
+    print(canonical({
+        "artifact_blake3": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "component_key": options["--component-key"],
+        "schema": 1,
+        "symbols": [callable_name],
+        "uniffi_namespace": namespace,
+    }), end="")
 elif command == "witness":
     artifact = pathlib.Path(options["--artifact"])
     manifest_path = artifact.parent / "component-manifest.json"
@@ -770,9 +786,10 @@ grep -Fq 'stored witness disagrees with a fresh structural witness' \
 [[ ! -e $REPO/Packages/NMP/NMP.xcframework ]]
 echo 'ok - otool-time native inode replacement cannot reach the XCFramework'
 
-# Exercise a transient ABA at the final destination binding. The staged
-# directory is swapped out and restored while its FD remains pinned; the
-# verifier must publish only the restored staged inode and its exact bytes.
+# Exercise a transient ABA at the final destination binding. The verifier
+# captures the sealed staged inode before closing every directory descriptor,
+# publishes it with no-replace semantics, then must reject any substituted
+# final binding while preserving the restored exact bytes.
 aba_hook="$TMP/swift-aba-hook"
 aba_output="$TMP/swift-aba.out"
 aba_log="$TMP/swift-aba.log"
@@ -787,8 +804,14 @@ rm "$aba_hook/sources-pinned.ready"
 wait_for_hook "$aba_pid" "$aba_hook/sources-pinned.ready" "$aba_output"
 printf '1' >"$aba_hook/sources-pinned.release"
 rm "$aba_hook/sources-pinned.ready"
+# The wrapper re-validates every pinned source once more before it stages the
+# publication, so release that barrier before waiting on the staged tree.
+wait_for_hook "$aba_pid" "$aba_hook/sources-verified.ready" "$aba_output"
+printf '1' >"$aba_hook/sources-verified.release"
 wait_for_hook "$aba_pid" "$aba_hook/destination-staged.ready" "$aba_output"
 printf '1' >"$aba_hook/destination-staged.release"
+wait_for_hook "$aba_pid" "$aba_hook/destination-ready.ready" "$aba_output"
+printf '1' >"$aba_hook/destination-ready.release"
 wait_for_hook "$aba_pid" "$aba_hook/destination-published.ready" "$aba_output"
 aba_destination="$REPO/Packages/NMP/NMP.xcframework"
 mv "$aba_destination" "$aba_destination.verified"

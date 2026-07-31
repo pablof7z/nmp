@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import hashlib
 import json
 import os
 import pathlib
@@ -59,12 +61,14 @@ class PinnedDirectory:
         path: pathlib.Path,
         descriptor: int,
         identity: tuple[int, int],
+        mode: int,
         parent: PinnedDirectory | None,
         name: str | None,
     ) -> None:
         self.path = path
         self.descriptor = descriptor
         self.identity = identity
+        self.mode = mode
         self.parent = parent
         self.name = name
 
@@ -85,6 +89,10 @@ class PinnedDirectory:
             refuse(f"{self.path}: pinned directory binding is no longer a directory")
         if (current.st_dev, current.st_ino) != self.identity:
             refuse(f"{self.path}: pinned directory binding changed during verification")
+        if stat.S_IMODE(current.st_mode) != stat.S_IMODE(self.mode):
+            refuse(
+                f"{self.path}: pinned directory mode changed during verification"
+            )
 
 
 class PinnedFile:
@@ -101,10 +109,32 @@ class PinnedFile:
         self.identity = (status.st_dev, status.st_ino)
         self.size = status.st_size
         self.mode = status.st_mode
+        self.mtime_ns = status.st_mtime_ns
+        self.ctime_ns = status.st_ctime_ns
+        self.nlink = status.st_nlink
+        self.content_sha256 = self.current_sha256()
 
     @property
     def descriptor_path(self) -> str:
         return f"/dev/fd/{self.descriptor}"
+
+    def current_sha256(self) -> bytes:
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < self.size:
+            try:
+                chunk = os.pread(
+                    self.descriptor,
+                    min(1024 * 1024, self.size - offset),
+                    offset,
+                )
+            except OSError as error:
+                refuse(f"{self.path}: cannot digest pinned file: {error}")
+            if not chunk:
+                refuse(f"{self.path}: pinned file became shorter while digesting")
+            digest.update(chunk)
+            offset += len(chunk)
+        return digest.digest()
 
     def read_bytes(self) -> bytes:
         chunks: list[bytes] = []
@@ -119,7 +149,10 @@ class PinnedFile:
             chunks.append(chunk)
             offset += len(chunk)
         self.revalidate()
-        return b"".join(chunks)
+        result = b"".join(chunks)
+        if hashlib.sha256(result).digest() != self.content_sha256:
+            refuse(f"{self.path}: pinned file bytes changed during verification")
+        return result
 
     def revalidate(self) -> None:
         try:
@@ -141,6 +174,21 @@ class PinnedFile:
                 refuse(f"{self.path}: pinned {location} identity changed during verification")
             if status.st_size != self.size:
                 refuse(f"{self.path}: pinned {location} size changed during verification")
+            if (
+                stat.S_IMODE(status.st_mode),
+                status.st_mtime_ns,
+                status.st_ctime_ns,
+                status.st_nlink,
+            ) != (
+                stat.S_IMODE(self.mode),
+                self.mtime_ns,
+                self.ctime_ns,
+                self.nlink,
+            ):
+                refuse(
+                    f"{self.path}: pinned {location} metadata changed during "
+                    "verification"
+                )
 
 
 class PinRegistry:
@@ -187,6 +235,7 @@ class PinRegistry:
                 absolute,
                 descriptor,
                 (status.st_dev, status.st_ino),
+                status.st_mode,
                 None,
                 None,
             )
@@ -214,6 +263,7 @@ class PinRegistry:
             absolute,
             descriptor,
             (status.st_dev, status.st_ino),
+            status.st_mode,
             parent,
             absolute.name,
         )
@@ -333,12 +383,13 @@ def pin_tree(registry: PinRegistry, path: pathlib.Path) -> PinnedTree:
                 directories.append((child_relative, child))
                 visit(child_relative, child)
             elif stat.S_ISREG(status.st_mode):
-                files.append(
-                    (
-                        child_relative,
-                        registry.pin_file(child_path, sealed=True),
+                child = registry.pin_file(child_path, sealed=True)
+                if child.nlink != 1:
+                    refuse(
+                        f"{child_path}: publication source files must have "
+                        "exactly one link"
                     )
-                )
+                files.append((child_relative, child))
             else:
                 refuse(
                     f"{child_path}: publish tree entries must be regular files "
@@ -350,6 +401,7 @@ def pin_tree(registry: PinRegistry, path: pathlib.Path) -> PinnedTree:
 
 
 def copy_pinned_file(source: PinnedFile, destination: int) -> None:
+    digest = hashlib.sha256()
     offset = 0
     while offset < source.size:
         try:
@@ -362,6 +414,7 @@ def copy_pinned_file(source: PinnedFile, destination: int) -> None:
             refuse(f"{source.path}: cannot read pinned publication source: {error}")
         if not chunk:
             refuse(f"{source.path}: publication source became shorter")
+        digest.update(chunk)
         written = 0
         while written < len(chunk):
             try:
@@ -372,10 +425,17 @@ def copy_pinned_file(source: PinnedFile, destination: int) -> None:
                 refuse(f"{source.path}: publication copy made no write progress")
             written += count
         offset += len(chunk)
+    source.revalidate()
+    if digest.digest() != source.content_sha256:
+        refuse(
+            f"{source.path}: publication source bytes changed after being pinned"
+        )
 
 
 def pinned_bytes_equal(first: PinnedFile, second: PinnedFile) -> bool:
     if first.size != second.size:
+        return False
+    if first.content_sha256 != second.content_sha256:
         return False
     offset = 0
     while offset < first.size:
@@ -389,6 +449,260 @@ def pinned_bytes_equal(first: PinnedFile, second: PinnedFile) -> bool:
             return False
         offset += len(left)
     return True
+
+
+def normalized_publication_mode(mode: int, *, directory: bool) -> int:
+    sealed_mode = stat.S_IMODE(mode) & ~0o222
+    if sealed_mode:
+        return sealed_mode
+    return 0o555 if directory else 0o444
+
+
+def require_exact_tree_copy(
+    source: PinnedTree,
+    destination: PinnedTree,
+) -> None:
+    source_directories = dict(source.directories)
+    destination_directories = dict(destination.directories)
+    if source_directories.keys() != destination_directories.keys():
+        refuse(
+            f"{destination.root.path}: published directory set disagrees with "
+            f"pinned source: "
+            f"{sorted(source_directories.keys() ^ destination_directories.keys(), key=str)}"
+        )
+    for relative, source_directory in source_directories.items():
+        source_mode = normalized_publication_mode(
+            source_directory.mode,
+            directory=True,
+        )
+        destination_mode = stat.S_IMODE(
+            os.fstat(destination_directories[relative].descriptor).st_mode
+        )
+        if destination_mode != source_mode:
+            refuse(
+                f"{destination.root.path / relative}: published mode disagrees "
+                f"with pinned source: {destination_mode:#05o} != "
+                f"{source_mode:#05o}"
+            )
+    source_files = dict(source.files)
+    destination_files = dict(destination.files)
+    if source_files.keys() != destination_files.keys():
+        refuse(
+            f"{destination.root.path}: published file set disagrees with "
+            f"pinned source: "
+            f"{sorted(source_files.keys() ^ destination_files.keys(), key=str)}"
+        )
+    for relative, source_file in source_files.items():
+        destination_file = destination_files[relative]
+        source_mode = normalized_publication_mode(
+            source_file.mode,
+            directory=False,
+        )
+        destination_mode = stat.S_IMODE(
+            os.fstat(destination_file.descriptor).st_mode
+        )
+        if destination_mode != source_mode:
+            refuse(
+                f"{destination.root.path / relative}: published mode disagrees "
+                f"with pinned source: {destination_mode:#05o} != "
+                f"{source_mode:#05o}"
+            )
+        if not pinned_bytes_equal(source_file, destination_file):
+            refuse(
+                f"{destination.root.path / relative}: published bytes disagree "
+                "with pinned source"
+            )
+
+
+def rename_noreplace(
+    parent_descriptor: int,
+    source_name: str,
+    destination_name: str,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(source_name)
+    destination = os.fsencode(destination_name)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            parent_descriptor,
+            source,
+            parent_descriptor,
+            destination,
+            0x00000004 | 0x00000010,  # RENAME_EXCL | RENAME_NOFOLLOW_ANY
+        )
+    elif sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError:
+            refuse("atomic no-replace publication requires renameat2 on Linux")
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            parent_descriptor,
+            source,
+            parent_descriptor,
+            destination,
+            0x00000001,  # RENAME_NOREPLACE
+        )
+    else:
+        refuse(
+            f"atomic no-replace publication is unsupported on {sys.platform}"
+        )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination_name)
+
+
+def remove_directory_contents(descriptor: int, path: pathlib.Path) -> None:
+    try:
+        os.fchmod(descriptor, 0o700)
+        names = sorted(os.listdir(descriptor))
+    except OSError as error:
+        refuse(f"{path}: cannot open failed publication for cleanup: {error}")
+    for name in names:
+        try:
+            status = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            refuse(f"{path / name}: cannot inspect failed publication: {error}")
+        if stat.S_ISDIR(status.st_mode):
+            try:
+                child = os.open(
+                    name,
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptor,
+                )
+            except OSError as error:
+                refuse(
+                    f"{path / name}: cannot pin failed publication directory: "
+                    f"{error}"
+                )
+            try:
+                child_status = os.fstat(child)
+                if (child_status.st_dev, child_status.st_ino) != (
+                    status.st_dev,
+                    status.st_ino,
+                ):
+                    refuse(
+                        f"{path / name}: failed publication directory changed "
+                        "during cleanup"
+                    )
+                remove_directory_contents(child, path / name)
+            finally:
+                os.close(child)
+            try:
+                os.rmdir(name, dir_fd=descriptor)
+            except OSError as error:
+                refuse(
+                    f"{path / name}: cannot remove failed publication directory: "
+                    f"{error}"
+                )
+        else:
+            try:
+                os.unlink(name, dir_fd=descriptor)
+            except OSError as error:
+                refuse(
+                    f"{path / name}: cannot remove failed publication entry: {error}"
+                )
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        refuse(f"{path}: cannot sync failed publication cleanup: {error}")
+
+
+def cleanup_hidden_publication(
+    parent: PinnedDirectory,
+    hidden_name: str,
+    hidden_identity: tuple[int, int],
+) -> None:
+    try:
+        current = os.stat(
+            hidden_name,
+            dir_fd=parent.descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        refuse(f"{parent.path / hidden_name}: cannot inspect cleanup target: {error}")
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != hidden_identity
+    ):
+        # The verifier no longer owns this binding. Refusing to touch it is
+        # safer than deleting an attacker-created replacement.
+        return
+
+    cleanup_name = f".nmp-cleanup-{os.getpid()}-{secrets.token_hex(8)}"
+    try:
+        rename_noreplace(parent.descriptor, hidden_name, cleanup_name)
+        current = os.stat(
+            cleanup_name,
+            dir_fd=parent.descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        refuse(
+            f"{parent.path / hidden_name}: cannot quarantine failed publication: "
+            f"{error}"
+        )
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != hidden_identity
+    ):
+        refuse(
+            f"{parent.path / cleanup_name}: cleanup quarantine identity changed"
+        )
+    try:
+        descriptor = os.open(
+            cleanup_name,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent.descriptor,
+        )
+    except OSError as error:
+        refuse(
+            f"{parent.path / cleanup_name}: cannot pin cleanup quarantine: {error}"
+        )
+    try:
+        status = os.fstat(descriptor)
+        if (status.st_dev, status.st_ino) != hidden_identity:
+            refuse(
+                f"{parent.path / cleanup_name}: cleanup descriptor identity changed"
+            )
+        remove_directory_contents(descriptor, parent.path / cleanup_name)
+    finally:
+        os.close(descriptor)
+    try:
+        os.rmdir(cleanup_name, dir_fd=parent.descriptor)
+        os.fsync(parent.descriptor)
+    except OSError as error:
+        refuse(
+            f"{parent.path / cleanup_name}: cannot remove cleanup quarantine: {error}"
+        )
 
 
 def mutation_hook(phase: str) -> None:
@@ -491,6 +805,9 @@ def publish_tree(
     except OSError as error:
         refuse(f"{destination}: cannot create fresh hidden publication: {error}")
 
+    hidden_status = os.fstat(hidden_descriptor)
+    hidden_identity = (hidden_status.st_dev, hidden_status.st_ino)
+    publication_succeeded = False
     destination_directories: dict[pathlib.PurePath, int] = {
         pathlib.PurePath("."): hidden_descriptor
     }
@@ -498,8 +815,11 @@ def publish_tree(
         for relative, source_directory in tree.directories[1:]:
             parent_relative = relative.parent
             parent_descriptor = destination_directories[parent_relative]
-            mode = stat.S_IMODE(os.fstat(source_directory.descriptor).st_mode) & ~0o222
-            staging_mode = (mode or 0o555) | 0o700
+            mode = normalized_publication_mode(
+                source_directory.mode,
+                directory=True,
+            )
+            staging_mode = mode | 0o700
             try:
                 os.mkdir(relative.name, staging_mode, dir_fd=parent_descriptor)
                 descriptor = os.open(
@@ -519,7 +839,7 @@ def publish_tree(
 
         for relative, source in tree.files:
             directory_descriptor = destination_directories[relative.parent]
-            mode = stat.S_IMODE(source.mode) & ~0o222
+            mode = normalized_publication_mode(source.mode, directory=False)
             try:
                 destination_descriptor = os.open(
                     relative.name,
@@ -528,7 +848,7 @@ def publish_tree(
                     | os.O_EXCL
                     | getattr(os, "O_CLOEXEC", 0)
                     | getattr(os, "O_NOFOLLOW", 0),
-                    mode or 0o444,
+                    mode,
                     dir_fd=directory_descriptor,
                 )
             except OSError as error:
@@ -538,14 +858,17 @@ def publish_tree(
             try:
                 copy_pinned_file(source, destination_descriptor)
                 os.fsync(destination_descriptor)
-                os.fchmod(destination_descriptor, mode or 0o444)
+                os.fchmod(destination_descriptor, mode)
             finally:
                 os.close(destination_descriptor)
 
         for relative, source_directory in reversed(tree.directories):
             descriptor = destination_directories[relative]
-            mode = stat.S_IMODE(os.fstat(source_directory.descriptor).st_mode) & ~0o222
-            os.fchmod(descriptor, mode or 0o555)
+            mode = normalized_publication_mode(
+                source_directory.mode,
+                directory=True,
+            )
+            os.fchmod(descriptor, mode)
             os.fsync(descriptor)
         mutation_hook("destination-staged")
         parent.revalidate()
@@ -563,13 +886,45 @@ def publish_tree(
             )
         else:
             refuse(f"{destination}: final publication binding appeared during staging")
+
+        # Some macOS filesystems refuse to rename a directory while it or a
+        # descendant is open. Seal and fsync the complete tree first, capture
+        # its inode, then close every staging descriptor before the one atomic
+        # no-replace rename. A fresh exact-tree pin after the deterministic
+        # race hook proves the closed tree was not changed before publication.
+        staged_identity = hidden_identity
+        for relative, descriptor in sorted(
+            destination_directories.items(),
+            key=lambda item: len(item[0].parts),
+            reverse=True,
+        ):
+            del relative
+            os.close(descriptor)
+        destination_directories.clear()
+        mutation_hook("destination-ready")
+        parent.revalidate()
+        staging_registry = PinRegistry()
         try:
-            os.rename(
+            staged_tree = pin_tree(
+                staging_registry,
+                destination.parent / hidden_name,
+            )
+            require_exact_tree_copy(tree, staged_tree)
+            if staged_tree.root.identity != staged_identity:
+                refuse(
+                    f"{destination}: staged publication inode changed before rename"
+                )
+            staging_registry.revalidate()
+        finally:
+            staging_registry.close()
+        parent.revalidate()
+        try:
+            rename_noreplace(
+                parent.descriptor,
                 hidden_name,
                 destination.name,
-                src_dir_fd=parent.descriptor,
-                dst_dir_fd=parent.descriptor,
             )
+            publication_succeeded = True
             os.fsync(parent.descriptor)
             mutation_hook("destination-published")
             published_status = os.stat(
@@ -577,15 +932,14 @@ def publish_tree(
                 dir_fd=parent.descriptor,
                 follow_symlinks=False,
             )
-            staged_status = os.fstat(hidden_descriptor)
             if not stat.S_ISDIR(published_status.st_mode):
                 refuse(f"{destination}: published binding is not a directory")
             if (
                 published_status.st_dev,
                 published_status.st_ino,
             ) != (
-                staged_status.st_dev,
-                staged_status.st_ino,
+                staged_identity[0],
+                staged_identity[1],
             ):
                 refuse(
                     f"{destination}: published binding is not the staged directory inode"
@@ -600,15 +954,15 @@ def publish_tree(
         ):
             del relative
             os.close(descriptor)
-
-    published_root = registry.pin_directory(destination, sealed=True)
-    del published_root
-    for relative, source in tree.files:
-        published = registry.pin_file(destination / relative, sealed=True)
-        if not pinned_bytes_equal(source, published):
-            refuse(
-                f"{destination / relative}: published bytes disagree with pinned source"
+        if not publication_succeeded:
+            cleanup_hidden_publication(
+                parent,
+                hidden_name,
+                hidden_identity,
             )
+
+    published_tree = pin_tree(registry, destination)
+    require_exact_tree_copy(tree, published_tree)
     registry.revalidate()
 
 
@@ -1522,6 +1876,8 @@ def main(arguments: list[str]) -> int:
                     derived["inputs"],
                 )
             if tree is not None and publish_destination is not None:
+                mutation_hook("sources-verified")
+                registry.revalidate()
                 if len(path_pairs) != len(pairs):
                     refuse("internal artifact pin count disagrees with parsed pairs")
                 payload_identities = [

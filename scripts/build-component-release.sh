@@ -224,6 +224,8 @@ fi
 }
 
 METADATA_AUDIT_EXECUTABLE=
+AUTHORITATIVE_CALLABLES=
+AUTHORITATIVE_CALLABLE_PLAN=
 if [[ -n $METADATA_AUDIT_BIN ]]; then
   echo "component-build: audit compiled $COMPONENT_KEY metadata" >&2
   METADATA_AUDIT_TARGET_DIR="$BASE_TARGET_DIR/nmp-component-metadata-audit-tool/$COMPONENT_KEY"
@@ -235,9 +237,36 @@ if [[ -n $METADATA_AUDIT_BIN ]]; then
     echo "component-build: metadata audit executable was not built" >&2
     exit 1
   }
+  METADATA_AUDIT_LIBRARY="${LIBRARIES[0]}"
+  if [[ $COMPONENT_KIND == optional &&
+    -f "$RELEASE_DIR/lib$LIBRARY_STEM.a" ]]; then
+    # ELF hides dependency-owned interface symbols at cdylib link time. Audit
+    # the companion static output from the same Cargo invocation so the full
+    # compiled provider/interface type graph remains available; the final
+    # dynamic artifact witness separately requires every provider callable to
+    # remain public and every interface-owned symbol to remain hidden.
+    METADATA_AUDIT_LIBRARY="$RELEASE_DIR/lib$LIBRARY_STEM.a"
+  fi
   scripts/verify-component-manifests.py \
     --metadata-audit-tool "$METADATA_AUDIT_EXECUTABLE" \
-    --artifact "${LIBRARIES[0]}" >/dev/null
+    --artifact "$METADATA_AUDIT_LIBRARY" >/dev/null
+fi
+if [[ $COMPONENT_KIND == optional ]]; then
+  [[ -n $METADATA_AUDIT_EXECUTABLE &&
+    $METADATA_AUDIT_LIBRARY == "$RELEASE_DIR/lib$LIBRARY_STEM.a" ]] || {
+    echo "component-build: optional callable authority requires the audited companion static archive" >&2
+    exit 1
+  }
+  AUTHORITATIVE_CALLABLES="$MARKER_DIR/$TARGET.authoritative-callables.nul"
+  AUTHORITATIVE_CALLABLE_PLAN="$MARKER_DIR/$TARGET.authoritative-callables.json"
+  AUTHORITATIVE_CALLABLE_PLAN_TEMP="$AUTHORITATIVE_CALLABLE_PLAN.tmp.$$"
+  "$WITNESS_BIN" plan-authoritative-callables \
+    --artifact "$METADATA_AUDIT_LIBRARY" \
+    --target "$TARGET" \
+    --component-key "$COMPONENT_KEY" \
+    --out "$AUTHORITATIVE_CALLABLES" >"$AUTHORITATIVE_CALLABLE_PLAN_TEMP"
+  mv "$AUTHORITATIVE_CALLABLE_PLAN_TEMP" "$AUTHORITATIVE_CALLABLE_PLAN"
+  chmod a-w "$AUTHORITATIVE_CALLABLES" "$AUTHORITATIVE_CALLABLE_PLAN"
 fi
 
 ARTIFACT_SNAPSHOT=$(mktemp -d "$ARTIFACT_PARENT/$TARGET.XXXXXX")
@@ -462,7 +491,8 @@ for library in "$ARTIFACT_SNAPSHOT"/lib"$LIBRARY_STEM".{a,so,dylib}; do
       --target "$TARGET" \
       --component-key "$COMPONENT_KEY" \
       --attestation-symbol "$ATTESTATION_SYMBOL" \
-      --forbid-symbols "$LOCALIZATION_SYMBOLS" >"$witness_temporary"
+      --forbid-symbols "$LOCALIZATION_SYMBOLS" \
+      --require-callables "$AUTHORITATIVE_CALLABLES" >"$witness_temporary"
   else
     "$WITNESS_BIN" witness \
       --artifact "$library" \

@@ -457,7 +457,8 @@ release_if_reached() {
   local output=$4
   local deadline=$((SECONDS + 15))
   while [[ ! -e $hook/$phase.ready ]]; do
-    if ! kill -0 "$pid" 2>/dev/null; then
+    if ! kill -0 "$pid" 2>/dev/null ||
+      [[ $(ps -o stat= -p "$pid" 2>/dev/null) == *Z* ]]; then
       return
     fi
     if (( SECONDS >= deadline )); then
@@ -496,13 +497,17 @@ for relative, source in left_entries.items():
     published = right_entries[relative]
     if source.is_dir() != published.is_dir():
         raise SystemExit(f"published entry type disagrees: {relative}")
+    source_mode = stat.S_IMODE(source.stat().st_mode) & ~0o222
+    published_mode = stat.S_IMODE(published.stat().st_mode)
+    expected_mode = source_mode or (0o555 if source.is_dir() else 0o444)
+    if published_mode != expected_mode:
+        raise SystemExit(
+            f"published mode disagrees: {relative}: "
+            f"{published_mode:#05o} != {expected_mode:#05o}"
+        )
     if source.is_file():
         if source.read_bytes() != published.read_bytes():
             raise SystemExit(f"published bytes disagree: {relative}")
-        if stat.S_IMODE(published.stat().st_mode) & 0o222:
-            raise SystemExit(f"published file is writable: {relative}")
-    elif stat.S_IMODE(published.stat().st_mode) & 0o222:
-        raise SystemExit(f"published directory is writable: {relative}")
 PY
 }
 
@@ -538,17 +543,49 @@ run_barrier_mutation() {
     wait_for_ready "$pid" "$hook/sources-pinned.ready" "$TMP/$name.out"
     printf '1' >"$hook/sources-pinned.release"
   fi
-  if [[ $phase == destination-published ]]; then
+  if [[ $phase == destination-staged || $phase == destination-ready ||
+    $phase == destination-published ]]; then
+    wait_for_ready "$pid" "$hook/sources-verified.ready" "$TMP/$name.out"
+    printf '1' >"$hook/sources-verified.release"
+  fi
+  if [[ $phase == destination-ready || $phase == destination-published ]]; then
     wait_for_ready "$pid" "$hook/destination-staged.ready" "$TMP/$name.out"
     printf '1' >"$hook/destination-staged.release"
+  fi
+  if [[ $phase == destination-published ]]; then
+    wait_for_ready "$pid" "$hook/destination-ready.ready" "$TMP/$name.out"
+    printf '1' >"$hook/destination-ready.release"
   fi
   wait_for_ready "$pid" "$hook/$phase.ready" "$TMP/$name.out"
 
   case "$mutation" in
+    same-inode-same-size)
+      local payload="$fixture/provider-source/jna/linux-x86-64/provider.payload"
+      chmod u+w "$payload"
+      python3 - "$payload" <<'PY'
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+with path.open("r+b") as stream:
+    original = stream.read()
+    replacement = bytes([original[0] ^ 0xFF]) + original[1:]
+    stream.seek(0)
+    stream.write(replacement)
+    stream.flush()
+    os.fsync(stream.fileno())
+PY
+      chmod a-w "$payload"
+      ;;
+    source-directory-mode)
+      chmod o-x "$fixture/provider-source/jna/linux-x86-64"
+      ;;
     ancestor-directory)
       chmod u+w "$fixture"
       mv "$fixture/provider-source" "$fixture/provider-source.original"
       cp -R "$fixture/provider-source.original" "$fixture/provider-source"
+      chmod a-w "$fixture"
       ;;
     artifact-inode)
       chmod u+w "$fixture/provider-source"
@@ -557,6 +594,7 @@ run_barrier_mutation() {
       cp "$fixture/provider-source/libnmp_nip46_ffi.a.original" \
         "$fixture/provider-source/libnmp_nip46_ffi.a"
       chmod a-w "$fixture/provider-source/libnmp_nip46_ffi.a"
+      chmod a-w "$fixture/provider-source"
       ;;
     manifest-inode)
       chmod u+w "$fixture/provider-source"
@@ -565,6 +603,7 @@ run_barrier_mutation() {
       cp "$fixture/provider-source/component-manifest.json.original" \
         "$fixture/provider-source/component-manifest.json"
       chmod a-w "$fixture/provider-source/component-manifest.json"
+      chmod a-w "$fixture/provider-source"
       ;;
     witness-inode)
       chmod u+w "$fixture/provider-source"
@@ -573,6 +612,7 @@ run_barrier_mutation() {
       cp "$fixture/provider-source/libnmp_nip46_ffi.a.witness.json.original" \
         "$fixture/provider-source/libnmp_nip46_ffi.a.witness.json"
       chmod a-w "$fixture/provider-source/libnmp_nip46_ffi.a.witness.json"
+      chmod a-w "$fixture/provider-source"
       ;;
     forbidden-inode)
       chmod u+w "$fixture/provider-source"
@@ -582,6 +622,7 @@ run_barrier_mutation() {
         "$fixture/provider-source/component-interface-forbidden-symbols.nul"
       chmod a-w \
         "$fixture/provider-source/component-interface-forbidden-symbols.nul"
+      chmod a-w "$fixture/provider-source"
       ;;
     plan-inode)
       chmod u+w "$fixture/provider-source"
@@ -591,6 +632,7 @@ run_barrier_mutation() {
         "$fixture/provider-source/component-interface-localization-plan.json"
       chmod a-w \
         "$fixture/provider-source/component-interface-localization-plan.json"
+      chmod a-w "$fixture/provider-source"
       ;;
     audit-inode)
       chmod u+w "$fixture/provider-source"
@@ -599,6 +641,7 @@ run_barrier_mutation() {
       cp "$fixture/provider-source/nmp-nip46-metadata-audit.original" \
         "$fixture/provider-source/nmp-nip46-metadata-audit"
       chmod 0555 "$fixture/provider-source/nmp-nip46-metadata-audit"
+      chmod a-w "$fixture/provider-source"
       ;;
     aba-restore)
       chmod u+w "$fixture/provider-source"
@@ -610,15 +653,50 @@ run_barrier_mutation() {
       mv "$fixture/provider-source/libnmp_nip46_ffi.a.original" \
         "$fixture/provider-source/libnmp_nip46_ffi.a"
       chmod a-w "$fixture/provider-source/libnmp_nip46_ffi.a"
+      chmod a-w "$fixture/provider-source"
       ;;
     destination-parent)
       chmod u+w "$fixture"
       mv "$destination_parent" "$fixture/destination-parent.original"
       mkdir "$destination_parent"
+      chmod a-w "$fixture"
       ;;
     final-name)
       printf '%s\n' 'must remain untouched' >"$TMP/$name-final-name-target"
       ln -s "$TMP/$name-final-name-target" "$destination"
+      ;;
+    final-name-after-recheck)
+      mkdir "$destination"
+      ;;
+    published-extra-file)
+      chmod u+w "$destination"
+      printf '%s\n' 'unexpected payload' >"$destination/unverified"
+      chmod a-w "$destination/unverified" "$destination"
+      ;;
+    published-file-mode)
+      chmod a+x "$destination/jna/linux-x86-64/provider.payload"
+      ;;
+    published-directory-mode)
+      chmod o-x "$destination/jna/linux-x86-64"
+      ;;
+    staged-extra-file)
+      local hidden
+      hidden=$(find "$destination_parent" -mindepth 1 -maxdepth 1 \
+        -name '.final.nmp-publish-*' -type d -print -quit)
+      [[ -n $hidden ]]
+      chmod u+w "$hidden"
+      printf '%s\n' 'unexpected staged payload' >"$hidden/unverified"
+      chmod a-w "$hidden/unverified" "$hidden"
+      ;;
+    staged-root-replacement)
+      local hidden
+      hidden=$(find "$destination_parent" -mindepth 1 -maxdepth 1 \
+        -name '.final.nmp-publish-*' -type d -print -quit)
+      [[ -n $hidden ]]
+      mv "$hidden" "$hidden.original"
+      mkdir "$hidden"
+      printf '%s\n' 'attacker-owned replacement' >"$hidden/attacker"
+      chmod a-w "$hidden/attacker" "$hidden"
       ;;
     published-name-inode)
       mv "$destination" "$destination.original"
@@ -637,9 +715,18 @@ run_barrier_mutation() {
 
   printf '1' >"$hook/$phase.release"
   if [[ $phase == sources-pinned ]]; then
+    release_if_reached "$pid" "$hook" sources-verified "$TMP/$name.out"
     release_if_reached "$pid" "$hook" destination-staged "$TMP/$name.out"
+    release_if_reached "$pid" "$hook" destination-ready "$TMP/$name.out"
+    release_if_reached "$pid" "$hook" destination-published "$TMP/$name.out"
+  elif [[ $phase == sources-verified ]]; then
+    release_if_reached "$pid" "$hook" destination-staged "$TMP/$name.out"
+    release_if_reached "$pid" "$hook" destination-ready "$TMP/$name.out"
     release_if_reached "$pid" "$hook" destination-published "$TMP/$name.out"
   elif [[ $phase == destination-staged ]]; then
+    release_if_reached "$pid" "$hook" destination-ready "$TMP/$name.out"
+    release_if_reached "$pid" "$hook" destination-published "$TMP/$name.out"
+  elif [[ $phase == destination-ready ]]; then
     release_if_reached "$pid" "$hook" destination-published "$TMP/$name.out"
   fi
   wait_for_child "$pid" "$TMP/$name.out"
@@ -657,7 +744,28 @@ run_barrier_mutation() {
       echo "component-manifests-test: mutation $name was accepted" >&2
       exit 1
     fi
-    grep -qF "$expected_message" "$TMP/$name.out"
+    if ! grep -qF "$expected_message" "$TMP/$name.out"; then
+      echo "component-manifests-test: mutation $name missed expected refusal:" >&2
+      echo "  $expected_message" >&2
+      sed -n '1,160p' "$TMP/$name.out" >&2
+      exit 1
+    fi
+  fi
+  if [[ $expected_status == refusal && $phase == destination-* &&
+    $mutation != staged-root-replacement ]]; then
+    if find "$destination_parent" -mindepth 1 -maxdepth 1 \
+      \( -name '.final.nmp-publish-*' -o -name '.nmp-cleanup-*' \) \
+      -print -quit | grep -q .; then
+      echo "component-manifests-test: failed publication payload was left behind" >&2
+      exit 1
+    fi
+  fi
+  if [[ $mutation == staged-root-replacement ]]; then
+    local replacement
+    replacement=$(find "$destination_parent" -mindepth 1 -maxdepth 1 \
+      -name '.final.nmp-publish-*' -type d -print -quit)
+    [[ -n $replacement ]]
+    grep -qF 'attacker-owned replacement' "$replacement/attacker"
   fi
   if [[ $mutation == final-name ]]; then
     [[ -L $destination ]]
@@ -692,30 +800,61 @@ expect_publish_refusal publication-leaf-symlink "$symlink_fixture" \
   "$symlink_destination/final" \
   'publish tree entries must be regular files or directories'
 
+hardlink_fixture=$(fresh_publication_fixture publication-hardlink)
+chmod u+w "$hardlink_fixture/provider-source/jna/linux-x86-64"
+ln "$hardlink_fixture/provider-source/jna/linux-x86-64/provider.payload" \
+  "$hardlink_fixture/provider-source/jna/linux-x86-64/provider.payload.alias"
+chmod a-w "$hardlink_fixture/provider-source/jna/linux-x86-64"
+hardlink_destination="$TMP/publication-hardlink-destination"
+mkdir "$hardlink_destination"
+expect_publish_refusal publication-hardlink "$hardlink_fixture" \
+  "$hardlink_destination/final" \
+  'publication source files must have exactly one link'
+
+run_barrier_mutation publication-source-bytes sources-pinned \
+  same-inode-same-size refusal 'metadata changed during verification'
+run_barrier_mutation publication-verified-source-bytes sources-verified \
+  same-inode-same-size refusal 'metadata changed during verification'
+run_barrier_mutation publication-source-directory-mode sources-pinned \
+  source-directory-mode refusal \
+  'pinned directory mode changed during verification'
 run_barrier_mutation publication-ancestor sources-pinned \
   ancestor-directory refusal 'pinned directory binding changed'
 run_barrier_mutation publication-artifact-inode sources-pinned \
-  artifact-inode refusal 'pinned path identity changed'
+  artifact-inode refusal 'pinned descriptor metadata changed'
 run_barrier_mutation publication-manifest-inode sources-pinned \
-  manifest-inode refusal 'pinned path identity changed'
+  manifest-inode refusal 'pinned descriptor metadata changed'
 run_barrier_mutation publication-witness-inode sources-pinned \
-  witness-inode refusal 'pinned path identity changed'
+  witness-inode refusal 'pinned descriptor metadata changed'
 run_barrier_mutation publication-forbidden-inode sources-pinned \
-  forbidden-inode refusal 'pinned path identity changed'
+  forbidden-inode refusal 'pinned descriptor metadata changed'
 run_barrier_mutation publication-plan-inode sources-pinned \
-  plan-inode refusal 'pinned path identity changed'
+  plan-inode refusal 'pinned descriptor metadata changed'
 run_barrier_mutation publication-audit-inode sources-pinned \
-  audit-inode refusal 'pinned path identity changed'
+  audit-inode refusal 'pinned descriptor metadata changed'
 run_barrier_mutation publication-aba sources-pinned \
-  aba-restore success ''
+  aba-restore refusal 'pinned descriptor metadata changed'
 run_barrier_mutation publication-destination-parent destination-staged \
   destination-parent refusal 'pinned directory binding changed'
 run_barrier_mutation publication-final-name destination-staged \
   final-name refusal 'final publication binding appeared during staging'
+run_barrier_mutation publication-final-name-race destination-ready \
+  final-name-after-recheck refusal 'cannot atomically publish pinned tree'
+run_barrier_mutation publication-staged-extra destination-ready \
+  staged-extra-file refusal 'published file set disagrees with pinned source'
+run_barrier_mutation publication-staged-root-replacement destination-ready \
+  staged-root-replacement refusal \
+  'published directory set disagrees with pinned source'
 run_barrier_mutation publication-published-inode destination-published \
   published-name-inode refusal \
   'published binding is not the staged directory inode'
 run_barrier_mutation publication-published-symlink destination-published \
   published-name-symlink refusal 'published binding is not a directory'
+run_barrier_mutation publication-published-extra destination-published \
+  published-extra-file refusal 'published file set disagrees with pinned source'
+run_barrier_mutation publication-published-file-mode destination-published \
+  published-file-mode refusal 'published mode disagrees with pinned source'
+run_barrier_mutation publication-published-directory-mode destination-published \
+  published-directory-mode refusal 'published mode disagrees with pinned source'
 
-echo "component-manifests-test: exact set, mismatch refusals, pinned mutation refusal, ABA safety, and byte-exact publication passed"
+echo "component-manifests-test: exact set, mismatch refusals, pinned mutation refusal, ABA safety, and byte/metadata-exact publication passed"

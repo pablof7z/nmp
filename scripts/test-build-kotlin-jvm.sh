@@ -456,8 +456,9 @@ assert_contains 'stored witness disagrees with a fresh structural witness' \
 echo 'ok - bindgen-time native inode replacement cannot reach JNA resources'
 
 # The final publication name is also authority. Replace the just-published
-# resource directory while the verifier still holds its staged directory FD;
-# the wrapper must fail instead of accepting the attacker-controlled binding.
+# resource directory after the verifier atomically installs its captured
+# staged inode; the wrapper must fail instead of accepting the
+# attacker-controlled binding.
 publish_hook="$TMP/kotlin-publish-hook"
 publish_output="$TMP/kotlin-publish.out"
 publish_log="$TMP/kotlin-publish.log"
@@ -477,9 +478,17 @@ wait_for_hook \
   "$publish_pid" "$publish_hook/sources-pinned.ready" "$publish_output"
 printf '1' >"$publish_hook/sources-pinned.release"
 rm "$publish_hook/sources-pinned.ready"
+# The wrapper re-validates every pinned source once more before it stages the
+# publication, so release that barrier before waiting on the staged tree.
+wait_for_hook \
+  "$publish_pid" "$publish_hook/sources-verified.ready" "$publish_output"
+printf '1' >"$publish_hook/sources-verified.release"
 wait_for_hook \
   "$publish_pid" "$publish_hook/destination-staged.ready" "$publish_output"
 printf '1' >"$publish_hook/destination-staged.release"
+wait_for_hook \
+  "$publish_pid" "$publish_hook/destination-ready.ready" "$publish_output"
+printf '1' >"$publish_hook/destination-ready.release"
 wait_for_hook \
   "$publish_pid" "$publish_hook/destination-published.ready" "$publish_output"
 published_resources="$REPO/Packages/NMPKotlin/src/main/resources"

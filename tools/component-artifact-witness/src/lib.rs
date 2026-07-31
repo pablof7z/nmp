@@ -176,12 +176,22 @@ pub struct LocalizationPlanWitness {
     symbols: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CallablePlanWitness {
+    artifact_blake3: String,
+    component_key: String,
+    schema: u32,
+    symbols: Vec<String>,
+    uniffi_namespace: String,
+}
+
 pub fn witness(
     artifact: &Path,
     target: &str,
     component_key: &str,
     attestation_symbol: &str,
     forbidden_symbols: Option<&Path>,
+    required_callables: Option<&Path>,
 ) -> Result<ArtifactWitness> {
     validate_component_key(component_key)?;
     validate_symbol_argument(attestation_symbol, "attestation symbol")?;
@@ -195,6 +205,15 @@ pub fn witness(
     validate_attestation(&attestation, authority, target)?;
     let components = extract_uniffi_components(&bytes)?;
     validate_component_namespaces(authority, &components)?;
+    let required_callables = required_callables
+        .map(read_nul_symbol_file)
+        .transpose()?;
+    validate_authoritative_callables(
+        authority,
+        &components,
+        &analysis.public_symbols,
+        required_callables.as_ref(),
+    )?;
 
     if let Some(path) = forbidden_symbols {
         let forbidden = read_nul_symbol_file(path)?;
@@ -233,6 +252,48 @@ pub fn witness(
         target: target.to_owned(),
         uniffi_components: components,
     })
+}
+
+pub fn plan_authoritative_callables(
+    artifact: &Path,
+    target: &str,
+    component_key: &str,
+) -> Result<(CallablePlanWitness, Vec<u8>)> {
+    validate_component_key(component_key)?;
+    let authority = component_authority(component_key)?;
+    let target_spec = TargetSpec::parse(target)?;
+    let bytes = fs::read(artifact)
+        .with_context(|| format!("read callable authority {}", artifact.display()))?;
+    let analysis = analyze_bytes(&bytes, target_spec)?;
+    ensure!(
+        analysis.format.starts_with("archive-"),
+        "callable authority requires an ordinary static archive, found {}",
+        analysis.format
+    );
+    let components = extract_uniffi_components(&bytes)?;
+    validate_component_namespaces(authority, &components)?;
+    validate_authoritative_callables(authority, &components, &analysis.public_symbols, None)?;
+    let symbols = authoritative_callable_set(authority, &components)?;
+    ensure!(
+        !symbols.is_empty(),
+        "callable authority for {:?} is empty",
+        authority.component_key
+    );
+    let mut nul = Vec::new();
+    for symbol in &symbols {
+        nul.extend_from_slice(symbol.as_bytes());
+        nul.push(0);
+    }
+    Ok((
+        CallablePlanWitness {
+            artifact_blake3: blake3::hash(&bytes).to_hex().to_string(),
+            component_key: component_key.to_owned(),
+            schema: 1,
+            symbols: symbols.iter().cloned().collect(),
+            uniffi_namespace: authority.uniffi_namespace.to_owned(),
+        },
+        nul,
+    ))
 }
 
 pub fn plan_localization(
@@ -802,6 +863,52 @@ fn validate_component_namespaces(
     Ok(())
 }
 
+fn validate_authoritative_callables(
+    authority: &ComponentAuthority,
+    components: &[UniFfiComponentWitness],
+    public_symbols: &[SymbolOccurrence],
+    required_callables: Option<&BTreeSet<String>>,
+) -> Result<()> {
+    let observed = authoritative_callable_set(authority, components)?;
+    if let Some(required) = required_callables {
+        ensure!(
+            observed == *required,
+            "authoritative callable metadata disagrees with companion static authority; missing={:?}, unexpected={:?}",
+            required.difference(&observed).collect::<Vec<_>>(),
+            observed.difference(required).collect::<Vec<_>>()
+        );
+    }
+    for callable in required_callables.unwrap_or(&observed) {
+        let count = public_symbols
+            .iter()
+            .filter(|symbol| symbol.normalized_name == *callable)
+            .count();
+        ensure!(
+            count == 1,
+            "authoritative callable {}::{callable} has {count} public definitions",
+            authority.uniffi_namespace
+        );
+    }
+    Ok(())
+}
+
+fn authoritative_callable_set(
+    authority: &ComponentAuthority,
+    components: &[UniFfiComponentWitness],
+) -> Result<BTreeSet<String>> {
+    let matching = components
+        .iter()
+        .filter(|component| component.namespace == authority.uniffi_namespace)
+        .collect::<Vec<_>>();
+    ensure!(
+        matching.len() == 1,
+        "expected exactly one authoritative UniFFI namespace {:?}, found {}",
+        authority.uniffi_namespace,
+        matching.len()
+    );
+    Ok(matching[0].callables.iter().cloned().collect())
+}
+
 fn validate_attestation(value: &Value, authority: &ComponentAuthority, target: &str) -> Result<()> {
     let fields = value
         .as_object()
@@ -1293,6 +1400,73 @@ mod tests {
         };
         let error = finish_uniffi_components(vec![duplicate(), duplicate()]).unwrap_err();
         assert!(error.to_string().contains("appears more than once"));
+    }
+
+    #[test]
+    fn authoritative_callables_must_each_have_one_public_definition() {
+        let components = vec![UniFfiComponentWitness {
+            namespace: OPTIONAL_AUTHORITY.uniffi_namespace.to_owned(),
+            callables: vec![
+                "ffi_nmp_nip46_ffi_first".to_owned(),
+                "ffi_nmp_nip46_ffi_second".to_owned(),
+            ],
+        }];
+        let symbol = |name: &str, owner: &str| SymbolOccurrence {
+            raw_name: name.to_owned(),
+            normalized_name: name.to_owned(),
+            owner: owner.to_owned(),
+            data: None,
+        };
+        let exact = vec![
+            symbol("ffi_nmp_nip46_ffi_first", "provider-one.o"),
+            symbol("ffi_nmp_nip46_ffi_second", "provider-two.o"),
+            symbol(
+                "ffi_nmp_component_interface_hidden",
+                "interface-hidden.o",
+            ),
+        ];
+        validate_authoritative_callables(&OPTIONAL_AUTHORITY, &components, &exact, None).unwrap();
+
+        let missing = validate_authoritative_callables(
+            &OPTIONAL_AUTHORITY,
+            &components,
+            &exact[..1],
+            None,
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("has 0 public definitions"));
+
+        let mut duplicate = exact.clone();
+        duplicate.push(symbol(
+            "ffi_nmp_nip46_ffi_first",
+            "provider-duplicate.o",
+        ));
+        let duplicate = validate_authoritative_callables(
+            &OPTIONAL_AUTHORITY,
+            &components,
+            &duplicate,
+            None,
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("has 2 public definitions"));
+
+        let required = BTreeSet::from([
+            "ffi_nmp_nip46_ffi_first".to_owned(),
+            "ffi_nmp_nip46_ffi_second".to_owned(),
+            "ffi_nmp_nip46_ffi_third".to_owned(),
+        ]);
+        let missing_metadata = validate_authoritative_callables(
+            &OPTIONAL_AUTHORITY,
+            &components,
+            &exact,
+            Some(&required),
+        )
+        .unwrap_err();
+        assert!(
+            missing_metadata
+                .to_string()
+                .contains("missing=[\"ffi_nmp_nip46_ffi_third\"]")
+        );
     }
 
     #[test]

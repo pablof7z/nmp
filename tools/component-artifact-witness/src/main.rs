@@ -6,7 +6,9 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use nmp_component_artifact_witness::{canonical_json, digest_file, plan_localization, witness};
+use nmp_component_artifact_witness::{
+    canonical_json, digest_file, plan_authoritative_callables, plan_localization, witness,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -29,6 +31,7 @@ fn run() -> Result<()> {
             let component_key = options.required_string("--component-key")?;
             let attestation_symbol = options.required_string("--attestation-symbol")?;
             let forbidden = options.optional_path("--forbid-symbols")?;
+            let required_callables = options.optional_path("--require-callables")?;
             options.finish()?;
             let result = witness(
                 &artifact,
@@ -36,7 +39,19 @@ fn run() -> Result<()> {
                 &component_key,
                 &attestation_symbol,
                 forbidden.as_deref(),
+                required_callables.as_deref(),
             )?;
+            print!("{}", String::from_utf8(canonical_json(&result)?)?);
+        }
+        Some("plan-authoritative-callables") => {
+            let artifact = options.required_path("--artifact")?;
+            let target = options.required_string("--target")?;
+            let component_key = options.required_string("--component-key")?;
+            let output = options.required_path("--out")?;
+            options.finish()?;
+            let (result, exact_symbols) =
+                plan_authoritative_callables(&artifact, &target, &component_key)?;
+            atomic_write(&output, &exact_symbols)?;
             print!("{}", String::from_utf8(canonical_json(&result)?)?);
         }
         Some("plan-localization") => {
@@ -62,10 +77,14 @@ fn run() -> Result<()> {
 fn usage(executable: &OsString) -> Result<()> {
     bail!(
         "usage:\n  {} witness --artifact PATH --target TRIPLE --component-key KEY \
-         --attestation-symbol SYMBOL [--forbid-symbols NUL_FILE]\n  \
+         --attestation-symbol SYMBOL [--forbid-symbols NUL_FILE] \
+         [--require-callables NUL_FILE]\n  \
+         {} plan-authoritative-callables --artifact PATH --target TRIPLE \
+         --component-key KEY --out NUL_FILE\n  \
          {} plan-localization --artifact PATH --target TRIPLE \
          --interface-namespace NAMESPACE --out NUL_FILE\n  \
          {} digest --file PATH",
+        PathBuf::from(executable).display(),
         PathBuf::from(executable).display(),
         PathBuf::from(executable).display(),
         PathBuf::from(executable).display()

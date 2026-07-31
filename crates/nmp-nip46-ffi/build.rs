@@ -46,6 +46,17 @@ fn main() {
     let interface_identity = env::var("DEP_NMP_COMPONENT_INTERFACE_INTERFACE_IDENTITY")
         .expect("component-interface supplies its complete identity");
 
+    if target.contains("-linux-") {
+        // The optional ELF provider links the shared interface as an rlib, but
+        // core alone owns that interface's public UniFFI namespace. Hide every
+        // archive-owned dependency symbol at link time; the provider crate's
+        // own direct objects (including its NIP-46 UniFFI surface and
+        // attestation) remain exportable. The final artifact witness derives
+        // the exact forbidden interface set from the paired core and refuses
+        // the package if any member still escapes.
+        println!("cargo:rustc-link-arg-cdylib=-Wl,--exclude-libs,ALL");
+    }
+
     let core = if profile == "release" {
         validate_release_context(&target);
         required_core_from_artifact(&target, &interface_identity)

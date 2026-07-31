@@ -26,6 +26,15 @@ fi
 
 grep -qF 'nmp-component-interface' crates/nmp-nip46-ffi/Cargo.toml ||
   fail "the optional NIP-46 artifact does not use the shared interface"
+[[ $(grep -cF \
+  'cargo:rustc-link-arg-cdylib=-Wl,--exclude-libs,ALL' \
+  crates/nmp-nip46-ffi/build.rs) == 1 ]] ||
+  fail "the optional ELF provider does not hide dependency-owned symbols at link time"
+grep -qF 'plan-authoritative-callables' scripts/build-component-release.sh ||
+  fail "the optional provider does not derive callable authority from its audited static archive"
+grep -qF -- '--require-callables "$AUTHORITATIVE_CALLABLES"' \
+  scripts/build-component-release.sh ||
+  fail "the final provider witness does not require the audited callable set"
 interface_source=crates/nmp-component-interface/src/signer.rs
 core_source=crates/nmp-ffi/src/signer.rs
 provider_source=crates/nmp-nip46-ffi/src/signer.rs
@@ -58,12 +67,17 @@ grep -qF 'Arc<dyn nmp_signer::Nip46TaskRuntime>' "$provider_source" ||
 # structural refusal above instead of relying on reviewer memory.
 legacy_mailbox_mutation='pub unsafe fn assemble_core_signer_mailbox() -> FfiSignerMailbox'
 ambient_runtime_mutation='let runtime = tokio::runtime::Handle::current(); tokio::spawn(async {})'
+unsealed_elf_mutation='cargo:rustc-link-arg-cdylib=-Wl,--export-dynamic'
 printf '%s\n' "$legacy_mailbox_mutation" |
   grep -qE 'pub unsafe|[Mm]ailbox' ||
   fail "legacy mailbox mutation positive control escaped"
 printf '%s\n' "$ambient_runtime_mutation" |
   grep -qE 'Handle::current[[:space:]]*\(|tokio::spawn[[:space:]]*\(' ||
   fail "ambient runtime mutation positive control escaped"
+if printf '%s\n' "$unsealed_elf_mutation" |
+  grep -qF 'cargo:rustc-link-arg-cdylib=-Wl,--exclude-libs,ALL'; then
+  fail "unsealed ELF mutation positive control escaped"
+fi
 grep -qF 'nmp-core-component-v2' crates/nmp-ffi/build.rs ||
   fail "the core identity is not v2"
 
@@ -77,4 +91,151 @@ if grep -qE 'PACKAGE_SET|PROVIDER_ONLY_CRATES|nmp-core-component-v1' \
   fail "the v1 pair/package-set identity path still survives"
 fi
 
-echo "component-v2-substrate: take-once adapter and contextual core runtime present"
+run_elf_artifact_falsifiers() (
+  [[ $(uname -s) == Linux ]] ||
+    fail "ELF artifact falsifiers must execute on Linux"
+  command -v rustup >/dev/null 2>&1 ||
+    fail "rustup is required for the real ELF artifact falsifiers"
+  rustup component add llvm-tools-preview >/dev/null
+
+  local proof target core provider release_dir witness forbidden callables
+  local missing_callables missing_output unsealed_output unsealed_status
+  proof=$(mktemp -d "${TMPDIR:-/tmp}/nmp-component-elf-falsifier.XXXXXX")
+
+  target=$(rustc -vV | sed -n 's/^host: //p')
+  [[ $target == *-linux-* ]] ||
+    fail "Rust host target is not Linux: $target"
+  cargo fetch --locked >/dev/null
+
+  core=$(
+    scripts/build-component-release.sh "$proof/target" "$target" nmp-ffi
+  )
+  provider=$(
+    scripts/build-component-release.sh "$proof/target" "$target" \
+      --core-artifact "$core/libnmp_ffi.so" nmp-nip46-ffi
+  )
+  release_dir="$proof/target/nmp-component-build-v2/nmp-nip46/$target/release"
+  witness="$proof/target/nmp-component-artifact-witness-tool/release/nmp-component-artifact-witness"
+  forbidden="$proof/target/nmp-component-build-v2/nmp-nip46/.nmp-component-build-v2/$target.interface-symbols.nul"
+  callables="$proof/target/nmp-component-build-v2/nmp-nip46/.nmp-component-build-v2/$target.authoritative-callables.nul"
+  [[ -f $release_dir/libnmp_nip46_ffi.a && -x $witness &&
+    -f $forbidden && -f $callables ]] ||
+    fail "the real sealed ELF build did not retain its audited proof inputs"
+
+  "$witness" witness \
+    --artifact "$provider/libnmp_nip46_ffi.so" \
+    --target "$target" \
+    --component-key nmp-nip46 \
+    --attestation-symbol NMP_NIP46_COMPONENT_ATTESTATION_V2 \
+    --forbid-symbols "$forbidden" \
+    --require-callables "$callables" >/dev/null
+
+  # The final dynamic metadata is not allowed to define its own completeness.
+  # Add one independently required callable to the static-derived authority;
+  # the unchanged real provider must be refused for the exact missing member.
+  missing_callables="$proof/missing-authoritative-callable.nul"
+  cp "$callables" "$missing_callables"
+  chmod u+w "$missing_callables"
+  printf '%s\0' ffi_nmp_nip46_ffi_deliberately_missing >>"$missing_callables"
+  missing_output="$proof/missing-callable.out"
+  if "$witness" witness \
+    --artifact "$provider/libnmp_nip46_ffi.so" \
+    --target "$target" \
+    --component-key nmp-nip46 \
+    --attestation-symbol NMP_NIP46_COMPONENT_ATTESTATION_V2 \
+    --forbid-symbols "$forbidden" \
+    --require-callables "$missing_callables" >"$missing_output" 2>&1; then
+    fail "the real provider accepted a callable missing from dynamic metadata and exports"
+  fi
+  grep -qF 'missing=["ffi_nmp_nip46_ffi_deliberately_missing"]' \
+    "$missing_output" ||
+    fail "the missing-callable mutation failed for an unrelated reason"
+
+  # Disable the one ELF link mechanism in this isolated tracked-tree copy.
+  # Reusing the same target leaves the sealed core fixed and rebuilds the
+  # actual provider; its final witness must now observe the interface leak.
+  [[ $(grep -cF \
+    'println!("cargo:rustc-link-arg-cdylib=-Wl,--exclude-libs,ALL");' \
+    crates/nmp-nip46-ffi/build.rs) == 1 ]] ||
+    fail "the isolated ELF mutation could not locate the exact link mechanism"
+  perl -0pi -e \
+    's/[[:space:]]*println!\(\"cargo:rustc-link-arg-cdylib=-Wl,--exclude-libs,ALL\"\);//' \
+    crates/nmp-nip46-ffi/build.rs
+  if grep -qF 'cargo:rustc-link-arg-cdylib=-Wl,--exclude-libs,ALL' \
+    crates/nmp-nip46-ffi/build.rs; then
+    fail "the isolated ELF mutation did not disable the link mechanism"
+  fi
+  unsealed_output="$proof/unsealed-provider.out"
+  set +e
+  scripts/build-component-release.sh "$proof/target" "$target" \
+    --core-artifact "$core/libnmp_ffi.so" nmp-nip46-ffi \
+    >"$unsealed_output" 2>&1
+  unsealed_status=$?
+  set -e
+  [[ $unsealed_status -ne 0 ]] ||
+    fail "the actual unsealed ELF provider passed its final artifact witness"
+  grep -qF 'artifact still publicly defines forbidden exact symbols' \
+    "$unsealed_output" ||
+    fail "the unsealed ELF mutation failed before the final symbol-leak assertion"
+
+  echo "component-v2-substrate: real sealed ELF provider passed; missing-callable and linker-disable mutations were refused"
+  chmod -R u+w "$proof" 2>/dev/null || true
+  rm -r "$proof"
+)
+
+run_elf_falsifiers_in_isolated_copy() (
+  local isolated started status temporary_root
+  if [[ $(uname -s) == Darwin ]]; then
+    # Keep the copy beside the checked-out worktree: Docker Desktop already
+    # shares this /Users path, while a host temporary directory may not be
+    # visible inside its Linux VM.
+    temporary_root=${ROOT%/*}
+  else
+    temporary_root=${TMPDIR:-/tmp}
+  fi
+  isolated=$(mktemp -d "$temporary_root/nmp-component-elf-copy.XXXXXX")
+  mkdir "$isolated/repo"
+  git ls-files -z |
+    tar --null -T - -cf - |
+    tar -xf - -C "$isolated/repo"
+  started=$SECONDS
+  set +e
+  case "$(uname -s)" in
+    Linux)
+      (
+        cd "$isolated/repo"
+        NMP_COMPONENT_ELF_FALSIFIER_INNER=1 \
+          bash scripts/test-component-v2-substrate.sh
+      )
+      ;;
+    Darwin)
+      command -v docker >/dev/null 2>&1 ||
+        fail "Docker is required to run the real ELF artifact falsifiers on macOS"
+      docker run --rm \
+        --mount "type=bind,src=$isolated,dst=/work" \
+        rustlang/rust:nightly \
+        bash -c '
+          set -euo pipefail
+          cd /work/repo
+          NMP_COMPONENT_ELF_FALSIFIER_INNER=1 \
+            bash scripts/test-component-v2-substrate.sh
+        '
+      ;;
+    *)
+      fail "real ELF artifact falsifiers support Linux directly or Docker on macOS"
+      ;;
+  esac
+  status=$?
+  set -e
+  chmod -R u+w "$isolated" 2>/dev/null || true
+  rm -r "$isolated"
+  [[ $status -eq 0 ]] || return "$status"
+  echo "component-v2-substrate: ELF artifact falsifiers completed in $((SECONDS - started))s"
+)
+
+if [[ ${NMP_COMPONENT_ELF_FALSIFIER_INNER:-} == 1 ]]; then
+  run_elf_artifact_falsifiers
+else
+  run_elf_falsifiers_in_isolated_copy
+  echo "component-v2-substrate: take-once adapter and contextual core runtime present"
+fi
