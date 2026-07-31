@@ -204,10 +204,12 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
 
     // Representative row observations deliver their initial current-state frame.
     for stream in streams.iter().take(8) {
-        let frame = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        let pull = stream.begin_next().expect("row ticket begins");
+        let frame = tokio::time::timeout(Duration::from_secs(10), pull.receive())
             .await
             .expect("a row observation delivers within 10s")
-            .expect("row next() is not a misuse");
+            .expect("row pull is not a misuse");
+        pull.commit().expect("delivered row pull commits");
         assert!(
             frame.is_some(),
             "each row observation yields an initial frame"

@@ -372,15 +372,28 @@ struct FollowScenarioOutcome {
 // #680: bridge each pull-based FFI stream handle into an mpsc channel via a
 // forwarding Tokio task, so every existing mpsc-based collect/wait helper is
 // reused unchanged. The task holds a clone of the handle, keeping the stream
-// open until `next()` yields `None` (cancel / shutdown / producer drop). The
+// open until the pull yields `None` (cancel / shutdown / producer drop). The
 // caller keeps its own handle clone for explicit `cancel()`.
+//
+// #762: rows are claimed with a ticket before the await and committed only
+// once this task actually holds the frame -- the same two-phase discipline the
+// Swift and Kotlin wrappers use, so the direct/FFI oracle exercises it too.
 fn bridge_rows(
     stream: &Arc<NmpRowStream>,
 ) -> mpsc::Receiver<(Vec<FfiRowDelta>, FfiAcquisitionEvidence)> {
     let (tx, rx) = mpsc::channel();
     let stream = Arc::clone(stream);
     tokio::spawn(async move {
-        while let Ok(Some(frame)) = stream.next().await {
+        loop {
+            let Ok(pull) = stream.begin_next() else {
+                break;
+            };
+            let Ok(Some(frame)) = pull.receive().await else {
+                break;
+            };
+            if pull.commit().is_err() {
+                break;
+            }
             // Unbounded FFI observations carry deltas + evidence; `window` is
             // always `None` (windowing is a policy on the read noun, #485).
             if tx.send((frame.deltas, frame.evidence)).is_err() {

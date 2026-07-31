@@ -42,8 +42,21 @@ fn spawn_parked_consumer(stream: Arc<NmpRowStream>) -> tokio::task::JoinHandle<(
         // The first `next()` resolves with the observation's initial frame; the
         // second parks on the empty mailbox (no relays, no further changes) with
         // its waker registered — a genuinely pending `next()`.
-        while let Ok(Some(_frame)) = stream.next().await {
-            // keep pulling: after the initial frame(s) the next `next()` parks
+        while let Ok(pull) = stream.begin_next() {
+            match pull.receive().await {
+                Ok(Some(_frame)) => {
+                    pull.commit().expect("delivered row pull commits");
+                }
+                Ok(None) => {
+                    let _ = pull.commit();
+                    break;
+                }
+                Err(_) => {
+                    pull.abort();
+                    break;
+                }
+            }
+            // keep pulling: after the initial frame(s) the next ticket parks
         }
     })
 }

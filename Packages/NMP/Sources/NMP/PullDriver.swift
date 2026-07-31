@@ -10,19 +10,73 @@
 import Foundation
 import NMPFFI
 
-/// The shared shape of every #680 pull handle. The generated stream objects
-/// already satisfy this; these extensions only name the conformance.
+/// The shared shape of every #680 pull handle. Row observations override the
+/// native operation with #762's ticketed READY/complete acknowledgement;
+/// self-contained snapshots and finite fact streams still forward directly to
+/// their generated `next()`.
 protocol NMPPullHandle: AnyObject, Sendable {
     associatedtype Frame: Sendable
-    func next() async throws -> Frame?
+    func pullNext() async throws -> Frame?
     func cancel()
 }
 
-extension NmpRowStream: NMPPullHandle {}
-extension NmpDiagnosticsStream: NMPPullHandle {}
-extension NmpFollowStream: NMPPullHandle {}
-extension NmpReceiptStream: NMPPullHandle {}
-extension NmpFollowActionStream: NMPPullHandle {}
+extension NmpRowStream: NMPPullHandle {
+    typealias Frame = FfiFrame
+
+    /// Create the exclusive native ticket before the cancellable await, then
+    /// synchronously commit before this function returns to mapping, cadence
+    /// control, or another suspension point. Every non-commit path aborts the
+    /// ticket, restoring an unbounded delta for the next pull.
+    func pullNext() async throws -> FfiFrame? {
+        let pull: NmpRowPull
+        do {
+            pull = try beginNext()
+        } catch let error as FfiRowPullError {
+            switch error {
+            case .Closed:
+                return nil
+            default:
+                throw NMPError.concurrentNext
+            }
+        }
+
+        var committed = false
+        defer {
+            if !committed {
+                pull.abort()
+            }
+        }
+        do {
+            let frame = try await pull.receive()
+            try pull.commit()
+            committed = true
+            return frame
+        } catch let error as FfiRowPullError {
+            switch error {
+            case .Closed, .Aborted:
+                return nil
+            default:
+                throw NMPError.concurrentNext
+            }
+        }
+    }
+}
+
+extension NmpDiagnosticsStream: NMPPullHandle {
+    func pullNext() async throws -> FfiDiagnosticsSnapshot? { try await next() }
+}
+
+extension NmpFollowStream: NMPPullHandle {
+    func pullNext() async throws -> FfiFollowSnapshot? { try await next() }
+}
+
+extension NmpReceiptStream: NMPPullHandle {
+    func pullNext() async throws -> FfiWriteStatus? { try await next() }
+}
+
+extension NmpFollowActionStream: NMPPullHandle {
+    func pullNext() async throws -> FfiFollowActionStatus? { try await next() }
+}
 
 /// One live Swift iterator may own a native pull handle at a time. The gate is
 /// shared when an AsyncSequence value is copied and uses an enum rather than a
@@ -110,7 +164,7 @@ final class NMPPullIteratorCore<Handle: NMPPullHandle, Element: Sendable>:
 
         do {
             let frame = try await withTaskCancellationHandler {
-                try await handle.next()
+                try await handle.pullNext()
             } onCancel: {
                 self.cancel()
             }
