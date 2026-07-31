@@ -19,8 +19,8 @@ use std::path::Path;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome,
     DeliveryAttemptOutcome, EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState,
-    LocalOrigin, MemoryStore, PromoteOutcome, ReceiptState, RedbStore, RefuseReason, RelayObserved,
-    RetractReason, SigState, WriteDurability,
+    LocalOrigin, MemoryStore, PersistenceFault, PromoteOutcome, ReceiptState, RedbStore,
+    RefuseReason, RelayObserved, RetractReason, SigState, WriteDurability,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -1020,6 +1020,88 @@ fn raw_delivery_relay_id(path: &Path, relay: &RelayUrl) -> u32 {
             .expect("relay is interned")
             .value(),
     )
+}
+
+fn assert_route_recovery_refuses_broken_relay_dictionary(
+    path: &Path,
+    intent_id: nmp_store::IntentId,
+    expected_message: &str,
+) {
+    let store = RedbStore::open(path).unwrap();
+    let error = store
+        .recover_route_revisions(intent_id)
+        .expect_err("recovery must refuse a non-bijective relay dictionary");
+    assert_eq!(error.fault(), PersistenceFault::Invariant);
+    assert!(
+        error.message().contains(expected_message),
+        "unexpected recovery refusal: {error}"
+    );
+}
+
+#[test]
+fn route_recovery_refuses_a_forward_relay_without_its_reverse_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("route-missing-relay-reverse.redb");
+    let k = keys();
+    let relay = RelayUrl::parse("wss://missing-reverse.example").unwrap();
+    let intent_id = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let (frozen, _) = compose(&k, Kind::TextNote, "missing reverse", 501);
+        let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 501));
+        let intent_id = outcome.journaled_intent_id().unwrap();
+        store
+            .record_route_revision(intent_id, BTreeSet::from([relay.clone()]))
+            .unwrap();
+        intent_id
+    };
+
+    const RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
+        TableDefinition::new("delivery_relay_ids_v1");
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut reverse = tx.open_table(RELAY_IDS).unwrap();
+        assert!(reverse.remove(relay.as_str().as_bytes()).unwrap().is_some());
+    }
+    tx.commit().unwrap();
+    drop(db);
+
+    assert_route_recovery_refuses_broken_relay_dictionary(&path, intent_id, "missing reverse row");
+}
+
+#[test]
+fn route_recovery_refuses_a_reverse_relay_row_mapped_to_another_surrogate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("route-mismatched-relay-reverse.redb");
+    let k = keys();
+    let first = RelayUrl::parse("wss://first-reverse.example").unwrap();
+    let second = RelayUrl::parse("wss://second-reverse.example").unwrap();
+    let intent_id = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let (frozen, _) = compose(&k, Kind::TextNote, "mismatched reverse", 502);
+        let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 502));
+        let intent_id = outcome.journaled_intent_id().unwrap();
+        store
+            .record_route_revision(intent_id, BTreeSet::from([first.clone(), second.clone()]))
+            .unwrap();
+        intent_id
+    };
+
+    let second_id = raw_delivery_relay_id(&path, &second).to_be_bytes();
+    const RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
+        TableDefinition::new("delivery_relay_ids_v1");
+    let db = Database::open(&path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut reverse = tx.open_table(RELAY_IDS).unwrap();
+        reverse
+            .insert(first.as_str().as_bytes(), &second_id)
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+
+    assert_route_recovery_refuses_broken_relay_dictionary(&path, intent_id, "directions disagree");
 }
 
 fn raw_attempt_key(intent_id: nmp_store::IntentId, relay_id: u32, ordinal: u64) -> [u8; 20] {
