@@ -91,7 +91,7 @@ with:
 - an injected clock and deterministic randomness where time/jitter matter;
 - scripted relay and signer capabilities;
 - bounded observation channels; and
-- the same validation, resolver, router, and outbox code used in production.
+- the same validation, resolver, router, and delivery code used in production.
 
 That surface must remain a test harness, not a public mechanism-assembly API.
 Apps should be able to drive relay frames, signer results, disconnects, AUTH

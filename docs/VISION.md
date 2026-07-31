@@ -173,7 +173,7 @@ ordinary query invalidation makes the change visible everywhere it matches.
 If an unsigned replaceable row temporarily displaces another valid row,
 cancellation or terminal pre-signature failure performs a compensating store
 mutation that restores the prior winner. A purely pending predecessor whose
-unattempted outbox obligation was made obsolete by the newer winner is retired
+unattempted delivery obligation was made obsolete by the newer winner is retired
 atomically instead: its receipt reports `Superseded`, and cancelling the newer
 write cannot resurrect an ownerless sentinel draft. Once signed, relay
 rejection changes receipt evidence only; it does not retract a valid signed

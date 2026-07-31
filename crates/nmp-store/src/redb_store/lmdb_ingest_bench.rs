@@ -21,7 +21,7 @@ use crate::MemoryStore;
 
 use super::canonical::{observation_key, observation_relay_key};
 use super::ingest::insert_with_tables;
-use super::ingest_txn::{GovernedIngestTxn, GovernedStringMap};
+use super::ingest_txn::{GovernedDeliveryMap, GovernedIngestTxn, GovernedStringMap};
 use super::postings::{
     compact_segment, encode_dictionary, encode_run, merge_dead_blocks, shard_for,
     validate_run_metas, CompactionSegmentSource, DeadKeys, DictionaryView, Family, Membership,
@@ -104,12 +104,12 @@ struct LmdbDatabases {
     tombstones: BytesDb,
     addr_tombstones: BytesDb,
     expiration: BytesDb,
-    outbox_intents: BytesDb,
-    outbox_receipts: BytesDb,
-    outbox_displaced: BytesDb,
-    outbox_kind5_claims: BytesDb,
-    outbox_suppress_by_id: BytesDb,
-    outbox_suppress_by_addr: BytesDb,
+    delivery_intents: BytesDb,
+    delivery_receipts: BytesDb,
+    delivery_displaced: BytesDb,
+    delivery_kind5_claims: BytesDb,
+    delivery_suppress_by_id: BytesDb,
+    delivery_suppress_by_addr: BytesDb,
     segments: BytesDb,
     dictionaries: BytesDb,
     run_meta: BytesDb,
@@ -139,12 +139,12 @@ impl LmdbDatabases {
             tombstones: create("tombstones")?,
             addr_tombstones: create("addr_tombstones")?,
             expiration: create("expiration_index_v6")?,
-            outbox_intents: create("outbox_intents")?,
-            outbox_receipts: create("outbox_receipts")?,
-            outbox_displaced: create("outbox_displaced_v6")?,
-            outbox_kind5_claims: create("outbox_kind5_claims")?,
-            outbox_suppress_by_id: create("outbox_suppress_by_id")?,
-            outbox_suppress_by_addr: create("outbox_suppress_by_addr")?,
+            delivery_intents: create("delivery_intents")?,
+            delivery_receipts: create("delivery_receipts")?,
+            delivery_displaced: create("delivery_displaced_v6")?,
+            delivery_kind5_claims: create("delivery_kind5_claims")?,
+            delivery_suppress_by_id: create("delivery_suppress_by_id")?,
+            delivery_suppress_by_addr: create("delivery_suppress_by_addr")?,
             segments: create("postings_segments_v8")?,
             dictionaries: create("postings_dictionaries_v8")?,
             run_meta: create("postings_run_meta_v8")?,
@@ -353,12 +353,12 @@ fn open_databases(env: &Env, txn: &RoTxn<'_>) -> Result<LmdbDatabases, String> {
         tombstones: open("tombstones")?,
         addr_tombstones: open("addr_tombstones")?,
         expiration: open("expiration_index_v6")?,
-        outbox_intents: open("outbox_intents")?,
-        outbox_receipts: open("outbox_receipts")?,
-        outbox_displaced: open("outbox_displaced_v6")?,
-        outbox_kind5_claims: open("outbox_kind5_claims")?,
-        outbox_suppress_by_id: open("outbox_suppress_by_id")?,
-        outbox_suppress_by_addr: open("outbox_suppress_by_addr")?,
+        delivery_intents: open("delivery_intents")?,
+        delivery_receipts: open("delivery_receipts")?,
+        delivery_displaced: open("delivery_displaced_v6")?,
+        delivery_kind5_claims: open("delivery_kind5_claims")?,
+        delivery_suppress_by_id: open("delivery_suppress_by_id")?,
+        delivery_suppress_by_addr: open("delivery_suppress_by_addr")?,
         segments: open("postings_segments_v8")?,
         dictionaries: open("postings_dictionaries_v8")?,
         run_meta: open("postings_run_meta_v8")?,
@@ -706,11 +706,16 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         match map {
             GovernedStringMap::Tombstones => self.db.tombstones,
             GovernedStringMap::AddrTombstones => self.db.addr_tombstones,
-            GovernedStringMap::OutboxIntents => self.db.outbox_intents,
-            GovernedStringMap::OutboxReceipts => self.db.outbox_receipts,
-            GovernedStringMap::OutboxKind5Claims => self.db.outbox_kind5_claims,
-            GovernedStringMap::OutboxSuppressById => self.db.outbox_suppress_by_id,
-            GovernedStringMap::OutboxSuppressByAddr => self.db.outbox_suppress_by_addr,
+        }
+    }
+
+    fn delivery_db(&self, map: GovernedDeliveryMap) -> BytesDb {
+        match map {
+            GovernedDeliveryMap::Intents => self.db.delivery_intents,
+            GovernedDeliveryMap::Receipts => self.db.delivery_receipts,
+            GovernedDeliveryMap::Kind5Claims => self.db.delivery_kind5_claims,
+            GovernedDeliveryMap::SuppressById => self.db.delivery_suppress_by_id,
+            GovernedDeliveryMap::SuppressByAddr => self.db.delivery_suppress_by_addr,
         }
     }
 }
@@ -938,32 +943,53 @@ impl GovernedIngestTxn for LmdbIngestTxn<'_, '_, '_> {
             .map_err(lmdb_err)
     }
 
-    fn string_remove(
-        &mut self,
-        map: GovernedStringMap,
-        key: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        let db = self.string_db(map);
-        let value = db
-            .get(self.txn, key.as_bytes())
+    fn delivery_get(
+        &self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
+        Ok(self
+            .delivery_db(map)
+            .get(self.txn, key)
             .map_err(lmdb_err)?
-            .map(|bytes| bytes.to_vec());
-        db.delete(self.txn, key.as_bytes()).map_err(lmdb_err)?;
-        value
-            .map(|bytes| String::from_utf8(bytes).map_err(lmdb_err))
-            .transpose()
+            .map(<[u8]>::to_vec))
     }
 
-    fn displaced_remove(&mut self, key: &str) -> Result<Option<Vec<u8>>, PersistenceError> {
+    fn delivery_put(
+        &mut self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.delivery_db(map)
+            .put(self.txn, key, value)
+            .map_err(lmdb_err)
+    }
+
+    fn delivery_remove(
+        &mut self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
+        let db = self.delivery_db(map);
+        let value = db
+            .get(self.txn, key)
+            .map_err(lmdb_err)?
+            .map(|bytes| bytes.to_vec());
+        db.delete(self.txn, key).map_err(lmdb_err)?;
+        Ok(value)
+    }
+
+    fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError> {
         let value = self
             .db
-            .outbox_displaced
-            .get(self.txn, key.as_bytes())
+            .delivery_displaced
+            .get(self.txn, key)
             .map_err(lmdb_err)?
             .map(<[u8]>::to_vec);
         self.db
-            .outbox_displaced
-            .delete(self.txn, key.as_bytes())
+            .delivery_displaced
+            .delete(self.txn, key)
             .map_err(lmdb_err)?;
         Ok(value)
     }

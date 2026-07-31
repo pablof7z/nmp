@@ -1,8 +1,18 @@
 use super::canonical::{
-    encode_stored_event, encode_stored_event_record, record_to_stored_event,
-    stored_event_to_record, try_decode_stored_event, try_decode_stored_event_record,
+    encode_stored_event_record, record_to_stored_event, stored_event_to_record,
 };
 use super::commit::commit_prepared;
+use super::delivery::{
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decrement_pending_ephemeral_in_txn,
+    is_suppressed_in_txn, remove_addr_claimant_in_txn, remove_claimant_in_txn,
+    update_delivery_receipt, DeliveryIntentRecord, DeliveryReceiptRecord, SuppressClaimRecord,
+};
+use super::delivery_codec::{
+    attempt_range, codec_error, deadline_intent_range, deadline_key, decode_claims,
+    decode_deadline, decode_displaced, decode_intent, decode_receipt, encode_claims,
+    encode_displaced, encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
+    parse_deadline_by_intent_key, parse_lane_key, receipt_key, route_revision_range,
+};
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
@@ -10,51 +20,46 @@ use super::mutation::{
     process_kind5_deletions_provisional_in_txn, reinsert_stashed_in_txn, remove_row_in_txn,
     tombstone_refuses,
 };
-use super::outbox::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decode_deadline_by_intent, decode_lane,
-    decrement_pending_ephemeral_in_txn, intent_key, intent_row_prefix, is_suppressed_in_txn,
-    prefix_range, receipt_key, remove_addr_claimant_in_txn, remove_claimant_in_txn,
-    update_outbox_receipt, OutboxIntentRecord, OutboxReceiptRecord, SuppressClaimRecord,
-};
 use super::query::expiration_key;
 use super::schema::{
-    persist_err, EventKey, OUTBOX_ATTEMPTS, OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS,
-    OUTBOX_DEADLINES, OUTBOX_DEADLINES_BY_INTENT, OUTBOX_LANES, OUTBOX_META, OUTBOX_RECEIPTS,
-    OUTBOX_ROUTE_REVISIONS,
+    persist_err, EventKey, DELIVERY_ATTEMPTS, DELIVERY_ATTEMPT_DETAILS, DELIVERY_CORRELATIONS,
+    DELIVERY_DEADLINES, DELIVERY_DEADLINES_BY_INTENT, DELIVERY_LANES, DELIVERY_META,
+    DELIVERY_RECEIPTS, DELIVERY_ROUTE_REVISIONS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
 use super::store::RedbStore;
 use super::{
     address_key_for, candidate_wins, AcceptOutcome, AcceptWrite, BTreeMap, BTreeSet,
-    CompensateOutcome, Event, EventId, HashMap, HashSet, IntentId, IntentSigState, Kind,
-    LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState, RefuseReason,
-    SigState, Signature, StoredEvent, Timestamp,
+    CompensateOutcome, EventId, HashMap, HashSet, IntentId, IntentSigState, Kind, LocalOrigin,
+    PersistenceError, PromoteOutcome, Provenance, ReceiptState, RefuseReason, SigState, Signature,
+    StoredEvent, Timestamp,
 };
 use crate::RetiredIntent;
-use nostr::JsonUtil;
 use redb::ReadableTable;
 
-/// Redb half of replaceable-outbox coalescing. Everything here runs inside
+/// Redb half of replaceable-delivery coalescing. Everything here runs inside
 /// the same governed transaction that installs the newer canonical winner.
 fn retire_superseded_owners_in_txn(
     ingest: &mut RedbIngestTxn<'_, '_>,
     write_txn: &redb::WriteTransaction,
     mut replaced: StoredEvent,
 ) -> Result<(Option<StoredEvent>, Vec<RetiredIntent>), PersistenceError> {
-    let attempts = write_txn.open_table(OUTBOX_ATTEMPTS).map_err(persist_err)?;
-    let attempt_details = write_txn
-        .open_table(OUTBOX_ATTEMPT_DETAILS)
+    let attempts = write_txn
+        .open_table(DELIVERY_ATTEMPTS)
         .map_err(persist_err)?;
-    let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+    let attempt_details = write_txn
+        .open_table(DELIVERY_ATTEMPT_DETAILS)
+        .map_err(persist_err)?;
+    let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
     let mut route_revisions = write_txn
-        .open_table(OUTBOX_ROUTE_REVISIONS)
+        .open_table(DELIVERY_ROUTE_REVISIONS)
         .map_err(persist_err)?;
     let mut deadlines = write_txn
-        .open_table(OUTBOX_DEADLINES)
+        .open_table(DELIVERY_DEADLINES)
         .map_err(persist_err)?;
     let mut deadlines_by_intent = write_txn
-        .open_table(OUTBOX_DEADLINES_BY_INTENT)
+        .open_table(DELIVERY_DEADLINES_BY_INTENT)
         .map_err(persist_err)?;
 
     let owners = replaced
@@ -66,27 +71,26 @@ fn retire_superseded_owners_in_txn(
     let mut eligible = Vec::new();
     for owner in owners {
         let key = intent_key(owner);
-        let Some(intent_json) = ingest
-            .outbox_intents
-            .get(key.as_str())
+        let Some(intent_bytes) = ingest
+            .delivery_intents
+            .get(&key)
             .map_err(persist_err)?
-            .map(|guard| guard.value().to_string())
+            .map(|guard| guard.value().to_vec())
         else {
             continue;
         };
-        let intent: OutboxIntentRecord = serde_json::from_str(&intent_json).map_err(|error| {
-            PersistenceError::invariant(format!("decode outbox intent {}: {error}", owner.0))
-        })?;
-        let (lower, upper) = prefix_range(intent_row_prefix(owner));
+        let intent = decode_intent(&intent_bytes)
+            .map_err(|error| codec_error(&format!("intent {}", owner.0), error))?;
+        let (attempt_lower, attempt_upper) = attempt_range(owner);
         let has_attempt = attempts
-            .range(lower.as_str()..upper.as_str())
+            .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
             .map_err(persist_err)?
             .next()
             .transpose()
             .map_err(persist_err)?
             .is_some()
             || attempt_details
-                .range(lower.as_str()..upper.as_str())
+                .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
                 .map_err(persist_err)?
                 .next()
                 .transpose()
@@ -97,19 +101,23 @@ fn retire_superseded_owners_in_txn(
         }
         let mut lane_keys = Vec::new();
         let mut lane_started = false;
+        let (lane_lower, lane_upper) = lane_range(owner);
         for row in lanes
-            .range(lower.as_str()..upper.as_str())
+            .range::<&[u8; 12]>(&lane_lower..=&lane_upper)
             .map_err(persist_err)?
         {
-            let (lane_key, lane_json) = row.map_err(persist_err)?;
-            let lane = decode_lane(lane_key.value(), lane_json.value())?;
-            if lane.key.intent_id != owner {
+            let (lane_key, lane_bytes) = row.map_err(persist_err)?;
+            let (key_intent, _) =
+                parse_lane_key(lane_key.value()).map_err(|error| codec_error("lane key", error))?;
+            let (_, last_ordinal, _) = super::delivery_codec::decode_lane(lane_bytes.value())
+                .map_err(|error| codec_error("lane", error))?;
+            if key_intent != owner {
                 return Err(PersistenceError::invariant(
                     "lane retirement range escaped intent prefix",
                 ));
             }
-            lane_started |= lane.last_ordinal != 0;
-            lane_keys.push(lane_key.value().to_string());
+            lane_started |= last_ordinal != 0;
+            lane_keys.push(*lane_key.value());
         }
         if !lane_started {
             eligible.push((owner, intent.receipt_id, lane_keys));
@@ -123,57 +131,59 @@ fn retire_superseded_owners_in_txn(
         }
         let key = intent_key(*owner);
         let displaced_bytes = ingest
-            .outbox_displaced
-            .remove(key.as_str())
+            .delivery_displaced
+            .remove(&key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec());
         if let Some(bytes) = displaced_bytes {
-            predecessor.get_or_insert(try_decode_stored_event(&bytes)?);
+            predecessor.get_or_insert(
+                decode_displaced(&bytes).map_err(|error| codec_error("displaced event", error))?,
+            );
         }
-        ingest
-            .outbox_intents
-            .remove(key.as_str())
-            .map_err(persist_err)?;
+        ingest.delivery_intents.remove(&key).map_err(persist_err)?;
         for lane_key in lane_keys {
-            lanes.remove(lane_key.as_str()).map_err(persist_err)?;
+            lanes.remove(lane_key).map_err(persist_err)?;
         }
 
-        let (lower, upper) = prefix_range(intent_row_prefix(*owner));
+        let (lower, upper) = route_revision_range(*owner);
         let route_keys = route_revisions
-            .range(lower.as_str()..upper.as_str())
+            .range::<&[u8; 16]>(&lower..=&upper)
             .map_err(persist_err)?
-            .map(|row| {
-                row.map(|(key, _)| key.value().to_string())
-                    .map_err(persist_err)
-            })
+            .map(|row| row.map(|(key, _)| *key.value()).map_err(persist_err))
             .collect::<Result<Vec<_>, _>>()?;
         for route_key in route_keys {
-            route_revisions
-                .remove(route_key.as_str())
-                .map_err(persist_err)?;
+            route_revisions.remove(&route_key).map_err(persist_err)?;
         }
 
+        let (lower, upper) = deadline_intent_range(*owner);
         let deadline_rows = deadlines_by_intent
-            .range(lower.as_str()..upper.as_str())
+            .range::<&[u8; 20]>(&lower..=&upper)
             .map_err(persist_err)?
             .map(|row| {
-                let (by_intent_key, json) = row.map_err(persist_err)?;
-                Ok((
-                    by_intent_key.value().to_string(),
-                    decode_deadline_by_intent(by_intent_key.value(), json.value())?,
-                ))
+                let (by_intent_key, encoded) = row.map_err(persist_err)?;
+                let (key_intent, at, relay_id) =
+                    parse_deadline_by_intent_key(by_intent_key.value())
+                        .map_err(|error| codec_error("deadline-by-intent key", error))?;
+                if key_intent != *owner {
+                    return Err(PersistenceError::invariant(
+                        "deadline retirement range escaped intent prefix",
+                    ));
+                }
+                let value = decode_deadline(encoded.value())
+                    .map_err(|error| codec_error("deadline", error))?;
+                Ok((*by_intent_key.value(), at, relay_id, value))
             })
             .collect::<Result<Vec<_>, PersistenceError>>()?;
-        for (by_intent_key, deadline) in deadline_rows {
+        for (by_intent_key, at, relay_id, _) in deadline_rows {
             deadlines
-                .remove(super::outbox::deadline_key(&deadline).as_str())
+                .remove(&deadline_key(at, *owner, relay_id))
                 .map_err(persist_err)?;
             deadlines_by_intent
-                .remove(by_intent_key.as_str())
+                .remove(&by_intent_key)
                 .map_err(persist_err)?;
         }
-        update_outbox_receipt(
-            &mut ingest.outbox_receipts,
+        update_delivery_receipt(
+            &mut ingest.delivery_receipts,
             *receipt_id,
             ReceiptState::Superseded,
         )?;
@@ -232,9 +242,9 @@ pub(super) fn accept_write(
 
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, write_txn| {
-        let mut outbox_meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
-        let mut outbox_correlations = write_txn
-            .open_table(OUTBOX_CORRELATIONS)
+        let mut delivery_meta = write_txn.open_table(DELIVERY_META).map_err(persist_err)?;
+        let mut delivery_correlations = write_txn
+            .open_table(DELIVERY_CORRELATIONS)
             .map_err(persist_err)?;
 
         if let Some(expected) = replaceable_base {
@@ -287,7 +297,7 @@ pub(super) fn accept_write(
         let is_deletion = frozen.kind == Kind::EventDeletion;
 
         // Dedup detection: checked against BOTH the live `EVENTS` row
-        // AND every OTHER intent's `OUTBOX_DISPLACED` stash (issue #2
+        // AND every OTHER intent's `DELIVERY_DISPLACED` stash (issue #2
         // P0 correction, codex-nova ruling) — a duplicate accepted
         // while its canonical predecessor is currently sitting
         // displaced (superseded by a later local edit, not yet
@@ -298,12 +308,12 @@ pub(super) fn accept_write(
         // doc.
         enum DupLoc {
             Live(EventKey, Box<StoredEvent>),
-            Stash(String),
+            Stash([u8; 8]),
         }
         let dup_loc = if let Some((event_key, stored)) = existing {
             Some(DupLoc::Live(event_key, Box::new(stored)))
         } else {
-            find_any_displaced_key_by_event_id_in_txn(&ingest.outbox_displaced, frozen.id)?
+            find_any_displaced_key_by_event_id_in_txn(&ingest.delivery_displaced, frozen.id)?
                 .map(DupLoc::Stash)
         };
 
@@ -315,18 +325,21 @@ pub(super) fn accept_write(
         let (result, displaced): (AcceptOutcome, Option<StoredEvent>) = if let Some(dup_loc) =
             dup_loc
         {
-            let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
-            let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
+            let intent_id = alloc_intent_id_in_txn(&mut delivery_meta)?;
+            let receipt_id = alloc_receipt_id_in_txn(&mut delivery_meta)?;
             let mut existing_record = match &dup_loc {
                 DupLoc::Live(_event_key, stored) => stored_event_to_record(stored),
-                DupLoc::Stash(key) => try_decode_stored_event_record(
-                    ingest
-                        .outbox_displaced
-                        .get(key.as_str())
-                        .map_err(persist_err)?
-                        .expect("just found this key")
-                        .value(),
-                )?,
+                DupLoc::Stash(key) => stored_event_to_record(
+                    &decode_displaced(
+                        ingest
+                            .delivery_displaced
+                            .get(key)
+                            .map_err(persist_err)?
+                            .expect("just found this key")
+                            .value(),
+                    )
+                    .map_err(|error| codec_error("displaced event", error))?,
+                ),
             };
             // codex-nova ruling: a row with NO local provenance at
             // all is purely relay-observed — its event signature
@@ -375,8 +388,8 @@ pub(super) fn accept_write(
                 DupLoc::Stash(key) => {
                     let encoded = encode_stored_event_record(&existing_record);
                     ingest
-                        .outbox_displaced
-                        .insert(key.as_str(), encoded.as_slice())
+                        .delivery_displaced
+                        .insert(key, encoded.as_slice())
                         .map_err(persist_err)?;
                 }
             }
@@ -392,10 +405,11 @@ pub(super) fn accept_write(
             if frozen.kind == Kind::EventDeletion && !already_signed {
                 let (_hidden, claims) =
                     process_kind5_deletions_provisional_in_txn(ingest, intent_id, &frozen)?;
-                let encoded_claims = serde_json::to_string(&claims).expect("redb: encode claims");
+                let encoded_claims =
+                    encode_claims(&claims).map_err(|error| codec_error("claims", error))?;
                 ingest
-                    .outbox_kind5_claims
-                    .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
+                    .delivery_kind5_claims
+                    .insert(&intent_key(intent_id), encoded_claims.as_slice())
                     .map_err(persist_err)?;
             }
 
@@ -427,8 +441,8 @@ pub(super) fn accept_write(
         } else if tombstone_refuses(ingest, &frozen)? {
             (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
         } else {
-            let intent_id = alloc_intent_id_in_txn(&mut outbox_meta)?;
-            let receipt_id = alloc_receipt_id_in_txn(&mut outbox_meta)?;
+            let intent_id = alloc_intent_id_in_txn(&mut delivery_meta)?;
+            let receipt_id = alloc_receipt_id_in_txn(&mut delivery_meta)?;
             let local = LocalOrigin {
                 owners: BTreeSet::from([intent_id]),
                 sig_state: SigState::Pending,
@@ -474,10 +488,10 @@ pub(super) fn accept_write(
                         let (hidden, claims) =
                             process_kind5_deletions_provisional_in_txn(ingest, intent_id, &frozen)?;
                         let encoded_claims =
-                            serde_json::to_string(&claims).expect("redb: encode claims");
+                            encode_claims(&claims).map_err(|error| codec_error("claims", error))?;
                         ingest
-                            .outbox_kind5_claims
-                            .insert(intent_key(intent_id).as_str(), encoded_claims.as_str())
+                            .delivery_kind5_claims
+                            .insert(&intent_key(intent_id), encoded_claims.as_slice())
                             .map_err(persist_err)?;
                         (
                             AcceptOutcome::Kind5Processed {
@@ -597,15 +611,15 @@ pub(super) fn accept_write(
         // receipt record commit in this SAME transaction as the
         // event-table mutation (and the `IntentId`/receipt-id
         // allocation) above — a crash here leaves either nothing or a
-        // fully `recover_outbox`-able `Accepted`. R3: `Refused` is the
+        // fully `recover_delivery`-able `Accepted`. R3: `Refused` is the
         // one outcome that journals nothing at all.
         if let (Some(intent_id), Some(receipt_id)) =
             (result.journaled_intent_id(), result.journaled_receipt_id())
         {
             let key = intent_key(intent_id);
-            let intent_record = OutboxIntentRecord {
+            let intent_record = DeliveryIntentRecord {
                 receipt_id,
-                frozen_json: frozen.as_json(),
+                frozen: frozen.clone(),
                 expected_pubkey,
                 signing_identity_ref,
                 durability,
@@ -614,36 +628,36 @@ pub(super) fn accept_write(
                 accepted_at,
             };
             let encoded_intent =
-                serde_json::to_string(&intent_record).expect("redb: encode outbox intent");
+                encode_intent(&intent_record).map_err(|error| codec_error("intent", error))?;
             ingest
-                .outbox_intents
-                .insert(key.as_str(), encoded_intent.as_str())
+                .delivery_intents
+                .insert(&key, encoded_intent.as_slice())
                 .map_err(persist_err)?;
 
             if let Some(displaced) = &displaced {
-                let encoded_displaced = encode_stored_event(displaced);
+                let encoded_displaced = encode_displaced(displaced)
+                    .map_err(|error| codec_error("displaced event", error))?;
                 ingest
-                    .outbox_displaced
-                    .insert(key.as_str(), encoded_displaced.as_slice())
+                    .delivery_displaced
+                    .insert(&key, encoded_displaced.as_slice())
                     .map_err(persist_err)?;
             }
 
             // Architecture review correction: the RETAINED receipt
-            // record, independent of `OUTBOX_INTENTS`'s open-work row.
+            // record, independent of `DELIVERY_INTENTS`'s open-work row.
             // `receipt_state` is `Accepted` except for the `Duplicate`-
             // of-an-already-signed-row case above, which overrides it
             // to `Signed` (codex-nova ruling).
-            let receipt_record = OutboxReceiptRecord {
+            let receipt_record = DeliveryReceiptRecord {
                 intent_id: Some(intent_id),
                 frozen_id: frozen.id,
                 expected_pubkey,
                 state: receipt_state,
             };
-            let encoded_receipt =
-                serde_json::to_string(&receipt_record).expect("redb: encode outbox receipt");
+            let encoded_receipt = encode_receipt(&receipt_record);
             ingest
-                .outbox_receipts
-                .insert(receipt_key(receipt_id).as_str(), encoded_receipt.as_str())
+                .delivery_receipts
+                .insert(&receipt_key(receipt_id), encoded_receipt.as_slice())
                 .map_err(persist_err)?;
 
             // #591: journal the caller's correlation token, in this
@@ -654,8 +668,8 @@ pub(super) fn accept_write(
             // documented as their contract violation, not a case this
             // store detects or refuses.
             if let Some(token) = &correlation {
-                outbox_correlations
-                    .insert(token.as_ref() as &str, receipt_key(receipt_id).as_str())
+                delivery_correlations
+                    .insert(token.as_ref().as_bytes(), &receipt_key(receipt_id))
                     .map_err(persist_err)?;
             }
         }
@@ -684,22 +698,17 @@ pub(super) fn promote_signed(
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
-        let intent_json = ingest
-            .outbox_intents
-            .get(key.as_str())
+        let intent_bytes = ingest
+            .delivery_intents
+            .get(&key)
             .map_err(persist_err)?
-            .map(|guard| guard.value().to_string());
+            .map(|guard| guard.value().to_vec());
 
-        let outcome = match intent_json {
+        let outcome = match intent_bytes {
             None => PromoteOutcome::NotFound,
-            Some(intent_json) => {
-                let intent_record: OutboxIntentRecord = serde_json::from_str(&intent_json)
-                    .map_err(|error| {
-                        PersistenceError::invariant(format!(
-                            "decode outbox intent {}: {error}",
-                            intent_id.0
-                        ))
-                    })?;
+            Some(intent_bytes) => {
+                let intent_record = decode_intent(&intent_bytes)
+                    .map_err(|error| codec_error(&format!("intent {}", intent_id.0), error))?;
                 // No-second-transition guard (codex-nova finding): a
                 // repeat promotion (e.g. a duplicate signer completion)
                 // must not overwrite an already-Signed row and re-emit
@@ -710,13 +719,7 @@ pub(super) fn promote_signed(
                 if intent_record.sig_state == IntentSigState::Signed {
                     return Ok(PromoteOutcome::NotFound);
                 }
-                let frozen_event =
-                    Event::from_json(&intent_record.frozen_json).map_err(|error| {
-                        PersistenceError::invariant(format!(
-                            "decode frozen event for intent {}: {error}",
-                            intent_id.0
-                        ))
-                    })?;
+                let frozen_event = intent_record.frozen;
                 let frozen_id = frozen_event.id;
 
                 // Architecture review correction (load-bearing): is
@@ -753,18 +756,21 @@ pub(super) fn promote_signed(
                         .and_then(|(_key, r)| r.local.as_ref())
                         .is_some_and(|l| l.sig_state == SigState::Signed)
                 } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
-                    &ingest.outbox_displaced,
+                    &ingest.delivery_displaced,
                     frozen_id,
                     intent_id,
                 )? {
                     let other_bytes = ingest
-                        .outbox_displaced
-                        .get(other_key.as_str())
+                        .delivery_displaced
+                        .get(&other_key)
                         .map_err(persist_err)?
                         .expect("just found this key")
                         .value()
                         .to_vec();
-                    let other_record = try_decode_stored_event_record(&other_bytes)?;
+                    let other_record = stored_event_to_record(
+                        &decode_displaced(&other_bytes)
+                            .map_err(|error| codec_error("displaced event", error))?,
+                    );
                     other_record
                         .local
                         .as_ref()
@@ -811,7 +817,7 @@ pub(super) fn promote_signed(
                         owners,
                     )
                 } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
-                    &ingest.outbox_displaced,
+                    &ingest.delivery_displaced,
                     frozen_id,
                     intent_id,
                 )? {
@@ -824,13 +830,16 @@ pub(super) fn promote_signed(
                     // copy of an intent that actually did sign. Same
                     // `already_signed` skip as the live case above.
                     let other_bytes = ingest
-                        .outbox_displaced
-                        .get(other_key.as_str())
+                        .delivery_displaced
+                        .get(&other_key)
                         .map_err(persist_err)?
                         .expect("just found this key")
                         .value()
                         .to_vec();
-                    let mut other_record = try_decode_stored_event_record(&other_bytes)?;
+                    let mut other_record = stored_event_to_record(
+                        &decode_displaced(&other_bytes)
+                            .map_err(|error| codec_error("displaced event", error))?,
+                    );
                     if !already_signed {
                         other_record.event = signed_frozen_event.clone();
                         if let Some(local) = other_record.local.as_mut() {
@@ -838,8 +847,8 @@ pub(super) fn promote_signed(
                         }
                         let encoded_other = encode_stored_event_record(&other_record);
                         ingest
-                            .outbox_displaced
-                            .insert(other_key.as_str(), encoded_other.as_slice())
+                            .delivery_displaced
+                            .insert(&other_key, encoded_other.as_slice())
                             .map_err(persist_err)?;
                     }
                     let owners = other_record
@@ -925,34 +934,23 @@ pub(super) fn compensate_write_with_state(
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
-        let intent_json = ingest
-            .outbox_intents
-            .get(key.as_str())
+        let intent_bytes = ingest
+            .delivery_intents
+            .get(&key)
             .map_err(persist_err)?
-            .map(|guard| guard.value().to_string());
+            .map(|guard| guard.value().to_vec());
 
-        let outcome = match intent_json {
+        let outcome = match intent_bytes {
             None => CompensateOutcome::NotFound,
-            Some(intent_json) => {
-                let intent_record: OutboxIntentRecord = serde_json::from_str(&intent_json)
-                    .map_err(|error| {
-                        PersistenceError::invariant(format!(
-                            "decode outbox intent {}: {error}",
-                            intent_id.0
-                        ))
-                    })?;
+            Some(intent_bytes) => {
+                let intent_record = decode_intent(&intent_bytes)
+                    .map_err(|error| codec_error(&format!("intent {}", intent_id.0), error))?;
                 if intent_record.sig_state == IntentSigState::Signed {
                     // Pre-signature only (retraction doc §4.2's
                     // "Promotion correction").
                     CompensateOutcome::AlreadySigned
                 } else {
-                    let frozen_event =
-                        Event::from_json(&intent_record.frozen_json).map_err(|error| {
-                            PersistenceError::invariant(format!(
-                                "decode frozen event for intent {}: {error}",
-                                intent_id.0
-                            ))
-                        })?;
+                    let frozen_event = intent_record.frozen.clone();
                     let frozen_id = frozen_event.id;
                     let live = ingest.canonical.load_by_id(&frozen_id)?;
                     let is_live = live.as_ref().is_some_and(|(_event_key, stored)| {
@@ -991,7 +989,7 @@ pub(super) fn compensate_write_with_state(
                             ingest.canonical.replace_local(*event_key, record.local)?;
                         }
                     } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
-                        &ingest.outbox_displaced,
+                        &ingest.delivery_displaced,
                         frozen_id,
                         intent_id,
                     )? {
@@ -1005,14 +1003,16 @@ pub(super) fn compensate_write_with_state(
                         // sitting in the SAME stash slot must survive
                         // this intent's cancellation too.
                         let other_bytes = ingest
-                            .outbox_displaced
-                            .get(other_key.as_str())
+                            .delivery_displaced
+                            .get(&other_key)
                             .map_err(persist_err)?
                             .expect("just found this key")
                             .value()
                             .to_vec();
-                        let mut other_record =
-                            stored_event_to_record(&try_decode_stored_event(&other_bytes)?);
+                        let mut other_record = stored_event_to_record(
+                            &decode_displaced(&other_bytes)
+                                .map_err(|error| codec_error("displaced event", error))?,
+                        );
                         let Some(mut local) = other_record.local.clone() else {
                             return Err(PersistenceError::invariant(format!(
                                 "displaced event for intent {} lost local ownership",
@@ -1025,23 +1025,20 @@ pub(super) fn compensate_write_with_state(
                             && other_record.provenance.is_empty();
                         if should_drop {
                             ingest
-                                .outbox_displaced
-                                .remove(other_key.as_str())
+                                .delivery_displaced
+                                .remove(&other_key)
                                 .map_err(persist_err)?;
                         } else {
                             other_record.local = Some(local);
                             let encoded_other = encode_stored_event_record(&other_record);
                             ingest
-                                .outbox_displaced
-                                .insert(other_key.as_str(), encoded_other.as_slice())
+                                .delivery_displaced
+                                .insert(&other_key, encoded_other.as_slice())
                                 .map_err(persist_err)?;
                         }
                     }
 
-                    ingest
-                        .outbox_intents
-                        .remove(key.as_str())
-                        .map_err(persist_err)?;
+                    ingest.delivery_intents.remove(&key).map_err(persist_err)?;
                     // THIS intent's OWN displaced predecessor (if any)
                     // is restored through the same one door regardless
                     // of whether its row was live or already gone for
@@ -1050,15 +1047,17 @@ pub(super) fn compensate_write_with_state(
                     // tombstone check makes this safe even if the
                     // predecessor was itself since deleted or expired.
                     let displaced_bytes = ingest
-                        .outbox_displaced
-                        .remove(key.as_str())
+                        .delivery_displaced
+                        .remove(&key)
                         .map_err(persist_err)?
                         .map(|guard| guard.value().to_vec());
                     let restored = match displaced_bytes {
-                        Some(bytes) => {
-                            reinsert_stashed_in_txn(ingest, try_decode_stored_event(&bytes)?)?
-                                .map(Box::new)
-                        }
+                        Some(bytes) => reinsert_stashed_in_txn(
+                            ingest,
+                            decode_displaced(&bytes)
+                                .map_err(|error| codec_error("displaced event", error))?,
+                        )?
+                        .map(Box::new),
                         None => None,
                     };
 
@@ -1079,46 +1078,33 @@ pub(super) fn compensate_write_with_state(
                     // wrong-author e-tag claim on a row some OTHER
                     // author holds), is correctly excluded.
                     let mut revealed = Vec::new();
-                    let claims_json = ingest
-                        .outbox_kind5_claims
-                        .remove(key.as_str())
+                    let claims_bytes = ingest
+                        .delivery_kind5_claims
+                        .remove(&key)
                         .map_err(persist_err)?
-                        .map(|guard| guard.value().to_string());
-                    if let Some(claims_json) = claims_json {
-                        let claims: Vec<SuppressClaimRecord> = serde_json::from_str(&claims_json)
-                            .map_err(|error| {
-                            PersistenceError::invariant(format!(
-                                "decode suppression claims for intent {}: {error}",
-                                intent_id.0
-                            ))
+                        .map(|guard| guard.value().to_vec());
+                    if let Some(claims_bytes) = claims_bytes {
+                        let claims = decode_claims(&claims_bytes).map_err(|error| {
+                            codec_error(
+                                &format!("suppression claims for intent {}", intent_id.0),
+                                error,
+                            )
                         })?;
 
                         let mut candidate_ids: Vec<EventId> = Vec::new();
                         let mut seen_candidates: HashSet<EventId> = HashSet::new();
                         for claim in &claims {
                             let target_id = match claim {
-                                SuppressClaimRecord::Id(id_key) => {
-                                    // `id_tombstone_key` is
-                                    // `"{id_hex}:{author_hex}"` — the
-                                    // target's own id is everything
-                                    // before the first `:`.
-                                    let hex = id_key.split(':').next().ok_or_else(|| {
-                                        PersistenceError::invariant(format!(
-                                            "decode id suppression claim for intent {}",
-                                            intent_id.0
-                                        ))
-                                    })?;
-                                    Some(EventId::from_hex(hex).map_err(|error| {
-                                        PersistenceError::invariant(format!(
-                                            "decode id suppression claim for intent {}: {error}",
-                                            intent_id.0
-                                        ))
-                                    })?)
-                                }
+                                SuppressClaimRecord::Id { target, .. } => Some(*target),
                                 SuppressClaimRecord::Addr { key: addr_key, .. } => {
+                                    let addr_key = std::str::from_utf8(addr_key).map_err(|_| {
+                                        PersistenceError::invariant(
+                                            "address suppression key is not UTF-8",
+                                        )
+                                    })?;
                                     let event_key = ingest
                                         .addr_index
-                                        .get(addr_key.as_str())
+                                        .get(addr_key)
                                         .map_err(persist_err)?
                                         .map(|guard| guard.value());
                                     match event_key {
@@ -1142,8 +1128,8 @@ pub(super) fn compensate_write_with_state(
                             let visible = match ingest.canonical.load_by_id(id)? {
                                 None => false,
                                 Some((_key, se)) => !is_suppressed_in_txn(
-                                    &ingest.outbox_suppress_by_id,
-                                    &ingest.outbox_suppress_by_addr,
+                                    &ingest.delivery_suppress_by_id,
+                                    &ingest.delivery_suppress_by_addr,
                                     &se.event,
                                 )?,
                             };
@@ -1152,16 +1138,19 @@ pub(super) fn compensate_write_with_state(
 
                         for claim in claims {
                             match claim {
-                                SuppressClaimRecord::Id(id_key) => {
+                                SuppressClaimRecord::Id {
+                                    target,
+                                    claiming_author,
+                                } => {
                                     remove_claimant_in_txn(
-                                        &mut ingest.outbox_suppress_by_id,
-                                        &id_key,
+                                        &mut ingest.delivery_suppress_by_id,
+                                        &id_claim_key(&target, &claiming_author),
                                         intent_id,
                                     )?;
                                 }
                                 SuppressClaimRecord::Addr { key: addr_key, .. } => {
                                     remove_addr_claimant_in_txn(
-                                        &mut ingest.outbox_suppress_by_addr,
+                                        &mut ingest.delivery_suppress_by_addr,
                                         &addr_key,
                                         intent_id,
                                     )?;
@@ -1175,8 +1164,8 @@ pub(super) fn compensate_write_with_state(
                             }
                             if let Some((_key, se)) = ingest.canonical.load_by_id(&id)? {
                                 if !is_suppressed_in_txn(
-                                    &ingest.outbox_suppress_by_id,
-                                    &ingest.outbox_suppress_by_addr,
+                                    &ingest.delivery_suppress_by_id,
+                                    &ingest.delivery_suppress_by_addr,
                                     &se.event,
                                 )? {
                                     revealed.push(se);
@@ -1185,8 +1174,8 @@ pub(super) fn compensate_write_with_state(
                         }
                     }
 
-                    update_outbox_receipt(
-                        &mut ingest.outbox_receipts,
+                    update_delivery_receipt(
+                        &mut ingest.delivery_receipts,
                         intent_record.receipt_id,
                         terminal_state,
                     )?;
@@ -1208,27 +1197,27 @@ pub(super) fn cancel_ephemeral_receipt(
 ) -> Result<crate::CancelEphemeralOutcome, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let outcome = {
-        let mut receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+        let mut receipts = write_txn
+            .open_table(DELIVERY_RECEIPTS)
+            .map_err(persist_err)?;
         let key = receipt_key(receipt_id);
-        let existing = receipts.get(key.as_str()).map_err(persist_err)?;
-        let Some(json) = existing.map(|guard| guard.value().to_string()) else {
+        let existing = receipts.get(&key).map_err(persist_err)?;
+        let Some(encoded) = existing.map(|guard| guard.value().to_vec()) else {
             return Ok(crate::CancelEphemeralOutcome::NotFound);
         };
-        let mut record: OutboxReceiptRecord = serde_json::from_str(&json)
-            .map_err(|err| PersistenceError::invariant(format!("decode outbox receipt: {err}")))?;
+        let mut record =
+            decode_receipt(&encoded).map_err(|error| codec_error("ephemeral receipt", error))?;
         if record.intent_id.is_some() {
             crate::CancelEphemeralOutcome::NotEphemeral
         } else {
             match record.state {
                 ReceiptState::Accepted => {
                     record.state = ReceiptState::Cancelled;
-                    let encoded = serde_json::to_string(&record).map_err(|err| {
-                        PersistenceError::invariant(format!("encode outbox receipt: {err}"))
-                    })?;
+                    let encoded = encode_receipt(&record);
                     receipts
-                        .insert(key.as_str(), encoded.as_str())
+                        .insert(&key, encoded.as_slice())
                         .map_err(persist_err)?;
-                    let mut meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
+                    let mut meta = write_txn.open_table(DELIVERY_META).map_err(persist_err)?;
                     decrement_pending_ephemeral_in_txn(&mut meta)?;
                     crate::CancelEphemeralOutcome::Cancelled
                 }
@@ -1253,25 +1242,25 @@ pub(super) fn mark_ephemeral_signed(
 ) -> Result<bool, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let changed = {
-        let mut receipts = write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?;
+        let mut receipts = write_txn
+            .open_table(DELIVERY_RECEIPTS)
+            .map_err(persist_err)?;
         let key = receipt_key(receipt_id);
-        let existing = receipts.get(key.as_str()).map_err(persist_err)?;
-        let Some(json) = existing.map(|guard| guard.value().to_string()) else {
+        let existing = receipts.get(&key).map_err(persist_err)?;
+        let Some(encoded) = existing.map(|guard| guard.value().to_vec()) else {
             return Ok(false);
         };
-        let mut record: OutboxReceiptRecord = serde_json::from_str(&json)
-            .map_err(|err| PersistenceError::invariant(format!("decode outbox receipt: {err}")))?;
+        let mut record =
+            decode_receipt(&encoded).map_err(|error| codec_error("ephemeral receipt", error))?;
         if record.intent_id.is_some() || record.state != ReceiptState::Accepted {
             false
         } else {
             record.state = ReceiptState::Signed;
-            let encoded = serde_json::to_string(&record).map_err(|err| {
-                PersistenceError::invariant(format!("encode outbox receipt: {err}"))
-            })?;
+            let encoded = encode_receipt(&record);
             receipts
-                .insert(key.as_str(), encoded.as_str())
+                .insert(&key, encoded.as_slice())
                 .map_err(persist_err)?;
-            let mut meta = write_txn.open_table(OUTBOX_META).map_err(persist_err)?;
+            let mut meta = write_txn.open_table(DELIVERY_META).map_err(persist_err)?;
             decrement_pending_ephemeral_in_txn(&mut meta)?;
             true
         }

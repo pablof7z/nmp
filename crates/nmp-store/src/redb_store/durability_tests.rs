@@ -408,8 +408,8 @@ fn the_rendered_failure_separates_the_first_io_from_the_latch_reports() {
     assert!(first.contains("reopen=required") && latched.contains("reopen=required"));
 
     assert_eq!(
-        PersistenceError::invariant("decode outbox intent 7").to_string(),
-        "durable-store persistence failure: decode outbox intent 7",
+        PersistenceError::invariant("decode delivery intent 7").to_string(),
+        "durable-store persistence failure: decode delivery intent 7",
         "an invariant carries no durability question and gains no annotation"
     );
 }

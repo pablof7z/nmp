@@ -52,7 +52,7 @@ An in-progress relay reconciliation is connection-local. A replacement connectio
 5. Reattach retained receipt ids and fold replayed/current facts.
 6. Start new UI observers only after the model is ready to own their teardown.
 
-NMP may restore canonical rows, provenance, source evidence, durable write lanes, and retained receipt facts. It does not restore UI navigation, ordering, moderation state, query-handle ownership, or secret material from the event/outbox store.
+NMP may restore canonical rows, provenance, source evidence, durable write lanes, and retained receipt facts. It does not restore UI navigation, ordering, moderation state, query-handle ownership, or secret material from the event/delivery store.
 
 ## Receipt recovery matrix
 
@@ -99,7 +99,7 @@ Keep recovery owned by the failing layer:
 - query source disconnect: transport reconnects while demand remains live;
 - missing signer: restore/attach the same expected identity; do not re-author;
 - remote signer handoff failure: close that connection attempt and begin a new explicit attempt;
-- durable relay failure: outbox owns attempts/backoff and emits receipt facts;
+- durable relay failure: delivery owns attempts/backoff and emits receipt facts;
 - at-most-once ambiguity: preserve `OutcomeUnknown`; never blind resend;
 - replaceable conflict: acquire the new canonical base and make a new user decision;
 - engine-start or observation infra failure (`EngineStartFailed` at construction, `ObservationUnavailable` for canonical windowed history-projection setup): preserve the owning boundary and retry only as a new bounded attempt; relay connection failure remains acquisition evidence and ordinary operations are never refused for capacity;

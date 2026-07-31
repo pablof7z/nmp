@@ -1,6 +1,6 @@
 use super::*;
 
-// ---- write outbox scheduling -------------------------------------------
+// ---- durable delivery scheduling -------------------------------------------
 
 /// Test 4 analog: `enqueue_is_not_converged` (ledger #9). A durable
 /// publish's FIRST status is `Accepted`, never a terminal; an `Ephemeral`
@@ -345,7 +345,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         drop(core);
 
         let store = RedbStore::open(&path).unwrap();
-        let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
+        let intent = store.recover_delivery().expect("recover delivery")[0].intent_id;
         assert!(store.recover_attempts(intent).unwrap().is_empty());
         drop(store);
 

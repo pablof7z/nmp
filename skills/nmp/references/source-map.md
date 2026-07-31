@@ -30,7 +30,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-grammar/src/binding.rs`
 - Source: `crates/nmp-grammar/src/descriptor.rs`
 - Source: `crates/nmp-grammar/src/write.rs`
-- Source: `crates/nmp/src/outbox/mod.rs`
+- Source: `crates/nmp/src/delivery/mod.rs`
 - Source: `crates/nmp/src/core/diagnostics.rs`
 - Source: `crates/nmp/src/core/mod.rs`
 - Source: `crates/nmp/src/runtime/mod.rs`

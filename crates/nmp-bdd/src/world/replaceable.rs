@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use nostr::{EventId, Timestamp};
 
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use super::budgets::EVENTUALLY;
@@ -252,7 +252,7 @@ impl NmpWorld {
     /// The timestamp of the version a scenario's word names.
     ///
     /// Read from what the scenario SAID when it staged that version, not off
-    /// the wire. #995 retires a replaceable write's outbox obligation the
+    /// the wire. #995 retires a replaceable write's delivery obligation the
     /// moment a newer write takes the same coordinate, so a displaced
     /// predecessor may correctly never reach any relay -- and the sentence
     /// two lines above the assertion already states its timestamp outright.

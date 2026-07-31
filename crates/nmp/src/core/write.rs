@@ -5,14 +5,14 @@
 
 use super::*;
 
-fn public_retry_cause(cause: TransientCause) -> Option<RetryCause> {
+fn public_retry_cause(cause: DeliveryTransientCause) -> Option<RetryCause> {
     match cause {
-        TransientCause::Interrupted => Some(RetryCause::Interrupted),
-        TransientCause::AckTimeout => Some(RetryCause::AckTimeout),
-        TransientCause::ConnectionLost => Some(RetryCause::ConnectionLost),
-        TransientCause::RelayRateLimited => Some(RetryCause::RelayRateLimited),
-        TransientCause::RelayError => Some(RetryCause::RelayError),
-        TransientCause::AuthRequired => None,
+        DeliveryTransientCause::Interrupted => Some(RetryCause::Interrupted),
+        DeliveryTransientCause::AckTimeout => Some(RetryCause::AckTimeout),
+        DeliveryTransientCause::ConnectionLost => Some(RetryCause::ConnectionLost),
+        DeliveryTransientCause::RelayRateLimited => Some(RetryCause::RelayRateLimited),
+        DeliveryTransientCause::RelayError => Some(RetryCause::RelayError),
+        DeliveryTransientCause::AuthRequired => None,
     }
 }
 
@@ -221,7 +221,7 @@ impl<S: EventStore> EngineCore<S> {
 
     /// O(1) via `intent_receipts` (epic #507 finding E5) -- this door used
     /// to be a full `self.pending` linear scan, run once per due deadline in
-    /// `consume_due_outbox_deadlines`.
+    /// `consume_due_delivery_deadlines`.
     pub(super) fn receipt_for_intent(&self, intent_id: IntentId) -> Option<ReceiptId> {
         self.intent_receipts.get(&intent_id).copied()
     }
@@ -468,30 +468,30 @@ impl<S: EventStore> EngineCore<S> {
             return effects;
         };
 
-        let key = LaneKey {
+        let key = DeliveryLaneKey {
             intent_id,
             relay: target.session.relay.clone(),
         };
         let Ok(Some(lane)) = self
             .resolver
             .store()
-            .recover_outbox_lanes(intent_id)
+            .recover_delivery_lanes(intent_id)
             .map(|lanes| lanes.into_iter().find(|lane| lane.key == key))
         else {
             return effects;
         };
         if !matches!(
             lane.state,
-            LaneState::InFlight {
+            DeliveryLaneState::InFlight {
                 ordinal: current,
-                phase: InFlightPhase::AwaitingHandoff,
+                phase: DeliveryInFlightPhase::AwaitingHandoff,
             } if current == ordinal
         ) {
             return effects;
         }
 
         let durability = self.pending.get(&target.receipt).map(|p| p.durability);
-        let detail = AttemptHandoffDetail {
+        let detail = DeliveryAttemptHandoff {
             at: self.clock,
             result: match result {
                 HandoffResult::NotHandedOff => HandoffEvidence::NotHandedOff,
@@ -500,15 +500,15 @@ impl<S: EventStore> EngineCore<S> {
             },
         };
         let next = match (result, durability) {
-            (HandoffResult::NotHandedOff, _) => PostHandoffState::WaitingConnection,
+            (HandoffResult::NotHandedOff, _) => DeliveryPostHandoffState::WaitingConnection,
             (HandoffResult::Written, _) | (HandoffResult::Ambiguous, Some(Durability::Durable)) => {
-                PostHandoffState::AwaitingAck {
+                DeliveryPostHandoffState::AwaitingAck {
                     deadline: self.clock + ACK_TIMEOUT_SECS,
                 }
             }
             (HandoffResult::Ambiguous, Some(Durability::AtMostOnce)) => {
-                PostHandoffState::Terminal {
-                    outcome: AttemptOutcome::OutcomeUnknown,
+                DeliveryPostHandoffState::Terminal {
+                    outcome: DeliveryAttemptOutcome::OutcomeUnknown,
                     finished_at: self.clock,
                 }
             }
@@ -588,7 +588,7 @@ impl<S: EventStore> EngineCore<S> {
     /// `receipts_by_lane_relay`, except in its degraded fallback.
     pub(super) fn recover_all_lanes(
         &self,
-    ) -> Result<Vec<(ReceiptId, RecoveredLane)>, PersistenceError> {
+    ) -> Result<Vec<(ReceiptId, DeliveryLane)>, PersistenceError> {
         let mut lanes = Vec::new();
         for (id, pending) in &self.pending {
             let Some(intent_id) = pending.intent_id else {
@@ -597,7 +597,7 @@ impl<S: EventStore> EngineCore<S> {
             lanes.extend(
                 self.resolver
                     .store()
-                    .recover_outbox_lanes(intent_id)?
+                    .recover_delivery_lanes(intent_id)?
                     .into_iter()
                     .map(|lane| (*id, lane)),
             );
@@ -621,11 +621,11 @@ impl<S: EventStore> EngineCore<S> {
         let mut eligible = Vec::new();
         for (id, lane) in lanes {
             match lane.state {
-                LaneState::InFlight { .. } => {
+                DeliveryLaneState::InFlight { .. } => {
                     in_flight = in_flight.saturating_add(1);
                     in_flight_relays.insert(lane.key.relay.clone());
                 }
-                LaneState::Eligible { since } => eligible.push((since, id, lane)),
+                DeliveryLaneState::Eligible { since } => eligible.push((since, id, lane)),
                 _ => {}
             }
         }
@@ -726,9 +726,9 @@ impl<S: EventStore> EngineCore<S> {
             };
             debug_assert_eq!(
                 advanced.state,
-                LaneState::InFlight {
+                DeliveryLaneState::InFlight {
                     ordinal: attempt.ordinal,
-                    phase: InFlightPhase::AwaitingHandoff,
+                    phase: DeliveryInFlightPhase::AwaitingHandoff,
                 }
             );
             if let Some(pending) = self.pending.get_mut(&id) {
@@ -765,7 +765,7 @@ impl<S: EventStore> EngineCore<S> {
     /// `schedule_ready` at the end). The non-degraded path below instead
     /// narrows via `receipts_by_lane_relay` to exactly the receipts that
     /// actually own a lane on `session.relay`, re-reading only those
-    /// intents. (`receipts_by_lane_relay`/`LaneKey` stay URL-keyed in the
+    /// intents. (`receipts_by_lane_relay`/`DeliveryLaneKey` stay URL-keyed in the
     /// store — only the SESSION comparison below, derived per lane from its
     /// pending write's signing identity, decides whether a lane belongs to
     /// THIS session.)
@@ -806,13 +806,13 @@ impl<S: EventStore> EngineCore<S> {
             .into_iter()
             .collect();
 
-        let mut lanes: Vec<(ReceiptId, RecoveredLane)> = Vec::new();
+        let mut lanes: Vec<(ReceiptId, DeliveryLane)> = Vec::new();
         for id in candidates {
             let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id)
             else {
                 continue;
             };
-            match self.resolver.store().recover_outbox_lanes(intent_id) {
+            match self.resolver.store().recover_delivery_lanes(intent_id) {
                 Ok(recovered) => lanes.extend(
                     recovered
                         .into_iter()
@@ -857,7 +857,7 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         session: &RelaySessionKey,
         auth_only: bool,
-        lanes: Vec<(ReceiptId, RecoveredLane)>,
+        lanes: Vec<(ReceiptId, DeliveryLane)>,
         effects: &mut Vec<Effect>,
     ) {
         for (id, lane) in lanes {
@@ -871,9 +871,9 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             let should_wake = if auth_only {
-                matches!(lane.state, LaneState::WaitingAuth)
+                matches!(lane.state, DeliveryLaneState::WaitingAuth)
             } else {
-                matches!(lane.state, LaneState::WaitingConnection)
+                matches!(lane.state, DeliveryLaneState::WaitingConnection)
             };
             if !should_wake {
                 continue;
@@ -915,13 +915,13 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    pub(super) fn consume_due_outbox_deadlines(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(super) fn consume_due_delivery_deadlines(&mut self, now: Timestamp) -> Vec<Effect> {
         let mut effects = Vec::new();
         loop {
             let due = match self
                 .resolver
                 .store()
-                .due_outbox_deadlines(now, DEADLINE_READ_BATCH)
+                .due_delivery_deadlines(now, DEADLINE_READ_BATCH)
             {
                 Ok(due) => due,
                 Err(_) => {
@@ -937,7 +937,7 @@ impl<S: EventStore> EngineCore<S> {
                 let lane = self
                     .resolver
                     .store()
-                    .recover_outbox_lanes(deadline.key.intent_id)
+                    .recover_delivery_lanes(deadline.key.intent_id)
                     .ok()
                     .and_then(|lanes| {
                         lanes.into_iter().find(|lane| {
@@ -949,7 +949,7 @@ impl<S: EventStore> EngineCore<S> {
                     continue;
                 };
                 match (deadline.kind, lane.state.clone()) {
-                    (DeadlineKind::RetryEligible, LaneState::Transient { .. }) => {
+                    (DeliveryDeadlineKind::RetryEligible, DeliveryLaneState::Transient { .. }) => {
                         if self
                             .commit_lane_eligible(&lane.key, lane.revision, deadline.at)
                             .is_err()
@@ -958,10 +958,10 @@ impl<S: EventStore> EngineCore<S> {
                         }
                     }
                     (
-                        DeadlineKind::AckTimeout,
-                        LaneState::InFlight {
+                        DeliveryDeadlineKind::AckTimeout,
+                        DeliveryLaneState::InFlight {
                             ordinal,
-                            phase: InFlightPhase::AwaitingAck { .. },
+                            phase: DeliveryInFlightPhase::AwaitingAck { .. },
                         },
                     ) => {
                         let durability =
@@ -972,7 +972,7 @@ impl<S: EventStore> EngineCore<S> {
                                     &lane.key,
                                     lane.revision,
                                     ordinal,
-                                    AttemptOutcome::OutcomeUnknown,
+                                    DeliveryAttemptOutcome::OutcomeUnknown,
                                     now,
                                 )
                                 .is_ok()
@@ -997,7 +997,7 @@ impl<S: EventStore> EngineCore<S> {
                                     lane.revision,
                                     ordinal,
                                     eligible_at,
-                                    TransientCause::AckTimeout,
+                                    DeliveryTransientCause::AckTimeout,
                                     Some("ack timeout".to_string()),
                                 )
                                 .is_ok()
@@ -1045,7 +1045,7 @@ impl<S: EventStore> EngineCore<S> {
         // `pending`/`lane_relay_index_degraded` in the untrustworthy state
         // they must be in for a set that was never rebuilt. The one-shot
         // #122 degradation is the whole visible outcome.
-        let recovered = match self.resolver.store().recover_outbox() {
+        let recovered = match self.resolver.store().recover_delivery() {
             Ok(recovered) => recovered,
             Err(error) => {
                 self.lane_relay_index_degraded = true;
@@ -1148,7 +1148,7 @@ impl<S: EventStore> EngineCore<S> {
                 Err(_) => {
                     // This intent may already own real persisted lanes from
                     // before this boot; skipping straight to the next intent
-                    // (as below) means `bootstrap_outbox_lanes` never runs
+                    // (as below) means `bootstrap_delivery_lanes` never runs
                     // for it this boot, so the reverse index can never learn
                     // those lanes -- an unprovable gap, so degrade rather
                     // than silently under-index (epic #507 finding E5).
@@ -1231,7 +1231,7 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         self.retry_scheduler_blocked = false;
-        effects.extend(self.consume_due_outbox_deadlines(self.clock));
+        effects.extend(self.consume_due_delivery_deadlines(self.clock));
         for id in recovered_ids {
             self.close_if_all_lanes_terminal(id);
         }
@@ -1262,7 +1262,7 @@ impl<S: EventStore> EngineCore<S> {
         id: ReceiptId,
         durability: Durability,
         signing_pubkey: PublicKey,
-        lanes: Vec<RecoveredLane>,
+        lanes: Vec<DeliveryLane>,
         effects: &mut Vec<Effect>,
     ) {
         for lane in lanes {
@@ -1274,9 +1274,9 @@ impl<S: EventStore> EngineCore<S> {
             let session =
                 RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey));
             match lane.state {
-                LaneState::InFlight {
+                DeliveryLaneState::InFlight {
                     ordinal,
-                    phase: InFlightPhase::AwaitingHandoff,
+                    phase: DeliveryInFlightPhase::AwaitingHandoff,
                 } => match durability {
                     Durability::Durable => {
                         let eligible_at = self.clock;
@@ -1285,7 +1285,7 @@ impl<S: EventStore> EngineCore<S> {
                             lane.revision,
                             ordinal,
                             eligible_at,
-                            TransientCause::Interrupted,
+                            DeliveryTransientCause::Interrupted,
                             Some("process restarted before handoff resolved".to_string()),
                         );
                     }
@@ -1295,7 +1295,7 @@ impl<S: EventStore> EngineCore<S> {
                                 &lane.key,
                                 lane.revision,
                                 ordinal,
-                                AttemptOutcome::OutcomeUnknown,
+                                DeliveryAttemptOutcome::OutcomeUnknown,
                                 self.clock,
                             )
                             .is_ok()
@@ -1308,18 +1308,18 @@ impl<S: EventStore> EngineCore<S> {
                     }
                     Durability::Ephemeral => unreachable!(),
                 },
-                LaneState::WaitingConnection
-                | LaneState::Eligible { .. }
-                | LaneState::Transient { .. } => {
+                DeliveryLaneState::WaitingConnection
+                | DeliveryLaneState::Eligible { .. }
+                | DeliveryLaneState::Transient { .. } => {
                     effects.push(Effect::EnsureWriteRelay(session));
                 }
-                LaneState::InFlight {
-                    phase: InFlightPhase::AwaitingAck { .. },
+                DeliveryLaneState::InFlight {
+                    phase: DeliveryInFlightPhase::AwaitingAck { .. },
                     ..
                 } => {
                     effects.push(Effect::EnsureWriteRelay(session));
                 }
-                LaneState::WaitingAuth => {
+                DeliveryLaneState::WaitingAuth => {
                     // A `WaitingAuth` park never survives a restart: its
                     // authenticated grant was generation-scoped to a socket
                     // this process no longer holds. Recover it as
@@ -1343,7 +1343,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.lane_relay_index_degraded = true;
                     }
                 }
-                LaneState::Terminal { .. } => {}
+                DeliveryLaneState::Terminal { .. } => {}
             }
         }
     }
@@ -1352,7 +1352,7 @@ impl<S: EventStore> EngineCore<S> {
     ///
     /// This is the whole way OUT of the conservative retention a failed
     /// bootstrap takes (#1000). `uncertain` is cleared only by a committed
-    /// `RecoveredLane` for that exact relay, and an intent whose bootstrap
+    /// `DeliveryLane` for that exact relay, and an intent whose bootstrap
     /// failed owns NO lane rows — so `schedule_ready`, the deadline sweep and
     /// the wake index all find nothing for it and no committed lane fact can
     /// ever arrive on its own. Without this door a single transient store
@@ -1418,7 +1418,7 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// its retained facts. Unknown ids do not create state.
-    pub(super) fn retained_receipt_status(receipt: &nmp_store::RecoveredReceipt) -> WriteStatus {
+    pub(super) fn retained_receipt_status(receipt: &nmp_store::DeliveryReceipt) -> WriteStatus {
         match receipt.state {
             ReceiptState::Accepted => WriteStatus::Accepted,
             ReceiptState::Signed => WriteStatus::Signed(receipt.frozen_id),
@@ -1495,7 +1495,7 @@ impl<S: EventStore> EngineCore<S> {
                         )
                     }
                 };
-                let lanes = match self.resolver.store().recover_outbox_lanes(intent_id) {
+                let lanes = match self.resolver.store().recover_delivery_lanes(intent_id) {
                     Ok(lanes) => lanes,
                     Err(_) => {
                         return ReceiptReplayPage::unavailable(
@@ -1604,7 +1604,7 @@ impl<S: EventStore> EngineCore<S> {
                         }
                     }
                     if let Some(transient) = detail.transient {
-                        if transient.cause == TransientCause::AuthRequired {
+                        if transient.cause == DeliveryTransientCause::AuthRequired {
                             awaiting_auth.insert((attempt.relay.clone(), attempt.ordinal));
                             replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Transient),
@@ -1637,13 +1637,15 @@ impl<S: EventStore> EngineCore<S> {
                     // deliberately moved Sent to the later transport
                     // Written result, so replaying Started as Sent would
                     // recreate the exact false claim this seam removes.
-                    AttemptOutcome::Started => continue,
-                    AttemptOutcome::Acked => WriteStatus::Acked(attempt.relay),
-                    AttemptOutcome::Rejected(reason) => {
+                    DeliveryAttemptOutcome::Started => continue,
+                    DeliveryAttemptOutcome::Acked => WriteStatus::Acked(attempt.relay),
+                    DeliveryAttemptOutcome::Rejected(reason) => {
                         WriteStatus::Rejected(attempt.relay, reason)
                     }
-                    AttemptOutcome::GaveUp => WriteStatus::GaveUp(attempt.relay),
-                    AttemptOutcome::OutcomeUnknown => WriteStatus::OutcomeUnknown(attempt.relay),
+                    DeliveryAttemptOutcome::GaveUp => WriteStatus::GaveUp(attempt.relay),
+                    DeliveryAttemptOutcome::OutcomeUnknown => {
+                        WriteStatus::OutcomeUnknown(attempt.relay)
+                    }
                 };
                 replay.push((replay_key(ReceiptAttemptReplayPhase::Outcome), status));
             }
@@ -1656,7 +1658,7 @@ impl<S: EventStore> EngineCore<S> {
                     revision: lane.revision,
                 };
                 match lane.state {
-                    LaneState::WaitingConnection
+                    DeliveryLaneState::WaitingConnection
                         if !awaiting_relay
                             .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
                     {
@@ -1667,7 +1669,7 @@ impl<S: EventStore> EngineCore<S> {
                             },
                         ));
                     }
-                    LaneState::WaitingAuth
+                    DeliveryLaneState::WaitingAuth
                         if !awaiting_auth
                             .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
                     {
@@ -1678,8 +1680,8 @@ impl<S: EventStore> EngineCore<S> {
                             },
                         ));
                     }
-                    LaneState::Terminal {
-                        outcome: LaneTerminalOutcome::AuthDenied(denial),
+                    DeliveryLaneState::Terminal {
+                        outcome: DeliveryTerminalOutcome::AuthDenied(denial),
                         ..
                     } => {
                         replay.push((
@@ -1692,12 +1694,12 @@ impl<S: EventStore> EngineCore<S> {
                             },
                         ));
                     }
-                    LaneState::Transient {
+                    DeliveryLaneState::Transient {
                         ordinal,
                         eligible_at,
                         cause,
                         raw_reason,
-                    } if cause != TransientCause::AuthRequired
+                    } if cause != DeliveryTransientCause::AuthRequired
                         && !retry_eligible.contains(&(
                             lane.key.relay.clone(),
                             ordinal,
@@ -1833,7 +1835,7 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    // ---- write outbox (D: intent -> signed -> routed -> sent -> acked) --
+    // ---- durable delivery (D: intent -> signed -> routed -> sent -> acked) --
 
     /// `Publish` (issues #2/#3 U3): enter durable/at-most-once writes through
     /// `resolver.accept_local` exactly once. The store allocates both ids
@@ -1890,7 +1892,7 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         // #591 review (PR #604 finding 2): `Durability::Ephemeral` has no
-        // outbox row for a correlation token to name -- `accept_ephemeral`
+        // delivery row for a correlation token to name -- `accept_ephemeral`
         // below never receives `correlation`, so a token on an ephemeral
         // write would otherwise be silently dropped (never journaled, no
         // later `reattach_by_correlation` could ever find it) WHILE the
@@ -1901,7 +1903,7 @@ impl<S: EventStore> EngineCore<S> {
         // closed instead of accepting either silent behavior.
         if durability == Durability::Ephemeral && correlation.is_some() {
             return self.fail_unaccepted(
-                "ephemeral writes cannot carry a correlation token: there is no durable outbox \
+                "ephemeral writes cannot carry a correlation token: there is no durable delivery \
                  row for the token to name, and reusing an earlier durable token here would \
                  silently reattach that unrelated obligation instead of accepting this write"
                     .to_string(),
@@ -2143,7 +2145,7 @@ impl<S: EventStore> EngineCore<S> {
                 intent_id,
                 // Exactly the value handed to `AcceptWrite::accepted_at`
                 // above, so the in-process projection and the one a later
-                // boot rebuilds from `RecoveredIntent` are the same instant.
+                // boot rebuilds from `DeliveryIntent` are the same instant.
                 accepted_at: self.clock,
                 signing_pubkey,
                 frozen: frozen.clone(),
@@ -2305,7 +2307,7 @@ impl<S: EventStore> EngineCore<S> {
     /// receipt fact come from the same reducer turn.
     pub(super) fn retained_cancel_result(
         id: ReceiptId,
-        receipt: &nmp_store::RecoveredReceipt,
+        receipt: &nmp_store::DeliveryReceipt,
     ) -> Result<CancelWriteOutcome, CancelWriteError> {
         match receipt.state {
             ReceiptState::Cancelled => Ok(CancelWriteOutcome::Cancelled),
@@ -2736,12 +2738,12 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         id: ReceiptId,
         signing_pubkey: PublicKey,
-        lanes: Vec<RecoveredLane>,
+        lanes: Vec<DeliveryLane>,
         effects: &mut Vec<Effect>,
     ) {
         let write_access = AccessContext::Nip42(signing_pubkey);
         for lane in lanes {
-            if matches!(lane.state, LaneState::WaitingConnection) {
+            if matches!(lane.state, DeliveryLaneState::WaitingConnection) {
                 // The freshly-bootstrapped lane's connectivity check is
                 // against the intent's identity-scoped authenticated
                 // session (#8 U2), the exact session `schedule_ready` will
@@ -3413,22 +3415,22 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             let relay = &session.relay;
-            let key = LaneKey {
+            let key = DeliveryLaneKey {
                 intent_id,
                 relay: relay.clone(),
             };
             let lane = self
                 .resolver
                 .store()
-                .recover_outbox_lanes(intent_id)
+                .recover_delivery_lanes(intent_id)
                 .ok()
                 .and_then(|lanes| lanes.into_iter().find(|lane| lane.key == key));
             let Some(lane) = lane else {
                 continue;
             };
-            let LaneState::InFlight {
+            let DeliveryLaneState::InFlight {
                 ordinal,
-                phase: InFlightPhase::AwaitingAck { .. },
+                phase: DeliveryInFlightPhase::AwaitingAck { .. },
             } = lane.state
             else {
                 continue;
@@ -3441,7 +3443,7 @@ impl<S: EventStore> EngineCore<S> {
                             &key,
                             lane.revision,
                             ordinal,
-                            AttemptOutcome::Acked,
+                            DeliveryAttemptOutcome::Acked,
                             self.clock,
                         )
                         .is_ok()
@@ -3457,7 +3459,7 @@ impl<S: EventStore> EngineCore<S> {
                             &key,
                             lane.revision,
                             ordinal,
-                            AttemptOutcome::Rejected(message.clone()),
+                            DeliveryAttemptOutcome::Rejected(message.clone()),
                             self.clock,
                         )
                         .is_ok()
@@ -3508,7 +3510,7 @@ impl<S: EventStore> EngineCore<S> {
                             lane.revision,
                             ordinal,
                             self.clock,
-                            TransientCause::AuthRequired,
+                            DeliveryTransientCause::AuthRequired,
                             Some(message.clone()),
                             true,
                         )
@@ -3554,7 +3556,7 @@ impl<S: EventStore> EngineCore<S> {
             }
             let relay = &session.relay;
             match lane.state {
-                LaneState::Eligible { .. } => {
+                DeliveryLaneState::Eligible { .. } => {
                     if self
                         .commit_lane_waiting(&lane.key, lane.revision, false)
                         .is_ok()
@@ -3568,9 +3570,9 @@ impl<S: EventStore> EngineCore<S> {
                         );
                     }
                 }
-                LaneState::InFlight {
+                DeliveryLaneState::InFlight {
                     ordinal,
-                    phase: InFlightPhase::AwaitingAck { .. },
+                    phase: DeliveryInFlightPhase::AwaitingAck { .. },
                 } => {
                     let durability = self.pending.get(&id).map(|pending| pending.durability);
                     if durability == Some(Durability::AtMostOnce) {
@@ -3579,7 +3581,7 @@ impl<S: EventStore> EngineCore<S> {
                                 &lane.key,
                                 lane.revision,
                                 ordinal,
-                                AttemptOutcome::OutcomeUnknown,
+                                DeliveryAttemptOutcome::OutcomeUnknown,
                                 self.clock,
                             )
                             .is_ok()
@@ -3600,7 +3602,7 @@ impl<S: EventStore> EngineCore<S> {
                                 lane.revision,
                                 ordinal,
                                 eligible_at,
-                                TransientCause::ConnectionLost,
+                                DeliveryTransientCause::ConnectionLost,
                                 Some("connection lost while awaiting ACK".to_string()),
                             )
                             .is_ok()
@@ -3620,7 +3622,7 @@ impl<S: EventStore> EngineCore<S> {
                         }
                     }
                 }
-                LaneState::WaitingAuth => {
+                DeliveryLaneState::WaitingAuth => {
                     // A `WaitingAuth` park is authenticated-generation-scoped:
                     // the relay demanded auth on THIS socket, and that grant
                     // (and any in-flight challenge) died with the disconnect.
@@ -3645,13 +3647,13 @@ impl<S: EventStore> EngineCore<S> {
                         );
                     }
                 }
-                LaneState::WaitingConnection
-                | LaneState::Transient { .. }
-                | LaneState::InFlight {
-                    phase: InFlightPhase::AwaitingHandoff,
+                DeliveryLaneState::WaitingConnection
+                | DeliveryLaneState::Transient { .. }
+                | DeliveryLaneState::InFlight {
+                    phase: DeliveryInFlightPhase::AwaitingHandoff,
                     ..
                 }
-                | LaneState::Terminal { .. } => {}
+                | DeliveryLaneState::Terminal { .. } => {}
             }
         }
     }

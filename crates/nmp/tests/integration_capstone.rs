@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::RelayAdmissionPolicy;
 use nmp::mechanism::core::{AcquisitionEvidence, RowDelta, SourceStatus};
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, RowsReceiver};
 use nmp::{Engine, EngineConfig};

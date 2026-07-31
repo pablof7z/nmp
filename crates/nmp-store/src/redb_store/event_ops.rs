@@ -1,13 +1,14 @@
 use super::commit::commit_prepared;
+use super::delivery::is_suppressed_in_txn;
 use super::ingest::insert_with_tables;
 use super::ingest_txn::GovernedWrite;
 use super::mutation::remove_row_in_txn;
-use super::outbox::{is_suppressed_in_txn, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID};
 use super::query::{expiration_key_upper_bound, plan_ordered_query};
 use super::schema::{
     persist_err, EventKey, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
     EXPIRATION_INDEX, RELAYS,
 };
+use super::schema::{DELIVERY_SUPPRESS_BY_ADDR, DELIVERY_SUPPRESS_BY_ID};
 #[cfg(test)]
 use super::store::RedbCrashPoint;
 use super::store::RedbStore;
@@ -128,11 +129,11 @@ pub(super) fn query(
             .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let mut relay_cache = HashMap::new();
-        let outbox_suppress_by_id = read_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ID)
+        let delivery_suppress_by_id = read_txn
+            .open_table(DELIVERY_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
-        let outbox_suppress_by_addr = read_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+        let delivery_suppress_by_addr = read_txn
+            .open_table(DELIVERY_SUPPRESS_BY_ADDR)
             .map_err(persist_err)?;
         let prepared_filter = PreparedFilter::new(filter);
         let mut out = Vec::new();
@@ -169,7 +170,11 @@ pub(super) fn query(
                 &relays,
                 &mut relay_cache,
             )?;
-            if !is_suppressed_in_txn(&outbox_suppress_by_id, &outbox_suppress_by_addr, &se.event)? {
+            if !is_suppressed_in_txn(
+                &delivery_suppress_by_id,
+                &delivery_suppress_by_addr,
+                &se.event,
+            )? {
                 out.push(se);
             }
         }
@@ -606,8 +611,8 @@ pub(super) fn gc(
                     })
                 )
                 && !is_suppressed_in_txn(
-                    &txn.outbox_suppress_by_id,
-                    &txn.outbox_suppress_by_addr,
+                    &txn.delivery_suppress_by_id,
+                    &txn.delivery_suppress_by_addr,
                     &event,
                 )?
                 && !claims.is_claimed(&event)

@@ -5,10 +5,9 @@ use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
-    CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet,
-    InsertOutcome, MemoryStore, PersistenceError, PromoteOutcome, RecoveredAttempt,
-    RecoveredIntent, RecoveredReceipt, RecoveredRouteRevision, RelayObserved, RetractReason,
-    StoredEvent,
+    CoverageInterval, CoverageKey, DeliveryAttempt, DeliveryIntent, DeliveryReceipt,
+    DeliveryRouteRevision, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
+    MemoryStore, PersistenceError, PromoteOutcome, RelayObserved, RetractReason, StoredEvent,
 };
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
 
@@ -163,14 +162,14 @@ impl EventStore for FailingReadStore {
         self.inner.compensate_write(intent_id)
     }
 
-    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
-        self.inner.recover_outbox()
+    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
+        self.inner.recover_delivery()
     }
 
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
+    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
 
@@ -182,21 +181,21 @@ impl EventStore for FailingReadStore {
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<RecoveredRouteRevision, PersistenceError> {
+    ) -> Result<DeliveryRouteRevision, PersistenceError> {
         self.inner.record_route_revision(intent_id, relays)
     }
 
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
 
     fn recover_attempts(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
 

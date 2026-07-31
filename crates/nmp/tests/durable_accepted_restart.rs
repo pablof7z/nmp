@@ -8,21 +8,64 @@ use nmp::mechanism::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp_grammar::{
     AccessContext, Durability, EventBuilder as NmpEventBuilder, Identity, RelaySessionKey,
     WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, AttemptOutcome, EventStore, IntentSigState,
-    LaneTerminalOutcome, RedbStore, SigState, WriteDurability,
+    sentinel_signature, AcceptWrite, DeliveryAttemptOutcome, DeliveryTerminalOutcome, EventStore,
+    IntentSigState, RedbStore, SigState, WriteDurability,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{
     EventBuilder, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
 use redb::{Database, ReadableTable, TableDefinition};
+
+fn corrupt_first_delivery_row<const N: usize>(
+    path: &std::path::Path,
+    table_name: &'static str,
+    prefix: &[u8],
+) {
+    let definition: TableDefinition<&[u8; N], &[u8]> = TableDefinition::new(table_name);
+    let db = Database::open(path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(definition).unwrap();
+        let (key, mut value) = table
+            .iter()
+            .unwrap()
+            .map(|row| {
+                let (key, value) = row.unwrap();
+                (*key.value(), value.value().to_vec())
+            })
+            .find(|(key, _)| key.as_slice().starts_with(prefix))
+            .expect("matching durable-delivery row");
+        assert!(value.len() >= 5, "versioned delivery envelope");
+        value[4] = 200;
+        table.insert(&key, value.as_slice()).unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+fn insert_corrupt_delivery_row<const N: usize>(
+    path: &std::path::Path,
+    table_name: &'static str,
+    key: &[u8; N],
+    magic: &[u8; 4],
+) {
+    let definition: TableDefinition<&[u8; N], &[u8]> = TableDefinition::new(table_name);
+    let db = Database::open(path).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(definition).unwrap();
+        let value = [magic.as_slice(), &[200, 0, 0, 0]].concat();
+        table.insert(key, value.as_slice()).unwrap();
+    }
+    tx.commit().unwrap();
+}
 
 fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
@@ -274,20 +317,23 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             .iter()
             .map(|attempt| (attempt.ordinal, &attempt.outcome))
             .collect::<Vec<_>>(),
-        vec![(1, &AttemptOutcome::Started), (2, &AttemptOutcome::Acked)],
+        vec![
+            (1, &DeliveryAttemptOutcome::Started),
+            (2, &DeliveryAttemptOutcome::Acked)
+        ],
         "restart preserves the interrupted ordinal and ACKs a new retry ordinal"
     );
     let original_lane = store
-        .recover_outbox_lanes(intent)
+        .recover_delivery_lanes(intent)
         .unwrap()
         .into_iter()
         .find(|lane| lane.key.relay == relay)
         .unwrap();
     assert_eq!(
         original_lane.state,
-        nmp_store::LaneState::Terminal {
+        nmp_store::DeliveryLaneState::Terminal {
             ordinal: 2,
-            outcome: LaneTerminalOutcome::Acked,
+            outcome: DeliveryTerminalOutcome::Acked,
         }
     );
 }
@@ -347,7 +393,7 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
     let store = RedbStore::open(&path).unwrap();
     let attempts = store.recover_attempts(intent_id).unwrap();
     assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].outcome, AttemptOutcome::OutcomeUnknown);
+    assert_eq!(attempts[0].outcome, DeliveryAttemptOutcome::OutcomeUnknown);
 }
 
 #[test]
@@ -739,8 +785,8 @@ fn assert_persisted_routing_fails_closed_without_dropping(
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store
-        .recover_outbox()
-        .expect("recover outbox")
+        .recover_delivery()
+        .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
     assert!(store.recover_attempts(intent_id).unwrap().is_empty());
@@ -838,7 +884,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     let (cancelled, cancellation) = core.cancel_write(receipt);
     assert_eq!(
         cancelled,
-        Ok(nmp::mechanism::outbox::CancelWriteOutcome::Cancelled)
+        Ok(nmp::mechanism::delivery::CancelWriteOutcome::Cancelled)
     );
     assert!(cancellation.iter().any(
         |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::Cancelled) if *id == receipt)
@@ -853,7 +899,10 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
 
     drop(core);
     let store = RedbStore::open(&path).unwrap();
-    assert!(store.recover_outbox().expect("recover outbox").is_empty());
+    assert!(store
+        .recover_delivery()
+        .expect("recover delivery")
+        .is_empty());
     let mut reopened =
         EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     assert!(reopened.recover_on_boot().is_empty());
@@ -891,7 +940,10 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
     };
 
     let store = RedbStore::open(&path).unwrap();
-    assert!(store.recover_outbox().expect("recover outbox").is_empty());
+    assert!(store
+        .recover_delivery()
+        .expect("recover delivery")
+        .is_empty());
     let mut reopened =
         EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     assert!(reopened.recover_on_boot().is_empty());
@@ -902,7 +954,7 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
     let (refused, effects) = reopened.cancel_write(receipt);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::outbox::CancelWriteError::AlreadySigned {
+        Err(nmp::mechanism::delivery::CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         }) if receipt_id == receipt && event_id == event.id
@@ -955,31 +1007,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             receipt_id,
         )
     };
-    const ATTEMPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_attempts");
-    let db = Database::open(&path).unwrap();
-    let tx = db.begin_write().unwrap();
-    {
-        let mut table = tx.open_table(ATTEMPTS).unwrap();
-        let key = format!(
-            "{:020}:{:020}:{}:{:020}",
-            intent_id.0,
-            relay.as_str().len(),
-            relay.as_str(),
-            1
-        );
-        let json = table
-            .get(key.as_str())
-            .unwrap()
-            .unwrap()
-            .value()
-            .to_string();
-        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        value["version"] = serde_json::json!(200);
-        let encoded = serde_json::to_string(&value).unwrap();
-        table.insert(key.as_str(), encoded.as_str()).unwrap();
-    }
-    tx.commit().unwrap();
-    drop(db);
+    corrupt_first_delivery_row::<20>(&path, "delivery_attempts_v1", &intent_id.0.to_be_bytes());
 
     let store = RedbStore::open(&path).unwrap();
     let mut core =
@@ -991,8 +1019,8 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()
-        .recover_outbox()
-        .expect("recover outbox")
+        .recover_delivery()
+        .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
 }
@@ -1063,17 +1091,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         (intent_id, receipt_id)
     };
 
-    const RECEIPTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_receipts");
-    let db = Database::open(&path).unwrap();
-    let tx = db.begin_write().unwrap();
-    {
-        let mut table = tx.open_table(RECEIPTS).unwrap();
-        table
-            .insert(format!("{:020}", receipt_id.0).as_str(), "{")
-            .unwrap();
-    }
-    tx.commit().unwrap();
-    drop(db);
+    corrupt_first_delivery_row::<8>(&path, "delivery_receipts_v1", &receipt_id.0.to_be_bytes());
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, 10);
@@ -1085,10 +1103,10 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     let (refused, effects) = core.cancel_write(receipt_id);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::outbox::CancelWriteError::PersistenceFailed {
+        Err(nmp::mechanism::delivery::CancelWriteError::PersistenceFailed {
             receipt_id: failed_id,
             reason,
-        }) if failed_id == receipt_id && reason.contains("decode outbox receipt")
+        }) if failed_id == receipt_id && reason.contains("decode durable delivery receipt")
     ));
     assert!(
         effects.is_empty(),
@@ -1098,8 +1116,8 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     let recovered = store
-        .recover_outbox()
-        .expect("recover outbox")
+        .recover_delivery()
+        .expect("recover delivery")
         .into_iter()
         .find(|intent| intent.intent_id == intent_id)
         .expect("failed cancellation must retain open work");
@@ -1204,17 +1222,10 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
         (intent_id, receipt_id)
     };
 
-    const ROUTES: TableDefinition<&str, &str> = TableDefinition::new("outbox_route_revisions");
-    let db = Database::open(&path).unwrap();
-    let tx = db.begin_write().unwrap();
-    {
-        let mut table = tx.open_table(ROUTES).unwrap();
-        table
-            .insert(format!("{:020}:{:020}", intent_id.0, 1).as_str(), "{}")
-            .unwrap();
-    }
-    tx.commit().unwrap();
-    drop(db);
+    let mut route_key = [0_u8; 16];
+    route_key[..8].copy_from_slice(&intent_id.0.to_be_bytes());
+    route_key[8..].copy_from_slice(&1u64.to_be_bytes());
+    insert_corrupt_delivery_row::<16>(&path, "delivery_route_revisions_v1", &route_key, b"NMDV");
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, 10);
@@ -1225,8 +1236,8 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()
-        .recover_outbox()
-        .expect("recover outbox")
+        .recover_delivery()
+        .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
 }
@@ -1234,7 +1245,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
 /// #790 boot falsifier: an unreadable durable journal degrades explicitly
 /// instead of panicking the host or silently booting as "nothing open".
 ///
-/// Before #790 `recover_outbox` returned a bare `Vec` and `.expect()`ed the
+/// Before #790 `recover_delivery` returned a bare `Vec` and `.expect()`ed the
 /// row decode, so this exact file aborted the process inside
 /// `recover_on_boot` — the one moment an embedding app is least able to
 /// survive it. The contract now: exactly one #122 degradation effect, and
@@ -1244,8 +1255,6 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
 /// obligation set.
 #[test]
 fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
-    const OUTBOX_INTENTS: TableDefinition<&str, &str> = TableDefinition::new("outbox_intents");
-
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("unreadable-journal.redb");
     let keys = Keys::generate();
@@ -1279,29 +1288,11 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
 
     // Corrupt the one journal row through a raw handle; no store door can
     // write these bytes, which is exactly why this class needs a falsifier.
-    let db = Database::open(&path).unwrap();
-    let tx = db.begin_write().unwrap();
-    let key = {
-        let table = tx.open_table(OUTBOX_INTENTS).unwrap();
-        let key = table
-            .first()
-            .unwrap()
-            .expect("one journaled intent")
-            .0
-            .value()
-            .to_owned();
-        key
-    };
-    {
-        let mut table = tx.open_table(OUTBOX_INTENTS).unwrap();
-        table.insert(key.as_str(), "{ not json").unwrap();
-    }
-    tx.commit().unwrap();
-    drop(db);
+    corrupt_first_delivery_row::<8>(&path, "delivery_intents_v1", &[]);
 
     let store = RedbStore::open(&path).unwrap();
     assert!(
-        store.recover_outbox().is_err(),
+        store.recover_delivery().is_err(),
         "an undecodable journal row is an error, never an empty recovery"
     );
     let mut core = EngineCore::new_with_fixture_routing_facts(
@@ -1324,7 +1315,7 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
         "boot degrades exactly once: {effects:?}"
     );
     assert!(
-        degradations[0].contains("decode outbox intent"),
+        degradations[0].contains("decode durable delivery intent"),
         "the degradation names the unreadable row: {}",
         degradations[0]
     );

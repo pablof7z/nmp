@@ -115,14 +115,14 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             let transitioned = match lane.state {
-                LaneState::WaitingAuth | LaneState::Terminal { .. } => continue,
-                LaneState::InFlight { ordinal, .. } => {
+                DeliveryLaneState::WaitingAuth | DeliveryLaneState::Terminal { .. } => continue,
+                DeliveryLaneState::InFlight { ordinal, .. } => {
                     let committed = self.commit_lane_suspension(
                         &lane.key,
                         lane.revision,
                         ordinal,
                         self.clock,
-                        TransientCause::AuthRequired,
+                        DeliveryTransientCause::AuthRequired,
                         Some("AUTH challenge received".to_string()),
                         true,
                     );
@@ -131,9 +131,9 @@ impl<S: EventStore> EngineCore<S> {
                     }
                     committed
                 }
-                LaneState::WaitingConnection
-                | LaneState::Eligible { .. }
-                | LaneState::Transient { .. } => {
+                DeliveryLaneState::WaitingConnection
+                | DeliveryLaneState::Eligible { .. }
+                | DeliveryLaneState::Transient { .. } => {
                     self.commit_lane_waiting(&lane.key, lane.revision, true)
                 }
             };
@@ -344,7 +344,7 @@ impl<S: EventStore> EngineCore<S> {
                     )
                 })
                 .is_some_and(|candidate| candidate == *session);
-            if !exact_session || !matches!(lane.state, LaneState::WaitingAuth) {
+            if !exact_session || !matches!(lane.state, DeliveryLaneState::WaitingAuth) {
                 continue;
             }
             let denial = StoredAuthDenial {

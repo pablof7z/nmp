@@ -572,7 +572,7 @@ pub(crate) fn decode_provenance(bytes: &[u8]) -> Result<Provenance, DecodeError>
     Ok(Provenance { seen, local })
 }
 
-/// Preserve the self-contained encoding used by displaced outbox rows while
+/// Preserve the self-contained encoding used by displaced delivery rows while
 /// composing it from the same event and provenance codecs as canonical rows.
 pub(crate) fn encode(stored: &StoredEvent) -> Result<Vec<u8>, DecodeError> {
     let event = encode_event(&stored.event)?;
@@ -590,7 +590,7 @@ pub(crate) fn encode(stored: &StoredEvent) -> Result<Vec<u8>, DecodeError> {
     Ok(out)
 }
 
-/// Decode the self-contained composite used by displaced outbox rows.
+/// Decode the self-contained composite used by displaced delivery rows.
 pub(crate) fn decode(bytes: &[u8]) -> Result<StoredEvent, DecodeError> {
     if bytes.len() < COMPOSITE_HEADER_LEN {
         return Err(DecodeError::Truncated);

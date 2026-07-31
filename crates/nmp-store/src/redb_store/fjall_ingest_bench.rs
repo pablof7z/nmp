@@ -3,7 +3,7 @@
 //! This is deliberately not an `EventStore` implementation. It proves that
 //! the real policy in `ingest`/`mutation` can execute against a second atomic
 //! transaction engine before NMP accepts the much larger query, coverage,
-//! outbox-recovery, packaging, and migration surface tracked by #629.
+//! delivery-recovery, packaging, and migration surface tracked by #629.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
@@ -18,7 +18,7 @@ use nostr::{Event, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use super::ingest::insert_with_tables;
-use super::ingest_txn::{GovernedIngestTxn, GovernedStringMap};
+use super::ingest_txn::{GovernedDeliveryMap, GovernedIngestTxn, GovernedStringMap};
 use super::query::{
     author_cardinality_key, by_author_key, by_kind_key, created_at_key, global_cardinality_key,
     kind_cardinality_key, tag_cardinality_key, tag_index_key,
@@ -79,12 +79,12 @@ struct FjallKeyspaces {
     by_kind: SingleWriterTxKeyspace,
     by_tag: SingleWriterTxKeyspace,
     cardinality: SingleWriterTxKeyspace,
-    outbox_intents: SingleWriterTxKeyspace,
-    outbox_receipts: SingleWriterTxKeyspace,
-    outbox_displaced: SingleWriterTxKeyspace,
-    outbox_kind5_claims: SingleWriterTxKeyspace,
-    outbox_suppress_by_id: SingleWriterTxKeyspace,
-    outbox_suppress_by_addr: SingleWriterTxKeyspace,
+    delivery_intents: SingleWriterTxKeyspace,
+    delivery_receipts: SingleWriterTxKeyspace,
+    delivery_displaced: SingleWriterTxKeyspace,
+    delivery_kind5_claims: SingleWriterTxKeyspace,
+    delivery_suppress_by_id: SingleWriterTxKeyspace,
+    delivery_suppress_by_addr: SingleWriterTxKeyspace,
 }
 
 impl FjallKeyspaces {
@@ -110,12 +110,12 @@ impl FjallKeyspaces {
             by_kind: open("governed_by_kind")?,
             by_tag: open("governed_by_tag")?,
             cardinality: open("governed_cardinality")?,
-            outbox_intents: open("governed_outbox_intents")?,
-            outbox_receipts: open("governed_outbox_receipts")?,
-            outbox_displaced: open("governed_outbox_displaced")?,
-            outbox_kind5_claims: open("governed_outbox_kind5_claims")?,
-            outbox_suppress_by_id: open("governed_outbox_suppress_by_id")?,
-            outbox_suppress_by_addr: open("governed_outbox_suppress_by_addr")?,
+            delivery_intents: open("governed_delivery_intents")?,
+            delivery_receipts: open("governed_delivery_receipts")?,
+            delivery_displaced: open("governed_delivery_displaced")?,
+            delivery_kind5_claims: open("governed_delivery_kind5_claims")?,
+            delivery_suppress_by_id: open("governed_delivery_suppress_by_id")?,
+            delivery_suppress_by_addr: open("governed_delivery_suppress_by_addr")?,
         })
     }
 
@@ -123,11 +123,16 @@ impl FjallKeyspaces {
         match map {
             GovernedStringMap::Tombstones => &self.tombstones,
             GovernedStringMap::AddrTombstones => &self.addr_tombstones,
-            GovernedStringMap::OutboxIntents => &self.outbox_intents,
-            GovernedStringMap::OutboxReceipts => &self.outbox_receipts,
-            GovernedStringMap::OutboxKind5Claims => &self.outbox_kind5_claims,
-            GovernedStringMap::OutboxSuppressById => &self.outbox_suppress_by_id,
-            GovernedStringMap::OutboxSuppressByAddr => &self.outbox_suppress_by_addr,
+        }
+    }
+
+    fn delivery_map(&self, map: GovernedDeliveryMap) -> &SingleWriterTxKeyspace {
+        match map {
+            GovernedDeliveryMap::Intents => &self.delivery_intents,
+            GovernedDeliveryMap::Receipts => &self.delivery_receipts,
+            GovernedDeliveryMap::Kind5Claims => &self.delivery_kind5_claims,
+            GovernedDeliveryMap::SuppressById => &self.delivery_suppress_by_id,
+            GovernedDeliveryMap::SuppressByAddr => &self.delivery_suppress_by_addr,
         }
     }
 }
@@ -468,30 +473,44 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
         Ok(())
     }
 
-    fn string_remove(
+    fn delivery_get(
+        &self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
+        Ok(self
+            .get(self.keyspaces.delivery_map(map), key)?
+            .map(|value| value.to_vec()))
+    }
+
+    fn delivery_put(
         &mut self,
-        map: GovernedStringMap,
-        key: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        let keyspace = self.keyspaces.string_map(map);
-        let previous = self
-            .get(keyspace, key)?
-            .map(|value| {
-                String::from_utf8(value.to_vec()).map_err(|error| {
-                    PersistenceError::invariant(format!("decode Fjall string: {error}"))
-                })
-            })
-            .transpose()?;
+        map: GovernedDeliveryMap,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.transaction
+            .insert(self.keyspaces.delivery_map(map), key, value);
+        Ok(())
+    }
+
+    fn delivery_remove(
+        &mut self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
+        let keyspace = self.keyspaces.delivery_map(map);
+        let previous = self.get(keyspace, key)?.map(|value| value.to_vec());
         self.transaction.remove(keyspace, key);
         Ok(previous)
     }
 
-    fn displaced_remove(&mut self, key: &str) -> Result<Option<Vec<u8>>, PersistenceError> {
+    fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError> {
         let previous = self
-            .get(&self.keyspaces.outbox_displaced, key)?
+            .get(&self.keyspaces.delivery_displaced, key)?
             .map(|value| value.to_vec());
         self.transaction
-            .remove(&self.keyspaces.outbox_displaced, key);
+            .remove(&self.keyspaces.delivery_displaced, key);
         Ok(previous)
     }
 }

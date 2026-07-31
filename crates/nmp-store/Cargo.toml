@@ -43,8 +43,8 @@ fjall = { version = "=3.1.6", optional = true }
 # production NMP and browser targets do not acquire a C build dependency.
 heed = { version = "=0.22.1", optional = true }
 # `RedbStore` canonical event rows use a versioned portable binary envelope
-# for borrowed query filtering. Outbox/coverage control records remain typed
-# serde JSON where they are not event-query hot-path values.
+# for borrowed query filtering. Durable-delivery control records use their own
+# explicit binary codec; coverage and tombstone records remain typed serde JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"

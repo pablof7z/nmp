@@ -478,11 +478,11 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     );
     drop(recovered);
     let store = RedbStore::open(&path).expect("inspect recovered redb");
-    let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
+    let intent = store.recover_delivery().expect("recover delivery")[0].intent_id;
     let attempts = store.recover_attempts(intent).unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].relay, relay);
-    assert_eq!(attempts[0].outcome, AttemptOutcome::Started);
+    assert_eq!(attempts[0].outcome, DeliveryAttemptOutcome::Started);
 }
 
 #[test]
@@ -524,7 +524,7 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
 
     {
         let store = RedbStore::open(&path).unwrap();
-        let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
+        let intent = store.recover_delivery().expect("recover delivery")[0].intent_id;
         let revisions = store.recover_route_revisions(intent).unwrap();
         assert_eq!(revisions.len(), 1);
         assert_eq!(revisions[0].relays, BTreeSet::from([relay.clone()]));
@@ -650,7 +650,7 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
 
     {
         let store = RedbStore::open(&path).unwrap();
-        let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
+        let intent = store.recover_delivery().expect("recover delivery")[0].intent_id;
         let durable = store
             .recover_route_revisions(intent)
             .unwrap()
@@ -725,7 +725,7 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
         )));
     }
     let store = RedbStore::open(&path).unwrap();
-    let intent = store.recover_outbox().expect("recover outbox")[0].intent_id;
+    let intent = store.recover_delivery().expect("recover delivery")[0].intent_id;
     assert!(store.recover_route_revisions(intent).unwrap().is_empty());
     assert!(store.recover_attempts(intent).unwrap().is_empty());
     drop(store);

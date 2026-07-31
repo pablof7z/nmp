@@ -65,11 +65,11 @@ Socket reconnect and publication retry are separate mechanisms:
 |---|---|
 | Reconnect a socket | transport |
 | Correlate one remote signer operation | signer provider |
-| Retry one `(intent, relay)` publication lane | durable outbox |
+| Retry one `(intent, relay)` publication lane | durable delivery |
 | Wake eligible work and cap concurrency | engine deadline scheduler |
 
-The transport must not hide a durable EVENT buffer below the outbox. For every
-durable lane the outbox persists exact signed bytes and `AttemptStarted` before
+The transport must not hide a durable EVENT buffer below delivery. For every
+durable lane the delivery store persists exact signed bytes and `AttemptStarted` before
 dispatch, then records outcome, ordinal, and next eligibility.
 
 Offline and AUTH-blocked time do not consume attempts. Transient failures advance

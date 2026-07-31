@@ -26,7 +26,7 @@ use crate::runtime::FifoReceiver;
 use std::sync::Mutex;
 
 use crate::core::ReceiptId;
-use crate::outbox::WriteStatus;
+use crate::delivery::WriteStatus;
 use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
@@ -105,38 +105,38 @@ pub enum CancelWriteError {
 }
 
 fn cancel_write_outcome_from_engine(
-    outcome: crate::outbox::CancelWriteOutcome,
+    outcome: crate::delivery::CancelWriteOutcome,
 ) -> CancelWriteOutcome {
     match outcome {
-        crate::outbox::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
+        crate::delivery::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
     }
 }
 
-fn cancel_write_error_from_engine(error: crate::outbox::CancelWriteError) -> CancelWriteError {
+fn cancel_write_error_from_engine(error: crate::delivery::CancelWriteError) -> CancelWriteError {
     match error {
-        crate::outbox::CancelWriteError::UnknownReceipt { receipt_id } => {
+        crate::delivery::CancelWriteError::UnknownReceipt { receipt_id } => {
             CancelWriteError::UnknownReceipt { receipt_id }
         }
-        crate::outbox::CancelWriteError::AlreadySigned {
+        crate::delivery::CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         } => CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         },
-        crate::outbox::CancelWriteError::AlreadyCompensated { receipt_id } => {
+        crate::delivery::CancelWriteError::AlreadyCompensated { receipt_id } => {
             CancelWriteError::AlreadyCompensated { receipt_id }
         }
-        crate::outbox::CancelWriteError::AlreadySuperseded { receipt_id } => {
+        crate::delivery::CancelWriteError::AlreadySuperseded { receipt_id } => {
             CancelWriteError::AlreadySuperseded { receipt_id }
         }
-        crate::outbox::CancelWriteError::AlreadyAbandoned { receipt_id } => {
+        crate::delivery::CancelWriteError::AlreadyAbandoned { receipt_id } => {
             CancelWriteError::AlreadyAbandoned { receipt_id }
         }
-        crate::outbox::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
+        crate::delivery::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
             CancelWriteError::PersistenceFailed { receipt_id, reason }
         }
-        crate::outbox::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
+        crate::delivery::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
     }
 }
 
@@ -814,7 +814,7 @@ impl Engine {
     /// account's registered capability and return the exact signed event.
     ///
     /// This is intentionally orthogonal to [`Self::publish`]: it creates no
-    /// write intent, pending row, receipt, outbox lane, relay plan, or
+    /// write intent, pending row, receipt, delivery lane, relay plan, or
     /// publication. The active author is frozen while the same lifecycle /
     /// identity lock is held, and the runtime validates the returned body,
     /// author, id, and signature before completion.
@@ -1512,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_event_returns_exact_verified_event_without_store_or_outbox_residue() {
+    fn sign_event_returns_exact_verified_event_without_store_or_delivery_residue() {
         use nmp_store::EventStore;
 
         let fixture = tempfile::tempdir().expect("temporary directory");
@@ -1562,8 +1562,11 @@ mod tests {
             "sign-only must not create a canonical row"
         );
         assert!(
-            store.recover_outbox().expect("recover outbox").is_empty(),
-            "sign-only must not create an intent, receipt, or outbox lane"
+            store
+                .recover_delivery()
+                .expect("recover delivery")
+                .is_empty(),
+            "sign-only must not create an intent, receipt, or delivery lane"
         );
     }
 

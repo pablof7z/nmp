@@ -5,8 +5,8 @@
 //! state has a dedicated compact value, and relay observations are fixed-width
 //! `(event, interned-relay) -> timestamp` rows. Every ordered secondary index
 //! points straight at the event key. Queries borrow note fields from redb
-//! guards and join provenance only for returned rows. Displaced outbox rows
-//! remain self-contained binary snapshots; other outbox/coverage metadata
+//! guards and join provenance only for returned rows. Displaced delivery rows
+//! remain self-contained binary snapshots; other delivery/coverage metadata
 //! remains typed JSON.
 //!
 //! Nothing here panics the embedding host over the contents of a file it
@@ -55,14 +55,15 @@ use crate::persistent_store_lifetime::{
 #[cfg(test)]
 use crate::AuthDenialSource;
 use crate::{
-    AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
-    AuthDenial, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
-    EventCursor, EventStore, GcReport, GcRetentionSet, InFlightPhase, InsertOutcome, IntentId,
-    IntentSigState, LaneDeadline, LaneKey, LaneState, LaneTerminalOutcome, LocalOrigin,
-    PersistenceError, PostHandoffState, PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt,
-    RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
-    RecoveredRouteRevision, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
-    TransientCause, WriteDurability,
+    AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome, CompensateOutcome,
+    CoverageInterval, CoverageKey, DeliveryAttempt, DeliveryAttemptDetails, DeliveryAttemptHandoff,
+    DeliveryAttemptOutcome, DeliveryAttemptTransient, DeliveryDeadline, DeliveryDeadlineKind,
+    DeliveryInFlightPhase, DeliveryIntent, DeliveryLane, DeliveryLaneKey, DeliveryLaneState,
+    DeliveryPostHandoffState, DeliveryReceipt, DeliveryRouteRevision, DeliveryTerminalOutcome,
+    DeliveryTransientCause, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
+    IntentId, IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance,
+    ReceiptState, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
+    WriteDurability,
 };
 
 #[cfg(feature = "bench-instrumentation")]
@@ -106,9 +107,10 @@ pub use store_bench::{
 mod schema;
 #[cfg(test)]
 use schema::*;
-mod outbox;
+mod delivery;
+mod delivery_codec;
 #[cfg(test)]
-use outbox::*;
+use delivery::*;
 mod canonical;
 #[cfg(test)]
 use canonical::*;
@@ -126,9 +128,9 @@ pub(crate) use store::with_required_database_init_test_hook;
 #[cfg(test)]
 use store::RedbCrashPoint;
 pub use store::RedbStore;
+mod delivery_ops;
 mod event_ops;
 mod ingest;
-mod outbox_ops;
 mod write_ops;
 
 impl EventStore for RedbStore {
@@ -276,97 +278,97 @@ impl EventStore for RedbStore {
         write_ops::mark_ephemeral_signed(self, receipt_id)
     }
 
-    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
-        outbox_ops::recover_outbox(self)
+    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
+        delivery_ops::recover_delivery(self)
     }
 
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
-        outbox_ops::reattach_receipt(self, receipt_id)
+    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
+        delivery_ops::reattach_receipt(self, receipt_id)
     }
 
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
-        outbox_ops::lookup_correlation(self, token)
+        delivery_ops::lookup_correlation(self, token)
     }
 
     fn record_route_revision(
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<RecoveredRouteRevision, PersistenceError> {
-        outbox_ops::record_route_revision(self, intent_id, relays)
+    ) -> Result<DeliveryRouteRevision, PersistenceError> {
+        delivery_ops::record_route_revision(self, intent_id, relays)
     }
 
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
-        outbox_ops::recover_route_revisions(self, intent_id)
+    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
+        delivery_ops::recover_route_revisions(self, intent_id)
     }
 
     fn recover_attempts(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
-        outbox_ops::recover_attempts(self, intent_id)
+    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
+        delivery_ops::recover_attempts(self, intent_id)
     }
 
-    fn bootstrap_outbox_lanes(
+    fn bootstrap_delivery_lanes(
         &mut self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
-        outbox_ops::bootstrap_outbox_lanes(self, intent_id)
+    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
+        delivery_ops::bootstrap_delivery_lanes(self, intent_id)
     }
 
-    fn recover_outbox_lanes(
+    fn recover_delivery_lanes(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
-        outbox_ops::recover_outbox_lanes(self, intent_id)
+    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
+        delivery_ops::recover_delivery_lanes(self, intent_id)
     }
 
-    fn due_outbox_deadlines(
+    fn due_delivery_deadlines(
         &self,
         now: Timestamp,
         limit: usize,
-    ) -> Result<Vec<LaneDeadline>, PersistenceError> {
-        outbox_ops::due_outbox_deadlines(self, now, limit)
+    ) -> Result<Vec<DeliveryDeadline>, PersistenceError> {
+        delivery_ops::due_delivery_deadlines(self, now, limit)
     }
 
-    fn next_outbox_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        outbox_ops::next_outbox_deadline(self)
+    fn next_delivery_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        delivery_ops::next_delivery_deadline(self)
     }
 
     fn set_lane_waiting(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         auth: bool,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        outbox_ops::set_lane_waiting(self, key, expected_revision, auth)
+    ) -> Result<DeliveryLane, PersistenceError> {
+        delivery_ops::set_lane_waiting(self, key, expected_revision, auth)
     }
 
     fn set_lane_eligible(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         since: Timestamp,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        outbox_ops::set_lane_eligible(self, key, expected_revision, since)
+    ) -> Result<DeliveryLane, PersistenceError> {
+        delivery_ops::set_lane_eligible(self, key, expected_revision, since)
     }
 
     fn set_lane_transient(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         ordinal: u64,
         eligible_at: Timestamp,
-        cause: TransientCause,
+        cause: DeliveryTransientCause,
         raw_reason: Option<String>,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        outbox_ops::set_lane_transient(
+    ) -> Result<DeliveryLane, PersistenceError> {
+        delivery_ops::set_lane_transient(
             self,
             key,
             expected_revision,
@@ -379,15 +381,15 @@ impl EventStore for RedbStore {
 
     fn suspend_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         ordinal: u64,
         at: Timestamp,
-        cause: TransientCause,
+        cause: DeliveryTransientCause,
         raw_reason: Option<String>,
         auth: bool,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        outbox_ops::suspend_lane_attempt(
+    ) -> Result<DeliveryLane, PersistenceError> {
+        delivery_ops::suspend_lane_attempt(
             self,
             key,
             expected_revision,
@@ -401,57 +403,64 @@ impl EventStore for RedbStore {
 
     fn start_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         event: Event,
         started_at: Timestamp,
-    ) -> Result<(RecoveredAttempt, RecoveredLane), PersistenceError> {
-        outbox_ops::start_lane_attempt(self, key, expected_revision, event, started_at)
+    ) -> Result<(DeliveryAttempt, DeliveryLane), PersistenceError> {
+        delivery_ops::start_lane_attempt(self, key, expected_revision, event, started_at)
     }
 
     fn record_lane_handoff(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         ordinal: u64,
-        detail: AttemptHandoffDetail,
-        next: PostHandoffState,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        outbox_ops::record_lane_handoff(self, key, expected_revision, ordinal, detail, next)
+        detail: DeliveryAttemptHandoff,
+        next: DeliveryPostHandoffState,
+    ) -> Result<DeliveryLane, PersistenceError> {
+        delivery_ops::record_lane_handoff(self, key, expected_revision, ordinal, detail, next)
     }
 
     fn finish_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         ordinal: u64,
-        outcome: AttemptOutcome,
+        outcome: DeliveryAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        outbox_ops::finish_lane_attempt(self, key, expected_revision, ordinal, outcome, finished_at)
+    ) -> Result<DeliveryLane, PersistenceError> {
+        delivery_ops::finish_lane_attempt(
+            self,
+            key,
+            expected_revision,
+            ordinal,
+            outcome,
+            finished_at,
+        )
     }
 
     fn deny_lane_auth(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         denial: AuthDenial,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        outbox_ops::deny_lane_auth(self, key, expected_revision, denial)
+    ) -> Result<DeliveryLane, PersistenceError> {
+        delivery_ops::deny_lane_auth(self, key, expected_revision, denial)
     }
 
     fn recover_attempt_details(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredAttemptDetails>, PersistenceError> {
-        outbox_ops::recover_attempt_details(self, intent_id)
+    ) -> Result<Vec<DeliveryAttemptDetails>, PersistenceError> {
+        delivery_ops::recover_attempt_details(self, intent_id)
     }
 
     fn close_terminal_intent(
         &mut self,
         intent_id: IntentId,
     ) -> Result<CloseIntentOutcome, PersistenceError> {
-        outbox_ops::close_terminal_intent(self, intent_id)
+        delivery_ops::close_terminal_intent(self, intent_id)
     }
 
     fn accept_ephemeral(
@@ -459,7 +468,7 @@ impl EventStore for RedbStore {
         frozen_id: EventId,
         expected_pubkey: PublicKey,
     ) -> Result<u64, PersistenceError> {
-        outbox_ops::accept_ephemeral(self, frozen_id, expected_pubkey)
+        delivery_ops::accept_ephemeral(self, frozen_id, expected_pubkey)
     }
 }
 

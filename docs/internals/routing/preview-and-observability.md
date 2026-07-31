@@ -127,17 +127,17 @@ compute to" is this call with a DM builder.
 ## 3. What already exists: granular delivery failure — BUILT
 
 Post-routing failure is already observable per lane on master.
-`WriteStatus` (`crates/nmp/src/outbox/mod.rs:32`) carries, among its
+`WriteStatus` (`crates/nmp/src/delivery/mod.rs:54`) carries, among its
 delivery states:
 
 - `Rejected(RelayUrl, String)` — the relay's own refusal, with its message
-  (`outbox/mod.rs:87`)
+  (`delivery/mod.rs:176`)
 - `RetryEligible { relay, attempt, eligible_at }` — a failed attempt with
-  the persisted ordinal and when the lane may retry (`outbox/mod.rs:64`)
-- `GaveUp(RelayUrl)` — this lane exhausted its policy (`outbox/mod.rs:88`)
+  the persisted ordinal and when the lane may retry (`delivery/mod.rs:151`)
+- `GaveUp(RelayUrl)` — this lane exhausted its policy (`delivery/mod.rs:177`)
 - `OutcomeUnknown(RelayUrl)` — an at-most-once attempt crossed a
   process-loss boundary after its Started fact committed; terminal
-  ambiguity, never retry permission (`outbox/mod.rs:102`)
+  ambiguity, never retry permission (`delivery/mod.rs:191`)
 
 plus `AwaitingRelay`/`AwaitingAuth` for lanes parked on connectivity and
 AUTH. "We were trying to publish to relay X and it didn't work" is served by
@@ -155,7 +155,7 @@ signed) but resolution has not produced a single relay. `detail` carries the
 resolver's stated reason ("no DM relay list known for npub…", "author relay
 list never fetched"). Like `AwaitingCapability { pubkey }` — the shipped
 precedent for a durable park that names what it waits for
-(`crates/nmp/src/outbox/mod.rs:47`) — it is retained, not terminal, and
+(`crates/nmp/src/delivery/mod.rs:72`) — it is retained, not terminal, and
 **re-emitted verbatim on receipt reattachment**, so a route parked for a
 month is still visible with its reason a month later, across restarts. A park
 nobody can see is indistinguishable from data loss; the detail string is the
