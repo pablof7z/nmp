@@ -9,6 +9,7 @@ owns:
   - the never-built GroupHostAuthority / GroupHost, and why it died twice
   - the honest history of #838's PinnedHost removal and its deliberate reversal
   - the check-nip29-ownership.sh ban whose premise is now dead, and what replaces it
+  - check-routing-vocabulary.sh, the cross-surface owner of the two-word rule
   - AuthorRelayList(Kind) — proposed, died unbuilt
 related:
   - docs/internals/routing/auto-and-explicit.md
@@ -22,6 +23,7 @@ related:
   - docs/internals/writes/payload-and-replaceable-edits.md
 issues:
   - "#838 removed PinnedHost(HostAuthority); its conclusion is deliberately reversed here"
+  - "#1105 moved the tombstones into a cross-surface gate and proved the group door end to end"
 ---
 
 # Removed routes — a tombstone record
@@ -180,6 +182,38 @@ positive pins on what the reversal must NOT have loosened:**
 
 The rest of the gate — chat-schema ownership, `previous` minting, the
 removed native surface — is untouched by routing and stays.
+
+### 3.4 Who owns the tombstones now (#1105)
+
+`check-nip29-ownership.sh` carried the routing-vocabulary clause for one
+release as a name-only grep over three Rust source trees plus the two SDK
+sources. That was never enough for what §1–§4 claim: a grep proves a name is
+absent, not that the surviving vocabulary is exactly two words, and it did
+not scan `GroupHost` or `AuthorRelayList` at all — the two never-built names
+this document tombstones hardest.
+
+`scripts/check-routing-vocabulary.sh` (#1105) owns the whole contract, for
+the whole domain, in one place:
+
+- **cardinality by enumeration, per surface** — the `nmp-grammar` enum, the
+  `nmp-ffi` mirror, BOTH public FFI conversion directions, the Swift enum and
+  the Kotlin sealed class each declare exactly `Auto` and `Explicit`. Because
+  the sets are exact, "it names no NIP and no strategy" needs no rule of its
+  own: there is no third name left to be one. A third word appearing on ONE
+  SDK — the failure a Rust-only test cannot see — is caught here;
+- **every retired spelling**, including `GroupHost` and `AuthorRelayList`,
+  absent from every tree an app or SDK can reach, with the failure message
+  naming the replacement (`Auto`, or `Explicit` minted by whichever crate);
+- **the group door** — no group write operation takes a relay or a routing
+  value, stated as a signature.
+
+The gate has its own falsifier, `scripts/test-check-routing-vocabulary.sh`,
+which restores a retired spelling and adds a third variant to each surface in
+turn and requires each mutation to go red. The runtime half — the app
+supplies content only, the host alone receives, the author's discovered
+outbox is never contacted — is
+`crates/nmp/tests/group_publication_door.rs`, because no static check can
+observe a delivery.
 
 ---
 

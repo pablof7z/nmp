@@ -164,32 +164,15 @@ if [[ -n $dead_spellings ]]; then
   fail "a removed routing spelling reappeared -- delete it, do not assert it"
 fi
 
-# #972 revises the clause that used to sit here.
-#
-# It banned `HostAuthority`/`PinnedHost` on #838's premise that "no supported
-# general-purpose or NIP-29 operation can currently route an arbitrary write
-# to one selected relay". That premise is dead: publishing to chosen relays is
-# now a first-class general capability (`WriteRouting::Explicit`),
-# app-constructible on every platform, and NIP-29 is one consumer of it rather
-# than its justification. A grep guarding a capability that should exist is
-# not a tripwire, it is sediment
-# (`docs/internals/routing/removed-routes.md` §3.3).
-#
-# What replaces it is a POSITIVE pin on what the reversal must not have
-# loosened: the routing vocabulary the design deleted must never come back, in
-# any spelling, anywhere an app or SDK can reach. The two dead never-built
-# names ride along, for the same reason as above -- they must simply never
-# return.
-# (`AuthorOutbox` excludes the unrelated read-side `SourceAuthority::
-# AuthorOutboxes`, which this design does not touch.)
-removed_routing_names='AuthorOutbox([^e]|$)|PrivateNarrow|NarrowOnly|PrivateRoute|RelayListBootstrap|HostAuthority|PinnedHost'
-found=$(grep -RInE "$removed_routing_names" \
-  crates/nmp-grammar/src crates/nmp/src crates/nmp-ffi/src \
-  Packages/NMP/Sources Packages/NMPKotlin/src/main || true)
-if [[ -n $found ]]; then
-  printf '%s\n' "$found"
-  fail "a deleted routing spelling came back; the vocabulary is Auto and Explicit"
-fi
+# The retired ROUTING VOCABULARY (`AuthorOutbox`, `PrivateNarrow`,
+# `RelayListBootstrap`, `GroupHost`, `AuthorRelayList`, ...) is no longer this
+# gate's business. #972 left a name-only grep here; #1105 replaced it with
+# `scripts/check-routing-vocabulary.sh`, which owns the whole contract for the
+# whole domain: the surviving vocabulary ENUMERATED per surface (Rust, FFI in
+# both conversion directions, Swift, Kotlin) as exactly two words, every
+# retired spelling tombstoned with the replacement it maps to, and the group
+# door proved to take no relay and no routing value. One owner, not two
+# half-owners.
 
 # The ownership half is untouched by the reversal and still holds: routing
 # policy for a group belongs to nmp-nip29, never to the engine crates.

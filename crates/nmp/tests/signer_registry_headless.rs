@@ -370,7 +370,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
 /// `active_a_rejects_b_authored_default_even_when_b_is_registered`. Two
 /// changes hollowed that claim out: a builder structurally cannot carry an
 /// author (#1005), so there was nothing "b-authored" left to reject, and the
-/// only `Failed` it was actually observing came from `AuthorOutbox` erroring
+/// only `Failed` it was actually observing came from an `Auto` route erroring
 /// on an empty `FixtureRoutingFacts` — the exact defect this issue fixes. What
 /// the fixture really pins is restated here as the property that replaced it.
 #[test]
