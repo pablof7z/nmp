@@ -27,17 +27,21 @@ impl<S: EventStore> EngineCore<S> {
 
     // ---- subscribe / unsubscribe / re-root ------------------------------
 
-    pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
+    pub(crate) fn open_observation(
+        &mut self,
+        query: LiveQuery,
+    ) -> ObservationOpen<HandleId, RowsSeed> {
         let mut effects = Vec::new();
         // Graph construction can read the store (a `Derived` binding resolves
-        // its inner query). On a persistence failure (issue #122) degrade to
-        // read-only and install NO handle rather than panic — the observer
-        // simply receives no rows.
+        // its inner query). The resolver transaction discards every partially
+        // built graph node on failure, so this refusal owns no handle or
+        // demand atom.
         let (qh, _delta) = match self.resolver.subscribe(query) {
             Ok(v) => v,
             Err(e) => {
+                let reason = format!("canonical query resolution failed: {e}");
                 self.degrade_store(e, &mut effects);
-                return effects;
+                return ObservationOpen::Refused { reason, effects };
             }
         };
         let id = qh.id();
@@ -53,14 +57,49 @@ impl<S: EventStore> EngineCore<S> {
                 execution: ObservationExecutionState::default(),
             },
         );
+
+        // Prove the candidate's canonical row snapshot before recompiling the
+        // router or refreshing any sibling. If this read fails, removing the
+        // just-created owner and draining its resolver drop restores the exact
+        // pre-call demand. No wire, relay-admission, attribution, diagnostics,
+        // or sibling-frame effect has yet been created.
+        let current = match self.rows_for(id) {
+            Ok(current) => current,
+            Err(error) => {
+                let reason = format!("canonical row projection failed: {error}");
+                drop(self.handles.remove(&id));
+                let _ = self.resolver.unsubscribe(id);
+                self.degrade_store(error, &mut effects);
+                return ObservationOpen::Refused { reason, effects };
+            }
+        };
+
         self.reconcile_observation_resolution(id, ResolutionCause::Initial, &mut effects);
         self.recompile(&mut effects);
         // A wire-contributing query can change the capped greedy source plan
         // for every existing query. A suppressed query leaves that plan
         // untouched but still needs its initial cache/evidence frame.
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_handles_except(id, &mut effects);
         self.refresh_all_histories(&mut effects);
-        effects
+        let evidence = self.handle_evidence_for(id);
+        let seed = self
+            .apply_handle_projection(id, current, evidence)
+            .expect("a new handle has no prior projection and always yields one seed");
+        ObservationOpen::Opened { id, seed, effects }
+    }
+
+    pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
+        match self.open_observation(query) {
+            ObservationOpen::Opened {
+                id,
+                seed,
+                mut effects,
+            } => {
+                effects.push(Effect::EmitRows(id, seed.deltas, seed.evidence));
+                effects
+            }
+            ObservationOpen::Refused { effects, .. } => effects,
+        }
     }
 
     pub(super) fn on_unsubscribe(&mut self, id: HandleId) -> Vec<Effect> {
@@ -1137,6 +1176,20 @@ impl<S: EventStore> EngineCore<S> {
         self.refresh_handles(ids, effects);
     }
 
+    pub(super) fn refresh_all_handles_except(
+        &mut self,
+        except: HandleId,
+        effects: &mut Vec<Effect>,
+    ) {
+        let ids: Vec<HandleId> = self
+            .handles
+            .keys()
+            .copied()
+            .filter(|id| *id != except)
+            .collect();
+        self.refresh_handles(ids, effects);
+    }
+
     /// Refresh only acquisition evidence after a coverage-only mutation.
     /// Coverage cannot change canonical rows, so a complete projection can
     /// retain its remembered row set and avoid reopening the store's event
@@ -1554,9 +1607,18 @@ impl<S: EventStore> EngineCore<S> {
                 return;
             }
         };
-        let Some(state) = self.handles.get_mut(&id) else {
-            return;
-        };
+        if let Some(seed) = self.apply_handle_projection(id, current, evidence) {
+            effects.push(Effect::EmitRows(id, seed.deltas, seed.evidence));
+        }
+    }
+
+    fn apply_handle_projection(
+        &mut self,
+        id: HandleId,
+        current: BTreeMap<EventId, Row>,
+        evidence: AcquisitionEvidence,
+    ) -> Option<RowsSeed> {
+        let state = self.handles.get_mut(&id)?;
         let current_rows: BTreeMap<EventId, RememberedRow> = current
             .iter()
             .map(|(id, row)| {
@@ -1571,7 +1633,7 @@ impl<S: EventStore> EngineCore<S> {
             .collect();
         state.projection_complete = true;
         if current_rows == state.last_rows && state.last_evidence.as_ref() == Some(&evidence) {
-            return;
+            return None;
         }
         let mut delta: Vec<RowDelta> = Vec::new();
         for (event_id, row) in current {
@@ -1593,7 +1655,10 @@ impl<S: EventStore> EngineCore<S> {
         }
         state.last_rows = current_rows;
         state.last_evidence = Some(evidence.clone());
-        effects.push(Effect::EmitRows(id, delta, evidence));
+        Some(RowsSeed {
+            deltas: delta,
+            evidence,
+        })
     }
 
     fn refresh_handle_evidence(&mut self, id: HandleId, effects: &mut Vec<Effect>) {
@@ -1688,6 +1753,15 @@ impl<S: EventStore> EngineCore<S> {
         &self,
         id: HandleId,
     ) -> Result<(BTreeMap<EventId, Row>, AcquisitionEvidence), PersistenceError> {
+        let rows = self.rows_for(id)?;
+        let evidence = self.handle_evidence_for(id);
+        Ok((rows, evidence))
+    }
+
+    pub(super) fn rows_for(
+        &self,
+        id: HandleId,
+    ) -> Result<BTreeMap<EventId, Row>, PersistenceError> {
         let root_atoms = self.resolver.root_atoms(id);
         let demand_scopes = self.resolver.demand_scopes(id);
         let pinned_relays: Option<BTreeSet<RelayUrl>> = self
@@ -1751,7 +1825,6 @@ impl<S: EventStore> EngineCore<S> {
                 by_id.retain(|event_id, _| keep.contains(event_id));
             }
         }
-        let evidence = self.handle_evidence_for(id);
-        Ok((by_id, evidence))
+        Ok(by_id)
     }
 }

@@ -99,8 +99,8 @@ pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, AuthSendCompletion, DiagnosticsSnapshot, Effect, EngineCore,
     EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId,
-    ObservationEvidence, PublishError, ReattachOutcome, ReceiptId, RelayAdmissionPolicy, Row,
-    RowDelta,
+    ObservationEvidence, ObservationOpen, PublishError, ReattachOutcome, ReceiptId,
+    RelayAdmissionPolicy, Row, RowDelta,
 };
 use crate::delivery::{CancelWriteError, CancelWriteOutcome, WriteStatus};
 use crate::relay_information_service::{
@@ -878,6 +878,10 @@ enum Cmd {
         id: ReceiptId,
         reply: Sender<usize>,
     },
+    #[cfg(test)]
+    ObservationOwnershipCensus {
+        reply: Sender<ObservationOwnershipCensus>,
+    },
     CancelWrite {
         id: ReceiptId,
         reply: Sender<Result<CancelWriteOutcome, CancelWriteError>>,
@@ -932,6 +936,22 @@ enum Cmd {
     /// lets the observer's `LatestReceiver::recv` return `None`.
     UnobserveDiagnostics(u64),
     Shutdown,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ObservationOwnershipCensus {
+    handles: usize,
+    histories: usize,
+    history_handles: usize,
+    resolver_nodes: usize,
+    demand_atoms: usize,
+    planned_sessions: usize,
+    pending_execution_owners: usize,
+    active_execution_owners: usize,
+    live_wire_owners: usize,
+    row_channels: usize,
+    history_channels: usize,
 }
 
 /// Every signing capability the engine thread currently holds, keyed by its
@@ -1433,8 +1453,18 @@ impl Drop for RuntimeThreadCountGuard {
 /// Supported construction failure for the engine-owned thread graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineThreadError {
-    ThreadUnavailable { component: String, reason: String },
-    RelayBudgetOverflow { relay_limit: usize },
+    ThreadUnavailable {
+        component: String,
+        reason: String,
+    },
+    /// The serialized observation-open transaction could not establish its
+    /// initial canonical projection. No observation owner or receiver escaped.
+    ObservationUnavailable {
+        reason: String,
+    },
+    RelayBudgetOverflow {
+        relay_limit: usize,
+    },
     EngineShuttingDown,
 }
 
@@ -1443,6 +1473,9 @@ impl std::fmt::Display for EngineThreadError {
         match self {
             Self::ThreadUnavailable { component, reason } => {
                 write!(f, "{component} thread unavailable: {reason}")
+            }
+            Self::ObservationUnavailable { reason } => {
+                write!(f, "observation unavailable: {reason}")
             }
             Self::RelayBudgetOverflow { relay_limit } => write!(
                 f,
@@ -4171,6 +4204,23 @@ fn engine_loop<S>(
                 Cmd::ReceiptDeliveryCount { id, reply } => {
                     let _ = reply.send(receipt_deliveries.borrow().count(id));
                 }
+                #[cfg(test)]
+                Cmd::ObservationOwnershipCensus { reply } => {
+                    let core_census = core.observation_ownership_census();
+                    let _ = reply.send(ObservationOwnershipCensus {
+                        handles: core_census.handles,
+                        histories: core_census.histories,
+                        history_handles: core_census.history_handles,
+                        resolver_nodes: core_census.resolver_nodes,
+                        demand_atoms: core_census.demand_atoms,
+                        planned_sessions: core_census.planned_sessions,
+                        pending_execution_owners: core_census.pending_execution_owners,
+                        active_execution_owners: core_census.active_execution_owners,
+                        live_wire_owners: core_census.live_wire_owners,
+                        row_channels: row_channels.len(),
+                        history_channels: history_channels.len(),
+                    });
+                }
                 Cmd::ObserveDiagnostics { reply } => {
                     let id = next_diag_id;
                     next_diag_id = next_diag_id.saturating_add(1);
@@ -4720,6 +4770,23 @@ fn engine_loop<S>(
             Cmd::ReceiptDeliveryCount { id, reply } => {
                 let _ = reply.send(receipt_deliveries.borrow().count(id));
             }
+            #[cfg(test)]
+            Cmd::ObservationOwnershipCensus { reply } => {
+                let core_census = core.observation_ownership_census();
+                let _ = reply.send(ObservationOwnershipCensus {
+                    handles: core_census.handles,
+                    histories: core_census.histories,
+                    history_handles: core_census.history_handles,
+                    resolver_nodes: core_census.resolver_nodes,
+                    demand_atoms: core_census.demand_atoms,
+                    planned_sessions: core_census.planned_sessions,
+                    pending_execution_owners: core_census.pending_execution_owners,
+                    active_execution_owners: core_census.active_execution_owners,
+                    live_wire_owners: core_census.live_wire_owners,
+                    row_channels: row_channels.len(),
+                    history_channels: history_channels.len(),
+                });
+            }
             Cmd::CancelWrite { id, reply } => {
                 let (result, effects) = core.cancel_write(id);
                 if result == Ok(CancelWriteOutcome::Cancelled) {
@@ -4803,19 +4870,36 @@ fn engine_loop<S>(
                 );
             }
             Cmd::Subscribe { query, reply } => {
-                let mut effects = core.handle(EngineMsg::Tick(clock.now()));
-                effects.extend(core.handle(EngineMsg::Subscribe(query)));
-                // `on_subscribe` always emits exactly one `Effect::EmitRows`
-                // for the handle it just created (its `last_evidence` starts
-                // `None`, which can never equal `Some(_)` -- see
-                // `core::mod`'s `refresh_handle`), so this is always found.
-                let id = effects
-                    .iter()
-                    .find_map(|e| match e {
-                        Effect::EmitRows(id, ..) if !row_channels.contains_key(id) => Some(*id),
-                        _ => None,
-                    })
-                    .expect("Subscribe must yield a fresh EmitRows for its own handle");
+                let mut tick_effects = core.handle(EngineMsg::Tick(clock.now()));
+                let (id, seed, mut effects) = match core.open_observation(query) {
+                    ObservationOpen::Opened {
+                        id,
+                        seed,
+                        mut effects,
+                    } => {
+                        tick_effects.append(&mut effects);
+                        (id, seed, tick_effects)
+                    }
+                    ObservationOpen::Refused {
+                        reason,
+                        mut effects,
+                    } => {
+                        tick_effects.append(&mut effects);
+                        let _ =
+                            reply.send(Err(EngineThreadError::ObservationUnavailable { reason }));
+                        dispatch_core_effects(
+                            &mut core,
+                            tick_effects,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                        continue;
+                    }
+                };
                 let (rows_tx, rows_rx) = rows_channel();
                 row_channels.insert(id, rows_tx);
                 if reply.send(Ok((id, rows_rx))).is_err() {
@@ -4836,6 +4920,7 @@ fn engine_loop<S>(
                     );
                     continue;
                 }
+                effects.push(Effect::EmitRows(id, seed.deltas, seed.evidence));
                 dispatch_core_effects(
                     &mut core,
                     effects,
@@ -4848,28 +4933,35 @@ fn engine_loop<S>(
                 );
             }
             Cmd::SubscribeHistory { query, reply } => {
-                let mut effects = core.handle(EngineMsg::Tick(clock.now()));
-                effects.extend(core.handle(EngineMsg::SubscribeHistory(query)));
-                let Some(id) = effects.iter().find_map(|effect| match effect {
-                    Effect::EmitHistory(id, _) if !history_channels.contains_key(id) => Some(*id),
-                    _ => None,
-                }) else {
-                    let _ = reply.send(Err(EngineThreadError::ThreadUnavailable {
-                        component: "history projection".to_string(),
-                        reason: "history session could not open its canonical projection"
-                            .to_string(),
-                    }));
-                    dispatch_core_effects(
-                        &mut core,
-                        effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                    continue;
+                let mut tick_effects = core.handle(EngineMsg::Tick(clock.now()));
+                let (id, seed, mut effects) = match core.open_history_observation(query) {
+                    ObservationOpen::Opened {
+                        id,
+                        seed,
+                        mut effects,
+                    } => {
+                        tick_effects.append(&mut effects);
+                        (id, seed, tick_effects)
+                    }
+                    ObservationOpen::Refused {
+                        reason,
+                        mut effects,
+                    } => {
+                        tick_effects.append(&mut effects);
+                        let _ =
+                            reply.send(Err(EngineThreadError::ObservationUnavailable { reason }));
+                        dispatch_core_effects(
+                            &mut core,
+                            tick_effects,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                        continue;
+                    }
                 };
                 let (history_tx, history_rx) = latest_channel();
                 history_channels.insert(id, history_tx);
@@ -4891,6 +4983,7 @@ fn engine_loop<S>(
                     );
                     continue;
                 }
+                effects.push(Effect::EmitHistory(id, seed));
                 dispatch_core_effects(
                     &mut core,
                     effects,
@@ -6200,8 +6293,9 @@ impl Handle {
     /// (review): a relay whose initially-required connection worker cannot be
     /// opened — including a rare OS thread-spawn refusal — is NOT a subscription
     /// failure; that relay is reported as unavailable in acquisition evidence
-    /// and the subscription proceeds on its other sources. An unwindowed
-    /// subscription therefore never returns a construction error here.
+    /// and the subscription proceeds on its other sources. A canonical
+    /// store/resolver failure before the first frame instead returns
+    /// [`EngineThreadError::ObservationUnavailable`] with no live handle.
     ///
     /// # Panics
     /// If the engine thread has already shut down. Calling `subscribe`
@@ -6601,6 +6695,17 @@ impl Handle {
         reply_rx
             .recv()
             .expect("nmp-engine: engine dropped receipt delivery census reply")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observation_ownership_census(&self) -> ObservationOwnershipCensus {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::ObservationOwnershipCensus { reply: reply_tx })
+            .expect("nmp-engine: observation ownership census called after shutdown");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped observation ownership census reply")
     }
 
     /// Stop the engine thread (and, transitively, its bridge threads — see

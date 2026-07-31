@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureRoutingFacts;
@@ -15,8 +15,36 @@ use super::*;
 
 #[derive(Debug)]
 enum FailRead {
-    Query(String),
+    Query {
+        message: String,
+        block: Option<BlockedRead>,
+    },
     NewestBefore(String),
+}
+
+#[derive(Debug)]
+struct BlockedRead {
+    entered: mpsc::SyncSender<()>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+struct BlockedReadControl {
+    entered: mpsc::Receiver<()>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl BlockedReadControl {
+    fn wait_until_entered(&self) {
+        self.entered
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("runtime must reach the controlled store read");
+    }
+
+    fn release(&self) {
+        let (released, wake) = &*self.release;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+    }
 }
 
 #[derive(Clone, Default)]
@@ -24,7 +52,23 @@ struct ReadFailureControl(Arc<Mutex<Option<FailRead>>>);
 
 impl ReadFailureControl {
     fn fail_query(&self, message: &str) {
-        *self.0.lock().unwrap() = Some(FailRead::Query(message.to_owned()));
+        *self.0.lock().unwrap() = Some(FailRead::Query {
+            message: message.to_owned(),
+            block: None,
+        });
+    }
+
+    fn block_then_fail_query(&self, message: &str) -> BlockedReadControl {
+        let (entered_tx, entered) = mpsc::sync_channel(0);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        *self.0.lock().unwrap() = Some(FailRead::Query {
+            message: message.to_owned(),
+            block: Some(BlockedRead {
+                entered: entered_tx,
+                release: Arc::clone(&release),
+            }),
+        });
+        BlockedReadControl { entered, release }
     }
 
     fn fail_newest_before(&self, message: &str) {
@@ -33,10 +77,22 @@ impl ReadFailureControl {
 
     fn take_query_failure(&self) -> Option<PersistenceError> {
         let mut failure = self.0.lock().unwrap();
-        if matches!(failure.as_ref(), Some(FailRead::Query(_))) {
-            let Some(FailRead::Query(message)) = failure.take() else {
+        if matches!(failure.as_ref(), Some(FailRead::Query { .. })) {
+            let Some(FailRead::Query { message, block }) = failure.take() else {
                 unreachable!()
             };
+            drop(failure);
+            if let Some(block) = block {
+                block
+                    .entered
+                    .send(())
+                    .expect("controlled read witness remains alive");
+                let (released, wake) = &*block.release;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            }
             Some(PersistenceError::invariant(message))
         } else {
             None
@@ -209,37 +265,354 @@ impl EventStore for FailingReadStore {
 }
 
 #[test]
-fn production_runtime_projection_failure_is_the_observation_refusal() {
+fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
     let control = ReadFailureControl::default();
-    control.fail_query("canonical history projection failed");
-    let store = FailingReadStore::new(MemoryStore::new(), control);
+    let store = FailingReadStore::new(MemoryStore::new(), control.clone());
     let (engine, handle) = crate::runtime::EngineThread::spawn(
         store,
         4,
         nmp_transport::PoolConfig::default(),
         RelayAdmissionPolicy::default(),
     )
-    .expect("runtime starts before the injected canonical-store read failure");
-    let query = HistoryQuery::new(
+    .expect("runtime starts before injected canonical-store read failures");
+    assert_eq!(
+        handle.observation_ownership_census(),
+        crate::runtime::ObservationOwnershipCensus::default()
+    );
+
+    let ordinary = LiveQuery::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1])),
+        ..Filter::default()
+    });
+    control.fail_query("canonical ordinary projection failed");
+    assert!(matches!(
+        handle.subscribe(ordinary.clone()),
+        Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
+            if reason.contains("canonical ordinary projection failed")
+    ));
+    assert_eq!(
+        handle.observation_ownership_census(),
+        crate::runtime::ObservationOwnershipCensus::default(),
+        "post-handle ordinary projection refusal must roll back every owner"
+    );
+    let (ordinary_handle, ordinary_rows) = handle
+        .subscribe(ordinary)
+        .expect("a healthy ordinary open proves the engine thread survived");
+    ordinary_rows
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("healthy empty ordinary query still receives its initial frame");
+    handle.unsubscribe(ordinary_handle);
+    assert_eq!(
+        handle.observation_ownership_census(),
+        crate::runtime::ObservationOwnershipCensus::default()
+    );
+
+    let history = HistoryQuery::new(
         LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1])),
+            kinds: Some(BTreeSet::from([2])),
             ..Filter::default()
         }),
         1,
         2,
     );
-
+    control.fail_query("canonical history projection failed");
     assert!(matches!(
-        handle.subscribe_history(query),
-        Err(crate::runtime::EngineThreadError::ThreadUnavailable {
-            component,
-            reason,
-        }) if component == "history projection"
-            && reason == "history session could not open its canonical projection"
+        handle.subscribe_history(history.clone()),
+        Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
+            if reason.contains("canonical history projection failed")
     ));
+    assert_eq!(
+        handle.observation_ownership_census(),
+        crate::runtime::ObservationOwnershipCensus::default(),
+        "post-handle history projection refusal must roll back every owner"
+    );
+    let (history_handle, history_rows) = handle
+        .subscribe_history(history)
+        .expect("a healthy history open proves the engine thread survived");
+    history_rows
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("healthy empty history query still receives its initial frame");
+    handle.unsubscribe_history(history_handle);
+    assert_eq!(
+        handle.observation_ownership_census(),
+        crate::runtime::ObservationOwnershipCensus::default()
+    );
+
+    let derived = LiveQuery::from_filter(Filter {
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner: nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([3])),
+                ..Filter::default()
+            }),
+            project: Selector::Tag("p".to_owned()),
+        }))),
+        kinds: Some(BTreeSet::from([1])),
+        ..Filter::default()
+    });
+    control.fail_query("derived resolver construction failed");
+    assert!(matches!(
+        handle.subscribe(derived.clone()),
+        Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
+            if reason.contains("derived resolver construction failed")
+    ));
+    assert_eq!(
+        handle.observation_ownership_census(),
+        crate::runtime::ObservationOwnershipCensus::default(),
+        "pre-handle ordinary refusal must discard partial resolver nodes"
+    );
+
+    control.fail_query("derived history construction failed");
+    assert!(matches!(
+        handle.subscribe_history(HistoryQuery::new(derived, 1, 2)),
+        Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
+            if reason.contains("derived history construction failed")
+    ));
+    assert_eq!(
+        handle.observation_ownership_census(),
+        crate::runtime::ObservationOwnershipCensus::default(),
+        "pre-handle history refusal must discard partial resolver nodes"
+    );
 
     handle.shutdown();
     engine.join();
+}
+
+#[test]
+fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() {
+    {
+        let control = ReadFailureControl::default();
+        let blocked = control.block_then_fail_query("ordinary refusal won the shutdown race");
+        let (engine, handle) = crate::runtime::EngineThread::spawn(
+            FailingReadStore::new(MemoryStore::new(), control),
+            4,
+            nmp_transport::PoolConfig::default(),
+            RelayAdmissionPolicy::default(),
+        )
+        .unwrap();
+        let caller_handle = handle.clone();
+        let caller = std::thread::spawn(move || {
+            caller_handle.subscribe(LiveQuery::from_filter(Filter {
+                kinds: Some(BTreeSet::from([1])),
+                ..Filter::default()
+            }))
+        });
+        blocked.wait_until_entered();
+        handle.shutdown();
+        blocked.release();
+        assert!(matches!(
+            caller.join().expect("ordinary caller must not panic"),
+            Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
+                if reason.contains("ordinary refusal won the shutdown race")
+        ));
+        engine.join();
+    }
+
+    {
+        let control = ReadFailureControl::default();
+        let blocked = control.block_then_fail_query("history refusal won the shutdown race");
+        let (engine, handle) = crate::runtime::EngineThread::spawn(
+            FailingReadStore::new(MemoryStore::new(), control),
+            4,
+            nmp_transport::PoolConfig::default(),
+            RelayAdmissionPolicy::default(),
+        )
+        .unwrap();
+        let caller_handle = handle.clone();
+        let caller = std::thread::spawn(move || {
+            caller_handle.subscribe_history(HistoryQuery::new(
+                LiveQuery::from_filter(Filter {
+                    kinds: Some(BTreeSet::from([2])),
+                    ..Filter::default()
+                }),
+                1,
+                2,
+            ))
+        });
+        blocked.wait_until_entered();
+        handle.shutdown();
+        blocked.release();
+        assert!(matches!(
+            caller.join().expect("history caller must not panic"),
+            Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
+                if reason.contains("history refusal won the shutdown race")
+        ));
+        engine.join();
+    }
+}
+
+fn routed_query(author: PublicKey, kind: u16) -> LiveQuery {
+    LiveQuery::from_filter(Filter {
+        authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+        kinds: Some(BTreeSet::from([kind])),
+        ..Filter::default()
+    })
+}
+
+fn assert_only_refusal_diagnostic(effects: &[Effect], expected: &str) {
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::EmitDiagnostics(snapshot)
+                    if snapshot.store_degraded.as_deref() == Some(expected)
+            ))
+            .count(),
+        1,
+        "one durable-store degradation fact survives the rolled-back open"
+    );
+    assert!(
+        effects
+            .iter()
+            .all(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
+        "a refused open must stage no wire, relay, attribution, or sibling-frame effect"
+    );
+}
+
+fn assert_plan_unchanged(actual: &RelayPlan, expected: &RelayPlan) {
+    assert_eq!(actual.reqs, expected.reqs);
+    assert_eq!(actual.limited, expected.limited);
+    assert_eq!(actual.refused_sessions, expected.refused_sessions);
+    assert_eq!(
+        actual.subscription_shortfalls,
+        expected.subscription_shortfalls
+    );
+}
+
+#[test]
+fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
+    let existing_author = Keys::generate().public_key();
+    let candidate_author = Keys::generate().public_key();
+    let existing_relay = RelayUrl::parse("wss://open-existing.example").unwrap();
+    let candidate_relay = RelayUrl::parse("wss://open-candidate.example").unwrap();
+    let facts = FixtureRoutingFacts::new()
+        .with_outbound_routes(existing_author, [existing_relay])
+        .with_outbound_routes(candidate_author, [candidate_relay]);
+    let control = ReadFailureControl::default();
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        FailingReadStore::new(MemoryStore::new(), control.clone()),
+        facts,
+        1,
+    );
+    let existing_id = match core.open_observation(routed_query(existing_author, 1)) {
+        ObservationOpen::Opened { id, .. } => id,
+        ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
+    };
+    let baseline_census = core.observation_ownership_census();
+    let baseline_demand = core.active_demand();
+    let baseline_plan = core.router.plan().clone();
+    let baseline_compiles = core.router_compiles.get();
+    let baseline_projection = {
+        let state = &core.handles[&existing_id];
+        (
+            state.last_rows.clone(),
+            state.last_evidence.clone(),
+            state.projection_complete,
+        )
+    };
+
+    control.fail_query("candidate ordinary projection failed");
+    let effects = match core.open_observation(routed_query(candidate_author, 2)) {
+        ObservationOpen::Refused { reason, effects } => {
+            assert!(reason.contains("candidate ordinary projection failed"));
+            effects
+        }
+        ObservationOpen::Opened { .. } => panic!("injected projection failure was ignored"),
+    };
+
+    assert_only_refusal_diagnostic(
+        &effects,
+        "durable-store persistence failure: candidate ordinary projection failed",
+    );
+    assert_eq!(core.observation_ownership_census(), baseline_census);
+    assert_eq!(core.active_demand(), baseline_demand);
+    assert_plan_unchanged(core.router.plan(), &baseline_plan);
+    assert_eq!(
+        core.router_compiles.get(),
+        baseline_compiles,
+        "the fallible canonical gate must run before speculative recompile"
+    );
+    let state = &core.handles[&existing_id];
+    assert_eq!(
+        (
+            state.last_rows.clone(),
+            state.last_evidence.clone(),
+            state.projection_complete,
+        ),
+        baseline_projection,
+        "existing rows and evidence stay byte-identical"
+    );
+
+    assert!(matches!(
+        core.open_observation(routed_query(candidate_author, 2)),
+        ObservationOpen::Opened { .. }
+    ));
+}
+
+#[test]
+fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
+    let existing_author = Keys::generate().public_key();
+    let candidate_author = Keys::generate().public_key();
+    let existing_relay = RelayUrl::parse("wss://history-open-existing.example").unwrap();
+    let candidate_relay = RelayUrl::parse("wss://history-open-candidate.example").unwrap();
+    let facts = FixtureRoutingFacts::new()
+        .with_outbound_routes(existing_author, [existing_relay])
+        .with_outbound_routes(candidate_author, [candidate_relay]);
+    let control = ReadFailureControl::default();
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        FailingReadStore::new(MemoryStore::new(), control.clone()),
+        facts,
+        1,
+    );
+    let existing_id = match core.open_history_observation(HistoryQuery::new(
+        routed_query(existing_author, 1),
+        1,
+        2,
+    )) {
+        ObservationOpen::Opened { id, .. } => id,
+        ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
+    };
+    let baseline_census = core.observation_ownership_census();
+    let baseline_demand = core.active_demand();
+    let baseline_plan = core.router.plan().clone();
+    let baseline_compiles = core.router_compiles.get();
+    let baseline_history = snapshot(&core, existing_id);
+
+    control.fail_query("candidate history projection failed");
+    let effects = match core.open_history_observation(HistoryQuery::new(
+        routed_query(candidate_author, 2),
+        1,
+        2,
+    )) {
+        ObservationOpen::Refused { reason, effects } => {
+            assert!(reason.contains("candidate history projection failed"));
+            effects
+        }
+        ObservationOpen::Opened { .. } => panic!("injected projection failure was ignored"),
+    };
+
+    assert_only_refusal_diagnostic(
+        &effects,
+        "durable-store persistence failure: candidate history projection failed",
+    );
+    assert_eq!(core.observation_ownership_census(), baseline_census);
+    assert_eq!(core.active_demand(), baseline_demand);
+    assert_plan_unchanged(core.router.plan(), &baseline_plan);
+    assert_eq!(
+        core.router_compiles.get(),
+        baseline_compiles,
+        "the fallible canonical gate must run before speculative recompile"
+    );
+    assert_eq!(
+        snapshot(&core, existing_id),
+        baseline_history,
+        "existing history rows, evidence, and ownership stay byte-identical"
+    );
+
+    assert!(matches!(
+        core.open_history_observation(HistoryQuery::new(routed_query(candidate_author, 2), 1, 2,)),
+        ObservationOpen::Opened { .. }
+    ));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
