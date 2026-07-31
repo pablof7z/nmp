@@ -173,11 +173,23 @@ async fn delivered_carries_no_previous(w: &mut NmpWorld) {
     );
 }
 
-#[then(regex = r#"^no surface anywhere can mint a previous tag for a group publication$"#)]
-async fn nothing_can_mint_previous(w: &mut NmpWorld) {
-    let (passed, said) = w.gate_outcome_now();
+/// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-005's corrected claim: the UNSIGNED
+/// group-publication door never invents its own `previous` row (proven
+/// again here, on the delivered event) and never silently accepts a
+/// caller-supplied one (proven for the same door, on the same world, by the
+/// sibling scenario "An event carrying a previous tag is refused"). This
+/// step no longer claims "no surface anywhere" can mint one -- #1034
+/// deliberately preserves one global ordered Exact escape, and a
+/// caller-SIGNED event may already carry a tag shaped like `previous` that
+/// the pre-signed door's `validate_context` preserves verbatim rather than
+/// interpreting.
+#[then(
+    regex = r#"^the unsigned group-publication door never invents or accepts a caller-supplied previous tag$"#
+)]
+async fn the_unsigned_door_never_invents_a_previous_tag(w: &mut NmpWorld) {
+    let event = delivered(w).await;
     assert!(
-        passed,
-        "the ownership gate is what forbids a caller-mintable previous authority: {said}"
+        values_of(&event, "previous").is_empty(),
+        "the unsigned group-publication door never invents a previous row of its own"
     );
 }
