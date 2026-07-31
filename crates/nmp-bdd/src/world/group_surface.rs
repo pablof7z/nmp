@@ -87,8 +87,7 @@ impl NmpWorld {
         let group_id = self.group_host_group_id();
         let author = self.me_pubkey();
         let draft = EventBuilder::new(Kind::from(9u16)).tag(
-            Tag::parse(["h", &group_id])
-                .expect("nmp-bdd: a two-value fixture tag is well-formed"),
+            Tag::parse(["h", &group_id]).expect("nmp-bdd: a two-value fixture tag is well-formed"),
         );
         let engine = self
             .engine
