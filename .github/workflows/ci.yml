@@ -185,10 +185,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test (workspace)
-        # Privileged, profile-free Bash refuses inherited functions and
-        # BASH_ENV. The absolute hosted-runner Cargo path also bypasses PATH.
-        shell: /bin/bash --noprofile --norc -p -e -o pipefail {0}
-        run: /home/runner/.cargo/bin/cargo test --workspace
+        run: cargo test --workspace
 
   # All macOS qualification now lives in macos-qualification.yml. One runner
   # owns the Swift package, optional NIP-46 provider, and iOS Simulator suites
@@ -219,8 +216,5 @@ jobs:
         run: scripts/build-kotlin-jvm.sh
 
       - name: gradlew test
-        # The closed proof shell cannot import a function shadow for the
-        # repository-owned wrapper, and the run scalar is one exact command.
-        shell: /bin/bash --noprofile --norc -p -e -o pipefail {0}
         run: ./gradlew test --console=plain
         working-directory: Packages/NMPKotlin
