@@ -29,9 +29,9 @@ async fn construction_is_the_only_source_of_h(w: &mut NmpWorld) {
     let surface = w.group_surface();
     assert!(
         surface
-            .door
-            .contains("pub fn new(host: RelayUrl, group_id: impl Into<String>)"),
-        "the group id enters at construction and nowhere else"
+            .binding
+            .contains("pub fn group(&self, group_id: impl Into<String>) -> Group"),
+        "the group id enters when a scope is narrowed to one group, and nowhere else"
     );
     assert_no_parameter(&surface, &["group_id"], "an h value");
 }

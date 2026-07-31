@@ -53,9 +53,12 @@ for await snapshot in try engine.observe(activeAccountDemand()) {
     // NIP-51 decodes its own kind:10009 list, as itself.
     guard let list = snapshot.rows.first.map(parseSimpleGroupsListTolerant)
     else { continue }
-    // The app selects one entry and discovers groups on its host with NIP-29.
+    // The app selects one entry and names the relay(s) it discovers on with
+    // NIP-29. A group can live on more than one relay, so the app names a SET
+    // -- here a singleton, since the list only carried one host per entry.
     guard let selected = list.items.first else { continue }
-    let discovery = try groupDiscoveryDemand(host: selected.hostRelay)
+    let scope = try NMPRelayScope.on([selected.hostRelay])
+    let group = scope.group(selected.groupID)
     // Content selection is schema/app-owned; NIP-29 does not invent a fixed
     // group content-kind catalog.
 }
@@ -67,15 +70,15 @@ Two exact owners, no wrapper between them:
   codec, replacement construction, and typed list entries — plus every
   evidence field on the decode (malformed item count, private content).
 - NIP-29 owns its group metadata, membership, role, and moderation schemas and
-  its host-scoped operations. It accepts the exact fields an operation needs (a
-  host, a group id) and claims neither kind `10009` nor kind `30002`. It does
-  not depend on the NIP-51 package at all.
+  its scope-narrowed operations. It accepts the exact fields an operation
+  needs (a relay set named once, a group id) and claims neither kind `10009`
+  nor kind `30002`. It does not depend on the NIP-51 package at all.
 
 The underlying kind `10009` demand is rooted at current pubkey and acquired
-through user-list authority, never through the currently selected group host.
-The selected group remains app state. Neither module maintains a parallel
-cache, a second projection of the other's value, or its own subscription
-lifecycle.
+through user-list authority, never through the currently selected group's
+relay scope. The selected group remains app state. Neither module maintains a
+parallel cache, a second projection of the other's value, or its own
+subscription lifecycle.
 
 ## Semantic operations
 
@@ -83,18 +86,20 @@ Protocol operations can own multi-event/state rules that should not leak into
 app code:
 
 ```swift
-let group = try await nip29.createGroup(
-    name: "Research",
-    host: selectedHost,
-    using: engine
-)
+let scope = try NMPRelayScope.on([selectedHost])  // named once, never per-call
+let group = scope.group("research")
 
-let receipt = try group.makeAdmin(pubkey, using: engine)
+let receipt = try group.createGroup(engine: engine, authorPubkeyHex: myPubkeyHex)
+try group.editMetadata(engine: engine, authorPubkeyHex: myPubkeyHex, name: "Research")
+let adminReceipt = try group.addUser(
+    engine: engine, authorPubkeyHex: myPubkeyHex, pubkeyHex: memberPubkeyHex, role: "admin"
+)
 ```
 
 NIP-29 owns the exact management events, tags, validation, group-state
-transition, and host authority required by those operations. The result still
-uses core write receipts.
+transition, and relay-scope authority required by those operations — the app
+never passes a host, a route, or an `h` value to any of them. The result
+still uses core write receipts.
 
 ## Compose foreign drafts without stealing ownership
 
@@ -106,8 +111,8 @@ let receipt = try group.publish(photo, using: engine)
 
 - Blossom owns upload and asset verification.
 - NIP-68 owns the photo event schema.
-- NIP-29 adds only validated group context, including the `h` tag and host
-  authority.
+- NIP-29 adds only validated group context, including the `h` tag and the
+  relay-scope authority the group's write routes to.
 - Core freezes the final body, selects one signer, maintains one canonical row,
   and publishes one intent.
 

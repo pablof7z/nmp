@@ -8,6 +8,14 @@
 //! for the absence of a parameter is the declaration itself, which is also
 //! exactly what `scripts/check-nip29-ownership.sh` reads, so the scenarios and
 //! the gate agree on their evidence by construction.
+//!
+//! #1033 split the door across two files with no `GroupOperations` trait left
+//! anywhere: `crates/nmp/src/nip29/group.rs` declares `Group`'s inherent read
+//! and write methods (`door` below), and `crates/nmp/src/nip29/mod.rs`
+//! declares the `RelayScope` door an app narrows to a `Group` through
+//! (`binding` below, repurposed from "the engine binding" to "the scope
+//! door" -- the field name survives because every consuming `Then` step still
+//! reads it as "the other half of the surface").
 
 use std::collections::BTreeSet;
 
@@ -28,7 +36,7 @@ use super::NmpWorld;
 /// agree on their evidence by construction.
 #[derive(Debug, Default, Clone)]
 pub struct GroupSurface {
-    /// Every method signature declared on the `GroupOperations` trait.
+    /// Every `pub fn` signature declared on `Group`'s own inherent impl.
     pub write_signatures: Vec<String>,
     /// Every `pub fn` the NIP-29 composer module exports.
     pub composer_fns: Vec<String>,
@@ -36,7 +44,7 @@ pub struct GroupSurface {
     pub composer_kinds: BTreeSet<u16>,
     /// The `Group` door's own source, above its test module.
     pub door: String,
-    /// The engine binding's own source.
+    /// The `RelayScope` door's own source, above its test module.
     pub binding: String,
 }
 
@@ -61,22 +69,41 @@ fn shipped_half(source: &str) -> String {
 }
 
 impl NmpWorld {
-    /// Hand the PURE door a draft that carries its own `h` and return what it
+    /// Hand the door a draft that carries its own `h` and return what it
     /// says. Answers a claim about the door rather than about a run: a
     /// scenario that publishes nothing still asserts the refusal is
     /// unconditional.
+    ///
+    /// Contextualization is checked BEFORE the publish door is ever reached
+    /// (`Group::publish` calls `nmp_nip29::contextualize` first), so handing
+    /// this to the real engine still answers the question the old pure-door
+    /// call answered: no signature, no journal row, no receipt, and no relay
+    /// contact -- see [`nmp::nip29::GroupPublishError::Context`].
     pub async fn door_refuses_a_caller_supplied_context(&mut self) -> GroupContextError {
         // The group value needs a bound host, and starting the world contacts
         // nothing on its own -- which the sibling identity scenario proves.
         self.ensure_started().await;
         let group = self.group_value(None);
+        let group_id = self.group_host_group_id();
+        let author = self.me_pubkey();
         let draft = EventBuilder::new(Kind::from(9u16)).tag(
-            Tag::parse(["h", group.id()]).expect("nmp-bdd: a two-value fixture tag is well-formed"),
+            Tag::parse(["h", &group_id]).expect("nmp-bdd: a two-value fixture tag is well-formed"),
         );
-        group
-            .write_intent(draft)
-            .err()
-            .expect("the group door must refuse a caller-supplied h row")
+        let engine = self
+            .engine
+            .as_ref()
+            .expect("nmp-bdd: the engine must be started before probing the door");
+        match group.publish(engine, author, draft) {
+            Err(nmp::nip29::GroupPublishError::Context(error)) => error,
+            Err(nmp::nip29::GroupPublishError::Engine(error)) => panic!(
+                "the group door must refuse a caller-supplied h row before reaching the \
+                 publish door, but the publish door itself refused instead: {error:?}"
+            ),
+            Ok(_) => panic!(
+                "the group door must refuse a caller-supplied h row, but the publication \
+                 was accepted"
+            ),
+        }
     }
 
     /// `When I inspect the group's read/write/operation surface` -- reads the
@@ -94,27 +121,35 @@ impl NmpWorld {
     }
 
     /// The door's declared shape, read fresh off its own source.
+    ///
+    /// #1033 deleted the `GroupOperations` extension trait: every read and
+    /// write method the app calls is now INHERENT on `Group`
+    /// (`crates/nmp/src/nip29/group.rs`, `door` below), narrowed from a
+    /// `RelayScope` (`crates/nmp/src/nip29/mod.rs`, `binding` below). Both are
+    /// read verbatim rather than compiled against, because the claims this
+    /// surface answers are about the SOURCE TEXT declaring a parameter or a
+    /// verb, not about anything a call site could exercise.
     pub fn group_surface(&self) -> GroupSurface {
-        let binding = workspace_source("crates/nmp/src/group.rs");
-        let door = shipped_half(&workspace_source("crates/nmp-nip29/src/group.rs"));
+        let door = shipped_half(&workspace_source("crates/nmp/src/nip29/group.rs"));
+        let binding = shipped_half(&workspace_source("crates/nmp/src/nip29/mod.rs"));
         let composers = shipped_half(&workspace_source("crates/nmp-nip29/src/operations.rs"));
 
-        let trait_body = binding
-            .split_once("pub trait GroupOperations {")
-            .map(|(_, rest)| rest.split("\n}\n").next().unwrap_or(rest).to_string())
-            .expect("nmp-bdd: the GroupOperations trait must be declarable");
         let mut write_signatures = Vec::new();
         let mut current: Option<String> = None;
-        for line in trait_body.lines() {
+        for line in door.lines() {
             let line = line.trim();
-            if line.starts_with("fn ") {
-                current = Some(line.to_string());
+            if line.starts_with("pub fn ") {
+                current = Some(
+                    line.strip_prefix("pub ")
+                        .expect("checked starts_with pub fn ")
+                        .to_string(),
+                );
             } else if let Some(sig) = current.as_mut() {
                 sig.push(' ');
                 sig.push_str(line);
             }
             if let Some(sig) = current.as_ref() {
-                if sig.ends_with(';') {
+                if sig.ends_with('{') || sig.ends_with(';') {
                     write_signatures.push(current.take().expect("checked"));
                 }
             }
