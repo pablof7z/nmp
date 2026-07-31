@@ -124,19 +124,26 @@ guards.
 make the bad state (teardown running twice, or not at all) unrepresentable;
 a bool next to `Drop` only makes it *unlikely*.
 
-**Real example — `owns_executor` (`crates/nmp-signer/src/nip46.rs`).**
-`Session` carries `executor: nmp_executor::Executor` plus `owns_executor: bool`
-(`nip46.rs:720-721`), and `Drop for Session` only calls
-`self.executor.shutdown()` `if self.owns_executor` (`nip46.rs:900-906`).
-Nothing in the type system stops a future call site from constructing a
-`Session` with `owns_executor: true` while the executor is also owned
-elsewhere, or from cloning/relocating the flag out of step with the executor
-handle it is meant to describe — the invariant lives entirely in the
-constructor call sites agreeing with each other. A companion instance in the
-same codebase: `AsyncWait.armed` (`crates/nmp-engine/src/relay_information.rs:1274-1303`)
-gates whether `Drop for AsyncWait` needs to do anything, set to `false` on
-every `Poll::Ready` arm and read once in `drop`. Both are exactly the pattern
-issue #490's ledger calls out under "replace 3 bare-`bool`-`Drop` gates."
+**Real example — `ResolvingOwner.active` (`crates/nmp-ffi/src/auth.rs`).**
+`ResolvingOwner` carries `sender: Option<nmp::AuthPolicyPendingSender>` plus a
+plain `active: bool` (`auth.rs:85-90`), constructed `true` (`auth.rs:102`) and
+flipped to `false` only by `finish()` after it has already driven completion
+state to `Completed` and notified waiters (`auth.rs:113-126`). `Drop for
+ResolvingOwner` re-runs that same completion/notify sequence, but only `if
+!self.active { return; }` skips it (`auth.rs:129-133`). Nothing in the type
+system stops a future call site from cloning/relocating the flag out of step
+with which completion path actually ran, or from adding a second early return
+that forgets to flip it — the invariant that `finish()` and `Drop` never both
+fire the completion sequence lives entirely in the two call sites agreeing
+with each other, not in the type. The two original instances issue #490's
+ledger cited under "replace 3 bare-`bool`-`Drop` gates" — `owns_executor` in
+the deleted NIP-46 signer session, and `AsyncWait.armed` in the pre-#827
+`nmp-engine` crate — are both gone (the former crate was removed with NIP-46
+in #1171, the latter folded into `nmp` and its bool replaced by
+`FlightWaitLifecycle`, an enum, in `crates/nmp/src/relay_information_service.rs`
+— itself a worked example of this gate's fix applied). `ResolvingOwner.active`
+is this gate's current trained-tell example: a plain bool, not an enum or
+`Option::take`, still gating a `Drop` teardown path.
 
 ---
 
