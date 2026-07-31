@@ -111,6 +111,24 @@ pub(crate) struct Graph {
 }
 
 impl Graph {
+    pub(crate) fn allocation_checkpoint(&self) -> NodeId {
+        self.next_id
+    }
+
+    /// Remove every node allocated after `checkpoint` without rewinding the
+    /// monotonic id namespace.
+    ///
+    /// Graph construction is fallible because a derived binding reads the
+    /// store before its parent nodes are installed. A failed subscription
+    /// therefore needs to discard both fully-inserted descendants and ids
+    /// allocated for parents that were never inserted. Keeping `next_id`
+    /// monotonic ensures a failed construction can never make a later live
+    /// node alias an id that briefly existed.
+    pub(crate) fn discard_allocated_after(&mut self, checkpoint: NodeId) {
+        self.nodes.retain(|id, _| *id <= checkpoint);
+        self.meta.retain(|id, _| *id <= checkpoint);
+    }
+
     pub(crate) fn resolution_snapshot(&self, root: NodeId) -> Vec<ResolutionNodeSnapshot> {
         let mut out = Vec::new();
         self.snapshot_filter(root, "$", &mut out);

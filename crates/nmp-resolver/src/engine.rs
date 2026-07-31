@@ -581,7 +581,17 @@ impl<S: EventStore> Engine<S> {
         }
 
         let (source, access) = q.0.atom_context();
-        let root = self.build_filter_node(&q.0.selection, source, access, ParentLink::Root, 0)?;
+        let graph_checkpoint = self.graph.allocation_checkpoint();
+        let root = match self.build_filter_node(&q.0.selection, source, access, ParentLink::Root, 0)
+        {
+            Ok(root) => root,
+            Err(error) => {
+                self.graph.discard_allocated_after(graph_checkpoint);
+                self.reactive_nodes
+                    .retain(|node_id| *node_id <= graph_checkpoint);
+                return Err(error);
+            }
+        };
         self.descriptor_to_root.insert(key.clone(), root);
         self.graph_entries.insert(
             root,
