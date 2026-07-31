@@ -70,7 +70,7 @@ Feature: The h and previous tags belong to the group, not to the caller
   # nmp:id=PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-005
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip29::the_unsigned_door_never_invents_a_previous_tag
-  # nmp:falsifier=appending a previous row from Group::contextualize makes the_unsigned_door_never_invents_a_previous_tag observe a previous row on the minted draft
+  # nmp:falsifier=appending a previous row from nmp_nip29::contextualize makes the_unsigned_door_never_invents_a_previous_tag observe a previous row on the minted draft
   @nip29
   Scenario: The unsigned group-publication door never invents a previous tag
     When I publish an event of kind 9 with content "first light" through the group

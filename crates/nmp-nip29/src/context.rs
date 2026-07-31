@@ -249,9 +249,15 @@ mod tests {
         );
     }
 
-    /// No `previous` row is ever synthesized, on any path, for any draft.
+    /// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-005: the unsigned door never
+    /// INVENTS a `previous` row of its own, on any path, for any draft. This
+    /// is a claim about the unsigned semantic-composition door only -- it
+    /// does not claim there is no way anywhere in the repository for an
+    /// already-signed event to carry a tag shaped like `previous`; the
+    /// pre-signed path (`validate_context`) validates only `h` and preserves
+    /// whatever the caller already signed verbatim.
     #[test]
-    fn publication_never_synthesizes_previous() {
+    fn the_unsigned_door_never_invents_a_previous_tag() {
         let built = contextualize(GROUP, EventBuilder::new(Kind::from(30023u16))).unwrap();
         assert_eq!(rows(&built), vec![vec!["h".to_string(), GROUP.to_string()]]);
     }
@@ -270,17 +276,31 @@ mod tests {
         );
     }
 
+    /// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-001: an unsigned draft already
+    /// carrying THIS group's own `h` is refused before signing or routing --
+    /// the refusal is about who owns the tag, not about which value it holds.
     #[test]
-    fn a_caller_supplied_h_is_refused_whether_or_not_it_matches() {
-        for value in [GROUP, "darkroom"] {
-            let draft = EventBuilder::new(Kind::from(9u16)).tag(Tag::parse(["h", value]).unwrap());
-            assert_eq!(
-                contextualize(GROUP, draft).err(),
-                Some(GroupContextError::CallerSuppliedContext)
-            );
-        }
+    fn caller_supplied_own_h_is_refused_before_signing_or_routing() {
+        let draft = EventBuilder::new(Kind::from(9u16)).tag(Tag::parse(["h", GROUP]).unwrap());
+        assert_eq!(
+            contextualize(GROUP, draft).err(),
+            Some(GroupContextError::CallerSuppliedContext)
+        );
     }
 
+    /// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-002: the same refusal, the same
+    /// error variant, for a draft naming ANOTHER group's `h` -- proving the
+    /// refusal never depends on whether the caller's value happens to match.
+    #[test]
+    fn caller_supplied_other_group_h_is_refused_the_same_way() {
+        let draft = EventBuilder::new(Kind::from(9u16)).tag(Tag::parse(["h", "darkroom"]).unwrap());
+        assert_eq!(
+            contextualize(GROUP, draft).err(),
+            Some(GroupContextError::CallerSuppliedContext)
+        );
+    }
+
+    /// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-003.
     #[test]
     fn a_caller_supplied_previous_is_refused() {
         let draft = EventBuilder::new(Kind::from(9u16)).tag(timeline_tag());
@@ -290,6 +310,100 @@ mod tests {
         );
     }
 
+    /// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-004: a draft carrying BOTH an `h`
+    /// and a `previous` row is refused on whichever tag the caller wrote
+    /// FIRST, never silently trimmed down to one. This is a genuine
+    /// precedence claim, not a fixed "h always wins" shortcut: reversing the
+    /// caller's own tag order reverses which typed error comes back.
+    #[test]
+    fn combined_h_and_previous_is_refused_deterministically_on_whichever_tag_came_first() {
+        let h_first = EventBuilder::new(Kind::from(9u16))
+            .tag(Tag::parse(["h", GROUP]).unwrap())
+            .tag(timeline_tag());
+        assert_eq!(
+            contextualize(GROUP, h_first).err(),
+            Some(GroupContextError::CallerSuppliedContext),
+            "h was the caller's first tag, so the refusal names h, not previous"
+        );
+
+        let previous_first = EventBuilder::new(Kind::from(9u16))
+            .tag(timeline_tag())
+            .tag(Tag::parse(["h", GROUP]).unwrap());
+        assert_eq!(
+            contextualize(GROUP, previous_first).err(),
+            Some(GroupContextError::CallerSuppliedTimeline),
+            "previous was the caller's first tag, so the refusal names previous, not h -- \
+             precedence follows the caller's own tag order, not a fixed check order"
+        );
+    }
+
+    /// PROTOCOL-CONTEXTTAGISSIGNED-001: whatever eventually signs this draft
+    /// receives a builder that already carries exactly one `h` row -- the
+    /// context tag is appended before the builder is handed onward for
+    /// signing, never after.
+    #[test]
+    fn the_builder_handed_onward_for_signing_already_carries_exactly_one_h_row() {
+        let built = contextualize(
+            GROUP,
+            EventBuilder::new(Kind::from(9u16)).content("first light"),
+        )
+        .unwrap();
+        let h_rows: Vec<&Tag> = built
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+            .collect();
+        assert_eq!(h_rows.len(), 1, "exactly one h row: {:?}", built.tags);
+        assert_eq!(h_rows[0].as_slice(), &["h".to_string(), GROUP.to_string()]);
+    }
+
+    /// PROTOCOL-CONTEXTTAGISSIGNED-002: the h row is inside the bytes that
+    /// get signed, so it is covered by both the id and the signature --
+    /// changing it after the fact must invalidate them.
+    #[test]
+    fn the_delivered_event_s_id_and_signature_cover_the_h_tag() {
+        let built = contextualize(
+            GROUP,
+            EventBuilder::new(Kind::from(9u16)).content("first light"),
+        )
+        .unwrap();
+        let keys = Keys::generate();
+        let event = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from(1_700_000_000u64),
+            built.kind,
+            built.tags.clone(),
+            built.content.clone(),
+        )
+        .sign_with_keys(&keys)
+        .expect("fixture keys sign cleanly");
+
+        assert!(
+            event.verify().is_ok(),
+            "the signature and id must verify over the exact delivered bytes, h row included"
+        );
+
+        let mut tampered = event.clone();
+        let without_h: Vec<Tag> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) != Some("h"))
+            .cloned()
+            .collect();
+        assert_ne!(
+            without_h.len(),
+            event.tags.len(),
+            "NOTHING TO OBSERVE -- the delivered event carries no h row to remove"
+        );
+        tampered.tags = without_h.into_iter().collect();
+        assert!(
+            tampered.verify().is_err(),
+            "removing the h row must invalidate the event's own id, proving h was inside \
+             the signed bytes"
+        );
+    }
+
+    /// PROTOCOL-PRESIGNEDPUBLICATION-003.
     #[test]
     fn a_signed_event_with_no_context_is_refused_not_repaired() {
         let event = signed(Vec::new());
@@ -305,6 +419,7 @@ mod tests {
             .any(|t| t.as_slice().first().map(String::as_str) == Some("h")));
     }
 
+    /// PROTOCOL-PRESIGNEDPUBLICATION-004.
     #[test]
     fn a_signed_event_naming_another_group_names_both_in_its_refusal() {
         let event = signed(vec![Tag::parse(["h", "darkroom"]).unwrap()]);
@@ -320,6 +435,7 @@ mod tests {
         assert!(said.contains("darkroom") && said.contains(GROUP), "{said}");
     }
 
+    /// PROTOCOL-PRESIGNEDPUBLICATION-005.
     #[test]
     fn a_signed_event_with_two_context_rows_is_ambiguous() {
         let event = signed(vec![

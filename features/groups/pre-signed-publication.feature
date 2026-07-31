@@ -14,9 +14,9 @@ Feature: A pre-signed event is published unchanged, and its h is validated
 
   # nmp:id=PROTOCOL-PRESIGNEDPUBLICATION-001
   # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::a_correctly_contextualized_signed_event_is_routed_verbatim
-  # nmp:evidence=rust:nmp::a_pre_signed_event_reaches_the_host_byte_identical_on_the_wire
-  # nmp:falsifier=mutating any field of a pre-signed event before publish (a tag, the content, the id) makes a_correctly_contextualized_signed_event_is_routed_verbatim's payload-equality assertion and a_pre_signed_event_reaches_the_host_byte_identical_on_the_wire's delivered-event assertion fail
+  # nmp:evidence=rust:nmp::a_pre_signed_event_is_carried_into_the_minted_intent_byte_for_byte
+  # nmp:evidence=rust:nmp::publish_signed_delivers_the_callers_exact_pre_signed_bytes_to_every_host
+  # nmp:falsifier=mutating any field of a pre-signed event before publish (a tag, the content, the id) makes a_pre_signed_event_is_carried_into_the_minted_intent_byte_for_byte's payload-equality assertion and publish_signed_delivers_the_callers_exact_pre_signed_bytes_to_every_host's delivered-event assertion fail
   @nip29
   Scenario: A correctly contextualised signed event goes out byte for byte
     Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "first light"
@@ -83,7 +83,7 @@ Feature: A pre-signed event is published unchanged, and its h is validated
 
   # nmp:id=PROTOCOL-PRESIGNEDPUBLICATION-006
   # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::the_route_follows_the_group_not_whichever_key_signed_the_pre_signed_event
+  # nmp:evidence=rust:nmp::the_route_follows_the_group_not_whichever_key_signed_the_pre_signed_event
   # nmp:evidence=rust:nmp::a_pre_signed_event_from_another_author_routes_only_to_the_host_never_to_their_own_outbox
   # nmp:falsifier=routing a pre-signed event by its signer's own relay list instead of the group's retained host makes the_route_follows_the_group_not_whichever_key_signed_the_pre_signed_event's route assertion and a_pre_signed_event_from_another_author_routes_only_to_the_host_never_to_their_own_outbox's untouched-outbox assertion fail
   @nip29
