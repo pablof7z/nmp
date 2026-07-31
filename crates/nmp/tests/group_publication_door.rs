@@ -16,7 +16,7 @@
 //! in-process relays rather than by inspecting a minted value:
 //!
 //!   1. a group read/publication routes to the WHOLE relay set as
-//!      `Explicit`, never widened, and never to a discovered author-outbox
+//!      `Explicit`, never widened, and never to a discovered outbox
 //!      relay -- `a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_author_outbox`;
 //!   2. exactly one signed `h` tag reaches the wire, no other context tag --
 //!      folded into the same test, checked at every host;
