@@ -138,6 +138,24 @@ jobs:
       - name: Keep NIP-29 context separate from C7 and client policy
         run: bash scripts/check-nip29-ownership.sh
 
+  # #1122 (PROTOCOL-NIP29OPERATIONS-012/013): the nine NIP-29-owned named
+  # operations, and only those nine, get named composers on every surface --
+  # Rust facade, FFI, Swift, Kotlin -- each taking semantic fields plus a
+  # retained capability, never a raw kind, tag, relay or route. Invoked
+  # directly (not via `bash`) so its exact executable name is this job's own
+  # #1074 evidence locator (`script:repository::scripts/check-nip29-operation-
+  # catalogue.sh`, features/groups/one-typed-group-door.feature).
+  nip29-operation-catalogue:
+    name: NIP-29 exhaustive operation catalogue
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Only the nine modeled operations get named composers, semantic-only
+        run: scripts/check-nip29-operation-catalogue.sh
+
   # NMP keeps no backwards compatibility: a replaced spelling is deleted in the
   # same change. There are no external consumers, so compatibility is a tax
   # paid to strangers who do not exist.

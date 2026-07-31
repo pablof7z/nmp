@@ -1,23 +1,29 @@
 Feature: Every NIP-29 operation crosses one typed group door
   #1122's reserved distinctions for the app-facing group door: identity,
-  routing, and the operation surface's own shape. #1033 is the owning final
-  API -- a retained multi-host relay scope, then a group id, with one
-  ordinary engine publication/receipt path -- and it deletes `Group`'s
-  single-host constructor and `group_discovery_demand` in the same change
-  that replaces them. Proving these distinctions against today's
-  single-host `Group` would hard-code a door #1033 is actively replacing;
-  each scenario here stays `specified`, pointing at #1033, until the final
-  facade lands and can carry the falsifier honestly.
+  routing, and the operation surface's own shape. #1033 landed as
+  `235bed1c` (PR #1173): a retained multi-host `RelayScope`, then a group
+  id, with one ordinary engine publication/receipt path
+  (`crates/nmp/src/nip29/{mod,group,predicate,read}.rs`). `Group::new`'s
+  single-host constructor and `group_discovery_demand` are gone -- no alias,
+  no forwarding wrapper. Every distinction below is now proved against that
+  final facade.
 
-  The legacy `features/groups/*.feature` fixture still describes this
-  behavior in prose; it is not deleted here because equal-or-stronger
-  governed evidence does not exist yet for these eight distinctions
-  (`docs/internals/nip29/group-publication.md` sections 1-9).
+  `scripts/check-nip29-ownership.sh` proves the door's STRUCTURE (the
+  banned pre-#1033 spellings stay gone, the `RelayScope`/`Group` shape is
+  present, the two #1033 routing/source-stamping falsifiers exist).
+  `scripts/check-nip29-operation-catalogue.sh` proves the exhaustive
+  nine-name operation catalogue and its exact per-surface parameter shape.
+  This feature proves BEHAVIOUR: what an app can actually observe happen
+  (or not happen) when it uses the door.
+
+  The legacy `features/groups/*.feature` fixture is retired for the eight
+  distinctions this file now carries as `built` -- equal-or-stronger
+  governed evidence exists for all of them.
 
   # nmp:id=PROTOCOL-GROUPISANIDENTITY-001
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1033
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::constructing_a_group_scope_and_a_group_contacts_no_relay
+  # nmp:falsifier=Neither `nip29::on` nor `RelayScope::group` takes an `Engine`, so there is no spelling that could reach the network; proved against a REAL running relay (contact_count/wire_record both stay at zero) rather than taken on the type signature alone, so a hidden global/lazy connection would still be caught.
   @nip29
   Scenario: Constructing a group scope contacts nothing
     When I construct the group scope and do nothing else
@@ -26,9 +32,9 @@ Feature: Every NIP-29 operation crosses one typed group door
     And no query was sent to any relay
 
   # nmp:id=PROTOCOL-GROUPISANIDENTITY-002
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1033
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_join_request_is_publishable_with_no_subscription_at_all
+  # nmp:falsifier=`engine.observe` is never called anywhere in the falsifier; it asserts on the relay's own decoded wire log (`ScriptedRelay::wire_record().reqs`) staying empty even after the join request is fully acked -- a regression that opened a hidden subscription before writing would fail this exact assertion.
   @nip29
   Scenario: A join request is publishable with no subscription at all
     Given I have never observed anything from this group
@@ -38,9 +44,9 @@ Feature: Every NIP-29 operation crosses one typed group door
     And the publication did not require a read to succeed first
 
   # nmp:id=PROTOCOL-GROUPISANIDENTITY-003
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1033
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_join_request_is_delivered_while_the_same_groups_read_reports_one_hosts_refusal_as_an_explicit_fact_and_never_as_a_false_empty
+  # nmp:falsifier=Performed: mutating `Group::read_branches` to collapse every host's branch onto the SAME (refusing) host makes the healthy host's row and its `AcquisitionEvidence` source both disappear -- the live query then times out waiting for host B's row/source, a real observed failure (20s timeout, `rows=[]`) restored to green after reverting the mutation.
   @nip29
   Scenario: I can write into a group whose content one host refuses to let me read
     Given a host refuses my reads until I am a member
@@ -51,9 +57,9 @@ Feature: Every NIP-29 operation crosses one typed group door
     And the query does not report the group as empty because of it
 
   # nmp:id=PROTOCOL-GROUPISANIDENTITY-004
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1033
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_of_its_own
+  # nmp:falsifier=One `Group` binding, never reconstructed, mints two reads and two writes; the second write happens AFTER both reads' subscriptions are dropped -- if the handle secretly owned a lifecycle tied to either subscription, that second write would fail rather than deliver and ack normally.
   @nip29
   Scenario: One retained group handle mints every read and every write across its lifetime, with no lifecycle of its own
     Given a filter selecting kind 9
@@ -66,9 +72,9 @@ Feature: Every NIP-29 operation crosses one typed group door
     And the handle owns no subscription lifecycle of its own
 
   # nmp:id=PROTOCOL-NIP29OPERATIONS-009
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1033
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_moderation_rejection_reports_the_hosts_exact_message_and_is_never_accepted
+  # nmp:falsifier=Performed: mutating `classify_relay_ack` (crates/nmp/src/core/mod.rs) to reclassify the `restricted` OK prefix as `RelayAckClass::Transient` instead of `Rejected` makes the receipt stream loop on `RetryEligible`/re-`Sent` forever instead of ever producing `Rejected` -- a real observed 20s timeout, restored to green after reverting the mutation.
   @nip29
   Scenario: A moderation action the host refuses surfaces truthfully
     Given I am not an admin of the group
@@ -80,9 +86,9 @@ Feature: Every NIP-29 operation crosses one typed group door
     And no other relay was tried
 
   # nmp:id=PROTOCOL-NIP29OPERATIONS-010
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1033
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_moderation_rejection_is_a_host_fact_not_a_routing_failure
+  # nmp:falsifier=Same performed mutation as NIP29OPERATIONS-009 (`restricted` reclassified as `Transient`): this falsifier additionally asserts no `GaveUp`/`Failed`/`RoutePersistenceBlocked` status ever appears and that the OTHER host in a two-host scope acks independently -- both held under the mutation's real failure and were restored to green with it.
   @nip29
   Scenario: A refused moderation action is reported as a relay rejection, not a guess
     Given I am not an admin of the group
@@ -93,9 +99,9 @@ Feature: Every NIP-29 operation crosses one typed group door
     And NMP made no claim of its own about my permissions in the group
 
   # nmp:id=PROTOCOL-NIP29OPERATIONS-012
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1033
+  # nmp:status=built
+  # nmp:evidence=script:repository::scripts/check-nip29-operation-catalogue.sh
+  # nmp:falsifier=Performed: adding a `kind: nostr::Kind` parameter to `Group::join_request` in `crates/nmp/src/nip29/group.rs` makes the script fail with "named operation `join_request` takes a raw kind, tag, relay or route parameter"; reverting restores the `ok` exit.
   @nip29
   Scenario: Every named operation takes semantic fields and a retained group capability, never a raw kind, tag, relay or route
     When I inspect the compiled Rust, Swift and Kotlin group operation surface
@@ -105,9 +111,9 @@ Feature: Every NIP-29 operation crosses one typed group door
     And no named operation accepts a relay or a route
 
   # nmp:id=PROTOCOL-NIP29OPERATIONS-013
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1033
+  # nmp:status=built
+  # nmp:evidence=script:repository::scripts/check-nip29-operation-catalogue.sh
+  # nmp:falsifier=Performed: adding a decoy `sendReaction(engine:authorPubkeyHex:emoji:)` method to `Packages/NMP/Sources/NMP/NIP29.swift`'s `NMPGroup` makes the script fail ("named-operation catalogue is not exactly the nine modeled operations"); reverting restores the `ok` exit.
   @nip29
   Scenario: Only deliberately modeled NIP-29 operations get named composers, on every surface
     When I inspect the group operation surface across Rust, FFI, Swift and Kotlin

@@ -44,20 +44,18 @@ mod tests {
     /// the exact live set rather than fetching it; a governed scenario that
     /// names any other issue is a real traceability bug this test must
     /// catch, not silently pass.
+    ///
+    /// Empty as of #1122's `PROTOCOL-GROUPISANIDENTITY-*`/door-shape-
+    /// dependent `PROTOCOL-NIP29OPERATIONS-*` records going `built` against
+    /// the landed #1033 relay-scope/group facade: no governed scenario
+    /// names an open issue any more.
     struct KnownLiveIssues;
 
     impl IssueLookup for KnownLiveIssues {
         fn state(&self, issue: u64) -> Result<IssueState, TraceError> {
-            match issue {
-                // #1033 owns the final NIP-29 relay-scope/group facade that
-                // PROTOCOL-GROUPISANIDENTITY-* and the door-shape-dependent
-                // PROTOCOL-NIP29OPERATIONS-* records are `specified` against
-                // (#1122). Confirmed open at authoring time.
-                1033 => Ok(IssueState::Open),
-                other => Err(TraceError(format!(
-                    "real fixture unexpectedly requested untracked issue #{other}"
-                ))),
-            }
+            Err(TraceError(format!(
+                "real fixture unexpectedly requested untracked issue #{issue}"
+            )))
         }
     }
 
