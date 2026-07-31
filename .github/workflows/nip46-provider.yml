@@ -5,6 +5,10 @@ on:
     branches: [master]
   pull_request:
 
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+
 jobs:
   change-routing:
     name: NIP-46 change routing

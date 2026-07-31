@@ -940,12 +940,15 @@ fn ensure_digest(value: &str, field: &str) -> Result<()> {
 
 fn ensure_target_token(value: &str) -> Result<()> {
     ensure!(
-        value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            && value.as_bytes()[0].is_ascii_alphanumeric()
-            && !value.ends_with('-')
-            && !value.contains("--"),
+        value.split('-').all(|segment| {
+            !segment.is_empty()
+                && segment.as_bytes()[0].is_ascii_alphanumeric()
+                && segment.as_bytes()[segment.len() - 1].is_ascii_alphanumeric()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                && !segment.contains("__")
+        }),
         "attestation target is not a stable Rust target token"
     );
     Ok(())
@@ -1419,6 +1422,14 @@ mod tests {
         let target = "aarch64-apple-darwin";
         let valid = parse_attestation_bytes(&attestation_record(core_attestation(target))).unwrap();
         validate_attestation(&valid, &CORE_AUTHORITY, target).unwrap();
+
+        let linux_target = "x86_64-unknown-linux-gnu";
+        validate_attestation(
+            &core_attestation(linux_target),
+            &CORE_AUTHORITY,
+            linux_target,
+        )
+        .unwrap();
     }
 
     #[test]

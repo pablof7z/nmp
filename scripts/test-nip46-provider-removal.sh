@@ -9,6 +9,12 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/nmp-nip46-removal.XXXXXX")
 trap 'rm -rf "$TEMP_ROOT"' EXIT
 
+# Component build scripts deliberately use nested `--frozen` Cargo queries so
+# identity computation cannot mutate the lock or reach the network. Populate
+# the shared cache from the intact locked workspace before copying/removing
+# provider packages; the isolated proof then remains truly frozen.
+(cd "$ROOT" && cargo fetch --locked)
+
 COPY="$TEMP_ROOT/repo"
 mkdir -p "$COPY"
 (
@@ -25,6 +31,11 @@ mkdir -p "$COPY"
     --exclude=gen-kotlin-nip46 \
     -cf - .
 ) | (cd "$COPY" && tar -xf -)
+
+# A developer checkout may contain ignored, deliberately sealed package
+# payloads. Only directory writability is needed to delete them from this
+# disposable copy and to clean the temporary tree; never alter the source.
+find "$COPY" -type d -exec chmod u+w {} +
 
 rm -rf \
   "$COPY/crates/nmp-nip46" \
