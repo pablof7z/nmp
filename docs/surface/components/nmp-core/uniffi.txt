@@ -7878,36 +7878,6 @@ function Function {
 }
 
 function Function {
-    name: "nmp_core_component_identity",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [],
-    return_type: Some(
-        String,
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_nmp_core_component_identity",
-        is_async: false,
-        arguments: [],
-        return_type: Some(
-            RustBuffer(
-                None,
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "Return the loaded core library's exact native component identity.\n\nThis value is plain data by design: a provider can compare it before\nrequesting or lowering [`FfiSignerMailbox`].",
-    ),
-    throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_nmp_core_component_identity",
-    checksum: Some(
-        14080,
-    ),
-}
-
-function Function {
     name: "parse_nostr_content",
     module_path: "nmp_ffi",
     is_async: false,
@@ -9667,104 +9637,6 @@ object Object {
 }
 
 object Object {
-    name: "FfiSignerMailbox",
-    imp: Struct,
-    module_path: "nmp_ffi",
-    remote: false,
-    constructors: [],
-    methods: [],
-    uniffi_traits: [],
-    trait_impls: [],
-    ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_ffisignermailbox",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiSignerMailbox",
-                ),
-            },
-        ],
-        return_type: Some(
-            RustArcPtr(
-                "FfiSignerMailbox",
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_ffisignermailbox",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiSignerMailbox",
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: true,
-        is_object_free_function: true,
-    },
-    ffi_init_callback: None,
-    docstring: Some(
-        "Opaque provider mailbox bound to one exact core engine.\n\nNative provider components consume this external UniFFI object rather than\nimporting or mirroring `NmpEngine`. Its Rust-only operations are the\nordinary generic signer door and the engine-owned adapter runtime already\nused by supported provider sessions. Construction is sealed inside core:\nlinked crates can receive this object only from\n[`NmpEngine::signer_mailbox`](crate::facade::NmpEngine::signer_mailbox).\n\n```compile_fail\nlet _ = nmp_ffi::signer::FfiSignerMailbox::from_engine(panic!());\n```",
-    ),
-}
-
-object Object {
-    name: "FfiSignerRegistration",
-    imp: Struct,
-    module_path: "nmp_ffi",
-    remote: false,
-    constructors: [],
-    methods: [],
-    uniffi_traits: [],
-    trait_impls: [],
-    ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_ffisignerregistration",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiSignerRegistration",
-                ),
-            },
-        ],
-        return_type: Some(
-            RustArcPtr(
-                "FfiSignerRegistration",
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_ffisignerregistration",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiSignerRegistration",
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: true,
-        is_object_free_function: true,
-    },
-    ffi_init_callback: None,
-    docstring: Some(
-        "Opaque proof for one exact provider capability installation.\n\nThe value is intentionally provider-neutral. A provider retains it only\nlong enough to detach the exact installation it created; it cannot select\nanother signer or remove a replacement registered for the same key.",
-    ),
-}
-
-object Object {
     name: "NmpDiagnosticsStream",
     imp: Struct,
     module_path: "nmp_ffi",
@@ -11106,49 +10978,6 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_sign_event",
             checksum: Some(
                 26885,
-            ),
-        },
-        Method {
-            name: "signer_mailbox",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "FfiSignerMailbox",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_signer_mailbox",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "FfiSignerMailbox",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Return the protocol-neutral, opaque attachment mailbox consumed by\noptional signer-provider components. The mailbox shares this exact\nengine lifecycle; it is not another engine or a provider registry.",
-            ),
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_signer_mailbox",
-            checksum: Some(
-                59488,
             ),
         },
         Method {
