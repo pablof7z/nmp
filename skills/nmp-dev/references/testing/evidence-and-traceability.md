@@ -70,9 +70,12 @@ that owns the proof. Comments, environment notes, manual-only workflows,
 ignored failures, masked/dead shell commands, and other scalar lookalikes do
 not create a lane. Disabling shell errexit or following the proof command with
 any later command can mask failure and is rejected: the proof must be the
-terminal command in its shell or subshell context. Live evidence additionally
-requires `on.workflow_dispatch`, the exact enabled target under `jobs`, a
-positive `timeout-minutes`, and an enabled executable run step.
+terminal command in its shell or subshell context. The step must name its proof
+tool directly — `cargo`, `swift`, the repository-owned Gradle wrapper, or the
+exact repository script path — with no environment prefix, and a non-Bash
+`shell:` carries no lane claim. Live evidence additionally requires
+`on.workflow_dispatch`, the exact enabled target under `jobs`, a positive
+`timeout-minutes`, and an enabled executable run step.
 
 All corpus and evidence paths must resolve to repository-owned regular files
 through repository-owned directories. Symlink-backed feature files, workflow

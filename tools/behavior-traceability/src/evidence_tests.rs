@@ -521,75 +521,55 @@ fn deterministic_lane_must_be_required_failure_propagating_and_reachable() {
     let fixture = resolver_fixture();
     let workflow = fixture.path().join(".github/workflows/ci.yml");
     for (trigger, continue_on_error, command) in [
-        (
-            "workflow_dispatch",
-            None,
-            "/home/runner/.cargo/bin/cargo test --workspace",
-        ),
+        ("workflow_dispatch", None, "cargo test --workspace"),
         (
             "[push, pull_request]",
             Some("true"),
-            "/home/runner/.cargo/bin/cargo test --workspace",
+            "cargo test --workspace",
         ),
         (
             "[push, pull_request]",
             Some("${{ matrix.experimental }}"),
-            "/home/runner/.cargo/bin/cargo test --workspace",
+            "cargo test --workspace",
+        ),
+        ("[push, pull_request]", None, "echo cargo test --workspace"),
+        (
+            "[push, pull_request]",
+            None,
+            "false && cargo test --workspace",
         ),
         (
             "[push, pull_request]",
             None,
-            "echo /home/runner/.cargo/bin/cargo test --workspace",
+            "cargo test --workspace || true",
         ),
         (
             "[push, pull_request]",
             None,
-            "false && /home/runner/.cargo/bin/cargo test --workspace",
+            "cargo test --workspace | tee test.log",
         ),
         (
             "[push, pull_request]",
             None,
-            "/home/runner/.cargo/bin/cargo test --workspace || true",
+            "set +e; cargo test --workspace; true",
         ),
+        ("[push, pull_request]", None, "cargo test --workspace; true"),
         (
             "[push, pull_request]",
             None,
-            "/home/runner/.cargo/bin/cargo test --workspace | tee test.log",
+            "set +o errexit; cargo test --workspace; exit 0",
         ),
+        ("[push, pull_request]", None, "cargo test --workspace; :"),
         (
             "[push, pull_request]",
             None,
-            "set +e; /home/runner/.cargo/bin/cargo test --workspace; true",
+            "cargo test --workspace; echo masked",
         ),
+        ("[push, pull_request]", None, "cargo test --workspace &"),
         (
             "[push, pull_request]",
             None,
-            "/home/runner/.cargo/bin/cargo test --workspace; true",
-        ),
-        (
-            "[push, pull_request]",
-            None,
-            "set +o errexit; /home/runner/.cargo/bin/cargo test --workspace; exit 0",
-        ),
-        (
-            "[push, pull_request]",
-            None,
-            "/home/runner/.cargo/bin/cargo test --workspace; :",
-        ),
-        (
-            "[push, pull_request]",
-            None,
-            "/home/runner/.cargo/bin/cargo test --workspace; echo masked",
-        ),
-        (
-            "[push, pull_request]",
-            None,
-            "/home/runner/.cargo/bin/cargo test --workspace &",
-        ),
-        (
-            "[push, pull_request]",
-            None,
-            "(cd .; /home/runner/.cargo/bin/cargo test --workspace; echo masked)",
+            "(cd .; cargo test --workspace; echo masked)",
         ),
     ] {
         fs::write(
@@ -598,7 +578,7 @@ fn deterministic_lane_must_be_required_failure_propagating_and_reachable() {
                 trigger,
                 "ubuntu-latest",
                 None,
-                CLOSED_PROOF_SHELL,
+                "",
                 continue_on_error,
                 command,
             ),
@@ -614,35 +594,21 @@ fn deterministic_lane_must_be_required_failure_propagating_and_reachable() {
 }
 
 #[test]
-fn proof_step_requires_the_exact_runner_shell_and_one_closed_command() {
+fn proof_step_requires_the_known_runner_shell_family_and_one_closed_command() {
     let fixture = resolver_fixture();
     let workflow = fixture.path().join(".github/workflows/ci.yml");
     for (runner, shell, command) in [
+        ("macos-14", None, "cargo test --workspace"),
+        // A non-Bash interpreter means the `run` scalar is not the shell
+        // command this grammar reads, so it carries no lane claim.
+        ("ubuntu-latest", Some("pwsh {0}"), "cargo test --workspace"),
         (
             "ubuntu-latest",
-            None,
-            "/home/runner/.cargo/bin/cargo test --workspace",
+            Some("python {0}"),
+            "cargo test --workspace",
         ),
-        (
-            "ubuntu-latest",
-            Some("/bin/bash --noprofile --norc -e -o pipefail {0}"),
-            "/home/runner/.cargo/bin/cargo test --workspace",
-        ),
-        (
-            "macos-14",
-            Some(CLOSED_PROOF_SHELL),
-            "/home/runner/.cargo/bin/cargo test --workspace",
-        ),
-        (
-            "ubuntu-latest",
-            Some(CLOSED_PROOF_SHELL),
-            "echo setup; /home/runner/.cargo/bin/cargo test --workspace",
-        ),
-        (
-            "ubuntu-latest",
-            Some(CLOSED_PROOF_SHELL),
-            "(cd .; /home/runner/.cargo/bin/cargo test --workspace)",
-        ),
+        ("ubuntu-latest", None, "echo setup; cargo test --workspace"),
+        ("ubuntu-latest", None, "(cd .; cargo test --workspace)"),
     ] {
         fs::write(
             &workflow,
@@ -670,9 +636,9 @@ fn proof_step_requires_the_exact_runner_shell_and_one_closed_command() {
             "[push, pull_request]",
             "ubuntu-latest",
             None,
-            CLOSED_PROOF_SHELL,
+            "",
             None,
-            "/home/runner/.cargo/bin/cargo test --workspace",
+            "cargo test --workspace",
         ),
     )
     .unwrap();
@@ -727,25 +693,25 @@ fn command_spelling_cannot_substitute_for_provenance() {
             "rust:owner::rust_proof",
             "ubuntu-latest",
             None,
-            "function /home/runner/.cargo/bin/cargo { return 0; }\n/home/runner/.cargo/bin/cargo test --workspace",
+            "function cargo { return 0; }\ncargo test --workspace",
         ),
         (
             "rust:owner::rust_proof",
             "ubuntu-lookalike",
             None,
-            "/home/runner/.cargo/bin/cargo test --workspace",
+            "cargo test --workspace",
         ),
         (
             "rust:owner::rust_proof",
             "ubuntu-latest",
             None,
-            "/home/runner/.cargo/bin/cargo test --workspace shadow_filter",
+            "cargo test --workspace shadow_filter",
         ),
         (
             "rust:owner::rust_proof",
             "ubuntu-latest",
             None,
-            "/home/runner/.cargo/bin/cargo test --workspace --no-run",
+            "cargo test --workspace --no-run",
         ),
         (
             "swift:SwiftOwner::testSwiftProof",
@@ -757,7 +723,7 @@ fn command_spelling_cannot_substitute_for_provenance() {
             "swift:SwiftOwner::testSwiftProof",
             "macos-14",
             Some("Packages/SwiftOwner"),
-            "function /usr/bin/xcrun { return 0; }\n/usr/bin/xcrun --run swift test",
+            "function /usr/bin/xcrun { return 0; }\nswift test",
         ),
         (
             "swift:SwiftOwner::testSwiftProof",
@@ -769,7 +735,7 @@ fn command_spelling_cannot_substitute_for_provenance() {
             "swift:SwiftOwner::testSwiftProof",
             "macos-14",
             Some("Packages/SwiftOwner"),
-            "/usr/bin/xcrun --run swift test --filter shadow",
+            "swift test --filter shadow",
         ),
         (
             "kotlin:KotlinOwner::kotlinProof",
@@ -826,7 +792,7 @@ fn command_spelling_cannot_substitute_for_provenance() {
                 "[push, pull_request]",
                 runner,
                 working_directory,
-                CLOSED_PROOF_SHELL,
+                "",
                 None,
                 command,
             ),
@@ -842,30 +808,6 @@ fn command_spelling_cannot_substitute_for_provenance() {
             "{locator} accepted shadow command:\n{command}"
         );
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn privileged_proof_shell_ignores_inherited_functions_and_bash_env() {
-    let fixture = tempdir().unwrap();
-    let bash_env = fixture.path().join("bash-env");
-    fs::write(&bash_env, "false() { return 0; }\n").unwrap();
-    let status = Command::new("/bin/bash")
-        .args([
-            "--noprofile",
-            "--norc",
-            "-p",
-            "-e",
-            "-o",
-            "pipefail",
-            "-c",
-            "false",
-        ])
-        .env("BASH_FUNC_false%%", "() { return 0; }")
-        .env("BASH_ENV", bash_env)
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(1));
 }
 
 #[test]
@@ -1075,8 +1017,6 @@ fn assert_rust_locator_error(fixture: &tempfile::TempDir, target: &str, expected
     );
 }
 
-const CLOSED_PROOF_SHELL: &str = "/bin/bash --noprofile --norc -p -e -o pipefail {0}";
-
 fn lane_workflow(
     trigger: &str,
     runner: &str,
@@ -1164,25 +1104,21 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - shell: /bin/bash --noprofile --norc -p -e -o pipefail {0}
-        run: /home/runner/.cargo/bin/cargo test --workspace
+      - run: cargo test --workspace
   swift:
     runs-on: macos-14
     steps:
       - working-directory: Packages/SwiftOwner
-        shell: /bin/bash --noprofile --norc -p -e -o pipefail {0}
-        run: /usr/bin/xcrun --run swift test
+        run: swift test
   kotlin:
     runs-on: ubuntu-latest
     steps:
       - working-directory: Packages/KotlinOwner
-        shell: /bin/bash --noprofile --norc -p -e -o pipefail {0}
         run: ./gradlew test
   script:
     runs-on: ubuntu-latest
     steps:
-      - shell: /bin/bash --noprofile --norc -p -e -o pipefail {0}
-        run: scripts/proof.sh
+      - run: scripts/proof.sh
 "#,
     )
     .unwrap();

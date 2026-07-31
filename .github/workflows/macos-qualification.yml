@@ -57,10 +57,7 @@ jobs:
 
       - name: Test the Swift package
         if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
-        # xcrun is the system-owned tool resolver; privileged, profile-free
-        # Bash refuses inherited functions and BASH_ENV command shadows.
-        shell: /bin/bash --noprofile --norc -p -e -o pipefail {0}
-        run: /usr/bin/xcrun --run swift test
+        run: swift test
         working-directory: Packages/NMP
 
       # These archive-local maps took 11 seconds in the measured baseline.
@@ -90,6 +87,5 @@ jobs:
 
       - name: Test the selectable NIP-46 provider package
         if: ${{ !cancelled() && steps.apple_components.outcome == 'success' }}
-        shell: /bin/bash --noprofile --norc -p -e -o pipefail {0}
-        run: /usr/bin/xcrun --run swift test
+        run: swift test
         working-directory: Packages/NMPNip46

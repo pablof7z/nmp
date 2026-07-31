@@ -107,14 +107,21 @@ non-ignored names reported by normal libtest harnesses; dead or feature-gated
 files, other packages, custom harnesses, failed builds/lists, and ambiguous
 names cannot become evidence. Build scripts, proc macros, and harness
 initialization therefore run only inside this credential-free bounded phase.
-Executable evidence maps only to a closed proof-step grammar: one explicit
-`run` command under `/bin/bash --noprofile --norc -p -e -o pipefail {0}` on a
-known hosted-runner family. Privileged, profile-free Bash ignores inherited
-functions and `BASH_ENV`; the command must then name the hosted Cargo path,
-system `xcrun`, or the exact repository-owned Gradle/script path. Setup,
-wrappers, shell control flow, PATH lookup, aliases, functions, substitutions,
-and trailing commands are not proof. This is a provenance boundary, not a
-list of suspicious spellings.
+Executable evidence maps only to a closed proof-step grammar: one whole `run`
+command on a known hosted-runner family, under the runner's ordinary Bash, that
+names its proof tool directly — `cargo`, `swift`, the repository-owned Gradle
+wrapper, or the exact repository script path. Setup steps, wrappers, shell
+control flow, environment prefixes, substitutions, backgrounding, and any
+trailing command are not proof: the proof must be the terminal command in its
+shell context, and a step that disables errexit or follows the proof with
+anything else is rejected. A non-Bash `shell:` carries no lane claim at all.
+
+This grammar decides *whether a required lane runs the named proof*, not
+whether that lane's shell can be subverted from inside the workflow that owns
+it. `.github/workflows/ci.yml` is an owner-protected path of the
+surface-governance migration policy, so a pull request cannot introduce a
+command shadow there without owner authorization; that protection, not this
+grammar, is what keeps the mapped lane honest.
 
 ```text
 features/

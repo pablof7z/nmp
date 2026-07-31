@@ -1477,13 +1477,13 @@ fn positive_integer(value: &YamlValue) -> Option<u64> {
 }
 
 fn rust_lane_runs(step: &WorkflowRunStep<'_>, owner: &str) -> bool {
-    let Some(command) = closed_proof_command(step) else {
+    let Some(command) = single_proof_command(step) else {
         return false;
     };
-    let Some((executable, arguments)) = executable_and_arguments(&command) else {
+    let Some((executable, arguments)) = proof_executable_and_arguments(&command) else {
         return false;
     };
-    if step.runner != "ubuntu-latest" || executable != "/home/runner/.cargo/bin/cargo" {
+    if step.runner != "ubuntu-latest" || executable != "cargo" {
         return false;
     }
     arguments_equal(arguments, &["test", "--workspace"])
@@ -1501,32 +1501,29 @@ fn rust_lane_runs(step: &WorkflowRunStep<'_>, owner: &str) -> bool {
 }
 
 fn swift_lane_runs(step: &WorkflowRunStep<'_>, owner: &str) -> bool {
-    let Some(command) = closed_proof_command(step) else {
+    let Some(command) = single_proof_command(step) else {
         return false;
     };
-    let Some((executable, arguments)) = executable_and_arguments(&command) else {
+    let Some((executable, arguments)) = proof_executable_and_arguments(&command) else {
         return false;
     };
     step.runner == "macos-14"
-        && executable == "/usr/bin/xcrun"
+        && executable == "swift"
         && ((working_directory_names_owner(step.working_directory, owner)
-            && arguments_equal(arguments, &["--run", "swift", "test"]))
+            && arguments_equal(arguments, &["test"]))
             || (step.working_directory.is_none()
-                && arguments.len() == 5
-                && arguments_equal(
-                    &arguments[..4],
-                    &["--run", "swift", "test", "--package-path"],
-                )
+                && arguments.len() == 3
+                && arguments_equal(&arguments[..2], &["test", "--package-path"])
                 && arguments
-                    .get(4)
+                    .get(2)
                     .is_some_and(|path| path_names_owner(path, owner))))
 }
 
 fn kotlin_lane_runs(step: &WorkflowRunStep<'_>, owner: &str) -> bool {
-    let Some(command) = closed_proof_command(step) else {
+    let Some(command) = single_proof_command(step) else {
         return false;
     };
-    let Some((executable, arguments)) = executable_and_arguments(&command) else {
+    let Some((executable, arguments)) = proof_executable_and_arguments(&command) else {
         return false;
     };
     step.runner == "ubuntu-latest"
@@ -1539,10 +1536,10 @@ fn kotlin_lane_runs(step: &WorkflowRunStep<'_>, owner: &str) -> bool {
 }
 
 fn script_lane_runs(step: &WorkflowRunStep<'_>, target: &str) -> bool {
-    let Some(command) = closed_proof_command(step) else {
+    let Some(command) = single_proof_command(step) else {
         return false;
     };
-    let Some((executable, arguments)) = executable_and_arguments(&command) else {
+    let Some((executable, arguments)) = proof_executable_and_arguments(&command) else {
         return false;
     };
     (step.runner == "ubuntu-latest" || step.runner == "macos-14")
@@ -1592,11 +1589,35 @@ fn executable_and_arguments(segment: &[String]) -> Option<(&str, &[String])> {
     Some((executable, &segment[index + 1..]))
 }
 
-const CLOSED_PROOF_SHELL: &str = "/bin/bash --noprofile --norc -p -e -o pipefail {0}";
-
-fn closed_proof_command(step: &WorkflowRunStep<'_>) -> Option<Vec<String>> {
-    if step.shell != Some(CLOSED_PROOF_SHELL) {
+/// The exact executable and arguments a proof step names, with no leading
+/// environment prefix.
+///
+/// `executable_and_arguments` deliberately sees through `env`/`NAME=value`
+/// prefixes so masking analysis can read the real command. A lane claim is a
+/// stricter thing: the step must name its proof tool directly, so
+/// `PATH=./shadow cargo test` and `env BASH_FUNC_cargo%%=... /bin/bash -c ...`
+/// are not a lane at all.
+fn proof_executable_and_arguments(segment: &[String]) -> Option<(&str, &[String])> {
+    let (executable, arguments) = segment.split_first()?;
+    if is_environment_assignment(executable) || executable == "env" {
         return None;
+    }
+    Some((executable.as_str(), arguments))
+}
+
+/// One whole proof command, read from a step whose shell is the runner's
+/// ordinary Bash.
+///
+/// A non-Bash `shell:` (`pwsh`, `python`, a custom interpreter) means the `run`
+/// scalar is not the shell command this grammar can read, so it cannot carry a
+/// lane claim. Everything else about masking, control flow, and trailing
+/// commands is decided from the command text itself.
+fn single_proof_command(step: &WorkflowRunStep<'_>) -> Option<Vec<String>> {
+    if let Some(shell) = step.shell {
+        let interpreter = shell.split_whitespace().next().unwrap_or(shell);
+        if executable_name(interpreter) != "bash" {
+            return None;
+        }
     }
     let command = step.command.trim();
     if command.is_empty()
