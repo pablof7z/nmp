@@ -5,19 +5,38 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
-use nmp_ffi::types::FfiFilter;
+use nmp_ffi::types::{FfiFilter, FfiFrame};
 
 /// Consume every immediately-available frame (an observation delivers its
-/// initial current-state frame on open) so a subsequent `next()` genuinely
-/// parks on an empty mailbox. The timed-out `next()` future is dropped
-/// mid-poll, which releases the single-reader guard (RAII) — proving that path
-/// too.
+/// initial current-state frame on open) so a subsequent ticket genuinely parks
+/// on an empty mailbox. The timed-out `receive()` future is dropped mid-poll,
+/// then the pre-existing ticket is aborted — the exact Kotlin wrapper order.
 async fn quiesce(stream: &NmpRowStream) {
-    while tokio::time::timeout(Duration::from_millis(150), stream.next())
-        .await
-        .is_ok()
-    {}
+    loop {
+        let pull = stream.begin_next().expect("stream is open");
+        match tokio::time::timeout(Duration::from_millis(150), pull.receive()).await {
+            Ok(Ok(Some(_))) => pull.commit().expect("delivered frame commits"),
+            Ok(Ok(None)) => {
+                pull.commit().expect("terminal result commits");
+                break;
+            }
+            Ok(Err(error)) => panic!("unexpected row-pull error: {error}"),
+            Err(_) => {
+                pull.abort();
+                break;
+            }
+        }
+    }
+}
+
+async fn next_committed(stream: &NmpRowStream) -> Option<FfiFrame> {
+    let pull = stream.begin_next().expect("stream is open");
+    let frame = pull.receive().await.expect("ticket lifecycle is valid");
+    pull.commit()
+        .expect("foreign completion commits the ticket");
+    frame
 }
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -84,10 +103,9 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
 
     // Acceptance #2: every observation receives its initial/current state over
     // the async pull path.
-    let initial = tokio::time::timeout(Duration::from_secs(5), rows[0].next())
+    let initial = tokio::time::timeout(Duration::from_secs(5), next_committed(&rows[0]))
         .await
-        .expect("a row observation delivers its initial frame within 5s")
-        .expect("row next() is not a misuse");
+        .expect("a row observation delivers its initial frame within 5s");
     assert!(
         initial.is_some(),
         "a row observation yields its initial current-state frame"
@@ -112,8 +130,8 @@ async fn cancel_wakes_a_parked_next_to_none_and_is_idempotent() {
     let stream = engine.observe(note_query(), None).expect("opens");
     quiesce(&stream).await;
 
-    let reader = stream.clone();
-    let waiter = tokio::spawn(async move { reader.next().await });
+    let pull = stream.begin_next().expect("parked ticket begins");
+    let waiter = tokio::spawn(async move { pull.receive().await });
     // Let the reader park on the now-empty mailbox.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -124,12 +142,15 @@ async fn cancel_wakes_a_parked_next_to_none_and_is_idempotent() {
         .await
         .expect("cancel wakes the parked next() within 5s")
         .expect("reader task did not panic")
-        .expect("next() is not a misuse");
+        .expect("receive() is not a misuse");
     assert!(ended.is_none(), "a cancelled handle yields None, no frame");
 
-    // A post-cancel next() stays None.
-    let again = stream.next().await.expect("not a misuse");
-    assert!(again.is_none(), "no frame after cancel");
+    // A post-cancel ticket cannot resurrect a retained frame.
+    assert_eq!(
+        stream.begin_next().unwrap_err(),
+        FfiRowPullError::Closed,
+        "no ticket or frame exists after cancel"
+    );
 
     engine.shutdown();
 }
@@ -147,8 +168,14 @@ async fn shutdown_wakes_all_pending_next_to_none() {
     let waiters: Vec<_> = streams
         .iter()
         .map(|s| {
-            let s = s.clone();
-            tokio::spawn(async move { s.next().await })
+            let pull = s.begin_next().expect("shutdown waiter ticket begins");
+            tokio::spawn(async move {
+                let ended = pull.receive().await;
+                if ended.is_ok() {
+                    pull.commit().expect("terminal shutdown pull commits");
+                }
+                ended
+            })
         })
         .collect();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -173,18 +200,16 @@ async fn concurrent_next_on_one_handle_is_a_typed_error() {
     let stream = engine.observe(note_query(), None).expect("opens");
     quiesce(&stream).await;
 
-    let a = stream.clone();
-    let first = tokio::spawn(async move { a.next().await });
+    let first_pull = stream.begin_next().expect("first ticket begins");
+    let first = tokio::spawn(async move { first_pull.receive().await });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Second overlapping next() must return promptly with the misuse error,
     // not hang behind the parked first one.
-    let second = tokio::time::timeout(Duration::from_secs(5), stream.next())
-        .await
-        .expect("the concurrent next() returns promptly");
-    assert!(
-        second.is_err(),
-        "a concurrent next() on one handle is rejected as misuse"
+    assert_eq!(
+        stream.begin_next().unwrap_err(),
+        FfiRowPullError::ConcurrentNext,
+        "a concurrent ticket is rejected before any second async pull begins"
     );
 
     stream.cancel();

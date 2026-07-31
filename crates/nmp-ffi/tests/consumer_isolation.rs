@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
+use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::types::{
     FfiDurability, FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWriteIntent, FfiWritePayload,
     FfiWriteRouting,
@@ -36,6 +36,13 @@ fn added_ids(frame: &FfiFrame, into: &mut BTreeSet<String>) {
     }
 }
 
+async fn next_committed(stream: &NmpRowStream) -> Option<FfiFrame> {
+    let pull = stream.begin_next().expect("row ticket begins");
+    let frame = pull.receive().await.expect("row ticket lifecycle is valid");
+    pull.commit().expect("delivered row ticket commits");
+    frame
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engine() {
     let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine builds");
@@ -55,7 +62,7 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
 
     // Drain the active consumer's initial current-state frame so subsequent
     // frames correspond to the changes we drive.
-    let _ = tokio::time::timeout(Duration::from_secs(2), active.next()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), next_committed(&active)).await;
 
     let mut active_rows: BTreeSet<String> = BTreeSet::new();
     let mut max_active_latency = Duration::ZERO;
@@ -81,10 +88,9 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
         // The active consumer must observe progress promptly — its latency must
         // be independent of the never-polled stalled consumer.
         let started = Instant::now();
-        let frame = tokio::time::timeout(Duration::from_secs(5), active.next())
+        let frame = tokio::time::timeout(Duration::from_secs(5), next_committed(&active))
             .await
-            .expect("active consumer is NOT delayed by the stalled one")
-            .expect("active next() is not a misuse");
+            .expect("active consumer is NOT delayed by the stalled one");
         max_active_latency = max_active_latency.max(started.elapsed());
         if let Some(frame) = frame {
             added_ids(&frame, &mut active_rows);
@@ -106,8 +112,8 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
     let mut stalled_rows: BTreeSet<String> = BTreeSet::new();
     let mut frames = 0usize;
     while stalled_rows.len() < CHANGES && frames < 32 {
-        match tokio::time::timeout(Duration::from_secs(3), stalled.next()).await {
-            Ok(Ok(Some(frame))) => {
+        match tokio::time::timeout(Duration::from_secs(3), next_committed(&stalled)).await {
+            Ok(Some(frame)) => {
                 frames += 1;
                 added_ids(&frame, &mut stalled_rows);
             }

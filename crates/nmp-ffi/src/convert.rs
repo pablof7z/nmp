@@ -258,6 +258,32 @@ pub enum FfiRequestRowsError {
     StoreUnavailable,
 }
 
+/// Exact lifecycle refusal for the private row-pull ticket used by the native
+/// SDK bridges (#762).
+///
+/// The ticket exists before Kotlin enters UniFFI's cancellable async
+/// READY/complete split. It is intentionally not an app-facing observation
+/// noun: Swift and Kotlin create, receive, and settle it inside their existing
+/// `AsyncSequence`/`Flow` adapters.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiRowPullError {
+    /// Another ticket still owns this single-consumer stream.
+    ConcurrentNext,
+    /// `receive()` was already started on this ticket.
+    ReceiveAlreadyStarted,
+    /// `commit()` ran before `receive()` reached a retained value or terminal
+    /// result. The ticket and stream state are unchanged.
+    NotReady,
+    /// This ticket was already committed or aborted. It can never affect a
+    /// later ticket.
+    Finished,
+    /// The stream was cancelled or dropped. A retained delta was discarded
+    /// and cannot be resurrected by a late ticket operation.
+    Closed,
+    /// `abort()` won while the Rust receive future was still resolving.
+    Aborted,
+}
+
 impl From<nmp::EngineError> for FfiError {
     fn from(err: nmp::EngineError) -> Self {
         match err {
@@ -488,6 +514,23 @@ pub fn sign_event_failure(error: nmp::SignEventError) -> FfiSignEventFailure {
 }
 
 impl std::error::Error for FfiError {}
+
+impl std::fmt::Display for FfiRowPullError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConcurrentNext => write!(f, "another row pull ticket is still active"),
+            Self::ReceiveAlreadyStarted => {
+                write!(f, "receive was already started on this row pull ticket")
+            }
+            Self::NotReady => write!(f, "the row pull ticket has no result to commit"),
+            Self::Finished => write!(f, "the row pull ticket is already settled"),
+            Self::Closed => write!(f, "the row stream is closed"),
+            Self::Aborted => write!(f, "the row pull ticket was aborted"),
+        }
+    }
+}
+
+impl std::error::Error for FfiRowPullError {}
 
 impl From<RequestRowsError> for FfiRequestRowsError {
     fn from(error: RequestRowsError) -> Self {
