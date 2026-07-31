@@ -129,8 +129,8 @@ fi
 #    reader would read it as a licence rather than a debt. An entry that stops
 #    being used must be deleted from this list in the same change. This is what
 #    forced the earlier `nmp_grammar::reference` (deleted by #913) and the four
-#    `nmp_signer::` NIP-46 entries (moved out to `nmp-nip46-ffi` by #945) off
-#    the list rather than letting them linger as stale permission.
+#    `nmp_signer::` NIP-46 entries off the list rather than letting them
+#    linger as stale permission.
 for residual in nmp_grammar::ConcreteFilter; do
   census "\\b${residual}\\b" | strip_comments | grep -q . ||
     fail "residual allowance is stale and must be removed: $residual"

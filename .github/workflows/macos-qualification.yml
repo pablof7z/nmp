@@ -42,12 +42,9 @@ jobs:
       - name: Add selected Apple targets
         run: rustup target add ${{ steps.apple_scope.outputs.targets }}
 
-      # Core and the optional provider must come from one Cargo resolution
-      # unit. The paired builder compiles that unit once per selected target,
-      # then packages both XCFrameworks from the same sealed snapshots.
-      - name: Build matched core and NIP-46 provider XCFrameworks once
+      - name: Build the core XCFramework once
         id: apple_components
-        run: scripts/build-swift-nip46-xcframework.sh ${{ steps.apple_scope.outputs.mode }}
+        run: scripts/build-swift-xcframework.sh ${{ steps.apple_scope.outputs.mode }}
 
       - name: Build the Swift package
         id: swift_package
@@ -60,32 +57,3 @@ jobs:
         run: swift test
         working-directory: Packages/NMP
 
-      # These archive-local maps took 11 seconds in the measured baseline.
-      # Uploading the much larger XCFrameworks merely to run the same
-      # strings/nm checks on Ubuntu would consume more exclusive Mac time.
-      - name: Prove identity and clean inventory for every packaged slice
-        if: ${{ !cancelled() && steps.apple_components.outcome == 'success' }}
-        run: |
-          while IFS= read -r matched_core; do
-            relative_path=${matched_core#Packages/NMP/NMP.xcframework/}
-            slice_directory=${relative_path%/libnmp_ffi.a}
-            matched_provider=Packages/NMPNip46/NMPNip46.xcframework/$slice_directory/libnmp_nip46_ffi.a
-            test -f "$matched_provider"
-            scripts/check-nip46-component-identity.sh \
-              --matched-only \
-              "$matched_core" \
-              "$matched_provider"
-            scripts/check-nip46-artifact-inventory.sh \
-              "$matched_core" \
-              "$matched_provider" \
-              Packages/NMP/Sources/NMPFFI \
-              Packages/NMPNip46/Sources/NMPNip46FFI
-          done < <(
-            find Packages/NMP/NMP.xcframework -type f -name libnmp_ffi.a |
-              sort
-          )
-
-      - name: Test the selectable NIP-46 provider package
-        if: ${{ !cancelled() && steps.apple_components.outcome == 'success' }}
-        run: swift test
-        working-directory: Packages/NMPNip46

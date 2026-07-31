@@ -233,10 +233,9 @@ Two decisions harden the raw scan into an enforceable check:
   malformed concepts/platforms, and empty reasons fail. The file is currently
   empty of entries.
 
-The scan is component-scoped. A concept found in `nmp-core` cannot satisfy a
-missing `nmp-nip46` wrapper (or vice versa), and an exception for one component
-cannot mask another component. Roots and explicit platform omissions come
-from the same governed `component.toml` records that own snapshot generation.
+The scan is record-scoped. An exception for one governed record cannot mask
+another. Roots and explicit platform omissions come from the same governed
+`component.toml` records that own snapshot generation.
 
 Backtested against real history: at the commit before the #493 Kotlin
 Following port (`920033e^`), the check fails with exactly the five real

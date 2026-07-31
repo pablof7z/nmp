@@ -31,7 +31,6 @@ use crate::convert::{
     FfiRowPullError, WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
-use crate::signer::FfiSignerMailbox;
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
     FfiFilter, FfiFrame, FfiLiveQuery, FfiReceiptReattachment, FfiRelayInformation,
@@ -272,13 +271,6 @@ impl NmpEngine {
         registration: Arc<FfiAccountRegistration>,
     ) -> Result<bool, FfiError> {
         Ok(self.engine.remove_account(&registration.inner)?)
-    }
-
-    /// Return the protocol-neutral, opaque attachment mailbox consumed by
-    /// optional signer-provider components. The mailbox shares this exact
-    /// engine lifecycle; it is not another engine or a provider registry.
-    pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox> {
-        FfiSignerMailbox::from_engine(Arc::clone(&self.engine))
     }
 
     /// Install a native-owned authorization policy for one exact account.

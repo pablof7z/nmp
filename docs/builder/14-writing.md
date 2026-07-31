@@ -99,7 +99,7 @@ for await fact in receipt.facts {
 }
 ```
 
-A disconnected NIP-46 session is not terminal failure. The obligation survives
+A disconnected remote-signer session is not terminal failure. The obligation survives
 until a matching provider reattaches, the app cancels it, protocol expiry makes
 it invalid, or a terminal signer/protocol response occurs.
 
