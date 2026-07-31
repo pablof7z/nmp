@@ -49,6 +49,7 @@ mod read;
 
 use std::collections::BTreeSet;
 
+use nmp_grammar::Demand;
 use nostr::RelayUrl;
 
 pub use group::{Group, GroupPublishError, GroupReceipts};
@@ -153,12 +154,19 @@ impl RelayScope {
     /// engine.observe(relays.groups_where(&mine)?, None)?;
     /// ```
     pub fn groups_where(&self, predicate: &GroupPredicate) -> Result<LiveQuery, GroupReadError> {
-        read::one_live_query(
-            self.hosts
-                .iter()
-                .map(|host| nmp_nip29::groups_where_at(host, predicate.lower_at(host)))
-                .collect(),
-        )
+        read::one_live_query(self.listing_branches(predicate))
+    }
+
+    /// One complete listing branch per host, in canonical host order. Split
+    /// out so the per-branch source-stamping property is assertable on its own
+    /// -- it is the property the whole design exists to guarantee, and it must
+    /// be provable for a MULTI-host scope without depending on how branches
+    /// are later aggregated into one live query.
+    pub(crate) fn listing_branches(&self, predicate: &GroupPredicate) -> Vec<Demand> {
+        self.hosts
+            .iter()
+            .map(|host| nmp_nip29::groups_where_at(host, predicate.lower_at(host)))
+            .collect()
     }
 
     #[cfg(test)]
@@ -172,6 +180,9 @@ use crate::LiveQuery;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nmp_grammar::{
+        AccessContext, Binding, Derived, IdentityField, IndexedTagName, SourceAuthority,
+    };
 
     fn host(n: u16) -> RelayUrl {
         RelayUrl::parse(&format!("wss://host-{n}.example.com")).expect("a well-formed host")
@@ -191,5 +202,86 @@ mod tests {
         let b = on([host(1), host(2)]).expect("two hosts");
         assert_eq!(a, b);
         assert_eq!(a.hosts().len(), 2);
+    }
+    fn pinned(host: RelayUrl) -> SourceAuthority {
+        SourceAuthority::Pinned(BTreeSet::from([host]))
+    }
+
+    fn derived(binding: &Binding) -> &Derived {
+        match binding {
+            Binding::Derived(inner) => inner,
+            other => panic!("expected Derived, got {other:?}"),
+        }
+    }
+
+    /// THE falsifier this issue turns on. A depth-2 NIP-29-owned graph over a
+    /// TWO-host scope: for each host, the outer listing demand AND the inner
+    /// member-evidence demand nested inside its `#d` binding must both be
+    /// pinned to that host EXACTLY -- not to the other host, not to both, not
+    /// to an inherited or defaulted source.
+    ///
+    /// Checking only the outer demand does not satisfy this issue: the
+    /// silent-under-resolution bug lives entirely at the inner level.
+    #[test]
+    fn scope_stamps_exact_hosts_on_every_nested_nip29_demand() {
+        let scope = on([host(1), host(2)]).expect("two hosts");
+        let predicate =
+            member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
+        let branches = scope.listing_branches(&predicate);
+        let d = IndexedTagName::new('d').expect("d is a single ASCII letter");
+
+        assert_eq!(branches.len(), 2, "one complete branch per host");
+        for (index, expected) in [host(1), host(2)].into_iter().enumerate() {
+            let outer = &branches[index];
+            assert_eq!(
+                outer.source,
+                pinned(expected.clone()),
+                "depth 0 (the listing) must be pinned to {expected} alone"
+            );
+            assert_eq!(outer.access, AccessContext::Public);
+
+            let inner = &derived(
+                outer
+                    .selection
+                    .tags
+                    .get(&d)
+                    .expect("the listing keys #d on the predicate"),
+            )
+            .inner;
+            assert_eq!(
+                inner.source,
+                pinned(expected.clone()),
+                "depth 1 (the member-list evidence) must be pinned to {expected} alone, \
+                 not inherited and not cross-hosted"
+            );
+            assert_eq!(inner.access, AccessContext::Public);
+            assert_eq!(
+                inner.selection.kinds,
+                Some(BTreeSet::from([39002u16])),
+                "the evidence branch is the member list NIP-29 defines"
+            );
+        }
+    }
+
+    /// A group read is likewise one complete branch per host, each scoped by
+    /// `#h` and pinned to that host alone.
+    #[test]
+    fn a_group_read_is_one_complete_branch_per_host() {
+        let scope = on([host(1), host(2)]).expect("two hosts");
+        let group = scope.group("photographers");
+        let branches = group
+            .read_branches(nmp_grammar::Filter::default())
+            .expect("a plain selection scopes");
+        assert_eq!(branches.len(), 2);
+        let h = IndexedTagName::new('h').expect("h is a single ASCII letter");
+        for (branch, expected) in branches.iter().zip([host(1), host(2)]) {
+            assert_eq!(branch.source, pinned(expected));
+            assert_eq!(
+                branch.selection.tags.get(&h),
+                Some(&Binding::Literal(BTreeSet::from([
+                    "photographers".to_string()
+                ])))
+            );
+        }
     }
 }

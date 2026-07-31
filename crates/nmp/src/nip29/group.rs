@@ -100,11 +100,22 @@ impl Group {
     ///
     /// Hand the result to the one read door: `engine.observe(query, None)`.
     pub fn read(&self, selection: Filter) -> Result<LiveQuery, GroupReadError> {
-        let mut branches = Vec::with_capacity(self.hosts.len());
-        for host in &self.hosts {
-            branches.push(nmp_nip29::group_demand_at(host, &self.id, selection.clone())?);
-        }
-        read::one_live_query(branches)
+        read::one_live_query(self.read_branches(selection)?)
+    }
+
+    /// One complete read branch per host, in canonical host order. Split out
+    /// for the same reason as
+    /// [`RelayScope::listing_branches`](super::RelayScope::listing_branches):
+    /// the per-branch scoping property must be assertable for a MULTI-host
+    /// group independently of how branches are aggregated.
+    pub(crate) fn read_branches(
+        &self,
+        selection: Filter,
+    ) -> Result<Vec<nmp_grammar::Demand>, GroupContextError> {
+        self.hosts
+            .iter()
+            .map(|host| nmp_nip29::group_demand_at(host, &self.id, selection.clone()))
+            .collect()
     }
 
     /// Ask whether an already-signed event belongs to this group, without
