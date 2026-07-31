@@ -135,16 +135,30 @@ mod tests {
     /// The host an app browses with is its own explicit typed input, never
     /// harvested from parser output by the boundary itself.
     ///
-    /// #858's FFI falsifier too: the SELECTED entry feeds NIP-29's
-    /// host-pinned discovery constructor directly, field for field, with no
+    /// #1033's FFI falsifier too (successor to #858's, updated for the
+    /// `group_discovery_demand` -> `FfiRelayScope`/`FfiGroup` projection):
+    /// the SELECTED entry's `host_relay` AND `group_id` both feed NIP-29's
+    /// host-pinned constructors directly, field for field, with no
     /// intermediate NIP-29-owned copy of the NIP-51 value in between.
     #[test]
     fn nip29_browsing_still_demands_an_explicitly_supplied_host() {
+        use crate::types::{FfiFilter, FfiSourceAuthority};
+
         let list = parse_simple_groups_list_tolerant(fabricated_row(10_009));
         let selected = list.items[0].clone();
-        let demand = crate::nip29::group_discovery_demand(selected.host_relay.clone())
+        let scope = crate::nip29::FfiRelayScope::on(vec![selected.host_relay.clone()])
             .expect("app-supplied host parses");
-        assert_eq!(demand.selection.kinds, Some(vec![39000]));
+        let group = scope.group(selected.group_id.clone());
+        let query = group
+            .read(FfiFilter::default())
+            .expect("a single-host group read is one branch");
+        assert_eq!(query.branches.len(), 1);
+        assert_eq!(
+            query.branches[0].source,
+            FfiSourceAuthority::Pinned {
+                relays: vec![selected.host_relay.clone()]
+            }
+        );
 
         assert_eq!(
             selected.group_id, "group-a",
