@@ -926,6 +926,7 @@ fn validate_attestation(value: &Value, authority: &ComponentAuthority, target: &
         "component_key",
         "graph_digest",
         "identity",
+        "interface_dependency_digest",
         "interface_identity",
         "kind",
         "library_stem",
@@ -987,7 +988,12 @@ fn validate_attestation(value: &Value, authority: &ComponentAuthority, target: &
         "interface_identity",
         INTERFACE_AUTHORITY.identity_prefix,
     )?;
-    for field in ["build_flags_digest", "graph_digest", "rustc_digest"] {
+    for field in [
+        "build_flags_digest",
+        "graph_digest",
+        "interface_dependency_digest",
+        "rustc_digest",
+    ] {
         ensure_digest(json_string(fields, field)?, field)?;
     }
     if kind == "optional" {
@@ -1635,6 +1641,7 @@ mod tests {
             ("build_flags_digest", "ABC"),
             ("cargo_package", "NMP FFI"),
             ("graph_digest", "44"),
+            ("interface_dependency_digest", "not-a-digest"),
             ("library_stem", "nmp-ffi"),
             ("profile", "debug"),
             ("rustc_digest", "55"),
@@ -1856,6 +1863,7 @@ mod tests {
             "component_key": "nmp-core",
             "graph_digest": "4444444444444444444444444444444444444444444444444444444444444444",
             "identity": CORE_IDENTITY,
+            "interface_dependency_digest": "9999999999999999999999999999999999999999999999999999999999999999",
             "interface_identity": INTERFACE_IDENTITY,
             "kind": "core",
             "library_stem": "nmp_ffi",
@@ -1874,6 +1882,7 @@ mod tests {
             "component_key": "nmp-nip46",
             "graph_digest": "4444444444444444444444444444444444444444444444444444444444444444",
             "identity": "nmp-nip46-component-v2-6666666666666666666666666666666666666666666666666666666666666666",
+            "interface_dependency_digest": "9999999999999999999999999999999999999999999999999999999999999999",
             "interface_identity": INTERFACE_IDENTITY,
             "kind": "optional",
             "library_stem": "nmp_nip46_ffi",

@@ -4,6 +4,8 @@
 //! the supplied OS probe/launch URI and render these bounded progress facts.
 
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -417,10 +419,37 @@ struct Nip46Attachment {
     attached: bool,
 }
 
+/// Everything [`drive_desired_signer_state`] needs from an attached signer:
+/// the public key it reports to the connection, and the signer's own crossing
+/// onto the adapter control lane. [`nmp::Nip46Signer`] is the only production
+/// implementation; the driver is generic over this so its command sequencing
+/// can be falsified without a live remote-signer session.
+trait DesiredSigner: Clone + Send + Sync + 'static {
+    fn public_key_hex(&self) -> String;
+
+    fn attach<'a>(
+        self: Box<Self>,
+        control: &'a SignerAdapterControl,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ComponentInterfaceError>> + Send + 'a>>;
+}
+
+impl DesiredSigner for nmp::Nip46Signer {
+    fn public_key_hex(&self) -> String {
+        self.user_public_key().to_hex()
+    }
+
+    fn attach<'a>(
+        self: Box<Self>,
+        control: &'a SignerAdapterControl,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ComponentInterfaceError>> + Send + 'a>> {
+        Box::pin(control.attach_boxed(self))
+    }
+}
+
 #[derive(Clone)]
-enum DesiredSignerState {
+enum DesiredSignerState<S = nmp::Nip46Signer> {
     Detached,
-    Attached(Box<nmp::Nip46Signer>),
+    Attached(Box<S>),
 }
 
 enum ObserverDelivery {
@@ -987,16 +1016,6 @@ pub fn prepare_nip46_restore(
     ))
 }
 
-#[uniffi::export]
-pub fn prepare_nip46_from_parts(
-    compatibility: Arc<FfiNip46Compatibility>,
-    parts: FfiNip46SessionCheckpoint,
-    timeout_millis: u64,
-    observer: Box<dyn Nip46ConnectionObserver>,
-) -> Result<Arc<FfiNip46PreparedConnection>, FfiNip46ProviderError> {
-    prepare_nip46_restore(compatibility, parts, timeout_millis, observer)
-}
-
 fn prepare_connection<F>(
     observer: Box<dyn Nip46ConnectionObserver>,
     task: F,
@@ -1037,30 +1056,59 @@ where
     })
 }
 
-async fn drive_desired_signer_state(
+async fn drive_desired_signer_state<S: DesiredSigner>(
     connection: Weak<Nip46Connection>,
     control: SignerAdapterControl,
-    mut desired: tokio::sync::watch::Receiver<DesiredSignerState>,
+    mut desired: tokio::sync::watch::Receiver<DesiredSignerState<S>>,
 ) {
+    // The channel keeps only the newest level, so a `Detached` that arrives
+    // between two `Attached` levels is dropped before this task observes it.
+    // The core door refuses a second attach while a registration is live, and
+    // that refusal is terminal for the connection, so track what was last
+    // applied and replay the elided detach instead of driving the door into
+    // its refusal. Tracking also stops a coalesced `Attached` from reporting a
+    // detach that removed nothing.
+    let mut attached = false;
     while desired.changed().await.is_ok() {
         let next = { desired.borrow_and_update().clone() };
         match next {
             DesiredSignerState::Detached => {
+                if !attached {
+                    continue;
+                }
+                attached = false;
                 let result = control.detach().await;
                 if let Some(connection) = connection.upgrade() {
                     connection.adapter_detached(result);
                 }
             }
             DesiredSignerState::Attached(signer) => {
-                let public_key = signer.user_public_key().to_hex();
-                let result = control.attach_boxed(signer).await;
+                if attached {
+                    let result = control.detach().await;
+                    let detached = result.is_ok();
+                    attached = false;
+                    if let Some(connection) = connection.upgrade() {
+                        connection.adapter_detached(result);
+                    }
+                    if !detached {
+                        // The connection has already failed on the detach
+                        // error; attaching over a live registration would only
+                        // add the core's refusal on top of it.
+                        break;
+                    }
+                }
+                let public_key = signer.public_key_hex();
+                let result = signer.attach(&control).await;
+                attached = result.is_ok();
                 if let Some(connection) = connection.upgrade() {
                     connection.adapter_attached(public_key, result);
                 }
             }
         }
     }
-    let _ = control.detach().await;
+    if attached {
+        let _ = control.detach().await;
+    }
 }
 
 /// #704: run one NIP-46 connect handshake as an async task on the engine's
@@ -1195,8 +1243,10 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
+    use nmp_component_interface::SignerAdapterCommand;
     use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
     use nostr::Keys;
+    use tokio::sync::oneshot;
 
     struct CloseCountingObserver {
         closed: Arc<AtomicUsize>,
@@ -1682,5 +1732,291 @@ mod tests {
         drop(prepared);
         assert_eq!(closed.load(Ordering::SeqCst), 1);
         engine.shutdown();
+    }
+
+    /// How long a command is waited for before the driver is declared hung.
+    /// The driver does no I/O here, so this is a liveness backstop, never a
+    /// performance assertion.
+    const OBSERVATION: Duration = Duration::from_secs(10);
+    /// How long the driver is watched for a command it must NOT emit.
+    const QUIET: Duration = Duration::from_millis(250);
+    /// Backstop for the whole driver/script pair, so a driver that never ends
+    /// fails the test instead of hanging it.
+    const COMPLETION: Duration = Duration::from_secs(60);
+
+    /// Desired-state payload standing in for a connected `Nip46Signer`. A real
+    /// one only exists after a full relay handshake, which is not reachable
+    /// from a unit test; nothing below depends on any signing behaviour, only
+    /// on the level sequence the driver is handed.
+    #[derive(Clone)]
+    struct TestSigner {
+        public_key: &'static str,
+    }
+
+    impl ::nmp::SigningCapability for TestSigner {
+        fn public_key(&self) -> Option<::nmp::SignerPublicKey> {
+            None
+        }
+
+        fn sign(
+            &self,
+            _unsigned: ::nmp::SignerUnsignedEvent,
+        ) -> ::nmp::SignerOp<::nmp::SignerSignedEvent> {
+            unimplemented!("the desired-state driver never signs")
+        }
+    }
+
+    impl DesiredSigner for TestSigner {
+        fn public_key_hex(&self) -> String {
+            self.public_key.to_string()
+        }
+
+        fn attach<'a>(
+            self: Box<Self>,
+            control: &'a SignerAdapterControl,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ComponentInterfaceError>> + Send + 'a>>
+        {
+            Box::pin(control.attach_boxed(self))
+        }
+    }
+
+    fn command_name(command: &SignerAdapterCommand) -> &'static str {
+        match command {
+            SignerAdapterCommand::Attach { .. } => "Attach",
+            SignerAdapterCommand::Detach { .. } => "Detach",
+        }
+    }
+
+    type Acknowledgement = oneshot::Sender<Result<(), ComponentInterfaceError>>;
+
+    /// `drive_desired_signer_state` running against a command receiver this
+    /// test owns, so both the exact command sequence and the acknowledgement
+    /// timing are observable. The control is the real one -- it is minted by
+    /// `new_signer_adapter` and handed to the task factory exactly as the core
+    /// installation path does -- so no test-only constructor is needed.
+    struct DriverHarness {
+        commands: tokio::sync::mpsc::Receiver<SignerAdapterCommand>,
+        desired: Option<tokio::sync::watch::Sender<DesiredSignerState<TestSigner>>>,
+        _connection: Arc<Nip46Connection>,
+        closed: Arc<AtomicUsize>,
+    }
+
+    /// Build the driver task and the levers that drive it. The runtime is the
+    /// one the `#[tokio::test]` attribute already built and entered: this crate
+    /// is the separately linked provider, so it mints no runtime of its own and
+    /// spawns nothing -- the driver is joined into the test's own task below.
+    fn start_driver() -> (DriverHarness, ProviderAdapterTask) {
+        let closed = Arc::new(AtomicUsize::new(0));
+        let connection = test_connection(Arc::new(CloseCountingObserver {
+            closed: Arc::clone(&closed),
+        }));
+        let weak = Arc::downgrade(&connection);
+        let (desired, changes) =
+            tokio::sync::watch::channel(DesiredSignerState::<TestSigner>::Detached);
+        let adapter = new_signer_adapter(
+            || {},
+            move |control, _runtime| Box::pin(drive_desired_signer_state(weak, control, changes)),
+        );
+        let started = adapter
+            .take_for_install()
+            .expect("a fresh adapter still owns its parts")
+            .start(
+                tokio::runtime::Handle::try_current()
+                    .expect("the test attribute has already entered its runtime"),
+            );
+        (
+            DriverHarness {
+                commands: started.commands,
+                desired: Some(desired),
+                _connection: connection,
+                closed,
+            },
+            started.task,
+        )
+    }
+
+    impl DriverHarness {
+        fn set(&self, state: DesiredSignerState<TestSigner>) {
+            self.desired
+                .as_ref()
+                .expect("the desired-state sender is still live")
+                .send_replace(state);
+        }
+
+        fn close_desired(&mut self) {
+            self.desired.take();
+        }
+
+        async fn recv_within(
+            &mut self,
+            budget: Duration,
+        ) -> Result<Option<SignerAdapterCommand>, ()> {
+            tokio::time::timeout(budget, self.commands.recv())
+                .await
+                .map_err(|_| ())
+        }
+
+        async fn next_command(&mut self, expected: &str) -> SignerAdapterCommand {
+            match self.recv_within(OBSERVATION).await {
+                Ok(Some(command)) => command,
+                Ok(None) => panic!("expected {expected}; the driver ended instead"),
+                Err(_) => {
+                    panic!("expected {expected}; the driver emitted nothing in {OBSERVATION:?}")
+                }
+            }
+        }
+
+        async fn expect_attach(&mut self, expected: &str) -> Acknowledgement {
+            match self.next_command(expected).await {
+                SignerAdapterCommand::Attach { reply, .. } => reply,
+                SignerAdapterCommand::Detach { .. } => {
+                    panic!("expected {expected}; the driver emitted Detach")
+                }
+            }
+        }
+
+        async fn expect_detach(&mut self, expected: &str) -> Acknowledgement {
+            match self.next_command(expected).await {
+                SignerAdapterCommand::Detach { reply } => reply,
+                SignerAdapterCommand::Attach { .. } => {
+                    panic!("expected {expected}; the driver emitted Attach")
+                }
+            }
+        }
+
+        /// Give the driver a real chance to run and assert it commanded
+        /// nothing. Also the yield point that lets it observe a level.
+        async fn assert_quiet(&mut self, why: &str) {
+            match self.recv_within(QUIET).await {
+                Err(_) => {}
+                Ok(Some(command)) => panic!(
+                    "the driver emitted {} when it must be quiet: {why}",
+                    command_name(&command)
+                ),
+                Ok(None) => panic!("the driver ended early when it must be quiet: {why}"),
+            }
+        }
+    }
+
+    /// Run the driver concurrently with the level script inside this one test
+    /// task and require both to finish. Joining rather than spawning keeps the
+    /// provider source free of any runtime authority of its own; the outer
+    /// budget turns a driver that never ends into a failure rather than a hang.
+    async fn drive_to_completion(driver: ProviderAdapterTask, script: impl Future<Output = ()>) {
+        tokio::time::timeout(COMPLETION, async move {
+            tokio::join!(driver, script);
+        })
+        .await
+        .expect("the driver and its level script both run to completion");
+    }
+
+    /// #952 falsifier. `tokio::sync::watch` keeps only the newest level, so a
+    /// `Detached` arriving between two `Attached` levels -- exactly what a
+    /// relay flap produces while an Attach is still in flight -- is coalesced
+    /// away and never observed. The core attach door hard-refuses a second
+    /// attach while a registration is live, and that refusal is terminal for
+    /// the connection, so a level-triggered driver would kill a live session
+    /// on a mere flap. The observed sequence must be Attach, Detach, Attach --
+    /// never Attach, Attach.
+    #[tokio::test(flavor = "current_thread")]
+    async fn coalesced_detach_is_replayed_before_attaching_over_a_live_registration() {
+        let (mut harness, driver) = start_driver();
+        let script = async {
+            harness.set(DesiredSignerState::Attached(Box::new(TestSigner {
+                public_key: "signer-a",
+            })));
+            let first = harness.expect_attach("the first Attach").await;
+
+            // The first Attach is still in flight: in production this window is
+            // an mpsc hop plus a blocking engine round trip. Both levels
+            // therefore land in the watch cell before the driver can observe
+            // either, and the `Detached` is coalesced away.
+            harness.set(DesiredSignerState::Detached);
+            harness.set(DesiredSignerState::Attached(Box::new(TestSigner {
+                public_key: "signer-b",
+            })));
+            harness
+                .assert_quiet(
+                    "no level may be applied while the driver's own Attach is unacknowledged",
+                )
+                .await;
+
+            first
+                .send(Ok(()))
+                .expect("the driver is awaiting the first acknowledgement");
+
+            let replayed = match harness.next_command("the replayed Detach").await {
+                SignerAdapterCommand::Detach { reply } => reply,
+                SignerAdapterCommand::Attach { .. } => panic!(
+                    "the driver issued a second Attach while its own registration was still \
+                     live: the coalesced Detached level was never replayed, so the core attach \
+                     door refuses with CoreRefused and terminally fails a session that only saw \
+                     a relay flap"
+                ),
+            };
+            replayed
+                .send(Ok(()))
+                .expect("the driver is awaiting the replayed detach acknowledgement");
+
+            harness
+                .expect_attach("the second Attach, after the replayed Detach")
+                .await
+                .send(Ok(()))
+                .expect("the driver is awaiting the second attach acknowledgement");
+
+            harness
+                .assert_quiet("every coalesced level has been applied")
+                .await;
+            assert_eq!(
+                harness.closed.load(Ordering::SeqCst),
+                0,
+                "a coalesced flap must not terminate the connection"
+            );
+
+            // The registration is genuinely live, so ending the loop must
+            // remove it.
+            harness.close_desired();
+            harness
+                .expect_detach("the cleanup Detach for the live registration")
+                .await
+                .send(Ok(()))
+                .expect("the driver is awaiting the cleanup acknowledgement");
+        };
+        drive_to_completion(driver, script).await;
+    }
+
+    /// #952 falsifier, spurious-detach half. A `Detached` level with nothing
+    /// attached removes nothing: it must issue no command inline, and ending
+    /// the loop with nothing attached must issue no cleanup command either. A
+    /// detach that removes nothing still reports `Unavailable` to the observer
+    /// and burns the single-slot adapter lane.
+    #[tokio::test(flavor = "current_thread")]
+    async fn detached_level_with_nothing_attached_never_commands_the_core() {
+        let (mut harness, driver) = start_driver();
+        let script = async {
+            harness.set(DesiredSignerState::Detached);
+            harness
+                .assert_quiet("nothing is attached, so there is no registration to remove")
+                .await;
+
+            harness.close_desired();
+            match harness.recv_within(OBSERVATION).await {
+                // The driver dropped its control, which is the only way this
+                // channel closes: it ran to completion having commanded
+                // nothing.
+                Ok(None) => {}
+                Ok(Some(command)) => panic!(
+                    "the driver emitted {} with nothing attached",
+                    command_name(&command)
+                ),
+                Err(_) => panic!("the driver never finished after its sender was dropped"),
+            }
+            assert_eq!(
+                harness.closed.load(Ordering::SeqCst),
+                0,
+                "no command means no reported failure"
+            );
+        };
+        drive_to_completion(driver, script).await;
     }
 }

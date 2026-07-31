@@ -15,6 +15,7 @@ struct CoreManifest {
     identity: String,
     rustc_digest: String,
     flags_digest: String,
+    interface_dependency_digest: String,
     artifact_blake3: Option<String>,
     manifest_blake3: Option<String>,
 }
@@ -81,6 +82,7 @@ fn main() {
             identity: computed.identity,
             rustc_digest: computed.rustc_digest,
             flags_digest: computed.flags_digest,
+            interface_dependency_digest: computed.interface_dependency_digest,
             artifact_blake3: None,
             manifest_blake3: None,
         }
@@ -109,6 +111,31 @@ fn main() {
     assert_eq!(
         computed.flags_digest, core.flags_digest,
         "optional component flags disagree with sealed core"
+    );
+    // The core and this provider are separate Cargo resolutions under separate
+    // target directories, so each links its own compilation of Tokio and of
+    // every other crate the shared interface declares. Their identities are
+    // computed from isolated graphs and can therefore agree while the two
+    // builds disagree about, say, Tokio's feature set -- which changes the
+    // layout of the `tokio::runtime::Handle` and `tokio::sync` channels the
+    // interface moves across the seam. Nothing else in this build compares
+    // that, so this is the only place it can be caught.
+    assert!(
+        component_identity::is_digest(&core.interface_dependency_digest),
+        "sealed core has no usable interface dependency digest: {:?}",
+        core.interface_dependency_digest
+    );
+    assert_eq!(
+        computed.interface_dependency_digest,
+        core.interface_dependency_digest,
+        "the shared component interface resolved differently in this provider than in the \
+         core it is paired with: interface_dependency_digest {} (provider) != {} (core). \
+         Values crossing the seam would have two layouts. This provider resolved:\n{}\n\
+         Rebuild the core and compare, or add the missing feature to the tokio dependency \
+         in crates/nmp-component-interface/Cargo.toml so both graphs resolve one Tokio.",
+        computed.interface_dependency_digest,
+        core.interface_dependency_digest,
+        computed.interface_dependency_summary
     );
 
     println!(
@@ -212,6 +239,7 @@ fn required_core_from_artifact(target: &str, interface_identity: &str) -> CoreMa
         "component_key",
         "graph_digest",
         "identity",
+        "interface_dependency_digest",
         "interface_identity",
         "kind",
         "library_stem",
@@ -259,6 +287,7 @@ fn required_core_from_artifact(target: &str, interface_identity: &str) -> CoreMa
     let identity = field("identity").to_owned();
     let rustc_digest = field("rustc_digest").to_owned();
     let flags_digest = field("build_flags_digest").to_owned();
+    let interface_dependency_digest = field("interface_dependency_digest").to_owned();
 
     let (_, witness) = read_canonical_readonly_json(&witness_path, "sealed core witness");
     let witness_fields = witness.as_object().expect("core witness must be an object");
@@ -329,6 +358,7 @@ fn required_core_from_artifact(target: &str, interface_identity: &str) -> CoreMa
         "component_key",
         "graph_digest",
         "identity",
+        "interface_dependency_digest",
         "interface_identity",
         "kind",
         "library_stem",
@@ -368,6 +398,7 @@ fn required_core_from_artifact(target: &str, interface_identity: &str) -> CoreMa
         "build_flags_digest",
         "cargo_package",
         "graph_digest",
+        "interface_dependency_digest",
         "library_stem",
         "profile",
         "rustc_digest",
@@ -385,6 +416,7 @@ fn required_core_from_artifact(target: &str, interface_identity: &str) -> CoreMa
         identity,
         rustc_digest,
         flags_digest,
+        interface_dependency_digest,
         artifact_blake3: Some(artifact_blake3),
         manifest_blake3: Some(blake3::hash(&manifest_bytes).to_hex().to_string()),
     }
@@ -428,6 +460,7 @@ fn write_manifest(
         "component_key": COMPONENT_KEY,
         "graph_digest": computed.graph_digest,
         "identity": computed.identity,
+        "interface_dependency_digest": computed.interface_dependency_digest,
         "interface_identity": interface_identity,
         "kind": "optional",
         "library_stem": LIBRARY_STEM,
@@ -462,6 +495,7 @@ fn write_attestation(
         "component_key": COMPONENT_KEY,
         "graph_digest": computed.graph_digest,
         "identity": computed.identity,
+        "interface_dependency_digest": computed.interface_dependency_digest,
         "interface_identity": interface_identity,
         "kind": "optional",
         "library_stem": LIBRARY_STEM,

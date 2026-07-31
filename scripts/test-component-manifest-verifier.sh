@@ -34,6 +34,7 @@ common = {
     "component_key": "nmp-core",
     "graph_digest": "4" * 64,
     "identity": core_identity,
+    "interface_dependency_digest": "a" * 64,
     "interface_identity": interface,
     "kind": "core",
     "library_stem": "nmp_ffi",
@@ -109,6 +110,19 @@ mutate_and_refuse flags \
 mutate_and_refuse compiler \
   'value["rustc_digest"]="8"*64' \
   'rustc_digest disagrees'
+# Two components can agree on toolchain, flags and crossing-contract identity
+# and still have resolved that contract's own dependencies (Tokio above all)
+# differently, because each is an independent Cargo resolution. The set-level
+# tuple is the only place that shows up.
+mutate_and_refuse interface-dependencies \
+  'value["interface_dependency_digest"]="8"*64' \
+  'interface_dependency_digest disagrees'
+mutate_and_refuse interface-dependencies-unparseable \
+  'value["interface_dependency_digest"]="not-a-digest"' \
+  'invalid interface_dependency_digest'
+mutate_and_refuse interface-dependencies-missing \
+  'value.pop("interface_dependency_digest")' \
+  'interface_dependency_digest'
 
 python3 - "$TMP/provider.json" "$TMP/duplicate.json" <<'PY'
 import json, pathlib, sys
@@ -158,6 +172,7 @@ common = {
     "component_key": "nmp-core",
     "graph_digest": "4" * 64,
     "identity": core_identity,
+    "interface_dependency_digest": "a" * 64,
     "interface_identity": interface,
     "kind": "core",
     "library_stem": "nmp_ffi",
@@ -200,6 +215,7 @@ def witness(manifest, artifact):
         "component_key",
         "graph_digest",
         "identity",
+        "interface_dependency_digest",
         "interface_identity",
         "kind",
         "library_stem",
@@ -283,6 +299,7 @@ common = {
     "component_key": "nmp-core",
     "graph_digest": "4" * 64,
     "identity": core_identity,
+    "interface_dependency_digest": "a" * 64,
     "interface_identity": interface,
     "kind": "core",
     "library_stem": "nmp_ffi",
@@ -341,6 +358,7 @@ elif command == "witness":
         "component_key",
         "graph_digest",
         "identity",
+        "interface_dependency_digest",
         "interface_identity",
         "kind",
         "library_stem",

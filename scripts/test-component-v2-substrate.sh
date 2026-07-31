@@ -233,9 +233,78 @@ run_elf_falsifiers_in_isolated_copy() (
   echo "component-v2-substrate: ELF artifact falsifiers completed in $((SECONDS - started))s"
 )
 
+# The core and the provider are independent Cargo resolutions under separate
+# target directories, so each links its OWN compilation of Tokio. The shared
+# interface moves a `tokio::runtime::Handle` by value and `tokio::sync`
+# channels across that seam, so the two compilations must be the same one.
+#
+# No identity can see this: every component identity is computed from an
+# isolated unit graph of `nmp-component-interface` alone, which is invariant
+# to how Tokio feature-unifies inside `nmp-ffi` versus `nmp-nip46-ffi`.
+# `interface_dependency_digest` is the only value derived from the resolution
+# the consuming build actually performs.
+#
+# Mutation: give the core graph one Tokio feature the provider graph cannot
+# have (`nmp-ffi` is forbidden in the provider's own graph). `fs` adds no
+# package, so `Cargo.lock` stays exact and `--frozen` still holds; the only
+# thing that moves is Tokio's resolved feature set on one side of the seam.
+run_interface_dependency_falsifier() (
+  local isolated repo output started
+  local core_tokio='tokio = { version = "1", features = ["rt", "time", "net"] }'
+  local diverged='tokio = { version = "1", features = ["rt", "time", "net", "fs"] }'
+  local refusal='the shared component interface resolved differently in this provider'
+
+  isolated=$(mktemp -d "${TMPDIR:-/tmp}/nmp-interface-dependency-falsifier.XXXXXX")
+  repo="$isolated/repo"
+  mkdir "$repo"
+  git ls-files -z | tar --null -T - -cf - | tar -xf - -C "$repo"
+  started=$SECONDS
+
+  [[ $(grep -cF "$core_tokio" "$repo/crates/nmp-ffi/Cargo.toml") == 1 ]] ||
+    fail "the falsifier could not locate the core's exact Tokio dependency"
+  perl -0pi -e "s/\Q$core_tokio\E/$diverged/" "$repo/crates/nmp-ffi/Cargo.toml"
+  grep -qF "$diverged" "$repo/crates/nmp-ffi/Cargo.toml" ||
+    fail "the falsifier did not diverge the core's Tokio feature set"
+
+  output="$isolated/diverged.out"
+  set +e
+  (
+    cd "$repo"
+    CARGO_TARGET_DIR="$isolated/target" cargo check --frozen -p nmp-nip46-ffi
+  ) >"$output" 2>&1
+  local diverged_status=$?
+  set -e
+  [[ $diverged_status -ne 0 ]] ||
+    fail "the provider accepted a core that resolved the shared interface's Tokio differently"
+  grep -qF "$refusal" "$output" ||
+    fail "the diverged-Tokio build failed for an unrelated reason: $(tail -20 "$output")"
+
+  # Positive control in the same tree and the same target directory: restore
+  # the one line and the identical command must build. Without this, a build
+  # that refused for any reason at all would look like a passing falsifier.
+  perl -0pi -e "s/\Q$diverged\E/$core_tokio/" "$repo/crates/nmp-ffi/Cargo.toml"
+  grep -qF "$core_tokio" "$repo/crates/nmp-ffi/Cargo.toml" ||
+    fail "the falsifier could not restore the core's Tokio dependency"
+  output="$isolated/converged.out"
+  set +e
+  (
+    cd "$repo"
+    CARGO_TARGET_DIR="$isolated/target" cargo check --frozen -p nmp-nip46-ffi
+  ) >"$output" 2>&1
+  local converged_status=$?
+  set -e
+  [[ $converged_status -eq 0 ]] ||
+    fail "the unmutated provider was refused: $(tail -20 "$output")"
+
+  chmod -R u+w "$isolated" 2>/dev/null || true
+  rm -r "$isolated"
+  echo "component-v2-substrate: a core/provider Tokio feature divergence was refused, and the unmutated pair still builds ($((SECONDS - started))s)"
+)
+
 if [[ ${NMP_COMPONENT_ELF_FALSIFIER_INNER:-} == 1 ]]; then
   run_elf_artifact_falsifiers
 else
   run_elf_falsifiers_in_isolated_copy
+  run_interface_dependency_falsifier
   echo "component-v2-substrate: take-once adapter and contextual core runtime present"
 fi

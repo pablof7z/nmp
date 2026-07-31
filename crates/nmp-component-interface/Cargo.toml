@@ -8,7 +8,24 @@ links = "nmp_component_interface"
 
 [dependencies]
 nmp-signer.workspace = true
-tokio = { version = "1", features = ["rt", "sync"] }
+# `SignerAdapterRuntime` carries a `tokio::runtime::Handle` by value and the
+# adapter lanes carry `tokio::sync` channels, so both independently linked
+# components must compile the SAME Tokio. Cargo features are additive and this
+# crate is in both graphs, so declaring the whole set core needs here is what
+# makes the core and the provider resolve one Tokio: without `io-util` the
+# provider's graph resolves Tokio with fewer features than the core's and the
+# layout of everything crossing the seam is no longer guaranteed to agree.
+# `interface_dependency_digest` refuses the pair when they drift again; the
+# repair is to add the newly-required feature to this exact line.
+tokio = { version = "1", features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
 uniffi.workspace = true
 
 [build-dependencies]

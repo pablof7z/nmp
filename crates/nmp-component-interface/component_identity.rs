@@ -15,11 +15,21 @@ pub struct IdentitySpec<'a> {
     pub forbidden_packages: &'a [&'a str],
 }
 
+/// Package owning the Rust types that cross from the core artifact into a
+/// separately linked component.
+pub const INTERFACE_PACKAGE: &str = "nmp-component-interface";
+
 pub struct ComputedIdentity {
     pub identity: String,
     pub rustc_digest: String,
     pub flags_digest: String,
     pub graph_digest: String,
+    /// Digest of how every package the crossing contract itself declares
+    /// resolved *in this build*, not in the contract's isolated graph.
+    pub interface_dependency_digest: String,
+    /// Human-readable form of exactly what that digest covers, for the
+    /// refusal message when two components disagree.
+    pub interface_dependency_summary: String,
 }
 
 pub fn compute_component_identity(
@@ -28,9 +38,12 @@ pub fn compute_component_identity(
     rustc: &Path,
     spec: &IdentitySpec<'_>,
 ) -> Result<ComputedIdentity, String> {
+    let metadata = cargo_metadata(workspace, cargo)?;
     let mut graph = cargo_unit_graph(workspace, cargo, spec)?;
-    let package_roots = validate_and_collect_local_packages(&graph, workspace, cargo, spec)?;
+    let package_roots = validate_and_collect_local_packages(&graph, &metadata, workspace, spec)?;
     canonicalize_unit_graph(&mut graph, workspace);
+    let (interface_dependency_digest, interface_dependency_summary) =
+        digest_interface_dependencies(&graph, &interface_dependency_packages(&metadata)?, spec)?;
 
     let rustc_output = Command::new(rustc)
         .args(["--version", "--verbose"])
@@ -86,7 +99,152 @@ pub fn compute_component_identity(
         rustc_digest,
         flags_digest,
         graph_digest,
+        interface_dependency_digest,
+        interface_dependency_summary,
     })
+}
+
+/// Every package the crossing contract names in its own manifest as a normal
+/// dependency, plus the contract itself.
+///
+/// These are the only crates whose types the contract can spell in the API
+/// that moves values between two independently resolved builds, so these are
+/// the crates whose resolution both builds must agree on. Anything deeper is
+/// private to one of them.
+fn interface_dependency_packages(metadata: &serde_json::Value) -> Result<BTreeSet<String>, String> {
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Cargo metadata has no packages".to_owned())?;
+    let mut matches = packages.iter().filter(|package| {
+        package.get("name").and_then(serde_json::Value::as_str) == Some(INTERFACE_PACKAGE)
+    });
+    let interface = matches
+        .next()
+        .ok_or_else(|| format!("Cargo metadata has no {INTERFACE_PACKAGE} package"))?;
+    if matches.next().is_some() {
+        return Err(format!(
+            "Cargo metadata resolved more than one {INTERFACE_PACKAGE} package"
+        ));
+    }
+    let mut names = BTreeSet::from([INTERFACE_PACKAGE.to_owned()]);
+    for dependency in interface
+        .get("dependencies")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{INTERFACE_PACKAGE} has no dependencies array"))?
+    {
+        // `kind` is null for a normal dependency; build and dev dependencies
+        // never contribute a type to the crossing.
+        if !dependency
+            .get("kind")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            continue;
+        }
+        let name = dependency
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{INTERFACE_PACKAGE} dependency has no name"))?;
+        // A dependency the contract does not always link cannot be required
+        // to resolve identically on both sides, and silently skipping it
+        // would hide exactly the divergence this digest exists to catch.
+        for field in ["optional", "target"] {
+            let conditional = match field {
+                "optional" => {
+                    dependency.get(field).and_then(serde_json::Value::as_bool) == Some(true)
+                }
+                _ => dependency.get(field).is_some_and(|value| !value.is_null()),
+            };
+            if conditional {
+                return Err(format!(
+                    "{INTERFACE_PACKAGE} dependency {name} is conditional ({field}); the \
+                     crossing contract must link one unconditional dependency set"
+                ));
+            }
+        }
+        names.insert(name.to_owned());
+    }
+    Ok(names)
+}
+
+/// Digest the resolved units of those packages *as this component resolved
+/// them*. Feature unification is a property of the whole graph being built,
+/// so two components that link their own compilation of the same crate can
+/// resolve it differently; the digest is what makes that visible.
+fn digest_interface_dependencies(
+    graph: &serde_json::Value,
+    packages: &BTreeSet<String>,
+    spec: &IdentitySpec<'_>,
+) -> Result<(String, String), String> {
+    let units = graph
+        .get("units")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Cargo unit graph has no units array".to_owned())?;
+    let mut seen = BTreeSet::new();
+    let mut records = Vec::new();
+    let mut summary = Vec::new();
+    for unit in units {
+        let pkg_id = unit
+            .get("pkg_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Cargo unit has no pkg_id".to_owned())?;
+        let (name, version) = package_coordinate(pkg_id);
+        if !packages.contains(&name) {
+            continue;
+        }
+        let mut record = unit
+            .as_object()
+            .ok_or_else(|| "Cargo unit is not an object".to_owned())?
+            .clone();
+        // Dependency edges are positions in this graph's unit array; they say
+        // nothing comparable across two separately resolved graphs. Every
+        // other field is already canonical (`canonicalize_unit_graph` dropped
+        // `src_path` and normalized workspace paths).
+        record.remove("dependencies");
+        let features = unit
+            .get("features")
+            .and_then(serde_json::Value::as_array)
+            .map(|features| {
+                features
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        let mode = unit
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        summary.push(format!("{name} {version} {mode} [{features}]"));
+        records.push(
+            serde_json::to_string(&serde_json::Value::Object(record))
+                .map_err(|error| format!("serialize interface dependency unit: {error}"))?,
+        );
+        seen.insert(name);
+    }
+    let missing = packages.difference(&seen).cloned().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "component {} resolved no unit for interface dependencies {}",
+            spec.component_key,
+            missing.join(", ")
+        ));
+    }
+    records.sort();
+    records.dedup();
+    summary.sort();
+    summary.dedup();
+    let mut hasher = blake3::Hasher::new();
+    add_field(
+        &mut hasher,
+        "interface-package",
+        INTERFACE_PACKAGE.as_bytes(),
+    );
+    for record in &records {
+        add_field(&mut hasher, "interface-dependency-unit", record.as_bytes());
+    }
+    Ok((hasher.finalize().to_hex().to_string(), summary.join("\n")))
 }
 
 fn cargo_unit_graph(
@@ -127,21 +285,7 @@ fn cargo_unit_graph(
         .map_err(|error| format!("parse Cargo no-build unit graph: {error}"))
 }
 
-fn validate_and_collect_local_packages(
-    graph: &serde_json::Value,
-    workspace: &Path,
-    cargo: &Path,
-    spec: &IdentitySpec<'_>,
-) -> Result<BTreeSet<PathBuf>, String> {
-    let units = graph
-        .get("units")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "Cargo unit graph has no units array".to_owned())?;
-    let reachable = units
-        .iter()
-        .filter_map(|unit| unit.get("pkg_id").and_then(serde_json::Value::as_str))
-        .collect::<BTreeSet<_>>();
-
+fn cargo_metadata(workspace: &Path, cargo: &Path) -> Result<serde_json::Value, String> {
     let output = Command::new(cargo)
         .current_dir(workspace)
         .args(["metadata", "--frozen", "--format-version", "1"])
@@ -153,8 +297,24 @@ fn validate_and_collect_local_packages(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("parse Cargo metadata: {error}"))?;
+    serde_json::from_slice(&output.stdout).map_err(|error| format!("parse Cargo metadata: {error}"))
+}
+
+fn validate_and_collect_local_packages(
+    graph: &serde_json::Value,
+    metadata: &serde_json::Value,
+    workspace: &Path,
+    spec: &IdentitySpec<'_>,
+) -> Result<BTreeSet<PathBuf>, String> {
+    let units = graph
+        .get("units")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Cargo unit graph has no units array".to_owned())?;
+    let reachable = units
+        .iter()
+        .filter_map(|unit| unit.get("pkg_id").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+
     let packages = metadata
         .get("packages")
         .and_then(serde_json::Value::as_array)
@@ -291,6 +451,14 @@ fn package_coordinate(pkg_id: &str) -> (String, String) {
         .next()
         .unwrap_or(pkg_id);
     (name.to_owned(), tail.to_owned())
+}
+
+/// Exactly the shape every digest recorded in a component manifest has.
+pub fn is_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 pub fn normalize_build_text(text: &str, workspace: &Path) -> String {

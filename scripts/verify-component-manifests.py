@@ -26,6 +26,7 @@ COMMON_FIELDS = {
     "component_key",
     "graph_digest",
     "identity",
+    "interface_dependency_digest",
     "interface_identity",
     "kind",
     "library_stem",
@@ -1117,7 +1118,12 @@ def validate_shape(manifest: dict[str, Any], source: pathlib.Path) -> None:
         value = string(manifest, field, source)
         if not IDENTITY.fullmatch(value):
             refuse(f"{source}: invalid {field}: {value!r}")
-    for field in ("build_flags_digest", "graph_digest", "rustc_digest"):
+    for field in (
+        "build_flags_digest",
+        "graph_digest",
+        "interface_dependency_digest",
+        "rustc_digest",
+    ):
         value = string(manifest, field, source)
         if not DIGEST.fullmatch(value):
             refuse(f"{source}: invalid {field}: {value!r}")
@@ -1167,12 +1173,20 @@ def verify(sources: list[PinnedFile]) -> dict[str, Any]:
         refuse(f"manifest set must contain exactly one core; found {len(cores)}")
     core_source, core = cores[0]
     core_identity = string(core, "identity", core_source.path)
+    # Every component in one set is built from one toolchain, one flag set,
+    # one crossing contract -- and one resolution of that contract's own
+    # dependencies. The last is not implied by the others: each component is
+    # an independent Cargo resolution under its own target directory, so the
+    # Tokio (and every other interface dependency) it links can feature-unify
+    # differently while all the identities still agree. Values crossing the
+    # seam would then have two layouts.
     tuple_fields = (
         "target",
         "profile",
         "rustc_digest",
         "build_flags_digest",
         "interface_identity",
+        "interface_dependency_digest",
     )
     for source, manifest in entries:
         for field in tuple_fields:
@@ -1597,6 +1611,7 @@ def validate_artifact_pairs(
             "build_flags_digest",
             "cargo_package",
             "graph_digest",
+            "interface_dependency_digest",
             "library_stem",
             "profile",
             "rustc_digest",

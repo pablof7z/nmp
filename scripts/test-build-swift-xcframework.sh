@@ -119,6 +119,7 @@ elif command == "witness":
             "component_key": key,
             "graph_digest": digest("fixture-graph-" + key),
             "identity": identity,
+            "interface_dependency_digest": digest("fixture-interface-dependencies"),
             "interface_identity": (
                 "nmp-component-interface-v2-" + digest("fixture-interface")
             ),
@@ -144,6 +145,7 @@ elif command == "witness":
                 "component_key": "nmp-core",
                 "graph_digest": digest("fixture-graph-nmp-core"),
                 "identity": core_identity,
+                "interface_dependency_digest": manifest["interface_dependency_digest"],
                 "interface_identity": manifest["interface_identity"],
                 "kind": "core",
                 "library_stem": "nmp_ffi",
@@ -188,6 +190,7 @@ elif command == "witness":
         "component_key",
         "graph_digest",
         "identity",
+        "interface_dependency_digest",
         "interface_identity",
         "kind",
         "library_stem",
@@ -391,6 +394,7 @@ value = {
     "component_key": key,
     "graph_digest": digest("fixture-graph-" + key),
     "identity": identity,
+    "interface_dependency_digest": digest("fixture-interface-dependencies"),
     "interface_identity": "nmp-component-interface-v2-" + digest("fixture-interface"),
     "kind": kind,
     "library_stem": stem,

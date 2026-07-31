@@ -166,7 +166,7 @@ artifact_verify_refuses coordinated-json-lie \
   --localization-source "$CORE_ARTIFACT_ONE/libnmp_ffi.a" \
   --localization-plan "$LOCALIZATION_PLAN"
 
-for field in uniffi_namespace graph_digest; do
+for field in uniffi_namespace graph_digest interface_dependency_digest; do
   mutation="$TMP/provider-$field-lie.json"
   cp "$PROVIDER_ARTIFACT/component-manifest.json" "$mutation"
   chmod u+w "$mutation"
@@ -183,9 +183,16 @@ path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
 PY
   chmod a-w "$mutation"
   expected="attestation $field disagrees with manifest"
-  if [[ "$field" == uniffi_namespace ]]; then
-    expected='expected one compiled component for manifest namespace'
-  fi
+  case "$field" in
+    uniffi_namespace)
+      expected='expected one compiled component for manifest namespace'
+      ;;
+    # Unlike graph_digest, this one is required to be EQUAL across the set,
+    # so the set-level tuple refuses it before any artifact is opened.
+    interface_dependency_digest)
+      expected='interface_dependency_digest disagrees with core'
+      ;;
+  esac
   artifact_verify_refuses "provider-$field-lie" \
     "$expected" \
     --witness-tool "$WITNESS_BIN" \

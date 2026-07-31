@@ -1,4 +1,5 @@
 #[path = "../nmp-component-interface/component_identity.rs"]
+#[allow(dead_code)]
 mod component_identity;
 
 use std::env;
@@ -122,6 +123,7 @@ fn write_manifest(
         "component_key": COMPONENT_KEY,
         "graph_digest": computed.graph_digest,
         "identity": computed.identity,
+        "interface_dependency_digest": computed.interface_dependency_digest,
         "interface_identity": interface_identity,
         "kind": "core",
         "library_stem": LIBRARY_STEM,
@@ -150,6 +152,7 @@ fn write_attestation(
         "component_key": COMPONENT_KEY,
         "graph_digest": computed.graph_digest,
         "identity": computed.identity,
+        "interface_dependency_digest": computed.interface_dependency_digest,
         "interface_identity": interface_identity,
         "kind": "core",
         "library_stem": LIBRARY_STEM,

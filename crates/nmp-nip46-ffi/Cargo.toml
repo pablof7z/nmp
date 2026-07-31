@@ -41,6 +41,11 @@ toml05 = { package = "toml", version = "0.5" }
 nmp.workspace = true
 nmp-ffi.workspace = true
 tempfile = "3"
+# `#[tokio::test]` only. The tests must not mint a runtime themselves -- this
+# crate is the separately linked provider, and `scripts/test-component-v2-substrate.sh`
+# refuses any runtime-authority spelling anywhere in its source. Test-only:
+# resolver v2 keeps these features out of the lib/cdylib build.
+tokio = { version = "1", features = ["macros", "rt"] }
 tungstenite = "0.29"
 url = "2"
 

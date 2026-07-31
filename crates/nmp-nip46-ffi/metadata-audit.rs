@@ -23,7 +23,6 @@ const PROOF_ENTRY: &str = "nmp_nip46_ffi::verify_nip46_component";
 const ADAPTER_ENTRY: &str = "nmp_nip46_ffi::FfiNip46PreparedConnection::adapter";
 const REQUIRED_ADAPTER_ENTRIES: &[&str] = &[
     "nmp_nip46_ffi::prepare_nip46_bunker",
-    "nmp_nip46_ffi::prepare_nip46_from_parts",
     "nmp_nip46_ffi::prepare_nip46_invitation",
     "nmp_nip46_ffi::prepare_nip46_restore",
 ];
