@@ -1,18 +1,20 @@
 //! `When` — the NIP-29 `Group` door.
 //!
-//! Every write below goes through the REAL product door -- the
-//! `GroupOperations` extension trait on a live `nmp::Engine` -- and every read
-//! through `LiveQuery::single(group.demand(filter))` and the ordinary subscription
-//! call. The harness reimplements neither, because both are the thing under
-//! test.
+//! Every write below goes through the REAL product door -- INHERENT methods
+//! on `nmp::nip29::Group` -- and every read through `group.read(filter)` (one
+//! ordinary `LiveQuery`) and the ordinary subscription call. The harness
+//! reimplements neither, because both are the thing under test.
+//!
+//! Every write also freezes an exact decoded `author` (#878): the group never
+//! resolves "whoever happens to be active" on its own, so each step resolves
+//! the scenario's own logged-in identity through `NmpWorld::me_pubkey` and
+//! hands it over explicitly, exactly as an app would.
 //!
 //! Each step also records what IT named (`GroupCall`), because "I named no
 //! relay and no tag on that call" is a claim about the app's words and is
 //! unrecoverable from the intent afterwards.
 
 use cucumber::when;
-
-use nmp::GroupOperations;
 
 use crate::world::{parse_kind_list, GroupCall, NmpWorld};
 
@@ -36,12 +38,13 @@ async fn publish_kind_through_named_group(
 
 async fn publish_kind(w: &mut NmpWorld, group_id: Option<&str>, kind: u16, content: String) {
     let builder = nmp::EventBuilder::new(nmp::Kind::from(kind)).content(content);
+    let author = w.me_pubkey();
     let call = GroupCall {
         named_kind: true,
         ..GroupCall::default()
     };
     w.group_operation(group_id, call, move |group, engine| {
-        group.publish(engine, builder)
+        group.publish(engine, author, builder)
     })
     .await;
 }
@@ -53,13 +56,14 @@ async fn publish_staged_draft(w: &mut NmpWorld) {
         .supplied_draft()
         .cloned()
         .expect("nmp-bdd: no unsigned event has been staged to publish");
+    let author = w.me_pubkey();
     let call = GroupCall {
         named_kind: true,
         named_tag: true,
         ..GroupCall::default()
     };
     w.group_operation(None, call, move |group, engine| {
-        group.publish(engine, builder)
+        group.publish(engine, author, builder)
     })
     .await;
 }
@@ -107,16 +111,18 @@ async fn publish_join_request_with_code(w: &mut NmpWorld, code: String) {
 }
 
 async fn join_request(w: &mut NmpWorld, code: Option<String>) {
+    let author = w.me_pubkey();
     w.group_operation(None, GroupCall::default(), move |group, engine| {
-        group.join_request(engine, code.as_deref())
+        group.join_request(engine, author, code.as_deref())
     })
     .await;
 }
 
 #[when(regex = r#"^I publish a leave request through the group$"#)]
 async fn publish_leave_request(w: &mut NmpWorld) {
-    w.group_operation(None, GroupCall::default(), |group, engine| {
-        group.leave_request(engine)
+    let author = w.me_pubkey();
+    w.group_operation(None, GroupCall::default(), move |group, engine| {
+        group.leave_request(engine, author)
     })
     .await;
 }
@@ -133,8 +139,9 @@ async fn add_user_with_named_role(w: &mut NmpWorld, pubkey: String, role: String
 
 async fn add_user_with_role(w: &mut NmpWorld, pubkey: String, role: Option<String>) {
     let pubkey = w.member_pubkey(&pubkey);
+    let author = w.me_pubkey();
     w.group_operation(None, GroupCall::default(), move |group, engine| {
-        group.add_user(engine, pubkey, role.as_deref())
+        group.add_user(engine, author, pubkey, role.as_deref())
     })
     .await;
 }
@@ -142,8 +149,9 @@ async fn add_user_with_role(w: &mut NmpWorld, pubkey: String, role: Option<Strin
 #[when(regex = r#"^I remove user "([0-9a-fA-F]{64})" from the group$"#)]
 async fn remove_user(w: &mut NmpWorld, pubkey: String) {
     let pubkey = w.member_pubkey(&pubkey);
+    let author = w.me_pubkey();
     w.group_operation(None, GroupCall::default(), move |group, engine| {
-        group.remove_user(engine, pubkey)
+        group.remove_user(engine, author, pubkey)
     })
     .await;
 }
@@ -159,8 +167,9 @@ async fn edit_metadata_name_only(w: &mut NmpWorld, name: String) {
 }
 
 async fn edit_metadata(w: &mut NmpWorld, name: Option<String>, about: Option<String>) {
+    let author = w.me_pubkey();
     w.group_operation(None, GroupCall::default(), move |group, engine| {
-        group.edit_metadata(engine, name.as_deref(), about.as_deref())
+        group.edit_metadata(engine, author, name.as_deref(), about.as_deref())
     })
     .await;
 }
@@ -174,16 +183,18 @@ async fn invoke_named_operation(w: &mut NmpWorld, operation: String) {
     match operation.trim() {
         "join request" => join_request(w, Some("dark-slide-42".to_string())).await,
         "leave request" => {
-            w.group_operation(None, GroupCall::default(), |group, engine| {
-                group.leave_request(engine)
+            let author = w.me_pubkey();
+            w.group_operation(None, GroupCall::default(), move |group, engine| {
+                group.leave_request(engine, author)
             })
             .await
         }
         "add user" => add_user_with_role(w, SUBJECT.to_string(), None).await,
         "remove user" => {
             let pubkey = w.member_pubkey(SUBJECT);
+            let author = w.me_pubkey();
             w.group_operation(None, GroupCall::default(), move |group, engine| {
-                group.remove_user(engine, pubkey)
+                group.remove_user(engine, author, pubkey)
             })
             .await
         }
