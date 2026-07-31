@@ -308,9 +308,7 @@ mod tests {
     #[test]
     fn a_signed_event_naming_another_group_names_both_in_its_refusal() {
         let event = signed(vec![Tag::parse(["h", "darkroom"]).unwrap()]);
-        let error = validate_context(GROUP, &event)
-            .err()
-            .expect("another group's h is a refusal");
+        let error = validate_context(GROUP, &event).expect_err("another group's h is a refusal");
         assert_eq!(
             error,
             GroupContextError::MismatchedContext {
