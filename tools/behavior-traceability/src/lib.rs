@@ -38,12 +38,23 @@ pub fn validate_repository(
 mod tests {
     use super::*;
 
-    struct NoIssues;
+    /// The real governed corpus's `specified`/`known-violation` issue
+    /// references, as of this checkpoint. This self-test does not hold a
+    /// GitHub token (the head-built checker never does), so it hard-codes
+    /// the exact live set rather than fetching it; a governed scenario that
+    /// names any other issue is a real traceability bug this test must
+    /// catch, not silently pass.
+    ///
+    /// Empty as of #1122's `PROTOCOL-GROUPISANIDENTITY-*`/door-shape-
+    /// dependent `PROTOCOL-NIP29OPERATIONS-*` records going `built` against
+    /// the landed #1033 relay-scope/group facade: no governed scenario
+    /// names an open issue any more.
+    struct KnownLiveIssues;
 
-    impl IssueLookup for NoIssues {
+    impl IssueLookup for KnownLiveIssues {
         fn state(&self, issue: u64) -> Result<IssueState, TraceError> {
             Err(TraceError(format!(
-                "real built-only fixture unexpectedly requested issue #{issue}"
+                "real fixture unexpectedly requested untracked issue #{issue}"
             )))
         }
     }
@@ -56,6 +67,6 @@ mod tests {
             .parent()
             .unwrap();
         let corpus = crate::corpus::load(&root.join("features")).unwrap();
-        crate::validate::validate(root, &corpus, &NoIssues).unwrap();
+        crate::validate::validate(root, &corpus, &KnownLiveIssues).unwrap();
     }
 }
