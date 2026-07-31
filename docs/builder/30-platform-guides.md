@@ -40,12 +40,6 @@ plaintext app-sandbox autologin without placing secret material in the Rust
 event/delivery store; pass it to `NMPEngine` and call
 `clearPersistedAccount()` before destroying the live signer on sign-out.
 
-For the currently built local remote-signer path, add `primalconnect` to the
-host app's `LSApplicationQueriesSchemes`, add/import the separate `NMPNip46`
-product, call `NMPNip46SignerDiscovery.installed()`, start
-`oneClickConnectNip46`, and wait for `.ready`. `UIApplication.open` returning
-`true` is not readiness.
-
 Query and diagnostics bridges buffer newest state. Receipt facts remain
 reattachable rather than relying on an unbounded `AsyncStream` backlog.
 
@@ -59,12 +53,6 @@ composables against the public SDK without adding Compose to the core module.
 It owns no engine, HTTP, timer, polling, cache, or image loader and is not an
 Android artifact qualification; see [Controlled relay identity UI](36-relay-ui.md).
 
-NIP-46 is another separate child component, `:nip46`; the root SDK neither
-names nor links it. The component consumes the core engine's opaque signer
-mailbox and contributes an ordinary signer. Build its generated bindings with
-`scripts/build-kotlin-nip46-jvm.sh`, which refreshes the matched core and
-provider native libraries together, then run `./gradlew :nip46:test`.
-
 The Android product must include a standard Keystore-backed provider and prove
 process-death receipt/signer reattachment, not merely JVM binding generation.
 Newest-state observation is bounded/conflated while receipt history remains
@@ -75,13 +63,7 @@ explicit plaintext sandbox persistence. It provides the same restore/clear
 semantics as Swift and the same warning: it is not Keystore or a secure Android
 production provider.
 
-The current desktop-JVM projection can already consume Android package-query
-results through `installedAndroid(packageIds)` and produce an exact
-`NMPAndroidSignerHandoff(uri, packageName)`. A real Android host must declare
-package visibility for the signer packages/schemes, start
-`connectNip46(invitation)` before launching the URI, and apply
-`Intent.setPackage(packageName)` so a shared scheme never selects the wrong
-app. Android AAR/runtime Compose/Keystore and NIP-55 execution remain open work.
+Android AAR/runtime Compose/Keystore and NIP-55 execution remain open work.
 
 ## Other platforms
 

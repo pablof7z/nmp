@@ -96,8 +96,6 @@
       "nmp-local-signer": "signer-provider",
       "nmp-content": "pure-extension",
       "nmp-nip02": "protocol-service",
-      "nmp-nip46": "protocol-provider",
-      "nmp-nip46-ffi": "protocol-projection",
       "nmp-nip65-consumer-check": "application",
       "nmp-ffi": "sdk",
       "nmp-consumer-check": "application",

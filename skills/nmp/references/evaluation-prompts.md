@@ -20,7 +20,7 @@ Prompt: "Review a proposal claiming that every NMP row exposes pending signature
 
 ## Native signer refusal
 
-Prompt: "Plan a Swift and Kotlin NIP-46 sign-in flow that remains honest when the OS refuses a worker thread before the signer becomes ready. Include lifecycle and error ownership."
+Prompt: "Plan a Swift and Kotlin local-key sign-in flow that remains honest about construction and observation failures. Include lifecycle and error ownership."
 
 ## Brownfield audit
 

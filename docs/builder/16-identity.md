@@ -64,7 +64,7 @@ let receipt = try engine.publish(.init(
 ))
 ```
 
-The provider may be local, NIP-46, hardware-backed, or app-defined. NMP asks it
+The provider may be local, remote, hardware-backed, or app-defined. NMP asks it
 to sign one exact frozen body when needed.
 
 Platform SDKs should ship standard providers backed by Keychain or Android

@@ -68,7 +68,6 @@ pub mod nip02;
 pub mod nip22;
 pub mod nip29;
 pub mod nip51;
-pub mod signer;
 pub mod types;
 
 uniffi::setup_scaffolding!();
