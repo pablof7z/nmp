@@ -145,7 +145,7 @@ Each long-lived stream family is a `#[derive(uniffi::Object)]` handle:
 
 | family      | object              | methods                                              |
 |-------------|---------------------|------------------------------------------------------|
-| row/window  | `NmpRowStream`      | `async next() -> Option<FfiFrame>`; `cancel()`; `request_rows(u64)` |
+| row/window  | `NmpRowStream` + private `NmpRowPull` | sync `begin_next()`; ticket `async receive()`, sync `commit()`/`abort()`; stream `cancel()`/`request_rows(u64)` |
 | diagnostics | `NmpDiagnosticsStream` | `async next() -> Option<FfiDiagnosticsSnapshot>`; `cancel()` |
 | receipts    | `NmpReceiptStream`  | `async next() -> Option<FfiWriteStatus>`; `cancel()` |
 | follow      | `NmpFollowStream`   | `async next() -> Option<FfiFollowSnapshot>`; `cancel()` |
@@ -177,7 +177,8 @@ param, no reservation, no thread. `None` from `next()` is the terminal signal
 ## Native SDK wrappers
 
 - **Swift:** each handle wraps as a direct `AsyncSequence`: one app
-  `Iterator.next()` performs exactly one native `handle.next()`. The
+  `Iterator.next()` synchronously claims one native row ticket, awaits its
+  `receive()`, and commits before mapping or cadence control. The
   reference-owned iterator core has an enum lifecycle and shares an
   enum-backed, lock-protected claim, so only one iterator owns the handle; a
   competitor receives typed `NMPError.concurrentNext` before touching native
@@ -187,13 +188,13 @@ param, no reservation, no thread. `None` from `next()` is the terminal signal
   Swift queue. Current-state streams cadence-limit returned snapshots to about
   one per 16 ms without pulling ahead, leaving conflation in the one native
   mailbox.
-- **Kotlin:** each handle wraps as a `Flow` built with `flow { while(true){ val v
-  = handle.next() ?: break; emit(v) } }`, with `handle.cancel()` in a
-  `finally`/`onCompletion`. Ordinary observation flows are cold and open one
-  independent native handle per collection; the windowed handle's frames flow
-  is explicitly single-collection. `.conflate()` is removed because the engine
-  mailbox already folds intermediate state. Cancellation of the collecting
-  coroutine cancels its Rust handle.
+- **Kotlin:** each handle wraps as a `Flow` whose row loop synchronously calls
+  `beginNext()`, awaits `receive()`, commits before folding/emitting, and aborts
+  every non-commit path in `finally`; `handle.cancel()` still runs at collection
+  teardown. Ordinary observation flows are cold and open one independent native
+  handle per collection; the windowed handle's frames flow is explicitly
+  single-collection. `.conflate()` is removed because the engine mailbox
+  already folds intermediate state.
 
 ## The rescoped blocking-adapter pool
 
@@ -272,9 +273,12 @@ implementation:
    `withTaskCancellationHandler` and explicitly calls `handle.cancel()`. Its
    reference-owned `deinit` covers normal loop exit, including `break`; a
    denied competing iterator never owns and therefore never cancels the
-   accepted handle. Kotlin cancellation drops the in-flight Rust future; the
-   single-reader guard is released on the future's `Drop` (RAII
-   `ReadingGuard`), so a timed-out `next()` cannot brick the handle.
+   accepted handle. Kotlin can cancel after UniFFI reports Rust READY but
+   before generated completion retrieves the result. A private row ticket now
+   exists before that await: foreign completion synchronously commits it, and
+   cancellation/free/drop aborts it. An unbounded delta remains retained until
+   commit while reducer output composes into the existing one-slot successor,
+   bounding the edge at one claimed frame plus one composed successor.
 6. **NIP-46 session-lifetime workers move to session-owned threads.** Permanent
    slot occupants (session worker + event forwarder, session-lifetime) behind one
    fixed counter would be a miniature of the very defect — an unrelated
@@ -300,18 +304,17 @@ implementation:
    `NMPError.concurrentNext` without touching the handle. The normal-break,
    drop, direct-pull, and competing-iterator falsifiers cover these paths.
 
-### Known residual (documented, not silently accepted)
+### READY-before-complete cancellation closure (#762)
 
-Under Kotlin *per-call* cancellation (`withTimeout { handle.next() }`) a frame
-whose `poll` already returned `Ready` but was dropped before UniFFI's
-`complete` retrieved it is lost. This does not affect self-contained snapshot
-streams (window/diagnostics/follow — each `next()` is the complete current
-state) nor the required cancellation falsifiers (which cancel the *handle*,
-closing it). It can only diverge the unbounded delta row stream, and only for a
-consumer that cancels one `next()` yet keeps pulling — a violation of the
-single-consumer "call `next()` again only after consuming the previous value"
-contract. The compliant idiom (cancel the collection → `cancel()` the handle) is
-safe. Recorded in known-gaps for a later peek/commit hardening.
+The private `NmpRowPull` closes the former Kotlin per-call cancellation gap
+without adding an app noun. `begin_next()` atomically claims the stream before
+the cancellable await. `receive()` is start-once; `commit()` consumes the
+candidate only after foreign code has retrieved it; `abort()` or ticket drop
+restores an unbounded delta exactly. Stream cancellation discards both the
+claim and retained candidate terminally. Windowed snapshots use the same
+ticketed transport for SDK parity but remain self-contained and need no replay.
+Direct Rust `AsyncSubscription` and the other snapshot/fact stream families
+are unchanged.
 
 ## Falsifiers
 
@@ -320,7 +323,9 @@ See `crates/*/tests` and the SDK test suites. The acceptance tests in #680
 cancellation races, normal Swift loop exit, finite FIFO lag under 40 durable
 retry cycles, paged receipt replay, receipt detach/reattach, 128 alternating
 close/drop reattachments while permanently parked at `AwaitingCapability`,
-shutdown with pending `next()`, Swift/Kotlin/SDK parity, 29er reproduction,
-symbol audit)
+shutdown with pending `next()`, READY-before-complete generated Kotlin
+cancellation, retained-frame replay, commit/abort/cancel races, repeated
+cancellation bounds, window-snapshot non-replay, Swift commit-before-map,
+Swift/Kotlin/SDK parity, 29er reproduction, symbol audit)
 fail under the old one-thread-per-observer/unbounded-fact-delivery design and
 pass under this one.

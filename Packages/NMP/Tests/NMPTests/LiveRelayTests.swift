@@ -779,6 +779,28 @@ private final class DiagnosticsRaceState: @unchecked Sendable {
     )
 }
 
+private final class DiagnosticsRaceRowPull: NmpRowPull, @unchecked Sendable {
+    private let state: DiagnosticsRaceState
+
+    init(state: DiagnosticsRaceState) {
+        self.state = state
+        super.init(noPointer: .init())
+    }
+
+    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        state = DiagnosticsRaceState()
+        super.init(unsafeFromRawPointer: pointer)
+    }
+
+    override func receive() async throws -> FfiFrame? {
+        await state.nextRow()
+    }
+
+    override func commit() throws {}
+
+    override func abort() {}
+}
+
 private final class DiagnosticsRaceRowStream: NmpRowStream, @unchecked Sendable {
     private let state: DiagnosticsRaceState
 
@@ -792,8 +814,8 @@ private final class DiagnosticsRaceRowStream: NmpRowStream, @unchecked Sendable 
         super.init(unsafeFromRawPointer: pointer)
     }
 
-    override func next() async throws -> FfiFrame? {
-        await state.nextRow()
+    override func beginNext() throws -> NmpRowPull {
+        DiagnosticsRaceRowPull(state: state)
     }
 
     override func cancel() {

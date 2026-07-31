@@ -4011,6 +4011,70 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiRowPullError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "ConcurrentNext",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "Another ticket still owns this single-consumer stream.",
+            ),
+        },
+        Variant {
+            name: "ReceiveAlreadyStarted",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`receive()` was already started on this ticket.",
+            ),
+        },
+        Variant {
+            name: "NotReady",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`commit()` ran before `receive()` reached a retained value or terminal\nresult. The ticket and stream state are unchanged.",
+            ),
+        },
+        Variant {
+            name: "Finished",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "This ticket was already committed or aborted. It can never affect a\nlater ticket.",
+            ),
+        },
+        Variant {
+            name: "Closed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The stream was cancelled or dropped. A retained delta was discarded\nand cannot be resurrected by a late ticket operation.",
+            ),
+        },
+        Variant {
+            name: "Aborted",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`abort()` won while the Rust receive future was still resolving.",
+            ),
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "Exact lifecycle refusal for the private row-pull ticket used by the native\nSDK bridges (#762).\n\nThe ticket exists before Kotlin enters UniFFI's cancellable async\nREADY/complete split. It is intentionally not an app-facing observation\nnoun: Swift and Kotlin create, receive, and settle it inside their existing\n`AsyncSequence`/`Flow` adapters.",
+    ),
+}
+
+enum Enum {
     name: "FfiSelector",
     module_path: "nmp_ffi",
     remote: false,
@@ -11492,12 +11556,228 @@ object Object {
 }
 
 object Object {
+    name: "NmpRowPull",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "abort",
+            object_name: "NmpRowPull",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmprowpull_abort",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpRowPull",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Roll back a ticket that did not reach foreign completion. A retained\nunbounded delta becomes the next ticket's candidate; a windowed\nsnapshot is self-contained and needs no replay.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowpull_abort",
+            checksum: Some(
+                54195,
+            ),
+        },
+        Method {
+            name: "commit",
+            object_name: "NmpRowPull",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmprowpull_commit",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpRowPull",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Acknowledge that foreign code obtained the result. For an unbounded\nframe this destructively releases the retained delta exactly once.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiRowPullError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowpull_commit",
+            checksum: Some(
+                47496,
+            ),
+        },
+        Method {
+            name: "receive",
+            object_name: "NmpRowPull",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiFrame",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmprowpull_receive",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpRowPull",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await this ticket's frame. A ticket is start-once: a second call is a\ntyped refusal both while the first is pending and after it reached\nREADY.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiRowPullError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowpull_receive",
+            checksum: Some(
+                6800,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmprowpull",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpRowPull",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpRowPull",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmprowpull",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpRowPull",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "One private foreign-delivery claim for [`NmpRowStream`] (#762).\n\nThe native wrapper owns this object before it awaits [`Self::receive`].\nAfter a non-cancelled return it synchronously calls [`Self::commit`];\nevery other path calls [`Self::abort`]. Dropping a ticket aborts it\nidempotently.",
+    ),
+}
+
+object Object {
     name: "NmpRowStream",
     imp: Struct,
     module_path: "nmp_ffi",
     remote: false,
     constructors: [],
     methods: [
+        Method {
+            name: "begin_next",
+            object_name: "NmpRowStream",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpRowPull",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmprowstream_begin_next",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpRowStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpRowPull",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Claim the stream synchronously, before entering UniFFI's cancellable\nasync READY/complete split. A second live ticket is refused; it never\nobserves or replays the first ticket's retained delta.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiRowPullError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowstream_begin_next",
+            checksum: Some(
+                65251,
+            ),
+        },
         Method {
             name: "cancel",
             object_name: "NmpRowStream",
@@ -11522,60 +11802,13 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Withdraw the subscription now, rather than waiting for `Drop` (a Swift\n`deinit` can be delayed by ARC in ways an app may want to preempt).\nWakes any parked `next()` to `None`. Safe to call more than once, and\nsafe to never call at all.",
+                "Withdraw the subscription now, rather than waiting for `Drop` (a Swift\n`deinit` can be delayed by ARC in ways an app may want to preempt).\nWakes any parked ticket `receive()` to `None`. Safe to call more than once, and\nsafe to never call at all.",
             ),
             throws: None,
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowstream_cancel",
             checksum: Some(
-                798,
-            ),
-        },
-        Method {
-            name: "next",
-            object_name: "NmpRowStream",
-            object_module_path: "nmp_ffi",
-            is_async: true,
-            object_impl: Struct,
-            arguments: [],
-            return_type: Some(
-                Optional {
-                    inner_type: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiFrame",
-                    },
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmprowstream_next",
-                is_async: true,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpRowStream",
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    Handle,
-                ),
-                has_rust_call_status_arg: false,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Await the next observation [`FfiFrame`], or `None` once the engine has\ntorn the subscription down (cancel / shutdown / producer drop).\n[`FfiError::ConcurrentNext`] if a `next()` is already in flight — the\nstream is single-consumer.",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmprowstream_next",
-            checksum: Some(
-                63150,
+                21430,
             ),
         },
         Method {
@@ -11667,7 +11900,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The app-facing pull-based handle to a live subscription (returned by\n[`NmpEngine::observe`], #680). Await [`Self::next`] for the next\n[`FfiFrame`], or `None` once the observation ends; `Drop`/[`Self::cancel`]\nwithdraw it. Holds ONLY the `Send + Sync` [`nmp::AsyncSubscription`] — no\ndedicated drain thread and no raw engine-control capability ever reaches\nthis crate. Awaiting `next()` reserves no native thread and no runtime; the\nengine mailbox wakes the parked future.",
+        "The app-facing pull-based handle to a live subscription (returned by\n[`NmpEngine::observe`], #680/#762). Native SDKs synchronously call\n[`Self::begin_next`] before awaiting [`NmpRowPull::receive`], then\nsynchronously commit or abort that ticket. The ticket is private transport\nownership inside the existing Swift `AsyncSequence` / Kotlin `Flow`; it is\nnot another app-facing observation noun.\n\nFor unbounded delta observations, one frame may be retained in the active\nticket until foreign completion acknowledges it. Reducer output produced\nmeanwhile still composes in the existing one-slot engine mailbox. The\nmaximum is therefore one claimed delta plus one composed successor, never\none item per cancellation. Windowed frames remain self-contained snapshots\nand are not retained on abort.",
     ),
 }
 
