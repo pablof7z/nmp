@@ -346,8 +346,16 @@ class PinnedTree:
         return {source.identity for _, source in self.files}
 
 
-def pin_tree(registry: PinRegistry, path: pathlib.Path) -> PinnedTree:
-    root = registry.pin_directory(path, sealed=True)
+def pin_tree(
+    registry: PinRegistry,
+    path: pathlib.Path,
+    *,
+    writable_root: bool = False,
+) -> PinnedTree:
+    # A staged publication root stays owner-writable until its rename, so the
+    # caller verifying that tree may waive the seal for the root alone. Every
+    # descendant is still required to be read-only.
+    root = registry.pin_directory(path, sealed=not writable_root)
     directories: list[tuple[pathlib.PurePath, PinnedDirectory]] = [
         (pathlib.PurePath("."), root)
     ]
@@ -461,6 +469,8 @@ def normalized_publication_mode(mode: int, *, directory: bool) -> int:
 def require_exact_tree_copy(
     source: PinnedTree,
     destination: PinnedTree,
+    *,
+    skip_root_mode: bool = False,
 ) -> None:
     source_directories = dict(source.directories)
     destination_directories = dict(destination.directories)
@@ -471,6 +481,10 @@ def require_exact_tree_copy(
             f"{sorted(source_directories.keys() ^ destination_directories.keys(), key=str)}"
         )
     for relative, source_directory in source_directories.items():
+        if skip_root_mode and relative == pathlib.PurePath("."):
+            # The staged root stays owner-writable until its publication
+            # rename; its sealed mode is proven once the final name exists.
+            continue
         source_mode = normalized_publication_mode(
             source_directory.mode,
             directory=True,
@@ -565,7 +579,22 @@ def rename_noreplace(
         )
     if result != 0:
         error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), destination_name)
+        detail = ""
+        try:
+            source_status = os.stat(
+                source_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            parent_status = os.fstat(parent_descriptor)
+        except OSError:
+            pass
+        else:
+            detail = (
+                f" (source mode {stat.S_IMODE(source_status.st_mode):#05o},"
+                f" parent mode {stat.S_IMODE(parent_status.st_mode):#05o})"
+            )
+        raise OSError(error, os.strerror(error) + detail, destination_name)
 
 
 def remove_directory_contents(descriptor: int, path: pathlib.Path) -> None:
@@ -868,6 +897,13 @@ def publish_tree(
                 source_directory.mode,
                 directory=True,
             )
+            if relative == pathlib.PurePath("."):
+                # Renaming a directory requires write permission on that
+                # directory itself, because the kernel may rewrite its parent
+                # link. Sealing the staged root before publication therefore
+                # makes the rename fail with EACCES. Keep the root writable by
+                # its owner across the rename and seal it at its final name.
+                mode |= 0o700
             os.fchmod(descriptor, mode)
             os.fsync(descriptor)
         mutation_hook("destination-staged")
@@ -908,8 +944,9 @@ def publish_tree(
             staged_tree = pin_tree(
                 staging_registry,
                 destination.parent / hidden_name,
+                writable_root=True,
             )
-            require_exact_tree_copy(tree, staged_tree)
+            require_exact_tree_copy(tree, staged_tree, skip_root_mode=True)
             if staged_tree.root.identity != staged_identity:
                 refuse(
                     f"{destination}: staged publication inode changed before rename"
@@ -944,6 +981,33 @@ def publish_tree(
                 refuse(
                     f"{destination}: published binding is not the staged directory inode"
                 )
+            # The root stayed owner-writable so the rename could proceed. Seal
+            # it now that it carries its final name, and prove the descriptor
+            # is still the published inode before changing its mode.
+            published_descriptor = os.open(
+                destination.name,
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent.descriptor,
+            )
+            try:
+                sealed_status = os.fstat(published_descriptor)
+                if (sealed_status.st_dev, sealed_status.st_ino) != staged_identity:
+                    refuse(
+                        f"{destination}: published root changed before it was sealed"
+                    )
+                os.fchmod(
+                    published_descriptor,
+                    normalized_publication_mode(
+                        tree.directories[0][1].mode,
+                        directory=True,
+                    ),
+                )
+                os.fsync(published_descriptor)
+            finally:
+                os.close(published_descriptor)
         except OSError as error:
             refuse(f"{destination}: cannot atomically publish pinned tree: {error}")
     finally:
@@ -955,11 +1019,22 @@ def publish_tree(
             del relative
             os.close(descriptor)
         if not publication_succeeded:
-            cleanup_hidden_publication(
-                parent,
-                hidden_name,
-                hidden_identity,
-            )
+            failing = sys.exc_info()[0] is not None
+            try:
+                cleanup_hidden_publication(
+                    parent,
+                    hidden_name,
+                    hidden_identity,
+                )
+            except Refusal as cleanup_error:
+                # A cleanup refusal must never replace the refusal that caused
+                # it, or the real publication failure becomes invisible.
+                if not failing:
+                    raise
+                sys.stderr.write(
+                    f"component-manifests: cleanup after the failed publication "
+                    f"of {destination} also failed: {cleanup_error}\n"
+                )
 
     published_tree = pin_tree(registry, destination)
     require_exact_tree_copy(tree, published_tree)
