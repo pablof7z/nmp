@@ -140,11 +140,11 @@ persistence, and invalidation.
 
 ### #16: exactly one retry owner per domain
 
-**Excludes:** transport, signer adapter, and outbox independently resending the
+**Excludes:** transport, signer adapter, and delivery independently resending the
 same obligation.
 
 Transport reconnects sockets; a signer adapter owns one correlated operation;
-the durable outbox owns each `(intent, relay)` attempt; one deadline scheduler
+durable delivery owns each `(intent, relay)` attempt; one deadline scheduler
 owns time and concurrency.
 
 ### #17: limits cannot silently truncate
@@ -166,7 +166,7 @@ Selection work may share; wire demand and evidence share only after a
 compatibility proof. Every nested `Derived` demand carries its own explicit
 source/access context; it cannot inherit or borrow the outer demand's evidence.
 
-### #19: event/outbox persistence cannot become a secret vault
+### #19: event/delivery persistence cannot become a secret vault
 
 **Excludes:** raw signing material being stored beside event and retry state.
 

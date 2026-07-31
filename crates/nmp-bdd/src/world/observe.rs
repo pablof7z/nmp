@@ -21,7 +21,7 @@ use nostr::EventId;
 use nmp::mechanism::core::{
     AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact,
 };
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{DiagnosticsHandle, QueryHandle, RowsReceiver};
 
 use super::budgets::{EVENTUALLY, NEVER};

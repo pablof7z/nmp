@@ -31,7 +31,7 @@
 - **AUTH:** NIP-42 relay challenge/response. The identity used can change what
   one source returns, so it participates in access context.
 - **npub / nsec / hex:** public-key, secret-key, and raw encodings. Secret
-  material never belongs in the event/outbox store.
+  material never belongs in the event/delivery store.
 
 ## NMP terms
 
@@ -78,7 +78,7 @@
 - **Lane:** an internal typed reason a source/relay participates in compiled
   work.
 - **Diagnostics:** permanent read-only proof of graph, store, routing,
-  transport, outbox, limit, and error state.
+  transport, delivery, limit, and error state.
 - **Re-root:** incrementally re-resolve only graph nodes depending on a changed
   reactive input.
 

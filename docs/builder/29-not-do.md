@@ -68,7 +68,7 @@ An app serving mutually untrusted local users needs an explicit destructive
 reset that clears cache, pending writes, receipts, evidence, and capabilities.
 Changing `$currentPubkey` is not logout-and-wipe.
 
-## It does not store raw secrets in the event/outbox database
+## It does not store raw secrets in the event/delivery database
 
 NMP persists frozen bodies, expected authors, signatures, pending obligations,
 attempts, and receipts. Secret material belongs behind a signer provider and

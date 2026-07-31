@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::RelayAdmissionPolicy;
 use nmp::mechanism::core::RowDelta;
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};

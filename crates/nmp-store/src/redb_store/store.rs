@@ -1,23 +1,27 @@
 use super::canonical::{fold_seen_at, observation_key, observation_range, observation_relay_key};
 use super::commit::commit_prepared;
-use super::outbox::{
+use super::delivery::{
     is_suppressed_in_txn, reconcile_ephemeral_receipts_in_txn, replace_lane_in_txn,
-    OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID,
+};
+use super::delivery_codec::{
+    codec_error, decode_meta_u64, decode_relay, encode_meta_u64, relay_key, DeliveryRelayId,
+    DELIVERY_CODEC_VERSION, DELIVERY_CODEC_VERSION_KEY, PENDING_EPHEMERAL_RECEIPTS_KEY,
 };
 use super::postings::Family;
 use super::postings_store::{scan_packed, PackedScan};
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
     persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, COVERAGE,
-    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META, EXPIRATION_INDEX,
+    DELIVERY_ATTEMPTS, DELIVERY_ATTEMPT_DETAILS, DELIVERY_CORRELATIONS, DELIVERY_DEADLINES,
+    DELIVERY_DEADLINES_BY_INTENT, DELIVERY_DISPLACED, DELIVERY_INTENTS, DELIVERY_KIND5_CLAIMS,
+    DELIVERY_LANES, DELIVERY_META, DELIVERY_RECEIPTS, DELIVERY_RELAYS, DELIVERY_RELAY_IDS,
+    DELIVERY_ROUTE_REVISIONS, DELIVERY_SUPPRESS_BY_ADDR, DELIVERY_SUPPRESS_BY_ID, EVENTS,
+    EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META, EXPIRATION_INDEX,
     INDEX_CARDINALITY, INDEX_CARDINALITY_META, INDEX_CARDINALITY_SAMPLE_KEY,
     INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION, INDEX_CARDINALITY_VERSION_KEY,
-    OUTBOX_ATTEMPTS, OUTBOX_ATTEMPT_DETAILS, OUTBOX_CORRELATIONS, OUTBOX_DEADLINES,
-    OUTBOX_DEADLINES_BY_INTENT, OUTBOX_DISPLACED, OUTBOX_INTENTS, OUTBOX_LANES, OUTBOX_META,
-    OUTBOX_RECEIPTS, OUTBOX_ROUTE_REVISIONS, PENDING_EPHEMERAL_RECEIPTS_KEY, POSTINGS_DEAD_KEYS,
-    POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
-    POSTINGS_SEGMENTS, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS, SCHEMA_META,
-    SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
+    POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN,
+    POSTINGS_RUN_META, POSTINGS_SEGMENTS, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META,
+    RELAY_REFS, SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -27,11 +31,12 @@ use super::AtomicU8;
 use super::Ordering;
 use super::{
     acquire_for_open, binary_event, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
-    EventCursor, EventId, Filter, HashMap, LaneKey, LaneState, Path, PersistenceError,
-    PreparedFilter, Provenance, RecoveredLane, RedbStoreOpenError, RelayUrl,
+    DeliveryLane, DeliveryLaneKey, DeliveryLaneState, EventCursor, EventId, Filter, HashMap, Path,
+    PersistenceError, PreparedFilter, Provenance, RedbStoreOpenError, RelayUrl,
     RequiredLockedFileBackend, StoreOwnership, StoredEvent, StoredEventView, Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTableMetadata, TableHandle};
+use std::sync::Mutex;
 
 /// A persistent, `redb`-backed `EventStore`. One database, MVCC, ACID; the
 /// same insert door and coverage/GC contract as [`crate::MemoryStore`], the
@@ -66,6 +71,11 @@ pub struct RedbStore {
     // token, so no process can open or reset the target until this database
     // handle has finished closing.
     pub(super) _ownership: StoreOwnership,
+    /// Lazy process-local projection of the durable delivery relay dictionary.
+    /// Dictionary allocation remains transaction-authoritative; this cache
+    /// only prevents reparsing a canonical URL for every row that references
+    /// the same four-byte surrogate.
+    delivery_relays: Mutex<DeliveryRelayCache>,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -93,6 +103,12 @@ pub struct RedbStore {
     /// Equivalent instrumentation for resolved-route revision ranges.
     #[cfg(test)]
     pub(super) route_revision_range_rows: AtomicU64,
+}
+
+#[derive(Default)]
+struct DeliveryRelayCache {
+    by_id: HashMap<DeliveryRelayId, RelayUrl>,
+    by_url: HashMap<RelayUrl, DeliveryRelayId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,26 +189,109 @@ impl Drop for RedbStore {
 }
 
 impl RedbStore {
+    pub(super) fn delivery_relay_id(
+        &self,
+        relay: &RelayUrl,
+    ) -> Result<DeliveryRelayId, PersistenceError> {
+        if let Some(id) = self
+            .delivery_relays
+            .lock()
+            .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
+            .by_url
+            .get(relay)
+            .copied()
+        {
+            return Ok(id);
+        }
+        let read = self.db.begin_read().map_err(persist_err)?;
+        let relay_ids = read.open_table(DELIVERY_RELAY_IDS).map_err(persist_err)?;
+        let raw = relay_ids
+            .get(relay.as_str().as_bytes())
+            .map_err(persist_err)?
+            .map(|guard| *guard.value())
+            .ok_or_else(|| PersistenceError::invariant("delivery relay is not interned"))?;
+        let id = u32::from_be_bytes(raw);
+        self.cache_delivery_relay(id, relay.clone())?;
+        Ok(id)
+    }
+
+    pub(super) fn delivery_relay(&self, id: DeliveryRelayId) -> Result<RelayUrl, PersistenceError> {
+        if let Some(relay) = self
+            .delivery_relays
+            .lock()
+            .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
+            .by_id
+            .get(&id)
+            .cloned()
+        {
+            return Ok(relay);
+        }
+        let read = self.db.begin_read().map_err(persist_err)?;
+        let relays = read.open_table(DELIVERY_RELAYS).map_err(persist_err)?;
+        let key = relay_key(id);
+        let encoded = relays
+            .get(&key)
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_vec())
+            .ok_or_else(|| {
+                PersistenceError::invariant(format!(
+                    "delivery row references missing relay surrogate {id}"
+                ))
+            })?;
+        let relay = decode_relay(&encoded).map_err(|error| codec_error("relay", error))?;
+        self.cache_delivery_relay(id, relay.clone())?;
+        Ok(relay)
+    }
+
+    pub(super) fn cache_delivery_relay(
+        &self,
+        id: DeliveryRelayId,
+        relay: RelayUrl,
+    ) -> Result<(), PersistenceError> {
+        let mut cache = self
+            .delivery_relays
+            .lock()
+            .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?;
+        if cache
+            .by_id
+            .get(&id)
+            .is_some_and(|existing| existing != &relay)
+            || cache
+                .by_url
+                .get(&relay)
+                .is_some_and(|existing| *existing != id)
+        {
+            return Err(PersistenceError::invariant(
+                "delivery relay cache disagrees with durable dictionary",
+            ));
+        }
+        cache.by_id.insert(id, relay.clone());
+        cache.by_url.insert(relay, id);
+        Ok(())
+    }
+
     pub(super) fn persist_lane_state(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
-        state: LaneState,
-    ) -> Result<RecoveredLane, PersistenceError> {
+        state: DeliveryLaneState,
+    ) -> Result<DeliveryLane, PersistenceError> {
+        let relay_id = self.delivery_relay_id(&key.relay)?;
         let write_txn = self.db.begin_write().map_err(persist_err)?;
         let lane = {
-            let mut lanes = write_txn.open_table(OUTBOX_LANES).map_err(persist_err)?;
+            let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
             let mut deadlines = write_txn
-                .open_table(OUTBOX_DEADLINES)
+                .open_table(DELIVERY_DEADLINES)
                 .map_err(persist_err)?;
             let mut deadlines_by_intent = write_txn
-                .open_table(OUTBOX_DEADLINES_BY_INTENT)
+                .open_table(DELIVERY_DEADLINES_BY_INTENT)
                 .map_err(persist_err)?;
             replace_lane_in_txn(
                 &mut lanes,
                 &mut deadlines,
                 &mut deadlines_by_intent,
                 key,
+                relay_id,
                 expected_revision,
                 state,
             )?
@@ -222,7 +321,7 @@ impl RedbStore {
     /// adoption, alias, drain, or destructive-reset path. Continuing requires
     /// deliberate discard and recreation: relay-backed cache rows can be
     /// reacquired, but accepted unpublished writes and the rest of their
-    /// durable outbox evidence are permanently lost
+    /// durable delivery evidence are permanently lost
     /// (`docs/internals/conventions/schema-epoch-discard.md`).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(path, BenchmarkDurability::Immediate, |path| {
@@ -369,10 +468,25 @@ impl RedbStore {
                     )
                     .into());
                 }
-                let outbox_meta = read_txn.open_table(OUTBOX_META)?;
-                let pending_ephemeral = outbox_meta
+                let delivery_meta = read_txn.open_table(DELIVERY_META)?;
+                let codec_version = delivery_meta
+                    .get(DELIVERY_CODEC_VERSION_KEY)?
+                    .map(|guard| decode_meta_u64(guard.value(), "delivery codec version"))
+                    .transpose()
+                    .map_err(|error| {
+                        redb::Error::Corrupted(format!(
+                            "invalid durable-delivery codec marker: {error}"
+                        ))
+                    })?;
+                if codec_version != Some(DELIVERY_CODEC_VERSION) {
+                    return Err(redb::Error::Corrupted(format!(
+                        "current schema has durable-delivery codec {codec_version:?}, expected {DELIVERY_CODEC_VERSION}"
+                    ))
+                    .into());
+                }
+                let pending_ephemeral = delivery_meta
                     .get(PENDING_EPHEMERAL_RECEIPTS_KEY)?
-                    .map(|guard| guard.value().parse::<u64>())
+                    .map(|guard| decode_meta_u64(guard.value(), "pending ephemeral receipt count"))
                     .transpose()
                     .map_err(|err| {
                         redb::Error::Corrupted(format!(
@@ -389,8 +503,8 @@ impl RedbStore {
             if pending_ephemeral > 0 {
                 let write_txn = db.begin_write()?;
                 {
-                    let mut outbox_receipts = write_txn.open_table(OUTBOX_RECEIPTS)?;
-                    let reconciled = reconcile_ephemeral_receipts_in_txn(&mut outbox_receipts)
+                    let mut delivery_receipts = write_txn.open_table(DELIVERY_RECEIPTS)?;
+                    let reconciled = reconcile_ephemeral_receipts_in_txn(&mut delivery_receipts)
                         .map_err(|error| redb::Error::Corrupted(error.message().to_owned()))?
                         as u64;
                     if reconciled != pending_ephemeral {
@@ -399,8 +513,11 @@ impl RedbStore {
                         ))
                         .into());
                     }
-                    let mut outbox_meta = write_txn.open_table(OUTBOX_META)?;
-                    outbox_meta.insert(PENDING_EPHEMERAL_RECEIPTS_KEY, "0")?;
+                    let mut delivery_meta = write_txn.open_table(DELIVERY_META)?;
+                    delivery_meta.insert(
+                        PENDING_EPHEMERAL_RECEIPTS_KEY,
+                        encode_meta_u64(0).as_slice(),
+                    )?;
                 }
                 write_txn.commit()?;
                 _open_write_transactions += 1;
@@ -408,7 +525,7 @@ impl RedbStore {
         } else {
             // A nonempty database without the exact current marker is never
             // treated as fresh and is never mutated: initializing over it
-            // would combine unversioned durable outbox/coverage/tombstone
+            // would combine unversioned durable-delivery/coverage/tombstone
             // facts with an empty canonical epoch.
             if table_count != 0 {
                 return Err(unsupported_schema(ownership.target(), None));
@@ -445,20 +562,26 @@ impl RedbStore {
                     write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
                 cardinality_sample_meta
                     .insert(INDEX_CARDINALITY_SAMPLE_KEY, sample_key.as_slice())?;
-                write_txn.open_table(OUTBOX_INTENTS)?;
-                write_txn.open_table(OUTBOX_DISPLACED)?;
-                write_txn.open_table(OUTBOX_ATTEMPTS)?;
-                write_txn.open_table(OUTBOX_ROUTE_REVISIONS)?;
-                write_txn.open_table(OUTBOX_LANES)?;
-                write_txn.open_table(OUTBOX_DEADLINES)?;
-                write_txn.open_table(OUTBOX_DEADLINES_BY_INTENT)?;
-                write_txn.open_table(OUTBOX_ATTEMPT_DETAILS)?;
-                write_txn.open_table(OUTBOX_META)?;
-                write_txn.open_table(OUTBOX_KIND5_CLAIMS)?;
-                write_txn.open_table(OUTBOX_SUPPRESS_BY_ID)?;
-                write_txn.open_table(OUTBOX_SUPPRESS_BY_ADDR)?;
-                write_txn.open_table(OUTBOX_RECEIPTS)?;
-                write_txn.open_table(OUTBOX_CORRELATIONS)?;
+                write_txn.open_table(DELIVERY_INTENTS)?;
+                write_txn.open_table(DELIVERY_DISPLACED)?;
+                write_txn.open_table(DELIVERY_ATTEMPTS)?;
+                write_txn.open_table(DELIVERY_ROUTE_REVISIONS)?;
+                write_txn.open_table(DELIVERY_LANES)?;
+                write_txn.open_table(DELIVERY_DEADLINES)?;
+                write_txn.open_table(DELIVERY_DEADLINES_BY_INTENT)?;
+                write_txn.open_table(DELIVERY_ATTEMPT_DETAILS)?;
+                let mut delivery_meta = write_txn.open_table(DELIVERY_META)?;
+                delivery_meta.insert(
+                    DELIVERY_CODEC_VERSION_KEY,
+                    encode_meta_u64(DELIVERY_CODEC_VERSION).as_slice(),
+                )?;
+                write_txn.open_table(DELIVERY_KIND5_CLAIMS)?;
+                write_txn.open_table(DELIVERY_SUPPRESS_BY_ID)?;
+                write_txn.open_table(DELIVERY_SUPPRESS_BY_ADDR)?;
+                write_txn.open_table(DELIVERY_RECEIPTS)?;
+                write_txn.open_table(DELIVERY_CORRELATIONS)?;
+                write_txn.open_table(DELIVERY_RELAYS)?;
+                write_txn.open_table(DELIVERY_RELAY_IDS)?;
                 let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
                 schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
             }
@@ -468,6 +591,7 @@ impl RedbStore {
         Ok(Self {
             db,
             _ownership: ownership,
+            delivery_relays: Mutex::new(DeliveryRelayCache::default()),
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]
@@ -523,13 +647,13 @@ impl RedbStore {
     }
 
     #[cfg(test)]
-    pub(super) fn reset_outbox_range_rows(&self) {
+    pub(super) fn reset_delivery_range_rows(&self) {
         self.attempt_range_rows.store(0, Ordering::Relaxed);
         self.route_revision_range_rows.store(0, Ordering::Relaxed);
     }
 
     #[cfg(test)]
-    pub(super) fn outbox_range_rows(&self) -> (u64, u64) {
+    pub(super) fn delivery_range_rows(&self) -> (u64, u64) {
         (
             self.attempt_range_rows.load(Ordering::Relaxed),
             self.route_revision_range_rows.load(Ordering::Relaxed),
@@ -676,14 +800,14 @@ impl RedbStore {
     ) -> Result<Vec<EventId>, PersistenceError> {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
-        let outbox_suppress_by_id = read_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ID)
+        let delivery_suppress_by_id = read_txn
+            .open_table(DELIVERY_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
-        let outbox_suppress_by_addr = read_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+        let delivery_suppress_by_addr = read_txn
+            .open_table(DELIVERY_SUPPRESS_BY_ADDR)
             .map_err(persist_err)?;
-        let suppression_possible = !outbox_suppress_by_id.is_empty().map_err(persist_err)?
-            || !outbox_suppress_by_addr.is_empty().map_err(persist_err)?;
+        let suppression_possible = !delivery_suppress_by_id.is_empty().map_err(persist_err)?
+            || !delivery_suppress_by_addr.is_empty().map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
         let prepared_filter = PreparedFilter::new(filter);
@@ -727,7 +851,11 @@ impl RedbStore {
                         "materialize canonical event {event_key}: {error:?}"
                     ))
                 })?;
-                if is_suppressed_in_txn(&outbox_suppress_by_id, &outbox_suppress_by_addr, &event)? {
+                if is_suppressed_in_txn(
+                    &delivery_suppress_by_id,
+                    &delivery_suppress_by_addr,
+                    &event,
+                )? {
                     return Ok(None);
                 }
             }
@@ -768,11 +896,11 @@ impl RedbStore {
             .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let relay_keys = read_txn.open_table(RELAY_KEYS).map_err(persist_err)?;
-        let outbox_suppress_by_id = read_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ID)
+        let delivery_suppress_by_id = read_txn
+            .open_table(DELIVERY_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
-        let outbox_suppress_by_addr = read_txn
-            .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+        let delivery_suppress_by_addr = read_txn
+            .open_table(DELIVERY_SUPPRESS_BY_ADDR)
             .map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
@@ -830,8 +958,8 @@ impl RedbStore {
                 &mut relay_cache,
             )?;
             if is_suppressed_in_txn(
-                &outbox_suppress_by_id,
-                &outbox_suppress_by_addr,
+                &delivery_suppress_by_id,
+                &delivery_suppress_by_addr,
                 &stored.event,
             )? {
                 return Ok(None);

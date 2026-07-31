@@ -55,7 +55,7 @@ impl NmpWorld {
         self.publish_note(text).await;
         let signed = self.receipt_eventually(|seen| {
             seen.iter()
-                .any(|status| matches!(status, nmp::mechanism::outbox::WriteStatus::Signed(_)))
+                .any(|status| matches!(status, nmp::mechanism::delivery::WriteStatus::Signed(_)))
         });
         assert!(
             signed,
@@ -181,7 +181,9 @@ impl NmpWorld {
     /// A bounded settle over the receipt stream, used by the "nothing
     /// changed" assertions: it costs the full negative budget by
     /// construction.
-    pub fn receipt_statuses_after_settling(&mut self) -> Vec<nmp::mechanism::outbox::WriteStatus> {
+    pub fn receipt_statuses_after_settling(
+        &mut self,
+    ) -> Vec<nmp::mechanism::delivery::WriteStatus> {
         let _ = self.receipt_never(|_| false);
         self.receipt_statuses()
     }

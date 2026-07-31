@@ -18,22 +18,23 @@ use crate::coverage::{
     coverage_key, merge_interval, shrink_after_eviction, window_erase, GcVictimIndex,
 };
 use crate::{
-    AcceptOutcome, AcceptWrite, AttemptHandoffDetail, AttemptOutcome, AttemptTransientDetail,
-    AuthDenial, CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, DeadlineKind,
-    EventStore, GcReport, GcRetentionSet, InFlightPhase, InsertOutcome, IntentId, IntentSigState,
-    LaneDeadline, LaneKey, LaneState, LaneTerminalOutcome, LocalOrigin, PersistenceError,
-    PostHandoffState, PromoteOutcome, Provenance, ReceiptState, RecoveredAttempt,
-    RecoveredAttemptDetails, RecoveredIntent, RecoveredLane, RecoveredReceipt,
-    RecoveredRouteRevision, RefuseReason, RelayObserved, RetiredIntent, RetractReason, SigState,
-    StoredEvent, TransientCause, WriteDurability,
+    AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome, CompensateOutcome,
+    CoverageInterval, CoverageKey, DeliveryAttempt, DeliveryAttemptDetails, DeliveryAttemptHandoff,
+    DeliveryAttemptOutcome, DeliveryAttemptTransient, DeliveryDeadline, DeliveryDeadlineKind,
+    DeliveryInFlightPhase, DeliveryIntent, DeliveryLane, DeliveryLaneKey, DeliveryLaneState,
+    DeliveryPostHandoffState, DeliveryReceipt, DeliveryRouteRevision, DeliveryTerminalOutcome,
+    DeliveryTransientCause, EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId,
+    IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, ReceiptState,
+    RefuseReason, RelayObserved, RetiredIntent, RetractReason, SigState, StoredEvent,
+    WriteDurability,
 };
 
-/// One `OUTBOX_INTENTS` row (M3 durable-outbox unit, crashsafe-accepted-2-3-
+/// One `DELIVERY_INTENTS` row (M3 durable-delivery unit, crashsafe-accepted-2-3-
 /// plan.md §2.2) as retained in memory. `MemoryStore` implements the same
 /// door SEMANTICS as `RedbStore` so the two backends can never diverge on
-/// the outbox contract (this struct is the in-memory mirror of
-/// `RedbStore`'s `OUTBOX_INTENTS` JSON record) — but carries no durability
-/// guarantee of its own (Fable checkpoint Q4): `recover_outbox` always
+/// the delivery contract (this struct is the in-memory mirror of
+/// `RedbStore`'s `DELIVERY_INTENTS` JSON record) — but carries no durability
+/// guarantee of its own (Fable checkpoint Q4): `recover_delivery` always
 /// returns empty, because nothing here survives a process crash by
 /// construction. Its fields are therefore write-only from this backend's
 /// own perspective (never read back by `MemoryStore` itself, only kept in
@@ -43,7 +44,7 @@ use crate::{
 /// silently diverge.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-struct OutboxIntentRecord {
+struct DeliveryIntentRecord {
     receipt_id: u64,
     frozen: Event,
     expected_pubkey: PublicKey,
@@ -155,14 +156,14 @@ pub struct MemoryStore {
     /// every removal so `expire_due`/`next_expiration` never rescan the
     /// whole store (retraction-and-negative-deltas.md §3.1).
     expiration_index: BTreeMap<Timestamp, HashSet<EventId>>,
-    /// `OUTBOX_INTENTS` mirror (crashsafe-accepted-2-3-plan.md §2.2) — one
+    /// `DELIVERY_INTENTS` mirror (crashsafe-accepted-2-3-plan.md §2.2) — one
     /// entry per still-open locally-accepted write intent.
-    outbox_intents: HashMap<IntentId, OutboxIntentRecord>,
-    /// `OUTBOX_DISPLACED` mirror: the predecessor each open intent
+    delivery_intents: HashMap<IntentId, DeliveryIntentRecord>,
+    /// `DELIVERY_DISPLACED` mirror: the predecessor each open intent
     /// evicted, if any, kept durable-in-memory until `promote_signed` or
     /// `compensate_write` drops it.
-    outbox_displaced: HashMap<IntentId, StoredEvent>,
-    /// `OUTBOX_META`'s in-memory mirror: the next `IntentId` to allocate.
+    delivery_displaced: HashMap<IntentId, StoredEvent>,
+    /// `DELIVERY_META`'s in-memory mirror: the next `IntentId` to allocate.
     /// The store owns this counter (never a caller) — see `IntentId`'s doc
     /// for why a caller-inferred value is unsound.
     next_intent_id: u64,
@@ -171,26 +172,26 @@ pub struct MemoryStore {
     /// correction: receipts are durably retained across restart, so a
     /// caller-side receipt-id counter has `IntentId`'s exact reuse hazard).
     next_receipt_id: u64,
-    /// `OUTBOX_RECEIPTS` mirror: retained receipt records, independent of
-    /// `outbox_intents`'s open-work rows (architecture review correction —
+    /// `DELIVERY_RECEIPTS` mirror: retained receipt records, independent of
+    /// `delivery_intents`'s open-work rows (architecture review correction —
     /// see `ReceiptState`'s doc). Never pruned by this unit.
-    outbox_receipts: HashMap<u64, RecoveredReceipt>,
-    /// `OUTBOX_CORRELATIONS` mirror (#591): caller correlation token ->
+    delivery_receipts: HashMap<u64, DeliveryReceipt>,
+    /// `DELIVERY_CORRELATIONS` mirror (#591): caller correlation token ->
     /// the receipt id it was journaled under. Never pruned by this unit.
-    outbox_correlations: HashMap<String, u64>,
-    /// Typed mirror of `OUTBOX_ATTEMPTS`, keyed by its complete stable key.
-    outbox_attempts: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttempt>,
-    outbox_attempt_details: BTreeMap<(IntentId, RelayUrl, u64), RecoveredAttemptDetails>,
-    outbox_lanes: BTreeMap<IntentId, BTreeMap<RelayUrl, RecoveredLane>>,
-    outbox_deadlines: BTreeMap<(Timestamp, IntentId, RelayUrl), LaneDeadline>,
-    outbox_deadlines_by_intent: BTreeMap<IntentId, BTreeSet<(Timestamp, RelayUrl)>>,
+    delivery_correlations: HashMap<String, u64>,
+    /// Typed mirror of `DELIVERY_ATTEMPTS`, keyed by its complete stable key.
+    delivery_attempts: BTreeMap<(IntentId, RelayUrl, u64), DeliveryAttempt>,
+    delivery_attempt_details: BTreeMap<(IntentId, RelayUrl, u64), DeliveryAttemptDetails>,
+    delivery_lanes: BTreeMap<IntentId, BTreeMap<RelayUrl, DeliveryLane>>,
+    delivery_deadlines: BTreeMap<(Timestamp, IntentId, RelayUrl), DeliveryDeadline>,
+    delivery_deadlines_by_intent: BTreeMap<IntentId, BTreeSet<(Timestamp, RelayUrl)>>,
     /// Append-only resolved route revisions, keyed by `(intent, ordinal)`.
-    outbox_route_revisions: BTreeMap<(IntentId, u64), RecoveredRouteRevision>,
+    delivery_route_revisions: BTreeMap<(IntentId, u64), DeliveryRouteRevision>,
     /// Every still-open kind:5 intent's OWN suppression claims (see
     /// [`SuppressClaim`]'s doc) — dropped wholesale by `promote_signed`
     /// (after committing the deletion for real) or `compensate_write`
     /// (reversing it, nothing else to do).
-    outbox_kind5_claims: HashMap<IntentId, Vec<SuppressClaim>>,
+    delivery_kind5_claims: HashMap<IntentId, Vec<SuppressClaim>>,
     /// Reverse index: which intents currently claim a given `(target id,
     /// claiming author)` pair — consulted by `is_suppressed` to decide
     /// `query` visibility. More than one intent can claim the SAME target
@@ -329,29 +330,31 @@ impl MemoryStore {
         }
     }
 
-    fn get_lane(&self, key: &LaneKey) -> Option<&RecoveredLane> {
-        self.outbox_lanes
+    fn get_lane(&self, key: &DeliveryLaneKey) -> Option<&DeliveryLane> {
+        self.delivery_lanes
             .get(&key.intent_id)
             .and_then(|lanes| lanes.get(&key.relay))
     }
 
-    fn insert_lane(&mut self, lane: RecoveredLane) {
-        self.outbox_lanes
+    fn insert_lane(&mut self, lane: DeliveryLane) {
+        self.delivery_lanes
             .entry(lane.key.intent_id)
             .or_default()
             .insert(lane.key.relay.clone(), lane);
     }
 
-    fn lane_deadline(lane: &RecoveredLane) -> Option<LaneDeadline> {
+    fn lane_deadline(lane: &DeliveryLane) -> Option<DeliveryDeadline> {
         let (at, kind) = match lane.state {
-            LaneState::Transient { eligible_at, .. } => (eligible_at, DeadlineKind::RetryEligible),
-            LaneState::InFlight {
-                phase: InFlightPhase::AwaitingAck { deadline },
+            DeliveryLaneState::Transient { eligible_at, .. } => {
+                (eligible_at, DeliveryDeadlineKind::RetryEligible)
+            }
+            DeliveryLaneState::InFlight {
+                phase: DeliveryInFlightPhase::AwaitingAck { deadline },
                 ..
-            } => (deadline, DeadlineKind::AckTimeout),
+            } => (deadline, DeliveryDeadlineKind::AckTimeout),
             _ => return None,
         };
-        Some(LaneDeadline {
+        Some(DeliveryDeadline {
             at,
             key: lane.key.clone(),
             lane_revision: lane.revision,
@@ -361,32 +364,32 @@ impl MemoryStore {
 
     fn replace_lane(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
-        state: LaneState,
-    ) -> Result<RecoveredLane, PersistenceError> {
+        state: DeliveryLaneState,
+    ) -> Result<DeliveryLane, PersistenceError> {
         let current = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         if current.revision != expected_revision {
-            return Err(PersistenceError::invariant("stale outbox lane revision"));
+            return Err(PersistenceError::invariant("stale delivery lane revision"));
         }
         let revision = current
             .revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane revision exhausted"))?;
         if let Some(old) = Self::lane_deadline(&current) {
-            self.outbox_deadlines
+            self.delivery_deadlines
                 .remove(&(old.at, key.intent_id, key.relay.clone()));
-            if let Some(rows) = self.outbox_deadlines_by_intent.get_mut(&key.intent_id) {
+            if let Some(rows) = self.delivery_deadlines_by_intent.get_mut(&key.intent_id) {
                 rows.remove(&(old.at, key.relay.clone()));
                 if rows.is_empty() {
-                    self.outbox_deadlines_by_intent.remove(&key.intent_id);
+                    self.delivery_deadlines_by_intent.remove(&key.intent_id);
                 }
             }
         }
-        let lane = RecoveredLane {
+        let lane = DeliveryLane {
             version: 1,
             key: key.clone(),
             revision,
@@ -394,11 +397,11 @@ impl MemoryStore {
             state,
         };
         if let Some(deadline) = Self::lane_deadline(&lane) {
-            self.outbox_deadlines_by_intent
+            self.delivery_deadlines_by_intent
                 .entry(key.intent_id)
                 .or_default()
                 .insert((deadline.at, key.relay.clone()));
-            self.outbox_deadlines
+            self.delivery_deadlines
                 .insert((deadline.at, key.intent_id, key.relay.clone()), deadline);
         }
         self.insert_lane(lane.clone());
@@ -432,8 +435,8 @@ impl MemoryStore {
         Ok(next)
     }
 
-    /// Write (or overwrite) one `OUTBOX_INTENTS` row plus its
-    /// `OUTBOX_DISPLACED` stash, if any — `accept_write`'s journal half of
+    /// Write (or overwrite) one `DELIVERY_INTENTS` row plus its
+    /// `DELIVERY_DISPLACED` stash, if any — `accept_write`'s journal half of
     /// the "one atomic commit" (in-memory: same call, no separate
     /// transaction to span).
     #[allow(clippy::too_many_arguments)]
@@ -450,9 +453,9 @@ impl MemoryStore {
         accepted_at: Timestamp,
         displaced: Option<StoredEvent>,
     ) {
-        self.outbox_intents.insert(
+        self.delivery_intents.insert(
             intent_id,
-            OutboxIntentRecord {
+            DeliveryIntentRecord {
                 receipt_id,
                 frozen,
                 expected_pubkey,
@@ -464,11 +467,11 @@ impl MemoryStore {
             },
         );
         if let Some(displaced) = displaced {
-            self.outbox_displaced.insert(intent_id, displaced);
+            self.delivery_displaced.insert(intent_id, displaced);
         }
     }
 
-    /// Write one `OUTBOX_RECEIPTS` row at `Accepted` — `accept_write`'s
+    /// Write one `DELIVERY_RECEIPTS` row at `Accepted` — `accept_write`'s
     /// receipt-retention half (architecture review correction). Always
     /// paired with `journal_intent` in the same call; never pruned by this
     /// unit.
@@ -480,9 +483,9 @@ impl MemoryStore {
         expected_pubkey: PublicKey,
         correlation: &Option<nmp_grammar::CorrelationToken>,
     ) {
-        self.outbox_receipts.insert(
+        self.delivery_receipts.insert(
             receipt_id,
-            RecoveredReceipt {
+            DeliveryReceipt {
                 receipt_id,
                 intent_id: Some(intent_id),
                 frozen_id,
@@ -493,7 +496,7 @@ impl MemoryStore {
         // #591: journal the caller's correlation token alongside the
         // receipt id it now names -- same call, same in-memory mutation.
         if let Some(token) = correlation {
-            self.outbox_correlations
+            self.delivery_correlations
                 .insert(token.as_ref().to_string(), receipt_id);
         }
     }
@@ -520,19 +523,19 @@ impl MemoryStore {
             .unwrap_or_default();
         let mut eligible = Vec::new();
         for owner in owners {
-            let Some(intent) = self.outbox_intents.get(&owner) else {
+            let Some(intent) = self.delivery_intents.get(&owner) else {
                 continue;
             };
             let has_attempt = self
-                .outbox_attempts
+                .delivery_attempts
                 .keys()
                 .any(|(candidate, _, _)| *candidate == owner)
                 || self
-                    .outbox_attempt_details
+                    .delivery_attempt_details
                     .keys()
                     .any(|(candidate, _, _)| *candidate == owner)
                 || self
-                    .outbox_lanes
+                    .delivery_lanes
                     .get(&owner)
                     .is_some_and(|lanes| lanes.values().any(|lane| lane.last_ordinal != 0));
             if !has_attempt {
@@ -545,21 +548,21 @@ impl MemoryStore {
             if let Some(local) = replaced.provenance.local.as_mut() {
                 local.owners.remove(owner);
             }
-            if let Some(displaced) = self.outbox_displaced.remove(owner) {
+            if let Some(displaced) = self.delivery_displaced.remove(owner) {
                 predecessor.get_or_insert(displaced);
             }
-            self.outbox_intents.remove(owner);
-            self.outbox_lanes.remove(owner);
-            self.outbox_route_revisions
+            self.delivery_intents.remove(owner);
+            self.delivery_lanes.remove(owner);
+            self.delivery_route_revisions
                 .retain(|(candidate, _), _| candidate != owner);
-            if let Some(rows) = self.outbox_deadlines_by_intent.remove(owner) {
+            if let Some(rows) = self.delivery_deadlines_by_intent.remove(owner) {
                 for (at, relay) in rows {
-                    self.outbox_deadlines.remove(&(at, *owner, relay));
+                    self.delivery_deadlines.remove(&(at, *owner, relay));
                 }
             }
-            self.outbox_receipts
+            self.delivery_receipts
                 .get_mut(receipt_id)
-                .expect("open outbox intent must retain its receipt")
+                .expect("open delivery intent must retain its receipt")
                 .state = ReceiptState::Superseded;
         }
 
@@ -798,7 +801,7 @@ impl MemoryStore {
     /// of `index_event`, called at EVERY site a row leaves `by_id`
     /// (ordinary `remove`, a replaceable/addressable supersession's
     /// displaced predecessor -- whether dropped outright or staged into
-    /// `outbox_displaced`, both leave `by_id` -- and `gc`'s eviction
+    /// `delivery_displaced`, both leave `by_id` -- and `gc`'s eviction
     /// pass). Must be called with the SAME `se` that `index_event` was
     /// originally called with (same id/author/kind/created_at/tags), so
     /// the tuples removed here byte-for-byte match what was inserted.
@@ -1134,7 +1137,7 @@ impl MemoryStore {
                 deleting.pubkey,
             ));
         }
-        self.outbox_kind5_claims.insert(intent_id, claims);
+        self.delivery_kind5_claims.insert(intent_id, claims);
 
         let mut hidden = Vec::new();
         for id in candidate_ids {
@@ -1229,8 +1232,8 @@ impl MemoryStore {
         let mut transitioned = Vec::new();
         let is_deletion = canonical_event.kind == Kind::EventDeletion;
         for owner_id in owners {
-            self.outbox_displaced.remove(owner_id);
-            if let Some(record) = self.outbox_intents.get_mut(owner_id) {
+            self.delivery_displaced.remove(owner_id);
+            if let Some(record) = self.delivery_intents.get_mut(owner_id) {
                 if record.sig_state != IntentSigState::Signed {
                     record.sig_state = IntentSigState::Signed;
                     record.frozen = canonical_event.clone();
@@ -1238,14 +1241,14 @@ impl MemoryStore {
                 }
             }
             if let Some(receipt) = self
-                .outbox_receipts
+                .delivery_receipts
                 .values_mut()
                 .find(|r| r.intent_id == Some(*owner_id))
             {
                 receipt.state = ReceiptState::Signed;
             }
             if is_deletion {
-                if let Some(claims) = self.outbox_kind5_claims.remove(owner_id) {
+                if let Some(claims) = self.delivery_kind5_claims.remove(owner_id) {
                     self.drop_kind5_claims(*owner_id, &claims);
                 }
             }
@@ -1802,7 +1805,7 @@ impl EventStore for MemoryStore {
         // doc). The intent is still journaled: it still gets signed and
         // delivered even though it does not WIN a fresh row here. Checked
         // against BOTH the live `EVENTS` row AND every OTHER intent's
-        // `OUTBOX_DISPLACED` stash (issue #2 P0 correction, codex-nova
+        // `DELIVERY_DISPLACED` stash (issue #2 P0 correction, codex-nova
         // ruling): a duplicate accepted while its canonical predecessor
         // is currently sitting displaced (superseded by a later local
         // edit, not yet restored) must ALSO join that stash entry's owner
@@ -1815,7 +1818,7 @@ impl EventStore for MemoryStore {
         let dup_loc = if self.by_id.contains_key(&frozen.id) {
             Some(DupLoc::Live)
         } else {
-            self.outbox_displaced
+            self.delivery_displaced
                 .iter()
                 .find(|(_, se)| se.event.id == frozen.id)
                 .map(|(k, _)| DupLoc::Stash(*k))
@@ -1829,7 +1832,7 @@ impl EventStore for MemoryStore {
                     .expect("just checked this id exists")
                     .clone(),
                 DupLoc::Stash(stash_key) => self
-                    .outbox_displaced
+                    .delivery_displaced
                     .get(&stash_key)
                     .expect("just found this key")
                     .clone(),
@@ -1882,7 +1885,7 @@ impl EventStore for MemoryStore {
                         .local = updated_local;
                 }
                 DupLoc::Stash(stash_key) => {
-                    self.outbox_displaced
+                    self.delivery_displaced
                         .get_mut(&stash_key)
                         .expect("just found this key")
                         .provenance
@@ -1908,7 +1911,7 @@ impl EventStore for MemoryStore {
                     .expect("just checked this id exists")
                     .clone(),
                 DupLoc::Stash(stash_key) => self
-                    .outbox_displaced
+                    .delivery_displaced
                     .get(&stash_key)
                     .expect("just found this key")
                     .clone(),
@@ -1946,7 +1949,7 @@ impl EventStore for MemoryStore {
                 &correlation,
             );
             if already_signed {
-                if let Some(receipt) = self.outbox_receipts.get_mut(&receipt_id) {
+                if let Some(receipt) = self.delivery_receipts.get_mut(&receipt_id) {
                     receipt.state = ReceiptState::Signed;
                 }
             }
@@ -2091,7 +2094,7 @@ impl EventStore for MemoryStore {
         intent_id: IntentId,
         sig: Signature,
     ) -> Result<PromoteOutcome, PersistenceError> {
-        let Some(intent_record) = self.outbox_intents.get(&intent_id) else {
+        let Some(intent_record) = self.delivery_intents.get(&intent_id) else {
             return Ok(PromoteOutcome::NotFound);
         };
         // No-second-transition guard (codex-nova finding): a repeat
@@ -2133,7 +2136,7 @@ impl EventStore for MemoryStore {
                 .and_then(|se| se.provenance.local.as_ref())
                 .is_some_and(|l| l.sig_state == SigState::Signed)
         } else {
-            self.outbox_displaced.values().any(|se| {
+            self.delivery_displaced.values().any(|se| {
                 se.event.id == frozen_id
                     && se.provenance.local.as_ref().is_some_and(|l| {
                         l.owners.contains(&intent_id) && l.sig_state == SigState::Signed
@@ -2162,7 +2165,7 @@ impl EventStore for MemoryStore {
                 .owners
                 .clone();
             (se.clone(), owners)
-        } else if let Some(other) = self.outbox_displaced.values_mut().find(|se| {
+        } else if let Some(other) = self.delivery_displaced.values_mut().find(|se| {
             // Not live. If this intent's exact frozen bytes are sitting in
             // some OTHER intent's displaced stash (it was superseded by a
             // later local edit before it could sign), sync the real
@@ -2203,7 +2206,7 @@ impl EventStore for MemoryStore {
             // when `!already_signed`: `already_signed` requires a matching
             // live row or stash entry to have been found above.
             let mut event = self
-                .outbox_intents
+                .delivery_intents
                 .get(&intent_id)
                 .expect("looked up at the top of this call")
                 .frozen
@@ -2252,7 +2255,7 @@ impl EventStore for MemoryStore {
             crate::CompensationReason::Failure => ReceiptState::Compensated,
             crate::CompensationReason::ExplicitCancellation => ReceiptState::Cancelled,
         };
-        let Some(intent_record) = self.outbox_intents.get(&intent_id) else {
+        let Some(intent_record) = self.delivery_intents.get(&intent_id) else {
             return Ok(CompensateOutcome::NotFound);
         };
         // Pre-signature only (retraction doc §4.2's "Promotion
@@ -2261,9 +2264,9 @@ impl EventStore for MemoryStore {
             return Ok(CompensateOutcome::AlreadySigned);
         }
         let receipt_id = intent_record.receipt_id;
-        if !self.outbox_receipts.contains_key(&receipt_id) {
+        if !self.delivery_receipts.contains_key(&receipt_id) {
             return Err(PersistenceError::invariant(format!(
-                "missing outbox receipt {receipt_id}"
+                "missing delivery receipt {receipt_id}"
             )));
         }
         let frozen_id = intent_record.frozen.id;
@@ -2315,7 +2318,7 @@ impl EventStore for MemoryStore {
             // identical fix for why (a `Duplicate` can share an event id
             // with an unrelated, real intent).
             let other_key = self
-                .outbox_displaced
+                .delivery_displaced
                 .iter()
                 .find(|(_, se)| {
                     se.event.id == frozen_id
@@ -2328,7 +2331,7 @@ impl EventStore for MemoryStore {
                 .map(|(k, _)| *k);
             if let Some(other_key) = other_key {
                 let se = self
-                    .outbox_displaced
+                    .delivery_displaced
                     .get_mut(&other_key)
                     .expect("just found this key");
                 let local = se
@@ -2341,12 +2344,12 @@ impl EventStore for MemoryStore {
                     && local.sig_state == SigState::Pending
                     && se.provenance.seen.is_empty();
                 if should_drop {
-                    self.outbox_displaced.remove(&other_key);
+                    self.delivery_displaced.remove(&other_key);
                 }
             }
         }
 
-        self.outbox_intents.remove(&intent_id);
+        self.delivery_intents.remove(&intent_id);
         // THIS intent's OWN displaced predecessor (if any) is restored
         // through the same one door regardless of whether its row was
         // live or already gone for some other reason (kind:5/expiry/relay
@@ -2354,7 +2357,7 @@ impl EventStore for MemoryStore {
         // this safe even if the predecessor was itself since deleted or
         // expired.
         let restored = self
-            .outbox_displaced
+            .delivery_displaced
             .remove(&intent_id)
             .and_then(|displaced| self.reinsert_stashed(displaced))
             .map(Box::new);
@@ -2372,7 +2375,7 @@ impl EventStore for MemoryStore {
         // place (e.g. a wrong-author e-tag claim on a row some OTHER
         // author holds), is correctly excluded.
         let mut revealed = Vec::new();
-        if let Some(claims) = self.outbox_kind5_claims.remove(&intent_id) {
+        if let Some(claims) = self.delivery_kind5_claims.remove(&intent_id) {
             let mut candidate_ids: Vec<EventId> = Vec::new();
             let mut seen_candidates: HashSet<EventId> = HashSet::new();
             for claim in &claims {
@@ -2406,7 +2409,7 @@ impl EventStore for MemoryStore {
             }
         }
 
-        self.outbox_receipts
+        self.delivery_receipts
             .get_mut(&receipt_id)
             .expect("receipt existence checked before compensation")
             .state = terminal_state;
@@ -2418,7 +2421,7 @@ impl EventStore for MemoryStore {
         &mut self,
         receipt_id: u64,
     ) -> Result<crate::CancelEphemeralOutcome, PersistenceError> {
-        let Some(receipt) = self.outbox_receipts.get_mut(&receipt_id) else {
+        let Some(receipt) = self.delivery_receipts.get_mut(&receipt_id) else {
             return Ok(crate::CancelEphemeralOutcome::NotFound);
         };
         if receipt.intent_id.is_some() {
@@ -2438,7 +2441,7 @@ impl EventStore for MemoryStore {
     }
 
     fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        let Some(receipt) = self.outbox_receipts.get_mut(&receipt_id) else {
+        let Some(receipt) = self.delivery_receipts.get_mut(&receipt_id) else {
             return Ok(false);
         };
         if receipt.intent_id.is_some() || receipt.state != ReceiptState::Accepted {
@@ -2448,7 +2451,7 @@ impl EventStore for MemoryStore {
         Ok(true)
     }
 
-    fn recover_outbox(&self) -> Result<Vec<RecoveredIntent>, PersistenceError> {
+    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
         // Fable checkpoint Q4: crash-safety is a `RedbStore`-only backend
         // property. Nothing here survives a real process crash, so there
         // is nothing to recover, by construction. This backend owns no
@@ -2460,29 +2463,29 @@ impl EventStore for MemoryStore {
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<RecoveredReceipt>, PersistenceError> {
+    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
         // NOT a Q4 "always empty" door: retention (not crash-survival) is
         // the contract here, and `MemoryStore` retains faithfully for the
         // life of the process — see `EventStore::reattach_receipt`'s doc.
-        Ok(self.outbox_receipts.get(&receipt_id).cloned())
+        Ok(self.delivery_receipts.get(&receipt_id).cloned())
     }
 
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
-        Ok(self.outbox_correlations.get(token).copied())
+        Ok(self.delivery_correlations.get(token).copied())
     }
 
     fn record_route_revision(
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<RecoveredRouteRevision, PersistenceError> {
-        if !self.outbox_intents.contains_key(&intent_id) {
+    ) -> Result<DeliveryRouteRevision, PersistenceError> {
+        if !self.delivery_intents.contains_key(&intent_id) {
             return Err(PersistenceError::invariant(
                 "route revision intent is not open",
             ));
         }
         let ordinal = self
-            .outbox_route_revisions
+            .delivery_route_revisions
             .keys()
             .filter(|(candidate, _)| *candidate == intent_id)
             .map(|(_, ordinal)| *ordinal)
@@ -2490,13 +2493,13 @@ impl EventStore for MemoryStore {
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| PersistenceError::invariant("route revision ordinal exhausted"))?;
-        let revision = RecoveredRouteRevision {
+        let revision = DeliveryRouteRevision {
             version: 1,
             intent_id,
             ordinal,
             relays,
         };
-        self.outbox_route_revisions
+        self.delivery_route_revisions
             .insert((intent_id, ordinal), revision.clone());
         Ok(revision)
     }
@@ -2504,9 +2507,9 @@ impl EventStore for MemoryStore {
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
         Ok(self
-            .outbox_route_revisions
+            .delivery_route_revisions
             .values()
             .filter(|revision| revision.intent_id == intent_id)
             .cloned()
@@ -2516,15 +2519,15 @@ impl EventStore for MemoryStore {
     fn recover_attempts(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredAttempt>, PersistenceError> {
+    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
         let mut recovered: Vec<_> = self
-            .outbox_attempts
+            .delivery_attempts
             .values()
             .filter(|attempt| attempt.intent_id == intent_id)
             .map(|attempt| {
                 let mut effective = attempt.clone();
                 if let Some(terminal) = self
-                    .outbox_attempt_details
+                    .delivery_attempt_details
                     .get(&(attempt.intent_id, attempt.relay.clone(), attempt.ordinal))
                     .and_then(|details| details.terminal.clone())
                 {
@@ -2541,17 +2544,17 @@ impl EventStore for MemoryStore {
         Ok(recovered)
     }
 
-    fn bootstrap_outbox_lanes(
+    fn bootstrap_delivery_lanes(
         &mut self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
-        if !self.outbox_intents.contains_key(&intent_id) {
+    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
+        if !self.delivery_intents.contains_key(&intent_id) {
             return Err(PersistenceError::invariant(
                 "lane bootstrap intent is not open",
             ));
         }
         let mut relays = BTreeSet::new();
-        for revision in self.outbox_route_revisions.values() {
+        for revision in self.delivery_route_revisions.values() {
             if revision.intent_id == intent_id {
                 relays.extend(revision.relays.iter().cloned());
             }
@@ -2560,14 +2563,14 @@ impl EventStore for MemoryStore {
         // current shape (base row + detail row + covering route revision)
         // rather than adopting a pre-detail attempt layout.
         let attempt_keys: BTreeSet<_> = self
-            .outbox_attempts
+            .delivery_attempts
             .keys()
             .filter(|(candidate, _, _)| *candidate == intent_id)
             .map(|(_, relay, ordinal)| (relay.clone(), *ordinal))
             .collect();
         for (relay, ordinal) in &attempt_keys {
             if !self
-                .outbox_attempt_details
+                .delivery_attempt_details
                 .contains_key(&(intent_id, relay.clone(), *ordinal))
             {
                 return Err(PersistenceError::invariant(
@@ -2581,7 +2584,7 @@ impl EventStore for MemoryStore {
             }
         }
         if self
-            .outbox_attempt_details
+            .delivery_attempt_details
             .keys()
             .filter(|(candidate, _, _)| *candidate == intent_id)
             .any(|(_, relay, ordinal)| !attempt_keys.contains(&(relay.clone(), *ordinal)))
@@ -2590,11 +2593,11 @@ impl EventStore for MemoryStore {
                 "attempt detail row has no base attempt row",
             ));
         }
-        if let Some(existing_lanes) = self.outbox_lanes.get(&intent_id) {
+        if let Some(existing_lanes) = self.delivery_lanes.get(&intent_id) {
             for (stored_relay, lane) in existing_lanes {
                 if lane.key.intent_id != intent_id || &lane.key.relay != stored_relay {
                     return Err(PersistenceError::invariant(
-                        "outbox lane storage key does not match value",
+                        "delivery lane storage key does not match value",
                     ));
                 }
                 if !relays.contains(stored_relay) {
@@ -2609,7 +2612,7 @@ impl EventStore for MemoryStore {
         let mut prepared_inserts = Vec::new();
         let mut prepared_return = Vec::with_capacity(relays.len());
         for relay in relays {
-            let key = LaneKey { intent_id, relay };
+            let key = DeliveryLaneKey { intent_id, relay };
             let attempts: Vec<_> = all_attempts
                 .iter()
                 .filter(|attempt| attempt.relay == key.relay)
@@ -2620,7 +2623,7 @@ impl EventStore for MemoryStore {
                 .filter(|attempt| {
                     crate::attempt_is_live(
                         attempt,
-                        self.outbox_attempt_details.get(&(
+                        self.delivery_attempt_details.get(&(
                             attempt.intent_id,
                             attempt.relay.clone(),
                             attempt.ordinal,
@@ -2633,7 +2636,7 @@ impl EventStore for MemoryStore {
                     && attempts.last().is_some_and(|attempt| {
                         !crate::attempt_is_live(
                             attempt,
-                            self.outbox_attempt_details.get(&(
+                            self.delivery_attempt_details.get(&(
                                 attempt.intent_id,
                                 attempt.relay.clone(),
                                 attempt.ordinal,
@@ -2649,15 +2652,15 @@ impl EventStore for MemoryStore {
                 let max = attempts.last().map_or(0, |attempt| attempt.ordinal);
                 if existing.last_ordinal != max {
                     return Err(PersistenceError::invariant(
-                        "outbox lane cursor disagrees with retained attempt history",
+                        "delivery lane cursor disagrees with retained attempt history",
                     ));
                 }
                 match attempts.last() {
-                    Some(attempt) if attempt.outcome != AttemptOutcome::Started => {
+                    Some(attempt) if attempt.outcome != DeliveryAttemptOutcome::Started => {
                         if existing.state
-                            != (LaneState::Terminal {
+                            != (DeliveryLaneState::Terminal {
                                 ordinal: attempt.ordinal,
-                                outcome: LaneTerminalOutcome::from_attempt(
+                                outcome: DeliveryTerminalOutcome::from_attempt(
                                     attempt.outcome.clone(),
                                 )?,
                             })
@@ -2669,12 +2672,12 @@ impl EventStore for MemoryStore {
                     }
                     _ if matches!(
                         existing.state,
-                        LaneState::Terminal {
-                            outcome: LaneTerminalOutcome::AuthDenied(_),
+                        DeliveryLaneState::Terminal {
+                            outcome: DeliveryTerminalOutcome::AuthDenied(_),
                             ..
                         }
                     ) => {}
-                    _ if matches!(existing.state, LaneState::Terminal { .. }) => {
+                    _ if matches!(existing.state, DeliveryLaneState::Terminal { .. }) => {
                         return Err(PersistenceError::invariant(
                             "terminal lane lacks matching terminal attempt",
                         ));
@@ -2689,12 +2692,12 @@ impl EventStore for MemoryStore {
                     "attempt history exists without its lane row",
                 ));
             }
-            let lane = RecoveredLane {
+            let lane = DeliveryLane {
                 version: 1,
                 key,
                 revision: 1,
                 last_ordinal: 0,
-                state: LaneState::WaitingConnection,
+                state: DeliveryLaneState::WaitingConnection,
             };
             prepared_inserts.push(lane.clone());
             prepared_return.push(lane);
@@ -2709,30 +2712,30 @@ impl EventStore for MemoryStore {
         Ok(prepared_return)
     }
 
-    fn recover_outbox_lanes(
+    fn recover_delivery_lanes(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredLane>, PersistenceError> {
+    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
         Ok(self
-            .outbox_lanes
+            .delivery_lanes
             .get(&intent_id)
             .into_iter()
             .flat_map(|lanes| lanes.values().cloned())
             .collect())
     }
 
-    fn due_outbox_deadlines(
+    fn due_delivery_deadlines(
         &self,
         now: Timestamp,
         limit: usize,
-    ) -> Result<Vec<LaneDeadline>, PersistenceError> {
+    ) -> Result<Vec<DeliveryDeadline>, PersistenceError> {
         if limit > 1_024 {
             return Err(PersistenceError::invariant(
                 "deadline read limit exceeds 1024",
             ));
         }
         let mut due = Vec::new();
-        for (_, deadline) in self.outbox_deadlines.range(
+        for (_, deadline) in self.delivery_deadlines.range(
             ..=(
                 now,
                 IntentId(u64::MAX),
@@ -2754,48 +2757,52 @@ impl EventStore for MemoryStore {
         Ok(due)
     }
 
-    fn next_outbox_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+    fn next_delivery_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
         Ok(self
-            .outbox_deadlines
+            .delivery_deadlines
             .first_key_value()
             .map(|((at, _, _), _)| *at))
     }
 
     fn set_lane_waiting(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         auth: bool,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         self.replace_lane(
             key,
             expected_revision,
             if auth {
-                LaneState::WaitingAuth
+                DeliveryLaneState::WaitingAuth
             } else {
-                LaneState::WaitingConnection
+                DeliveryLaneState::WaitingConnection
             },
         )
     }
 
     fn set_lane_eligible(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         since: Timestamp,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        self.replace_lane(key, expected_revision, LaneState::Eligible { since })
+    ) -> Result<DeliveryLane, PersistenceError> {
+        self.replace_lane(
+            key,
+            expected_revision,
+            DeliveryLaneState::Eligible { since },
+        )
     }
 
     fn set_lane_transient(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         ordinal: u64,
         eligible_at: Timestamp,
-        cause: TransientCause,
+        cause: DeliveryTransientCause,
         raw_reason: Option<String>,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         if raw_reason
             .as_ref()
             .is_some_and(|reason| reason.len() > 4_096)
@@ -2806,12 +2813,12 @@ impl EventStore for MemoryStore {
         }
         let lane = self
             .get_lane(key)
-            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         if ordinal != lane.last_ordinal {
             return Err(PersistenceError::invariant("stale attempt ordinal"));
         }
         if ordinal > 0
-            && !self.outbox_attempt_details.contains_key(&(
+            && !self.delivery_attempt_details.contains_key(&(
                 key.intent_id,
                 key.relay.clone(),
                 ordinal,
@@ -2822,7 +2829,7 @@ impl EventStore for MemoryStore {
         let recovered = self.replace_lane(
             key,
             expected_revision,
-            LaneState::Transient {
+            DeliveryLaneState::Transient {
                 ordinal,
                 eligible_at,
                 cause,
@@ -2830,10 +2837,10 @@ impl EventStore for MemoryStore {
             },
         )?;
         if ordinal > 0 {
-            self.outbox_attempt_details
+            self.delivery_attempt_details
                 .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
                 .expect("validated detail")
-                .transient = Some(AttemptTransientDetail {
+                .transient = Some(DeliveryAttemptTransient {
                 eligible_at,
                 cause,
                 raw_reason,
@@ -2844,14 +2851,14 @@ impl EventStore for MemoryStore {
 
     fn suspend_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         ordinal: u64,
         at: Timestamp,
-        cause: TransientCause,
+        cause: DeliveryTransientCause,
         raw_reason: Option<String>,
         auth: bool,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         if raw_reason
             .as_ref()
             .is_some_and(|reason| reason.len() > 4_096)
@@ -2862,26 +2869,26 @@ impl EventStore for MemoryStore {
         }
         let lane = self
             .get_lane(key)
-            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         if lane.revision != expected_revision || lane.last_ordinal != ordinal || ordinal == 0 {
             return Err(PersistenceError::invariant("stale suspended attempt"));
         }
-        self.outbox_attempt_details
+        self.delivery_attempt_details
             .get(&(key.intent_id, key.relay.clone(), ordinal))
             .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         let recovered = self.replace_lane(
             key,
             expected_revision,
             if auth {
-                LaneState::WaitingAuth
+                DeliveryLaneState::WaitingAuth
             } else {
-                LaneState::WaitingConnection
+                DeliveryLaneState::WaitingConnection
             },
         )?;
-        self.outbox_attempt_details
+        self.delivery_attempt_details
             .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
             .expect("validated attempt detail")
-            .transient = Some(AttemptTransientDetail {
+            .transient = Some(DeliveryAttemptTransient {
             eligible_at: at,
             cause,
             raw_reason,
@@ -2891,25 +2898,27 @@ impl EventStore for MemoryStore {
 
     fn start_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         event: Event,
         started_at: Timestamp,
-    ) -> Result<(RecoveredAttempt, RecoveredLane), PersistenceError> {
+    ) -> Result<(DeliveryAttempt, DeliveryLane), PersistenceError> {
         let lane = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
-        if lane.revision != expected_revision || !matches!(lane.state, LaneState::Eligible { .. }) {
+            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
+        if lane.revision != expected_revision
+            || !matches!(lane.state, DeliveryLaneState::Eligible { .. })
+        {
             return Err(PersistenceError::invariant(
                 "lane is not expected eligible cursor",
             ));
         }
         lane.revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane revision exhausted"))?;
         let intent = self
-            .outbox_intents
+            .delivery_intents
             .get(&key.intent_id)
             .ok_or_else(|| PersistenceError::invariant("attempt intent is not open"))?;
         if intent.sig_state != IntentSigState::Signed || intent.frozen != event {
@@ -2924,19 +2933,19 @@ impl EventStore for MemoryStore {
             .last_ordinal
             .checked_add(1)
             .ok_or_else(|| PersistenceError::invariant("attempt ordinal exhausted"))?;
-        let attempt = RecoveredAttempt {
+        let attempt = DeliveryAttempt {
             version: 1,
             intent_id: key.intent_id,
             relay: key.relay.clone(),
             ordinal,
             event,
-            outcome: AttemptOutcome::Started,
+            outcome: DeliveryAttemptOutcome::Started,
         };
-        self.outbox_attempts
+        self.delivery_attempts
             .insert((key.intent_id, key.relay.clone(), ordinal), attempt.clone());
-        self.outbox_attempt_details.insert(
+        self.delivery_attempt_details.insert(
             (key.intent_id, key.relay.clone(), ordinal),
-            RecoveredAttemptDetails {
+            DeliveryAttemptDetails {
                 version: 1,
                 intent_id: key.intent_id,
                 relay: key.relay.clone(),
@@ -2951,9 +2960,9 @@ impl EventStore for MemoryStore {
         let mut advanced = self.replace_lane(
             key,
             expected_revision,
-            LaneState::InFlight {
+            DeliveryLaneState::InFlight {
                 ordinal,
-                phase: InFlightPhase::AwaitingHandoff,
+                phase: DeliveryInFlightPhase::AwaitingHandoff,
             },
         )?;
         advanced.last_ordinal = ordinal;
@@ -2963,16 +2972,16 @@ impl EventStore for MemoryStore {
 
     fn record_lane_handoff(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         ordinal: u64,
-        detail: AttemptHandoffDetail,
-        next: PostHandoffState,
-    ) -> Result<RecoveredLane, PersistenceError> {
+        detail: DeliveryAttemptHandoff,
+        next: DeliveryPostHandoffState,
+    ) -> Result<DeliveryLane, PersistenceError> {
         if matches!(
             &next,
-            PostHandoffState::Terminal {
-                outcome: AttemptOutcome::Started,
+            DeliveryPostHandoffState::Terminal {
+                outcome: DeliveryAttemptOutcome::Started,
                 ..
             }
         ) {
@@ -2980,7 +2989,7 @@ impl EventStore for MemoryStore {
         }
         if matches!(
             &next,
-            PostHandoffState::Transient {
+            DeliveryPostHandoffState::Transient {
                 raw_reason: Some(reason),
                 ..
             } if reason.len() > 4_096
@@ -2992,24 +3001,24 @@ impl EventStore for MemoryStore {
         let lane = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         if lane.revision != expected_revision || lane.last_ordinal != ordinal {
             return Err(PersistenceError::invariant("stale lane handoff"));
         }
         if !matches!(
             lane.state,
-            LaneState::InFlight {
+            DeliveryLaneState::InFlight {
                 ordinal: current,
-                phase: InFlightPhase::AwaitingHandoff,
+                phase: DeliveryInFlightPhase::AwaitingHandoff,
             } if current == ordinal
         ) {
             return Err(PersistenceError::invariant("lane is not awaiting handoff"));
         }
         lane.revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane revision exhausted"))?;
         let details = self
-            .outbox_attempt_details
+            .delivery_attempt_details
             .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
             .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         if let Some(existing) = &details.handoff {
@@ -3020,35 +3029,35 @@ impl EventStore for MemoryStore {
             details.handoff = Some(detail);
         }
         let state = match next {
-            PostHandoffState::WaitingConnection => LaneState::WaitingConnection,
-            PostHandoffState::WaitingAuth => LaneState::WaitingAuth,
-            PostHandoffState::Eligible { since } => LaneState::Eligible { since },
-            PostHandoffState::AwaitingAck { deadline } => LaneState::InFlight {
+            DeliveryPostHandoffState::WaitingConnection => DeliveryLaneState::WaitingConnection,
+            DeliveryPostHandoffState::WaitingAuth => DeliveryLaneState::WaitingAuth,
+            DeliveryPostHandoffState::Eligible { since } => DeliveryLaneState::Eligible { since },
+            DeliveryPostHandoffState::AwaitingAck { deadline } => DeliveryLaneState::InFlight {
                 ordinal,
-                phase: InFlightPhase::AwaitingAck { deadline },
+                phase: DeliveryInFlightPhase::AwaitingAck { deadline },
             },
-            PostHandoffState::Transient {
+            DeliveryPostHandoffState::Transient {
                 eligible_at,
                 cause,
                 raw_reason,
-            } => LaneState::Transient {
+            } => DeliveryLaneState::Transient {
                 ordinal,
                 eligible_at,
                 cause,
                 raw_reason,
             },
-            PostHandoffState::Terminal {
+            DeliveryPostHandoffState::Terminal {
                 outcome,
                 finished_at,
             } => {
-                if outcome == AttemptOutcome::Started {
+                if outcome == DeliveryAttemptOutcome::Started {
                     return Err(PersistenceError::invariant("Started is not terminal"));
                 }
                 details.finished_at = Some(finished_at);
                 details.terminal = Some(outcome.clone());
-                LaneState::Terminal {
+                DeliveryLaneState::Terminal {
                     ordinal,
-                    outcome: LaneTerminalOutcome::from_attempt(outcome)?,
+                    outcome: DeliveryTerminalOutcome::from_attempt(outcome)?,
                 }
             }
         };
@@ -3057,28 +3066,28 @@ impl EventStore for MemoryStore {
 
     fn finish_lane_attempt(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         ordinal: u64,
-        outcome: AttemptOutcome,
+        outcome: DeliveryAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<RecoveredLane, PersistenceError> {
-        if outcome == AttemptOutcome::Started {
+    ) -> Result<DeliveryLane, PersistenceError> {
+        if outcome == DeliveryAttemptOutcome::Started {
             return Err(PersistenceError::invariant("Started is not terminal"));
         }
-        let lane_outcome = LaneTerminalOutcome::from_attempt(outcome.clone())?;
+        let lane_outcome = DeliveryTerminalOutcome::from_attempt(outcome.clone())?;
         let lane = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         if lane.revision != expected_revision || lane.last_ordinal != ordinal {
             return Err(PersistenceError::invariant("stale terminal attempt"));
         }
         lane.revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("outbox lane revision exhausted"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane revision exhausted"))?;
         let details = self
-            .outbox_attempt_details
+            .delivery_attempt_details
             .get_mut(&(key.intent_id, key.relay.clone(), ordinal))
             .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
         if let Some(existing) = &details.terminal {
@@ -3086,7 +3095,7 @@ impl EventStore for MemoryStore {
                 && details.finished_at == Some(finished_at)
                 && matches!(
                     lane.state,
-                    LaneState::Terminal {
+                    DeliveryLaneState::Terminal {
                         ordinal: current,
                         outcome: ref current_outcome,
                     } if current == ordinal && current_outcome == &lane_outcome
@@ -3103,7 +3112,7 @@ impl EventStore for MemoryStore {
         self.replace_lane(
             key,
             expected_revision,
-            LaneState::Terminal {
+            DeliveryLaneState::Terminal {
                 ordinal,
                 outcome: lane_outcome,
             },
@@ -3112,10 +3121,10 @@ impl EventStore for MemoryStore {
 
     fn deny_lane_auth(
         &mut self,
-        key: &LaneKey,
+        key: &DeliveryLaneKey,
         expected_revision: u64,
         denial: AuthDenial,
-    ) -> Result<RecoveredLane, PersistenceError> {
+    ) -> Result<DeliveryLane, PersistenceError> {
         if denial.reason.len() > 4_096 {
             return Err(PersistenceError::invariant(
                 "authentication denial reason exceeds 4096 bytes",
@@ -3124,7 +3133,7 @@ impl EventStore for MemoryStore {
         let lane = self
             .get_lane(key)
             .cloned()
-            .ok_or_else(|| PersistenceError::invariant("outbox lane not found"))?;
+            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         if lane.revision != expected_revision {
             return Err(PersistenceError::invariant(
                 "authentication denial lane revision is stale",
@@ -3132,14 +3141,14 @@ impl EventStore for MemoryStore {
         }
         if matches!(
             lane.state,
-            LaneState::Terminal {
-                outcome: LaneTerminalOutcome::AuthDenied(ref current),
+            DeliveryLaneState::Terminal {
+                outcome: DeliveryTerminalOutcome::AuthDenied(ref current),
                 ..
             } if current == &denial
         ) {
             return Ok(lane);
         }
-        if !matches!(lane.state, LaneState::WaitingAuth) {
+        if !matches!(lane.state, DeliveryLaneState::WaitingAuth) {
             return Err(PersistenceError::invariant(
                 "lane is not waiting for authentication",
             ));
@@ -3147,9 +3156,9 @@ impl EventStore for MemoryStore {
         self.replace_lane(
             key,
             expected_revision,
-            LaneState::Terminal {
+            DeliveryLaneState::Terminal {
                 ordinal: lane.last_ordinal,
-                outcome: LaneTerminalOutcome::AuthDenied(denial),
+                outcome: DeliveryTerminalOutcome::AuthDenied(denial),
             },
         )
     }
@@ -3157,9 +3166,9 @@ impl EventStore for MemoryStore {
     fn recover_attempt_details(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<RecoveredAttemptDetails>, PersistenceError> {
+    ) -> Result<Vec<DeliveryAttemptDetails>, PersistenceError> {
         Ok(self
-            .outbox_attempt_details
+            .delivery_attempt_details
             .values()
             .filter(|detail| detail.intent_id == intent_id)
             .cloned()
@@ -3170,25 +3179,25 @@ impl EventStore for MemoryStore {
         &mut self,
         intent_id: IntentId,
     ) -> Result<CloseIntentOutcome, PersistenceError> {
-        if !self.outbox_intents.contains_key(&intent_id) {
+        if !self.delivery_intents.contains_key(&intent_id) {
             return Ok(CloseIntentOutcome::AlreadyClosed);
         }
-        let lanes = self.recover_outbox_lanes(intent_id)?;
+        let lanes = self.recover_delivery_lanes(intent_id)?;
         if lanes.is_empty()
             || lanes
                 .iter()
-                .any(|lane| !matches!(lane.state, LaneState::Terminal { .. }))
+                .any(|lane| !matches!(lane.state, DeliveryLaneState::Terminal { .. }))
         {
             return Err(PersistenceError::invariant(
                 "intent lanes are not non-empty and terminal",
             ));
         }
-        if let Some(rows) = self.outbox_deadlines_by_intent.remove(&intent_id) {
+        if let Some(rows) = self.delivery_deadlines_by_intent.remove(&intent_id) {
             for (at, relay) in rows {
-                self.outbox_deadlines.remove(&(at, intent_id, relay));
+                self.delivery_deadlines.remove(&(at, intent_id, relay));
             }
         }
-        self.outbox_intents.remove(&intent_id);
+        self.delivery_intents.remove(&intent_id);
         Ok(CloseIntentOutcome::Closed)
     }
 
@@ -3197,16 +3206,16 @@ impl EventStore for MemoryStore {
         frozen_id: EventId,
         expected_pubkey: PublicKey,
     ) -> Result<u64, PersistenceError> {
-        // Receipt-ONLY: no EVENTS row, no OUTBOX_INTENTS row — nothing
+        // Receipt-ONLY: no EVENTS row, no DELIVERY_INTENTS row — nothing
         // backs `intent_id` at all (`None`). `MemoryStore` never models a
         // real crash (Q4), so there is no boot-time reconciliation to
         // `Abandoned` here — an ephemeral receipt just stays `Accepted`
         // for the life of the process unless the engine transitions it
         // itself (out of this unit's scope).
         let receipt_id = self.alloc_receipt_id()?;
-        self.outbox_receipts.insert(
+        self.delivery_receipts.insert(
             receipt_id,
-            RecoveredReceipt {
+            DeliveryReceipt {
                 receipt_id,
                 intent_id: None,
                 frozen_id,
@@ -3224,7 +3233,7 @@ mod lane_atomicity_tests {
     use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, PersistenceFault};
     use nostr::{EventBuilder, Keys};
 
-    fn setup(content: &str) -> (MemoryStore, IntentId, RelayUrl, Event, RecoveredLane) {
+    fn setup(content: &str) -> (MemoryStore, IntentId, RelayUrl, Event, DeliveryLane) {
         let keys = Keys::generate();
         let signed = EventBuilder::new(Kind::TextNote, content)
             .custom_created_at(Timestamp::from(900u64))
@@ -3260,13 +3269,13 @@ mod lane_atomicity_tests {
         store
             .record_route_revision(intent, BTreeSet::from([relay.clone()]))
             .unwrap();
-        let lane = store.bootstrap_outbox_lanes(intent).unwrap().remove(0);
+        let lane = store.bootstrap_delivery_lanes(intent).unwrap().remove(0);
         (store, intent, relay, signed, lane)
     }
 
     fn exhaust(store: &mut MemoryStore, intent: IntentId, relay: &RelayUrl) {
         store
-            .outbox_lanes
+            .delivery_lanes
             .get_mut(&intent)
             .unwrap()
             .get_mut(relay)
@@ -3276,13 +3285,13 @@ mod lane_atomicity_tests {
 
     fn assert_lane_state_unchanged(
         store: &MemoryStore,
-        lanes: &BTreeMap<IntentId, BTreeMap<RelayUrl, RecoveredLane>>,
-        deadlines: &BTreeMap<(Timestamp, IntentId, RelayUrl), LaneDeadline>,
+        lanes: &BTreeMap<IntentId, BTreeMap<RelayUrl, DeliveryLane>>,
+        deadlines: &BTreeMap<(Timestamp, IntentId, RelayUrl), DeliveryDeadline>,
         deadlines_by_intent: &BTreeMap<IntentId, BTreeSet<(Timestamp, RelayUrl)>>,
     ) {
-        assert_eq!(&store.outbox_lanes, lanes);
-        assert_eq!(&store.outbox_deadlines, deadlines);
-        assert_eq!(&store.outbox_deadlines_by_intent, deadlines_by_intent);
+        assert_eq!(&store.delivery_lanes, lanes);
+        assert_eq!(&store.delivery_deadlines, deadlines);
+        assert_eq!(&store.delivery_deadlines_by_intent, deadlines_by_intent);
     }
 
     #[test]
@@ -3294,14 +3303,14 @@ mod lane_atomicity_tests {
                 lane.revision,
                 0,
                 Timestamp::from(950u64),
-                TransientCause::ConnectionLost,
+                DeliveryTransientCause::ConnectionLost,
                 None,
             )
             .unwrap();
         exhaust(&mut transition, intent, &relay);
-        let lanes = transition.outbox_lanes.clone();
-        let deadlines = transition.outbox_deadlines.clone();
-        let deadlines_by_intent = transition.outbox_deadlines_by_intent.clone();
+        let lanes = transition.delivery_lanes.clone();
+        let deadlines = transition.delivery_deadlines.clone();
+        let deadlines_by_intent = transition.delivery_deadlines_by_intent.clone();
         assert!(transition
             .set_lane_waiting(&lane.key, u64::MAX, false)
             .is_err());
@@ -3312,15 +3321,15 @@ mod lane_atomicity_tests {
             .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(901u64))
             .unwrap();
         exhaust(&mut new_start, intent, &relay);
-        let lanes = new_start.outbox_lanes.clone();
-        let attempts = new_start.outbox_attempts.clone();
-        let details = new_start.outbox_attempt_details.clone();
+        let lanes = new_start.delivery_lanes.clone();
+        let attempts = new_start.delivery_attempts.clone();
+        let details = new_start.delivery_attempt_details.clone();
         assert!(new_start
             .start_lane_attempt(&lane.key, u64::MAX, signed, Timestamp::from(902u64))
             .is_err());
-        assert_eq!(new_start.outbox_lanes, lanes);
-        assert_eq!(new_start.outbox_attempts, attempts);
-        assert_eq!(new_start.outbox_attempt_details, details);
+        assert_eq!(new_start.delivery_lanes, lanes);
+        assert_eq!(new_start.delivery_attempts, attempts);
+        assert_eq!(new_start.delivery_attempt_details, details);
     }
 
     #[test]
@@ -3337,19 +3346,19 @@ mod lane_atomicity_tests {
                 &lane.key,
                 lane.revision,
                 1,
-                AttemptOutcome::Acked,
+                DeliveryAttemptOutcome::Acked,
                 Timestamp::from(952u64),
             )
             .unwrap();
         terminal
-            .outbox_lanes
+            .delivery_lanes
             .get_mut(&intent)
             .unwrap()
             .get_mut(&relay)
             .unwrap()
-            .state = LaneState::WaitingConnection;
+            .state = DeliveryLaneState::WaitingConnection;
         assert!(terminal
-            .bootstrap_outbox_lanes(intent)
+            .bootstrap_delivery_lanes(intent)
             .unwrap_err()
             .to_string()
             .contains("terminal attempt and lane"));
@@ -3360,17 +3369,17 @@ mod lane_atomicity_tests {
             .unwrap();
         live.start_lane_attempt(&lane.key, lane.revision, signed, Timestamp::from(951u64))
             .unwrap();
-        live.outbox_lanes
+        live.delivery_lanes
             .get_mut(&intent)
             .unwrap()
             .get_mut(&relay)
             .unwrap()
-            .state = LaneState::Terminal {
+            .state = DeliveryLaneState::Terminal {
             ordinal: 1,
-            outcome: LaneTerminalOutcome::Acked,
+            outcome: DeliveryTerminalOutcome::Acked,
         };
         assert!(live
-            .bootstrap_outbox_lanes(intent)
+            .bootstrap_delivery_lanes(intent)
             .unwrap_err()
             .to_string()
             .contains("terminal lane lacks"));
@@ -3378,7 +3387,7 @@ mod lane_atomicity_tests {
 
     /// #909: validation of a later relay cannot leave an earlier relay's
     /// prepared lane installed. The same fixture used to return
-    /// `Invariant/Absent` after partially mutating `outbox_lanes`.
+    /// `Invariant/Absent` after partially mutating `delivery_lanes`.
     #[test]
     fn bootstrap_invariant_applies_no_partial_memory_lane_set() {
         let (mut store, intent, _, _, _) = setup("bootstrap-two-phase");
@@ -3391,31 +3400,31 @@ mod lane_atomicity_tests {
         // Rebuild the fixture as "early lane missing, later lane invalid".
         // With no attempts, a cursor of one is contradictory. The old
         // relay-at-a-time loop inserted `early` before discovering this.
-        store.outbox_lanes.remove(&intent);
-        store.insert_lane(RecoveredLane {
+        store.delivery_lanes.remove(&intent);
+        store.insert_lane(DeliveryLane {
             version: 1,
-            key: LaneKey {
+            key: DeliveryLaneKey {
                 intent_id: intent,
                 relay: late.clone(),
             },
             revision: 1,
             last_ordinal: 1,
-            state: LaneState::WaitingConnection,
+            state: DeliveryLaneState::WaitingConnection,
         });
-        let before = store.outbox_lanes.clone();
+        let before = store.delivery_lanes.clone();
 
         let error = store
-            .bootstrap_outbox_lanes(intent)
+            .bootstrap_delivery_lanes(intent)
             .expect_err("late invariant must refuse bootstrap");
         assert_eq!(error.fault(), PersistenceFault::Invariant);
         assert_eq!(error.durability(), DurabilityOutcome::Absent);
         assert_eq!(
-            store.outbox_lanes, before,
+            store.delivery_lanes, before,
             "an Absent result must leave every relay exactly at prestate"
         );
         assert!(
             store
-                .get_lane(&LaneKey {
+                .get_lane(&DeliveryLaneKey {
                     intent_id: intent,
                     relay: early,
                 })
@@ -3423,37 +3432,38 @@ mod lane_atomicity_tests {
             "the earlier missing lane must not be partially inserted"
         );
 
-        store.outbox_lanes.get_mut(&intent).unwrap().remove(&late);
+        store.delivery_lanes.get_mut(&intent).unwrap().remove(&late);
         let recovered = store
-            .bootstrap_outbox_lanes(intent)
+            .bootstrap_delivery_lanes(intent)
             .expect("removing the bad row permits one complete apply");
         assert_eq!(
             recovered,
-            store.recover_outbox_lanes(intent).unwrap(),
+            store.recover_delivery_lanes(intent).unwrap(),
             "prepared return and applied lane set must be identical"
         );
     }
 
     /// #867: `MemoryStore` models only current states, so it must refuse the
     /// same pre-current attempt shapes `RedbStore` refuses (the mirror of
-    /// `lane_contract.rs`'s fixtures; seeded directly because `MemoryStore`'s
-    /// maps are private and it has no durable file to raw-insert into).
+    /// `delivery_lane_contract.rs`'s fixtures; seeded directly because
+    /// `MemoryStore`'s maps are private and it has no durable file to
+    /// raw-insert into).
     #[test]
     fn pre_current_attempt_shapes_are_refused_rather_than_adopted_in_memory() {
         let (mut store, intent, relay, signed, _) = setup("detail-less");
-        store.outbox_attempts.insert(
+        store.delivery_attempts.insert(
             (intent, relay.clone(), 1),
-            RecoveredAttempt {
+            DeliveryAttempt {
                 version: 1,
                 intent_id: intent,
                 relay: relay.clone(),
                 ordinal: 1,
                 event: signed.clone(),
-                outcome: AttemptOutcome::Started,
+                outcome: DeliveryAttemptOutcome::Started,
             },
         );
         assert!(store
-            .bootstrap_outbox_lanes(intent)
+            .bootstrap_delivery_lanes(intent)
             .unwrap_err()
             .to_string()
             .contains("missing its detail row"));
@@ -3467,10 +3477,10 @@ mod lane_atomicity_tests {
             .unwrap();
         // Drop the lane the current schema always commits first, leaving the
         // attempt history a pre-lane layout would have left behind.
-        store.outbox_lanes.remove(&intent);
+        store.delivery_lanes.remove(&intent);
         let _ = relay;
         assert!(store
-            .bootstrap_outbox_lanes(intent)
+            .bootstrap_delivery_lanes(intent)
             .unwrap_err()
             .to_string()
             .contains("without its lane row"));

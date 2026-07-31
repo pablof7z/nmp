@@ -415,7 +415,7 @@ pub struct NmpWorld {
     foreign_contact_lists: BTreeMap<String, String>,
     /// What the scenario SAID each staged version's timestamp was, keyed by
     /// the word it named it with. Held rather than read back off the wire
-    /// because #995 retires a displaced predecessor's outbox obligation, so a
+    /// because #995 retires a displaced predecessor's delivery obligation, so a
     /// version that is legitimately the store's may correctly never reach any
     /// relay.
     stated_created_at: BTreeMap<String, Timestamp>,

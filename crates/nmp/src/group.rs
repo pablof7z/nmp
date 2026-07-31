@@ -25,9 +25,9 @@ use nmp_grammar::{EventBuilder, WriteIntent};
 use nmp_nip29::{Group, GroupContextError};
 use nostr::{Event, EventId, PublicKey};
 
+use crate::delivery::WriteStatus;
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::outbox::WriteStatus;
 use crate::runtime::FifoReceiver;
 
 /// Why a group publication never reached the publish door, or what the door

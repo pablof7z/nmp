@@ -4,7 +4,7 @@
 //! attempted again” fact comes from the scripted relay's raw websocket tap,
 //! so the engine is not allowed to corroborate its own claim.
 
-use nmp::mechanism::outbox::{AuthDenialSource, WriteStatus};
+use nmp::mechanism::delivery::{AuthDenialSource, WriteStatus};
 
 use super::budgets::NEVER;
 use super::{AuthDenialObservation, NmpWorld};

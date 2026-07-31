@@ -6,14 +6,14 @@
 //! boundary without copying policy.
 
 use super::canonical::CanonicalWriteTables;
-use super::outbox::{OUTBOX_KIND5_CLAIMS, OUTBOX_SUPPRESS_BY_ADDR, OUTBOX_SUPPRESS_BY_ID};
 #[cfg(test)]
 use super::postings_store::crash_if_postings;
 use super::postings_store::PostingsBatch;
 use super::query::{insert_query_cardinalities, remove_query_cardinalities};
 use super::schema::{
-    persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, EXPIRATION_INDEX, OUTBOX_DISPLACED,
-    OUTBOX_INTENTS, OUTBOX_RECEIPTS, TOMBSTONES,
+    persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, DELIVERY_DISPLACED, DELIVERY_INTENTS,
+    DELIVERY_KIND5_CLAIMS, DELIVERY_RECEIPTS, DELIVERY_SUPPRESS_BY_ADDR, DELIVERY_SUPPRESS_BY_ID,
+    EXPIRATION_INDEX, TOMBSTONES,
 };
 #[cfg(feature = "bench-instrumentation")]
 use super::store::BenchmarkDurability;
@@ -102,11 +102,16 @@ impl GovernedWrite {
 pub(super) enum GovernedStringMap {
     Tombstones,
     AddrTombstones,
-    OutboxIntents,
-    OutboxReceipts,
-    OutboxKind5Claims,
-    OutboxSuppressById,
-    OutboxSuppressByAddr,
+}
+
+/// Binary durable-delivery maps reached from the same governed mutation.
+#[derive(Clone, Copy)]
+pub(super) enum GovernedDeliveryMap {
+    Intents,
+    Receipts,
+    Kind5Claims,
+    SuppressById,
+    SuppressByAddr,
 }
 
 /// Backend-neutral physical capabilities required by governed relay ingest.
@@ -155,12 +160,23 @@ pub(super) trait GovernedIngestTxn {
         key: &str,
         value: &str,
     ) -> Result<(), PersistenceError>;
-    fn string_remove(
+    fn delivery_get(
+        &self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError>;
+    fn delivery_put(
         &mut self,
-        map: GovernedStringMap,
-        key: &str,
-    ) -> Result<Option<String>, PersistenceError>;
-    fn displaced_remove(&mut self, key: &str) -> Result<Option<Vec<u8>>, PersistenceError>;
+        map: GovernedDeliveryMap,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), PersistenceError>;
+    fn delivery_remove(
+        &mut self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError>;
+    fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError>;
 }
 
 pub(super) struct RedbIngestTxn<'txn, 'batch> {
@@ -169,12 +185,12 @@ pub(super) struct RedbIngestTxn<'txn, 'batch> {
     pub(super) tombstones: redb::Table<'txn, &'static str, &'static str>,
     pub(super) addr_tombstones: redb::Table<'txn, &'static str, &'static str>,
     pub(super) expiration_index: redb::Table<'txn, &'static [u8; 40], EventKey>,
-    pub(super) outbox_intents: redb::Table<'txn, &'static str, &'static str>,
-    pub(super) outbox_receipts: redb::Table<'txn, &'static str, &'static str>,
-    pub(super) outbox_displaced: redb::Table<'txn, &'static str, &'static [u8]>,
-    pub(super) outbox_kind5_claims: redb::Table<'txn, &'static str, &'static str>,
-    pub(super) outbox_suppress_by_id: redb::Table<'txn, &'static str, &'static str>,
-    pub(super) outbox_suppress_by_addr: redb::Table<'txn, &'static str, &'static str>,
+    pub(super) delivery_intents: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) delivery_receipts: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) delivery_displaced: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) delivery_kind5_claims: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) delivery_suppress_by_id: redb::Table<'txn, &'static [u8; 64], &'static [u8]>,
+    pub(super) delivery_suppress_by_addr: redb::Table<'txn, &'static [u8], &'static [u8]>,
     postings: &'batch mut PostingsBatch,
 }
 
@@ -191,19 +207,23 @@ impl<'txn, 'batch> RedbIngestTxn<'txn, 'batch> {
             expiration_index: write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?,
-            outbox_intents: write_txn.open_table(OUTBOX_INTENTS).map_err(persist_err)?,
-            outbox_receipts: write_txn.open_table(OUTBOX_RECEIPTS).map_err(persist_err)?,
-            outbox_displaced: write_txn
-                .open_table(OUTBOX_DISPLACED)
+            delivery_intents: write_txn
+                .open_table(DELIVERY_INTENTS)
                 .map_err(persist_err)?,
-            outbox_kind5_claims: write_txn
-                .open_table(OUTBOX_KIND5_CLAIMS)
+            delivery_receipts: write_txn
+                .open_table(DELIVERY_RECEIPTS)
                 .map_err(persist_err)?,
-            outbox_suppress_by_id: write_txn
-                .open_table(OUTBOX_SUPPRESS_BY_ID)
+            delivery_displaced: write_txn
+                .open_table(DELIVERY_DISPLACED)
                 .map_err(persist_err)?,
-            outbox_suppress_by_addr: write_txn
-                .open_table(OUTBOX_SUPPRESS_BY_ADDR)
+            delivery_kind5_claims: write_txn
+                .open_table(DELIVERY_KIND5_CLAIMS)
+                .map_err(persist_err)?,
+            delivery_suppress_by_id: write_txn
+                .open_table(DELIVERY_SUPPRESS_BY_ID)
+                .map_err(persist_err)?,
+            delivery_suppress_by_addr: write_txn
+                .open_table(DELIVERY_SUPPRESS_BY_ADDR)
                 .map_err(persist_err)?,
             postings,
         })
@@ -315,21 +335,6 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
             GovernedStringMap::AddrTombstones => {
                 self.addr_tombstones.get(key).map_err(persist_err)?
             }
-            GovernedStringMap::OutboxIntents => {
-                self.outbox_intents.get(key).map_err(persist_err)?
-            }
-            GovernedStringMap::OutboxReceipts => {
-                self.outbox_receipts.get(key).map_err(persist_err)?
-            }
-            GovernedStringMap::OutboxKind5Claims => {
-                self.outbox_kind5_claims.get(key).map_err(persist_err)?
-            }
-            GovernedStringMap::OutboxSuppressById => {
-                self.outbox_suppress_by_id.get(key).map_err(persist_err)?
-            }
-            GovernedStringMap::OutboxSuppressByAddr => {
-                self.outbox_suppress_by_addr.get(key).map_err(persist_err)?
-            }
         };
         Ok(value.map(|guard| guard.value().to_owned()))
     }
@@ -343,54 +348,111 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         match map {
             GovernedStringMap::Tombstones => self.tombstones.insert(key, value),
             GovernedStringMap::AddrTombstones => self.addr_tombstones.insert(key, value),
-            GovernedStringMap::OutboxIntents => self.outbox_intents.insert(key, value),
-            GovernedStringMap::OutboxReceipts => self.outbox_receipts.insert(key, value),
-            GovernedStringMap::OutboxKind5Claims => self.outbox_kind5_claims.insert(key, value),
-            GovernedStringMap::OutboxSuppressById => self.outbox_suppress_by_id.insert(key, value),
-            GovernedStringMap::OutboxSuppressByAddr => {
-                self.outbox_suppress_by_addr.insert(key, value)
+        }
+        .map_err(persist_err)?;
+        Ok(())
+    }
+
+    fn delivery_get(
+        &self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
+        let value = match map {
+            GovernedDeliveryMap::Intents => self
+                .delivery_intents
+                .get(fixed_key::<8>(key, "delivery intent key")?)
+                .map_err(persist_err)?,
+            GovernedDeliveryMap::Receipts => self
+                .delivery_receipts
+                .get(fixed_key::<8>(key, "delivery receipt key")?)
+                .map_err(persist_err)?,
+            GovernedDeliveryMap::Kind5Claims => self
+                .delivery_kind5_claims
+                .get(fixed_key::<8>(key, "delivery kind:5 key")?)
+                .map_err(persist_err)?,
+            GovernedDeliveryMap::SuppressById => self
+                .delivery_suppress_by_id
+                .get(fixed_key::<64>(key, "delivery id-suppression key")?)
+                .map_err(persist_err)?,
+            GovernedDeliveryMap::SuppressByAddr => self
+                .delivery_suppress_by_addr
+                .get(key)
+                .map_err(persist_err)?,
+        };
+        Ok(value.map(|guard| guard.value().to_vec()))
+    }
+
+    fn delivery_put(
+        &mut self,
+        map: GovernedDeliveryMap,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), PersistenceError> {
+        match map {
+            GovernedDeliveryMap::Intents => self
+                .delivery_intents
+                .insert(fixed_key::<8>(key, "delivery intent key")?, value),
+            GovernedDeliveryMap::Receipts => self
+                .delivery_receipts
+                .insert(fixed_key::<8>(key, "delivery receipt key")?, value),
+            GovernedDeliveryMap::Kind5Claims => self
+                .delivery_kind5_claims
+                .insert(fixed_key::<8>(key, "delivery kind:5 key")?, value),
+            GovernedDeliveryMap::SuppressById => self
+                .delivery_suppress_by_id
+                .insert(fixed_key::<64>(key, "delivery id-suppression key")?, value),
+            GovernedDeliveryMap::SuppressByAddr => {
+                self.delivery_suppress_by_addr.insert(key, value)
             }
         }
         .map_err(persist_err)?;
         Ok(())
     }
 
-    fn string_remove(
+    fn delivery_remove(
         &mut self,
-        map: GovernedStringMap,
-        key: &str,
-    ) -> Result<Option<String>, PersistenceError> {
+        map: GovernedDeliveryMap,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
         let value = match map {
-            GovernedStringMap::Tombstones => self.tombstones.remove(key).map_err(persist_err)?,
-            GovernedStringMap::AddrTombstones => {
-                self.addr_tombstones.remove(key).map_err(persist_err)?
-            }
-            GovernedStringMap::OutboxIntents => {
-                self.outbox_intents.remove(key).map_err(persist_err)?
-            }
-            GovernedStringMap::OutboxReceipts => {
-                self.outbox_receipts.remove(key).map_err(persist_err)?
-            }
-            GovernedStringMap::OutboxKind5Claims => {
-                self.outbox_kind5_claims.remove(key).map_err(persist_err)?
-            }
-            GovernedStringMap::OutboxSuppressById => self
-                .outbox_suppress_by_id
-                .remove(key)
+            GovernedDeliveryMap::Intents => self
+                .delivery_intents
+                .remove(fixed_key::<8>(key, "delivery intent key")?)
                 .map_err(persist_err)?,
-            GovernedStringMap::OutboxSuppressByAddr => self
-                .outbox_suppress_by_addr
+            GovernedDeliveryMap::Receipts => self
+                .delivery_receipts
+                .remove(fixed_key::<8>(key, "delivery receipt key")?)
+                .map_err(persist_err)?,
+            GovernedDeliveryMap::Kind5Claims => self
+                .delivery_kind5_claims
+                .remove(fixed_key::<8>(key, "delivery kind:5 key")?)
+                .map_err(persist_err)?,
+            GovernedDeliveryMap::SuppressById => self
+                .delivery_suppress_by_id
+                .remove(fixed_key::<64>(key, "delivery id-suppression key")?)
+                .map_err(persist_err)?,
+            GovernedDeliveryMap::SuppressByAddr => self
+                .delivery_suppress_by_addr
                 .remove(key)
                 .map_err(persist_err)?,
         };
-        Ok(value.map(|guard| guard.value().to_owned()))
+        Ok(value.map(|guard| guard.value().to_vec()))
     }
 
-    fn displaced_remove(&mut self, key: &str) -> Result<Option<Vec<u8>>, PersistenceError> {
+    fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError> {
         Ok(self
-            .outbox_displaced
+            .delivery_displaced
             .remove(key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec()))
     }
+}
+
+fn fixed_key<'a, const N: usize>(
+    key: &'a [u8],
+    what: &'static str,
+) -> Result<&'a [u8; N], PersistenceError> {
+    key.try_into()
+        .map_err(|_| PersistenceError::invariant(format!("{what} has wrong width")))
 }

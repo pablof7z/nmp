@@ -40,7 +40,7 @@ module. Generated `Ffi` records and callback protocols do not enter app code.
 
 The package must support device and simulator builds and expose observations as
 native asynchronous sequences and values. Secret-backed signer providers use
-platform secure storage; the event/outbox database does not become a key vault.
+platform secure storage; the event/delivery database does not become a key vault.
 
 ## Kotlin and Android
 
@@ -133,7 +133,7 @@ change.
 ## Persistence belongs to the engine instance
 
 One persistent store path has one live engine owner. The app chooses the path
-and backup/reset policy; NMP owns the file format and atomic event/outbox
+and backup/reset policy; NMP owns the file format and atomic event/delivery
 transactions. Applications must not open or mutate the database directly.
 
 Cold construction may return cached rows before network acquisition completes.

@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 use nmp_store::{EventStore, RedbStore};
 
 use super::{NmpWorld, ME};
@@ -54,7 +54,7 @@ async fn past_tense_publish_observes_settled_absence_before_restart() {
         .expect("the durable setup must own a redb path");
     let store = RedbStore::open(path).expect("the stopped process releases its durable store");
     let recovered = store
-        .recover_outbox()
+        .recover_delivery()
         .expect("the accepted write must be recoverable");
     assert_eq!(recovered.len(), 1);
     assert!(

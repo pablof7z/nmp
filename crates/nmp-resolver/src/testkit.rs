@@ -247,7 +247,7 @@ pub fn expiring_kind1(
 /// NIP-01 id never depends on `sig`, so the frozen body keeps the exact id
 /// and matches queries identically to its eventual signed form
 /// (`crashsafe-accepted-2-3-plan.md` §1.1 Q1). Mirrors
-/// `nmp-store/tests/outbox_contract.rs`'s `compose`+`accept` fixtures so the
+/// `nmp-store/tests/delivery_contract.rs`'s `compose`+`accept` fixtures so the
 /// resolver's local-add contract exercises the SAME door shape. `accepted_at`
 /// is the journal timestamp; the frozen body keeps its own `created_at`.
 pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {

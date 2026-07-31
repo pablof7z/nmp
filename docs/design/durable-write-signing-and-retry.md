@@ -48,7 +48,7 @@ which planned sources and evidence are sufficient to compose at all. Raw FFI
 writes cannot mint the guard; native callers reach it through semantic
 operations such as NMP's NIP-02 `follow` / `unfollow` action.
 
-### Replaceable outbox coalescing
+### Replaceable delivery coalescing
 
 Acceptance uses the same NIP-01 coordinate as canonical replacement:
 `(pubkey, kind)` for kinds `0`, `3`, and `10000...19999`, and
@@ -130,13 +130,13 @@ is released only after its body, author, computed id, and signature all
 validate. Cancellation is scoped to that one signer operation.
 
 This path deliberately bypasses write acceptance. It creates no canonical
-pending row, intent or receipt id, outbox journal/lane, relay plan, or
+pending row, intent or receipt id, delivery journal/lane, relay plan, or
 publication. NIP-07 origin authorization and prompting remain host policy; the
 operation supplies governed key custody and exact-result validation only.
 
 ## 4. Secret-material boundary
 
-The Rust event/outbox store persists signing obligations, expected pubkeys,
+The Rust event/delivery store persists signing obligations, expected pubkeys,
 frozen bodies, and validated signatures. It does not persist raw secret keys.
 
 Platform SDKs should ship standard signer providers backed by platform secure
@@ -172,7 +172,7 @@ single success boolean.
 
 `Sent { relay, attempt, written_at }` is constructible only from a persisted
 `Written` handoff for that exact durable lane ordinal. Ephemeral transport work
-has no outbox attempt and therefore cannot mint this durable receipt fact.
+has no delivery attempt and therefore cannot mint this durable receipt fact.
 
 ## 6. Retry ownership
 
@@ -182,10 +182,10 @@ Retry is split by domain, with exactly one owner each:
 |---|---|---|
 | Socket connection | transport | reconnect the socket; never buffer durable EVENTs invisibly |
 | One remote-sign request | signer adapter | correlation, AUTH/connect for that operation, exact response validation |
-| One `(intent, relay)` lane | durable outbox | attempt state, eligibility, terminal relay evidence |
+| One `(intent, relay)` lane | durable delivery | attempt state, eligibility, terminal relay evidence |
 | Time and concurrency | engine deadline scheduler | wake eligible work without poll loops or per-intent threads |
 
-For every durable relay lane the outbox persists the exact signed bytes,
+For every durable relay lane the delivery store persists the exact signed bytes,
 `AttemptStarted`, attempt ordinal, outcome, and `nextEligibleAt`. Backoff uses
 deterministic jitter and explicit caps so restart does not reset or synchronize
 the fleet.
@@ -199,7 +199,7 @@ the fleet.
   Policy execution errors, unavailable signers, and subscription `CLOSED`
   auth-required/restricted frames do not have that authority.
 - An authentication denial first commits
-  `LaneTerminalOutcome::AuthDenied { source, reason }` against the lane's
+  `DeliveryTerminalOutcome::AuthDenied { source, reason }` against the lane's
   exact expected revision, then emits `WriteStatus::AuthDenied`. Idempotent
   success is considered only after that revision check, so a stale caller
   cannot mistake a newer equal-looking terminal fact for its own transition.
@@ -242,14 +242,14 @@ The reducer makes the scheduling authority explicit:
 - no admission path evicts a different relay or raises the physical-session
   ceiling.
 
-Releasing the Public session does not withdraw its query demand. The ordinary
-reducer receives the exact closed-session fact, the write's access-scoped
-worker runs through its normal AUTH and outbox path, and terminal write
-reconciliation releases it. The next real worker retirement restores any
-still-required Public session; the reducer replays its current request set once
-after the fresh Connected edge. Retry ordering derives from one coherent
-reducer snapshot whose `writes` set is a typed subset of the exact retained
-worker set.
+Releasing the Public session does not withdraw its query demand or erase its
+reconnect preamble. The ordinary reducer receives the exact closed-session
+fact, the write's access-scoped worker runs through its normal AUTH and
+delivery path, and terminal write reconciliation releases it. The next real
+worker retirement restores any still-required Public session; the reducer
+replays its current request set once after the fresh Connected edge. Retry
+ordering derives from one coherent reducer snapshot whose `writes` set is a
+typed subset of the exact retained worker set.
 
 This is bounded time-sharing, not socket-context coalescing and not public
 saturation. It closes the `max_relays = 1` deadlock where the Public read could

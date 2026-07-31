@@ -364,10 +364,10 @@ impl NmpWorld {
     pub fn published_event_id(&mut self) -> Option<EventId> {
         self.receipt_eventually(|seen| {
             seen.iter()
-                .any(|s| matches!(s, nmp::mechanism::outbox::WriteStatus::Signed(_)))
+                .any(|s| matches!(s, nmp::mechanism::delivery::WriteStatus::Signed(_)))
         });
         self.receipt_statuses().into_iter().find_map(|s| match s {
-            nmp::mechanism::outbox::WriteStatus::Signed(id) => Some(id),
+            nmp::mechanism::delivery::WriteStatus::Signed(id) => Some(id),
             _ => None,
         })
     }

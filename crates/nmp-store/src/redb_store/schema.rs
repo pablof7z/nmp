@@ -139,7 +139,7 @@ pub(super) const SCHEMA_VERSION_KEY: &str = "version";
 /// accepted writes, lanes, attempts, receipts, and route facts — because they
 /// share one `redb::Database` transaction boundary and are therefore one
 /// epoch, not seven independently-versioned ones.
-pub(super) const SCHEMA_VERSION: u64 = 11;
+pub(super) const SCHEMA_VERSION: u64 = 12;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
@@ -243,79 +243,50 @@ pub(super) const INDEX_CARDINALITY_VERSION: u64 = 3;
 pub(super) const INDEX_CARDINALITY_SAMPLE_META: TableDefinition<&str, &[u8]> =
     TableDefinition::new("index_cardinality_sample_meta");
 pub(super) const INDEX_CARDINALITY_SAMPLE_KEY: &str = "key";
-/// The durable write-outbox journal (crashsafe-accepted-2-3-plan.md §2.2,
-/// Fable checkpoint Q2 — APPROVED as co-resident in this same `Database`:
-/// redb atomicity is a per-`Database` property, so the one crash-atomic
-/// commit #3 requires forces the journal into the store's own transaction
-/// boundary). Key: [`intent_key`] (zero-padded decimal `IntentId`, shared
-/// verbatim with [`OUTBOX_DISPLACED`]). Value: JSON-encoded
-/// `OutboxIntentRecord`. A row exists for exactly as long as its intent is
-/// open — `compensate_write` deletes it on pre-signature termination; R8's
-/// terminal-deletion-on-full-delivery is a later unit's job (this frame
-/// never marks an intent all-lanes-terminal, since dispatch/ack tracking is
-/// U3/U4).
-pub(super) const OUTBOX_INTENTS: TableDefinition<&str, &str> =
-    TableDefinition::new("outbox_intents");
-/// The predecessor each open intent displaced, if any (retraction doc
-/// §4.2's durable stash). Key: the SAME [`intent_key`] as its
-/// `OUTBOX_INTENTS` row. Value is a self-contained `NMPC` binary snapshot
-/// (immutable event plus provenance), unlike canonical `EVENTS`'s event-only
-/// `NMPE` value. See [`encode_stored_event`]/[`decode_stored_event`]. Deleted
-/// durably by `promote_signed` (R6) or `compensate_write`; never by
-/// `recover_outbox` (read-only).
-pub(super) const OUTBOX_DISPLACED: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("outbox_displaced_v6");
-/// Per-`(intent, relay, ordinal)` durable attempt evidence
-/// (crashsafe-accepted-2-3-plan.md §5) — schema created here so the table
-/// exists for the dispatch-time attempt writer to come (U3/U4: "Persist
-/// `AttemptStarted` before dispatch"). This unit does not write rows into
-/// it (Fable checkpoint R2: folding attempt eligibility into
-/// `next_deadline` here is a busy-loop spin hazard — that fold ships with
-/// the retry-owner follow-up, not this frame) and `recover_outbox` does not
-/// read it — it is part of the one current store schema.
-#[allow(dead_code)]
-pub(super) const OUTBOX_ATTEMPTS: TableDefinition<&str, &str> =
-    TableDefinition::new("outbox_attempts");
-/// Append-only exact resolved-route snapshots, keyed by `(intent, ordinal)`.
-pub(super) const OUTBOX_ROUTE_REVISIONS: TableDefinition<&str, &str> =
-    TableDefinition::new("outbox_route_revisions");
-pub(super) const OUTBOX_LANES: TableDefinition<&str, &str> = TableDefinition::new("outbox_lanes");
-pub(super) const OUTBOX_DEADLINES: TableDefinition<&str, &str> =
-    TableDefinition::new("outbox_deadlines");
-pub(super) const OUTBOX_DEADLINES_BY_INTENT: TableDefinition<&str, &str> =
-    TableDefinition::new("outbox_deadlines_by_intent");
-pub(super) const OUTBOX_ATTEMPT_DETAILS: TableDefinition<&str, &str> =
-    TableDefinition::new("outbox_attempt_details");
-/// Store-owned outbox metadata — two rows, `"next_intent_id"` and
-/// `"next_receipt_id"`, each the next id of its kind to allocate (decimal
-/// `u64`, defaulting to 1 if the row has never been written). Both are
-/// bumped inside the SAME transaction as the `OUTBOX_INTENTS`/`EVENTS`
-/// writes they accompany, so allocation and the intent/receipt it names
-/// commit or roll back together (architecture review correction:
-/// allocation of EITHER id is a durable fact the store itself owns — see
-/// [`IntentId`]'s doc for the reuse hazard this closes; the identical
-/// hazard applies to receipt ids once receipts are durably retained).
-pub(super) const OUTBOX_META: TableDefinition<&str, &str> = TableDefinition::new("outbox_meta");
-pub(super) const NEXT_INTENT_ID_KEY: &str = "next_intent_id";
-pub(super) const NEXT_RECEIPT_ID_KEY: &str = "next_receipt_id";
-pub(super) const PENDING_EPHEMERAL_RECEIPTS_KEY: &str = "pending_ephemeral_receipts";
-/// Durably-RETAINED receipt records, keyed by `receipt_id` (zero-padded
-/// decimal, mirroring [`intent_key`]'s convention) — independent of
-/// `OUTBOX_INTENTS`'s open-work rows (architecture review correction: see
-/// [`crate::ReceiptState`]'s doc for why this separation exists). Never
-/// pruned by this unit.
-pub(super) const OUTBOX_RECEIPTS: TableDefinition<&str, &str> =
-    TableDefinition::new("outbox_receipts");
-/// #591: caller correlation token -> the receipt id it was journaled under,
-/// stored as [`receipt_key`]'s SAME zero-padded decimal string (this table
-/// is only ever point-looked-up by token, never range-scanned, so the
-/// padding is not load-bearing here -- it is simply reusing the existing
-/// key format rather than introducing a second one). Written inside the
-/// SAME transaction as the
-/// `OUTBOX_RECEIPTS` row it names (see `accept_write`'s doc), retained
-/// forever like `OUTBOX_RECEIPTS` -- there is no removal door.
-pub(super) const OUTBOX_CORRELATIONS: TableDefinition<&str, &str> =
-    TableDefinition::new("outbox_correlations");
+/// Fresh durable-delivery v1 namespace (#1027). The key widths are the
+/// semantic contract, not redb's numeric layout:
+///
+/// - intent/receipt: `u64-be`;
+/// - relay surrogate: `u32-be`;
+/// - lane: `intent:u64-be | relay:u32-be`;
+/// - attempt: lane key plus `ordinal:u64-be`;
+/// - route revision: `intent:u64-be | ordinal:u64-be`;
+/// - deadline: `time:u64-be | intent:u64-be | relay:u32-be`.
+///
+/// Values use the explicit codec in `delivery_codec.rs`. No previous
+/// execution table is opened, read, transformed, or deleted.
+pub(super) const DELIVERY_INTENTS: TableDefinition<&[u8; 8], &[u8]> =
+    TableDefinition::new("delivery_intents_v1");
+pub(super) const DELIVERY_DISPLACED: TableDefinition<&[u8; 8], &[u8]> =
+    TableDefinition::new("delivery_displaced_v1");
+pub(super) const DELIVERY_ATTEMPTS: TableDefinition<&[u8; 20], &[u8]> =
+    TableDefinition::new("delivery_attempts_v1");
+pub(super) const DELIVERY_ROUTE_REVISIONS: TableDefinition<&[u8; 16], &[u8]> =
+    TableDefinition::new("delivery_route_revisions_v1");
+pub(super) const DELIVERY_LANES: TableDefinition<&[u8; 12], &[u8]> =
+    TableDefinition::new("delivery_lanes_v1");
+pub(super) const DELIVERY_DEADLINES: TableDefinition<&[u8; 20], &[u8]> =
+    TableDefinition::new("delivery_deadlines_v1");
+pub(super) const DELIVERY_DEADLINES_BY_INTENT: TableDefinition<&[u8; 20], &[u8]> =
+    TableDefinition::new("delivery_deadlines_by_intent_v1");
+pub(super) const DELIVERY_ATTEMPT_DETAILS: TableDefinition<&[u8; 20], &[u8]> =
+    TableDefinition::new("delivery_attempt_details_v1");
+pub(super) const DELIVERY_META: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("delivery_meta_v1");
+pub(super) const DELIVERY_RECEIPTS: TableDefinition<&[u8; 8], &[u8]> =
+    TableDefinition::new("delivery_receipts_v1");
+pub(super) const DELIVERY_CORRELATIONS: TableDefinition<&[u8], &[u8; 8]> =
+    TableDefinition::new("delivery_correlations_v1");
+pub(super) const DELIVERY_RELAYS: TableDefinition<&[u8; 4], &[u8]> =
+    TableDefinition::new("delivery_relays_v1");
+pub(super) const DELIVERY_RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
+    TableDefinition::new("delivery_relay_ids_v1");
+pub(super) const DELIVERY_KIND5_CLAIMS: TableDefinition<&[u8; 8], &[u8]> =
+    TableDefinition::new("delivery_kind5_claims_v1");
+pub(super) const DELIVERY_SUPPRESS_BY_ID: TableDefinition<&[u8; 64], &[u8]> =
+    TableDefinition::new("delivery_suppress_by_id_v1");
+pub(super) const DELIVERY_SUPPRESS_BY_ADDR: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("delivery_suppress_by_addr_v1");
 
 /// The `tombstones` table's key for one (target id, claiming author) pair —
 /// see [`TOMBSTONES`]'s doc for why this is composite, not just the id.

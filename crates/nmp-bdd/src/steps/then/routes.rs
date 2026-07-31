@@ -12,7 +12,7 @@
 
 use cucumber::then;
 
-use nmp::mechanism::outbox::WriteStatus;
+use nmp::mechanism::delivery::WriteStatus;
 
 use crate::world::NmpWorld;
 

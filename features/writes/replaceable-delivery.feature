@@ -1,4 +1,4 @@
-Feature: Replaceable writes keep only useful outbox work
+Feature: Replaceable writes keep only useful delivery work
   @ledger-9
   Scenario Outline: A newer offline replaceable write retires the older obligation
     Given my relay list names "offline-relay" as my write relay

@@ -5,12 +5,12 @@ slug: relay-worker-demand
 status: built
 date: 2026-07-28
 audience: llms
-scope: durable outbox lane projection into relay-worker ownership
+scope: durable delivery lane projection into relay-worker ownership
 investigated_revision: 057f59ef9f3a5cbc1a3ce4e3c88d189d55b28244
 runtime_evidence_revision: 9a8ad1fd1a2999b067c19d842467a76a257f7f25
 implementation_pr: https://github.com/pablof7z/nmp/pull/988
 owns:
-  - how durable outbox lanes determine which relay sessions the write plane must keep alive
+  - how durable delivery lanes determine which relay sessions the write plane must keep alive
   - why the investigated implementation repeatedly read and decoded every lane
   - the rebuildable in-memory projection that removes those reads
   - the projection's ordering, restart, and degraded-state requirements
@@ -18,7 +18,9 @@ related:
   - docs/design-record.md
   - docs/bug-class-ledger.md
   - docs/known-gaps.md
+  - docs/internals/writes/durable-delivery.md
 issues:
+  - https://github.com/pablof7z/nmp/issues/1027
   - https://github.com/pablof7z/nmp/issues/985
   - https://github.com/pablof7z/nmp/issues/1000
   - https://github.com/pablof7z/nmp/issues/975
@@ -29,7 +31,7 @@ issues:
 
 # Durable write relay-worker demand
 
-This document records the repeated outbox-lane scans present at
+This document records the repeated delivery-lane scans present at
 `investigated_revision` and the reducer-owned replacement built in
 [#988](https://github.com/pablof7z/nmp/pull/988). It is deliberately not a
 backend-selection record. The performance problem was caused by asking durable
@@ -49,13 +51,19 @@ Pablo first asked:
 
 > is this related to the work we were doing in this session? is nmp still storing events as json and deserializing on every scan?
 
-The precise answer is:
+At `investigated_revision`, the precise answer was:
 
 - canonical Nostr events are stored in a compact binary encoding;
-- outbox-lane control records are stored as JSON values under string keys;
-- the hot path scans and JSON-decodes those lane records repeatedly;
+- delivery-lane control records were stored as JSON values under string keys;
+- the hot path scanned and JSON-decoded those lane records repeatedly;
 - therefore this is related to storage representation work, but it is not
   evidence that canonical events are stored as JSON.
+
+Current schema version 12 replaces that physical shape with the explicit
+binary `delivery_*_v1` namespace documented in
+[`durable-delivery.md`](durable-delivery.md). The reducer-owned projection
+remains the architectural fix for repeated dispatch reads; binary makes
+recovery and any remaining scan cheaper, but does not make a scan unnecessary.
 
 The design question was:
 
@@ -68,7 +76,7 @@ re-reading the authority every time.
 
 ## System model
 
-A durable write intent can own one outbox lane per destination relay. A lane is
+A durable write intent can own one delivery lane per destination relay. A lane is
 the durable state machine for delivery to that relay: waiting, eligible,
 attempting, retrying, suspended, or terminal. Nonterminal lanes require NMP to
 keep the corresponding authenticated relay session available. Terminal lanes
@@ -77,7 +85,7 @@ do not.
 The relevant ownership split is:
 
 ```text
-durable outbox tables
+durable delivery tables
   authority for intent, lane, attempt, and receipt state
           |
           | bootstrap/recovery and committed transition results
@@ -107,7 +115,7 @@ At `investigated_revision`, `write_relay_workers`:
 2. walks every `PendingWrite`;
 3. includes the pending write's already-known pending, unstarted, and
    route-blocked relays;
-4. calls `EventStore::recover_outbox_lanes(intent_id)` for every pending intent;
+4. calls `EventStore::recover_delivery_lanes(intent_id)` for every pending intent;
 5. range-scans the durable lane table, JSON-decodes every returned lane, and
    parses its relay URL;
 6. retains the relay session for every nonterminal lane.
@@ -118,7 +126,7 @@ for the requirements. An unchanged reducer can therefore perform the same
 store reads, B-tree comparisons, JSON decoding, and URL parsing many times.
 
 This was not recovery in the operational sense even though the store method is
-named `recover_outbox_lanes`. Recovery data was being used as a recurring
+named `recover_delivery_lanes`. Recovery data was being used as a recurring
 query interface.
 
 ### What is binary and what is JSON
@@ -127,16 +135,17 @@ Canonical event insertion calls `binary_event::encode_event` and stores the
 resulting bytes. The representative ingest schema and its write amplification
 are a separate concern.
 
-Outbox lanes currently use:
+At the investigated revision, delivery lanes used:
 
 ```rust
 TableDefinition<&str, &str>
 ```
 
-The key contains the intent identifier and relay URL. The value is a
-JSON-encoded `RecoveredLane`. `recover_outbox_lanes` performs a key-range scan,
-decodes every matching value with `serde_json`, reconstructs relay URLs, and
-sorts the result.
+The key contained the intent identifier and relay URL. The value was a
+JSON-encoded lane. `recover_delivery_lanes` performed a key-range scan, decoded
+every matching value with `serde_json`, reconstructed relay URLs, and sorted
+the result. Current code uses `intent:u64-be | relay_id:u32-be` and an explicit
+versioned binary value.
 
 Changing the lane key or value encoding may reduce the cost of each scan, but
 it cannot make a redundant scan necessary. The first change should remove the
@@ -167,7 +176,7 @@ A profiler report supplied from a running Mosaico daemon pinned to NMP revision
 
 During that sample, the NMP engine thread was on CPU for the full window.
 Inclusive samples attributed about 68% of that thread to
-`recover_outbox_lanes`, about 61% to `required_relay_workers`, about 31% to
+`recover_delivery_lanes`, about 61% to `required_relay_workers`, about 31% to
 redb range-iterator construction, and about 17% to lane JSON decoding. String
 key comparison and UTF-8 validation were also visible.
 
@@ -201,7 +210,7 @@ Each `PendingWrite` now owns a `LaneWorkerProjection` with three sets:
 
 The reducer populates the projection from the lanes returned by startup
 recovery and bootstrap. Every successful durable lane mutation then feeds its
-returned post-commit `RecoveredLane` through one projection update path:
+returned post-commit `DeliveryLane` through one projection update path:
 
 ```text
 committed lane state is nonterminal -> insert relay
@@ -226,7 +235,7 @@ The store API already returned post-commit lane state from bootstrap and lane
 transitions, but many former call sites discarded those returned values.
 `core/lane_projection.rs` now owns wrappers for bootstrap and every lane-writing
 store door. Each wrapper commits first and applies the returned
-`RecoveredLane` before returning to ordinary reducer flow.
+`DeliveryLane` before returning to ordinary reducer flow.
 
 A recursive source-census falsifier scans every production module under
 `core/` and fails if any module outside `lane_projection.rs` invokes a raw
@@ -237,7 +246,7 @@ mechanical proof rather than relying on reviewer memory. The rule is:
 > lane state through the reducer projection before ordinary dispatch resumes.
 
 The durable store remains the sole retry authority. The projection is derived
-state rebuilt from complete bootstrap results; it is not a second outbox.
+state rebuilt from complete bootstrap results; it is not a second delivery authority.
 
 ### Route revisions and parked intents
 
@@ -322,7 +331,7 @@ runtime retains its existing workers.
 Conservative retention is only safe if it is temporary. The first #985
 implementation had no exit:
 [#1000](https://github.com/pablof7z/nmp/issues/1000) found that `uncertain` is
-cleared solely by a committed `RecoveredLane` for that exact relay, while an
+cleared solely by a committed `DeliveryLane` for that exact relay, while an
 intent whose bootstrap failed owns no lane rows at all — so `schedule_ready`,
 the deadline sweep and the wake index all find nothing for it and no committed
 lane fact can ever arrive. Its relay workers stayed pinned and its receipt
@@ -336,7 +345,7 @@ A failed bootstrap therefore records a **retryable gap** for that intent
 - arms a deadline through the existing `next_deadline`/`Tick` machinery, with
   the same capped exponential backoff shape as the lane retry schedule, so
   nothing new scans and steady state pays one empty-map probe;
-- is closed by exactly one event — a committed `bootstrap_outbox_lanes`, whose
+- is closed by exactly one event — a committed `bootstrap_delivery_lanes`, whose
   exact rebuild supersedes every conservative guess it stood in for — or by
   the pending write leaving `pending`.
 
@@ -378,7 +387,7 @@ behavior for that case remains an open recovery decision owned with #771 and
 The implementation is correct only if all of these hold:
 
 1. Durable lane state is the authority; the in-memory projection is
-   reconstructible and never independently persisted as outbox truth.
+   reconstructible and never independently persisted as delivery truth.
 2. After successful reconstruction, worker-demand calculation performs no
    lane-store read.
 3. Every committed lane creation or transition updates the projection before
@@ -406,7 +415,7 @@ The implementation is correct only if all of these hold:
 
 The implementation carries these permanent falsifiers:
 
-- `unchanged_worker_demand_reads_zero_outbox_lanes` first failed on the base
+- `unchanged_worker_demand_reads_zero_delivery_lanes` first failed on the base
   revision with 6 recovery reads for 3 pending intents, then passed with 0.
   It also proves that the required worker is still recognized; eliminating
   reads by forgetting demand would fail.
@@ -489,11 +498,11 @@ This design does not privilege redb. Any backend used by NMP should expose the
 same semantic lane-transition and recovery contract. Native and WASM targets
 do not need to use the same physical engine.
 
-The first #985 implementation intentionally does not:
+The first #985 implementation intentionally did not:
 
 - select or migrate a production database;
 - change the canonical event representation;
-- replace outbox JSON or string keys;
+- replace the legacy execution JSON or string keys (now closed by #1027);
 - use unchecked UTF-8 to reduce comparison cost;
 - redesign the public engine mutex;
 - add a speculative global worker reference-count cache;
@@ -529,9 +538,11 @@ removed and re-profiled.
   - persistence-error durability classification
 - `crates/nmp-store/src/redb_store/schema.rs`
   - redb lane table representation
-- `crates/nmp-store/src/redb_store/outbox.rs`
-  - lane key and JSON codec
-- `crates/nmp-store/src/redb_store/outbox_ops.rs`
+- `crates/nmp-store/src/redb_store/delivery.rs`
+  - binary lane/deadline mutation helpers
+- `crates/nmp-store/src/redb_store/delivery_codec.rs`
+  - explicit versioned values, bounds, and fixed-width key constructors
+- `crates/nmp-store/src/redb_store/delivery_ops.rs`
   - lane range scans, transition commits, and terminal closure
 - `crates/nmp-store/src/redb_store/canonical.rs`
   - binary canonical-event insertion
