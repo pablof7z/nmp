@@ -6,6 +6,7 @@
 import Foundation
 import XCTest
 @testable import NMP
+import NMPFFI
 
 final class PullIteratorCoreTests: XCTestCase {
     func testOneAppPullPerNativePullWithNoEagerProducerOrSwiftQueue() async throws {
@@ -56,6 +57,26 @@ final class PullIteratorCoreTests: XCTestCase {
         )
         XCTAssertEqual(handle.nextCalls, 2)
     }
+
+    func testRowTicketCommitsBeforeSwiftMapsTheFrame() async throws {
+        let settlement = RowTicketSettlement()
+        let handle = TicketedRowStream(settlement: settlement)
+        let core = NMPPullIteratorCore(
+            handle: handle,
+            iteratorGate: NMPPullIteratorGate()
+        ) { _ in
+            settlement.record("map")
+            return "mapped"
+        }
+
+        let value = try await core.next()
+        XCTAssertEqual(value, "mapped")
+        XCTAssertEqual(
+            settlement.events,
+            ["begin", "receive", "commit", "map"],
+            "foreign completion commits synchronously before mapping or another await"
+        )
+    }
 }
 
 private final class IntPullHandle: NMPPullHandle, @unchecked Sendable {
@@ -82,7 +103,7 @@ private final class IntPullHandle: NMPPullHandle, @unchecked Sendable {
         return recordedCancelCalls
     }
 
-    func next() async throws -> Int? {
+    func pullNext() async throws -> Int? {
         takeNext()
     }
 
@@ -99,4 +120,75 @@ private final class IntPullHandle: NMPPullHandle, @unchecked Sendable {
         guard !frames.isEmpty else { return nil }
         return frames.removeFirst()
     }
+}
+
+private final class RowTicketSettlement: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedEvents: [String] = []
+
+    var events: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedEvents
+    }
+
+    func record(_ event: String) {
+        lock.lock()
+        recordedEvents.append(event)
+        lock.unlock()
+    }
+}
+
+private final class TicketedRowPull: NmpRowPull, @unchecked Sendable {
+    private let settlement: RowTicketSettlement
+
+    init(settlement: RowTicketSettlement) {
+        self.settlement = settlement
+        super.init(noPointer: .init())
+    }
+
+    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        settlement = RowTicketSettlement()
+        super.init(unsafeFromRawPointer: pointer)
+    }
+
+    override func receive() async throws -> FfiFrame? {
+        settlement.record("receive")
+        return FfiFrame(
+            deltas: [],
+            window: nil,
+            evidence: FfiAcquisitionEvidence(sources: [], shortfall: [])
+        )
+    }
+
+    override func commit() throws {
+        settlement.record("commit")
+    }
+
+    override func abort() {
+        settlement.record("abort")
+    }
+}
+
+private final class TicketedRowStream: NmpRowStream, @unchecked Sendable {
+    private let settlement: RowTicketSettlement
+
+    init(settlement: RowTicketSettlement) {
+        self.settlement = settlement
+        super.init(noPointer: .init())
+    }
+
+    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        settlement = RowTicketSettlement()
+        super.init(unsafeFromRawPointer: pointer)
+    }
+
+    override func beginNext() throws -> NmpRowPull {
+        settlement.record("begin")
+        return TicketedRowPull(settlement: settlement)
+    }
+
+    override func cancel() {}
+
+    override func requestRows(atLeast: UInt64) throws {}
 }

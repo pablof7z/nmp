@@ -122,7 +122,7 @@ class NMPQuery internal constructor(
             }
             try {
                 while (true) {
-                    val frame = nmpRethrowingAsync { handle.next() } ?: break
+                    val frame = nextCommittedRowFrame(handle) ?: break
                     emit(windowRowBatch(frame))
                 }
             } finally {

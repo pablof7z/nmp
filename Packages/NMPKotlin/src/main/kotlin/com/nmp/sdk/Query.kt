@@ -4,19 +4,19 @@
 // the accumulated snapshot a collector sees.
 //
 // PULL MODEL (#680): the engine owns a single-slot latest-state mailbox per
-// observation; the wrapper is a thin pull adapter that awaits
-// `NmpRowStream.next()` in a loop and folds each delta frame into the
-// running snapshot. `null` from `next()` is the terminal signal (cancel /
-// engine shutdown / producer drop). There is NO callback observer, NO
-// dedicated drain thread, and NO native-task capacity concept anymore.
+// observation; the wrapper synchronously claims an `NmpRowPull`, awaits its
+// frame, and commits before folding the delta into the running snapshot.
+// `null` from `receive()` is the terminal signal (cancel / engine shutdown /
+// producer drop). There is NO callback observer, NO dedicated drain thread,
+// and NO native-task capacity concept anymore.
 //
 // TEARDOWN is COLLECTION-SCOPE-TIED: `handle.cancel()` runs in a `finally`,
 // which fires the moment the collecting coroutine is cancelled or the flow
-// completes. Cancelling the collecting coroutine also drops the in-flight
-// Rust `next()` future; the Rust single-reader guard is released on that
-// future's `Drop`, so a torn-down collection cannot brick the handle. This
-// is the deterministic teardown #46's bounded-latest-state contract needs --
-// not the JVM `Cleaner`, which only runs once GC actually collects.
+// completes. Cancelling the collecting coroutine drops the in-flight Rust
+// `receive()` future and aborts the still-owned pull ticket, restoring any
+// delta that reached Rust READY before generated Kotlin completion retrieved
+// it. This is the deterministic teardown #46's bounded-latest-state contract
+// needs -- not the JVM `Cleaner`, which only runs once GC actually collects.
 //
 // CONFLATION lives in the engine mailbox now, so there is deliberately NO
 // `.conflate()` on this side: a slow collector simply does not call `next()`
@@ -27,6 +27,8 @@ package com.nmp.sdk
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import uniffi.nmp_ffi.FfiFrame
+import uniffi.nmp_ffi.FfiRowPullException
 import uniffi.nmp_ffi.FfiRowDelta
 import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.NmpRowStream
@@ -75,7 +77,7 @@ private fun rowFlow(open: () -> NmpRowStream): Flow<RowBatch> =
                 // Rust frame -- fold it. (Windowed observations take the
                 // other arm of the one frame vocabulary: authoritative
                 // snapshots, no folding -- see Window.kt.)
-                val frame = nmpRethrowingAsync { handle.next() } ?: break
+                val frame = nextCommittedRowFrame(handle) ?: break
                 for (delta in frame.deltas) applyRowDelta(order, byId, delta)
                 val snapshot = order.mapNotNull { byId[it] }
                 emit(RowBatch(snapshot, AcquisitionEvidence.from(frame.evidence)))
@@ -84,6 +86,48 @@ private fun rowFlow(open: () -> NmpRowStream): Flow<RowBatch> =
             handle.cancel()
         }
     }
+
+/**
+ * #762's private two-phase foreign-delivery bridge.
+ *
+ * [NmpRowStream.beginNext] creates the exclusive native ticket before Kotlin
+ * enters UniFFI's cancellable READY/complete split. If cancellation wins
+ * before generated `receive()` retrieves the Rust result, this function still
+ * owns [pull] and aborts it in `finally`, restoring the retained delta for the
+ * next ticket. Once `receive()` returns, `commit()` is synchronous and runs
+ * before mapping, folding, emitting, or any other cancellation point.
+ */
+internal suspend fun nextCommittedRowFrame(handle: NmpRowStream): FfiFrame? {
+    val pull =
+        try {
+            handle.beginNext()
+        } catch (error: FfiRowPullException) {
+            return when (error) {
+                is FfiRowPullException.Closed -> null
+                else -> throw NMPError.ConcurrentNext
+            }
+        }
+    var committed = false
+    try {
+        val frame = pull.receive()
+        pull.commit()
+        committed = true
+        return frame
+    } catch (error: FfiRowPullException) {
+        return when (error) {
+            is FfiRowPullException.Closed,
+            is FfiRowPullException.Aborted,
+            -> null
+            else -> throw NMPError.ConcurrentNext
+        }
+    } finally {
+        try {
+            if (!committed) pull.abort()
+        } finally {
+            pull.close()
+        }
+    }
+}
 
 /**
  * The accumulator's per-delta step, extracted as a pure function so it is

@@ -35,6 +35,13 @@ use nmp_ffi::types::{
 const TEST_SECRET_KEY_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 
+async fn next_row(stream: &NmpRowStream) -> bool {
+    let pull = stream.begin_next().expect("row ticket begins");
+    let frame = pull.receive().await.expect("row ticket lifecycle is valid");
+    pull.commit().expect("delivered row ticket commits");
+    frame.is_some()
+}
+
 // A profile pubkey (hex) for a profile/avatar observer target.
 fn profile_pubkey(i: usize) -> String {
     format!("{:064x}", 0x1000 + i)
@@ -175,19 +182,15 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
     // path (spot-check a profile + a room + diagnostics — the families that used
     // to fail to load).
     assert!(
-        tokio::time::timeout(Duration::from_secs(5), composition.profiles[0].next())
+        tokio::time::timeout(Duration::from_secs(5), next_row(&composition.profiles[0]))
             .await
-            .expect("a profile observation delivers within 5s")
-            .expect("not a misuse")
-            .is_some(),
+            .expect("a profile observation delivers within 5s"),
         "profiles remain available (their initial state is delivered)"
     );
     assert!(
-        tokio::time::timeout(Duration::from_secs(5), composition.rooms[0].next())
+        tokio::time::timeout(Duration::from_secs(5), next_row(&composition.rooms[0]))
             .await
-            .expect("a room observation delivers")
-            .expect("not a misuse")
-            .is_some(),
+            .expect("a room observation delivers"),
     );
     assert!(
         tokio::time::timeout(Duration::from_secs(5), composition.diagnostics.next())
@@ -223,11 +226,9 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
         last.cancel_all();
         let next = open_composition(&engine, &author);
         assert!(
-            tokio::time::timeout(Duration::from_secs(5), next.profiles[0].next())
+            tokio::time::timeout(Duration::from_secs(5), next_row(&next.profiles[0]))
                 .await
-                .unwrap_or_else(|_| panic!("round {round}: a profile delivers after room switch"))
-                .expect("not a misuse")
-                .is_some(),
+                .unwrap_or_else(|_| panic!("round {round}: a profile delivers after room switch")),
             "round {round}: profiles still load after repeated room switching (no leaked/refused slot)"
         );
         last = next;
@@ -247,11 +248,9 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
         .expect("activate account");
     let restarted = open_composition(&engine, &author);
     assert!(
-        tokio::time::timeout(Duration::from_secs(5), restarted.profiles[0].next())
+        tokio::time::timeout(Duration::from_secs(5), next_row(&restarted.profiles[0]))
             .await
-            .expect("profile delivers after cold restart")
-            .expect("not a misuse")
-            .is_some(),
+            .expect("profile delivers after cold restart"),
         "after a full restart the whole composition reopens and profiles load"
     );
 
