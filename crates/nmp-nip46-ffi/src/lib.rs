@@ -6,4 +6,7 @@
 
 pub mod signer;
 
+#[cfg(nmp_component_release_attestation)]
+include!(concat!(env!("OUT_DIR"), "/component_attestation.rs"));
+
 uniffi::setup_scaffolding!();

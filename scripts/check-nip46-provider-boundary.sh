@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # #877/#952: NIP-46 is a selectable signer provider, never part of the
-# universal signer/core/native vocabulary. A provider must also prove exact
-# native-core compatibility before it may receive the external mailbox.
+# universal signer/core/native vocabulary. A provider must prove exact native
+# compatibility before it can return a take-once adapter for core installation.
 
 set -euo pipefail
 
@@ -97,6 +97,8 @@ fi
 required_paths=(
   crates/nmp-signer/src/capability.rs
   crates/nmp-local-signer/src/local.rs
+  crates/nmp-component-interface/src/signer.rs
+  crates/nmp-component-interface/component_identity.rs
   crates/nmp-ffi/build.rs
   crates/nmp-ffi/src/signer.rs
   crates/nmp-nip46/src/nip46.rs
@@ -156,96 +158,110 @@ if [[ -n "$found" ]]; then
   fail "core source still names the concrete NIP-46 provider"
 fi
 
-# The provider consumes the core component's one opaque mailbox. Importing the
-# engine object, mirroring an engine, or adding a foreign signing callback
-# would create another lifecycle/boundary and is forbidden by the issue.
-grep -qF 'pub struct FfiSignerMailbox' crates/nmp-ffi/src/signer.rs ||
-  fail "core opaque signer mailbox is missing"
-grep -qF 'pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox>' crates/nmp-ffi/src/facade.rs ||
-  fail "NmpEngine does not vend the opaque signer mailbox"
-grep -qF 'pub(crate) fn from_engine(engine: Arc<nmp::Engine>) -> Arc<Self>' \
-  crates/nmp-ffi/src/signer.rs ||
-  fail "opaque signer mailbox construction is not sealed inside core"
+# The provider contributes one opaque, take-once adapter. Only the core can
+# install it or mint the contextual runtime capability used by provider tasks.
+interface_source=crates/nmp-component-interface/src/signer.rs
+core_signer_source=crates/nmp-ffi/src/signer.rs
+provider_signer_source=crates/nmp-nip46-ffi/src/signer.rs
+grep -qF 'pub struct FfiSignerAdapter' "$interface_source" ||
+  fail "shared opaque signer adapter is missing"
+grep -qF 'pub fn new_signer_adapter(' "$interface_source" ||
+  fail "provider adapter preparation door is missing"
+grep -qF 'pub struct SignerAdapterRuntime' "$interface_source" ||
+  fail "core-minted contextual runtime capability is missing"
+grep -qF 'let _entered = handle.enter();' "$interface_source" ||
+  fail "provider futures are not entered in their linked Tokio context on every poll"
+if rg -q 'core-owner|pub unsafe|[Mm]ailbox|CoreSigner(Port|Lease)|pub fn from_core' \
+  "$interface_source" "$core_signer_source" "$provider_signer_source"; then
+  fail "deleted mailbox/unsafe authority or public contextual-runtime minting survives"
+fi
+[[ $(rg -o '\.take_for_install\(\)' "$core_signer_source" | wc -l | tr -d ' ') == 1 ]] ||
+  fail "core signer adapter must have exactly one take-for-install site"
+grep -qF 'pub(crate) fn install_signer_adapter(' "$core_signer_source" ||
+  fail "adapter installation is not sealed inside core"
+grep -qF 'pub fn install_signer_adapter(' crates/nmp-ffi/src/facade.rs ||
+  fail "NmpEngine does not own the adapter installation door"
+if grep -qE 'Handle::current[[:space:]]*\(|tokio::spawn[[:space:]]*\(|runtime::Builder::new' \
+  "$provider_signer_source"; then
+  fail "provider production code regained ambient or provider-owned runtime authority"
+fi
+grep -qF 'Arc<dyn nmp_signer::Nip46TaskRuntime>' "$provider_signer_source" ||
+  fail "provider NIP-46 child tasks bypass the contextual core scheduler"
+if cargo tree -p nmp-nip46-ffi --edges normal |
+  grep -qE '(^|[[:space:]])nmp(-ffi)? v'; then
+  fail "NIP-46 provider normal graph contains nmp or nmp-ffi"
+fi
+if cargo tree -p nmp-component-interface --edges normal |
+  grep -qE 'nmp-(ffi|nip46)($|[[:space:]])|(^|[[:space:]])nmp v'; then
+  fail "selection-neutral component interface contains a core/provider root"
+fi
 grep -qF 'pub fn nmp_core_component_identity() -> String' crates/nmp-ffi/src/signer.rs ||
   fail "core does not export its plain native component identity"
-grep -qF '"--unit-graph"' crates/nmp-ffi/build.rs ||
-  fail "core identity does not derive Cargo's resolved transitive unit graph"
-grep -qF 'validate_unit_graph_against_cargo' crates/nmp-ffi/build.rs ||
-  fail "core identity does not validate its derived graph against Cargo's resolved marker"
-grep -qF 'validated_release_marker' crates/nmp-ffi/build.rs ||
-  fail "core release identity is not bound to an isolated component target"
-grep -qF 'NMP_FFI_COMPONENT_AUTH' crates/nmp-ffi/build.rs ||
+grep -qF -- '"--unit-graph"' crates/nmp-component-interface/component_identity.rs ||
+  fail "component identity does not derive Cargo's transitive unit graph"
+grep -qF 'NMP_COMPONENT_BUILD_AUTH' crates/nmp-ffi/build.rs ||
   fail "isolated component target lacks per-build builder authorization"
-grep -qF 'features = ["nip46-provider-component"]' crates/nmp-nip46-ffi/Cargo.toml ||
-  fail "NIP-46 provider does not make its presence observable to the nmp-ffi build"
-grep -qF 'pub fn verify_nip46_core_component_identity(' crates/nmp-nip46-ffi/src/signer.rs ||
-  fail "NIP-46 provider does not verify plain core identity before object exchange"
-grep -qF 'compatibility: Arc<FfiNip46CoreCompatibility>' crates/nmp-nip46-ffi/src/signer.rs ||
+if grep -qF 'nip46-provider-component' crates/nmp-ffi/Cargo.toml; then
+  fail "obsolete provider-selection feature survives in core"
+fi
+grep -qF 'pub fn verify_nip46_component(' crates/nmp-nip46-ffi/src/signer.rs ||
+  fail "NIP-46 provider does not verify package interface and core identity"
+grep -qF 'compatibility: Arc<FfiNip46Compatibility>' crates/nmp-nip46-ffi/src/signer.rs ||
   fail "NIP-46 provider construction does not require a compatibility proof"
 grep -qF 'macro_metadata::extract_from_library' crates/nmp-nip46-ffi/metadata-audit.rs ||
-  fail "mailbox-entry falsifier does not inspect UniFFI's compiled export authority"
-grep -qF 'const CORE_MAILBOX_SOURCE: &str = "nmp_ffi::NmpEngine::signer_mailbox";' \
-  crates/nmp-nip46-ffi/metadata-audit.rs ||
-  fail "compiled metadata audit does not pin the one outward-only core mailbox source"
-grep -qF 'core_mailbox_sources != 1' crates/nmp-nip46-ffi/metadata-audit.rs ||
-  fail "compiled metadata audit does not require exactly one core mailbox source"
-grep -qF 'compiled UniFFI metadata must expose exactly one proof-bearing mailbox entry' \
-  crates/nmp-nip46-ffi/metadata-audit.rs ||
-  fail "compiled provider metadata does not enforce the single proof-bearing mailbox entry"
+  fail "adapter-entry falsifier does not inspect UniFFI's compiled export authority"
+grep -qF 'proof at input zero' crates/nmp-nip46-ffi/metadata-audit.rs ||
+  fail "compiled provider metadata does not enforce proof-first adapter ordering"
 for falsifier in \
-  exact_compiled_constructor_is_the_only_mailbox_entry \
-  missing_compiled_mailbox_entry_is_rejected \
-  exact_compiled_constructor_name_is_required \
-  missing_mailbox_metadata_positive_control_is_rejected \
+  missing_adapter_metadata_positive_control_is_rejected \
   missing_compatibility_metadata_positive_control_is_rejected \
-  missing_core_mailbox_source_positive_control_is_rejected \
-  foreign_namespace_mailbox_entry_is_not_hidden_from_audit \
-  forged_core_namespace_mailbox_input_is_not_exempted \
-  exact_core_mailbox_source_cannot_accept_a_mailbox_input \
-  exact_core_mailbox_source_cannot_throw_a_mailbox \
-  duplicate_core_mailbox_source_is_rejected; do
+  adapter_return_requires_proof_at_input_zero \
+  adapter_input_is_refused \
+  core_authority_type_is_refused \
+  prepared_connection_constructor_is_refused \
+  duplicate_proof_constructor_is_refused \
+  exact_compiled_surface_passes_the_full_audit; do
   grep -qF "fn $falsifier" crates/nmp-nip46-ffi/metadata-audit.rs ||
     fail "compiled metadata audit is missing falsifier $falsifier"
 done
-grep -qF -- '--bin nmp-nip46-metadata-audit' scripts/build-component-release.sh ||
+grep -qF -- '--bin "$METADATA_AUDIT_BIN"' scripts/build-component-release.sh ||
   fail "managed provider builds do not audit compiled UniFFI metadata before packaging"
-grep -qF 'withVerifiedNip46Core(actual: nmpProviderCoreComponentIdentity())' \
+grep -qF 'packagedInterfaceIdentity: nmpProviderComponentInterfaceIdentity()' \
   Packages/NMPNip46/Sources/NMPNip46/RemoteSigner.swift ||
-  fail "Swift provider does not verify the loaded core before requesting a mailbox"
-grep -qF 'withVerifiedNip46Core(nmpProviderCoreComponentIdentity())' \
+  fail "Swift provider does not verify packaged interface before preparing an adapter"
+grep -qF 'nmpProviderComponentInterfaceIdentity(),' \
   Packages/NMPKotlin/nip46/src/main/kotlin/com/nmp/sdk/RemoteSigner.kt ||
-  fail "Kotlin provider does not verify the loaded core before requesting a mailbox"
-for builder in scripts/build-swift-nip46-xcframework.sh scripts/build-kotlin-nip46-jvm.sh; do
-  grep -qF 'NMP_FFI_CARGO_PACKAGES="$COMPONENT_PACKAGES"' "$builder" ||
-    fail "$builder does not build core and provider under one package-set identity"
-done
+  fail "Kotlin provider does not verify packaged interface before preparing an adapter"
 for builder in scripts/build-swift-xcframework.sh scripts/build-kotlin-jvm.sh; do
   grep -qF 'scripts/build-component-release.sh' "$builder" ||
-    fail "$builder does not consume a sealed exact-package-set snapshot"
-  if grep -qF 'NMP_FFI_COMPONENT_AUTH=' "$builder"; then
+    fail "$builder does not consume sealed component snapshots"
+  if grep -qF 'NMP_COMPONENT_BUILD_AUTH=' "$builder"; then
     fail "$builder can still carry component authorization outside the managed Cargo invocation"
   fi
-  if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' "$builder"; then
-    fail "$builder still supplies declared graph content"
-  fi
 done
-grep -qF 'cargo build --frozen "${PACKAGE_ARGS[@]}" --release --target "$TARGET"' \
+grep -qF 'cargo build --frozen -p "$CARGO_PACKAGE" --release --target "$TARGET"' \
   scripts/build-component-release.sh ||
-  fail "managed component build does not freeze exact package roots, target, and release profile"
+  fail "managed component build does not freeze one exact package root"
+grep -qF 'scripts/verify-component-manifests.py' scripts/build-component-release.sh ||
+  fail "managed component build does not verify its exact manifest set"
 grep -qF 'rm -f "$AUTHORIZATION"' scripts/build-component-release.sh ||
   fail "managed component build does not revoke its authorization before returning"
 grep -qF 'nmp-component-artifacts' scripts/build-component-release.sh ||
   fail "managed component build does not seal package inputs outside the reusable Cargo target"
-if grep -qF 'NMP_FFI_CARGO_UNIT_GRAPH' crates/nmp-ffi/build.rs; then
-  fail "build script still accepts caller-declared graph content"
-fi
-if grep -qF 'NMP_FFI_COMPONENT_BUILD' crates/nmp-ffi/build.rs; then
-  fail "build script still trusts the obsolete broad enablement variable"
-fi
 if grep -nE 'Arc<NmpEngine>|engine:[[:space:]]*Arc<nmp::Engine>|FfiSigning(Capability)?Callback|SigningCapabilityCallback' \
   crates/nmp-nip46-ffi/src/signer.rs; then
-  fail "NIP-46 FFI bypasses the opaque mailbox or recreates a callback bridge"
+  fail "NIP-46 FFI bypasses the opaque adapter or recreates a callback bridge"
 fi
+
+# Mutation controls for the two repeatedly-restored bad designs.
+legacy_mailbox_mutation='pub unsafe fn assemble_core_signer_mailbox() -> FfiSignerMailbox'
+ambient_runtime_mutation='tokio::runtime::Handle::current(); tokio::spawn(async {})'
+printf '%s\n' "$legacy_mailbox_mutation" |
+  grep -qE 'pub unsafe|[Mm]ailbox' ||
+  fail "legacy mailbox mutation positive control escaped"
+printf '%s\n' "$ambient_runtime_mutation" |
+  grep -qE 'Handle::current[[:space:]]*\(|tokio::spawn[[:space:]]*\(' ||
+  fail "ambient runtime mutation positive control escaped"
 
 # Provider-only source must stay physically outside both core native roots.
 if find Packages/NMP/Sources/NMP Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk \

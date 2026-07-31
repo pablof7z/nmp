@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -307,7 +309,7 @@ impl Nip46Invitation {
             timeout,
             event_sink,
             cancellation,
-            SessionRuntime(standalone_runtime()?),
+            SessionRuntime::tokio(standalone_runtime()?),
         )
     }
 
@@ -323,7 +325,7 @@ impl Nip46Invitation {
             timeout,
             event_sink,
             Some(cancellation),
-            SessionRuntime(runtime),
+            SessionRuntime::tokio(runtime),
         )
     }
 
@@ -340,7 +342,7 @@ impl Nip46Invitation {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
-        runtime: tokio::runtime::Handle,
+        runtime: Arc<dyn Nip46TaskRuntime>,
     ) -> Result<Nip46Signer, Nip46Error> {
         let Self {
             client_keys,
@@ -549,7 +551,7 @@ impl Nip46Signer {
             timeout,
             event_sink,
             cancellation,
-            SessionRuntime(standalone_runtime()?),
+            SessionRuntime::tokio(standalone_runtime()?),
         )
     }
 
@@ -570,7 +572,7 @@ impl Nip46Signer {
             timeout,
             event_sink,
             Some(cancellation),
-            SessionRuntime(runtime),
+            SessionRuntime::tokio(runtime),
         )
     }
 
@@ -590,7 +592,7 @@ impl Nip46Signer {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
-        runtime: tokio::runtime::Handle,
+        runtime: Arc<dyn Nip46TaskRuntime>,
     ) -> Result<Self, Nip46Error> {
         let parsed = parse_bunker_uri(uri).map_err(Nip46Error::InvalidBunkerUri)?;
         let remote_signer_public_key = parsed.remote_signer_public_key;
@@ -737,7 +739,7 @@ impl Nip46Signer {
 
     pub fn logout(&self) -> SignerOp<()> {
         map_string(
-            &self.session.runtime_handle(),
+            &self.session,
             request_string(&self.session, "logout", Vec::new()),
             |result| {
                 (result == "ack").then_some(()).ok_or_else(|| {
@@ -793,7 +795,7 @@ impl Nip46Signer {
             timeout,
             Arc::new(|_| {}),
             None,
-            SessionRuntime(standalone_runtime()?),
+            SessionRuntime::tokio(standalone_runtime()?),
         )
     }
 
@@ -814,7 +816,7 @@ impl Nip46Signer {
             timeout,
             event_sink,
             Some(cancellation),
-            SessionRuntime(standalone_runtime()?),
+            SessionRuntime::tokio(standalone_runtime()?),
         )
     }
 
@@ -832,7 +834,7 @@ impl Nip46Signer {
         timeout: Duration,
         event_sink: Arc<dyn Fn(Nip46ConnectionEvent) + Send + Sync>,
         cancellation: &Nip46Cancellation,
-        runtime: tokio::runtime::Handle,
+        runtime: Arc<dyn Nip46TaskRuntime>,
     ) -> Result<Self, Nip46Error> {
         let client_keys = Keys::new(parts.client_secret_key.clone());
         let session = Session::spawn(
@@ -936,7 +938,7 @@ impl SigningCapability for Nip46Signer {
         .to_string();
         let user_public_key = self.user_public_key;
         map_string(
-            &self.session.runtime_handle(),
+            &self.session,
             request_string(&self.session, "sign_event", vec![body]),
             move |result| {
                 let event = Event::from_json(&result).map_err(|error| {
@@ -1203,18 +1205,69 @@ fn session_pool_config() -> PoolConfig {
     }
 }
 
+/// One provider-owned future scheduled on a core-owned runtime.
+#[doc(hidden)]
+pub type Nip46RuntimeTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Owned child-task cancellation and completion witness.
+#[doc(hidden)]
+pub trait Nip46RuntimeTaskHandle: Send + Sync {
+    fn abort(&self);
+    fn is_finished(&self) -> bool;
+}
+
+/// Hidden scheduling mechanism used by independently linked providers.
+///
+/// A raw Tokio handle cannot safely cross that boundary: its executor can poll
+/// the future, but the provider's separate Tokio copy would not have an entered
+/// reactor context. The provider supplies an implementation that enters its
+/// own Tokio copy on every poll while still scheduling on the core runtime.
+#[doc(hidden)]
+pub trait Nip46TaskRuntime: Send + Sync {
+    #[must_use]
+    fn spawn(&self, task: Nip46RuntimeTask) -> Box<dyn Nip46RuntimeTaskHandle>;
+}
+
+struct TokioTaskRuntime(tokio::runtime::Handle);
+
+struct TokioRuntimeTaskHandle(tokio::task::AbortHandle);
+
+impl Nip46RuntimeTaskHandle for TokioRuntimeTaskHandle {
+    fn abort(&self) {
+        self.0.abort();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.0.is_finished()
+    }
+}
+
+impl Nip46TaskRuntime for TokioTaskRuntime {
+    fn spawn(&self, task: Nip46RuntimeTask) -> Box<dyn Nip46RuntimeTaskHandle> {
+        let task = self.0.spawn(task);
+        Box::new(TokioRuntimeTaskHandle(task.abort_handle()))
+    }
+}
+
 /// #704: the async runtime a [`Session`] runs its worker/forwarder/switch-
-/// relays/result-map tasks on. Always a borrowed `Handle` — engine-associated
-/// sessions borrow the engine's runtime, and standalone direct-Rust sessions
-/// borrow the process-wide shared NIP-46 runtime ([`standalone_runtime`]).
-/// Either way the runtime outlives the session and is never shut down by it, so
-/// thread growth is O(1) in the number of sessions. This replaces the removed
-/// per-session `nmp-executor`.
-struct SessionRuntime(tokio::runtime::Handle);
+/// relays/result-map tasks on. Engine-associated component sessions use a
+/// context-preserving scheduler; standalone direct-Rust sessions use the
+/// process-wide shared NIP-46 runtime ([`standalone_runtime`]). Either way the
+/// runtime outlives the session and is never shut down by it, so thread growth
+/// is O(1) in the number of sessions.
+#[derive(Clone)]
+struct SessionRuntime(Arc<dyn Nip46TaskRuntime>);
 
 impl SessionRuntime {
-    fn handle(&self) -> tokio::runtime::Handle {
-        self.0.clone()
+    fn tokio(handle: tokio::runtime::Handle) -> Self {
+        Self(Arc::new(TokioTaskRuntime(handle)))
+    }
+
+    fn spawn(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> Box<dyn Nip46RuntimeTaskHandle> {
+        self.0.spawn(Box::pin(task))
     }
 }
 
@@ -1269,6 +1322,7 @@ struct Session {
     /// keeps using the subscriber channel; this signal is the async twin's edge.
     availability_signal: Arc<tokio::sync::Notify>,
     runtime: SessionRuntime,
+    tasks: Mutex<Vec<Box<dyn Nip46RuntimeTaskHandle>>>,
     /// The relay set this session currently targets, kept live by
     /// `SessionWorker::replace_relays` (#571's checkpoint reads this back
     /// through [`Session::current_relays`] without a worker round trip).
@@ -1291,7 +1345,7 @@ impl Session {
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let event_sinks: Arc<Mutex<Vec<EventSink>>> = Arc::new(Mutex::new(Vec::new()));
         let availability_error = Arc::new(Mutex::new(None));
-        let runtime_handle = runtime.handle();
+        let task_runtime = runtime.clone();
         let session = Arc::new(Self {
             requests,
             commands: commands.clone(),
@@ -1303,6 +1357,7 @@ impl Session {
             availability_error: Arc::clone(&availability_error),
             availability_signal: Arc::new(tokio::sync::Notify::new()),
             runtime,
+            tasks: Mutex::new(Vec::new()),
             current_relays: Mutex::new(relays.clone()),
         });
         if let Some(cancellation) = cancellation {
@@ -1319,7 +1374,7 @@ impl Session {
         // lifetime it awaits bounded inboxes, holding no OS thread. Session
         // teardown and external cancellation use an independent control signal,
         // so a full data queue cannot delay shutdown.
-        runtime_handle.spawn(async move {
+        let worker_task = task_runtime.spawn(async move {
             let mut worker = SessionWorker::new(
                 worker_pool,
                 client_keys,
@@ -1344,14 +1399,23 @@ impl Session {
                 )
                 .await;
         });
+        session
+            .tasks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(worker_task);
         drop(pool);
         Ok(session)
     }
 
-    /// The runtime handle this session spawns its async tasks (result-map,
-    /// switch-relays) on.
-    fn runtime_handle(&self) -> tokio::runtime::Handle {
-        self.runtime.handle()
+    fn spawn_task(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let task = self.runtime.spawn(task);
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
     }
 
     fn is_available(&self) -> bool {
@@ -1473,7 +1537,7 @@ impl Session {
         // #704: the switch-relays wait is an async task on the session runtime;
         // it holds no OS thread while the remote round-trip is outstanding.
         // Dropping the task (session teardown) fires the op's cancel hook.
-        self.runtime_handle().spawn(async move {
+        self.spawn_task(async move {
             let Ok(result) = tokio::time::timeout(SWITCH_RELAYS_TIMEOUT, op.recv_async()).await
             else {
                 return;
@@ -1523,10 +1587,14 @@ impl Drop for Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
-        // #704: the session only borrows a runtime `Handle` (the process-wide
-        // shared standalone runtime, or the engine's), so dropping the session
-        // never shuts a runtime down — the worker task observes the independent
-        // control signal above and exits on its own.
+        for task in self
+            .tasks
+            .get_mut()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .drain(..)
+        {
+            task.abort();
+        }
     }
 }
 
@@ -2127,7 +2195,7 @@ fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> 
         reply,
         cancellation: Arc::clone(&cancellation),
     };
-    session.runtime_handle().spawn(async move {
+    session.spawn_task(async move {
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => {}
@@ -2141,7 +2209,7 @@ fn request_string(session: &Arc<Session>, method: &str, params: Vec<String>) -> 
     operation
 }
 
-fn map_string<T, F>(runtime: &tokio::runtime::Handle, op: SignerOp<String>, map: F) -> SignerOp<T>
+fn map_string<T, F>(session: &Arc<Session>, op: SignerOp<String>, map: F) -> SignerOp<T>
 where
     T: Send + 'static,
     F: FnOnce(String) -> Result<T, SignerError> + Send + 'static,
@@ -2160,7 +2228,7 @@ where
             let (completion, mapped) = SignerOp::pending_channel_with_cancel(move || {
                 mapped_cancel.cancel();
             });
-            runtime.spawn(async move {
+            session.spawn_task(async move {
                 let result = match pending.await {
                     Ok(value) => map(value),
                     Err(error) => Err(error),
@@ -2232,7 +2300,8 @@ mod tests {
             event_sinks: Arc::new(Mutex::new(Vec::new())),
             availability_error: Arc::new(Mutex::new(None)),
             availability_signal: Arc::new(tokio::sync::Notify::new()),
-            runtime: SessionRuntime(standalone_runtime().unwrap()),
+            runtime: SessionRuntime::tokio(standalone_runtime().unwrap()),
+            tasks: Mutex::new(Vec::new()),
             current_relays: Mutex::new(Vec::new()),
         })
     }
@@ -2406,7 +2475,7 @@ mod tests {
             client,
             remote,
             None,
-            SessionRuntime(standalone_runtime().unwrap()),
+            SessionRuntime::tokio(standalone_runtime().unwrap()),
         )
         .unwrap();
 
@@ -2639,7 +2708,7 @@ mod tests {
             Keys::generate(),
             remote,
             Some(&cancellation),
-            SessionRuntime(standalone_runtime().unwrap()),
+            SessionRuntime::tokio(standalone_runtime().unwrap()),
         )
         .unwrap();
 
@@ -2972,7 +3041,8 @@ mod tests {
             event_sinks: Arc::clone(&event_sinks),
             availability_error: Arc::clone(&availability_error),
             availability_signal: Arc::new(tokio::sync::Notify::new()),
-            runtime: SessionRuntime(standalone_runtime().unwrap()),
+            runtime: SessionRuntime::tokio(standalone_runtime().unwrap()),
+            tasks: Mutex::new(Vec::new()),
             current_relays: Mutex::new(Vec::new()),
         });
         let mut worker = SessionWorker::new(

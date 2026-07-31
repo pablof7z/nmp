@@ -1,25 +1,34 @@
+@file:OptIn(NMPProviderComponentApi::class)
+
 package com.nmp.sdk
 
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.transformWhile
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import uniffi.nmp_nip46_ffi.FfiBunkerParseError
 import uniffi.nmp_nip46_ffi.FfiNip46ClientMetadata
 import uniffi.nmp_nip46_ffi.FfiNip46ConnectionEvent
-import uniffi.nmp_nip46_ffi.FfiNip46CoreCompatibility
+import uniffi.nmp_nip46_ffi.FfiNip46Compatibility
 import uniffi.nmp_nip46_ffi.FfiNip46Failure
 import uniffi.nmp_nip46_ffi.FfiNip46Invitation
+import uniffi.nmp_nip46_ffi.FfiNip46PreparedConnection
 import uniffi.nmp_nip46_ffi.FfiNip46ProviderException
 import uniffi.nmp_nip46_ffi.FfiNip46SignerApp
 import uniffi.nmp_nip46_ffi.Nip46Connection
 import uniffi.nmp_nip46_ffi.Nip46ConnectionObserver
-import uniffi.nmp_nip46_ffi.NmpNip46Provider
+import uniffi.nmp_nip46_ffi.NMP_NIP46_PACKAGED_COMPONENT_IDENTITY
+import uniffi.nmp_nip46_ffi.nmpNip46ComponentIdentity
+import uniffi.nmp_nip46_ffi.nip46Invitation as ffiNip46Invitation
 import uniffi.nmp_nip46_ffi.nip46SignerCatalog
-import uniffi.nmp_nip46_ffi.verifyNip46CoreComponentIdentity
+import uniffi.nmp_nip46_ffi.prepareNip46Bunker
+import uniffi.nmp_nip46_ffi.prepareNip46FromParts
+import uniffi.nmp_nip46_ffi.prepareNip46Invitation
+import uniffi.nmp_nip46_ffi.prepareNip46Restore
+import uniffi.nmp_nip46_ffi.verifyNip46Component
 
 /** Rust-owned NIP-46 signer facts. Android code should query the exact
  * [androidDetectionUri], filter handlers by [androidPackageId], then launch
@@ -103,6 +112,10 @@ sealed interface NMPNip46Failure {
     data class Rejected(val reason: String) : NMPNip46Failure
     data class InvalidResponse(val reason: String) : NMPNip46Failure
     data object SignerMissingPublicKey : NMPNip46Failure
+    data class CapabilityRegistryFull(val limit: ULong) : NMPNip46Failure
+    data object CapabilityInstanceExhausted : NMPNip46Failure
+    data object AdapterClosed : NMPNip46Failure
+    data class CoreRefused(val reason: String) : NMPNip46Failure
 
     /** A restore/import's live answer did not match the checkpoint's
      * expected identity (#571). No signer was attached under the wrong
@@ -123,6 +136,10 @@ sealed interface NMPNip46Failure {
                 is FfiNip46Failure.Rejected -> Rejected(ffi.reason)
                 is FfiNip46Failure.InvalidResponse -> InvalidResponse(ffi.reason)
                 FfiNip46Failure.SignerMissingPublicKey -> SignerMissingPublicKey
+                is FfiNip46Failure.CapabilityRegistryFull -> CapabilityRegistryFull(ffi.limit)
+                FfiNip46Failure.CapabilityInstanceExhausted -> CapabilityInstanceExhausted
+                FfiNip46Failure.AdapterClosed -> AdapterClosed
+                is FfiNip46Failure.CoreRefused -> CoreRefused(ffi.reason)
                 is FfiNip46Failure.RestoredIdentityMismatch ->
                     RestoredIdentityMismatch(ffi.expected, ffi.actual)
             }
@@ -197,24 +214,38 @@ internal class NMPNip46Observer : Nip46ConnectionObserver {
     }
 }
 
-class NMPNip46Connection internal constructor(
+private sealed interface NIP46ConnectionResources {
+    fun connection(): Nip46Connection?
+    fun close()
+
+    class Native(
+        private val prepared: FfiNip46PreparedConnection,
+        private val installation: NMPProviderSignerInstallation,
+    ) : NIP46ConnectionResources {
+        override fun connection(): Nip46Connection = prepared.connection()
+
+        override fun close() {
+            installation.close()
+            prepared.connection().use { it.disconnect() }
+            prepared.close()
+        }
+    }
+}
+
+class NMPNip46Connection private constructor(
     internal val observer: NMPNip46Observer,
-    private val ffiConnection: Nip46Connection?,
-    private val disconnect: () -> Unit,
+    initialResources: NIP46ConnectionResources,
 ) : AutoCloseable {
-    internal constructor(observer: NMPNip46Observer, disconnect: () -> Unit) : this(
+    internal constructor(
+        observer: NMPNip46Observer,
+        prepared: FfiNip46PreparedConnection,
+        installation: NMPProviderSignerInstallation,
+    ) : this(
         observer,
-        null,
-        disconnect,
+        NIP46ConnectionResources.Native(prepared, installation),
     )
 
-    internal constructor(observer: NMPNip46Observer, ffiConnection: Nip46Connection) : this(
-        observer,
-        ffiConnection,
-        ffiConnection::disconnect,
-    )
-
-    private val closed = AtomicBoolean(false)
+    private val resources = AtomicReference<NIP46ConnectionResources?>(initialResources)
     val states: Flow<NMPNip46ConnectionState> = observer.states
 
     /** Read out this session's checkpoint (#571): the minimum secrets and
@@ -223,16 +254,16 @@ class NMPNip46Connection internal constructor(
      * before this connection has reached `Ready`; checkpointing a session
      * that never authenticated would persist meaningless material. */
     fun checkpoint(): NMPNip46SessionCheckpoint {
-        val connection = ffiConnection
+        val connection = resources.get()?.connection()
             ?: throw NMPError.InvalidSigner("no underlying NIP-46 connection to checkpoint")
-        return NMPNip46SessionCheckpoint(nip46Rethrowing { connection.checkpoint() })
+        return connection.use {
+            NMPNip46SessionCheckpoint(nip46Rethrowing { it.checkpoint() })
+        }
     }
 
     /** Idempotently detach this exact signer session and emit [NMPNip46ConnectionState.Closed]. */
     override fun close() {
-        if (closed.compareAndSet(false, true)) {
-            disconnect()
-        }
+        resources.getAndSet(null)?.close()
     }
 }
 
@@ -255,10 +286,31 @@ class NMPNip46Invitation internal constructor(internal val ffi: FfiNip46Invitati
 
 data class NMPAndroidSignerHandoff(val uri: String, val packageName: String)
 
-@OptIn(NMPProviderComponentApi::class)
-private fun NMPEngine.nip46Provider(): NmpNip46Provider =
-    withVerifiedNip46Core(nmpProviderCoreComponentIdentity()) { compatibility ->
-        NmpNip46Provider(compatibility, signerProviderMailbox())
+private inline fun NMPEngine.prepareAndInstallNip46(
+    observer: NMPNip46Observer,
+    prepare: (FfiNip46Compatibility) -> FfiNip46PreparedConnection,
+): NMPNip46Connection =
+    withVerifiedNip46Component(
+        NMP_NIP46_PACKAGED_COMPONENT_IDENTITY,
+        nmpNip46ComponentIdentity(),
+        nmpProviderComponentInterfaceIdentity(),
+        nmpProviderCoreComponentIdentity(),
+    ) { compatibility ->
+        val prepared = nip46Rethrowing { prepare(compatibility) }
+        try {
+            val installation = installSignerProviderAdapter(prepared.adapter(compatibility))
+            NMPNip46Connection(observer, prepared, installation)
+        } catch (_: NMPProviderSignerInstallException.EngineClosed) {
+            // Untaken adapter with no successful owner: deterministic cleanup
+            // is safe and avoids waiting for the JVM cleaner.
+            prepared.connection().use { it.disconnect() }
+            prepared.close()
+            throw NMPError.EngineClosed
+        } catch (_: NMPProviderSignerInstallException.AdapterAlreadyTaken) {
+            // Do not disconnect or close this Prepared object: it may be the
+            // same generated wrapper retained by the successful first owner.
+            throw NMPError.InvalidSigner("prepared NIP-46 connection was already installed")
+        }
     }
 
 fun NMPEngine.nip46Invitation(
@@ -267,7 +319,14 @@ fun NMPEngine.nip46Invitation(
     metadata: NMPNip46ClientMetadata = NMPNip46ClientMetadata(),
 ): NMPNip46Invitation = NMPNip46Invitation(
     nip46Rethrowing {
-        nip46Provider().nip46Invitation(relays, permissions, metadata.toFfi())
+        withVerifiedNip46Component(
+            NMP_NIP46_PACKAGED_COMPONENT_IDENTITY,
+            nmpNip46ComponentIdentity(),
+            nmpProviderComponentInterfaceIdentity(),
+            nmpProviderCoreComponentIdentity(),
+        ) { compatibility ->
+            ffiNip46Invitation(compatibility, relays, permissions, metadata.toFfi())
+        }
     },
 )
 
@@ -276,14 +335,14 @@ fun NMPEngine.connectNip46(
     timeout: Duration = 60.seconds,
 ): NMPNip46Connection {
     val observer = NMPNip46Observer()
-    val ffiConnection = nip46Rethrowing {
-        nip46Provider().connectNip46Bunker(
+    return prepareAndInstallNip46(observer) { compatibility ->
+        prepareNip46Bunker(
+            compatibility,
             bunkerUri,
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
         )
     }
-    return NMPNip46Connection(observer, ffiConnection)
 }
 
 fun NMPEngine.connectNip46(
@@ -291,14 +350,14 @@ fun NMPEngine.connectNip46(
     timeout: Duration = 60.seconds,
 ): NMPNip46Connection {
     val observer = NMPNip46Observer()
-    val ffiConnection = nip46Rethrowing {
-        nip46Provider().connectNip46Invitation(
+    return prepareAndInstallNip46(observer) { compatibility ->
+        prepareNip46Invitation(
+            compatibility,
             invitation.ffi,
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
         )
     }
-    return NMPNip46Connection(observer, ffiConnection)
 }
 
 /** Restore an already-authorized NIP-46 client session from [store]'s
@@ -325,14 +384,14 @@ fun NMPEngine.restoreNip46Session(
     timeout: Duration = 60.seconds,
 ): NMPNip46Connection {
     val observer = NMPNip46Observer()
-    val ffiConnection = nip46Rethrowing {
-        nip46Provider().restoreNip46Session(
+    return prepareAndInstallNip46(observer) { compatibility ->
+        prepareNip46Restore(
+            compatibility,
             checkpoint.toFfi(),
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
         )
     }
-    return NMPNip46Connection(observer, ffiConnection)
 }
 
 /** Brownfield migration door (#571): import a pre-NMP legacy client session
@@ -360,14 +419,14 @@ fun NMPEngine.importNip46Session(
         origin = origin,
     )
     val observer = NMPNip46Observer()
-    val ffiConnection = nip46Rethrowing {
-        nip46Provider().nip46SessionFromParts(
+    return prepareAndInstallNip46(observer) { compatibility ->
+        prepareNip46FromParts(
+            compatibility,
             parts.toFfi(),
             timeout.inWholeMilliseconds.coerceAtLeast(0).toULong(),
             observer,
         )
     }
-    return NMPNip46Connection(observer, ffiConnection)
 }
 
 private inline fun <T> nip46Rethrowing(body: () -> T): T =
@@ -382,24 +441,49 @@ private inline fun <T> nip46Rethrowing(body: () -> T): T =
                 NMPError.InvalidRelayUrl(error.relay)
             is FfiNip46ProviderException.InvalidSigner ->
                 NMPError.InvalidSigner(error.reason)
-            is FfiNip46ProviderException.CoreComponentMismatch ->
+            is FfiNip46ProviderException.ProviderBindingMismatch ->
                 NMPError.NativeComponentMismatch(
                     component = "nmp-nip46",
-                    expectedCoreIdentity = error.expected,
-                    actualCoreIdentity = error.actual,
+                    expectedIdentity = error.expected,
+                    actualIdentity = error.actual,
                 )
-            is FfiNip46ProviderException.EngineClosed -> NMPError.EngineClosed
+            is FfiNip46ProviderException.ProviderNativeMismatch ->
+                NMPError.NativeComponentMismatch(
+                    component = "nmp-nip46",
+                    expectedIdentity = error.expected,
+                    actualIdentity = error.actual,
+                )
+            is FfiNip46ProviderException.PackageInterfaceMismatch ->
+                NMPError.NativeComponentMismatch(
+                    component = "nmp-nip46",
+                    expectedIdentity = error.expected,
+                    actualIdentity = error.actual,
+                )
+            is FfiNip46ProviderException.CoreIdentityMismatch ->
+                NMPError.NativeComponentMismatch(
+                    component = "nmp-nip46",
+                    expectedIdentity = error.expected,
+                    actualIdentity = error.actual,
+                )
         }
     }
 
 /** Validate plain component identity before evaluating [body]. Production's
- * body is the first place that requests/lowers the external core mailbox. */
-internal inline fun <T> withVerifiedNip46Core(
-    actual: String,
-    body: (FfiNip46CoreCompatibility) -> T,
+ * body is the first place that may prepare an external adapter. */
+internal inline fun <T> withVerifiedNip46Component(
+    packagedProviderIdentity: String,
+    loadedProviderIdentity: String,
+    packagedInterfaceIdentity: String,
+    loadedCoreIdentity: String,
+    body: (FfiNip46Compatibility) -> T,
 ): T {
     val compatibility = nip46Rethrowing {
-        verifyNip46CoreComponentIdentity(actual)
+        verifyNip46Component(
+            packagedProviderIdentity,
+            loadedProviderIdentity,
+            packagedInterfaceIdentity,
+            loadedCoreIdentity,
+        )
     }
     return body(compatibility)
 }

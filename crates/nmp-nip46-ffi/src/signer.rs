@@ -8,21 +8,73 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use nmp_ffi::convert::FfiError;
-use nmp_ffi::signer::{FfiSignerMailbox, FfiSignerRegistration};
+use nmp_component_interface::{
+    new_signer_adapter, ComponentInterfaceError, FfiSignerAdapter, ProviderAdapterTask,
+    SignerAdapterControl, SignerAdapterRuntime, COMPONENT_INTERFACE_IDENTITY,
+};
 use nmp_nip46 as nmp_signer;
 
-// Keep the moved projection readable while separating ownership: generic
-// engine/registration values come from `nmp`; every provider value comes from
-// `nmp-nip46`. This private composite namespace never crosses UniFFI.
+// Keep the provider projection readable without importing the core engine.
+// This private namespace contains only protocol primitives and provider
+// values; it never crosses UniFFI.
 mod provider_surface {
-    pub use nmp::*;
     pub use nmp_nip46::{
         known_nip46_signers, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Invitation,
         Nip46Signer,
     };
+    pub use nostr::{PublicKey, RelayUrl};
 }
 use provider_surface as nmp;
+
+struct ComponentNip46Runtime {
+    runtime: SignerAdapterRuntime,
+    connection: Weak<Nip46Connection>,
+}
+
+struct ComponentNip46TaskHandle {
+    task: tokio::task::AbortHandle,
+    supervisor: tokio::task::AbortHandle,
+}
+
+impl nmp_signer::Nip46RuntimeTaskHandle for ComponentNip46TaskHandle {
+    fn abort(&self) {
+        self.supervisor.abort();
+        self.task.abort();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+}
+
+impl nmp_signer::Nip46TaskRuntime for ComponentNip46Runtime {
+    fn spawn(
+        &self,
+        task: nmp_signer::Nip46RuntimeTask,
+    ) -> Box<dyn nmp_signer::Nip46RuntimeTaskHandle> {
+        let task = self.runtime.spawn(task);
+        let task_abort = task.abort_handle();
+        let connection = self.connection.clone();
+        let supervisor = self.runtime.spawn(async move {
+            if let Err(error) = task.await {
+                if let Some(connection) = connection.upgrade() {
+                    let reason = if error.is_panic() {
+                        "NIP-46 child runtime task panicked"
+                    } else {
+                        "NIP-46 child runtime task was cancelled unexpectedly"
+                    };
+                    connection.fail(FfiNip46Failure::CoreRefused {
+                        reason: reason.to_string(),
+                    });
+                }
+            }
+        });
+        Box::new(ComponentNip46TaskHandle {
+            task: task_abort,
+            supervisor: supervisor.abort_handle(),
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiNip46SignerApp {
@@ -43,15 +95,17 @@ pub struct FfiNip46ClientMetadata {
 
 /// Synchronous provider-boundary refusal. Connection/session failures remain
 /// in [`FfiNip46Failure`]; this type covers malformed caller values and a
-/// closed core mailbox before a session worker can start.
+/// closed provider adapter before a session worker can start.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiNip46ProviderError {
     InvalidSecretKey,
     InvalidPublicKey { field: String },
     InvalidRelay { relay: String },
     InvalidSigner { reason: String },
-    CoreComponentMismatch { expected: String, actual: String },
-    EngineClosed,
+    ProviderBindingMismatch { expected: String, actual: String },
+    ProviderNativeMismatch { expected: String, actual: String },
+    PackageInterfaceMismatch { expected: String, actual: String },
+    CoreIdentityMismatch { expected: String, actual: String },
 }
 
 impl std::fmt::Display for FfiNip46ProviderError {
@@ -63,11 +117,22 @@ impl std::fmt::Display for FfiNip46ProviderError {
             }
             Self::InvalidRelay { relay } => write!(f, "invalid NIP-46 relay: {relay:?}"),
             Self::InvalidSigner { reason } => write!(f, "invalid NIP-46 signer: {reason}"),
-            Self::CoreComponentMismatch { expected, actual } => write!(
+            Self::ProviderBindingMismatch { expected, actual } => write!(
+                f,
+                "NIP-46 provider native identity is {expected}, packaged binding is {actual}"
+            ),
+            Self::ProviderNativeMismatch { expected, actual } => write!(
+                f,
+                "NIP-46 provider was built as {expected}, loaded native identity is {actual}"
+            ),
+            Self::PackageInterfaceMismatch { expected, actual } => write!(
+                f,
+                "NIP-46 provider interface is {expected}, packaged interface is {actual}"
+            ),
+            Self::CoreIdentityMismatch { expected, actual } => write!(
                 f,
                 "NIP-46 provider requires core component {expected}, loaded {actual}"
             ),
-            Self::EngineClosed => f.write_str("core engine already shut down"),
         }
     }
 }
@@ -233,14 +298,18 @@ pub enum FfiNip46Failure {
     InvalidResponse {
         reason: String,
     },
-    /// `nmp::Engine::add_signer` maps every internal `AddSignerError` to
-    /// `EngineError::SignerMissingPublicKey` (crates/nmp/src/engine.rs). This
-    /// is the signer-side engine-attach failure; the other reachable
-    /// `add_signer` outcome, `EngineError::EngineClosed` (engine shut down
-    /// mid-handshake), is surfaced as `Disconnected` instead so the two are
-    /// not conflated. It is not a `Nip46Error` variant; it crosses a different
-    /// internal taxonomy (`nmp::EngineError`) at the same observer seam.
+    /// The provider signer supplied no stable public key. This is not a
+    /// `Nip46Error` variant; it crosses the component-interface taxonomy at
+    /// the same observer seam.
     SignerMissingPublicKey,
+    CapabilityRegistryFull {
+        limit: u64,
+    },
+    CapabilityInstanceExhausted,
+    AdapterClosed,
+    CoreRefused {
+        reason: String,
+    },
     /// A restore/import's live `get_public_key` answer did not match the
     /// checkpoint's expected identity (#571). No signer was attached under
     /// the wrong pubkey.
@@ -316,15 +385,24 @@ fn nip46_failure_to_ffi(error: nmp_signer::Nip46Error) -> FfiNip46Failure {
     }
 }
 
-/// `nmp::Engine::add_signer` (re)attachment failure -> [`FfiNip46Failure`].
-/// `add_signer` can fail two ways: the inner `AddSignerError` (always mapped
-/// to `EngineError::SignerMissingPublicKey`) and `EngineError::EngineClosed`
-/// when the engine shuts down mid-handshake. Preserve that distinction rather
-/// than collapsing both into a misleading "missing public key".
-fn engine_attach_failure_to_ffi(error: FfiError) -> FfiNip46Failure {
+/// Component-interface attachment failure -> [`FfiNip46Failure`].
+/// Preserve every reachable refusal rather than collapsing registry pressure,
+/// instance exhaustion, lifecycle closure, and core refusal into a
+/// misleading "missing public key".
+fn engine_attach_failure_to_ffi(error: ComponentInterfaceError) -> FfiNip46Failure {
     match error {
-        FfiError::EngineClosed => FfiNip46Failure::Disconnected,
-        _ => FfiNip46Failure::SignerMissingPublicKey,
+        ComponentInterfaceError::EngineClosed => FfiNip46Failure::Disconnected,
+        ComponentInterfaceError::SignerMissingPublicKey => FfiNip46Failure::SignerMissingPublicKey,
+        ComponentInterfaceError::CapabilityRegistryFull { limit } => {
+            FfiNip46Failure::CapabilityRegistryFull {
+                limit: limit as u64,
+            }
+        }
+        ComponentInterfaceError::CapabilityInstanceExhausted => {
+            FfiNip46Failure::CapabilityInstanceExhausted
+        }
+        ComponentInterfaceError::AdapterClosed => FfiNip46Failure::AdapterClosed,
+        ComponentInterfaceError::CoreRefused { reason } => FfiNip46Failure::CoreRefused { reason },
     }
 }
 
@@ -335,8 +413,14 @@ pub struct FfiNip46Invitation {
 
 struct Nip46Attachment {
     signer: Option<nmp::Nip46Signer>,
-    registration: Option<Arc<FfiSignerRegistration>>,
     available: bool,
+    attached: bool,
+}
+
+#[derive(Clone)]
+enum DesiredSignerState {
+    Detached,
+    Attached(Box<nmp::Nip46Signer>),
 }
 
 enum ObserverDelivery {
@@ -360,7 +444,7 @@ struct ObserverDeliveryState {
 /// both an ownership cycle and a pending-handshake keepalive.
 #[derive(uniffi::Object)]
 pub struct Nip46Connection {
-    mailbox: Arc<FfiSignerMailbox>,
+    desired: Mutex<Option<tokio::sync::watch::Sender<DesiredSignerState>>>,
     observer: Arc<dyn Nip46ConnectionObserver>,
     /// Serializes attachment transitions with observer-queue insertion. The
     /// queue itself invokes callbacks outside this lock, so a callback may
@@ -374,25 +458,26 @@ pub struct Nip46Connection {
 
 impl Nip46Connection {
     fn new(
-        mailbox: Arc<FfiSignerMailbox>,
+        desired: tokio::sync::watch::Sender<DesiredSignerState>,
         observer: Arc<dyn Nip46ConnectionObserver>,
+        cancellation: nmp_signer::Nip46Cancellation,
     ) -> Arc<Self> {
         Arc::new(Self {
-            mailbox,
+            desired: Mutex::new(Some(desired)),
             observer,
             lifecycle: Mutex::new(()),
             deliveries: Mutex::new(ObserverDeliveryState::default()),
             attachment: Mutex::new(Nip46Attachment {
                 signer: None,
-                registration: None,
                 available: false,
+                attached: false,
             }),
-            cancellation: nmp_signer::Nip46Cancellation::default(),
+            cancellation,
             closed: AtomicBool::new(false),
         })
     }
 
-    fn on_event(&self, event: nmp::Nip46ConnectionEvent) {
+    fn on_event(self: &Arc<Self>, event: nmp::Nip46ConnectionEvent) {
         let should_drain = {
             let _lifecycle = self
                 .lifecycle
@@ -401,8 +486,6 @@ impl Nip46Connection {
             if self.closed.load(Ordering::Acquire) {
                 return;
             }
-            let mut reattached_public_key = None;
-            let mut failure = None;
             match &event {
                 nmp::Nip46ConnectionEvent::Available => {
                     let mut attachment = self
@@ -410,61 +493,35 @@ impl Nip46Connection {
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner());
                     attachment.available = true;
-                    if attachment.registration.is_none() {
-                        if let Some(signer) = attachment.signer.clone() {
-                            match self.mailbox.attach(signer) {
-                                Ok(registration) => {
-                                    reattached_public_key = Some(
-                                        attachment
-                                            .signer
-                                            .as_ref()
-                                            .expect("reattached signer remains owned")
-                                            .user_public_key(),
-                                    );
-                                    attachment.registration = Some(registration);
-                                }
-                                Err(error) => failure = Some(engine_attach_failure_to_ffi(error)),
-                            }
-                        }
+                    if let Some(signer) = attachment.signer.clone() {
+                        self.set_desired(DesiredSignerState::Attached(Box::new(signer)));
                     }
                 }
                 nmp::Nip46ConnectionEvent::Unavailable => {
-                    let registration = {
-                        let mut attachment = self
-                            .attachment
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner());
-                        attachment.available = false;
-                        attachment.registration.take()
-                    };
-                    if let Some(registration) = registration {
-                        let _ = self.mailbox.detach(registration);
-                    }
+                    let mut attachment = self
+                        .attachment
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    attachment.available = false;
+                    self.set_desired(DesiredSignerState::Detached);
                 }
                 _ => {}
             }
-            if let Some(reason) = failure {
-                self.fail_locked(reason)
+            if matches!(&event, nmp::Nip46ConnectionEvent::Unavailable) {
+                false
             } else {
-                let mut should_drain =
-                    self.enqueue_delivery(ObserverDelivery::Event(event_to_ffi(event)));
-                if let Some(public_key) = reattached_public_key {
-                    should_drain |=
-                        self.enqueue_delivery(ObserverDelivery::Ready(public_key.to_hex()));
-                }
-                should_drain
+                self.enqueue_delivery(ObserverDelivery::Event(event_to_ffi(event)))
             }
         };
         self.drain_deliveries(should_drain);
     }
 
-    fn attach(&self, signer: nmp::Nip46Signer) {
-        let should_drain = {
+    fn attach(self: &Arc<Self>, signer: nmp::Nip46Signer) {
+        {
             let _lifecycle = self
                 .lifecycle
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            let pubkey = signer.user_public_key();
             let mut attachment = self
                 .attachment
                 .lock()
@@ -476,16 +533,71 @@ impl Nip46Connection {
             if !attachment.available {
                 return;
             }
-            match self.mailbox.attach(signer) {
-                Ok(registration) => {
-                    attachment.registration = Some(registration);
+            self.set_desired(DesiredSignerState::Attached(Box::new(signer)));
+        }
+    }
+
+    fn set_desired(&self, desired: DesiredSignerState) {
+        if let Some(sender) = self
+            .desired
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+        {
+            sender.send_replace(desired);
+        }
+    }
+
+    fn adapter_attached(&self, public_key: String, result: Result<(), ComponentInterfaceError>) {
+        let should_drain = {
+            let _lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            match result {
+                Ok(()) => {
+                    let mut attachment = self
+                        .attachment
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    let current = attachment.available
+                        && attachment
+                            .signer
+                            .as_ref()
+                            .is_some_and(|signer| signer.user_public_key().to_hex() == public_key);
+                    attachment.attached = current;
                     drop(attachment);
-                    self.enqueue_delivery(ObserverDelivery::Ready(pubkey.to_hex()))
+                    current && self.enqueue_delivery(ObserverDelivery::Ready(public_key))
                 }
-                Err(error) => {
-                    drop(attachment);
-                    self.fail_locked(engine_attach_failure_to_ffi(error))
+                Err(error) => self.fail_locked(engine_attach_failure_to_ffi(error)),
+            }
+        };
+        self.drain_deliveries(should_drain);
+    }
+
+    fn adapter_detached(&self, result: Result<(), ComponentInterfaceError>) {
+        let should_drain = {
+            let _lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            match result {
+                Ok(()) => {
+                    self.attachment
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .attached = false;
+                    self.enqueue_delivery(ObserverDelivery::Event(
+                        FfiNip46ConnectionEvent::Unavailable,
+                    ))
                 }
+                Err(error) => self.fail_locked(engine_attach_failure_to_ffi(error)),
             }
         };
         self.drain_deliveries(should_drain);
@@ -529,16 +641,22 @@ impl Nip46Connection {
 
     fn detach_locked(&self) {
         self.cancellation.cancel();
-        let registration = {
+        {
             let mut attachment = self
                 .attachment
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             attachment.signer = None;
-            attachment.registration.take()
-        };
-        if let Some(registration) = registration {
-            let _ = self.mailbox.detach(registration);
+            attachment.available = false;
+            attachment.attached = false;
+        }
+        if let Some(desired) = self
+            .desired
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            desired.send_replace(DesiredSignerState::Detached);
         }
     }
 
@@ -618,7 +736,7 @@ impl Nip46Connection {
             .attachment
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if attachment.registration.is_none() {
+        if !attachment.attached {
             return Err(FfiNip46ProviderError::InvalidSigner {
                 reason: "NIP-46 connection has not reached ready".to_string(),
             });
@@ -687,280 +805,355 @@ pub fn nip46_signer_catalog() -> Vec<FfiNip46SignerApp> {
         .collect()
 }
 
-/// Optional provider bound to one core engine. It contributes a signer only
-/// through the core engine's ordinary registration door.
+/// Verified carrier minted only by the four proof-first preparation doors.
+/// Foreign copies share these same native Arcs; an install failure drops only
+/// its local carrier reference and cannot disconnect another live owner.
 #[derive(uniffi::Object)]
-pub struct NmpNip46Provider {
-    _compatibility: Arc<FfiNip46CoreCompatibility>,
-    mailbox: Arc<FfiSignerMailbox>,
+pub struct FfiNip46PreparedConnection {
+    connection: Arc<Nip46Connection>,
+    adapter: Arc<FfiSignerAdapter>,
 }
 
-/// Opaque proof that the loaded core identity matched this provider build.
+#[uniffi::export]
+impl FfiNip46PreparedConnection {
+    /// Return the provider contribution with branded proof at input zero.
+    pub fn adapter(&self, _compatibility: Arc<FfiNip46Compatibility>) -> Arc<FfiSignerAdapter> {
+        Arc::clone(&self.adapter)
+    }
+
+    pub fn connection(&self) -> Arc<Nip46Connection> {
+        Arc::clone(&self.connection)
+    }
+}
+
+/// Exact standalone NIP-46 provider artifact identity.
+pub const NMP_NIP46_COMPONENT_IDENTITY: &str = env!("NMP_NIP46_COMPONENT_IDENTITY");
+/// Exact standalone core artifact identity sealed into this provider build.
+pub const NMP_NIP46_REQUIRED_CORE_IDENTITY: &str = env!("NMP_NIP46_REQUIRED_CORE_IDENTITY");
+
+/// Return the loaded NIP-46 library's identity as plain data.
+#[uniffi::export]
+pub fn nmp_nip46_component_identity() -> String {
+    NMP_NIP46_COMPONENT_IDENTITY.to_owned()
+}
+
+/// Opaque proof that both package axes matched this provider build.
 ///
-/// The proof is minted from plain identity text before the caller requests a
-/// core mailbox. Requiring it in [`NmpNip46Provider::new`] makes the ordering
-/// visible in generated bindings instead of relying on README discipline.
+/// The proof is minted from plain interface/core identity text before the
+/// caller requests an adapter. Every preparation door requires this proof as
+/// input zero before it can return an external adapter.
 #[derive(Debug, uniffi::Object)]
-pub struct FfiNip46CoreCompatibility {
+pub struct FfiNip46Compatibility {
     _private: (),
 }
 
-/// Verify the loaded core component before any external object is exchanged.
+/// Verify provider binding/native, package interface, and loaded core before
+/// any object is exchanged.
 #[uniffi::export]
-pub fn verify_nip46_core_component_identity(
-    actual: String,
-) -> Result<Arc<FfiNip46CoreCompatibility>, FfiNip46ProviderError> {
-    let expected = nmp_ffi::signer::CORE_COMPONENT_IDENTITY;
-    if actual != expected {
-        return Err(FfiNip46ProviderError::CoreComponentMismatch {
-            expected: expected.to_string(),
-            actual,
+pub fn verify_nip46_component(
+    packaged_provider_identity: String,
+    loaded_provider_identity: String,
+    packaged_interface_identity: String,
+    loaded_core_identity: String,
+) -> Result<Arc<FfiNip46Compatibility>, FfiNip46ProviderError> {
+    if packaged_provider_identity != NMP_NIP46_COMPONENT_IDENTITY {
+        return Err(FfiNip46ProviderError::ProviderBindingMismatch {
+            expected: NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            actual: packaged_provider_identity,
         });
     }
-    Ok(Arc::new(FfiNip46CoreCompatibility { _private: () }))
+    if loaded_provider_identity != NMP_NIP46_COMPONENT_IDENTITY {
+        return Err(FfiNip46ProviderError::ProviderNativeMismatch {
+            expected: NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            actual: loaded_provider_identity,
+        });
+    }
+    if packaged_interface_identity != COMPONENT_INTERFACE_IDENTITY {
+        return Err(FfiNip46ProviderError::PackageInterfaceMismatch {
+            expected: COMPONENT_INTERFACE_IDENTITY.to_string(),
+            actual: packaged_interface_identity,
+        });
+    }
+    if loaded_core_identity != NMP_NIP46_REQUIRED_CORE_IDENTITY {
+        return Err(FfiNip46ProviderError::CoreIdentityMismatch {
+            expected: NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
+            actual: loaded_core_identity,
+        });
+    }
+    Ok(Arc::new(FfiNip46Compatibility { _private: () }))
 }
 
 #[uniffi::export]
-impl NmpNip46Provider {
-    #[uniffi::constructor]
-    pub fn new(
-        compatibility: Arc<FfiNip46CoreCompatibility>,
-        mailbox: Arc<FfiSignerMailbox>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            _compatibility: compatibility,
-            mailbox,
+pub fn nip46_invitation(
+    _compatibility: Arc<FfiNip46Compatibility>,
+    relays: Vec<String>,
+    permissions: Option<String>,
+    metadata: FfiNip46ClientMetadata,
+) -> Result<Arc<FfiNip46Invitation>, FfiNip46ProviderError> {
+    let relays = relays
+        .into_iter()
+        .map(|relay| {
+            nmp::RelayUrl::parse(&relay).map_err(|_| FfiNip46ProviderError::InvalidRelay { relay })
         })
-    }
+        .collect::<Result<Vec<_>, _>>()?;
+    let invitation = nmp::Nip46Invitation::new(
+        relays,
+        permissions,
+        nmp::Nip46ClientMetadata {
+            name: metadata.name,
+            url: metadata.url,
+            image: metadata.image,
+        },
+    )
+    .map_err(|error| FfiNip46ProviderError::InvalidSigner {
+        reason: error.to_string(),
+    })?;
+    Ok(Arc::new(FfiNip46Invitation {
+        inner: Mutex::new(Some(invitation)),
+    }))
+}
 
-    pub fn nip46_invitation(
-        &self,
-        relays: Vec<String>,
-        permissions: Option<String>,
-        metadata: FfiNip46ClientMetadata,
-    ) -> Result<Arc<FfiNip46Invitation>, FfiNip46ProviderError> {
-        let relays = relays
-            .into_iter()
-            .map(|relay| {
-                nmp::RelayUrl::parse(&relay)
-                    .map_err(|_| FfiNip46ProviderError::InvalidRelay { relay })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let invitation = nmp::Nip46Invitation::new(
-            relays,
-            permissions,
-            nmp::Nip46ClientMetadata {
-                name: metadata.name,
-                url: metadata.url,
-                image: metadata.image,
-            },
-        )
-        .map_err(|error| FfiNip46ProviderError::InvalidSigner {
-            reason: error.to_string(),
+#[uniffi::export]
+pub fn prepare_nip46_bunker(
+    _compatibility: Arc<FfiNip46Compatibility>,
+    bunker_uri: String,
+    timeout_millis: u64,
+    observer: Box<dyn Nip46ConnectionObserver>,
+) -> Result<Arc<FfiNip46PreparedConnection>, FfiNip46ProviderError> {
+    Ok(prepare_connection(
+        observer,
+        move |connection, cancellation, runtime| {
+            bunker_connection_task(
+                connection,
+                cancellation,
+                bunker_uri,
+                timeout_millis,
+                runtime,
+            )
+        },
+    ))
+}
+
+#[uniffi::export]
+pub fn prepare_nip46_invitation(
+    _compatibility: Arc<FfiNip46Compatibility>,
+    invitation: Arc<FfiNip46Invitation>,
+    timeout_millis: u64,
+    observer: Box<dyn Nip46ConnectionObserver>,
+) -> Result<Arc<FfiNip46PreparedConnection>, FfiNip46ProviderError> {
+    let invitation = invitation
+        .inner
+        .lock()
+        .map_err(|_| FfiNip46ProviderError::InvalidSigner {
+            reason: "NIP-46 invitation lock poisoned".to_string(),
+        })?
+        .take()
+        .ok_or_else(|| FfiNip46ProviderError::InvalidSigner {
+            reason: "NIP-46 invitation was already consumed".to_string(),
         })?;
-        Ok(Arc::new(FfiNip46Invitation {
-            inner: Mutex::new(Some(invitation)),
-        }))
-    }
+    Ok(prepare_connection(
+        observer,
+        move |connection, cancellation, runtime| {
+            invitation_connection_task(
+                connection,
+                cancellation,
+                invitation,
+                timeout_millis,
+                runtime,
+            )
+        },
+    ))
+}
 
-    pub fn connect_nip46_bunker(
-        &self,
-        bunker_uri: String,
-        timeout_millis: u64,
-        observer: Box<dyn Nip46ConnectionObserver>,
-    ) -> Result<Arc<Nip46Connection>, FfiNip46ProviderError> {
-        let runtime = self
-            .mailbox
-            .adapter_runtime()
-            .map_err(|_| FfiNip46ProviderError::EngineClosed)?;
-        let mailbox = Arc::clone(&self.mailbox);
-        let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
-        let connection = Nip46Connection::new(mailbox, observer);
-        spawn_bunker_connection(
-            runtime,
-            Arc::downgrade(&connection),
-            connection.cancellation.clone(),
-            bunker_uri,
-            timeout_millis,
-        );
-        Ok(connection)
-    }
+#[uniffi::export]
+pub fn prepare_nip46_restore(
+    _compatibility: Arc<FfiNip46Compatibility>,
+    checkpoint: FfiNip46SessionCheckpoint,
+    timeout_millis: u64,
+    observer: Box<dyn Nip46ConnectionObserver>,
+) -> Result<Arc<FfiNip46PreparedConnection>, FfiNip46ProviderError> {
+    let checkpoint = checkpoint_from_ffi(checkpoint)?;
+    Ok(prepare_connection(
+        observer,
+        move |connection, cancellation, runtime| {
+            from_parts_connection_task(
+                connection,
+                cancellation,
+                checkpoint,
+                timeout_millis,
+                runtime,
+            )
+        },
+    ))
+}
 
-    pub fn connect_nip46_invitation(
-        &self,
-        invitation: Arc<FfiNip46Invitation>,
-        timeout_millis: u64,
-        observer: Box<dyn Nip46ConnectionObserver>,
-    ) -> Result<Arc<Nip46Connection>, FfiNip46ProviderError> {
-        let runtime = self
-            .mailbox
-            .adapter_runtime()
-            .map_err(|_| FfiNip46ProviderError::EngineClosed)?;
-        let invitation = invitation
-            .inner
-            .lock()
-            .map_err(|_| FfiNip46ProviderError::InvalidSigner {
-                reason: "NIP-46 invitation lock poisoned".to_string(),
-            })?
-            .take()
-            .ok_or_else(|| FfiNip46ProviderError::InvalidSigner {
-                reason: "NIP-46 invitation was already consumed".to_string(),
-            })?;
-        let mailbox = Arc::clone(&self.mailbox);
-        let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
-        let connection = Nip46Connection::new(mailbox, observer);
-        spawn_invitation_connection(
-            runtime,
-            Arc::downgrade(&connection),
-            connection.cancellation.clone(),
-            invitation,
-            timeout_millis,
-        );
-        Ok(connection)
-    }
+#[uniffi::export]
+pub fn prepare_nip46_from_parts(
+    compatibility: Arc<FfiNip46Compatibility>,
+    parts: FfiNip46SessionCheckpoint,
+    timeout_millis: u64,
+    observer: Box<dyn Nip46ConnectionObserver>,
+) -> Result<Arc<FfiNip46PreparedConnection>, FfiNip46ProviderError> {
+    prepare_nip46_restore(compatibility, parts, timeout_millis, observer)
+}
 
-    /// Restore an already-authorized NIP-46 client session from `checkpoint`
-    /// (#571) -- reconnects the SAME client transport identity to the SAME
-    /// remote signer with NO re-pairing handshake, returning an ordinary
-    /// [`Nip46Connection`] that reuses the existing observer/attachment
-    /// lifecycle: `.ready(user_public_key)` fires only once the checkpoint's
-    /// expected identity is validated against a live answer and the signer
-    /// is attached to this engine. A corrupt/malformed `checkpoint` is
-    /// refused synchronously; a live mismatch/unavailable/disconnected
-    /// outcome surfaces asynchronously as a typed `on_failed`, exactly like
-    /// `connect_nip46_bunker`/`connect_nip46_invitation`.
-    pub fn restore_nip46_session(
-        &self,
-        checkpoint: FfiNip46SessionCheckpoint,
-        timeout_millis: u64,
-        observer: Box<dyn Nip46ConnectionObserver>,
-    ) -> Result<Arc<Nip46Connection>, FfiNip46ProviderError> {
-        let checkpoint = checkpoint_from_ffi(checkpoint)?;
-        let runtime = self
-            .mailbox
-            .adapter_runtime()
-            .map_err(|_| FfiNip46ProviderError::EngineClosed)?;
-        let mailbox = Arc::clone(&self.mailbox);
-        let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
-        let connection = Nip46Connection::new(mailbox, observer);
-        spawn_from_parts_connection(
-            runtime,
-            Arc::downgrade(&connection),
-            connection.cancellation.clone(),
-            checkpoint,
-            timeout_millis,
-        );
-        Ok(connection)
-    }
+fn prepare_connection<F>(
+    observer: Box<dyn Nip46ConnectionObserver>,
+    task: F,
+) -> Arc<FfiNip46PreparedConnection>
+where
+    F: FnOnce(
+            Weak<Nip46Connection>,
+            nmp_signer::Nip46Cancellation,
+            Arc<dyn nmp_signer::Nip46TaskRuntime>,
+        ) -> ProviderAdapterTask
+        + Send
+        + 'static,
+{
+    let observer: Arc<dyn Nip46ConnectionObserver> = Arc::from(observer);
+    let cancellation = nmp_signer::Nip46Cancellation::default();
+    let cancel_on_drop = cancellation.clone();
+    let (desired, changes) = tokio::sync::watch::channel(DesiredSignerState::Detached);
+    let connection = Nip46Connection::new(desired, observer, cancellation.clone());
+    let weak = Arc::downgrade(&connection);
+    let adapter = new_signer_adapter(
+        move || cancel_on_drop.cancel(),
+        move |control, runtime| {
+            let session_runtime: Arc<dyn nmp_signer::Nip46TaskRuntime> =
+                Arc::new(ComponentNip46Runtime {
+                    runtime: runtime.clone(),
+                    connection: weak.clone(),
+                });
+            let provider = task(weak.clone(), cancellation, session_runtime);
+            Box::pin(runtime.contextualize(async move {
+                let (_, ()) =
+                    tokio::join!(provider, drive_desired_signer_state(weak, control, changes));
+            }))
+        },
+    );
+    Arc::new(FfiNip46PreparedConnection {
+        connection,
+        adapter,
+    })
+}
 
-    /// Brownfield migration door (#571): import a pre-NMP legacy client
-    /// session (for example Pod0's Keychain-persisted `nostrconnect://`
-    /// material) directly from its raw parts, without an NMP-owned
-    /// checkpoint ever having been written. Same reconnect-and-validate
-    /// mechanics as [`Self::restore_nip46_session`] -- a mismatch/corrupt
-    /// import never attaches under another pubkey and never deletes or
-    /// overwrites the caller's legacy material (this function reads its
-    /// input by value and touches no external storage itself).
-    pub fn nip46_session_from_parts(
-        &self,
-        parts: FfiNip46SessionCheckpoint,
-        timeout_millis: u64,
-        observer: Box<dyn Nip46ConnectionObserver>,
-    ) -> Result<Arc<Nip46Connection>, FfiNip46ProviderError> {
-        self.restore_nip46_session(parts, timeout_millis, observer)
+async fn drive_desired_signer_state(
+    connection: Weak<Nip46Connection>,
+    control: SignerAdapterControl,
+    mut desired: tokio::sync::watch::Receiver<DesiredSignerState>,
+) {
+    while desired.changed().await.is_ok() {
+        let next = { desired.borrow_and_update().clone() };
+        match next {
+            DesiredSignerState::Detached => {
+                let result = control.detach().await;
+                if let Some(connection) = connection.upgrade() {
+                    connection.adapter_detached(result);
+                }
+            }
+            DesiredSignerState::Attached(signer) => {
+                let public_key = signer.user_public_key().to_hex();
+                let result = control.attach_boxed(signer).await;
+                if let Some(connection) = connection.upgrade() {
+                    connection.adapter_attached(public_key, result);
+                }
+            }
+        }
     }
+    let _ = control.detach().await;
 }
 
 /// #704: run one NIP-46 connect handshake as an async task on the engine's
 /// shared adapter `runtime` — NOT on a dedicated OS thread. The handshake's
 /// availability wait is now awaited (see `Nip46Signer::*_observed_async`), so no
-/// OS thread is held while the signer comes online. `tokio::spawn` cannot fail,
-/// so this is infallible (the removed thread-admission error had a
-/// thread-spawn producer here; there is no longer any spawn error to report). On
-/// completion the connection attaches the signer or reports a typed failure.
-fn spawn_nip46_connect_async<F, Fut>(
-    runtime: &tokio::runtime::Handle,
-    connection: Weak<Nip46Connection>,
-    connect: F,
-) where
+/// OS thread is held while the signer comes online. The capability-owned
+/// contextual scheduler admits this task before the future runs, so the
+/// provider has no independent spawn error to report. On completion the
+/// connection attaches the signer or reports a typed failure.
+async fn run_nip46_connect<F, Fut>(connection: Weak<Nip46Connection>, connect: F)
+where
     F: FnOnce(Arc<dyn Fn(nmp::Nip46ConnectionEvent) + Send + Sync>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<nmp::Nip46Signer, nmp_signer::Nip46Error>> + Send,
 {
-    runtime.spawn(async move {
-        let events = lifecycle_sink(connection.clone());
-        let result = connect(events).await;
-        let Some(connection) = connection.upgrade() else {
-            return;
-        };
-        match result {
-            Ok(signer) => connection.attach(signer),
-            Err(error) => connection.fail(nip46_failure_to_ffi(error)),
-        }
-    });
+    let events = lifecycle_sink(connection.clone());
+    let result = connect(events).await;
+    let Some(connection) = connection.upgrade() else {
+        return;
+    };
+    match result {
+        Ok(signer) => connection.attach(signer),
+        Err(error) => connection.fail(nip46_failure_to_ffi(error)),
+    }
 }
 
-fn spawn_bunker_connection(
-    runtime: tokio::runtime::Handle,
+fn bunker_connection_task(
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     bunker_uri: String,
     timeout_millis: u64,
-) {
-    let session_runtime = runtime.clone();
-    spawn_nip46_connect_async(&runtime, connection, move |events| async move {
-        nmp::Nip46Signer::connect_bunker_observed_async(
-            &bunker_uri,
-            None,
-            nmp::Nip46ClientMetadata::default(),
-            Duration::from_millis(timeout_millis),
-            events,
-            &cancellation,
-            session_runtime,
-        )
-        .await
-    });
-}
-
-fn spawn_invitation_connection(
-    runtime: tokio::runtime::Handle,
-    connection: Weak<Nip46Connection>,
-    cancellation: nmp_signer::Nip46Cancellation,
-    invitation: nmp::Nip46Invitation,
-    timeout_millis: u64,
-) {
-    let session_runtime = runtime.clone();
-    spawn_nip46_connect_async(&runtime, connection, move |events| async move {
-        invitation
-            .connect_observed_async(
+    session_runtime: Arc<dyn nmp_signer::Nip46TaskRuntime>,
+) -> ProviderAdapterTask {
+    Box::pin(async move {
+        run_nip46_connect(connection, move |events| async move {
+            nmp::Nip46Signer::connect_bunker_observed_async(
+                &bunker_uri,
+                None,
+                nmp::Nip46ClientMetadata::default(),
                 Duration::from_millis(timeout_millis),
                 events,
                 &cancellation,
                 session_runtime,
             )
             .await
-    });
+        })
+        .await;
+    })
 }
 
-fn spawn_from_parts_connection(
-    runtime: tokio::runtime::Handle,
+fn invitation_connection_task(
+    connection: Weak<Nip46Connection>,
+    cancellation: nmp_signer::Nip46Cancellation,
+    invitation: nmp::Nip46Invitation,
+    timeout_millis: u64,
+    session_runtime: Arc<dyn nmp_signer::Nip46TaskRuntime>,
+) -> ProviderAdapterTask {
+    Box::pin(async move {
+        run_nip46_connect(connection, move |events| async move {
+            invitation
+                .connect_observed_async(
+                    Duration::from_millis(timeout_millis),
+                    events,
+                    &cancellation,
+                    session_runtime,
+                )
+                .await
+        })
+        .await;
+    })
+}
+
+fn from_parts_connection_task(
     connection: Weak<Nip46Connection>,
     cancellation: nmp_signer::Nip46Cancellation,
     checkpoint: nmp_signer::Nip46SessionCheckpoint,
     timeout_millis: u64,
-) {
+    session_runtime: Arc<dyn nmp_signer::Nip46TaskRuntime>,
+) -> ProviderAdapterTask {
     // #704: the restore path is engine-associated too — the session runs its
     // tasks on the shared adapter runtime, not a standalone runtime.
-    let session_runtime = runtime.clone();
-    spawn_nip46_connect_async(&runtime, connection, move |events| async move {
-        nmp::Nip46Signer::from_parts_observed_async(
-            checkpoint,
-            Duration::from_millis(timeout_millis),
-            events,
-            &cancellation,
-            session_runtime,
-        )
-        .await
-    });
+    Box::pin(async move {
+        run_nip46_connect(connection, move |events| async move {
+            nmp::Nip46Signer::from_parts_observed_async(
+                checkpoint,
+                Duration::from_millis(timeout_millis),
+                events,
+                &cancellation,
+                session_runtime,
+            )
+            .await
+        })
+        .await;
+    })
 }
 
 fn lifecycle_sink(
@@ -1010,18 +1203,99 @@ mod tests {
     }
 
     #[test]
-    fn exact_core_identity_mints_compatibility_and_mismatch_is_typed() {
-        assert!(verify_nip46_core_component_identity(
-            nmp_ffi::signer::nmp_core_component_identity()
+    fn exact_package_axes_mint_compatibility_and_mismatches_are_typed() {
+        assert!(verify_nip46_component(
+            NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            COMPONENT_INTERFACE_IDENTITY.to_string(),
+            NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
         )
         .is_ok());
 
         assert_eq!(
-            verify_nip46_core_component_identity("mismatched-core".to_string())
-                .expect_err("a different core identity must be refused"),
-            FfiNip46ProviderError::CoreComponentMismatch {
-                expected: nmp_ffi::signer::CORE_COMPONENT_IDENTITY.to_string(),
+            verify_nip46_component(
+                "mismatched-binding".to_string(),
+                NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+                COMPONENT_INTERFACE_IDENTITY.to_string(),
+                NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
+            )
+            .expect_err("a different packaged provider binding must be refused"),
+            FfiNip46ProviderError::ProviderBindingMismatch {
+                expected: NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+                actual: "mismatched-binding".to_string(),
+            }
+        );
+        assert_eq!(
+            verify_nip46_component(
+                NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+                "mismatched-native".to_string(),
+                COMPONENT_INTERFACE_IDENTITY.to_string(),
+                NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
+            )
+            .expect_err("a different loaded provider native must be refused"),
+            FfiNip46ProviderError::ProviderNativeMismatch {
+                expected: NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+                actual: "mismatched-native".to_string(),
+            }
+        );
+        assert_eq!(
+            verify_nip46_component(
+                NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+                NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+                "mismatched-interface".to_string(),
+                NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
+            )
+            .expect_err("a different packaged interface must be refused"),
+            FfiNip46ProviderError::PackageInterfaceMismatch {
+                expected: COMPONENT_INTERFACE_IDENTITY.to_string(),
+                actual: "mismatched-interface".to_string(),
+            }
+        );
+        assert_eq!(
+            verify_nip46_component(
+                NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+                NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+                COMPONENT_INTERFACE_IDENTITY.to_string(),
+                "mismatched-core".to_string(),
+            )
+            .expect_err("a different loaded core identity must be refused"),
+            FfiNip46ProviderError::CoreIdentityMismatch {
+                expected: NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
                 actual: "mismatched-core".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn every_component_attach_failure_keeps_its_typed_discriminant() {
+        assert_eq!(
+            engine_attach_failure_to_ffi(ComponentInterfaceError::EngineClosed),
+            FfiNip46Failure::Disconnected
+        );
+        assert_eq!(
+            engine_attach_failure_to_ffi(ComponentInterfaceError::SignerMissingPublicKey),
+            FfiNip46Failure::SignerMissingPublicKey
+        );
+        assert_eq!(
+            engine_attach_failure_to_ffi(ComponentInterfaceError::CapabilityRegistryFull {
+                limit: 19,
+            }),
+            FfiNip46Failure::CapabilityRegistryFull { limit: 19 }
+        );
+        assert_eq!(
+            engine_attach_failure_to_ffi(ComponentInterfaceError::CapabilityInstanceExhausted),
+            FfiNip46Failure::CapabilityInstanceExhausted
+        );
+        assert_eq!(
+            engine_attach_failure_to_ffi(ComponentInterfaceError::AdapterClosed),
+            FfiNip46Failure::AdapterClosed
+        );
+        assert_eq!(
+            engine_attach_failure_to_ffi(ComponentInterfaceError::CoreRefused {
+                reason: "exact refusal".to_string(),
+            }),
+            FfiNip46Failure::CoreRefused {
+                reason: "exact refusal".to_string(),
             }
         );
     }
@@ -1041,6 +1315,39 @@ mod tests {
     struct ReentrantObserver {
         deliveries: Arc<Mutex<Vec<&'static str>>>,
         connection: Mutex<Weak<Nip46Connection>>,
+    }
+
+    struct TerminalObserver {
+        failed: Mutex<Option<mpsc::Sender<FfiNip46Failure>>>,
+        closed: Mutex<Option<mpsc::Sender<()>>>,
+    }
+
+    impl Nip46ConnectionObserver for TerminalObserver {
+        fn on_event(&self, _event: FfiNip46ConnectionEvent) {}
+
+        fn on_ready(&self, _user_public_key: String) {}
+
+        fn on_failed(&self, failure: FfiNip46Failure) {
+            if let Some(sender) = self
+                .failed
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+            {
+                let _ = sender.send(failure);
+            }
+        }
+
+        fn on_closed(&self) {
+            if let Some(sender) = self
+                .closed
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+            {
+                let _ = sender.send(());
+            }
+        }
     }
 
     impl Nip46ConnectionObserver for ReentrantObserver {
@@ -1081,6 +1388,11 @@ mod tests {
         }
     }
 
+    fn test_connection(observer: Arc<dyn Nip46ConnectionObserver>) -> Arc<Nip46Connection> {
+        let (desired, _changes) = tokio::sync::watch::channel(DesiredSignerState::Detached);
+        Nip46Connection::new(desired, observer, nmp_signer::Nip46Cancellation::default())
+    }
+
     #[test]
     fn catalog_keeps_probe_launch_package_and_provider_distinct() {
         let primal = nip46_signer_catalog()
@@ -1104,22 +1416,14 @@ mod tests {
 
     #[test]
     fn connection_close_and_drop_are_idempotent_and_stream_scoped() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
-        let mailbox = engine.signer_mailbox();
         let closed_a = Arc::new(AtomicUsize::new(0));
         let closed_b = Arc::new(AtomicUsize::new(0));
-        let connection_a = Nip46Connection::new(
-            Arc::clone(&mailbox),
-            Arc::new(CloseCountingObserver {
-                closed: Arc::clone(&closed_a),
-            }),
-        );
-        let connection_b = Nip46Connection::new(
-            mailbox,
-            Arc::new(CloseCountingObserver {
-                closed: Arc::clone(&closed_b),
-            }),
-        );
+        let connection_a = test_connection(Arc::new(CloseCountingObserver {
+            closed: Arc::clone(&closed_a),
+        }));
+        let connection_b = test_connection(Arc::new(CloseCountingObserver {
+            closed: Arc::clone(&closed_b),
+        }));
 
         connection_a.disconnect();
         connection_a.disconnect();
@@ -1132,21 +1436,18 @@ mod tests {
         assert_eq!(closed_b.load(Ordering::SeqCst), 1);
         drop(connection_b);
         assert_eq!(closed_b.load(Ordering::SeqCst), 1);
-        engine.shutdown();
     }
 
     /// #571: a real `Nip46Connection` that has never attached a signer
     /// (never reached ready) refuses `checkpoint()` with a typed error --
     /// distinct from the Swift/Kotlin wrapper's own nil-underlying-
     /// connection guard, this exercises the actual FFI-level
-    /// `attachment.registration.is_none()` refusal this method's doc
+    /// `attachment.attached == false` refusal this method's doc
     /// documents.
     #[test]
     fn checkpoint_before_ready_is_refused_at_the_ffi_boundary() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
-        let mailbox = engine.signer_mailbox();
         let closed = Arc::new(AtomicUsize::new(0));
-        let connection = Nip46Connection::new(mailbox, Arc::new(CloseCountingObserver { closed }));
+        let connection = test_connection(Arc::new(CloseCountingObserver { closed }));
 
         assert!(matches!(
             connection.checkpoint(),
@@ -1154,19 +1455,16 @@ mod tests {
         ));
 
         connection.disconnect();
-        engine.shutdown();
     }
 
     #[test]
     fn observer_delivery_is_reentrant_and_closed_is_terminal() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
-        let mailbox = engine.signer_mailbox();
         let deliveries = Arc::new(Mutex::new(Vec::new()));
         let observer = Arc::new(ReentrantObserver {
             deliveries: Arc::clone(&deliveries),
             connection: Mutex::new(Weak::new()),
         });
-        let connection = Nip46Connection::new(mailbox, observer.clone());
+        let connection = test_connection(observer.clone());
         *observer
             .connection
             .lock()
@@ -1187,19 +1485,13 @@ mod tests {
             "a reentrant close is ordered after the active callback and seals the stream"
         );
         connection.disconnect();
-        engine.shutdown();
     }
 
     #[test]
     fn unavailable_before_attach_is_retained_as_attachment_state() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
-        let mailbox = engine.signer_mailbox();
-        let connection = Nip46Connection::new(
-            mailbox,
-            Arc::new(CloseCountingObserver {
-                closed: Arc::new(AtomicUsize::new(0)),
-            }),
-        );
+        let connection = test_connection(Arc::new(CloseCountingObserver {
+            closed: Arc::new(AtomicUsize::new(0)),
+        }));
 
         connection.on_event(nmp::Nip46ConnectionEvent::Available);
         connection.on_event(nmp::Nip46ConnectionEvent::Unavailable);
@@ -1209,9 +1501,72 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         assert!(!attachment.available);
-        assert!(attachment.registration.is_none());
+        assert!(!attachment.attached);
         drop(attachment);
         connection.disconnect();
+    }
+
+    #[test]
+    fn provider_task_uses_explicit_core_runtime_and_completes_without_panic() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "the provider task is deliberately constructed outside a Tokio context"
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = format!("ws://{}", listener.local_addr().unwrap());
+        let remote = Keys::generate();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            accepted_tx.send(()).unwrap();
+            while socket.read().is_ok() {}
+            closed_tx.send(()).unwrap();
+        });
+        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
+        let (failed_tx, failed_rx) = mpsc::channel();
+        let (terminal_closed_tx, terminal_closed_rx) = mpsc::channel();
+        let uri = format!(
+            "bunker://{}?relay={}&secret=explicit-runtime",
+            remote.public_key().to_hex(),
+            url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
+        );
+        let prepared = prepare_connection(
+            Box::new(TerminalObserver {
+                failed: Mutex::new(Some(failed_tx)),
+                closed: Mutex::new(Some(terminal_closed_tx)),
+            }),
+            move |connection, cancellation, runtime| {
+                bunker_connection_task(connection, cancellation, uri, 100, runtime)
+            },
+        );
+        let compatibility = verify_nip46_component(
+            NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            COMPONENT_INTERFACE_IDENTITY.to_string(),
+            NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
+        )
+        .unwrap();
+        let installation = engine
+            .install_signer_adapter(prepared.adapter(compatibility))
+            .expect("the core installs the provider task");
+        accepted_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the explicitly scheduled task opens its socket");
+        assert_eq!(
+            failed_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the provider task reports its terminal result"),
+            FfiNip46Failure::Timeout
+        );
+        terminal_closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the provider lifecycle completes after the typed failure");
+        closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("provider task completion closes its socket");
+        assert!(installation.uninstall());
         engine.shutdown();
     }
 
@@ -1231,33 +1586,39 @@ mod tests {
         });
 
         let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
-        let mailbox = engine.signer_mailbox();
-        let adapter_runtime = mailbox.adapter_runtime().unwrap();
         let closed = Arc::new(AtomicUsize::new(0));
-        let connection = Nip46Connection::new(
-            mailbox,
-            Arc::new(CloseCountingObserver {
-                closed: Arc::clone(&closed),
-            }),
-        );
-        let weak = Arc::downgrade(&connection);
         let uri = format!(
             "bunker://{}?relay={}&secret=pending-drop",
             remote.public_key().to_hex(),
             url::form_urlencoded::byte_serialize(relay.as_bytes()).collect::<String>()
         );
-        spawn_bunker_connection(
-            adapter_runtime,
-            weak.clone(),
-            connection.cancellation.clone(),
-            uri,
-            60_000,
+        let prepared = prepare_connection(
+            Box::new(CloseCountingObserver {
+                closed: Arc::clone(&closed),
+            }),
+            move |connection, cancellation, runtime| {
+                bunker_connection_task(connection, cancellation, uri, 60_000, runtime)
+            },
         );
+        let compatibility = verify_nip46_component(
+            NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            COMPONENT_INTERFACE_IDENTITY.to_string(),
+            NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
+        )
+        .unwrap();
+        let adapter = prepared.adapter(compatibility);
+        let installation = engine
+            .install_signer_adapter(adapter)
+            .expect("the core installs the prepared provider task");
+        let connection = prepared.connection();
+        let weak = Arc::downgrade(&connection);
         accepted_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("the pending handshake opens its socket");
 
         drop(connection);
+        drop(prepared);
 
         assert!(
             weak.upgrade().is_none(),
@@ -1267,6 +1628,59 @@ mod tests {
         closed_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("connection drop cancels the pending handshake socket");
+        installation.uninstall();
+        engine.shutdown();
+    }
+
+    #[test]
+    fn prepared_alias_replay_cannot_start_twice_or_disconnect_first_owner() {
+        let engine = NmpEngine::new(NmpEngineConfig::default()).unwrap();
+        let closed = Arc::new(AtomicUsize::new(0));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let counted_starts = Arc::clone(&starts);
+        let prepared = prepare_connection(
+            Box::new(CloseCountingObserver {
+                closed: Arc::clone(&closed),
+            }),
+            move |_connection, _cancellation, _runtime| {
+                counted_starts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::pending())
+            },
+        );
+        let failed_alias = Arc::clone(&prepared);
+        let compatibility = verify_nip46_component(
+            NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            NMP_NIP46_COMPONENT_IDENTITY.to_string(),
+            COMPONENT_INTERFACE_IDENTITY.to_string(),
+            NMP_NIP46_REQUIRED_CORE_IDENTITY.to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            0,
+            "preparation alone cannot invoke the provider task factory"
+        );
+        let installation = engine
+            .install_signer_adapter(prepared.adapter(Arc::clone(&compatibility)))
+            .expect("first prepared carrier installs");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            engine.install_signer_adapter(failed_alias.adapter(compatibility)),
+            Err(nmp_ffi::signer::FfiSignerAdapterInstallError::AdapterAlreadyTaken)
+        ));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        drop(failed_alias);
+        assert!(
+            !prepared.connection.closed.load(Ordering::Acquire),
+            "dropping the failed alias cannot close the first retained carrier"
+        );
+        assert_eq!(closed.load(Ordering::SeqCst), 0);
+
+        assert!(installation.uninstall());
+        drop(prepared);
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
         engine.shutdown();
     }
 }

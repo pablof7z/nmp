@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# #952 artifact falsifier. The ordinary three-library mode proves a core-only
-# build differs from a matched package set and that the matched pair agrees.
-# Apple PR qualification may use --matched-only because the Ubuntu provider
-# gate retains the real package-set mismatch proof.
+# #952 artifact falsifier. Core identity remains selection-neutral; the
+# independently built provider embeds that exact requirement and the same
+# crossing-interface identity while retaining its own distinct identity.
 
 set -euo pipefail
 
@@ -48,25 +47,35 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/nmp-nip46-component-identity.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
 identity_set() {
-  local library=$1 output=$2
+  local library=$1 pattern=$2 output=$3
   strings -a "$library" |
-    grep -Eo 'nmp-core-component-v1-[0-9a-f]{64}' |
+    grep -Eo "$pattern" |
     sort -u > "$output"
   [[ -s "$output" ]] || fail "no component identity embedded in $library"
 }
 
-identity_set "$MATCHED_CORE_LIBRARY" "$TMP/matched-core"
-identity_set "$MATCHED_PROVIDER_LIBRARY" "$TMP/matched-provider"
+identity_set "$MATCHED_CORE_LIBRARY" \
+  'nmp-core-component-v2-[0-9a-f]{64}' "$TMP/matched-core"
+identity_set "$MATCHED_PROVIDER_LIBRARY" \
+  'nmp-core-component-v2-[0-9a-f]{64}' "$TMP/provider-requirement"
+identity_set "$MATCHED_CORE_LIBRARY" \
+  'nmp-component-interface-v2-[0-9a-f]{64}' "$TMP/core-interface"
+identity_set "$MATCHED_PROVIDER_LIBRARY" \
+  'nmp-component-interface-v2-[0-9a-f]{64}' "$TMP/provider-interface"
+identity_set "$MATCHED_PROVIDER_LIBRARY" \
+  'nmp-nip46-component-v2-[0-9a-f]{64}' "$TMP/provider-identity"
 
-cmp -s "$TMP/matched-core" "$TMP/matched-provider" ||
-  fail "matched core and provider identity sets differ"
+cmp -s "$TMP/matched-core" "$TMP/provider-requirement" ||
+  fail "provider required-core identity differs from standalone core"
+cmp -s "$TMP/core-interface" "$TMP/provider-interface" ||
+  fail "core and provider crossing-interface identities differ"
 
 if [[ "$MODE" == full ]]; then
-  identity_set "$CORE_ONLY_LIBRARY" "$TMP/core-only"
-  if [[ -n $(comm -12 "$TMP/core-only" "$TMP/matched-core") ]]; then
-    fail "core-only and matched package-set identities overlap"
-  fi
-  echo "nip46-component-identity: core-only=$(wc -l < "$TMP/core-only" | tr -d ' ') matched=$(wc -l < "$TMP/matched-core" | tr -d ' ') shared; package-set mismatch refused"
+  identity_set "$CORE_ONLY_LIBRARY" \
+    'nmp-core-component-v2-[0-9a-f]{64}' "$TMP/core-only"
+  cmp -s "$TMP/core-only" "$TMP/matched-core" ||
+    fail "core identity changed when an optional component was selected"
+  echo "nip46-component-identity: selection-neutral core, exact provider requirement, shared interface, distinct provider identity"
 else
-  echo "nip46-component-identity: matched=$(wc -l < "$TMP/matched-core" | tr -d ' ') shared"
+  echo "nip46-component-identity: exact provider requirement and shared interface"
 fi

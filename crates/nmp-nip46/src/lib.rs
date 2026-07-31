@@ -15,5 +15,6 @@ pub use bunker::{
 pub use catalog::{known_nip46_signers, Nip46SignerApp};
 pub use nip46::{
     Nip46Cancellation, Nip46ClientMetadata, Nip46ConnectionEvent, Nip46Error, Nip46Invitation,
-    Nip46Origin, Nip46SessionCheckpoint, Nip46Signer,
+    Nip46Origin, Nip46RuntimeTask, Nip46RuntimeTaskHandle, Nip46SessionCheckpoint, Nip46Signer,
+    Nip46TaskRuntime,
 };

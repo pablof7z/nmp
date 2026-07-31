@@ -80,10 +80,10 @@ jobs:
             "$RUNNER_TEMP/libnmp_ffi-core-only.so"
           scripts/build-kotlin-nip46-jvm.sh
 
-      - name: Refuse unmanaged release identity
+      - name: Falsify managed v2 roots, manifests, attestations, and artifacts
         run: scripts/test-component-identity-build.sh
 
-      - name: Prove matched identity and package-set mismatch
+      - name: Prove exact core, provider, and interface v2 identities
         run: |
           scripts/check-nip46-component-identity.sh \
             "$RUNNER_TEMP/libnmp_ffi-core-only.so" \

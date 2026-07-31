@@ -4205,6 +4205,34 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiSignerAdapterInstallError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "AdapterAlreadyTaken",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "Typed refusal before a provider contribution is installed.",
+    ),
+}
+
+enum Enum {
     name: "FfiSourceAuthority",
     module_path: "nmp_ffi",
     remote: false,
@@ -7715,12 +7743,12 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Return the loaded core library's exact native component identity.\n\nThis value is plain data by design: a provider can compare it before\nrequesting or lowering [`FfiSignerMailbox`].",
+        "Return the loaded core library's identity as plain data.",
     ),
     throws: None,
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_nmp_core_component_identity",
     checksum: Some(
-        14080,
+        52707,
     ),
 }
 
@@ -9484,41 +9512,79 @@ object Object {
 }
 
 object Object {
-    name: "FfiSignerMailbox",
+    name: "FfiSignerAdapterInstallation",
     imp: Struct,
     module_path: "nmp_ffi",
     remote: false,
     constructors: [],
-    methods: [],
+    methods: [
+        Method {
+            name: "uninstall",
+            object_name: "FfiSignerAdapterInstallation",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Boolean,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffisigneradapterinstallation_uninstall",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiSignerAdapterInstallation",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Int8,
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Consume this exact installation. A repeated or stale uninstall is\ninert. The distinct name avoids colliding with UniFFI Kotlin's\ngenerated `AutoCloseable.close()` object-release method.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffisigneradapterinstallation_uninstall",
+            checksum: Some(
+                55856,
+            ),
+        },
+    ],
     uniffi_traits: [],
     trait_impls: [],
     ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_ffisignermailbox",
+        name: "uniffi_nmp_ffi_fn_clone_ffisigneradapterinstallation",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "FfiSignerMailbox",
+                    "FfiSignerAdapterInstallation",
                 ),
             },
         ],
         return_type: Some(
             RustArcPtr(
-                "FfiSignerMailbox",
+                "FfiSignerAdapterInstallation",
             ),
         ),
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
     ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_ffisignermailbox",
+        name: "uniffi_nmp_ffi_fn_free_ffisigneradapterinstallation",
         is_async: false,
         arguments: [
             FfiArgument {
                 name: "ptr",
                 type_: RustArcPtr(
-                    "FfiSignerMailbox",
+                    "FfiSignerAdapterInstallation",
                 ),
             },
         ],
@@ -9528,56 +9594,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Opaque provider mailbox bound to one exact core engine.\n\nNative provider components consume this external UniFFI object rather than\nimporting or mirroring `NmpEngine`. Its Rust-only operations are the\nordinary generic signer door and the engine-owned adapter runtime already\nused by supported provider sessions. Construction is sealed inside core:\nlinked crates can receive this object only from\n[`NmpEngine::signer_mailbox`](crate::facade::NmpEngine::signer_mailbox).\n\n```compile_fail\nlet _ = nmp_ffi::signer::FfiSignerMailbox::from_engine(panic!());\n```",
-    ),
-}
-
-object Object {
-    name: "FfiSignerRegistration",
-    imp: Struct,
-    module_path: "nmp_ffi",
-    remote: false,
-    constructors: [],
-    methods: [],
-    uniffi_traits: [],
-    trait_impls: [],
-    ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_ffisignerregistration",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiSignerRegistration",
-                ),
-            },
-        ],
-        return_type: Some(
-            RustArcPtr(
-                "FfiSignerRegistration",
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_ffisignerregistration",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiSignerRegistration",
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: true,
-        is_object_free_function: true,
-    },
-    ffi_init_callback: None,
-    docstring: Some(
-        "Opaque proof for one exact provider capability installation.\n\nThe value is intentionally provider-neutral. A provider retains it only\nlong enough to detach the exact installation it created; it cannot select\nanother signer or remove a replacement registered for the same key.",
+        "Exact core installation lease. Close/drop consumes its private lease once.",
     ),
 }
 
@@ -10080,6 +10097,72 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_follow",
             checksum: Some(
                 20611,
+            ),
+        },
+        Method {
+            name: "install_signer_adapter",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "adapter",
+                    type_: Object {
+                        module_path: "nmp_component_interface",
+                        name: "FfiSignerAdapter",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiSignerAdapterInstallation",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_install_signer_adapter",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "adapter",
+                        type_: RustArcPtr(
+                            "FfiSignerAdapter",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiSignerAdapterInstallation",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Consume one take-once provider contribution. Only this core-owned door\ncan install it; the private driver retains and removes the exact signer\nregistration through the ordinary engine lifecycle.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiSignerAdapterInstallError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_install_signer_adapter",
+            checksum: Some(
+                721,
             ),
         },
         Method {
@@ -10923,49 +11006,6 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_sign_event",
             checksum: Some(
                 26885,
-            ),
-        },
-        Method {
-            name: "signer_mailbox",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "FfiSignerMailbox",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_signer_mailbox",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "FfiSignerMailbox",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Return the protocol-neutral, opaque attachment mailbox consumed by\noptional signer-provider components. The mailbox shares this exact\nengine lifecycle; it is not another engine or a provider registry.",
-            ),
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_signer_mailbox",
-            checksum: Some(
-                59488,
             ),
         },
         Method {

@@ -15,11 +15,27 @@ use camino::Utf8PathBuf;
 use uniffi_meta::{Metadata, Type};
 
 const PROVIDER_MODULE: &str = "nmp_nip46_ffi";
-const CORE_MODULE: &str = "nmp_ffi";
-const MAILBOX_TYPE: &str = "FfiSignerMailbox";
-const COMPATIBILITY_TYPE: &str = "FfiNip46CoreCompatibility";
-const CORE_MAILBOX_SOURCE: &str = "nmp_ffi::NmpEngine::signer_mailbox";
-const REQUIRED_ENTRY: &str = "nmp_nip46_ffi::NmpNip46Provider::new";
+const INTERFACE_MODULE: &str = "nmp_component_interface";
+const ADAPTER_TYPE: &str = "FfiSignerAdapter";
+const COMPATIBILITY_TYPE: &str = "FfiNip46Compatibility";
+const PREPARED_TYPE: &str = "FfiNip46PreparedConnection";
+const PROOF_ENTRY: &str = "nmp_nip46_ffi::verify_nip46_component";
+const ADAPTER_ENTRY: &str = "nmp_nip46_ffi::FfiNip46PreparedConnection::adapter";
+const REQUIRED_ADAPTER_ENTRIES: &[&str] = &[
+    "nmp_nip46_ffi::prepare_nip46_bunker",
+    "nmp_nip46_ffi::prepare_nip46_from_parts",
+    "nmp_nip46_ffi::prepare_nip46_invitation",
+    "nmp_nip46_ffi::prepare_nip46_restore",
+];
+const FORBIDDEN_CORE_TYPES: &[&str] = &[
+    "FfiSignerMailbox",
+    "FfiSignerRegistration",
+    "CoreSignerPort",
+    "CoreSignerLease",
+    "CoreDetach",
+    "NmpEngine",
+    "FfiSignerAdapterInstallation",
+];
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct TypeKey {
@@ -205,16 +221,16 @@ fn library_callables(items: &[Metadata]) -> Vec<Callable<'_>> {
 
 fn audit(items: &[Metadata]) -> Result<String, String> {
     let graph = TypeGraph::from_metadata(items);
-    let has_mailbox_metadata = items.iter().any(|item| {
+    let has_adapter_metadata = items.iter().any(|item| {
         matches!(
             item,
             Metadata::Object(object)
-                if object.module_path == CORE_MODULE && object.name == MAILBOX_TYPE
+                if object.module_path == INTERFACE_MODULE && object.name == ADAPTER_TYPE
         )
     });
-    if !has_mailbox_metadata {
+    if !has_adapter_metadata {
         return Err(format!(
-            "compiled metadata has no {CORE_MODULE}::{MAILBOX_TYPE} positive control"
+            "compiled metadata has no {INTERFACE_MODULE}::{ADAPTER_TYPE} positive control"
         ));
     }
     let has_compatibility_metadata = items.iter().any(|item| {
@@ -230,71 +246,115 @@ fn audit(items: &[Metadata]) -> Result<String, String> {
             "compiled metadata has no {PROVIDER_MODULE}::{COMPATIBILITY_TYPE} positive control"
         ));
     }
-
-    let mut core_mailbox_sources = 0;
-    let mut mailbox_entries = Vec::new();
-    for callable in library_callables(items) {
-        let input_carries_mailbox = callable
-            .inputs
-            .iter()
-            .any(|ty| graph.contains_named(ty, CORE_MODULE, MAILBOX_TYPE));
-        let return_carries_mailbox = callable
-            .return_type
-            .is_some_and(|ty| graph.contains_named(ty, CORE_MODULE, MAILBOX_TYPE));
-        let throws_carries_mailbox = callable
-            .throws
-            .is_some_and(|ty| graph.contains_named(ty, CORE_MODULE, MAILBOX_TYPE));
-        let carries_mailbox =
-            input_carries_mailbox || return_carries_mailbox || throws_carries_mailbox;
-        if !carries_mailbox {
-            continue;
-        }
-
-        // The core vends the opaque mailbox through one exact outward-only
-        // callable. Do not exempt its namespace: a linked crate may choose
-        // the same `[lib] name` and therefore claim the same UniFFI module.
-        // UniFFI derives both this label and its no-mangle symbols from the
-        // same module/type/function tuple, so forging the exact allowance
-        // collides at link time; the exact-one check below remains the second
-        // line of defence. An input, throws position, duplicate, or any other
-        // callable remains subject to the provider-proof rule below.
-        if callable.label == CORE_MAILBOX_SOURCE
-            && return_carries_mailbox
-            && !input_carries_mailbox
-            && !throws_carries_mailbox
-        {
-            core_mailbox_sources += 1;
-            continue;
-        }
-
-        let requires_compatibility = callable
-            .inputs
-            .iter()
-            .any(|ty| graph.contains_named(ty, PROVIDER_MODULE, COMPATIBILITY_TYPE));
-        if !requires_compatibility {
+    if items.iter().any(|item| {
+        matches!(
+            item,
+            Metadata::Constructor(constructor)
+                if constructor.module_path == PROVIDER_MODULE
+                    && constructor.self_name == PREPARED_TYPE
+        )
+    }) {
+        return Err(format!(
+            "compiled metadata exposes a forbidden {PREPARED_TYPE} constructor"
+        ));
+    }
+    for item in items {
+        let (module, name) = match item {
+            Metadata::Object(value) => (&value.module_path, &value.name),
+            Metadata::Record(value) => (&value.module_path, &value.name),
+            Metadata::Enum(value) => (&value.module_path, &value.name),
+            _ => continue,
+        };
+        if module == "nmp_ffi" || FORBIDDEN_CORE_TYPES.contains(&name.as_str()) {
             return Err(format!(
-                "compiled UniFFI entry {} carries {CORE_MODULE}::{MAILBOX_TYPE} without an input containing {PROVIDER_MODULE}::{COMPATIBILITY_TYPE}",
+                "compiled provider metadata contains forbidden core authority {module}::{name}"
+            ));
+        }
+    }
+
+    let mut adapter_entries = BTreeSet::new();
+    let mut preparation_entries = BTreeSet::new();
+    let mut proof_entries = BTreeSet::new();
+    for callable in library_callables(items) {
+        let adapter_input = callable
+            .inputs
+            .iter()
+            .any(|ty| graph.contains_named(ty, INTERFACE_MODULE, ADAPTER_TYPE));
+        let adapter_return = callable
+            .return_type
+            .is_some_and(|ty| graph.contains_named(ty, INTERFACE_MODULE, ADAPTER_TYPE));
+        let adapter_throw = callable
+            .throws
+            .is_some_and(|ty| graph.contains_named(ty, INTERFACE_MODULE, ADAPTER_TYPE));
+        let compatibility_inputs = callable
+            .inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, ty)| {
+                graph
+                    .contains_named(ty, PROVIDER_MODULE, COMPATIBILITY_TYPE)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let compatibility_return = callable
+            .return_type
+            .is_some_and(|ty| graph.contains_named(ty, PROVIDER_MODULE, COMPATIBILITY_TYPE));
+        let prepared_return = callable
+            .return_type
+            .is_some_and(|ty| graph.contains_named(ty, PROVIDER_MODULE, PREPARED_TYPE));
+        if compatibility_return && compatibility_inputs.is_empty() {
+            proof_entries.insert(callable.label.clone());
+        }
+        if prepared_return {
+            if compatibility_inputs != [0] {
+                return Err(format!(
+                    "compiled UniFFI entry {} must receive compatibility proof at input zero before returning {PREPARED_TYPE}",
+                    callable.label
+                ));
+            }
+            preparation_entries.insert(callable.label.clone());
+        }
+        if !(adapter_input || adapter_return || adapter_throw) {
+            continue;
+        }
+        if adapter_input || adapter_throw || !adapter_return {
+            return Err(format!(
+                "compiled UniFFI entry {} must return the provider adapter, never receive or throw it",
                 callable.label
             ));
         }
-        mailbox_entries.push(callable.label);
+        if compatibility_inputs != [0] {
+            return Err(format!(
+                "compiled UniFFI entry {} must receive exactly one compatibility proof at input zero before returning an adapter",
+                callable.label
+            ));
+        }
+        adapter_entries.insert(callable.label);
     }
 
-    if core_mailbox_sources != 1 {
+    let expected_preparations = REQUIRED_ADAPTER_ENTRIES
+        .iter()
+        .map(|entry| (*entry).to_string())
+        .collect::<BTreeSet<_>>();
+    if preparation_entries != expected_preparations {
         return Err(format!(
-            "compiled UniFFI metadata must expose exactly one outward-only core mailbox source ({CORE_MAILBOX_SOURCE}); found {core_mailbox_sources}"
+            "compiled UniFFI metadata has wrong proof-first preparation set; found {preparation_entries:?}"
+        ));
+    }
+    let expected_adapters = BTreeSet::from([ADAPTER_ENTRY.to_string()]);
+    if adapter_entries != expected_adapters {
+        return Err(format!(
+            "compiled UniFFI metadata must expose exactly one proof-bearing adapter accessor ({ADAPTER_ENTRY}); found {adapter_entries:?}"
+        ));
+    }
+    let expected_proof = BTreeSet::from([PROOF_ENTRY.to_string()]);
+    if proof_entries != expected_proof {
+        return Err(format!(
+            "compiled UniFFI metadata must expose exactly one compatibility proof constructor ({PROOF_ENTRY}); found {proof_entries:?}"
         ));
     }
 
-    if mailbox_entries != [REQUIRED_ENTRY] {
-        return Err(format!(
-            "compiled UniFFI metadata must expose exactly one proof-bearing mailbox entry ({REQUIRED_ENTRY}); found {mailbox_entries:?}"
-        ));
-    }
-
-    Ok(format!(
-        "nip46-provider-metadata: one compiled mailbox entry, proof-bearing: {REQUIRED_ENTRY}"
-    ))
+    Ok("nip46-provider-metadata: four proof-first adapter preparations, one proof constructor, zero core authority types".to_string())
 }
 
 fn run() -> Result<(), String> {
@@ -331,8 +391,8 @@ fn main() {
 mod tests {
     use super::*;
     use uniffi_meta::{
-        ConstructorMetadata, FieldMetadata, FnMetadata, FnParamMetadata, MethodMetadata,
-        ObjectImpl, ObjectMetadata, RecordMetadata,
+        ConstructorMetadata, FnMetadata, FnParamMetadata, MethodMetadata, ObjectImpl,
+        ObjectMetadata,
     };
 
     fn object(module_path: &str, name: &str) -> Metadata {
@@ -354,38 +414,44 @@ mod tests {
     }
 
     fn valid_metadata() -> Vec<Metadata> {
-        vec![
-            object(CORE_MODULE, MAILBOX_TYPE),
+        let mut items = vec![
+            object(INTERFACE_MODULE, ADAPTER_TYPE),
             object(PROVIDER_MODULE, COMPATIBILITY_TYPE),
-            Metadata::Constructor(ConstructorMetadata {
-                module_path: PROVIDER_MODULE.to_string(),
-                self_name: "NmpNip46Provider".to_string(),
-                name: "new".to_string(),
-                is_async: false,
-                inputs: vec![
-                    FnParamMetadata::simple(
-                        "compatibility",
-                        object_type(PROVIDER_MODULE, COMPATIBILITY_TYPE),
-                    ),
-                    FnParamMetadata::simple("mailbox", object_type(CORE_MODULE, MAILBOX_TYPE)),
-                ],
-                throws: None,
-                checksum: None,
-                docstring: None,
-            }),
+            object(PROVIDER_MODULE, PREPARED_TYPE),
             Metadata::Method(MethodMetadata {
-                module_path: CORE_MODULE.to_string(),
-                self_name: "NmpEngine".to_string(),
-                name: "signer_mailbox".to_string(),
+                module_path: PROVIDER_MODULE.to_string(),
+                self_name: PREPARED_TYPE.to_string(),
+                name: "adapter".to_string(),
                 is_async: false,
-                inputs: Vec::new(),
-                return_type: Some(object_type(CORE_MODULE, MAILBOX_TYPE)),
+                inputs: vec![FnParamMetadata::simple(
+                    "compatibility",
+                    object_type(PROVIDER_MODULE, COMPATIBILITY_TYPE),
+                )],
+                return_type: Some(object_type(INTERFACE_MODULE, ADAPTER_TYPE)),
                 throws: None,
-                takes_self_by_arc: true,
+                takes_self_by_arc: false,
                 checksum: None,
                 docstring: None,
             }),
-        ]
+            function_in_module(
+                PROVIDER_MODULE,
+                "verify_nip46_component",
+                vec![Type::String, Type::String, Type::String, Type::String],
+                Some(object_type(PROVIDER_MODULE, COMPATIBILITY_TYPE)),
+            ),
+        ];
+        for entry in REQUIRED_ADAPTER_ENTRIES {
+            items.push(function_in_module(
+                PROVIDER_MODULE,
+                entry.rsplit("::").next().unwrap(),
+                vec![
+                    object_type(PROVIDER_MODULE, COMPATIBILITY_TYPE),
+                    Type::String,
+                ],
+                Some(object_type(PROVIDER_MODULE, PREPARED_TYPE)),
+            ));
+        }
+        items
     }
 
     fn function_in_module(
@@ -410,117 +476,19 @@ mod tests {
         })
     }
 
-    fn provider_function(name: &str, input: Type, return_type: Option<Type>) -> Metadata {
-        function_in_module(PROVIDER_MODULE, name, vec![input], return_type)
-    }
-
-    fn proof_bearing_mailbox_function(module_path: &str, name: &str) -> Metadata {
-        function_in_module(
-            module_path,
-            name,
-            vec![
-                object_type(PROVIDER_MODULE, COMPATIBILITY_TYPE),
-                object_type(CORE_MODULE, MAILBOX_TYPE),
-            ],
-            None,
-        )
-    }
-
     #[test]
-    fn compiled_record_carrier_cannot_hide_an_unproven_mailbox_entry() {
-        let mut items = valid_metadata();
-        items.push(Metadata::Record(RecordMetadata {
-            module_path: PROVIDER_MODULE.to_string(),
-            name: "MailboxCarrier".to_string(),
-            remote: false,
-            fields: vec![FieldMetadata {
-                name: "inner".to_string(),
-                ty: Type::Optional {
-                    inner_type: Box::new(object_type(CORE_MODULE, MAILBOX_TYPE)),
-                },
-                default: None,
-                docstring: None,
-            }],
-            docstring: None,
-        }));
-        items.push(provider_function(
-            "smuggled_mailbox",
-            Type::Record {
-                module_path: PROVIDER_MODULE.to_string(),
-                name: "MailboxCarrier".to_string(),
-            },
-            None,
-        ));
-
-        let error = audit(&items).expect_err("the record carrier must be resolved recursively");
-        assert!(error.contains("smuggled_mailbox"));
-        assert!(error.contains("without an input containing"));
-    }
-
-    #[test]
-    fn compiled_return_position_is_part_of_the_mailbox_boundary() {
-        let mut items = valid_metadata();
-        items.push(provider_function(
-            "returns_mailbox",
-            Type::String,
-            Some(object_type(CORE_MODULE, MAILBOX_TYPE)),
-        ));
-
-        let error = audit(&items).expect_err("return-position mailbox exports must not be hidden");
-        assert!(error.contains("returns_mailbox"));
-    }
-
-    #[test]
-    fn exact_compiled_constructor_is_the_only_mailbox_entry() {
-        let mut items = valid_metadata();
-        items.push(proof_bearing_mailbox_function(
-            PROVIDER_MODULE,
-            "second_mailbox_entry",
-        ));
-
-        let error = audit(&items).expect_err("a second proof-bearing mailbox entry must fail");
-        assert!(error.contains("must expose exactly one"));
-        assert!(error.contains("second_mailbox_entry"));
-    }
-
-    #[test]
-    fn missing_compiled_mailbox_entry_is_rejected() {
-        let mut items = valid_metadata();
-        items.retain(|item| !matches!(item, Metadata::Constructor(_)));
-
-        let error = audit(&items).expect_err("zero mailbox entries must fail");
-        assert!(error.contains("found []"));
-    }
-
-    #[test]
-    fn exact_compiled_constructor_name_is_required() {
-        let mut items = valid_metadata();
-        let Some(Metadata::Constructor(constructor)) = items
-            .iter_mut()
-            .find(|item| matches!(item, Metadata::Constructor(_)))
-        else {
-            panic!("valid metadata must contain the provider constructor");
-        };
-        constructor.name = "create".to_string();
-
-        let error = audit(&items).expect_err("renaming the required constructor must fail");
-        assert!(error.contains(REQUIRED_ENTRY));
-        assert!(error.contains("NmpNip46Provider::create"));
-    }
-
-    #[test]
-    fn missing_mailbox_metadata_positive_control_is_rejected() {
+    fn missing_adapter_metadata_positive_control_is_rejected() {
         let mut items = valid_metadata();
         items.retain(|item| {
             !matches!(
                 item,
                 Metadata::Object(object)
-                    if object.module_path == CORE_MODULE && object.name == MAILBOX_TYPE
+                    if object.module_path == INTERFACE_MODULE && object.name == ADAPTER_TYPE
             )
         });
 
-        let error = audit(&items).expect_err("missing mailbox metadata must fail closed");
-        assert!(error.contains("FfiSignerMailbox positive control"));
+        let error = audit(&items).expect_err("missing adapter metadata must fail closed");
+        assert!(error.contains("FfiSignerAdapter positive control"));
     }
 
     #[test]
@@ -536,106 +504,77 @@ mod tests {
         });
 
         let error = audit(&items).expect_err("missing compatibility metadata must fail closed");
-        assert!(error.contains("FfiNip46CoreCompatibility positive control"));
+        assert!(error.contains("FfiNip46Compatibility positive control"));
     }
 
     #[test]
-    fn foreign_namespace_mailbox_entry_is_not_hidden_from_audit() {
+    fn adapter_return_requires_proof_at_input_zero() {
+        let mut items = valid_metadata();
+        let Some(Metadata::Func(function)) = items
+            .iter_mut()
+            .find(|item| matches!(item, Metadata::Func(function) if function.name == "prepare_nip46_bunker"))
+        else {
+            panic!("valid metadata must contain a prepare function");
+        };
+        function.inputs.swap(0, 1);
+
+        let error = audit(&items).expect_err("proof moved from input zero must fail");
+        assert!(error.contains("input zero"));
+    }
+
+    #[test]
+    fn adapter_input_is_refused() {
         let mut items = valid_metadata();
         items.push(function_in_module(
-            "nmp_nip46_sideload",
-            "sideload_take_mailbox",
-            vec![object_type(CORE_MODULE, MAILBOX_TYPE)],
+            PROVIDER_MODULE,
+            "take_adapter",
+            vec![object_type(INTERFACE_MODULE, ADAPTER_TYPE)],
             None,
         ));
-
-        let error = audit(&items).expect_err("linked non-core namespaces must be audited");
-        assert!(error.contains("nmp_nip46_sideload::sideload_take_mailbox"));
-        assert!(error.contains("without an input containing"));
+        let error = audit(&items).expect_err("provider must never receive an adapter");
+        assert!(error.contains("never receive or throw"));
     }
 
     #[test]
-    fn forged_core_namespace_mailbox_input_is_not_exempted() {
+    fn core_authority_type_is_refused() {
+        let mut items = valid_metadata();
+        items.push(object("nmp_ffi", "NmpEngine"));
+        let error = audit(&items).expect_err("provider metadata must contain no core type");
+        assert!(error.contains("forbidden core authority"));
+    }
+
+    #[test]
+    fn prepared_connection_constructor_is_refused() {
+        let mut items = valid_metadata();
+        items.push(Metadata::Constructor(ConstructorMetadata {
+            module_path: PROVIDER_MODULE.to_string(),
+            self_name: PREPARED_TYPE.to_string(),
+            name: "new".to_string(),
+            is_async: false,
+            inputs: vec![],
+            throws: None,
+            checksum: None,
+            docstring: None,
+        }));
+        let error = audit(&items).expect_err("prepared carrier must be constructorless");
+        assert!(error.contains("forbidden FfiNip46PreparedConnection constructor"));
+    }
+
+    #[test]
+    fn duplicate_proof_constructor_is_refused() {
         let mut items = valid_metadata();
         items.push(function_in_module(
-            CORE_MODULE,
-            "impostor_take_mailbox",
-            vec![object_type(CORE_MODULE, MAILBOX_TYPE)],
-            None,
+            PROVIDER_MODULE,
+            "forge_compatibility",
+            vec![],
+            Some(object_type(PROVIDER_MODULE, COMPATIBILITY_TYPE)),
         ));
-
-        let error =
-            audit(&items).expect_err("claiming the core namespace must not exempt mailbox inputs");
-        assert!(error.contains("nmp_ffi::impostor_take_mailbox"));
-        assert!(error.contains("without an input containing"));
+        let error = audit(&items).expect_err("a second proof constructor must fail");
+        assert!(error.contains("forge_compatibility"));
     }
 
     #[test]
-    fn exact_core_mailbox_source_cannot_accept_a_mailbox_input() {
-        let mut items = valid_metadata();
-        let Some(Metadata::Method(method)) = items
-            .iter_mut()
-            .find(|item| matches!(item, Metadata::Method(_)))
-        else {
-            panic!("valid metadata must contain the core mailbox source");
-        };
-        method.inputs.push(FnParamMetadata::simple(
-            "mailbox",
-            object_type(CORE_MODULE, MAILBOX_TYPE),
-        ));
-
-        let error =
-            audit(&items).expect_err("the exact core source is exempt only in return position");
-        assert!(error.contains(CORE_MAILBOX_SOURCE));
-        assert!(error.contains("without an input containing"));
-    }
-
-    #[test]
-    fn exact_core_mailbox_source_cannot_throw_a_mailbox() {
-        let mut items = valid_metadata();
-        let Some(Metadata::Method(method)) = items
-            .iter_mut()
-            .find(|item| matches!(item, Metadata::Method(_)))
-        else {
-            panic!("valid metadata must contain the core mailbox source");
-        };
-        method.throws = Some(object_type(CORE_MODULE, MAILBOX_TYPE));
-
-        let error =
-            audit(&items).expect_err("the exact core source is exempt only in return position");
-        assert!(error.contains(CORE_MAILBOX_SOURCE));
-        assert!(error.contains("without an input containing"));
-    }
-
-    #[test]
-    fn duplicate_core_mailbox_source_is_rejected() {
-        let mut items = valid_metadata();
-        let duplicate = items
-            .iter()
-            .find_map(|item| match item {
-                Metadata::Method(method) => Some(method.clone()),
-                _ => None,
-            })
-            .expect("valid metadata must contain the core mailbox source");
-        items.push(Metadata::Method(duplicate));
-
-        let error = audit(&items).expect_err("two core mailbox sources must fail");
-        assert!(error.contains("exactly one outward-only core mailbox source"));
-        assert!(error.contains("found 2"));
-    }
-
-    #[test]
-    fn missing_core_mailbox_source_positive_control_is_rejected() {
-        let mut items = valid_metadata();
-        items.retain(|item| !matches!(item, Metadata::Method(_)));
-
-        let error = audit(&items).expect_err("the outward core mailbox source must be present");
-        assert!(error.contains("exactly one outward-only core mailbox source"));
-        assert!(error.contains(CORE_MAILBOX_SOURCE));
-    }
-
-    #[test]
-    fn valid_compiled_constructor_passes_the_full_audit() {
+    fn exact_compiled_surface_passes_the_full_audit() {
         assert!(audit(&valid_metadata()).is_ok());
     }
 }

@@ -757,9 +757,19 @@ impl Engine {
     where
         Sig: nmp_signer::SigningCapability + Send + 'static,
     {
+        self.add_signer_boxed(Box::new(signer))
+    }
+
+    /// Erased signer-capability door used by the core-owned native component
+    /// port. It preserves the one registry and exact registration token.
+    #[doc(hidden)]
+    pub fn add_signer_boxed(
+        &self,
+        signer: Box<dyn nmp_signer::SigningCapability + Send>,
+    ) -> Result<SignerRegistration, EngineError> {
         self.with_handle(|handle| {
             handle
-                .add_signer(signer)
+                .add_signer_boxed(signer)
                 .map_err(EngineError::from_add_signer_error)
         })?
     }

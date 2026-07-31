@@ -56,10 +56,10 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
             (
                 .nativeComponentMismatch(
                     component: "sentinel-provider",
-                    expectedCoreIdentity: "sentinel-expected",
-                    actualCoreIdentity: "sentinel-actual"
+                    expectedIdentity: "sentinel-expected",
+                    actualIdentity: "sentinel-actual"
                 ),
-                "Native component sentinel-provider requires core sentinel-expected, loaded sentinel-actual"
+                "Native component sentinel-provider requires identity sentinel-expected, loaded sentinel-actual"
             ),
             (.invalidNostrEntity("sentinel-entity"), "Invalid Nostr entity: sentinel-entity"),
             (.nostrEntitySecretKeyRejected, "Refusing to decode a secret-key entity"),

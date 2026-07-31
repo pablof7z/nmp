@@ -40,9 +40,14 @@ while IFS= read -r -d '' path; do
     scripts/build-kotlin-jvm.sh|\
     scripts/build-kotlin-nip46-jvm.sh|\
     scripts/check-nip46-*|\
+    scripts/test-component-manifest-verifier.sh|\
     scripts/test-component-identity-build.sh|\
+    scripts/test-component-v2-substrate.sh|\
     scripts/test-nip46-*|\
-    scripts/lib/*)
+    scripts/verify-component-manifests.py|\
+    scripts/lib/*|\
+    tools/component-artifact-witness/*|\
+    docs/surface/components/nmp-component-interface/*)
       printf 'true\n'
       exit 0
       ;;

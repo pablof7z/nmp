@@ -110,6 +110,10 @@ public enum NMPNip46Failure: Sendable, Equatable {
     case rejected(String)
     case invalidResponse(String)
     case signerMissingPublicKey
+    case capabilityRegistryFull(limit: UInt64)
+    case capabilityInstanceExhausted
+    case adapterClosed
+    case coreRefused(String)
     /// A restore/import's live answer did not match the checkpoint's
     /// expected identity (#571). No signer was attached under the wrong
     /// pubkey.
@@ -127,6 +131,14 @@ public enum NMPNip46Failure: Sendable, Equatable {
         case .rejected(let reason): self = .rejected(reason)
         case .invalidResponse(let reason): self = .invalidResponse(reason)
         case .signerMissingPublicKey: self = .signerMissingPublicKey
+        case .capabilityRegistryFull(let limit):
+            self = .capabilityRegistryFull(limit: limit)
+        case .capabilityInstanceExhausted:
+            self = .capabilityInstanceExhausted
+        case .adapterClosed:
+            self = .adapterClosed
+        case .coreRefused(let reason):
+            self = .coreRefused(reason)
         case .restoredIdentityMismatch(let expected, let actual):
             self = .restoredIdentityMismatch(expected: expected, actual: actual)
         }
@@ -181,27 +193,53 @@ final class NIP46Observer: Nip46ConnectionObserver, @unchecked Sendable {
     }
 }
 
+private struct NIP46NativeResources {
+    let prepared: FfiNip46PreparedConnection
+    let installation: NMPProviderSignerInstallation
+
+    func connection() -> Nip46Connection {
+        prepared.connection()
+    }
+
+    func close() {
+        installation.close()
+        prepared.connection().disconnect()
+    }
+}
+
+private enum NIP46ConnectionResources {
+    case native(NIP46NativeResources)
+
+    var connection: Nip46Connection? {
+        switch self {
+        case .native(let resources):
+            return resources.connection()
+        }
+    }
+
+    func close() {
+        switch self {
+        case .native(let resources):
+            resources.close()
+        }
+    }
+}
+
 public final class NMPNip46Connection: @unchecked Sendable {
     public let states: AsyncStream<NMPNip46ConnectionState>
     fileprivate let observer: NIP46Observer
-    /// `nil` only for the test-only `closeAction`-only initializer below;
-    /// every connection produced by pairing/restore/import carries this.
-    private let ffiConnection: Nip46Connection?
-    private let closeAction: () -> Void
     private let closeLock = NSLock()
-    private var isClosed = false
+    private var resources: NIP46ConnectionResources?
 
-    fileprivate init(observer: NIP46Observer, ffiConnection: Nip46Connection) {
+    init(
+        observer: NIP46Observer,
+        prepared: FfiNip46PreparedConnection,
+        installation: NMPProviderSignerInstallation
+    ) {
         self.observer = observer
-        self.ffiConnection = ffiConnection
-        closeAction = { ffiConnection.disconnect() }
-        states = observer.stream
-    }
-
-    init(observer: NIP46Observer, closeAction: @escaping () -> Void) {
-        self.observer = observer
-        ffiConnection = nil
-        self.closeAction = closeAction
+        resources = .native(
+            NIP46NativeResources(prepared: prepared, installation: installation)
+        )
         states = observer.stream
     }
 
@@ -211,6 +249,9 @@ public final class NMPNip46Connection: @unchecked Sendable {
     /// before this connection has reached `.ready`; checkpointing a session
     /// that never authenticated would persist meaningless material.
     public func checkpoint() throws -> NMPNip46SessionCheckpoint {
+        closeLock.lock()
+        let ffiConnection = resources?.connection
+        closeLock.unlock()
         guard let ffiConnection else {
             throw NMPError.invalidSigner("no underlying NIP-46 connection to checkpoint")
         }
@@ -222,13 +263,10 @@ public final class NMPNip46Connection: @unchecked Sendable {
     /// Dropping the last connection reference has the same effect.
     public func close() {
         closeLock.lock()
-        guard !isClosed else {
-            closeLock.unlock()
-            return
-        }
-        isClosed = true
+        let current = resources
+        resources = nil
         closeLock.unlock()
-        closeAction()
+        current?.close()
     }
 
     deinit {
@@ -247,12 +285,40 @@ public struct NMPNip46Invitation: Sendable {
 }
 
 extension NMPEngine {
-    private func nip46Provider() throws -> NmpNip46Provider {
-        try withVerifiedNip46Core(actual: nmpProviderCoreComponentIdentity()) { compatibility in
-            NmpNip46Provider(
-                compatibility: compatibility,
-                mailbox: signerProviderMailbox()
-            )
+    func prepareAndInstallNip46(
+        observer: NIP46Observer,
+        prepare: (FfiNip46Compatibility) throws -> FfiNip46PreparedConnection
+    ) throws -> NMPNip46Connection {
+        try withVerifiedNip46Component(
+            packagedProviderIdentity: nmpNip46PackagedComponentIdentity,
+            loadedProviderIdentity: nmpNip46ComponentIdentity(),
+            packagedInterfaceIdentity: nmpProviderComponentInterfaceIdentity(),
+            loadedCoreIdentity: nmpProviderCoreComponentIdentity()
+        ) { compatibility in
+            let prepared = try nip46Rethrowing {
+                try prepare(compatibility)
+            }
+            do {
+                let installation = try installSignerProviderAdapter(
+                    prepared.adapter(compatibility: compatibility)
+                )
+                return NMPNip46Connection(
+                    observer: observer,
+                    prepared: prepared,
+                    installation: installation
+                )
+            } catch NMPProviderSignerInstallError.engineClosed {
+                // The adapter was refused before its take-once state changed,
+                // and this preparation has no successful owner.
+                prepared.connection().disconnect()
+                throw NMPError.engineClosed
+            } catch NMPProviderSignerInstallError.adapterAlreadyTaken {
+                // Never disconnect or explicitly release `prepared` here: it
+                // may be an alias retained by the successful first owner.
+                throw NMPError.invalidSigner(
+                    "prepared NIP-46 connection was already installed"
+                )
+            }
         }
     }
 
@@ -262,11 +328,19 @@ extension NMPEngine {
         metadata: NMPNip46ClientMetadata = .init()
     ) throws -> NMPNip46Invitation {
         let invitation = try nip46Rethrowing {
-            try nip46Provider().nip46Invitation(
-                relays: relays,
-                permissions: permissions,
-                metadata: metadata.toFfi()
-            )
+            try withVerifiedNip46Component(
+                packagedProviderIdentity: nmpNip46PackagedComponentIdentity,
+                loadedProviderIdentity: nmpNip46ComponentIdentity(),
+                packagedInterfaceIdentity: nmpProviderComponentInterfaceIdentity(),
+                loadedCoreIdentity: nmpProviderCoreComponentIdentity()
+            ) { compatibility in
+                try NMPNip46FFI.nip46Invitation(
+                    compatibility: compatibility,
+                    relays: relays,
+                    permissions: permissions,
+                    metadata: metadata.toFfi()
+                )
+            }
         }
         return NMPNip46Invitation(ffi: invitation)
     }
@@ -277,14 +351,14 @@ extension NMPEngine {
         timeout: Duration = .seconds(60)
     ) throws -> NMPNip46Connection {
         let observer = NIP46Observer()
-        let ffiConnection = try nip46Rethrowing {
-            try nip46Provider().connectNip46Bunker(
+        return try prepareAndInstallNip46(observer: observer) { compatibility in
+            try prepareNip46Bunker(
+                compatibility: compatibility,
                 bunkerUri: bunkerURI,
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
             )
         }
-        return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
     }
 
     @discardableResult
@@ -293,14 +367,14 @@ extension NMPEngine {
         timeout: Duration = .seconds(60)
     ) throws -> NMPNip46Connection {
         let observer = NIP46Observer()
-        let ffiConnection = try nip46Rethrowing {
-            try nip46Provider().connectNip46Invitation(
+        return try prepareAndInstallNip46(observer: observer) { compatibility in
+            try prepareNip46Invitation(
+                compatibility: compatibility,
                 invitation: invitation.ffi,
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
             )
         }
-        return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
     }
 
     /// Restore an already-authorized NIP-46 client session from `store`'s
@@ -331,14 +405,14 @@ extension NMPEngine {
         timeout: Duration = .seconds(60)
     ) throws -> NMPNip46Connection {
         let observer = NIP46Observer()
-        let ffiConnection = try nip46Rethrowing {
-            try nip46Provider().restoreNip46Session(
+        return try prepareAndInstallNip46(observer: observer) { compatibility in
+            try prepareNip46Restore(
+                compatibility: compatibility,
                 checkpoint: checkpoint.toFfi(),
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
             )
         }
-        return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
     }
 
     /// Brownfield migration door (#571): import a pre-NMP legacy client
@@ -367,14 +441,14 @@ extension NMPEngine {
             origin: origin
         )
         let observer = NIP46Observer()
-        let ffiConnection = try nip46Rethrowing {
-            try nip46Provider().nip46SessionFromParts(
+        return try prepareAndInstallNip46(observer: observer) { compatibility in
+            try prepareNip46FromParts(
+                compatibility: compatibility,
                 parts: parts.toFfi(),
                 timeoutMillis: timeout.milliseconds,
                 observer: observer
             )
         }
-        return NMPNip46Connection(observer: observer, ffiConnection: ffiConnection)
     }
 
     #if canImport(UIKit)
@@ -415,14 +489,22 @@ extension NMPEngine {
 }
 
 /// Validate plain component identity before evaluating `body`. Production's
-/// body is the first place that requests/lowers the external core mailbox;
-/// tests inject a trap body to prove mismatch cannot reach that point.
-func withVerifiedNip46Core<T>(
-    actual: String,
-    body: (FfiNip46CoreCompatibility) throws -> T
+/// body is the first place that may prepare an external adapter; tests inject
+/// a trap body to prove mismatch cannot reach that point.
+func withVerifiedNip46Component<T>(
+    packagedProviderIdentity: String,
+    loadedProviderIdentity: String,
+    packagedInterfaceIdentity: String,
+    loadedCoreIdentity: String,
+    body: (FfiNip46Compatibility) throws -> T
 ) throws -> T {
     let compatibility = try nip46Rethrowing {
-        try verifyNip46CoreComponentIdentity(actual: actual)
+        try verifyNip46Component(
+            packagedProviderIdentity: packagedProviderIdentity,
+            loadedProviderIdentity: loadedProviderIdentity,
+            packagedInterfaceIdentity: packagedInterfaceIdentity,
+            loadedCoreIdentity: loadedCoreIdentity
+        )
     }
     return try body(compatibility)
 }
@@ -440,14 +522,15 @@ private func nip46Rethrowing<T>(_ body: () throws -> T) throws -> T {
             throw NMPError.invalidRelayUrl(relay)
         case .InvalidSigner(let reason):
             throw NMPError.invalidSigner(reason)
-        case .CoreComponentMismatch(let expected, let actual):
+        case .ProviderBindingMismatch(let expected, let actual),
+             .ProviderNativeMismatch(let expected, let actual),
+             .PackageInterfaceMismatch(let expected, let actual),
+             .CoreIdentityMismatch(let expected, let actual):
             throw NMPError.nativeComponentMismatch(
                 component: "nmp-nip46",
-                expectedCoreIdentity: expected,
-                actualCoreIdentity: actual
+                expectedIdentity: expected,
+                actualIdentity: actual
             )
-        case .EngineClosed:
-            throw NMPError.engineClosed
         }
     }
 }

@@ -102,67 +102,77 @@ about current code:
   receives a relay ACK. The protocol-neutral signer contract now lives in
   dependency-free `nmp-signer`; the explicit local-key implementation lives in
   `nmp-local-signer`, while the concrete remote protocol, relay/session, and
-  checkpoint implementation lives in selectable `nmp-nip46`. Core FFI/Swift/
-  Kotlin expose only one opaque signer mailbox. Separate NIP-46 FFI,
-  `Packages/NMPNip46`, and Kotlin `:nip46` components project Primal discovery,
-  one-click launch, package-filtered Android discovery, and an exact
-  URI/package handoff contract. Deleting those provider packages leaves core
-  and an unrelated external signer buildable. Supported native release builders
-  fix the core-only or matched core/provider Cargo roots, use an isolated
-  reusable target per package set, freeze the resolution after a locked fetch,
-  and hold a per-build authorization only inside the managed Cargo subprocess.
-  Before that authorization is revoked, the managed builder copies the exact
-  outputs into a fresh artifact snapshot; Swift/Kotlin packaging reads only
-  that snapshot, never the mutable Cargo target. Before exposing the snapshot,
-  the builder extracts UniFFI's compiled metadata from the provider library
-  and first requires positive metadata for both the core mailbox and provider
-  proof. It then audits every callable namespace in that library, permits only
-  the exact outward-only core source
-  `nmp_ffi::NmpEngine::signer_mailbox`, and requires exactly one other entry
-  carrying the core mailbox, with the compatibility proof in that
-  constructor's inputs. No namespace is exempt: a linked crate that claims
-  `nmp_ffi` is audited by callable shape like every other crate. The mailbox
-  has private fields and its Rust constructor is crate-private, so even a
-  linked namespace impostor cannot mint a mailbox for its allowlisted return;
-  only the real core `NmpEngine` can vend one. UniFFI derives the audit label
-  and no-mangle scaffolding symbol from the same module/type/function tuple,
-  so a linked crate forging that exact return label collides with core at link
-  time; the audit independently requires exactly one such source. This audits
-  the same compiled authority bindgen consumes, independent of source
-  location, claimed crate/module namespace, macro expansion, aliases, records,
-  or other Rust spelling. It cannot prove the meaning of a raw integer that
-  unsafe Rust later reinterprets as a mailbox pointer; such a `u64`/raw-handle
-  escape remains outside the audit's guarantee and is not a supported entry
-  shape.
-  `build.rs` canonicalizes both
-  the component root and its actual `OUT_DIR`, then requires the exact
-  `<target>/release/build/nmp-ffi-*/out` layout, so nested targets, `..`
-  escapes, and custom profile directories cannot inherit the authorization.
-  Only within that fixed shape does the deterministic
-  component identity self-derive and hash Cargo's exact resolved unit graph
-  (package roots/edges, transitive features, profiles, and targets), every
-  governed core/fixture input, and compiler/build inputs. An ad-hoc release
-  invocation cannot accidentally write or replace a package input; concurrent
-  managed builds of one package set refuse with a specific lock error rather
-  than rotating each other's authorization. The kernel-held lock remains owned
-  by any surviving Cargo/rustc descendants after a killed shell and releases
-  automatically when the last holder exits; stale lock-file bytes alone never
-  block a later build. Debug/IDE builds remain available
-  but are not packaging inputs. External path patches
-  that cannot be reproduced from the repository are refused. Swift and Kotlin
-  compare the embedded identities before requesting the opaque mailbox, and a
-  mismatch is a typed construction failure before any external Rust object
-  crosses the component seam (#952). The build authorization is a working-
-  discipline guard against accidental artifact substitution, not a secret
-  against a caller deliberately forging the marker or reading/replaying the
-  in-flight token; the native identity comparison is the runtime authority.
-  The managed builder never returns or prints that token. Supported builders always use the exact release
-  profile; custom/bench release-class builds are intentionally not a supported
-  packaging path and fail without that builder authorization. The Android AAR
-  work in #831 still owns
-  publishing that same identity in provenance/Gradle metadata and
-  emulator-qualifying a deliberately mismatched pair; the native check remains
-  the final authority when packaging metadata is stale or tampered.
+  checkpoint implementation lives in selectable `nmp-nip46`. The shared
+  `nmp-component-interface` now projects one opaque, branded
+  `FfiSignerAdapter` rather than exporting a core-owned object. The provider
+  mints a bounded, lazy contribution containing its task factory, serialized
+  attach/detach control, and take-once cancellation. It contains no core
+  engine, signer registration, runtime handle, or second callback bridge. The
+  core resolves its own adapter runtime before consuming the contribution,
+  takes the adapter exactly once, starts provider and driver work on that
+  runtime, and owns the exact installation lease; close/drop consumes that
+  lease and cancellation once. Separate NIP-46 FFI, `Packages/NMPNip46`, and
+  Kotlin `:nip46` components project Primal discovery, one-click launch,
+  package-filtered
+  Android discovery, and an exact URI/package handoff contract. Deleting those
+  provider packages leaves core and an unrelated external signer buildable.
+
+  Native release construction is component-v2 and selection-neutral. The
+  managed builder accepts one metadata-declared Cargo root at a time. It first
+  seals standalone core; an optional component then consumes that exact
+  read-only core artifact and its adjacent manifest/witness rather than
+  widening the core's feature or package set. Core, provider, and shared
+  interface have distinct deterministic identities
+  (`nmp-core-component-v2-*`, `nmp-nip46-component-v2-*`, and
+  `nmp-component-interface-v2-*`). Each identity covers the exact resolved
+  Cargo unit graph, transitive features, compiler, build flags, target/profile,
+  and governed inputs. The provider additionally commits to the required core
+  identity while the core identity stays unchanged when no provider is
+  selected.
+
+  Each build emits a canonical schema-2 component manifest and embeds a named
+  attestation payload in the compiled library. The provider manifest/payload
+  carries the exact required core identity plus BLAKE3 digests of the core
+  artifact and manifest. The artifact-witness tool reads the final archive,
+  shared object, dylib, or XCFramework input itself and records its BLAKE3,
+  size, target/architecture/format, public symbols, UniFFI components, and
+  parsed attestation. The fail-closed verifier checks the exact read-only
+  artifact/manifest/witness tuple, target/profile/compiler/flags/interface
+  agreement, provider-to-core identity and byte-digest requirements, and
+  duplicate component keys. For a static provider it also proves that the
+  shared interface's exact structurally-derived symbol set was localized and
+  is no longer public. Only then does the builder publish a fresh read-only
+  artifact snapshot; Swift/Kotlin packaging never reads the mutable Cargo
+  target.
+
+  `build.rs` canonicalizes the component root and actual `OUT_DIR`, requires
+  the exact managed component/package/target release layout, and accepts the
+  short-lived build authorization only inside that Cargo subprocess. A
+  kernel-held lock serializes one component target and survives a killed shell
+  until its last Cargo/rustc descendant exits; stale lock-file bytes alone do
+  not block a later build. Debug/IDE builds remain available but are not
+  packaging inputs, external path patches that cannot be reproduced from the
+  repository are refused, and custom/bench release-class builds are not a
+  supported packaging path. The authorization is a working-discipline guard,
+  not a secret against a caller deliberately replaying it; the embedded
+  attestations, exact witnesses, manifests, and runtime identities are the
+  artifact authority.
+
+  Before provider work or adapter preparation can run, Swift and Kotlin ask
+  the provider to compare the packaged provider binding with the loaded
+  provider identity, the packaged interface with the loaded core interface,
+  and the provider's required core identity with the loaded core. A mismatch
+  is a typed `nativeComponentMismatch`/`NativeComponentMismatch` construction
+  failure. Only the constructorless compatibility proof can enter one of the
+  four preparation functions, and only the returned Prepared carrier can
+  reveal its take-once adapter. The compiled UniFFI metadata audit enforces
+  proof-before-adapter ordering over every callable namespace. Thus no
+  external Rust object crosses the component seam before the exact v2 checks
+  succeed (#952). The Android AAR work in #831 still owns publishing the same
+  identities/digests in provenance and Gradle metadata and emulator-qualifying
+  a deliberately mismatched pair; the native check remains final authority
+  when packaging metadata is stale or tampered.
+
   Connections own scoped
   registrations, so a stale session cannot detach its replacement, and
   close/drop deterministically finishes only that session. An explicitly
@@ -172,7 +182,7 @@ about current code:
   #47/#51: explicit per-write identity override, standard Keychain/Keystore
   providers and automatic secure-vault restore, NIP-55 execution/Android AAR
   integration, and permanent signer connection/correlation counters in engine
-  diagnostics. The existing NIP-46 teardown, foreign-capability mailbox,
+  diagnostics. The existing NIP-46 teardown, foreign-capability,
   pull-delivery, and process-global-runtime corrections remain separately
   tracked by #770/#783/#784/#871; this ownership split does not claim them.
   The governed component catalog and distinct snapshots cover both core
@@ -430,7 +440,7 @@ about current code:
   - **NIP-29 tag/limit amplification CLOSED at the store boundary (#142); device room-open verification pending.** `BY_AUTHOR`/`BY_KIND` still left `kind:9 & #h=<group> & limit:200` decoding every cached kind:9 event across every room, and the complete-set `EventStore::query` door cannot safely honor `limit` because reactive recompute and negentropy require its full answer (#124/#139). **Fix:** redb now maintains a generic NIP-01 single-letter tag index keyed by tag/value/`created_at`/event-id in the same transaction as every canonical mutation and rebuilds it crash-atomically on legacy reopen. A separate `query_newest` door reverse-scans one ordered tag bucket and stops after N accepted rows; handle projection uses that bounded door per root atom, then preserves the authoritative final merged global top-N. Real persisted corpus: 1,062 kind:9 rows, busiest `#h` room 557 rows, `limit:200`; 50-iteration release mean fell from 5.150 ms to 0.784 ms (6.57x), and full-event JSON/crypto reconstruction fell from 1,062 candidates to 200. This proves the store cost drop, not yet the end-to-end device UX; the remaining binary-record/planner/batch work is tracked under #148.
   - **Nested-JSON canonical event rows CLOSED (#150), then split immutable-note storage CLOSED (#162).** Canonical v3 rows are endian-defined binary values addressed by monotonic `u64` surrogate keys: immutable id/pubkey/signature/time/kind/tags/content bytes live in `EVENTS`, raw 32-byte ids resolve through `EVENT_IDS`, and relay/local provenance lives in a separate binary metadata sidecar. Every ordered/address/expiry index stores the surrogate key; canonical lowercase 64-hex tag values occupy 32 raw bytes in the tag index. Query predicates borrow fixed fields and tag/content slices from the redb value guard, so rejected candidates never construct `nostr::Event`, parse hex, or reconstruct secp types. An exact equal-or-earlier relay replay reads only the metadata sidecar and performs no write at all; signature adoption rewrites the immutable note only when the signed event actually changes. The v3 change is intentionally schema-breaking: opening a file containing a legacy event epoch now fails before any v3 table is created, so old outbox/coverage facts can never run beside an empty v3 event store. Differential matching tests pin equivalence with `nostr::Filter::match_event`, and a raw referential-integrity audit covers supersession, duplicate provenance, kind:5, NIP-40, GC, compensation, and every crash seam. On the 1,114-event real corpus (1,062 kind:9, busiest room 557), the bounded room query measured 0.260 ms versus the original 5.150 ms; a 1,114-event exact replay measured 6.102 ms versus 24.98 ms before the split, and 20 exact passes left the 4,214,784-byte redb file unchanged. The surrogate is a lookup/CPU win, not a claimed size win: v3 logical stored bytes were 1,486,162 versus v2's 1,474,770 (+11,392, 0.77%); its five query indexes were 475,137 versus 465,940 (+9,197, 1.97%) because exact tie ordering still retains the full id while each row gains an eight-byte value. The checked-in `storage_stats` example reproduces physical and per-table accounting across both schemas. Many *distinct* relays still grow and rewrite the variable-length sidecar: relay-url interning/fixed-width observations remain open under #148. These remain store microbenchmarks; end-to-end device room-open verification is still pending.
   - **Relay URL interning and fixed-width per-event observations CLOSED (#167).** This supersedes the final “remain open” sentence in the historical #162/v3 bullet above. Canonical v4 stores optional local intent state in a dedicated `NMPL` value and each relay observation as one fixed 12-byte `(event_key:u64, relay_key:u32)` key plus an eight-byte latest timestamp. Relay URLs are interned once behind bijective forward/reverse tables with exact refcounts; removing the last observation reclaims the URL, while monotonic relay keys are never reused. Exact/equal replay point-checks one observation and writes nothing; a later timestamp replaces one eight-byte value; a new relay adds one fixed row without rewriting event or local bytes. A transaction accumulates effective refcounts in memory and flushes the hot row once per distinct relay, including bulk insert, expiry, GC, supersession, and compensation. Query materialization joins observations only after borrowed event filtering and caches each parsed relay URL once per query. Every observation/event/relay/refcount relation is included in the raw exact-set integrity audit and a process-abort seam proves dictionary, observation, refcount, event, indexes, and outbox remain one atomic fact. The checked-in `ingest_bench` now reproduces a 1/20/100-relay matrix from a real current store, including busiest-room newest-200, complete and reopen-first queries, exact-replay growth, and logical/physical bytes. A three-run matrix on the 1,114-event corpus (1,062 kind:9; busiest room 557) measured 0.296/0.700/2.678 ms for room newest-200, 1.691/4.640/18.368 ms for complete queries, 4.943/5.969/5.998 ms for exact replay with zero file growth, and 1,437,260/1,862,424/3,652,664 logical bytes. At 100 relays the physical file was 16,809,984 bytes. For historical scale, the earlier v3 101-relay run measured 6.571 ms room, 36.008 ms complete, 30.523 ms per new-relay pass, 6,168,304 logical bytes, and 29,700,096 physical bytes. Public `Provenance` construction necessarily remains proportional to returned observations; the avoidable URL reparsing, variable-sidecar COW, and repeated hot-refcount writes are closed. Device room-open verification remains pending.
-- **Ordered one-best-index query planning CLOSED (#149); device verification pending.** The author and kind indexes are binary `(field, created_at, !event-id)` rows, joined by global-created-at and tag indexes with the same suffix. `query_newest` chooses one best index (author, the smallest tag value set, kind, then global time), reverse-scans newest-first, and applies every remaining filter to the borrowed binary event. #646 removed the redundant physical author+kind index; a combined filter chooses the smaller author or kind bucket and post-filters the other exact predicate. Single ranges stop directly at the requested visible limit; OR values are exact k-way merges with id deduplication and the canonical `created_at DESC, id ASC` tie-break. All index mutations remain inside the same crash-atomic transaction as events, coverage, and delivery state; the store defines one exact current schema epoch and refuses any other at open (#867), so there is no in-place index migration. Tests prove kind/global scans materialize exactly N rows, multi-tag OR order is exact, and rejected candidates stay borrowed. On the real 1,062-row corpus, 100-iteration release means were 0.373 ms for the busiest room, 0.299 ms for kind:9, and 0.317 ms for the global newest 200. The original room baseline was 5.150 ms; end-to-end device room-open remains to be re-measured.
+  - **Ordered one-best-index query planning CLOSED (#149); device verification pending.** The author and kind indexes are binary `(field, created_at, !event-id)` rows, joined by global-created-at and tag indexes with the same suffix. `query_newest` chooses one best index (author, the smallest tag value set, kind, then global time), reverse-scans newest-first, and applies every remaining filter to the borrowed binary event. #646 removed the redundant physical author+kind index; a combined filter chooses the smaller author or kind bucket and post-filters the other exact predicate. Single ranges stop directly at the requested visible limit; OR values are exact k-way merges with id deduplication and the canonical `created_at DESC, id ASC` tie-break. All index mutations remain inside the same crash-atomic transaction as events, coverage, and delivery state; the store defines one exact current schema epoch and refuses any other at open (#867), so there is no in-place index migration. Tests prove kind/global scans materialize exactly N rows, multi-tag OR order is exact, and rejected candidates stay borrowed. On the real 1,062-row corpus, 100-iteration release means were 0.373 ms for the busiest room, 0.299 ms for kind:9, and 0.317 ms for the global newest 200. The original room baseline was 5.150 ms; end-to-end device room-open remains to be re-measured.
   - **Cardinality-aware complete/bounded planning and streaming execution CLOSED (#169); device verification pending.** The shape-priority planner and complete-query candidate `HashSet` unions/intersections are gone. redb originally persisted exact live-row counts for global, author, kind, author+kind, and every single-letter tag/value prefix. One transaction-owned index bundle accumulates checked deltas in memory and flushes each touched prefix once in the same crash-atomic commit as canonical events and indexes; duplicate tags count one physical row, zero rows disappear, and an independently versioned sidecar rebuilds atomically by counting ordered index keys without dereferencing canonical event values before publishing its marker. Both complete and bounded reads generate every applicable bounded-fan-out plan, choose the smallest persisted physical bucket, retain one reverse redb iterator per OR prefix, heap-merge in canonical `created_at DESC, id ASC` order, and apply only unmatched predicates to the borrowed binary view. Multi-value overlap deduplicates the immediately repeated surrogate without an unbounded candidate set; bounded reads stop without advancing or dereferencing the next candidate after the visible limit. Exact instrumentation distinguishes index entries, borrowed event-value dereferences, and owned materializations. Tests include deterministic mixed filters differential against `MemoryStore`, empty-set/reversed-window semantics, selected-tag masking, overlapping tag OR, raw sidecar audit across every governed mutation/crash test, and missing-epoch rebuild. The checked `query_bench` measures complete/bounded global, kind, author, author+kind, tags, multi-tag selection, populated author unions, rejected-heavy search, and reopen-first reads. Follow-up #627 replaced the exact planner-only sidecar with a per-store-keyed uniform one-in-sixteen sample. The key prevents relay-controlled event-id grinding; all event/index semantics remain exact, zero/close estimates only affect which complete index is post-filtered, sampled deletion deltas stay atomic with index deletion, and a missing/old sidecar key triggers one atomic sampled rebuild before queries. On the representative 100,000-event corpus, fifteen production-path pairs measured sampled ingest 26.6% faster, while the query matrix's worst paired-median p95 change was +1.7%, under the 10% gate. #646 then removed the physical author+kind index and its sampled prefix row: full relay ingest improved another 13.3% with 25.3% fewer process writes; the worst paired-median query p95 change was +6.6%, still under the gate. End-to-end device room-open remains pending.
   - **Bounded interior `Derived` projections CLOSED (#187); device verification pending.** A `Derived` binding kept its inner NIP-01 `limit` in the descriptor and wire filter but used complete-set `EventStore::query` for local construction and recompute, silently turning “authors of the newest 200 matches” into a full-history materialization. The resolver now selects explicit limits through `query_newest` before applying its closed selector; unlimited derived nodes and negentropy retain the complete query door unchanged. A generic falsifier proves an older row outside top-N cannot affect the derived set, a newer row evicts exactly the old floor, and kind:5 retraction pulls the next-newest row back in. On the #186 million-row fixture, the real resolver subscription over a 59,915-row hot bucket fell from 3,786.191 ms p50 to 0.730 ms p50 (1.406 ms p95) while producing the same 33 demand atoms. This is generic resolver semantics, not NIP-29-specific storage logic; #176 still owns physical-device closure.
   - **Portable packed tag/string arenas CLOSED (#170); device verification pending.** Immutable event codec v4 keeps the 158-byte fixed header, then stores cumulative tag ends, one four-byte atom descriptor per element, a dense arena, and directly addressable content. Descriptors inline zero-to-three-byte UTF-8, point to shortest-form LEB-length UTF-8 cells, or point to raw 32-byte canonical lowercase-hex identities; borrowed tag iteration returns text/raw views, and each query prepares raw wanted values once for binary search, so rejected candidates neither allocate nor hex-encode. Full validation rejects overflow, gaps, overlap, unused arena tails, non-zero reserved/padding bits, overlong LEB, invalid UTF-8, empty tags, representation aliases, truncation, and trailing bytes. The encoder makes two classification passes but allocates only the final value; materialization alone recreates exact lowercase hex strings for returned rows. Unchanged local/provenance sidecars retain codec v3, composite displaced rows move to v4, and the whole crash-atomic store bundle moves to rejecting epoch v5: any v4 event/displaced table aborts open before one v5 table is created, with no compatibility path. On the preserved 1,114-event corpus (2,543 tags, 5,085 atoms; 2,535 inline and 1,348 raw32), immutable values are 881,779→837,122 bytes (-5.064%) and the events table is 890,691→846,034 stored bytes (-5.014%). Five identical paired event-only redb builds measured 2,670,592→2,584,576 compacted bytes (-3.221%); full-store compacted file size is deliberately not claimed because redb 4.1 compaction is bimodal under layout entropy. A tag-heavy NIP-29 falsifier is 1,487→959 bytes (-35.51%). Alternating same-session real imports measured median 34.97 ms for v3 versus 34.01 ms for v4, while the codec itself encoded all 1,114 events in 0.187 ms; paired room/member/global queries remained within run noise and exact results were unchanged. End-to-end device room-open remains pending.

@@ -42,10 +42,11 @@ jobs:
       - name: Add selected Apple targets
         run: rustup target add ${{ steps.apple_scope.outputs.targets }}
 
-      # Core and the optional provider must come from one Cargo resolution
-      # unit. The paired builder compiles that unit once per selected target,
-      # then packages both XCFrameworks from the same sealed snapshots.
-      - name: Build matched core and NIP-46 provider XCFrameworks once
+      # Core and provider are independent v2 component roots. For each target,
+      # the provider builder consumes the exact sealed core artifact, verifies
+      # the core/provider/interface manifest tuple and embedded attestations,
+      # then packages only those witnessed snapshots.
+      - name: Build independently sealed core and NIP-46 provider XCFrameworks
         id: apple_components
         run: scripts/build-swift-nip46-xcframework.sh ${{ steps.apple_scope.outputs.mode }}
 

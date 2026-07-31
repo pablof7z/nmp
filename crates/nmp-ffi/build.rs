@@ -1,257 +1,186 @@
+#[path = "../nmp-component-interface/component_identity.rs"]
 mod component_identity;
 
 use std::env;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-const IDENTITY_VERSION: &str = "nmp-core-component-v1";
-const PROVIDER_ONLY_CRATES: &[&str] = &["nmp-nip46", "nmp-nip46-ffi"];
+const IDENTITY_VERSION: &str = "nmp-core-component-v2";
+const COMPONENT_KEY: &str = "nmp-core";
+const CARGO_PACKAGE: &str = "nmp-ffi";
+const LIBRARY_STEM: &str = "nmp_ffi";
+const UNIFFI_NAMESPACE: &str = "nmp_ffi";
 
 fn main() {
+    for variable in [
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTFLAGS",
+        "CARGO_BUILD_RUSTFLAGS",
+        "RUSTC",
+        "NMP_COMPONENT_BUILD_AUTH",
+        "NMP_COMPONENT_BUILD_ROOT",
+        "NMP_COMPONENT_MANIFEST_OUTPUT",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies CARGO_MANIFEST_DIR"),
     );
     let workspace = manifest_dir
         .parent()
         .and_then(Path::parent)
-        .expect("nmp-ffi remains under <workspace>/crates/nmp-ffi");
-
-    let mut hasher = blake3::Hasher::new();
-    add_field(&mut hasher, "identity-version", IDENTITY_VERSION.as_bytes());
-    add_field(
-        &mut hasher,
-        "target",
-        env::var("TARGET")
-            .expect("Cargo supplies TARGET")
-            .as_bytes(),
-    );
-    add_field(
-        &mut hasher,
-        "profile",
-        env::var("PROFILE")
-            .expect("Cargo supplies PROFILE")
-            .as_bytes(),
-    );
-    hash_cargo_unit_graph(workspace, &mut hasher);
-    for variable in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"] {
-        println!("cargo:rerun-if-env-changed={variable}");
-        if let Ok(value) = env::var(variable) {
-            add_field(
-                &mut hasher,
-                variable,
-                component_identity::normalize_build_text(&value, workspace).as_bytes(),
-            );
-        }
-    }
-
-    let rustc = env::var_os("RUSTC").expect("Cargo supplies RUSTC");
-    let rustc_version = Command::new(rustc)
-        .args(["--version", "--verbose"])
-        .output()
-        .expect("rustc --version --verbose must run");
-    if !rustc_version.status.success() {
-        panic!("rustc --version --verbose failed");
-    }
-    add_field(&mut hasher, "rustc", &rustc_version.stdout);
-
-    let mut cargo_features = env::vars()
-        .filter(|(key, _)| key.starts_with("CARGO_FEATURE_"))
-        .collect::<Vec<_>>();
-    cargo_features.sort();
-    for (key, value) in cargo_features {
-        add_field(&mut hasher, &key, value.as_bytes());
-    }
-
-    for relative in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"] {
-        hash_file(workspace, &workspace.join(relative), &mut hasher);
-    }
-
-    let crates_dir = workspace.join("crates");
-    println!("cargo:rerun-if-changed={}", crates_dir.display());
-    let mut crate_dirs = fs::read_dir(&crates_dir)
-        .expect("workspace crates directory exists")
-        .map(|entry| entry.expect("crate directory entry is readable").path())
-        .filter(|path| path.is_dir())
-        .filter(|path| {
-            path.file_name()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| !PROVIDER_ONLY_CRATES.contains(&name))
-        })
-        .collect::<Vec<_>>();
-    crate_dirs.sort();
-    for crate_dir in crate_dirs {
-        hash_source_tree(workspace, &crate_dir, &mut hasher);
-    }
-    hash_source_tree(workspace, &workspace.join("fixtures"), &mut hasher);
-
-    println!("cargo:rerun-if-env-changed=RUSTC");
-    println!(
-        "cargo:rustc-env=NMP_CORE_COMPONENT_IDENTITY={IDENTITY_VERSION}-{}",
-        hasher.finalize().to_hex()
-    );
-}
-
-fn hash_cargo_unit_graph(workspace: &Path, hasher: &mut blake3::Hasher) {
-    // Cargo exposes a build-script profile class here: `debug` or `release`.
-    // Built-in `bench` is release-class too. Supported component builders use
-    // exact `--release`; every unmanaged release-class invocation fails below.
-    let profile = env::var("PROFILE").expect("Cargo supplies PROFILE");
-    assert!(
-        profile == "debug" || profile == "release",
-        "unknown Cargo build-script profile class: {profile}"
-    );
-
-    let cargo_has_provider_component =
-        env::var_os("CARGO_FEATURE_NIP46_PROVIDER_COMPONENT").is_some();
-    let unexpected_features = env::vars()
-        .filter_map(|(key, _)| key.strip_prefix("CARGO_FEATURE_").map(str::to_owned))
-        .filter(|feature| feature != "DEFAULT" && feature != "NIP46_PROVIDER_COMPONENT")
-        .collect::<Vec<_>>();
-    assert!(
-        unexpected_features.is_empty(),
-        "component identity must explicitly resolve new nmp-ffi features: {unexpected_features:?}"
-    );
-
-    if profile == "release" {
-        let marker = validated_release_marker(cargo_has_provider_component);
-        println!("cargo:rerun-if-changed={}", marker.display());
-        let marker_bytes = fs::read(&marker)
-            .unwrap_or_else(|error| panic!("read component marker {}: {error}", marker.display()));
-        add_field(hasher, "component-build-marker", &marker_bytes);
-    }
-
-    let cargo = env::var_os("CARGO").expect("Cargo supplies CARGO");
+        .expect("nmp-ffi remains under <workspace>/crates");
     let target = env::var("TARGET").expect("Cargo supplies TARGET");
-    let mut command = Command::new(cargo);
-    command.current_dir(workspace).args([
-        "build",
-        "-Z",
-        "unstable-options",
-        "--unit-graph",
-        "--locked",
-        "-p",
-        "nmp-ffi",
-        "--target",
-        &target,
-    ]);
-    if cargo_has_provider_component {
-        command.args(["-p", "nmp-nip46-ffi"]);
-    }
-    if profile == "release" {
-        command.arg("--release");
-    }
-    let output = command
-        .output()
-        .expect("Cargo no-build unit graph resolution must run");
-    assert!(
-        output.status.success(),
-        "Cargo no-build unit graph resolution failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mut graph: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| panic!("parse Cargo no-build unit graph: {error}"));
-    component_identity::validate_unit_graph_against_cargo(
-        &graph,
+    let profile = env::var("PROFILE").expect("Cargo supplies PROFILE");
+    let cargo = PathBuf::from(env::var_os("CARGO").expect("Cargo supplies CARGO"));
+    let rustc = PathBuf::from(env::var_os("RUSTC").expect("Cargo supplies RUSTC"));
+    let interface_identity = env::var("DEP_NMP_COMPONENT_INTERFACE_INTERFACE_IDENTITY")
+        .expect("component-interface build script supplies its complete identity");
+    let computed = component_identity::compute_component_identity(
         workspace,
-        cargo_has_provider_component,
+        &cargo,
+        &rustc,
+        &component_identity::IdentitySpec {
+            version: IDENTITY_VERSION,
+            component_key: COMPONENT_KEY,
+            cargo_package: CARGO_PACKAGE,
+            target: &target,
+            profile: &profile,
+            interface_identity: Some(&interface_identity),
+            required_core_identity: None,
+            forbidden_packages: &["nmp-nip46", "nmp-nip46-ffi"],
+        },
     )
-    .unwrap_or_else(|error| panic!("validate Cargo no-build unit graph: {error}"));
-    component_identity::canonicalize_unit_graph(&mut graph, workspace);
-    let canonical = serde_json::to_vec(&graph)
-        .unwrap_or_else(|error| panic!("serialize canonical Cargo unit graph: {error}"));
-    add_field(hasher, "cargo-unit-graph", &canonical);
+    .unwrap_or_else(|error| panic!("compute standalone core identity: {error}"));
+
+    println!(
+        "cargo:rustc-env=NMP_CORE_COMPONENT_IDENTITY={}",
+        computed.identity
+    );
+    println!("cargo:rustc-check-cfg=cfg(nmp_component_release_attestation)");
+    if profile == "release" {
+        validate_release_context(&target);
+        write_manifest(&target, &interface_identity, &computed);
+        write_attestation(&target, &interface_identity, &computed);
+        println!("cargo:rustc-cfg=nmp_component_release_attestation");
+    }
 }
 
-fn validated_release_marker(cargo_has_provider_component: bool) -> PathBuf {
-    println!("cargo:rerun-if-env-changed=NMP_FFI_COMPONENT_AUTH");
-    println!("cargo:rerun-if-env-changed=NMP_FFI_COMPONENT_ROOT");
+fn validate_release_context(target: &str) {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
         .canonicalize()
         .expect("Cargo OUT_DIR must exist");
-    let component_root = PathBuf::from(
-        env::var_os("NMP_FFI_COMPONENT_ROOT")
-            .expect("release native components require the supported component builder"),
+    let root = PathBuf::from(
+        env::var_os("NMP_COMPONENT_BUILD_ROOT")
+            .expect("release native components require the managed builder"),
     )
     .canonicalize()
-    .expect("supported component root must exist");
-    let target = env::var("TARGET").expect("Cargo supplies TARGET");
-    let package_set = if cargo_has_provider_component {
-        "nip46"
-    } else {
-        "core"
-    };
-    let expected = format!(
-        "nmp-component-build-v1\npackage-set={package_set}\ntarget={target}\nprofile=release\n"
-    );
-
+    .expect("managed component root must exist");
     assert!(
-        component_root.file_name().and_then(OsStr::to_str) == Some(package_set)
-            && component_root
+        root.file_name().and_then(|name| name.to_str()) == Some(COMPONENT_KEY)
+            && root
                 .parent()
                 .and_then(Path::file_name)
-                .and_then(OsStr::to_str)
-                == Some("nmp-component-build"),
-        "release component root is not a supported package-set target"
+                .and_then(|name| name.to_str())
+                == Some("nmp-component-build-v2"),
+        "release component root is not the standalone core target"
     );
-    component_identity::validate_release_out_dir(&component_root, &out_dir, &target)
+    component_identity::validate_release_out_dir(&root, &out_dir, target, CARGO_PACKAGE)
         .unwrap_or_else(|error| panic!("{error}"));
-
-    let marker = component_root.join(".nmp-component-build-v1").join(&target);
-    let actual = fs::read_to_string(&marker)
-        .unwrap_or_else(|_| panic!("release component target has no supported builder marker"));
-    assert_eq!(
-        actual, expected,
-        "release component marker disagrees with Cargo-observed package set or target"
+    let marker_dir = root.join(".nmp-component-build-v2");
+    let marker = marker_dir.join(target);
+    let expected = format!(
+        "nmp-component-build-v2\ncomponent-key={COMPONENT_KEY}\ncargo-package={CARGO_PACKAGE}\ntarget={target}\nprofile=release\n"
     );
-    let authorization = component_root
-        .join(".nmp-component-build-v1")
-        .join(".authorization");
-    println!("cargo:rerun-if-changed={}", authorization.display());
-    let expected_authorization = fs::read_to_string(&authorization)
-        .unwrap_or_else(|_| panic!("release component target has no live builder authorization"));
-    if env::var("NMP_FFI_COMPONENT_AUTH").as_deref() != Ok(expected_authorization.trim()) {
-        panic!("release component authorization does not match its isolated target");
-    }
-    marker
+    let actual = fs::read_to_string(&marker)
+        .unwrap_or_else(|_| panic!("release component target has no managed marker"));
+    assert_eq!(actual, expected, "release component marker disagrees");
+    let authorization = marker_dir.join(".authorization");
+    let expected_auth = fs::read_to_string(&authorization)
+        .unwrap_or_else(|_| panic!("release component target has no live authorization"));
+    assert_eq!(
+        env::var("NMP_COMPONENT_BUILD_AUTH").as_deref(),
+        Ok(expected_auth.trim()),
+        "release component authorization does not match its isolated target"
+    );
 }
 
-fn hash_source_tree(workspace: &Path, directory: &Path, hasher: &mut blake3::Hasher) {
-    println!("cargo:rerun-if-changed={}", directory.display());
-    let mut entries = fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|error| panic!("read entry in {}: {error}", directory.display()))
-                .path()
-        })
-        .collect::<Vec<_>>();
-    entries.sort();
-
-    for path in entries {
-        if path.is_dir() {
-            hash_source_tree(workspace, &path, hasher);
-            continue;
-        }
-        hash_file(workspace, &path, hasher);
-    }
+fn write_manifest(
+    target: &str,
+    interface_identity: &str,
+    computed: &component_identity::ComputedIdentity,
+) {
+    let output = PathBuf::from(
+        env::var_os("NMP_COMPONENT_MANIFEST_OUTPUT")
+            .expect("managed release build supplies manifest output"),
+    );
+    let value = serde_json::json!({
+        "attestation_symbol": "NMP_CORE_COMPONENT_ATTESTATION_V2",
+        "binding_identity": computed.identity,
+        "build_flags_digest": computed.flags_digest,
+        "cargo_package": CARGO_PACKAGE,
+        "component_key": COMPONENT_KEY,
+        "graph_digest": computed.graph_digest,
+        "identity": computed.identity,
+        "interface_identity": interface_identity,
+        "kind": "core",
+        "library_stem": LIBRARY_STEM,
+        "native_identity": computed.identity,
+        "profile": "release",
+        "rustc_digest": computed.rustc_digest,
+        "schema": 2,
+        "target": target,
+        "uniffi_namespace": UNIFFI_NAMESPACE,
+    });
+    let mut bytes = serde_json::to_vec(&value).expect("serialize canonical core manifest");
+    bytes.push(b'\n');
+    let temporary = output.with_extension("json.tmp");
+    fs::write(&temporary, bytes).expect("write temporary core manifest");
+    fs::rename(&temporary, &output).expect("publish core manifest atomically");
 }
 
-fn hash_file(workspace: &Path, path: &Path, hasher: &mut blake3::Hasher) {
-    println!("cargo:rerun-if-changed={}", path.display());
-    let relative = path
-        .strip_prefix(workspace)
-        .unwrap_or_else(|_| panic!("{} is inside {}", path.display(), workspace.display()))
-        .to_string_lossy()
-        .replace('\\', "/");
-    let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    add_field(hasher, &relative, &bytes);
+fn write_attestation(
+    target: &str,
+    interface_identity: &str,
+    computed: &component_identity::ComputedIdentity,
+) {
+    let value = serde_json::json!({
+        "build_flags_digest": computed.flags_digest,
+        "cargo_package": CARGO_PACKAGE,
+        "component_key": COMPONENT_KEY,
+        "graph_digest": computed.graph_digest,
+        "identity": computed.identity,
+        "interface_identity": interface_identity,
+        "kind": "core",
+        "library_stem": LIBRARY_STEM,
+        "profile": "release",
+        "rustc_digest": computed.rustc_digest,
+        "schema": 1,
+        "target": target,
+        "uniffi_namespace": UNIFFI_NAMESPACE,
+    });
+    let payload = serde_json::to_vec(&value).expect("serialize canonical core attestation");
+    let payload_length =
+        u32::try_from(payload.len()).expect("core attestation payload fits in a u32");
+    let mut record = b"NMPATT01".to_vec();
+    record.extend_from_slice(&payload_length.to_le_bytes());
+    record.extend_from_slice(&payload);
+    write_attestation_source("NMP_CORE_COMPONENT_ATTESTATION_V2", &record);
 }
 
-fn add_field(hasher: &mut blake3::Hasher, name: &str, value: &[u8]) {
-    hasher.update(&(name.len() as u64).to_le_bytes());
-    hasher.update(name.as_bytes());
-    hasher.update(&(value.len() as u64).to_le_bytes());
-    hasher.update(value);
+fn write_attestation_source(symbol: &str, record: &[u8]) {
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
+        .join("component_attestation.rs");
+    let bytes = record
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let source = format!(
+        "#[used]\n#[no_mangle]\npub static {symbol}: [u8; {}] = [{bytes}];\n",
+        record.len()
+    );
+    let temporary = output.with_extension("rs.tmp");
+    fs::write(&temporary, source).expect("write temporary core attestation source");
+    fs::rename(&temporary, &output).expect("publish core attestation source atomically");
 }

@@ -1,0 +1,14 @@
+schema = 1
+key = "nmp-component-interface"
+state = "active"
+uniffi_namespace = "nmp_component_interface"
+artifact_owner = "nmp-core"
+
+ffi_sources = ["crates/nmp-component-interface/src"]
+
+swift_manifests = []
+swift_sources = []
+swift_omission_reason = "Generated core-package SPI only; there is no app-facing Swift API."
+kotlin_manifests = []
+kotlin_sources = []
+kotlin_omission_reason = "Generated core-package SPI only; there is no app-facing Kotlin API."

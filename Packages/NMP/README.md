@@ -46,8 +46,8 @@ lifecycle.
 
 NIP-46 is deliberately not linked or nameable from this core package. Apps
 that need it add the sibling `Packages/NMPNip46` product and import
-`NMPNip46`; that package consumes the core engine's opaque signer mailbox and
-contributes an ordinary signer without creating another engine lifecycle:
+`NMPNip46`; that package prepares a take-once signer adapter and asks the core
+engine to install it without creating another engine lifecycle:
 
 ```swift
 // Host Info.plist: LSApplicationQueriesSchemes = ["primalconnect"]
@@ -141,11 +141,11 @@ scripts/build-swift-nip46-xcframework.sh --sim-only
 swift test --package-path Packages/NMPNip46
 ```
 
-The provider builder refreshes both XCFrameworks from one Cargo resolution so
-the external mailbox has one exact native type identity. The provider verifies
-that identity against the loaded core before requesting the mailbox and throws
-the typed `NMPError.nativeComponentMismatch` on skew. Run the core builder alone
-only for a core-only artifact.
+The provider builder refreshes both XCFrameworks and seals the provider static
+artifact to the exact core static artifact it accompanies. The provider
+verifies the packaged interface, core, and provider identities before preparing
+its adapter and throws the typed `NMPError.nativeComponentMismatch` on skew.
+Run the core builder alone only for a core-only artifact.
 
 CI proves the core-only and selected-provider paths from clean checkouts in
 `.github/workflows/ci.yml` and `.github/workflows/nip46-provider.yml`; missing

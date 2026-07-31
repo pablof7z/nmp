@@ -72,8 +72,8 @@ public enum NMPError: Error, Sendable, Equatable {
     /// crosses the component boundary (#952).
     case nativeComponentMismatch(
         component: String,
-        expectedCoreIdentity: String,
-        actualCoreIdentity: String
+        expectedIdentity: String,
+        actualIdentity: String
     )
     /// `decodeNostrEntity`'s input was not valid bech32, had an
     /// unrecognized HRP prefix, or had a malformed inner TLV payload
@@ -228,10 +228,10 @@ extension NMPError: LocalizedError {
             "Engine already shut down"
         case .nativeComponentMismatch(
             let component,
-            let expectedCoreIdentity,
-            let actualCoreIdentity
+            let expectedIdentity,
+            let actualIdentity
         ):
-            "Native component \(component) requires core \(expectedCoreIdentity), loaded \(actualCoreIdentity)"
+            "Native component \(component) requires identity \(expectedIdentity), loaded \(actualIdentity)"
         case .invalidNostrEntity(let reason):
             "Invalid Nostr entity: \(reason)"
         case .nostrEntitySecretKeyRejected:

@@ -20,6 +20,15 @@ kotlin {
     jvmToolchain(17)
 }
 
+tasks.processResources {
+    // The verified JNA source tree is read-only by design. Do not preserve
+    // that directory mode into Gradle's private build output before its
+    // children have been copied.
+    dirPermissions {
+        unix("755")
+    }
+}
+
 tasks.test {
     useJUnitPlatform()
 }

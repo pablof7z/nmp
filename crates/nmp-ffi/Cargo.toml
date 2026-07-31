@@ -16,19 +16,20 @@ publish.workspace = true
 crate-type = ["staticlib", "cdylib", "lib"]
 name = "nmp_ffi"
 
+[package.metadata.nmp-component]
+schema = 1
+key = "nmp-core"
+kind = "core"
+library-stem = "nmp_ffi"
+uniffi-namespace = "nmp_ffi"
+bindgen-bin = "uniffi-bindgen"
+
 # `cargo run -p nmp-ffi --bin uniffi-bindgen generate --library <staticlib> \
 #   --language swift --out-dir gen/` (M4 plan §3 step 3, library mode -- reads
 # exported metadata straight from the compiled staticlib, no .udl file).
 [[bin]]
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
-
-[features]
-default = []
-# Cargo-controlled witness that the resolved graph contains the separately
-# selectable NIP-46 component. The provider dependency enables it; callers do
-# not set it directly.
-nip46-provider-component = []
 
 [dependencies]
 nostr.workspace = true
@@ -44,6 +45,10 @@ nostr.workspace = true
 # `nmp-nip22` alongside the facade. `scripts/check-ffi-facade-boundary.sh` is
 # the mechanism that keeps all of this true.
 nmp = { workspace = true, features = ["nip22"] }
+# #952: the only intentional internal crossing dependency. Its take-once
+# adapter can be installed only through the core-owned engine door; the
+# provider graph receives no engine, signer registration, or runtime owner.
+nmp-component-interface.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 # #108: the read-only NIP-29 host-browser projection. Direct deps here
 # (not proxied through the `nmp` facade) -- these stay opt-in, app-chosen
@@ -99,3 +104,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 [build-dependencies]
 blake3.workspace = true
 serde_json.workspace = true
+toml = "0.8"

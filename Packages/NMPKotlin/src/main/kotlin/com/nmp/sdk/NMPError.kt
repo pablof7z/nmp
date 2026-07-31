@@ -90,10 +90,10 @@ sealed class NMPError(message: String) : Exception(message) {
      * crosses the component boundary (#952). */
     data class NativeComponentMismatch(
         val component: String,
-        val expectedCoreIdentity: String,
-        val actualCoreIdentity: String,
+        val expectedIdentity: String,
+        val actualIdentity: String,
     ) : NMPError(
-        "native component $component requires core $expectedCoreIdentity, loaded $actualCoreIdentity",
+        "native component $component requires identity $expectedIdentity, loaded $actualIdentity",
     )
     /** `decodeNostrEntity`'s input was not valid bech32, had an
      * unrecognized HRP prefix, or had a malformed inner TLV payload (#116). */

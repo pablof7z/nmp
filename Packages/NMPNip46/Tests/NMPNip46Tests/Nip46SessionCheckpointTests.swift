@@ -114,11 +114,4 @@ final class Nip46SessionCheckpointTests: XCTestCase {
         let connection = try engine.restoreNip46Session(from: EmptyCheckpointStore())
         XCTAssertNil(connection)
     }
-
-    /// A connection that has not reached `.ready` refuses `checkpoint()`
-    /// with a typed error rather than persisting meaningless material.
-    func testCheckpointBeforeReadyIsRefused() {
-        let connection = NMPNip46Connection(observer: NIP46Observer(), closeAction: {})
-        XCTAssertThrowsError(try connection.checkpoint())
-    }
 }

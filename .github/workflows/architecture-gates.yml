@@ -165,7 +165,12 @@ jobs:
           bash scripts/test-nip46-provider-change-routing.sh
           bash scripts/test-nip46-provider-workflow.sh
 
-      - name: Keep NIP-46 out of core signer and native artifacts
+      - name: Falsify the v2 component substrate and exact manifest-set verifier
+        run: |
+          bash scripts/test-component-v2-substrate.sh
+          bash scripts/test-component-manifest-verifier.sh
+
+      - name: Keep NIP-46 behind the take-once component interface
         run: bash scripts/check-nip46-provider-boundary.sh
 
   ffi-facade-boundary:

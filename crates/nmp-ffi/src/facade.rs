@@ -31,7 +31,6 @@ use crate::convert::{
     write_status_to_ffi, FfiError, FfiRequestRowsError, WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
-use crate::signer::FfiSignerMailbox;
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDemand,
     FfiDiagnosticsSnapshot, FfiFilter, FfiFrame, FfiReceiptReattachment, FfiRelayInformation,
@@ -40,6 +39,7 @@ use crate::types::{
     FfiWindow, FfiWriteIntent, FfiWriteStatus,
 };
 use nmp::ReceiptReattachment;
+use nmp_component_interface::FfiSignerAdapter;
 
 /// Start a follow/unfollow action and expose its status stream (#680/#704). A
 /// valid target starts an async action task on the shared runtime; an
@@ -274,11 +274,17 @@ impl NmpEngine {
         Ok(self.engine.remove_account(&registration.inner)?)
     }
 
-    /// Return the protocol-neutral, opaque attachment mailbox consumed by
-    /// optional signer-provider components. The mailbox shares this exact
-    /// engine lifecycle; it is not another engine or a provider registry.
-    pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox> {
-        FfiSignerMailbox::from_engine(Arc::clone(&self.engine))
+    /// Consume one take-once provider contribution. Only this core-owned door
+    /// can install it; the private driver retains and removes the exact signer
+    /// registration through the ordinary engine lifecycle.
+    pub fn install_signer_adapter(
+        &self,
+        adapter: Arc<FfiSignerAdapter>,
+    ) -> Result<
+        Arc<crate::signer::FfiSignerAdapterInstallation>,
+        crate::signer::FfiSignerAdapterInstallError,
+    > {
+        crate::signer::install_signer_adapter(Arc::clone(&self.engine), adapter)
     }
 
     /// Install a native-owned authorization policy for one exact account.

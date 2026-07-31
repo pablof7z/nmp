@@ -40,7 +40,7 @@ let package = Package(
         ),
         .testTarget(
             name: "NMPNip46Tests",
-            dependencies: ["NMPNip46"]
+            dependencies: ["NMPNip46", "NMPNip46FFI"]
         ),
     ]
 )

@@ -3,8 +3,8 @@
 Selectable Swift NIP-46 signer provider for the core `NMP` package. It owns
 bunker/invitation parsing, connection/checkpoint lifecycle, provider discovery,
 and Primal handoff. The core engine crosses into this package only through the
-opaque `FfiSignerMailbox`; the provider attaches through the ordinary signer
-capability door.
+opaque, take-once `FfiSignerAdapter`; the core privately owns the driver,
+installation lease, and exact ordinary signer registration.
 
 From the repository root:
 
@@ -13,21 +13,23 @@ scripts/build-swift-nip46-xcframework.sh --macos-only
 swift test --package-path Packages/NMPNip46
 ```
 
-The provider builder regenerates both core and provider artifacts in one Cargo
-resolution. That is required for the external `FfiSignerMailbox` type; two
-independently compiled static archives are not link-compatible merely because
-their source versions match.
+The provider builder independently seals the core and provider artifacts,
+verifies their shared component-interface identity, and localizes the
+provider's private copy of that interface namespace before the two static
+archives are linked into one app image.
 
-Each artifact embeds a deterministic `nmp-core-component-v1-*` identity over
+Each artifact embeds a deterministic v2 identity (`nmp-core-component-v2-*`,
+`nmp-nip46-component-v2-*`, and `nmp-component-interface-v2-*`) over
 the governed core source, lockfile, compiler, target/profile, feature set, and
-selected Cargo package set. `NMPNip46` compares the provider's required
-identity with the loaded core's plain identity before it asks `NMPEngine` for a
-mailbox. A mismatch throws
-`NMPError.nativeComponentMismatch(component:expectedCoreIdentity:actualCoreIdentity:)`;
+selected Cargo graph. `NMPNip46` compares the packaged provider binding,
+loaded provider native, packaged interface, and loaded core identities before
+it prepares an adapter. A mismatch throws
+`NMPError.nativeComponentMismatch(component:expectedIdentity:actualIdentity:)`;
 no external Rust object has crossed into the provider at that point. The
-provider constructor requires the opaque compatibility proof returned by that
-check, so mailbox-first construction is not representable in generated
-bindings.
+four preparation functions require the opaque compatibility proof returned by
+that check, and only their constructorless Prepared carrier can reveal an
+adapter. The SDK performs prepare→install lexically and retains Prepared plus
+the core installation lease together.
 
 Use `--sim-only` or no mode flag when an iOS Simulator or device slice is
 needed. Apps that do not add this package neither name nor link NIP-46.

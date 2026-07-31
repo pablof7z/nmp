@@ -6290,10 +6290,20 @@ impl Handle {
     where
         Sig: SigningCapability + Send + 'static,
     {
+        self.add_signer_boxed(Box::new(signer))
+    }
+
+    /// Erased twin used by the core-owned native component port. This is the
+    /// same registry and lifecycle as [`Self::add_signer`], not a second
+    /// provider system.
+    pub(crate) fn add_signer_boxed(
+        &self,
+        signer: Box<dyn SigningCapability + Send>,
+    ) -> Result<SignerRegistration, AddSignerError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::AddSigner {
-                signer: Box::new(signer),
+                signer,
                 reply: reply_tx,
             })
             .expect("nmp-engine: add_signer() called after the engine thread shut down");

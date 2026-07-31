@@ -9,6 +9,15 @@ publish.workspace = true
 crate-type = ["staticlib", "cdylib", "lib"]
 name = "nmp_nip46_ffi"
 
+[package.metadata.nmp-component]
+schema = 1
+key = "nmp-nip46"
+kind = "optional"
+library-stem = "nmp_nip46_ffi"
+uniffi-namespace = "nmp_nip46_ffi"
+bindgen-bin = "nmp-nip46-uniffi-bindgen"
+metadata-audit-bin = "nmp-nip46-metadata-audit"
+
 [[bin]]
 name = "nmp-nip46-uniffi-bindgen"
 path = "uniffi-bindgen.rs"
@@ -20,15 +29,22 @@ path = "metadata-audit.rs"
 [dependencies]
 camino = "1"
 nostr.workspace = true
-nmp.workspace = true
-nmp-ffi = { workspace = true, features = ["nip46-provider-component"] }
+nmp-component-interface.workspace = true
 nmp-nip46.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 uniffi_bindgen = "0.29"
 uniffi_meta = "0.29"
 tokio = { version = "1", features = ["rt", "time", "net"] }
+toml05 = { package = "toml", version = "0.5" }
 
 [dev-dependencies]
+nmp.workspace = true
+nmp-ffi.workspace = true
 tempfile = "3"
 tungstenite = "0.29"
 url = "2"
+
+[build-dependencies]
+blake3.workspace = true
+serde_json.workspace = true
+toml = "0.8"

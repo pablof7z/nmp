@@ -48,6 +48,17 @@ kotlin {
     jvmToolchain(17)
 }
 
+tasks.processResources {
+    // Component publication deliberately seals the source resource tree.
+    // Gradle otherwise preserves that 0555 directory mode in build/resources
+    // before copying its children, making its own private destination
+    // unwritable. Keep the witnessed source sealed and normalize only the
+    // build-output directories Gradle owns.
+    dirPermissions {
+        unix("755")
+    }
+}
+
 tasks.test {
     useJUnitPlatform()
     systemProperty(

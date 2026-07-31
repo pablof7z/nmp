@@ -132,9 +132,15 @@ class Nip46SessionCheckpointTest {
      * a typed error rather than persisting meaningless material. */
     @Test
     fun checkpointBeforeReadyIsRefused() {
-        val connection = NMPNip46Connection(NMPNip46Observer()) {}
-        assertThrows(NMPError.InvalidSigner::class.java) {
-            connection.checkpoint()
+        NMPEngine(NMPConfig()).use { engine ->
+            engine.connectNip46(
+                "bunker://79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" +
+                    "?relay=ws%3A%2F%2F127.0.0.1%3A1",
+            ).use { connection ->
+                assertThrows(NMPError.InvalidSigner::class.java) {
+                    connection.checkpoint()
+                }
+            }
         }
     }
 }
