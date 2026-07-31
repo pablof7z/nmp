@@ -2,6 +2,7 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp::mechanism::core::{
     AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, RowDelta, ShortfallFact,
+    SourceStatus,
 };
 use nmp_grammar::Derived;
 use nmp_grammar::{
@@ -101,6 +102,17 @@ fn nested_query(
     .unwrap();
     outer.freshness = outer_freshness;
     LiveQuery(outer)
+}
+
+fn pinned_query(keys: &Keys, relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
+    let mut demand = Demand::new(
+        filter(keys),
+        SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        AccessContext::Public,
+    )
+    .unwrap();
+    demand.freshness = freshness;
+    LiveQuery(demand)
 }
 
 fn seeded_nested_store(keys: &Keys, inner_relay: &RelayUrl) -> MemoryStore {
@@ -540,6 +552,32 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
         )]),
         "fresh inner coverage suppresses only the nested request"
     );
+    let (_, _, fresh_evidence) = initial(&fresh_effects);
+    let inner_evidence = fresh_evidence
+        .sources
+        .iter()
+        .find(|source| source.relay == inner_relay)
+        .expect("the nested source retains its own evidence");
+    assert_eq!(
+        inner_evidence.reconciled_through,
+        Some(Timestamp::from(99_000u64)),
+        "the nested source exposes only its own fresh durable watermark"
+    );
+    assert_eq!(inner_evidence.status, SourceStatus::Connecting);
+    let outer_evidence = fresh_evidence
+        .sources
+        .iter()
+        .find(|source| source.relay == outer_relay)
+        .expect("the independently live outer source remains visible");
+    assert_eq!(
+        outer_evidence.reconciled_through, None,
+        "the nested watermark must not become a global completion claim"
+    );
+    assert_eq!(outer_evidence.status, SourceStatus::Connecting);
+    assert!(
+        fresh_evidence.shortfall.is_empty(),
+        "both Demand boundaries have an honest source"
+    );
 
     let mut stale_store = seeded_nested_store(&keys, &inner_relay);
     record(
@@ -550,6 +588,23 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
     );
     let mut stale = EngineCore::new(stale_store, 10);
     tick(&mut stale, 100_000);
+    let sibling_keys = Keys::generate();
+    let sibling_relay = RelayUrl::parse("wss://unrelated-live-sibling.example").unwrap();
+    let sibling_opened = subscribe(
+        &mut stale,
+        pinned_query(&sibling_keys, &sibling_relay, Freshness::Live),
+    );
+    let (sibling_id, _, sibling_evidence) = initial(&sibling_opened);
+    assert_eq!(
+        requested_filters(&sibling_opened),
+        BTreeSet::from([(
+            RelaySessionKey::public(sibling_relay.clone()),
+            concrete(&sibling_keys),
+        )]),
+        "the independent live sibling starts with exactly its own wire request"
+    );
+    assert_eq!(sibling_evidence.sources.len(), 1);
+    assert_eq!(sibling_evidence.sources[0].relay, sibling_relay);
     let stale_effects = subscribe(
         &mut stale,
         nested_query(
@@ -574,6 +629,17 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
             ),
         ]),
         "stale inner coverage degrades only the nested request to ordinary Live"
+    );
+    assert_eq!(
+        closes(&stale_effects),
+        0,
+        "opening the stale nested query must not replace the unrelated live sibling"
+    );
+    assert!(
+        !stale_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitRows(id, _, _) if *id == sibling_id)),
+        "the unrelated live sibling's rows and evidence remain unchanged"
     );
 }
 
@@ -619,6 +685,30 @@ fn nested_max_age_scoped_coverage_survives_redb_restart() {
     assert!(
         requested_filters(&effects).is_empty(),
         "reopened inner coverage satisfies nested MaxAge while the root independently remains CacheOnly"
+    );
+    let (_, _, evidence) = initial(&effects);
+    assert_eq!(
+        evidence.sources.len(),
+        1,
+        "only the nested source owns persisted coverage"
+    );
+    assert_eq!(evidence.sources[0].relay, inner_relay);
+    assert_eq!(
+        evidence.sources[0].reconciled_through,
+        Some(Timestamp::from(99_000u64)),
+        "the reopened snapshot retains the nested durable watermark"
+    );
+    assert_eq!(evidence.sources[0].status, SourceStatus::Connecting);
+    assert_eq!(
+        evidence.shortfall,
+        vec![ShortfallFact::NoPlannedSource {
+            atom: ConcreteFilter {
+                kinds: Some(BTreeSet::from([7u16])),
+                authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
+                ..ConcreteFilter::default()
+            },
+        }],
+        "the root CacheOnly boundary stays an explicit, separate no-source fact"
     );
 }
 

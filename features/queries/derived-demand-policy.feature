@@ -27,7 +27,7 @@ Feature: Every nested query keeps its own cache and freshness policy
       And that row was observed only from relay B
       And the nested query is pinned to relay A with agnostic cache projection
       When an app observes the outer live query
-      Then the row may contribute its derived value
+      Then the row contributes its derived value
 
     # nmp:id=QUERIES-DERIVED-CACHE-003
     # nmp:status=built
@@ -82,7 +82,6 @@ Feature: Every nested query keeps its own cache and freshness policy
     # nmp:id=QUERIES-DERIVED-FRESHNESS-003
     # nmp:status=built
     # nmp:evidence=rust:nmp::nested_max_age_uses_inner_scoped_coverage_only
-    # nmp:evidence=rust:nmp::nested_cache_only_opens_no_inner_wire_under_live_outer
     # nmp:falsifier=Evaluate nested MaxAge and evidence over the whole subtree through one shared plan; inner suppression or shortfall must borrow the outer source.
     Scenario: A max-age nested query uses only its own scoped coverage
       Given an outer query and its nested query have different planned sources
@@ -95,8 +94,6 @@ Feature: Every nested query keeps its own cache and freshness policy
     # nmp:id=QUERIES-DERIVED-FRESHNESS-004
     # nmp:status=built
     # nmp:evidence=rust:nmp::nested_max_age_uses_inner_scoped_coverage_only
-    # nmp:evidence=rust:nmp-resolver::derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute
-    # nmp:evidence=rust:nmp::nested_strict_pins_do_not_contaminate_public_root_cache_projection
     # nmp:falsifier=Store one acquisition or cache decision for the whole subtree; stale nested coverage or nested pins must change an unrelated root branch.
     Scenario: Stale nested coverage degrades only that nested query to live
       Given an outer query and its nested query have different planned sources
