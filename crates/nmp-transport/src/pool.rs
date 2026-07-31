@@ -64,6 +64,7 @@ struct ReconnectPreambleSnapshotBarrierInner {
 #[cfg(feature = "bench-instrumentation")]
 #[derive(Default)]
 struct ReconnectPreambleSnapshotBarrierState {
+    reconnect_delay_controlled: bool,
     observed: bool,
     released: bool,
 }
@@ -73,9 +74,10 @@ static RECONNECT_PREAMBLE_SNAPSHOT_BARRIER: std::sync::OnceLock<
     Mutex<Option<Arc<ReconnectPreambleSnapshotBarrierInner>>>,
 > = std::sync::OnceLock::new();
 
-/// Deterministic falsifier instrumentation: pause the next worker handshake
-/// for `relay` after it snapshots the reconnect preamble but before it can
-/// emit `Connected` or write that snapshot.
+/// Deterministic falsifier instrumentation: control the next reconnect for
+/// `relay` by removing its production backoff+jitter delay, then pause the
+/// worker after it snapshots the reconnect preamble but before it can emit
+/// `Connected` or write that snapshot.
 #[cfg(feature = "bench-instrumentation")]
 #[doc(hidden)]
 pub struct ReconnectPreambleSnapshotBarrier {
@@ -84,6 +86,14 @@ pub struct ReconnectPreambleSnapshotBarrier {
 
 #[cfg(feature = "bench-instrumentation")]
 impl ReconnectPreambleSnapshotBarrier {
+    pub fn reconnect_delay_was_controlled(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .map(|state| state.reconnect_delay_controlled)
+            .unwrap_or(false)
+    }
+
     pub fn wait_until_observed(&self, timeout: Duration) -> bool {
         let Ok(state) = self.inner.state.lock() else {
             return false;
@@ -139,6 +149,26 @@ pub fn install_reconnect_preamble_snapshot_barrier(
     );
     *installed = Some(Arc::clone(&inner));
     ReconnectPreambleSnapshotBarrier { inner }
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn control_reconnect_delay(relay: &RelayUrl, requested: Duration) -> Duration {
+    let registry = RECONNECT_PREAMBLE_SNAPSHOT_BARRIER.get_or_init(Default::default);
+    let barrier = registry
+        .lock()
+        .ok()
+        .and_then(|installed| installed.as_ref().cloned());
+    let Some(barrier) = barrier.filter(|barrier| barrier.relay == relay.as_str()) else {
+        return requested;
+    };
+    let Ok(mut state) = barrier.state.lock() else {
+        return requested;
+    };
+    if state.reconnect_delay_controlled {
+        return requested;
+    }
+    state.reconnect_delay_controlled = true;
+    Duration::ZERO
 }
 
 #[cfg(feature = "bench-instrumentation")]
