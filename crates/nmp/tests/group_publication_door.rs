@@ -2,8 +2,8 @@
 //! group listing actually do on the wire, against `nmp::nip29`'s new
 //! [`RelayScope`]/[`Group`] shape.
 //!
-//! `group_discovery_demand` and `Group`'s single-host constructor are gone
-//! (#1033). The surface under test here is:
+//! The single-host discovery door and `Group`'s single-host constructor are
+//! gone (#1033). The surface under test here is:
 //!
 //! ```text
 //! nip29::on([host_a, host_b])?.group("photographers")
