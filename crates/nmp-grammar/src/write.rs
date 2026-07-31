@@ -378,10 +378,27 @@ mod tests {
     /// the caller's relay list verbatim — same order, same entries, nothing
     /// added. There is no third variant to reach for and no widen operation
     /// on the value the caller handed over.
+    ///
+    /// The division of labour is in the SHAPES, which is why this is a
+    /// compile-time statement as much as a runtime one (#1105): `Auto` is a
+    /// unit variant, so it is structurally incapable of carrying a relay a
+    /// caller chose — it can only mean "derive it at send time"; `Explicit`
+    /// is the only variant that holds relays, so caller-chosen destinations
+    /// have exactly one spelling. Adding a third variant breaks the
+    /// exhaustive match below rather than passing unnoticed. The same
+    /// cardinality is enforced across the FFI, Swift and Kotlin surfaces by
+    /// `scripts/check-routing-vocabulary.sh`.
     #[test]
     fn routing_is_two_words_and_explicit_is_verbatim() {
         let a = RelayUrl::parse("wss://a.example.com").unwrap();
         let b = RelayUrl::parse("wss://b.example.com").unwrap();
+
+        let strategy_derived = WriteRouting::Auto;
+        match strategy_derived {
+            WriteRouting::Auto => {}
+            WriteRouting::Explicit(_) => panic!("constructed Auto"),
+        }
+
         let routing = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
         match routing {
             WriteRouting::Explicit(relays) => assert_eq!(relays, vec![b, a]),
