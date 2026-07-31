@@ -79,7 +79,6 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Signing & identity**
 - ✅ Local key signer — one fixed-allocation, non-`Clone` canonical zeroizing secret owner (moving the signer relocates only its pointer), with operation-scoped BIP-340/NIP-44 secret, key, hash-state, cipher-state, and plaintext owners that wipe on success, refusal, and unwind; no operational `nostr::Keys`/`SecretKey`/`Keypair` is retained, and `Debug` is redacted to the public key only ([#546](https://github.com/pablof7z/nmp/pull/546) began this; [#765](https://github.com/pablof7z/nmp/issues/765) replaced its unused duplicate with the real operational owner)
-- ✅ Full **NIP-46 bunker** — independent signer-relay connection, request correlation, `auth_url`/`switch_relays`, NIP-44 crypto, **reconnect across store close/reopen**, bounded sign-only across all four surfaces (Rust/FFI/Swift/Kotlin)
 - ✅ Per-write identity override — publish a single write under a registered secondary identity without changing the active account, across Rust/FFI/Swift/Kotlin. Retarget-immunity is proven: once accepted under the override, a later `set_active_account` can never redirect it to a different signer, even across a store close/reopen ([#47](https://github.com/pablof7z/nmp/issues/47) Unit A, [#550](https://github.com/pablof7z/nmp/pull/550))
 - ✅ Platform secure-vault account stores — Keychain-backed (Swift, iOS/macOS) and JVM `KeyStore`-backed (Kotlin/desktop) checkpoint providers for automatic secure session restore ([#47](https://github.com/pablof7z/nmp/issues/47) vault providers, [#554](https://github.com/pablof7z/nmp/pull/554))
 - ✅ Frozen identity on a parked write (`AwaitingCapability{pubkey}`) — a stranded reattached write now carries the exact pubkey it's still waiting on, not just "still parked." The PR's own cross-surface parity test caught direct-Rust and FFI reporting two *different* frozen pubkeys for the same receipt pre-merge, was fixed, and re-verified clean ([#47](https://github.com/pablof7z/nmp/issues/47) Unit B, [#556](https://github.com/pablof7z/nmp/pull/556))
@@ -113,14 +112,20 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   fan-out policy; exact kind:0/NIP-23 codecs belong to their own optional
   protocol owners ([#561](https://github.com/pablof7z/nmp/issues/561), corrected
   by [#879](https://github.com/pablof7z/nmp/issues/879))
-- 🧪 NIP-29 groups — direct Rust now exposes `nmp_nip29::Group` plus
-  `nmp::GroupOperations`: one identity mints host-pinned read demands and
-  publishes any `EventBuilder` through the ordinary engine lifecycle after
-  adding `h` and selecting the group host. The former kind:9 composer/content
-  catalog remains removed because C7 owns chat and `q` replies. Native Group
-  publication is not projected through FFI or Swift yet; [#1015](https://github.com/pablof7z/nmp/issues/1015)
-  tracks that explicit gap. This does not claim a Kotlin or Android Group
-  surface.
+- 🧪 NIP-29 groups — a group can live on more than one relay, so Rust and FFI
+  now expose `nmp::nip29::on(hosts)` returning a `RelayScope` (fallible — an
+  app-supplied relay set can be empty), narrowed to one `Group` via
+  `.group(id)` ([#1033](https://github.com/pablof7z/nmp/issues/1033);
+  superseded the single-host `Group::new(host, id)` door with no alias). Every
+  group write mints the ordinary `WriteIntent` and routes `Explicit` to the
+  whole scope; every group read is one ordinary `LiveQuery`
+  (`Single`/`Union` of per-host branches). Discovery is evidence-scoped —
+  `nip29::member_list_includes`/`admin_list_includes` return a composable
+  `GroupPredicate` over observed kind:39002/39001 rows, never claiming exact
+  membership/admin state. The former kind:9 composer/content catalog remains
+  removed because C7 owns chat and `q` replies. Swift/Kotlin native
+  projection of this surface is not yet built. This does not claim a Kotlin
+  or Android Group surface.
 - 🧪 NIP-51 lists — decode/reading only today; list **editing** is deliberately gated on [#50](https://github.com/pablof7z/nmp/issues/50)
 - 🧪 Blossom (BUD-11) media/blob — `nmp-blossom` ships kind:24242-authorized, sha256-verified blob upload plus mirror/delete/list, each with its own bound authorization ([#216](https://github.com/pablof7z/nmp/issues/216) epic, closes [#545](https://github.com/pablof7z/nmp/issues/545)/[#551](https://github.com/pablof7z/nmp/issues/551), [#552](https://github.com/pablof7z/nmp/pull/552)/[#557](https://github.com/pablof7z/nmp/pull/557)) — and **projected through FFI to Swift and Kotlin** ([#555](https://github.com/pablof7z/nmp/issues/555) closes, [#560](https://github.com/pablof7z/nmp/pull/560) merged): a native app can call upload/mirror/delete/list from Rust, Swift, or Kotlin today, each with typed error taxonomies and no collapsed variants. Upload durability is currently **app-owned** (a standalone async call, not yet a persisted/retried engine obligation) — an engine-integrated durable-upload upgrade is tracked as an explicit additive follow-up ([#562](https://github.com/pablof7z/nmp/issues/562)), not a silent gap.
 - ✅ NIP-68 picture events — `nmp-nip68` builds an unsigned kind:20 draft with `imeta` images minted only from a verified, content-addressed Blossom `BlobDescriptor`, plus a tolerant decoder that surfaces a missing sha256 as recorded diagnostics rather than trusting it ([#558](https://github.com/pablof7z/nmp/issues/558) closes, [#566](https://github.com/pablof7z/nmp/pull/566) merged). `build_picture` now takes an explicit `created_at` instead of sampling the clock — a determinism/FFI-parity fix ([#568](https://github.com/pablof7z/nmp/pull/568)). Engine-free, signing-free, first-cut tags only (`title`/`imeta`/`content-warning`/`t`); FFI/Swift/Kotlin projection is a separate later unit.
@@ -141,7 +146,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 ## Status / maturity
 
 - **Pre-1.0, pre-v2.** The v2 *semantic surface is freezing*; public names and shapes are provisional but governed.
-- **Proven:** the core store, resolver, router, transport, engine, Rust facade, Swift + Kotlin packages, and the NIP-46 remote-signer path — backed by 100+ Rust test modules, differential falsifiers against an independent store, and live-relay tests.
+- **Proven:** the core store, resolver, router, transport, engine, Rust facade, and the Swift + Kotlin packages — backed by 100+ Rust test modules, differential falsifiers against an independent store, and live-relay tests.
 - **Pending:** several promoted guarantees remain active work — see [`docs/known-gaps.md`](docs/known-gaps.md) (honest built-vs-missing record) and the [bug-class ledger](docs/bug-class-ledger.md) (target vs partial vs structurally proven).
 - The ownership boundary and behavioral invariants are the stable frame; the app-facing spelling is not.
 - **Headline (merged):** history is no longer a second noun — `observe(query, window)` makes windowing a policy on the one read noun, delivery mode derives from boundedness, and the #486 per-advance relay-REQ leak is fixed (deep scroll now holds O(1) live subscriptions per relay). Closes [#474](https://github.com/pablof7z/nmp/issues/474)/[#485](https://github.com/pablof7z/nmp/issues/485)/[#486](https://github.com/pablof7z/nmp/issues/486) — [#531](https://github.com/pablof7z/nmp/pull/531).

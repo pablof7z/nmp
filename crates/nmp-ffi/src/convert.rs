@@ -33,7 +33,7 @@ use crate::types::{
     FfiAuthPhase, FfiBinding, FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome,
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability,
     FfiEventBuilder, FfiFilter, FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity,
-    FfiIdentityField, FfiKindCount, FfiLaneCount, FfiRelayDiagnostics,
+    FfiIdentityField, FfiKindCount, FfiLaneCount, FfiLiveQuery, FfiRelayDiagnostics,
     FfiRelayInformationErrorKind, FfiRetryCause, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra,
     FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent,
     FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage,
@@ -206,6 +206,30 @@ pub enum FfiError {
     /// two competing row ceilings (`nmp::EngineError::WindowSelectionHasLimit`
     /// mirror).
     WindowSelectionHasLimit,
+    /// A windowed observe was declared over a live query that already carries
+    /// an aggregate result limit (#1108) -- the window and the aggregate bound
+    /// would be two competing owners of the merged row count
+    /// (`nmp::EngineError::WindowAggregateResultLimit` mirror).
+    WindowAggregateResultLimit,
+    /// A live query was declared with no demand branches at all (#1108)
+    /// (`nmp::LiveQueryError::EmptyUnion` mirror).
+    EmptyQueryUnion,
+    /// A live query declared an aggregate result limit of zero (#1108): a
+    /// query that may never contain a row is not a bound
+    /// (`nmp::LiveQueryError::AggregateResultLimitZero` mirror).
+    AggregateResultLimitZero,
+    /// A nested live-query branch carried its own aggregate result limit
+    /// (#1108). Branches flatten into ONE canonical set, so an inner bound has
+    /// no surviving scope and accepting it would silently discard it
+    /// (`nmp::LiveQueryError::NestedAggregateResultLimit` mirror).
+    NestedAggregateResultLimit,
+    /// A live query declared more branches than the supported hard ceiling
+    /// (#1108). The whole declaration is refused; no subset is installed
+    /// (`nmp::LiveQueryError::TooManyQueryBranches` mirror).
+    TooManyQueryBranches {
+        requested: u64,
+        maximum: u64,
+    },
     /// NIP-11 acquisition failed before any last-good document existed. Every
     /// `nmp::RelayInformationError` variant carries here as a typed
     /// `FfiRelayInformationErrorKind` instead of collapsing to a message
@@ -238,6 +262,103 @@ pub enum FfiError {
     InvalidNip73Target {
         reason: String,
     },
+    /// #1033 `FfiRelayScope::on` was called with no host at all
+    /// (`nmp::nip29::RelayScopeError::EmptyRelaySet` mirror). A group must
+    /// be hosted somewhere -- there is nothing to read from, nothing to
+    /// write to, and no honest evidence to report.
+    EmptyRelayScope,
+    /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedContext`
+    /// mirror). An unsigned draft handed to `FfiGroup::publish` already
+    /// carried an `h` row -- the group id retained by the scope is the only
+    /// source of that row, so a caller's own is refused whether it matches
+    /// this group or not.
+    GroupCallerSuppliedContext,
+    /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedContextConstraint`
+    /// mirror). A read selection handed to `FfiGroup::read` already
+    /// constrained `#h` -- the retained group id is the sole semantic
+    /// source of that row.
+    GroupCallerSuppliedContextConstraint,
+    /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedTimeline`
+    /// mirror). An unsigned draft already carried a `previous` row, which
+    /// the group never mints and never accepts from a caller.
+    GroupCallerSuppliedTimeline,
+    /// #1033 (`nmp::nip29::GroupContextError::MissingContext` mirror). A
+    /// pre-signed event handed to `FfiGroup::publish_signed`/
+    /// `FfiGroup::validate_context` carries no `h` row at all.
+    GroupContextMissing {
+        expected: String,
+    },
+    /// #1033 (`nmp::nip29::GroupContextError::MismatchedContext` mirror). A
+    /// pre-signed event names a different group than the one publishing or
+    /// validating it.
+    GroupContextMismatched {
+        found: String,
+        expected: String,
+    },
+    /// #1033 (`nmp::nip29::GroupContextError::AmbiguousContext` mirror). A
+    /// pre-signed event carries more than one `h` row, so which group it
+    /// claims to be in has no single answer.
+    GroupContextAmbiguous {
+        expected: String,
+    },
+}
+
+impl From<nmp::nip29::RelayScopeError> for FfiError {
+    fn from(err: nmp::nip29::RelayScopeError) -> Self {
+        match err {
+            nmp::nip29::RelayScopeError::EmptyRelaySet => Self::EmptyRelayScope,
+        }
+    }
+}
+
+impl From<nmp::nip29::GroupContextError> for FfiError {
+    fn from(err: nmp::nip29::GroupContextError) -> Self {
+        match err {
+            nmp::nip29::GroupContextError::CallerSuppliedContext => {
+                Self::GroupCallerSuppliedContext
+            }
+            nmp::nip29::GroupContextError::CallerSuppliedContextConstraint => {
+                Self::GroupCallerSuppliedContextConstraint
+            }
+            nmp::nip29::GroupContextError::CallerSuppliedTimeline => {
+                Self::GroupCallerSuppliedTimeline
+            }
+            nmp::nip29::GroupContextError::MissingContext { expected } => {
+                Self::GroupContextMissing { expected }
+            }
+            nmp::nip29::GroupContextError::MismatchedContext { found, expected } => {
+                Self::GroupContextMismatched { found, expected }
+            }
+            nmp::nip29::GroupContextError::AmbiguousContext { expected } => {
+                Self::GroupContextAmbiguous { expected }
+            }
+        }
+    }
+}
+
+/// `GroupReadError`'s two halves both already have an `FfiError` home --
+/// `Context` folds through `GroupContextError`'s own mapping above,
+/// `Declaration` through the existing `LiveQueryError` mapping (#1108) --
+/// so this is a plain re-dispatch, never a second error taxonomy.
+impl From<nmp::nip29::GroupReadError> for FfiError {
+    fn from(err: nmp::nip29::GroupReadError) -> Self {
+        match err {
+            nmp::nip29::GroupReadError::Context(error) => Self::from(error),
+            nmp::nip29::GroupReadError::Declaration(error) => Self::from(error),
+        }
+    }
+}
+
+/// Same re-dispatch discipline as `GroupReadError` above: `Context` through
+/// `GroupContextError`, `Engine` through the existing `nmp::EngineError`
+/// mapping.
+impl From<nmp::nip29::GroupPublishError> for FfiError {
+    fn from(err: nmp::nip29::GroupPublishError) -> Self {
+        match err {
+            nmp::nip29::GroupPublishError::Context(error) => Self::from(error),
+            nmp::nip29::GroupPublishError::Engine(error) => Self::from(error),
+        }
+    }
 }
 
 /// Exact failure returned by `NmpRowStream::request_rows`
@@ -319,6 +440,23 @@ impl From<nmp::EngineError> for FfiError {
                 }
             }
             nmp::EngineError::WindowSelectionHasLimit => Self::WindowSelectionHasLimit,
+            nmp::EngineError::WindowAggregateResultLimit => Self::WindowAggregateResultLimit,
+        }
+    }
+}
+
+impl From<nmp::LiveQueryError> for FfiError {
+    fn from(err: nmp::LiveQueryError) -> Self {
+        match err {
+            nmp::LiveQueryError::EmptyUnion => Self::EmptyQueryUnion,
+            nmp::LiveQueryError::AggregateResultLimitZero => Self::AggregateResultLimitZero,
+            nmp::LiveQueryError::NestedAggregateResultLimit => Self::NestedAggregateResultLimit,
+            nmp::LiveQueryError::TooManyQueryBranches { requested, maximum } => {
+                Self::TooManyQueryBranches {
+                    requested: requested as u64,
+                    maximum: maximum as u64,
+                }
+            }
         }
     }
 }
@@ -408,6 +546,24 @@ impl std::fmt::Display for FfiError {
             Self::WindowSelectionHasLimit => {
                 write!(f, "a windowed selection must not also declare a limit")
             }
+            Self::WindowAggregateResultLimit => write!(
+                f,
+                "a windowed observation must not also declare an aggregate result limit"
+            ),
+            Self::EmptyQueryUnion => {
+                write!(f, "a live query must declare at least one demand branch")
+            }
+            Self::AggregateResultLimitZero => {
+                write!(f, "an aggregate result limit of zero can never contain a row")
+            }
+            Self::NestedAggregateResultLimit => write!(
+                f,
+                "a nested live-query branch must not declare its own aggregate result limit"
+            ),
+            Self::TooManyQueryBranches { requested, maximum } => write!(
+                f,
+                "a live query supports at most {maximum} demand branches; {requested} were declared"
+            ),
             Self::RelayInformationUnavailable { kind } => {
                 write!(f, "relay information unavailable: {kind:?}")
             }
@@ -415,6 +571,33 @@ impl std::fmt::Display for FfiError {
                 write!(f, "invalid correlation token {got:?}: {reason}")
             }
             Self::InvalidNip73Target { reason } => write!(f, "invalid NIP-73 target: {reason}"),
+            Self::EmptyRelayScope => {
+                write!(f, "a NIP-29 relay scope must name at least one host relay")
+            }
+            Self::GroupCallerSuppliedContext => write!(
+                f,
+                "the 'h' tag belongs to the group, not to the caller"
+            ),
+            Self::GroupCallerSuppliedContextConstraint => write!(
+                f,
+                "the '#h' constraint belongs to the group, not to the caller's selection"
+            ),
+            Self::GroupCallerSuppliedTimeline => write!(
+                f,
+                "the 'previous' tag belongs to the group, not to the caller, and the group \
+                 never mints one"
+            ),
+            Self::GroupContextMissing { expected } => {
+                write!(f, "pre-signed event carries no 'h' row (expected {expected:?})")
+            }
+            Self::GroupContextMismatched { found, expected } => write!(
+                f,
+                "pre-signed event names group {found:?}, expected {expected:?}"
+            ),
+            Self::GroupContextAmbiguous { expected } => write!(
+                f,
+                "pre-signed event carries more than one 'h' row (expected {expected:?})"
+            ),
         }
     }
 }
@@ -725,10 +908,10 @@ mod window_conversion_tests {
                 rows: vec![row],
                 load: WindowLoad::Returned { added: 1 },
             }),
-            evidence: AcquisitionEvidence {
+            evidence: vec![AcquisitionEvidence {
                 sources: vec![],
                 shortfall: vec![],
-            },
+            }],
             execution: vec![],
         };
 
@@ -757,10 +940,10 @@ mod window_conversion_tests {
         let frame = Frame {
             deltas: vec![RowDelta::Added(row)],
             window: None,
-            evidence: AcquisitionEvidence {
+            evidence: vec![AcquisitionEvidence {
                 sources: vec![],
                 shortfall: vec![],
-            },
+            }],
             execution: vec![],
         };
 
@@ -900,6 +1083,16 @@ fn binding_from_ffi(b: FfiBinding, field: LiteralField) -> Result<GBinding, FfiE
                 .collect::<Result<_, _>>()?,
         })),
     })
+}
+
+/// #1033: a NIP-29 discovery predicate's `subjects` binding names PUBKEYS
+/// (`member_list_includes_at`/`admin_list_includes_at`'s `#p` row) -- the
+/// same hex-pubkey invariant `FfiFilter.authors` carries, not the unchecked
+/// rule an arbitrary `#<letter>` tag binding gets. A caller-supplied
+/// `Literal` that is not 32-byte hex is a typed [`FfiError::InvalidPublicKey`],
+/// never a panic two crates downstream.
+pub(crate) fn subjects_binding_from_ffi(b: FfiBinding) -> Result<GBinding, FfiError> {
+    binding_from_ffi(b, LiteralField::Authors)
 }
 
 pub fn binding_to_ffi(b: GBinding) -> FfiBinding {
@@ -1150,6 +1343,37 @@ fn shortfall_fact_to_ffi(f: ShortfallFact) -> FfiShortfallFact {
 /// ratified codex-nova names, see `types.rs`'s own doc). Replaces the
 /// deleted query-level collapse: every source's facts map faithfully, never
 /// rolled up into a verdict.
+/// `FfiLiveQuery -> nmp::LiveQuery` (#1108). Every construction refusal is a
+/// typed [`FfiError`] with the same case and fields Rust produces: an empty
+/// union, a zero aggregate bound, a nested aggregate bound, or more branches
+/// than the supported ceiling. No partial observation is ever installed.
+pub fn live_query_from_ffi(query: FfiLiveQuery) -> Result<nmp::LiveQuery, FfiError> {
+    let branches = query
+        .branches
+        .into_iter()
+        .map(|branch| demand_from_ffi(branch).map(nmp::LiveQuery::single))
+        .collect::<Result<Vec<_>, _>>()?;
+    let aggregate_result_limit = query.aggregate_result_limit.map(|limit| limit as usize);
+    nmp::LiveQuery::union(branches, aggregate_result_limit).map_err(FfiError::from)
+}
+
+/// `nmp::LiveQuery -> FfiLiveQuery` (#1033, the reverse of
+/// `live_query_from_ffi`). Canonicalization (branch sort/dedup, nested-limit
+/// refusal) already happened at construction on the Rust side, so this is a
+/// plain field-for-field projection with no failure mode of its own -- every
+/// NIP-29 read this crate mints reaches the app through this door.
+pub fn live_query_to_ffi(query: nmp::LiveQuery) -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: query
+            .branches()
+            .iter()
+            .cloned()
+            .map(demand_to_ffi)
+            .collect(),
+        aggregate_result_limit: query.aggregate_result_limit().map(|limit| limit as u32),
+    }
+}
+
 pub fn evidence_to_ffi(e: AcquisitionEvidence) -> FfiAcquisitionEvidence {
     FfiAcquisitionEvidence {
         sources: e.sources.into_iter().map(source_evidence_to_ffi).collect(),
@@ -1229,12 +1453,12 @@ pub fn frame_to_ffi(frame: Frame) -> FfiFrame {
                 rows: contents.rows.iter().map(row_to_ffi_row).collect(),
                 load: window_load_to_ffi(contents.load),
             }),
-            evidence: evidence_to_ffi(frame.evidence),
+            evidence: frame.evidence.into_iter().map(evidence_to_ffi).collect(),
         },
         None => FfiFrame {
             deltas: frame.deltas.iter().map(row_delta_to_ffi).collect(),
             window: None,
-            evidence: evidence_to_ffi(frame.evidence),
+            evidence: frame.evidence.into_iter().map(evidence_to_ffi).collect(),
         },
     }
 }
@@ -1779,6 +2003,15 @@ pub fn parse_pubkey(hex: &str) -> Result<PublicKey, FfiError> {
     })
 }
 
+/// #1033: the module-wide event-id parse rule (`FfiGroup::delete_event`'s
+/// `event_id` and any other exact 32-byte-hex `EventId` input) -- same
+/// typed-refusal discipline as [`parse_pubkey`], never a panic.
+pub fn parse_event_id(hex: &str) -> Result<EventId, FfiError> {
+    EventId::from_hex(hex).map_err(|_| FfiError::InvalidEventId {
+        got: hex.to_string(),
+    })
+}
+
 /// `FfiIdentity -> nmp::Identity`. `Explicit`'s pubkey goes through the
 /// module-wide [`parse_pubkey`] rule verbatim and nothing else: a bech32
 /// `npub` is REFUSED here, however well-formed, because "which encodings
@@ -1918,7 +2151,7 @@ fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
 /// `FfiEventBuilder -> nmp::EventBuilder`. The only thing that can fail is
 /// a tag row that is not a tag; there is deliberately no author to parse,
 /// no kind whitelist to check, and no timestamp to invent.
-fn event_builder_from_ffi(builder: FfiEventBuilder) -> Result<GEventBuilder, FfiError> {
+pub(crate) fn event_builder_from_ffi(builder: FfiEventBuilder) -> Result<GEventBuilder, FfiError> {
     Ok(GEventBuilder {
         kind: nostr::Kind::from(builder.kind),
         tags: tags_from_ffi(builder.tags)?,
@@ -1937,7 +2170,7 @@ fn event_builder_from_ffi(builder: FfiEventBuilder) -> Result<GEventBuilder, Ffi
 /// that happens to verify locally -- a non-verifying (e.g. tampered) event
 /// still parses fine at THIS boundary and is rejected downstream instead,
 /// surfacing as `WriteStatus::Failed` on the receipt stream.
-fn signed_event_from_ffi(
+pub(crate) fn signed_event_from_ffi(
     id: String,
     pubkey: String,
     created_at: u64,

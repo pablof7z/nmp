@@ -308,6 +308,32 @@ pub enum FfiWindowLoad {
     AtBound { max: u64 },
 }
 
+/// One live-query declaration (`nmp::LiveQuery` mirror, #1108): one or more
+/// complete, independent [`FfiDemand`] branches observed through ONE
+/// lifecycle, plus the optional bound on their merged row union.
+///
+/// Branches are canonicalized by the Rust constructor -- sorted, duplicates
+/// collapsed -- so permuted or repeated input produces the same observation
+/// and the same per-branch evidence order. `aggregate_result_limit` bounds
+/// the union AFTER branch rows are merged by event id; it is NOT a branch's
+/// own `FfiFilter::limit`, which bounds only that branch's selection.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiLiveQuery {
+    /// The demand branches. Must be nonempty and at most
+    /// `MAX_QUERY_BRANCHES`; both are typed refusals, never truncation.
+    pub branches: Vec<FfiDemand>,
+    /// Bound on the MERGED row union, never N rows per branch. Zero is a
+    /// typed refusal.
+    pub aggregate_result_limit: Option<u32>,
+}
+
+/// The hard ceiling on branches in one observation (`nmp::LiveQuery::
+/// MAX_BRANCHES` mirror). Exceeding it refuses the whole declaration.
+#[uniffi::export]
+pub fn max_query_branches() -> u32 {
+    nmp::LiveQuery::MAX_BRANCHES as u32
+}
+
 /// One delivered observation frame (`nmp::Frame` mirror) -- the ONE
 /// vocabulary both observation modes share. Delivery is DERIVED from
 /// boundedness, never a knob, and never carried twice on the wire:
@@ -328,7 +354,11 @@ pub struct FfiFrame {
     /// Present iff the observation is windowed: the complete bounded row set
     /// plus the window's growth fact.
     pub window: Option<FfiWindowContents>,
-    pub evidence: FfiAcquisitionEvidence,
+    /// This observation's acquisition evidence, ONE entry per canonical query
+    /// branch in branch order (#1108). A single-branch live query carries
+    /// exactly one entry. Branch identity is never erased and nothing here is
+    /// a global completeness verdict.
+    pub evidence: Vec<FfiAcquisitionEvidence>,
 }
 
 /// One delivered row -- RAW tokens only (ledger #12). Mirrors

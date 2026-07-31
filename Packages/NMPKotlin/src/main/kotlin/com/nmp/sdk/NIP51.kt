@@ -9,8 +9,8 @@
 // one is reintroduced.
 //
 // Reading kind:10009 stays the ordinary demand/observation noun
-// (`activeAccountDemand()`, below). Browsing a NIP-29 group still takes a
-// host the app explicitly chose -- see `groupDiscoveryDemand`.
+// (`activeAccountDemand()`, below). Browsing a NIP-29 group still takes an
+// explicit, caller-supplied relay set -- see `NMPRelayScope.on`.
 //
 // [SimpleGroupsList] is also the ONE native shape a decoded kind:10009 list
 // takes (#858). The NIP-29-facing wrapper family that used to sit beside it
@@ -29,8 +29,8 @@ import uniffi.nmp_ffi.parseSimpleGroupsListTolerant as ffiParseSimpleGroupsListT
  * optional display name.
  *
  * [hostRelay] is a canonically spelled *observed* string. It is not a
- * routing permission: passing it to `groupDiscoveryDemand` is the app's own
- * explicit decision, and that function parses it like any other
+ * routing permission: passing it to `NMPRelayScope.on` is the app's own
+ * explicit decision, and that constructor parses it like any other
  * caller-supplied host. */
 data class SimpleGroupEntry(
     val groupId: String,

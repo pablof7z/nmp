@@ -150,18 +150,14 @@ pub mod nip22;
 #[cfg(feature = "nip65")]
 pub mod nip65;
 
-// #977: the engine binding for the NIP-29 `Group` door. Unconditional, unlike
-// `nip22` above: `nmp-nip29` is pure composition over `nostr` +
-// `nmp-grammar` with no mechanism crate behind it, so there is nothing for a
-// feature flag to keep unlinked.
-mod group;
-
-// The composition half, re-exported AS ITSELF so the design's own spelling
-// (`nip29::Group::new(host, "photographers")`) is what an app writes. The
-// engine-bound half is the extension trait below, in scope by default so
-// `group.publish(&engine, builder)` needs no import.
-pub use crate::group::{GroupOperations, GroupPublishError, GroupReceipts};
-pub use nmp_nip29 as nip29;
+// #1033: the app-facing NIP-29 door. A real facade module, not a re-export of
+// `nmp-nip29`: the door retains a relay scope AND mints the one opaque
+// `WriteIntent`, and a crate that is engine-free by construction cannot do the
+// second. `nmp-nip29` stays pure vocabulary below it and this module
+// selectively exposes what an app needs of it. Unconditional, unlike `nip22`
+// above: there is no mechanism crate behind NIP-29 for a feature flag to keep
+// unlinked.
+pub mod nip29;
 
 pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
@@ -228,9 +224,9 @@ pub use subscription::{
 // `Filter`-only call sites need no source/access reasoning of their own.
 pub use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
-    IdentityField, IndexedTagName, Selector, SetAlgebra, SetOp, SourceAuthority,
+    IdentityField, IndexedTagName, LiveQuery, LiveQueryError, Selector, SetAlgebra, SetOp,
+    SourceAuthority,
 };
-pub use nmp_resolver::LiveQuery;
 
 // Bech32 nostr-entity DECODE (#116) -- npub/nprofile/note/nevent/naddr ->
 // hex id/pubkey + relay hints. A pure codec, unrelated to the two nouns

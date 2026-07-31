@@ -25,15 +25,21 @@ ordinary `WriteIntent`; FFI, Swift, and Kotlin expose matching engine-free
 `publish` door and receipt lifecycle. There is no `Engine.commentIntent`,
 `CommentIntent` wrapper, or NIP-22-specific composed-publication overload.
 
-NIP-29 Group publication is currently a direct-Rust surface.
-`nmp_nip29::Group` mints the host-pinned read demand and the complete
-explicit-host `WriteIntent`; `nmp::GroupOperations` submits that value through
-the ordinary `Engine::publish` lifecycle. No FFI or Swift Group publication
-door exists yet—only read-only `groupDiscoveryDemand`. Issue
-[#1015](https://github.com/pablof7z/nmp/issues/1015) owns that projection, and
-native apps must not reproduce `h`, host routing, signing, or receipt
-choreography while it is absent. This record makes no Kotlin or Android Group
-support claim.
+NIP-29 Group publication is a Rust-and-FFI surface, multi-relay
+([#1033](https://github.com/pablof7z/nmp/issues/1033); superseded the
+single-host `group_discovery_demand`/`Group::new(host, id)` door with no
+alias). `nmp::nip29::on(hosts)` names a caller-supplied relay set — fallible,
+since an app-supplied set can be empty — and returns a `RelayScope` narrowed
+to one `Group` via `.group(id)`. `Group`'s inherent `publish`/`publish_signed`
+and named operations mint the ordinary opaque `WriteIntent` and submit it
+through the existing `Engine::publish` lifecycle; every write routes
+`WriteRouting::Explicit` to the whole scope, never one host. Reads mint one
+ordinary `LiveQuery` per group or discovery predicate, never a group-specific
+observe door. `nmp-ffi` projects the full `FfiRelayScope`/`FfiGroup`/
+`FfiGroupPredicate` read-and-write surface. Swift and Kotlin do not yet
+project it; native apps must not reproduce `h`, host routing, signing, or
+receipt choreography while that projection is absent. This record makes no
+Kotlin or Android Group support claim.
 
 `nmp-ffi` is a projection of that facade. The repository uses UniFFI proc
 macros and extracts component metadata from a compiled library; there is no UDL
@@ -138,22 +144,20 @@ proves its workflow and invoked scripts are byte-identical to the base. Issue
 #81 must require both stable checks: `surface-governance` and
 `surface-regeneration`.
 
-The component-catalog introduction is an explicit two-phase bootstrap. While
-the base has the legacy aggregate snapshot and no catalog tool, credential-free
-ordinary CI runs the complete proposed catalog/checker/regenerator and requires
-the exact two-record `nmp-core` + `nmp-nip46` transition. The existing
-base-trusted target checker necessarily rejects replacement of its own program,
-so only the repository owner's protected update procedure can land that exact
-reviewed bootstrap. Once the catalog tool is on the default branch, both
-workflows always extract the program from the base. The completed bootstrap's
-environment signal and proposed-head copy fallback are deleted; absence of any
-base governance artifact fails closed instead of executing proposed code.
+Both workflows always extract the catalog/checker/regenerator program from the
+base. The base-trusted target checker necessarily rejects replacement of its
+own program, so only the repository owner's protected update procedure can land
+a change to it. Absence of any base governance artifact fails closed instead of
+executing proposed code.
 
-The bootstrap checkpoint intentionally contains no fabricated change-log
-entry. The real PR number/URL, independent reviewer, and signoff can only be
-appended after those facts exist. Future component records for #952 and #824
-are ordinary later catalog obligations, not prerequisites for the current
-two-record bootstrap.
+The bootstrap checkpoint intentionally contained no fabricated change-log
+entry: the real PR number/URL, independent reviewer, and signoff were appended
+only once those facts existed. That one-time catalog bootstrap is complete and
+PR #1171 deleted its dedicated `nmp-core` + `nmp-nip46` transition arm along
+with it. A new protocol or content family is now an ordinary co-located
+namespace record whose `artifact_owner` points at `nmp-core`
+(`docs/surface/components/README.md`), never a second bootstrap record with
+its own artifact.
 
 Steady-state protected-program evolution uses one reusable exact protocol, not
 an issue-specific exception. The base verifier owns the complete protected

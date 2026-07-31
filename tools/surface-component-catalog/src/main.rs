@@ -1207,28 +1207,7 @@ fn transition(
             "component catalog is absent from both base and head",
         )),
         (true, false) => Err(invalid("component catalog was deleted from the head")),
-        (false, true) => {
-            let legacy = exact_entry(repo, base_ref, LEGACY_SNAPSHOT)?;
-            if legacy.as_ref().is_none_or(|entry| !regular_blob(entry)) {
-                return Err(invalid(
-                    "catalog bootstrap requires the regular legacy core snapshot on the base",
-                ));
-            }
-            let head = validate_catalog(repo, head_ref)?;
-            let keys = head.records.keys().cloned().collect::<BTreeSet<_>>();
-            let expected = BTreeSet::from(["nmp-core".to_owned(), "nmp-nip46".to_owned()]);
-            if keys != expected
-                || head
-                    .records
-                    .values()
-                    .any(|record| record.descriptor.state != State::Active)
-            {
-                return Err(invalid(
-                    "catalog bootstrap must contain exactly active nmp-core and nmp-nip46 records",
-                ));
-            }
-            Ok("bootstrap")
-        }
+        (false, true) => Err(invalid("component catalog is absent from the base")),
         (true, true) => {
             let base = validate_catalog(repo, base_ref)?;
             let head = validate_catalog(repo, head_ref)?;

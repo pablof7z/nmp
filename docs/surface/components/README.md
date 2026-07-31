@@ -39,8 +39,8 @@ cannot collide.
 The compiled-library extractor also sees the complete active namespace set.
 Every namespace present in a built library must be declared somewhere in the
 active catalog, and the namespace requested for one snapshot must occur exactly
-once. This permits a provider library to carry its separately governed core
-dependency while refusing an undeclared or duplicate component.
+once. This permits one library to carry several separately governed
+co-located namespaces while refusing an undeclared or duplicate record.
 
 Retirement is the one-way `active -> retired` transition. The trusted tool
 renders the exact tombstone from the base record and actual PR identity:
@@ -54,6 +54,9 @@ while a live co-located child remains.
 The former `docs/surface/nmp-ffi-component.txt` path is deleted and permanently
 refused. `nmp-core/uniffi.txt` is the sole core namespace snapshot.
 
-Future shared-interface and independently published protocol records from
-issues #952 and #824 use this ordinary data path after their artifacts exist;
-they are not placeholders in the #954 bootstrap.
+NMP ships one native library. Under #824's rewritten contract, protocol and
+content families are selected into that library by Cargo feature rather than
+linked as separate artifacts, so a new family record is an ordinary co-located
+namespace pointing its `artifact_owner` at `nmp-core`. `nmp-nip46` is retired:
+its separately linked artifact and the machinery that policed the seam between
+two libraries were deleted by PR #1171.

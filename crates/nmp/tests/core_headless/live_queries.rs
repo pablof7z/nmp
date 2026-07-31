@@ -612,7 +612,7 @@ fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
     )
     .expect("Public over an author-bearing selection is legal (#106)");
 
-    let effects = core.handle(EngineMsg::Subscribe(LiveQuery(demand)));
+    let effects = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
     let (sub_id, _f) = req_for(&effects, &relay0);
     let wire = wire_sub_string(sub_id);
 
@@ -705,7 +705,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     let mut strict_demand = agnostic_demand.clone();
     strict_demand.cache = nmp_grammar::CacheMode::Strict;
 
-    let effects_agnostic = core.handle(EngineMsg::Subscribe(LiveQuery(agnostic_demand)));
+    let effects_agnostic = core.handle(EngineMsg::Subscribe(LiveQuery::single(agnostic_demand)));
 
     // Wire contacts ONLY the declared pinned relay for this new atom --
     // never relay_other (no re-req there at all: nothing about that atom
@@ -732,7 +732,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     // The Strict handle dedups onto the SAME graph/wire (no new Req at
     // relay_pinned), yet must NOT see the row: its provenance ({relay_other})
     // is disjoint from the pinned set ({relay_pinned}).
-    let effects_strict = core.handle(EngineMsg::Subscribe(LiveQuery(strict_demand)));
+    let effects_strict = core.handle(EngineMsg::Subscribe(LiveQuery::single(strict_demand)));
     assert!(
         !effects_strict
             .iter()
@@ -815,7 +815,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     )
     .expect("nonempty pinned relay set is legal");
 
-    let effects1 = core.handle(EngineMsg::Subscribe(LiveQuery(demand1)));
+    let effects1 = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand1)));
     let id1 = effects1
         .iter()
         .find_map(|e| match e {
@@ -832,7 +832,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
         "demand1's Pinned({{relay1}}) atom must never touch relay2"
     );
 
-    let effects2 = core.handle(EngineMsg::Subscribe(LiveQuery(demand2)));
+    let effects2 = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand2)));
     let id2 = effects2
         .iter()
         .find_map(|e| match e {
@@ -1112,15 +1112,18 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
 
 /// Find `relay`'s [`SourceEvidence`] entry, if any, inside `evidence`.
 fn source_for<'a>(
-    evidence: &'a AcquisitionEvidence,
+    evidence: &'a [AcquisitionEvidence],
     relay: &RelayUrl,
 ) -> Option<&'a SourceEvidence> {
-    evidence.sources.iter().find(|s| &s.relay == relay)
+    evidence
+        .iter()
+        .flat_map(|branch| branch.sources.iter())
+        .find(|s| &s.relay == relay)
 }
 
-fn evidence_from(effects: &[Effect], id: HandleId) -> Option<&AcquisitionEvidence> {
+fn evidence_from(effects: &[Effect], id: ObservationId) -> Option<&[AcquisitionEvidence]> {
     effects.iter().find_map(|e| match e {
-        Effect::EmitRows(hid, _, ev) if *hid == id => Some(ev),
+        Effect::EmitRows(hid, _, ev) if *hid == id => Some(ev.as_slice()),
         _ => None,
     })
 }
@@ -1143,8 +1146,8 @@ fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
         })
         .expect("a new subscription must emit its initial evidence");
 
-    assert!(evidence.sources.is_empty());
-    assert_eq!(evidence.shortfall, vec![ShortfallFact::NoResolvedDemand]);
+    assert!(evidence[0].sources.is_empty());
+    assert_eq!(evidence[0].shortfall, vec![ShortfallFact::NoResolvedDemand]);
 }
 
 #[test]
@@ -1165,9 +1168,9 @@ fn resolved_atom_without_a_planned_relay_reports_no_planned_source() {
         })
         .expect("a new subscription must emit its initial evidence");
 
-    assert!(evidence.sources.is_empty());
+    assert!(evidence[0].sources.is_empty());
     assert_eq!(
-        evidence.shortfall,
+        evidence[0].shortfall,
         vec![ShortfallFact::NoPlannedSource { atom }]
     );
 }
@@ -1237,7 +1240,7 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
         .unwrap();
     let a_initial = evidence_from(&effects, a_id).unwrap();
     assert_eq!(
-        a_initial
+        a_initial[0]
             .sources
             .iter()
             .map(|source| source.relay.clone())
@@ -1260,7 +1263,7 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
     let a_while_b_is_live = evidence_from(&effects, a_id)
         .expect("adding B changes A's capped current plan and must refresh A");
     assert_eq!(
-        a_while_b_is_live
+        a_while_b_is_live[0]
             .sources
             .iter()
             .map(|source| source.relay.clone())
@@ -1273,7 +1276,7 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
     let a_after_b_is_removed = evidence_from(&effects, a_id)
         .expect("removing B frees cap for r3 and must refresh surviving A");
     assert_eq!(
-        a_after_b_is_removed
+        a_after_b_is_removed[0]
             .sources
             .iter()
             .map(|source| source.relay.clone())
@@ -1440,7 +1443,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
         "the outer atom's own relay proved its own window"
     );
     let inner = source_for(evidence, &relay0).expect(
-        "relay0 (the INNER kind:3 atom's covering relay) must be PRESENT in evidence.sources -- \
+        "relay0 (the INNER kind:3 atom's covering relay) must be PRESENT in evidence[0].sources -- \
          the whole point of #12 is that interior atoms are consulted, never invisible",
     );
     assert_eq!(

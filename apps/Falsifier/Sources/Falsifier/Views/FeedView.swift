@@ -11,7 +11,7 @@ struct FeedView: View {
     let model: AppModel
 
     @State private var rows: [Row] = []
-    @State private var evidence: AcquisitionEvidence?
+    @State private var evidence: [AcquisitionEvidence] = []
 
     var body: some View {
         NavigationStack {
@@ -61,17 +61,21 @@ struct FeedView: View {
     // (`docs/design/scoped-evidence-49-12-plan.md` §4). This falsifier's own
     // rendering choice, not an NMP-provided aggregate.
     private var evidenceText: String {
-        guard let evidence else {
+        guard !evidence.isEmpty else {
             return "no evidence yet"
         }
-        let sourceCount = evidence.sources.count
-        let shortfallCount = evidence.shortfall.count
-        return "\(sourceCount) source(s), \(shortfallCount) shortfall fact(s)"
+        // One entry per query branch (#1108); this view happens to observe a
+        // single-branch query, and still reads the branches as branches.
+        return evidence
+            .map { branch in
+                "\(branch.sources.count) source(s), \(branch.shortfall.count) shortfall fact(s)"
+            }
+            .joined(separator: " | ")
     }
 
     private func observe() async {
         rows = []
-        evidence = nil
+        evidence = []
         guard let query = try? model.engine.observe(FeedFilters.follows(kinds: model.kinds)) else {
             return
         }

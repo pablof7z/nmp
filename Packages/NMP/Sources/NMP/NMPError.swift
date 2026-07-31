@@ -67,14 +67,6 @@ public enum NMPError: Error, Sendable, Equatable {
     case signEventAlreadyConsumed
     case invalidSignature(String)
     case engineClosed
-    /// A separately packaged native component was built against a different
-    /// core Rust object contract. Refused before an external object pointer
-    /// crosses the component boundary (#952).
-    case nativeComponentMismatch(
-        component: String,
-        expectedCoreIdentity: String,
-        actualCoreIdentity: String
-    )
     /// `decodeNostrEntity`'s input was not valid bech32, had an
     /// unrecognized HRP prefix, or had a malformed inner TLV payload
     /// (#116).
@@ -98,6 +90,22 @@ public enum NMPError: Error, Sendable, Equatable {
     /// second, competing bound on the wire filter is refused rather than
     /// silently reconciled.
     case windowSelectionHasLimit
+    /// A windowed `observe` was given a live query that already declares an
+    /// aggregate result limit (#1108) -- the window and the aggregate bound
+    /// would be two competing owners of the merged row count.
+    case windowAggregateResultLimit
+    /// A live query was declared with no demand branches at all (#1108).
+    case emptyQueryUnion
+    /// A live query declared an aggregate result limit of zero (#1108): a
+    /// query that may never contain a row is not a bound.
+    case aggregateResultLimitZero
+    /// A nested live-query branch carried its own aggregate result limit
+    /// (#1108). Branches flatten into one canonical set, so an inner bound
+    /// has no surviving scope and accepting it would silently discard it.
+    case nestedAggregateResultLimit
+    /// A live query declared more branches than the supported hard ceiling
+    /// (#1108). The whole declaration is refused; no subset is installed.
+    case tooManyQueryBranches(requested: UInt64, maximum: UInt64)
     /// No last-good NIP-11 document exists and acquisition failed.
     case relayInformationUnavailable(RelayInformationErrorKind)
     /// #591: `WriteIntent.correlation`/`reattachReceipt(correlation:)` was
@@ -113,6 +121,29 @@ public enum NMPError: Error, Sendable, Equatable {
     /// (`follow`/`unfollow`), never as a payload a native caller could
     /// reassemble without the guard.
     case replaceableEditHasNoWireForm
+    /// #1033: `NMPRelayScope.on`/`FfiRelayScope.on` was given an empty
+    /// relay set -- a group must be hosted somewhere.
+    case emptyRelayScope
+    /// #1033: an event builder handed to `NMPGroup.publish` already carried
+    /// its own `h` tag. The retained group id is the sole semantic source of
+    /// that tag; a caller-supplied one is refused before any write reaches
+    /// the door.
+    case groupCallerSuppliedContext
+    /// #1033: a read selection handed to `NMPGroup.read` already constrained
+    /// `#h`. The retained group id is the sole semantic source of that row.
+    case groupCallerSuppliedContextConstraint
+    /// #1033: a read selection handed to `NMPGroup.read` already declared a
+    /// `since`/`until`/`limit` timeline bound the group door itself owns.
+    case groupCallerSuppliedTimeline
+    /// #1033: `NMPGroup.validateContext`/`publishSigned` was given an event
+    /// carrying no `h` tag naming any group at all.
+    case groupContextMissing(expected: String)
+    /// #1033: an already-signed event's `h` tag names a different group
+    /// than the one it was handed to.
+    case groupContextMismatched(found: String, expected: String)
+    /// #1033: an already-signed event carried more than one distinct `h`
+    /// tag, so which group it belongs to is ambiguous.
+    case groupContextAmbiguous(expected: String)
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -153,6 +184,12 @@ public enum NMPError: Error, Sendable, Equatable {
         case .WindowInitialExceedsMax(let initial, let max):
             self = .windowInitialExceedsMax(initial: initial, max: max)
         case .WindowSelectionHasLimit: self = .windowSelectionHasLimit
+        case .WindowAggregateResultLimit: self = .windowAggregateResultLimit
+        case .EmptyQueryUnion: self = .emptyQueryUnion
+        case .AggregateResultLimitZero: self = .aggregateResultLimitZero
+        case .NestedAggregateResultLimit: self = .nestedAggregateResultLimit
+        case .TooManyQueryBranches(let requested, let maximum):
+            self = .tooManyQueryBranches(requested: requested, maximum: maximum)
         case .RelayInformationUnavailable(let kind):
             self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
         case .InvalidCorrelationToken(let got, let reason):
@@ -160,6 +197,16 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidNip73Target(let reason):
             self = .invalidNip73Target(reason: reason)
         case .ReplaceableEditHasNoWireForm: self = .replaceableEditHasNoWireForm
+        case .EmptyRelayScope: self = .emptyRelayScope
+        case .GroupCallerSuppliedContext: self = .groupCallerSuppliedContext
+        case .GroupCallerSuppliedContextConstraint:
+            self = .groupCallerSuppliedContextConstraint
+        case .GroupCallerSuppliedTimeline: self = .groupCallerSuppliedTimeline
+        case .GroupContextMissing(let expected): self = .groupContextMissing(expected: expected)
+        case .GroupContextMismatched(let found, let expected):
+            self = .groupContextMismatched(found: found, expected: expected)
+        case .GroupContextAmbiguous(let expected):
+            self = .groupContextAmbiguous(expected: expected)
         }
     }
 }
@@ -226,12 +273,6 @@ extension NMPError: LocalizedError {
             "Invalid signature hex: \(got.debugDescription)"
         case .engineClosed:
             "Engine already shut down"
-        case .nativeComponentMismatch(
-            let component,
-            let expectedCoreIdentity,
-            let actualCoreIdentity
-        ):
-            "Native component \(component) requires core \(expectedCoreIdentity), loaded \(actualCoreIdentity)"
         case .invalidNostrEntity(let reason):
             "Invalid Nostr entity: \(reason)"
         case .nostrEntitySecretKeyRejected:
@@ -246,6 +287,16 @@ extension NMPError: LocalizedError {
             "Window initial \(initial) exceeds max \(max)"
         case .windowSelectionHasLimit:
             "A windowed selection must not also declare a limit"
+        case .windowAggregateResultLimit:
+            "A windowed observation must not also declare an aggregate result limit"
+        case .emptyQueryUnion:
+            "A live query must declare at least one demand branch"
+        case .aggregateResultLimitZero:
+            "An aggregate result limit of zero can never contain a row"
+        case .nestedAggregateResultLimit:
+            "A nested live-query branch must not declare its own aggregate result limit"
+        case .tooManyQueryBranches(let requested, let maximum):
+            "A live query supports at most \(maximum) demand branches; \(requested) were declared"
         case .relayInformationUnavailable(let kind):
             "Relay information unavailable: \(kind)"
         case .invalidCorrelationToken(let got, let reason):
@@ -254,6 +305,20 @@ extension NMPError: LocalizedError {
             "Invalid NIP-73 target: \(reason)"
         case .replaceableEditHasNoWireForm:
             "A replaceable edit crosses this boundary only inside the semantic method that owns its precondition, never as a payload"
+        case .emptyRelayScope:
+            "RelayScope.on requires a nonempty relay set -- a group must be hosted somewhere"
+        case .groupCallerSuppliedContext:
+            "A group write must not carry its own h tag; the group's retained id is the sole source of that tag"
+        case .groupCallerSuppliedContextConstraint:
+            "A group read selection must not already constrain #h; the group's retained id is the sole source of that row"
+        case .groupCallerSuppliedTimeline:
+            "A group read selection must not already declare since/until/limit; the group door owns that bound"
+        case .groupContextMissing(let expected):
+            "Event carries no h tag; expected group \(expected.debugDescription)"
+        case .groupContextMismatched(let found, let expected):
+            "Event's h tag \(found.debugDescription) does not match expected group \(expected.debugDescription)"
+        case .groupContextAmbiguous(let expected):
+            "Event carries more than one distinct h tag; expected exactly group \(expected.debugDescription)"
         }
     }
 }

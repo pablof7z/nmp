@@ -2,13 +2,18 @@
 //! survives every crash boundary the issue names, and reattaching by that
 //! token behaves identically to the existing by-id door
 //! (`reattach_receipt`) once translated. "Restart" is represented the same
-//! way `durable_accepted_restart.rs`/`nip46_restart.rs` already establish
-//! for this codebase: dropping the whole reducer/store and reopening the
-//! real redb file, no sleeps or polling. `nmp-store`'s
-//! `redb_store::crash_atomicity_tests` module covers the literal
-//! SIGABRT-mid-transaction proof that the `DELIVERY_CORRELATIONS` row commits
-//! or rolls back atomically with the receipt it names; this file covers the
-//! engine-level replay/reattachment contract across each named boundary.
+//! way `durable_accepted_restart.rs` establishes for this codebase: dropping
+//! the whole reducer/store and reopening the real redb file, no sleeps or
+//! polling. That discipline exists because `RedbStore::open` allows only one
+//! open handle per path per process (see its registration), so a real
+//! process restart must be modeled by actually releasing the handle
+//! (`drop(core)`/`drop(store)`) before reopening it -- an in-process restart
+//! that keeps the old handle alive would prove nothing about the real
+//! crash-recovery path. `nmp-store`'s `redb_store::crash_atomicity_tests`
+//! module covers the literal SIGABRT-mid-transaction proof that the
+//! `DELIVERY_CORRELATIONS` row commits or rolls back atomically with the
+//! receipt it names; this file covers the engine-level replay/reattachment
+//! contract across each named boundary.
 
 use std::borrow::Cow;
 
@@ -277,7 +282,9 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
     // The second draft's body never became canonical -- only the first
     // ever entered the store. Drop the reducer first: `RedbStore` allows
     // only one open handle per path per process (see `RedbStore::open`'s
-    // registration), same discipline as `nip46_restart.rs`'s `drop(store)`.
+    // registration), so the prior handle must actually be released before
+    // reopening the file -- the same discipline `durable_accepted_restart.rs`
+    // uses to model a real process restart rather than an in-process reset.
     drop(core);
     let first_draft = unsigned_draft(keys.public_key(), 300, "first body");
     let first_frozen_id = nostr::EventId::new(

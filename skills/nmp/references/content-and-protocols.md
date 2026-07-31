@@ -32,26 +32,34 @@ NIP-22 `publishComposed`, or take-once lifecycle.
 
 ## NIP-29 groups
 
-Swift/Kotlin currently project only `groupDiscoveryDemand(host)`. NIP-29 does
-not supply a fixed group-content kind catalog: the app selects the independently
-enabled schema kinds and builds an ordinary `NMPDemand` scoped by `h` and a
-pinned source. Direct Rust has the full door: `nip29::Group::new(host, groupId)`
-is an identity that mints both a read `Demand` (`group.demand(filter)`, taken
-through the one `observe` door) and every write
-(`group.publish(&engine, builder)`, plus the named 9000-9022 operations). It
-preserves the draft's kind and schema, appends exactly one `h` before signing,
-and routes explicitly to the host. There is no native/Swift/Kotlin projection
-of group publication yet.
+A group can live on more than one relay at once, so the door is a scope named
+once, narrowed to a group: `nmp::nip29::on(hosts)` returns a `RelayScope`
+(fallible — `RelayScopeError::EmptyRelaySet` if the caller-supplied set is
+empty), and `scope.group(groupId)` narrows it, keeping the same hosts. There
+is no single-host constructor or free single-host discovery function — both
+deleted, no alias.
+
+NIP-29 does not supply a fixed group-content kind catalog: the app selects the
+independently enabled schema kinds and calls `group.read(filter)`, which
+scopes by `h` and returns one ordinary `LiveQuery` (one branch per scope host,
+folded automatically — never a per-host list the app merges), taken through
+the one `observe` door. Writes go through the same `Group`:
+`group.publish(&engine, author, builder)` (plus `publish_signed` and the named
+9000-9022 operations) preserves the draft's kind and schema, appends exactly
+one `h` before signing, and routes `Explicit` to every host in the scope, not
+one. Discovery across the scope is evidence-scoped:
+`nip29::member_list_includes`/`admin_list_includes` build a composable
+`GroupPredicate` (`union`/`intersect`/`minus`) over observed kind:39002/39001
+rows, consumed via `scope.groups_where(&predicate)`; absence from a list is
+never treated as proof of non-membership/non-admin.
+
+Rust and FFI project the full read-and-write door
+(`FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`). Swift/Kotlin projection of
+this surface is not yet built.
 
 `nmp-nipc7` independently owns pure kind:9 chat and `q` replies. It does not
 materialize mentions, notification `p` rows, NIP-29 `h`, or routing. No
 Swift/Kotlin C7 projection is claimed yet.
-
-## NIP-46 and local signers
-
-Swift and Kotlin expose NIP-46 invitations/connections and local-signer discovery metadata. The host owns OS handoff, package/scheme visibility, and UI. Materialize the handoff URI/value before invitation connection consumes the invitation; then connect, start listening, and only then launch the cached handoff. Wait for the connection's ready state and close the connection explicitly. Swift's `connectNip46` overloads are `throws`; NIP-46 connection has no capacity or thread refusal, and a genuine relay/session setup failure surfaces as a typed `NMPNip46Failure`/`Nip46Error`. If a handle returns but the inner session/initial relay worker fails, Swift streams `.failed(reason:)` then finishes and Kotlin streams `Failed(reason)` then `Closed`; the public wrappers do not reconstruct a typed refusal from that reason. Both paths are immediate failures, not signer-readiness timeouts.
-
-Amber is NIP-55-only and is not a NIP-46 signer. Kotlin exposes Android handoff values, but the current JVM package does not execute NIP-55 or ship an Android integration layer.
 
 When implementing a protocol feature not already projected, do not assemble it from mechanism crates in app code. First determine whether it belongs in an opt-in protocol crate and whether Rust/FFI/native surface governance is required.
 

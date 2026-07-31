@@ -1,5 +1,6 @@
 //! What a group promises as an IDENTITY: construction costs nothing, a write needs no read, and one value serves a whole room.
 
+use crate::world::observe::{branch_shortfall, branch_sources};
 use cucumber::then;
 
 use super::delivery::published_delivered_to;
@@ -56,12 +57,9 @@ async fn publication_needed_no_read(w: &mut NmpWorld) {
 #[then(regex = r#"^the query reports the refused read as a source fact$"#)]
 async fn query_reports_the_refusal(w: &mut NmpWorld) {
     let reported = w.feed_eventually(|_, evidence| {
-        !evidence.sources.is_empty()
-            && (evidence
-                .sources
-                .iter()
-                .any(|source| source.reconciled_through.is_none())
-                || !evidence.shortfall.is_empty())
+        branch_sources(evidence).next().is_some()
+            && (branch_sources(evidence).any(|source| source.reconciled_through.is_none())
+                || branch_shortfall(evidence).next().is_some())
     });
     assert!(
         reported,

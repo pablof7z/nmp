@@ -11,7 +11,7 @@
 # This is its own workflow file because .github/workflows/architecture-gates.yml
 # is an exact protected path of the surface-governance migration policy
 # (scripts/check-surface-migration-authorization.py), the same reason
-# dependency-direction.yml and nip46-provider.yml are separate files. Triggers
+# dependency-direction.yml is a separate file. Triggers
 # and strictness are identical to the gate workflow; only the file differs.
 
 name: Behavioral traceability

@@ -247,11 +247,11 @@ mod history_mutation_tests {
         }
         let selection = history_query(47, BTreeSet::from([9]))
             .live_query()
-            .0
+            .branches()[0]
             .selection
             .clone();
         let query = HistoryQuery::new(
-            LiveQuery(nmp_grammar::Demand {
+            LiveQuery::single(nmp_grammar::Demand {
                 selection,
                 source: SourceAuthority::Pinned(BTreeSet::from([wanted])),
                 access: AccessContext::Public,
@@ -321,11 +321,11 @@ mod history_mutation_tests {
         }
         let selection = history_query(47, BTreeSet::from([9]))
             .live_query()
-            .0
+            .branches()[0]
             .selection
             .clone();
         let strict_query = HistoryQuery::new(
-            LiveQuery(nmp_grammar::Demand {
+            LiveQuery::single(nmp_grammar::Demand {
                 selection,
                 source: SourceAuthority::Pinned(BTreeSet::from([wanted.clone()])),
                 access: AccessContext::Public,
@@ -865,8 +865,8 @@ mod history_mutation_tests {
         let prior_order = core.histories[&id].order.clone();
         let prior_evidence = core.histories[&id].last_evidence.clone();
         let prior_handles = core.histories[&id].handle_ids.clone();
-        let ordinary_prior_rows = core.handles[&ordinary_id].last_rows.clone();
-        let ordinary_prior_evidence = core.handles[&ordinary_id].last_evidence.clone();
+        let ordinary_prior_rows = core.observations[&ordinary_id].last_rows.clone();
+        let ordinary_prior_evidence = core.observations[&ordinary_id].last_evidence.clone();
         let second_prior_rows = core.histories[&second_id].last_rows.clone();
         let second_prior_evidence = core.histories[&second_id].last_evidence.clone();
         let second_prior_handles = core.histories[&second_id].handle_ids.clone();
@@ -884,9 +884,12 @@ mod history_mutation_tests {
         assert!(!staged
             .iter()
             .any(|effect| matches!(effect, Effect::EmitHistory(..) | Effect::EmitRows(..))));
-        assert_eq!(core.handles[&ordinary_id].last_rows, ordinary_prior_rows);
         assert_eq!(
-            core.handles[&ordinary_id].last_evidence,
+            core.observations[&ordinary_id].last_rows,
+            ordinary_prior_rows
+        );
+        assert_eq!(
+            core.observations[&ordinary_id].last_evidence,
             ordinary_prior_evidence
         );
         assert_eq!(core.histories[&second_id].last_rows, second_prior_rows);
@@ -928,8 +931,7 @@ mod history_mutation_tests {
         assert_eq!(delivered[0].load, WindowLoad::Requesting);
         assert_eq!(delivered[1].load, WindowLoad::Returned { added: 3 });
         assert_eq!(
-            delivered[1]
-                .evidence
+            delivered[1].evidence[0]
                 .shortfall
                 .iter()
                 .filter(|fact| matches!(fact, ShortfallFact::NoPlannedSource { .. }))

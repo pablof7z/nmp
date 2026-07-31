@@ -14,7 +14,7 @@ use nmp_store::{
 };
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
-use crate::engine::{Engine, GraphSnapshot, HandleId, LiveQuery, Metrics, QueryHandle};
+use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle};
 
 /// The scripted "fake relay" harness: `Engine<MemoryStore>` plus the
 /// pass-through calls the contract tests drive.
@@ -41,7 +41,7 @@ impl Harness {
             .expect("query persistence (MemoryStore never fails a door)")
     }
 
-    pub fn subscribe(&mut self, q: LiveQuery) -> (QueryHandle, DemandDelta) {
+    pub fn subscribe(&mut self, q: nmp_grammar::Demand) -> (QueryHandle, DemandDelta) {
         self.engine
             .subscribe(q)
             .expect("query persistence (MemoryStore never fails a door)")

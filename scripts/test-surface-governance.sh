@@ -569,51 +569,23 @@ rm "$repo/docs/surface/components/beta/uniffi.txt"
 commit_case "$repo" beta-retired
 expect_fail "new record cannot begin retired" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
-# The historical catalog bootstrap shape is exact: regular legacy base,
-# exactly two active records, then steady-state transition rules take over.
-bootstrap_repo() {
-  local repo=$1
-  new_repo "$repo"
-  rm -r "$repo/docs/surface/components"
-  rm -r "$repo/tools/surface-component-catalog"
-  printf 'legacy core snapshot\n' > "$repo/docs/surface/nmp-ffi-component.txt"
-  commit_case "$repo" legacy-base
-}
-
-repo="$TMP/bootstrap-valid"; bootstrap_repo "$repo"
-base=$(git -C "$repo" rev-parse HEAD)
-rm "$repo/docs/surface/nmp-ffi-component.txt"
-mkdir -p "$repo/docs/surface/components"
-printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
-descriptor "$repo" nmp-core nmp-core
-descriptor "$repo" nmp-nip46 nmp-nip46
-commit_case "$repo" exact-bootstrap
-expect_pass "exact two-record bootstrap" "$CATALOG_BIN" transition \
-  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
-
-repo="$TMP/bootstrap-extra"; bootstrap_repo "$repo"
-base=$(git -C "$repo" rev-parse HEAD)
-rm "$repo/docs/surface/nmp-ffi-component.txt"
-mkdir -p "$repo/docs/surface/components"
-printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
-descriptor "$repo" nmp-core nmp-core
-descriptor "$repo" nmp-nip46 nmp-nip46
-descriptor "$repo" premature premature
-commit_case "$repo" extra-bootstrap-record
-expect_fail "bootstrap extra record" "$CATALOG_BIN" transition \
-  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
-
-repo="$TMP/bootstrap-missing-legacy"; new_repo "$repo"
+# The catalog's one-shot bootstrap transition arm (base has no catalog, head
+# starts one) was deleted with #1171: absence of any base governance artifact
+# must fail closed rather than let a proposed head introduce the catalog for
+# the first time. This exercises `main.rs`'s `(false, true) =>
+# Err(invalid("component catalog is absent from the base"))` arm directly, so
+# a regression that turns it back into an `Ok(...)` bootstrap allowance is
+# caught here rather than shipping unnoticed.
+repo="$TMP/catalog-appears-at-head"; new_repo "$repo"
 rm -r "$repo/docs/surface/components"
-commit_case "$repo" catalog-absent
+commit_case "$repo" catalog-absent-from-base
 base=$(git -C "$repo" rev-parse HEAD)
 mkdir -p "$repo/docs/surface/components"
 printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
-descriptor "$repo" nmp-core nmp-core
-descriptor "$repo" nmp-nip46 nmp-nip46
-commit_case "$repo" bootstrap-without-legacy
-expect_fail "bootstrap missing legacy snapshot" "$CATALOG_BIN" transition \
-  "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+descriptor "$repo" alpha alpha
+commit_case "$repo" catalog-present-at-head
+expect_fail "component catalog absent from base cannot silently begin at head" \
+  "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
 if grep -R -Fq 'SURFACE_OWNER_BOOTSTRAP' \
   "$ROOT/scripts/check-surface-governance.sh" \

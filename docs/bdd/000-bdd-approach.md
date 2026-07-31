@@ -205,7 +205,7 @@ prose beyond what their assertions prove.
 - Matching ordinary and derived queries see the unsigned pending row through
   normal store semantics.
 - Default signer selection and explicit override are pinned at acceptance.
-- Missing NIP-46/provider capability remains durable `AwaitingSigner` and
+- Missing signer capability remains durable `AwaitingSigner` and
   resumes after a matching provider attaches.
 - Invalid signer responses cannot promote the row.
 - Pre-signature cancellation restores a displaced replaceable winner.

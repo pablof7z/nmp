@@ -1,4 +1,4 @@
-use nmp_resolver::LiveQuery;
+use nmp_grammar::{Demand, LiveQuery};
 
 use super::{AcquisitionEvidence, Row, RowDelta};
 
@@ -39,8 +39,15 @@ impl HistoryQuery {
             "window initial size must not exceed max_rows"
         );
         debug_assert!(
-            query.0.selection.limit.is_none(),
+            query
+                .branches()
+                .iter()
+                .all(|branch| branch.selection.limit.is_none()),
             "windowed selection must not also declare a NIP-01 limit"
+        );
+        debug_assert!(
+            query.aggregate_result_limit().is_none(),
+            "a window and an aggregate result limit are two owners of row membership"
         );
         Self {
             query,
@@ -64,44 +71,75 @@ impl HistoryQuery {
         self.max_rows
     }
 
-    pub(crate) fn initial_demand(&self) -> LiveQuery {
-        let mut demand = self.query.0.clone();
-        demand.selection.limit = Some(self.page_size);
-        LiveQuery(demand)
+    /// The initial bounded acquisition for each canonical branch, in branch
+    /// order. Each branch asks for the window's initial row count of its OWN
+    /// selection: taking the newest `page_size` from every branch is exact,
+    /// because a row outside one branch's newest `page_size` already has that
+    /// many newer witnesses in that same branch. The global bound is applied
+    /// once to the merged union, never per branch.
+    pub(crate) fn initial_demands(&self) -> Vec<Demand> {
+        self.query
+            .branches()
+            .iter()
+            .map(|branch| {
+                let mut demand = branch.clone();
+                demand.selection.limit = Some(self.page_size);
+                demand
+            })
+            .collect()
     }
 
-    pub(crate) fn tie_second_demand(&self, created_at: u64) -> Option<LiveQuery> {
-        let mut demand = self.query.0.clone();
-        let selection = &mut demand.selection;
-        if selection.since.is_some_and(|since| since > created_at)
-            || selection.until.is_some_and(|until| until < created_at)
-        {
-            return None;
-        }
-        selection.since = Some(created_at);
-        selection.until = Some(created_at);
-        selection.limit = None;
-        Some(LiveQuery(demand))
+    /// The exact tie-second acquisition for each branch that can contain
+    /// `created_at`, paired with its canonical branch index. A branch whose
+    /// own selection excludes that second contributes nothing.
+    pub(crate) fn tie_second_demands(&self, created_at: u64) -> Vec<(usize, Demand)> {
+        self.query
+            .branches()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, branch)| {
+                let mut demand = branch.clone();
+                let selection = &mut demand.selection;
+                if selection.since.is_some_and(|since| since > created_at)
+                    || selection.until.is_some_and(|until| until < created_at)
+                {
+                    return None;
+                }
+                selection.since = Some(created_at);
+                selection.until = Some(created_at);
+                selection.limit = None;
+                Some((index, demand))
+            })
+            .collect()
     }
 
-    /// The bounded older-range acquisition for one advance. `limit` is the
-    /// number of rows still needed to reach the current target (the actual
-    /// advance chunk `new_target - already_held`), not a fixed page size:
-    /// `request_rows(at_least)` can raise the target by an arbitrary amount,
-    /// so the wire request must ask for exactly the shortfall.
-    pub(crate) fn older_demand(&self, created_at: u64, limit: usize) -> Option<LiveQuery> {
-        let older_until = created_at.checked_sub(1)?;
-        let mut demand = self.query.0.clone();
-        let selection = &mut demand.selection;
-        let until = selection
-            .until
-            .map_or(older_until, |existing| existing.min(older_until));
-        if selection.since.is_some_and(|since| since > until) {
-            return None;
-        }
-        selection.until = Some(until);
-        selection.limit = Some(limit);
-        Some(LiveQuery(demand))
+    /// The bounded older-range acquisition for one advance, per branch.
+    /// `limit` is the number of rows still needed to reach the current
+    /// target (the actual advance chunk `new_target - already_held`), not a
+    /// fixed page size: `request_rows(at_least)` can raise the target by an
+    /// arbitrary amount, so each branch must ask for exactly the shortfall.
+    pub(crate) fn older_demands(&self, created_at: u64, limit: usize) -> Vec<(usize, Demand)> {
+        let Some(older_until) = created_at.checked_sub(1) else {
+            return Vec::new();
+        };
+        self.query
+            .branches()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, branch)| {
+                let mut demand = branch.clone();
+                let selection = &mut demand.selection;
+                let until = selection
+                    .until
+                    .map_or(older_until, |existing| existing.min(older_until));
+                if selection.since.is_some_and(|since| since > until) {
+                    return None;
+                }
+                selection.until = Some(until);
+                selection.limit = Some(limit);
+                Some((index, demand))
+            })
+            .collect()
     }
 }
 
@@ -164,7 +202,8 @@ impl std::error::Error for HistoryAdvanceError {}
 pub struct HistoryBatch {
     pub rows: Vec<Row>,
     pub deltas: Vec<RowDelta>,
-    pub evidence: AcquisitionEvidence,
+    /// Per-BRANCH acquisition evidence in canonical branch order (#1108).
+    pub evidence: Vec<AcquisitionEvidence>,
     pub load: WindowLoad,
 }
 
@@ -189,18 +228,49 @@ mod tests {
     #[test]
     fn acquisition_windows_keep_tie_proof_distinct_from_limited_older_work() {
         let history = HistoryQuery::new(query(), 5, 20);
-        assert_eq!(history.initial_demand().0.selection.limit, Some(5));
+        assert_eq!(history.initial_demands()[0].selection.limit, Some(5));
 
-        let tie = history.tie_second_demand(100).unwrap();
-        assert_eq!(tie.0.selection.since, Some(100));
-        assert_eq!(tie.0.selection.until, Some(100));
-        assert_eq!(tie.0.selection.limit, None);
+        let tie = history.tie_second_demands(100);
+        assert_eq!(tie[0].0, 0);
+        assert_eq!(tie[0].1.selection.since, Some(100));
+        assert_eq!(tie[0].1.selection.until, Some(100));
+        assert_eq!(tie[0].1.selection.limit, None);
 
         // The older range asks for exactly the advance chunk it is handed,
         // not a fixed page size.
-        let older = history.older_demand(100, 3).unwrap();
-        assert_eq!(older.0.selection.until, Some(99));
-        assert_eq!(older.0.selection.limit, Some(3));
-        assert!(history.older_demand(0, 3).is_none());
+        let older = history.older_demands(100, 3);
+        assert_eq!(older[0].1.selection.until, Some(99));
+        assert_eq!(older[0].1.selection.limit, Some(3));
+        assert!(history.older_demands(0, 3).is_empty());
+    }
+
+    #[test]
+    fn every_branch_gets_its_own_bounded_acquisition_in_canonical_order() {
+        let a = Demand::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        });
+        let b = Demand::from_filter(Filter {
+            kinds: Some(BTreeSet::from([7])),
+            ..Filter::default()
+        });
+        let union = LiveQuery::union(
+            [LiveQuery::single(b.clone()), LiveQuery::single(a.clone())],
+            None,
+        )
+        .unwrap();
+        let history = HistoryQuery::new(union, 2, 10);
+
+        let initial = history.initial_demands();
+        assert_eq!(initial.len(), 2);
+        assert!(initial.iter().all(|d| d.selection.limit == Some(2)));
+        assert_eq!(initial[0].selection.kinds, a.selection.kinds);
+        assert_eq!(initial[1].selection.kinds, b.selection.kinds);
+
+        let older = history.older_demands(100, 3);
+        assert_eq!(
+            older.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 }

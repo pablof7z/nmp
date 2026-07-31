@@ -252,7 +252,7 @@ final class EvidenceMappingTests: XCTestCase {
     /// `PullIteratorCoreTests`.
     func testRowAccumulatorSourcesGrewReplacesRowInPlaceWithoutDuplicating() throws {
         let accumulator = RowAccumulator()
-        let emptyEvidence = FfiAcquisitionEvidence(sources: [], shortfall: [])
+        let emptyEvidence = [FfiAcquisitionEvidence(sources: [], shortfall: [])]
 
         let ffiRow = FfiRow(
             id: "abc",

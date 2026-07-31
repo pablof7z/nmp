@@ -11,9 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, IndexedTagName, SourceAuthority};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
-use nmp_resolver::LiveQuery;
 use nmp_router::RelayUrl;
 
 /// NIP-29 group admins -- the inner query's kind: which groups name me.
@@ -142,7 +142,7 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
         AccessContext::Public,
     )
     .expect("nmp-bdd: a pinned inner demand over a nonempty relay set is constructible");
-    LiveQuery(
+    LiveQuery::single(
         Demand::new(
             Filter {
                 kinds: Some(GROUP_STATE_KINDS.into_iter().collect()),
@@ -171,7 +171,7 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
 /// other literal shape here, because group state has no author whose outbox
 /// could be discovered.
 pub(super) fn group_metadata_query(relays: BTreeSet<RelayUrl>, group_id: &str) -> LiveQuery {
-    LiveQuery(
+    LiveQuery::single(
         Demand::new(
             Filter {
                 kinds: Some(BTreeSet::from([39_000u16])),
@@ -208,7 +208,7 @@ fn pinned_query(relay: &RelayUrl, filter: Filter) -> LiveQuery {
 }
 
 fn pinned_query_from_relays(relays: BTreeSet<RelayUrl>, filter: Filter) -> LiveQuery {
-    LiveQuery(
+    LiveQuery::single(
         Demand::new(
             filter,
             SourceAuthority::Pinned(relays),

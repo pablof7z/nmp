@@ -9,7 +9,9 @@ owns:
   - who mints the h tag and the host route, and when
   - the pre-signed group publication path and whose requirement it is
   - where NIP-29's own kinds (9000–9022) live
-  - tombstones — contextualize_group_event, GroupPublication, GroupHostAuthority
+  - tombstones — contextualize_group_event, GroupPublication, GroupHostAuthority,
+    group_discovery_demand, Group::new(host, group_id), GroupOperations,
+    member_is/admin_is
 related:
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/resolvers.md
@@ -21,7 +23,8 @@ related:
 issues:
   - "#838 deleted group_content_demand, groupMessageIntent, and publishComposed — the precedents this design obeys"
   - "#827 folded nmp-engine into nmp; private composition layer exists"
-  - "#1015 tracks the still-absent FFI/Swift Group publication projection"
+  - "#1108 landed the composite LiveQuery::Union a multi-host read consumes"
+  - "#1033 replaced the single-host Group door with RelayScope/Group/GroupPredicate — see §11"
   - "previous tags deliberately unimplemented; NIP-42 AUTH for private groups unverified end-to-end"
 ---
 
@@ -35,8 +38,14 @@ consumer of that design, not a mechanism of its own.
 
 `status: built` — §§1–9 preserve the dated pre-implementation decision record,
 including its `DESIGNED` labels, rejected alternatives, and then-current source
-citations. The present implementation is recorded in §10 with current-tree
-anchors rather than rewriting the reasoning that selected it.
+citations. §10 records PR #1011's original single-host implementation; #1033
+superseded that single-host shape with a multi-relay one, recorded in §11 with
+current-tree anchors. **Read §11 for the present-tense shape** — every code
+example in §§1–9 and §10 illustrates the single-host `Group::new(host, id)`
+door, which no longer exists (no alias, per
+`docs/internals/conventions/no-backwards-compatibility.md`); they are kept
+verbatim as the reasoning record that led to the door §11 now describes, not
+as usable current-day API.
 
 ---
 
@@ -260,13 +269,18 @@ else; what remains NIP-29-shaped is only *who mints it* (§1, §5).
 
 ---
 
-## 10. Implementation correction — BUILT (#977 / PR #1011)
+## 10. Implementation correction — SUPERSEDED (#977 / PR #1011)
 
-PR #1011 implemented the direct-Rust `Group` door described above. The dated
-`DESIGNED` labels and tombstone analysis in §§1–9 remain the decision record;
-this section is the present-tense correction.
+**Superseded by §11.** PR #1011 implemented the direct-Rust `Group` door
+described above, single-host. #1033 deleted every symbol this section names
+(`crates/nmp-nip29/src/group.rs`, `crates/nmp/src/group.rs`, the
+`GroupOperations` trait, `groupDiscoveryDemand`) with no alias, replacing them
+with the multi-relay `RelayScope`/`Group`/`GroupPredicate` shape in §11. This
+section is kept as the historical record of what PR #1011 actually shipped,
+the same way §§1–9 are kept as the decision record — do not treat any path or
+signature below as current.
 
-Current source anchors on this revision:
+Source anchors as PR #1011 left them — historical, not current (see §11):
 
 - `crates/nmp-nip29/src/group.rs:47-256` defines the `(host, group_id)`
   identity, app-selected pinned demand, unsigned `h` contextualization, and
@@ -288,6 +302,127 @@ Current source anchors on this revision:
   `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt:1-13` expose only
   `groupDiscoveryDemand`. Issue #1015 owns a future native Group publication
   door; this document claims no Swift, Kotlin, or Android write surface.
+
+---
+
+## 11. Multi-relay correction — BUILT (#1033)
+
+A group can live on more than one relay at once. `Group::new(host, group_id)`
+pinned exactly one; #1033 replaces it with a scope an app names once and
+narrows, with no single-host convenience overload left behind (a singleton is
+`nip29::on([host])?.group(id)`). This section is the present-tense
+description; §§1–10 are the decision/implementation record that led here.
+
+**Two nouns, one narrowing.**
+
+```rust
+let relays = nip29::on([relay_a, relay_b])?;              // RelayScopeError::EmptyRelaySet if empty
+let group  = relays.group("photographers");                // same hosts, one group id
+
+engine.observe(relays.groups_where(&mine)?, None)?;         // discovery: which groups
+engine.observe(group.read(chat_filter)?, None)?;             // this group's content
+group.publish(&engine, author, EventBuilder::new(Kind::from(9)).content("hi"))?;
+```
+
+`nmp::nip29::on` is fallible where the deleted single-host door was not: a
+one-element pinned set can never be empty, but a caller-supplied SET can.
+`RelayScope`/`Group` are opaque, retain their hosts/id privately, and expose
+no accessor for either — an app cannot compose an event under one scope and
+route it under another because there is no spelling for saying so.
+
+**Per-relay authority, not per-group.** The `h` tag is a label; the relay
+decides. Two relays hosting the same group id are two independent groups with
+the same name — membership and the relay-signed 39000/39001/39002 metadata
+both diverge. NMP surfaces that divergence (the addressable coordinate
+includes the author pubkey, so two relays' own 39000s never compete); it does
+not collapse it. §5's "the host is not derivable, so `Group` mints `Explicit`"
+still holds, widened to the whole set: every group write routes
+`WriteRouting::Explicit(all scope hosts)`, never one host, never a fallback.
+
+**Reads are one ordinary `LiveQuery`, never a per-host list the app merges.**
+One host yields `LiveQuery::Single`; more than one yields the `LiveQuery::Union`
+of complete singleton-host branches that #1108 added for exactly this
+consumer. Every NIP-29-owned nesting level inside a branch — the outer listing
+demand and any inner evidence lookup a discovery predicate builds — is pinned
+to that one branch's host, stamped explicitly rather than inherited, because
+resolving evidence at relay A while listing at relay B would be a confidently
+*wrong* answer, not a slow one. A caller-owned inner binding (e.g. a kind:3
+follows lookup) keeps its own authority; NIP-29 never recursively repins it.
+
+**Cache is scoped to the host too, not just the wire request.**
+`SourceAuthority::Pinned` alone only scopes which relay is *asked*;
+`CacheMode` separately governs which already-cached rows may *answer*, and the
+grammar's `Agnostic` default ignores provenance — so a naive pinned demand
+could let host A's cached kind:39002 row answer host B's structurally
+identical lookup, reporting a member nothing at B actually supports. Every
+NIP-29-owned demand sets `CacheMode::Strict` at the one choke point
+(`pinned_public_at`) every constructor passes through, closing that leak. The
+user-visible consequence: a just-published group message appears under a
+host once *that host* has ACKed it, not immediately under every host in the
+scope — showing an event under a host that rejected it would be exactly the
+wrong answer this door exists to prevent. Do not describe cross-host
+appearance as immediate or synchronized; it is per-host, on that host's own
+acceptance.
+
+**Discovery is evidence-scoped, not exact-state.** kind:39002 (members) and
+kind:39001 (admins) are optional, possibly-partial relay-signed lists:
+inclusion is evidence, absence is not evidence of the opposite. The surface is
+therefore `nip29::member_list_includes(subjects)` /
+`nip29::admin_list_includes(subjects)`, returning a composable
+`GroupPredicate` (`union`/`intersect`/`minus`, folding with the grammar's own
+`SetOp`) — never `member_is`/`admin_is`, which would claim exact current
+state the underlying kinds cannot establish.
+
+**Current source anchors:**
+
+- `crates/nmp-nip29/src/context.rs` — the `h` row: `contextualize`,
+  `validate_context`, `group_demand_at` (one host's complete read branch for
+  one group id). Kind-blind; mints no `previous` tag. Carries the schema- and
+  no-`previous`-preservation falsifiers
+  (`draft_kind_and_schema_survive_except_for_appended_h`,
+  `publication_never_synthesizes_previous`).
+- `crates/nmp-nip29/src/discovery.rs` — `GROUP_METADATA_KIND` /
+  `GROUP_ADMINS_KIND` / `GROUP_MEMBERS_KIND` (39000/39001/39002),
+  `groups_where_at`, `member_list_includes_at`, `admin_list_includes_at`: one
+  host's complete discovery branch, every NIP-29-owned nesting level pinned to
+  that host. `pinned_public_at` is the one choke point every NIP-29 demand
+  passes through for BOTH axes: `SourceAuthority::Pinned` (which relay is
+  asked) and `CacheMode::Strict` (which cached rows may answer) — closing the
+  cross-host cache leak a merely-pinned-but-`Agnostic` demand would otherwise
+  have (`0ec66f8d`).
+- `crates/nmp-nip29/src/operations.rs` — the typed 9000–9022 composers,
+  unchanged in shape by this issue.
+- `crates/nmp/src/nip29/mod.rs` — `nip29::on`, `RelayScope`,
+  `RelayScope::group`, `RelayScope::groups_where`, and the falsifier that
+  exists to prove per-host stamping survives nesting,
+  `scope_stamps_exact_hosts_on_every_nested_nip29_demand`. `nmp::nip29` is a
+  real module here (`crates/nmp/src/lib.rs:160`), not a re-export of
+  `nmp-nip29` — the door needs both the retained scope and the one opaque
+  `WriteIntent`, and the engine-free lower crate cannot mint the latter.
+- `crates/nmp/src/nip29/group.rs` — `Group`'s inherent `read`,
+  `validate_context`, `publish`, `publish_signed`, and the named operations
+  (`join_request`, `leave_request`, `add_user`, `remove_user`,
+  `edit_metadata`, `delete_event`, `create_group`, `delete_group`,
+  `create_invite`) — all inherent, no `GroupOperations` trait. Carries
+  `a_group_write_routes_explicitly_to_every_host_in_the_scope`.
+- `crates/nmp/src/nip29/predicate.rs` — `GroupPredicate`,
+  `member_list_includes`, `admin_list_includes`, `union`/`intersect`/`minus`.
+- `crates/nmp/src/nip29/read.rs` — folds one branch per host into the one
+  `LiveQuery` (`LiveQuery::single`/`LiveQuery::union`), consuming #1108.
+- `crates/nmp-ffi/src/nip29.rs` — `FfiRelayScope`, `FfiGroup`,
+  `FfiGroupPredicate` project the full read/write surface, not only
+  discovery; Swift/Kotlin projection is the remaining native work.
+- `scripts/check-nip29-ownership.sh` — retargeted at this shape: requires
+  `RelayScope`, the evidence-scoped predicates, both falsifiers by name, and
+  forbids `crates/nmp-nip29/src/{group,demand}.rs`, `crates/nmp/src/group.rs`,
+  the `GroupOperations` trait, and a lower `WriteIntent` reference from
+  reappearing.
+
+Deleted, no alias: `group_discovery_demand` and its `pinned_demand` helper;
+`Group::new(host, group_id)` and every single-host constructor; `Group::demand`
+and `Group::write_intent`/`signed_write_intent` on the lower crate (the intent
+factories moved to the facade `Group` above); the `GroupOperations` extension
+trait; and the overclaiming `member_is`/`admin_is` spellings.
 
 The abandoned `GroupHostAuthority` reasoning in §9 remains intentionally
 visible. NIP-29 uses the general `Explicit` capability; its semantic boundary

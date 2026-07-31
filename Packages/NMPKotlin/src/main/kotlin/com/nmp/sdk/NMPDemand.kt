@@ -11,6 +11,8 @@ import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiCacheMode
 import uniffi.nmp_ffi.FfiDemand
 import uniffi.nmp_ffi.FfiFreshness
+import uniffi.nmp_ffi.FfiLiveQuery
+import uniffi.nmp_ffi.maxQueryBranches
 import uniffi.nmp_ffi.FfiSourceAuthority
 
 /** Which authority resolves a query's relay set (`nmp_grammar::
@@ -147,6 +149,49 @@ data class NMPDemand(
                 access = NMPAccessContext.from(ffi.access),
                 cache = NMPCacheMode.from(ffi.cache),
                 freshness = NMPFreshness.from(ffi.freshness),
+            )
+    }
+}
+
+/**
+ * One live-query declaration (#1108): one or more complete, independent
+ * [NMPDemand] branches observed through ONE lifecycle, plus the optional
+ * bound on their merged row union.
+ *
+ * Some correct reads need several branches whose results form one semantic
+ * query and whose host-scoped values must not cross between them. Flattening
+ * two hosts into one `NMPSourceAuthority.Pinned(setOf(a, b))` produces a
+ * confidently wrong cross-product; handing an app a list of demands makes the
+ * app own the aggregate observation. This is neither: it is one read noun.
+ *
+ * The Rust constructor canonicalizes the branches -- sorted, exact duplicates
+ * collapsed -- so permuted or repeated input yields the same observation and
+ * the same per-branch evidence order.
+ */
+data class NMPLiveQuery(
+    /** The demand branches. Must be nonempty and at most [MAX_BRANCHES];
+     * both are typed refusals at `observe`, never silent truncation. */
+    val branches: List<NMPDemand>,
+    /** Bound on the MERGED row union, applied after branch rows are merged by
+     * event id -- never `N` rows per branch. Distinct from a branch's own
+     * `NMPFilter.limit`, which bounds only that branch's selection. */
+    val aggregateResultLimit: UInt? = null,
+) {
+    fun toFfi(): FfiLiveQuery =
+        FfiLiveQuery(
+            branches = branches.map { it.toFfi() },
+            aggregateResultLimit = aggregateResultLimit,
+        )
+
+    companion object {
+        /** The hard ceiling on branches in one observation. Exceeding it
+         * refuses the whole declaration. */
+        val MAX_BRANCHES: UInt get() = maxQueryBranches()
+
+        fun from(ffi: FfiLiveQuery): NMPLiveQuery =
+            NMPLiveQuery(
+                branches = ffi.branches.map { NMPDemand.from(it) },
+                aggregateResultLimit = ffi.aggregateResultLimit,
             )
     }
 }

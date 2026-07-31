@@ -24,17 +24,16 @@ use crate::auth::{
     FfiAccountRegistration, FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration,
 };
 use crate::convert::{
-    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, demand_from_ffi,
-    diagnostics_snapshot_to_ffi, filter_from_ffi, frame_to_ffi, parse_pubkey,
-    relay_information_error_kind, sign_event_failure, sign_event_request_from_ffi,
-    sign_event_start_error, signed_event_to_ffi, window_from_ffi, write_intent_from_ffi,
-    write_status_to_ffi, FfiError, FfiRequestRowsError, FfiRowPullError, WriteStatusRef,
+    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, diagnostics_snapshot_to_ffi,
+    filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_pubkey, relay_information_error_kind,
+    sign_event_failure, sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi,
+    window_from_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError,
+    FfiRowPullError, WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
-use crate::signer::FfiSignerMailbox;
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDemand,
-    FfiDiagnosticsSnapshot, FfiFilter, FfiFrame, FfiReceiptReattachment, FfiRelayInformation,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
+    FfiFilter, FfiFrame, FfiLiveQuery, FfiReceiptReattachment, FfiRelayInformation,
     FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
     FfiRelayInformationLimitations, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent,
     FfiWindow, FfiWriteIntent, FfiWriteStatus,
@@ -274,13 +273,6 @@ impl NmpEngine {
         Ok(self.engine.remove_account(&registration.inner)?)
     }
 
-    /// Return the protocol-neutral, opaque attachment mailbox consumed by
-    /// optional signer-provider components. The mailbox shares this exact
-    /// engine lifecycle; it is not another engine or a provider registry.
-    pub fn signer_mailbox(&self) -> Arc<FfiSignerMailbox> {
-        FfiSignerMailbox::from_engine(Arc::clone(&self.engine))
-    }
-
     /// Install a native-owned authorization policy for one exact account.
     /// The callback may resolve inline or retain the supplied completion.
     pub fn add_auth_policy(
@@ -414,22 +406,30 @@ impl NmpEngine {
         Ok(NmpRowStream::new(subscription, windowed))
     }
 
-    /// Open a live subscription over an explicit [`FfiDemand`] (#107) --
+    /// Open a live subscription over an explicit [`FfiLiveQuery`] (#1108) --
     /// the constructor an app reaches for once [`Self::observe`]'s bare
-    /// `FfiFilter` (which always takes `Demand::from_filter`'s static
-    /// default) isn't enough: declaring `Pinned` wire authority, a non-
-    /// default `AccessContext`, or a non-`Agnostic` `CacheMode`. Same
-    /// pull-based/cancel/window shape as `observe` in every other respect
-    /// (see that method's doc for the `window` policy).
-    pub fn observe_demand(
+    /// [`FfiFilter`] (which always takes `Demand::from_filter`'s static
+    /// default, one branch) isn't enough: declaring `Pinned` wire authority,
+    /// a non-default `AccessContext`, a non-`Agnostic` `CacheMode`, SEVERAL
+    /// independent demand branches, or a bound on their merged row union.
+    ///
+    /// Branches are observed through this ONE subscription: rows are unioned
+    /// by event id with provenance merged, each frame carries one evidence
+    /// entry per canonical branch, and one cancellation withdraws every
+    /// branch exactly once. Same pull-based/cancel/window shape as `observe`
+    /// in every other respect (see that method's doc for the `window`
+    /// policy); a window and an `aggregate_result_limit` are two owners of
+    /// row membership and fail closed with
+    /// [`FfiError::WindowAggregateResultLimit`].
+    pub fn observe_query(
         &self,
-        query: FfiDemand,
+        query: FfiLiveQuery,
         window: Option<FfiWindow>,
     ) -> Result<Arc<NmpRowStream>, FfiError> {
-        let demand = demand_from_ffi(query)?;
+        let query = live_query_from_ffi(query)?;
         let window = window_from_ffi(window)?;
         let windowed = window.is_some();
-        let subscription = self.engine.observe_async(nmp::LiveQuery(demand), window)?;
+        let subscription = self.engine.observe_async(query, window)?;
         Ok(NmpRowStream::new(subscription, windowed))
     }
 
@@ -1243,8 +1243,9 @@ mod tests {
     use super::*;
     use crate::types::{
         FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter, FfiFrame,
-        FfiIdentity, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest, FfiSourceAuthority,
-        FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+        FfiIdentity, FfiLiveQuery, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest,
+        FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting,
+        FfiWriteStatus,
     };
     use redb::ReadableTable;
     use std::collections::BTreeSet;
@@ -1413,19 +1414,22 @@ mod tests {
         );
     }
 
-    fn ffi_windowed_demand(author: String) -> FfiDemand {
-        FfiDemand {
-            selection: FfiFilter {
-                kinds: Some(vec![7_778]),
-                authors: Some(FfiBinding::Literal {
-                    values: vec![author],
-                }),
-                ..FfiFilter::default()
-            },
-            source: FfiSourceAuthority::AuthorOutboxes,
-            access: FfiAccessContext::Public,
-            cache: FfiCacheMode::Agnostic,
-            freshness: crate::types::FfiFreshness::Live,
+    fn ffi_windowed_query(author: String) -> FfiLiveQuery {
+        FfiLiveQuery {
+            branches: vec![FfiDemand {
+                selection: FfiFilter {
+                    kinds: Some(vec![7_778]),
+                    authors: Some(FfiBinding::Literal {
+                        values: vec![author],
+                    }),
+                    ..FfiFilter::default()
+                },
+                source: FfiSourceAuthority::AuthorOutboxes,
+                access: FfiAccessContext::Public,
+                cache: FfiCacheMode::Agnostic,
+                freshness: crate::types::FfiFreshness::Live,
+            }],
+            aggregate_result_limit: None,
         }
     }
 
@@ -1492,8 +1496,8 @@ mod tests {
         })
         .unwrap();
         let handle = engine
-            .observe_demand(
-                ffi_windowed_demand(keys.public_key().to_hex()),
+            .observe_query(
+                ffi_windowed_query(keys.public_key().to_hex()),
                 Some(FfiWindow::Expandable { initial: 1, max: 2 }),
             )
             .unwrap();

@@ -20,8 +20,13 @@ use nostr::JsonUtil;
 /// when applicable. `access` is `public` or `nip42:<hex-pubkey>`.
 #[derive(Debug, Clone)]
 pub struct ObservationEvidence {
-    /// Monotonic within this observation.
+    /// Monotonic within this observation, across every branch of it.
     pub sequence: u64,
+    /// The canonical branch index this fact came from, or `None` for a fact
+    /// about the observation as a whole (withdrawal, mailbox overflow). Two
+    /// branches may resolve identical values at identical paths, so the
+    /// branch is the only thing that tells their traces apart.
+    pub branch: Option<usize>,
     pub kind: &'static str,
     pub path: Option<String>,
     pub revision: Option<u64>,
@@ -60,9 +65,14 @@ fn attribute(key: &str, value: impl ToString) -> (String, String) {
 
 impl ObservationEvidence {
     pub(crate) fn from_engine(value: crate::core::ObservationEvidence) -> Self {
-        let crate::core::ObservationEvidence { sequence, fact } = value;
+        let crate::core::ObservationEvidence {
+            sequence,
+            branch,
+            fact,
+        } = value;
         let mut evidence = Self {
             sequence,
+            branch,
             kind: "",
             path: None,
             revision: None,

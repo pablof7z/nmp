@@ -61,7 +61,7 @@ FFI_TYPES=crates/nmp-ffi/src/types.rs
 FFI_CONVERT=crates/nmp-ffi/src/convert.rs
 SWIFT=Packages/NMP/Sources/NMP/WriteIntent.swift
 KOTLIN=Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/WriteIntent.kt
-GROUP_DOOR=crates/nmp/src/group.rs
+GROUP_DOOR=crates/nmp/src/nip29/group.rs
 
 for path in "$GRAMMAR" "$FFI_TYPES" "$FFI_CONVERT" "$SWIFT" "$KOTLIN" "$GROUP_DOOR"; do
   [[ -f $path ]] || fail "required routing surface is missing: $path"
@@ -227,15 +227,40 @@ tombstone '[Aa]uthor[Rr]elay[Ll]ist' 'AuthorRelayList' '`Auto`'
 # The app hands the group an event and names nothing else. If a group verb
 # ever took a relay or a routing value, `Explicit` would stop being minted
 # by the group and start being spelled by the app -- which is the boundary
-# #977 built the door for.
-group_trait=$(block "$GROUP_DOOR" '^pub trait GroupOperations \{' | without_comments)
-[[ -n $group_trait ]] || fail "$GROUP_DOOR no longer declares the GroupOperations door"
-offending=$(printf '%s\n' "$group_trait" | grep -nE 'RelayUrl|WriteRouting|routing|relay' || true)
+# #977 built the door for and #1033 preserved when it widened one host to a
+# scope.
+#
+# #1033 moved the door: the `GroupOperations` extension trait over a lower
+# `nmp-nip29` type is deleted, and the verbs are INHERENT methods on
+# `nmp::nip29::Group`, which retains its scope's hosts privately. The
+# invariant is unchanged and is checked the same way, with one necessary
+# difference: a trait declaration is signatures only, while an inherent impl
+# carries BODIES -- and a body is exactly where `WriteRouting::Explicit` is
+# legitimately minted from the retained hosts. Scanning bodies would forbid
+# the very mechanism this gate exists to protect, so only the public
+# signatures are checked.
+group_impl=$(block "$GROUP_DOOR" '^impl Group \{' | without_comments)
+[[ -n $group_impl ]] || fail "$GROUP_DOOR no longer declares the inherent Group door"
+
+# Each public signature: from its `pub fn` line up to the line that opens the
+# body. `pub(crate)` helpers are not app surface and are deliberately skipped.
+group_signatures=$(
+  printf '%s\n' "$group_impl" |
+    awk '
+      /^    pub fn / { insig = 1 }
+      insig { print }
+      insig && /\{[[:space:]]*$/ { insig = 0 }
+    '
+)
+[[ -n $group_signatures ]] || fail "$GROUP_DOOR declares no public group verbs"
+
+offending=$(printf '%s\n' "$group_signatures" | grep -nE 'RelayUrl|WriteRouting|routing|relay' || true)
 if [[ -n $offending ]]; then
   printf '%s\n' "$offending"
   fail "a group write operation takes a relay or a routing value. The group
-       carries its host from construction and mints both the route and the
-       \`h\` row itself (docs/internals/nip29/group-publication.md §8)."
+       carries its hosts from the scope it was narrowed from and mints both
+       the route and the \`h\` row itself
+       (docs/internals/nip29/group-publication.md §8)."
 fi
 
 echo "routing-vocabulary: ok"

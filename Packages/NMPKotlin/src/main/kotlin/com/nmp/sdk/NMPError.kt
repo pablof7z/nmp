@@ -85,16 +85,6 @@ sealed class NMPError(message: String) : Exception(message) {
         NMPError("retained evidence for receipt $receiptId became unavailable during replay")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
-    /** A separately packaged native component was built against a different
-     * core Rust object contract. Refused before an external object pointer
-     * crosses the component boundary (#952). */
-    data class NativeComponentMismatch(
-        val component: String,
-        val expectedCoreIdentity: String,
-        val actualCoreIdentity: String,
-    ) : NMPError(
-        "native component $component requires core $expectedCoreIdentity, loaded $actualCoreIdentity",
-    )
     /** `decodeNostrEntity`'s input was not valid bech32, had an
      * unrecognized HRP prefix, or had a malformed inner TLV payload (#116). */
     data class InvalidNostrEntity(val reason: String) : NMPError("invalid nostr entity: $reason")
@@ -128,6 +118,32 @@ sealed class NMPError(message: String) : Exception(message) {
     object WindowSelectionHasLimit :
         NMPError("windowed selection must not also declare a limit")
 
+    /** A windowed `observe` was given a live query that already declares an
+     * aggregate result limit (#1108) -- the window and the aggregate bound
+     * would be two competing owners of the merged row count. */
+    object WindowAggregateResultLimit :
+        NMPError("a windowed observation must not also declare an aggregate result limit")
+
+    /** A live query was declared with no demand branches at all (#1108). */
+    object EmptyQueryUnion :
+        NMPError("a live query must declare at least one demand branch")
+
+    /** A live query declared an aggregate result limit of zero (#1108): a
+     * query that may never contain a row is not a bound. */
+    object AggregateResultLimitZero :
+        NMPError("an aggregate result limit of zero can never contain a row")
+
+    /** A nested live-query branch carried its own aggregate result limit
+     * (#1108). Branches flatten into one canonical set, so an inner bound has
+     * no surviving scope and accepting it would silently discard it. */
+    object NestedAggregateResultLimit :
+        NMPError("a nested live-query branch must not declare its own aggregate result limit")
+
+    /** A live query declared more branches than the supported hard ceiling
+     * (#1108). The whole declaration is refused; no subset is installed. */
+    data class TooManyQueryBranches(val requested: ULong, val maximum: ULong) :
+        NMPError("a live query supports at most $maximum demand branches; $requested were declared")
+
     data class RelayInformationUnavailable(val kind: RelayInformationErrorKind) :
         NMPError("relay information unavailable: ${kind.describe()}")
 
@@ -152,6 +168,52 @@ sealed class NMPError(message: String) : Exception(message) {
             "a replaceable edit crosses this boundary only inside the semantic method that owns " +
                 "its precondition, never as a payload",
         )
+
+    /** #1033: `NMPRelayScope.on`/`FfiRelayScope.on` was given an empty relay
+     * set -- a group must be hosted somewhere. */
+    object EmptyRelayScope :
+        NMPError("RelayScope.on requires a nonempty relay set -- a group must be hosted somewhere")
+
+    /** #1033: an event builder handed to `NMPGroup.publish` already carried
+     * its own `h` tag. The retained group id is the sole semantic source of
+     * that tag; a caller-supplied one is refused before any write reaches
+     * the door. */
+    object GroupCallerSuppliedContext :
+        NMPError(
+            "a group write must not carry its own h tag; the group's retained id is the sole " +
+                "source of that tag",
+        )
+
+    /** #1033: a read selection handed to `NMPGroup.read` already constrained
+     * `#h`. The retained group id is the sole semantic source of that row. */
+    object GroupCallerSuppliedContextConstraint :
+        NMPError(
+            "a group read selection must not already constrain #h; the group's retained id is " +
+                "the sole source of that row",
+        )
+
+    /** #1033: a read selection handed to `NMPGroup.read` already declared a
+     * `since`/`until`/`limit` timeline bound the group door itself owns. */
+    object GroupCallerSuppliedTimeline :
+        NMPError(
+            "a group read selection must not already declare since/until/limit; the group door " +
+                "owns that bound",
+        )
+
+    /** #1033: `NMPGroup.validateContext`/`publishSigned` was given an event
+     * carrying no `h` tag naming any group at all. */
+    data class GroupContextMissing(val expected: String) :
+        NMPError("event carries no h tag; expected group $expected")
+
+    /** #1033: an already-signed event's `h` tag names a different group than
+     * the one it was handed to. */
+    data class GroupContextMismatched(val found: String, val expected: String) :
+        NMPError("event's h tag $found does not match expected group $expected")
+
+    /** #1033: an already-signed event carried more than one distinct `h`
+     * tag, so which group it belongs to is ambiguous. */
+    data class GroupContextAmbiguous(val expected: String) :
+        NMPError("event carries more than one distinct h tag; expected exactly group $expected")
 
     companion object {
         fun from(ffi: FfiException): NMPError =
@@ -188,12 +250,27 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.WindowInitialExceedsMax ->
                     WindowInitialExceedsMax(ffi.initial, ffi.max)
                 is FfiException.WindowSelectionHasLimit -> WindowSelectionHasLimit
+                is FfiException.WindowAggregateResultLimit -> WindowAggregateResultLimit
+                is FfiException.EmptyQueryUnion -> EmptyQueryUnion
+                is FfiException.AggregateResultLimitZero -> AggregateResultLimitZero
+                is FfiException.NestedAggregateResultLimit -> NestedAggregateResultLimit
+                is FfiException.TooManyQueryBranches ->
+                    TooManyQueryBranches(ffi.requested, ffi.maximum)
                 is FfiException.RelayInformationUnavailable ->
                     RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
                 is FfiException.InvalidCorrelationToken ->
                     InvalidCorrelationToken(ffi.got, ffi.reason)
                 is FfiException.InvalidNip73Target -> InvalidNip73Target(ffi.reason)
                 is FfiException.ReplaceableEditHasNoWireForm -> ReplaceableEditHasNoWireForm
+                is FfiException.EmptyRelayScope -> EmptyRelayScope
+                is FfiException.GroupCallerSuppliedContext -> GroupCallerSuppliedContext
+                is FfiException.GroupCallerSuppliedContextConstraint ->
+                    GroupCallerSuppliedContextConstraint
+                is FfiException.GroupCallerSuppliedTimeline -> GroupCallerSuppliedTimeline
+                is FfiException.GroupContextMissing -> GroupContextMissing(ffi.expected)
+                is FfiException.GroupContextMismatched ->
+                    GroupContextMismatched(ffi.found, ffi.expected)
+                is FfiException.GroupContextAmbiguous -> GroupContextAmbiguous(ffi.expected)
             }
     }
 }

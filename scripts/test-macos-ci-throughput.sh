@@ -77,10 +77,10 @@ expect_failure "second macOS job" "expected exactly one PR macOS job, found 2"
 
 reset_fixture
 sed -i.bak \
-  's#scripts/check-nip46-artifact-inventory\.sh#scripts/removed-provider-proof.sh#' \
+  's#      - name: Test the Swift package#      - name: Removed Swift suite#' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "removed suite marker" "scripts/check-nip46-artifact-inventory.sh"
+expect_failure "removed suite marker" "      - name: Test the Swift package"
 
 reset_fixture
 sed -i.bak \
@@ -126,10 +126,11 @@ expect_failure "removed full master packaging" "aarch64-apple-ios aarch64-apple-
 
 reset_fixture
 sed -i.bak \
-  's#scripts/build-swift-nip46-xcframework.sh#scripts/build-swift-nip46-xcframework.sh; scripts/build-swift-xcframework.sh#' \
+  '/run: scripts\/build-swift-xcframework.sh/a\
+          scripts/build-swift-xcframework.sh' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "reintroduced standalone core build" "scripts/build-swift-xcframework.sh"
+expect_failure "duplicated native build" "expected exactly one Apple native build, found 2"
 
 reset_fixture
 sed -i.bak \
@@ -147,18 +148,11 @@ expect_failure "removed bounded-session Swift proof" "testDurableAutoRoutedWrite
 
 reset_fixture
 sed -i.bak \
-  's/libnmp_ffi-core-only.so/libnmp_ffi-no-mismatch-proof.so/g' \
-  "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml"
-rm "$FIXTURE_ROOT/.github/workflows/nip46-provider.yml.bak"
-expect_failure "removed cross-package mismatch proof" "libnmp_ffi-core-only.so"
-
-reset_fixture
-sed -i.bak \
   '/- name: Install pinned Rust toolchain/a\
       - name: Portable Rust tests drifted onto macOS\
         run: cargo test' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "portable work drifted onto macOS" "exactly eight named Apple qualification steps"
+expect_failure "portable work drifted onto macOS" "exactly six named Apple qualification steps"
 
-echo "macOS CI throughput test: baseline and thirteen mutations passed"
+echo "macOS CI throughput test: baseline and twelve mutations passed"

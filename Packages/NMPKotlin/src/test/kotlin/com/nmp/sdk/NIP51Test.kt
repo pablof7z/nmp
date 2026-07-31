@@ -49,15 +49,19 @@ class NIP51Test {
     /** Browsing a group takes a host the app explicitly supplies; the parsed
      * value never becomes routing authority on its own.
      *
-     * #858's Kotlin falsifier too: the selected [SimpleGroupEntry] feeds
-     * NIP-29's host-pinned discovery constructor directly, with no
+     * #858's Kotlin falsifier too, updated for #1033: the selected
+     * [SimpleGroupEntry] feeds NIP-29's host-scoped door
+     * ([NMPRelayScope.on]/[NMPRelayScope.group]) directly, with no
      * NIP-29-owned copy of the NIP-51 value in between. */
     @Test
     fun groupBrowsingStillTakesAnExplicitlySuppliedHost() {
         val list = parseSimpleGroupsListTolerant(fabricatedRow(10009u))
         val selected = list.items[0]
-        val demand = groupDiscoveryDemand(selected.hostRelay)
-        assertEquals(listOf<UShort>(39000u), demand.selection.kinds)
+        val scope = NMPRelayScope.on(listOf(selected.hostRelay))
+        val group = scope.group(selected.groupId)
+        val query = group.read(NMPFilter(kinds = listOf(39000u)))
+        assertEquals(1, query.branches.size)
+        assertEquals(listOf<UShort>(39000u), query.branches[0].selection.kinds)
 
         assertEquals("group-a", selected.groupId)
     }
