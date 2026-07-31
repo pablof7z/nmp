@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CHECK="$SCRIPT_DIR/check-surface-governance.sh"
 PARITY="$SCRIPT_DIR/check-sdk-parity.sh"
-WORKFLOW_CHECK="$SCRIPT_DIR/run-surface-regeneration-governance.sh"
+MIGRATION_TEST="$SCRIPT_DIR/test-surface-migration-authorization.py"
 [[ $# -eq 1 ]] || {
   echo "usage: $0 <workspace-root>" >&2
   exit 2
@@ -14,8 +14,66 @@ git -C "$ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || {
   echo "test-surface-governance: workspace root is not a Git worktree: $ROOT" >&2
   exit 2
 }
+PYTHONDONTWRITEBYTECODE=1 python3 "$MIGRATION_TEST"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+
+fail() {
+  echo "test-surface-governance: $*" >&2
+  exit 1
+}
+
+workflow_permissions() {
+  awk '
+    /^permissions:[[:space:]]*$/ {
+      inside = 1
+      next
+    }
+    inside && /^[^[:space:]]/ {
+      inside = 0
+    }
+    inside &&
+      /^  [A-Za-z0-9_-]+:[[:space:]]*(read|write|none)[[:space:]]*$/ {
+        line = $0
+        sub(/^  /, "", line)
+        gsub(/[[:space:]]/, "", line)
+        print line
+      }
+  ' "$1" | LC_ALL=C sort
+}
+
+falsify_missing_base_governance_artifact() {
+  local fixture="$TMP/base-trust"
+  local repo="$fixture/repo"
+  local trusted="$fixture/trusted-checker"
+  local witness="$fixture/proposed-code-executed"
+  mkdir -p "$repo" "$fixture"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email surface@example.invalid
+  git -C "$repo" config user.name SurfaceTest
+  printf 'base without governance artifact\n' > "$repo/ordinary.txt"
+  git -C "$repo" add ordinary.txt
+  git -C "$repo" commit -qm base-without-governance-artifact
+  local base
+  base=$(git -C "$repo" rev-parse HEAD)
+
+  mkdir -p "$repo/scripts"
+  cat > "$repo/scripts/check-surface-governance.sh" <<EOF
+#!/usr/bin/env bash
+touch "$witness"
+EOF
+  git -C "$repo" add scripts/check-surface-governance.sh
+  git -C "$repo" commit -qm proposed-head-governance
+
+  if git -C "$repo" show \
+      "$base:scripts/check-surface-governance.sh" > "$trusted" 2>/dev/null; then
+    fail "missing base governance artifact did not fail closed"
+  fi
+  [[ ! -s "$trusted" ]] ||
+    fail "missing base governance artifact was filled from the proposed head"
+  [[ ! -e "$witness" ]] ||
+    fail "proposed governance code executed during base extraction"
+}
 
 CATALOG_BIN=${SURFACE_CATALOG_BIN:-}
 if [[ -z "$CATALOG_BIN" ]]; then
@@ -204,7 +262,7 @@ checker_projections() {
 }
 
 run_checker() {
-  local repo=$1 base=$2 owner_bootstrap=${3:-0}
+  local repo=$1 base=$2
   local projections
   projections=$(checker_projections "$repo" "$base")
   SURFACE_CATALOG_BIN="$CATALOG_BIN" \
@@ -215,20 +273,7 @@ run_checker() {
   SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
   SURFACE_CHANGED_PROJECTIONS="$projections" \
   SURFACE_REGEN_CMD=scripts/regen.sh \
-  SURFACE_OWNER_BOOTSTRAP="$owner_bootstrap" \
     "$CHECK"
-}
-
-workflow_bootstrap_signal() {
-  local repo=$1 base=$2
-  local witness="$repo/workflow-signal"
-  cat > "$witness" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "${SURFACE_OWNER_BOOTSTRAP-unset}"
-EOF
-  chmod +x "$witness"
-  SURFACE_ROOT="$repo" SURFACE_BASE_REF="$base" SURFACE_CHECKER="$witness" \
-    "$WORKFLOW_CHECK"
 }
 
 # Baseline and exact root-or-omission/co-location rules.
@@ -524,8 +569,8 @@ rm "$repo/docs/surface/components/beta/uniffi.txt"
 commit_case "$repo" beta-retired
 expect_fail "new record cannot begin retired" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
-# The one owner bootstrap is exact: regular legacy base, exactly two active
-# records, then the ordinary steady-state transition rules take over.
+# The historical catalog bootstrap shape is exact: regular legacy base,
+# exactly two active records, then steady-state transition rules take over.
 bootstrap_repo() {
   local repo=$1
   new_repo "$repo"
@@ -570,21 +615,12 @@ commit_case "$repo" bootstrap-without-legacy
 expect_fail "bootstrap missing legacy snapshot" "$CATALOG_BIN" transition \
   "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
-repo="$TMP/workflow-bootstrap-signal"; bootstrap_repo "$repo"
-base=$(git -C "$repo" rev-parse HEAD)
-[[ $(workflow_bootstrap_signal "$repo" "$base") == 1 ]] || {
-  echo "FAIL: legacy workflow did not set the owner bootstrap signal" >&2
-  exit 1
-}
-echo "ok - workflow sets bootstrap signal on legacy base"
-
-repo="$TMP/workflow-steady-signal"; new_repo "$repo"
-base=$(git -C "$repo" rev-parse HEAD)
-[[ $(SURFACE_OWNER_BOOTSTRAP=1 workflow_bootstrap_signal "$repo" "$base") == unset ]] || {
-  echo "FAIL: steady-state workflow retained the owner bootstrap signal" >&2
-  exit 1
-}
-echo "ok - workflow removes bootstrap signal in steady state"
+if grep -R -Fq 'SURFACE_OWNER_BOOTSTRAP' \
+  "$ROOT/scripts/check-surface-governance.sh" \
+  "$ROOT/scripts/run-surface-regeneration-governance.sh"; then
+  fail "retired environment bootstrap bypass is still reachable"
+fi
+echo "ok - no environment bootstrap bypass"
 
 # Allowlist schema is exact, canonical, and component-scoped.
 allowlist_fail() {
@@ -773,11 +809,15 @@ SURFACE_REGEN_CMD=scripts/regen.sh \
 echo "ok - configured evidence path owns correction recognition"
 
 for protected in \
+  scripts/check-surface-migration-authorization.py \
   scripts/check-surface-governance.sh \
   scripts/check-sdk-parity.sh \
   scripts/lib/require-commands.sh \
   scripts/run-surface-regeneration-governance.sh \
+  scripts/test-surface-migration-authorization.py \
+  .github/workflows/architecture-gates.yml \
   .github/workflows/ci.yml \
+  .github/workflows/surface-governance.yml \
   tools/component-interface-snapshot/Cargo.lock \
   tools/component-interface-snapshot/Cargo.toml \
   tools/component-interface-snapshot/src/main.rs \
@@ -794,7 +834,39 @@ for protected in \
   commit_case "$repo" tamper
   expect_fail "protected program tamper: $protected" run_checker "$repo" "$base"
 done
-expect_fail "bootstrap flag cannot bypass steady state" run_checker "$repo" "$base" 1
+
+expected_permissions=$'contents:read\nissues:read\npull-requests:read\nstatuses:read'
+for workflow in \
+  "$ROOT/.github/workflows/surface-governance.yml" \
+  "$ROOT/.github/workflows/ci.yml"; do
+  [[ $(workflow_permissions "$workflow") == "$expected_permissions" ]] ||
+    fail "trusted workflow permissions are not the exact least-read set: $workflow"
+  grep -Fq 'check-surface-migration-authorization.py' "$workflow" ||
+    fail "trusted workflow does not extract the base migration verifier: $workflow"
+  grep -Fq 'test-surface-migration-authorization.py' "$workflow" ||
+    fail "trusted workflow does not extract the base migration falsifier: $workflow"
+  grep -Fq 'SURFACE_PR_RECORD:' "$workflow" ||
+    fail "trusted workflow does not pass its PR API record: $workflow"
+  grep -Fq 'SURFACE_ISSUE_RECORD:' "$workflow" ||
+    fail "trusted workflow does not pass its issue API record: $workflow"
+  grep -Fq 'SURFACE_STATUS_RECORDS:' "$workflow" ||
+    fail "trusted workflow does not pass its status API record: $workflow"
+  grep -Fq 'git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"' "$workflow" ||
+    fail "trusted workflow does not extract governance bytes from the base: $workflow"
+  if grep -Eq \
+      'bootstrap uses proposed copy|#954 bootstrap|cp "\$path" "\$TRUSTED_DIR/\$path"|cat-file -e "\$BASE_SHA:tools/surface-component-catalog/Cargo.toml"' \
+      "$workflow"; then
+    fail "trusted workflow retains a proposed-head governance fallback: $workflow"
+  fi
+done
+falsify_missing_base_governance_artifact
+if grep -Fq 'migration_candidate' "$ROOT/scripts/check-surface-governance.sh"; then
+  fail "shell wrapper duplicates the verifier's migration activation authority"
+fi
+grep -Fq 'python3 "$MIGRATION_CHECK" "${migration_args[@]}" verify' \
+  "$ROOT/scripts/check-surface-governance.sh" ||
+  fail "shell wrapper does not invoke the base-owned verifier unconditionally"
+echo "ok - workflows use least-read permissions and base-only governance bytes"
 
 repo="$TMP/checker-wrong-pr"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \

@@ -10,6 +10,9 @@ on:
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
+  statuses: read
 
 jobs:
   surface-governance:
@@ -34,6 +37,7 @@ jobs:
             "$TRUSTED_DIR/tools/rust-facade-snapshot/src" \
             "$TRUSTED_DIR/tools/surface-component-catalog/src"
           for path in \
+            scripts/check-surface-migration-authorization.py \
             scripts/check-surface-governance.sh \
             scripts/check-sdk-parity.sh \
             scripts/install-surface-tools.sh \
@@ -41,6 +45,7 @@ jobs:
             scripts/regenerate-surface-snapshots.sh \
             scripts/run-surface-regeneration-governance.sh \
             scripts/test-install-surface-tools.sh \
+            scripts/test-surface-migration-authorization.py \
             scripts/test-surface-governance.sh \
             tools/surface-toolchain.env \
             tools/component-interface-snapshot/Cargo.toml \
@@ -55,6 +60,47 @@ jobs:
             git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
           done
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
+
+      - name: Fetch PR and owner-status records through the base trust boundary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TRUSTED_DIR: ${{ runner.temp }}/nmp-surface-governance
+        run: |
+          mkdir -p "$TRUSTED_DIR/authorization"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            > "$TRUSTED_DIR/authorization/pull-request.json"
+          if ! gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/statuses?per_page=100" \
+              > "$TRUSTED_DIR/authorization/statuses.json"; then
+            # A fork head may not be addressable through the base repository's
+            # status endpoint. That is ordinary non-migration work; an actual
+            # migration still fails closed because [] cannot authorize it.
+            printf '[]\n' > "$TRUSTED_DIR/authorization/statuses.json"
+          fi
+          printf '{}\n' > "$TRUSTED_DIR/authorization/issue.json"
+          target_url=$(
+            jq -r --arg context "nmp/surface-governance-migration" '
+              [.[] | select(
+                type == "object" and .context == $context
+              )]
+              | sort_by([
+                  (.created_at // ""),
+                  (if (.id | type) == "number" then .id else -1 end)
+                ])
+              | if length == 0 then "" else (.[-1].target_url // "") end
+            ' "$TRUSTED_DIR/authorization/statuses.json"
+          )
+          issue_number=${target_url##*/}
+          if [[ $issue_number =~ ^[1-9][0-9]*$ &&
+                $target_url == "https://github.com/${GITHUB_REPOSITORY}/issues/${issue_number}" ]] &&
+              gh api "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" \
+                > "$TRUSTED_DIR/authorization/issue.tmp"; then
+            mv "$TRUSTED_DIR/authorization/issue.tmp" \
+              "$TRUSTED_DIR/authorization/issue.json"
+          fi
 
       - name: Install checksum-pinned surface tool through trusted base script
         env:
@@ -92,6 +138,9 @@ jobs:
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-governance-target/catalog
           SURFACE_PR_NUMBER: ${{ github.event.pull_request.number }}
           SURFACE_PR_URL: ${{ github.event.pull_request.html_url }}
+          SURFACE_PR_RECORD: ${{ runner.temp }}/nmp-surface-governance/authorization/pull-request.json
+          SURFACE_ISSUE_RECORD: ${{ runner.temp }}/nmp-surface-governance/authorization/issue.json
+          SURFACE_STATUS_RECORDS: ${{ runner.temp }}/nmp-surface-governance/authorization/statuses.json
           SURFACE_CHANGED_PROJECTIONS: ${{ steps.projections.outputs.value }}
           SURFACE_SKIP_REGEN: 1
         run: ${{ runner.temp }}/nmp-surface-governance/scripts/check-surface-governance.sh

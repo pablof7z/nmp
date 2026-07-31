@@ -5,6 +5,12 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  statuses: read
+
 jobs:
   # Deterministic regeneration runs in the ordinary pull_request trust domain,
   # never in pull_request_target. The separate trusted-base governance check
@@ -18,7 +24,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prepare base-trusted surface program (bootstrap uses proposed copy)
+      - name: Prepare base-trusted surface program
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           TRUSTED_DIR: ${{ runner.temp }}/nmp-surface-regeneration
@@ -33,6 +39,7 @@ jobs:
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/src" \
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src"
           paths=(
+            scripts/check-surface-migration-authorization.py
             scripts/check-surface-governance.sh
             scripts/check-sdk-parity.sh
             scripts/check-sdk-parity-allowlist.toml
@@ -41,6 +48,7 @@ jobs:
             scripts/regenerate-surface-snapshots.sh
             scripts/run-surface-regeneration-governance.sh
             scripts/test-install-surface-tools.sh
+            scripts/test-surface-migration-authorization.py
             scripts/test-surface-governance.sh
             tools/surface-toolchain.env
             tools/component-interface-snapshot/Cargo.toml
@@ -61,20 +69,51 @@ jobs:
             tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/Cargo.toml
             tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src/lib.rs
           )
-          # The #954 bootstrap is phase one: the base has the old checker but
-          # no component catalog program, so ordinary credential-free CI runs
-          # the complete proposed program. After that exact bootstrap lands,
-          # every later PR is judged by the base-trusted copy (phase two).
-          if git cat-file -e "$BASE_SHA:tools/surface-component-catalog/Cargo.toml" 2>/dev/null; then
-            for path in "${paths[@]}"; do
-              git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
-            done
-          else
-            for path in "${paths[@]}"; do
-              cp "$path" "$TRUSTED_DIR/$path"
-            done
-          fi
+          for path in "${paths[@]}"; do
+            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
+          done
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
+
+      - name: Fetch PR and owner-status records without executing head code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TRUSTED_DIR: ${{ runner.temp }}/nmp-surface-regeneration
+        run: |
+          mkdir -p "$TRUSTED_DIR/authorization"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            > "$TRUSTED_DIR/authorization/pull-request.json"
+          if ! gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/statuses?per_page=100" \
+              > "$TRUSTED_DIR/authorization/statuses.json"; then
+            # A fork head may not be addressable through the base repository's
+            # status endpoint. That is ordinary non-migration work; an actual
+            # migration still fails closed because [] cannot authorize it.
+            printf '[]\n' > "$TRUSTED_DIR/authorization/statuses.json"
+          fi
+          printf '{}\n' > "$TRUSTED_DIR/authorization/issue.json"
+          target_url=$(
+            jq -r --arg context "nmp/surface-governance-migration" '
+              [.[] | select(
+                type == "object" and .context == $context
+              )]
+              | sort_by([
+                  (.created_at // ""),
+                  (if (.id | type) == "number" then .id else -1 end)
+                ])
+              | if length == 0 then "" else (.[-1].target_url // "") end
+            ' "$TRUSTED_DIR/authorization/statuses.json"
+          )
+          issue_number=${target_url##*/}
+          if [[ $issue_number =~ ^[1-9][0-9]*$ &&
+                $target_url == "https://github.com/${GITHUB_REPOSITORY}/issues/${issue_number}" ]] &&
+              gh api "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" \
+                > "$TRUSTED_DIR/authorization/issue.tmp"; then
+            mv "$TRUSTED_DIR/authorization/issue.tmp" \
+              "$TRUSTED_DIR/authorization/issue.json"
+          fi
 
       - name: Install checksum-pinned surface tool
         env:
@@ -115,6 +154,9 @@ jobs:
           SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
           SURFACE_PR_NUMBER: ${{ github.event.pull_request.number }}
           SURFACE_PR_URL: ${{ github.event.pull_request.html_url }}
+          SURFACE_PR_RECORD: ${{ runner.temp }}/nmp-surface-regeneration/authorization/pull-request.json
+          SURFACE_ISSUE_RECORD: ${{ runner.temp }}/nmp-surface-regeneration/authorization/issue.json
+          SURFACE_STATUS_RECORDS: ${{ runner.temp }}/nmp-surface-regeneration/authorization/statuses.json
           SURFACE_CHANGED_PROJECTIONS: ${{ steps.projections.outputs.value }}
           SURFACE_REGEN_CMD: ${{ runner.temp }}/nmp-surface-regeneration/scripts/regenerate-surface-snapshots.sh
           SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env

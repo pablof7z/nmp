@@ -8,6 +8,8 @@ SNAPSHOT_DIR=${SURFACE_SNAPSHOT_DIR:-docs/surface}
 CHANGE_LOG=${SURFACE_CHANGE_LOG:-docs/surface-change-log.md}
 REGEN_CMD=${SURFACE_REGEN_CMD:-scripts/regenerate-surface-snapshots.sh}
 CATALOG_TOOL_DIR=${SURFACE_CATALOG_TOOL_DIR:-$ROOT/tools/surface-component-catalog}
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+MIGRATION_CHECK="$SCRIPT_DIR/check-surface-migration-authorization.py"
 
 fail() { echo "surface-governance: $*" >&2; exit 1; }
 
@@ -43,12 +45,16 @@ projection_set() {
   fi
 }
 
-if [[ ${1:-} == "--print-projections" ]]; then
+mode=${1:-}
+if [[ $mode == "--print-projections" ]]; then
   [[ $# -eq 1 ]] || fail "usage: $0 [--print-projections]"
   projection_set
   exit 0
+elif [[ $mode == "--print-migration-authorization" ]]; then
+  [[ $# -eq 1 ]] ||
+    fail "usage: $0 [--print-projections|--print-migration-authorization]"
 elif [[ $# -ne 0 ]]; then
-  fail "usage: $0 [--print-projections]"
+  fail "usage: $0 [--print-projections|--print-migration-authorization]"
 fi
 
 PR_NUMBER=${SURFACE_PR_NUMBER:-}
@@ -67,66 +73,40 @@ transition_mode=$(
 [[ $transition_mode == bootstrap || $transition_mode == steady ]] ||
   fail "component catalog returned an unknown transition mode: $transition_mode"
 
-# Parse the untrusted Git filename stream without line delimiters. Rename/copy
-# statuses carry two paths; every other status carries one.
-git diff --name-status -z "$BASE_REF...$HEAD_REF" > "$TMP/name-status"
-exec 3< "$TMP/name-status"
-: > "$TMP/changed-paths"
-while IFS= read -r -d '' status <&3; do
-  IFS= read -r -d '' path <&3 || fail "truncated git diff after status $status"
-  printf '%s\0' "$path" >> "$TMP/changed-paths"
-  case "$status" in
-    R*|C*)
-      IFS= read -r -d '' path <&3 || fail "truncated git rename/copy after status $status"
-      printf '%s\0' "$path" >> "$TMP/changed-paths"
-      ;;
-  esac
-done
-exec 3<&-
-
-# The pull_request_target workflow and these scripts are trusted from the base
-# revision. A PR cannot replace the program that judges itself. The sole
-# exception is this exact legacy-snapshot -> two-record owner bootstrap, and
-# only when the owner procedure explicitly sets SURFACE_OWNER_BOOTSTRAP=1.
-owner_bootstrap=0
-if [[ ${SURFACE_OWNER_BOOTSTRAP:-0} == 1 && $transition_mode == bootstrap ]]; then
-  owner_bootstrap=1
+[[ -f "$MIGRATION_CHECK" ]] ||
+  fail "base-trusted migration verifier is unavailable: $MIGRATION_CHECK"
+migration_args=(
+  --root "$ROOT"
+  --base "$BASE_REF"
+  --head "$HEAD_REF"
+  --pr-number "$PR_NUMBER"
+)
+if [[ $mode == "--print-migration-authorization" ]]; then
+  [[ ${SURFACE_MIGRATION_ISSUE:-} =~ ^[1-9][0-9]*$ ]] ||
+    fail "SURFACE_MIGRATION_ISSUE must name the open owning issue"
+  python3 "$MIGRATION_CHECK" "${migration_args[@]}" print-status \
+    --issue-number "$SURFACE_MIGRATION_ISSUE" ||
+    fail "the proposed governance migration cannot be authorized"
+  exit 0
 fi
-while IFS= read -r -d '' path; do
-  case "$path" in
-    .github/workflows/architecture-gates.yml|\
-    .github/workflows/ci.yml|\
-    .github/workflows/surface-governance.yml|\
-    scripts/check-sdk-parity.sh|\
-    scripts/check-sdk-parity-allowlist.txt|\
-    scripts/check-sdk-parity-allowlist.toml|\
-    scripts/check-surface-governance.sh|\
-    scripts/install-surface-tools.sh|\
-    scripts/lib/require-commands.sh|\
-    scripts/regenerate-surface-snapshots.sh|\
-    scripts/run-surface-regeneration-governance.sh|\
-    scripts/test-install-surface-tools.sh|\
-    scripts/test-surface-governance.sh|\
-    tools/component-interface-snapshot/Cargo.lock|\
-    tools/component-interface-snapshot/Cargo.toml|\
-    tools/component-interface-snapshot/src/main.rs|\
-    tools/rust-facade-snapshot/Cargo.lock|\
-    tools/rust-facade-snapshot/Cargo.toml|\
-    tools/rust-facade-snapshot/src/main.rs|\
-    tools/rust-facade-snapshot/tests/fixtures/*|\
-    tools/surface-component-catalog/Cargo.lock|\
-    tools/surface-component-catalog/Cargo.toml|\
-    tools/surface-component-catalog/src/main.rs|\
-    tools/surface-toolchain.env)
-      [[ $owner_bootstrap == 1 ]] ||
-        fail "protected governance program changed: $path"
-      ;;
-  esac
-done < "$TMP/changed-paths"
 
-if [[ ${SURFACE_OWNER_BOOTSTRAP:-0} == 1 && $owner_bootstrap != 1 ]]; then
-  fail "SURFACE_OWNER_BOOTSTRAP applies only to the exact legacy catalog bootstrap"
-fi
+# Reusable authorization is a GitHub commit-status record fetched by the
+# base-owned workflow. The helper owns both protected-path activation and the
+# complete PR/diff/object/issue/status verification. Exit 3 means the PR does
+# not touch a protected governance surface.
+set +e
+python3 "$MIGRATION_CHECK" "${migration_args[@]}" verify \
+  --pr-url "$PR_URL" \
+  --pull-request-record "${SURFACE_PR_RECORD:-}" \
+  --issue-record "${SURFACE_ISSUE_RECORD:-}" \
+  --status-records "${SURFACE_STATUS_RECORDS:-}" >/dev/null
+migration_status=$?
+set -e
+case "$migration_status" in
+  0) ;;
+  3) ;;
+  *) fail "protected governance migration is not exactly authorized" ;;
+esac
 
 # The ordinary pull_request job runs deterministic regeneration with the same
 # protected checker/CI program. The pull_request_target job sets SKIP_REGEN and
@@ -174,9 +154,7 @@ if [[ ${SURFACE_SKIP_REGEN:-0} != 1 ]]; then
 fi
 
 log_changed=0
-while IFS= read -r -d '' path; do
-  [[ $path == "$CHANGE_LOG" ]] && log_changed=1
-done < "$TMP/changed-paths"
+git diff --quiet "$BASE_REF...$HEAD_REF" -- "$CHANGE_LOG" || log_changed=1
 
 if [[ $EXPECTED_PROJECTIONS == none && $log_changed == 0 ]]; then
   echo "surface-governance: no governed projection change"
