@@ -82,13 +82,24 @@ on the head is real and already in the job log. Do not re-run those; run the two
 above.
 
 To run them, reproduce what `.github/workflows/surface-governance.yml` and
-`ci.yml` do — extract the governance program from the **base** commit into a
-scratch directory and point it at a worktree checked out at the head, with
-`SURFACE_BASE_REF`/`SURFACE_HEAD_REF`/`SURFACE_PR_NUMBER`/`SURFACE_PR_URL` set to
-the PR's values. Because the authorization step will abort again, replace its
-`verify` call with `migration_status=3` **in the scratch copy only**. That copy
-is evidence scaffolding: it is never committed, and the checker in the tree is
-never touched (§3).
+`ci.yml` do: extract the governance program from the **base** commit into a
+scratch directory, and point it at a worktree checked out at the head. Three
+details decide whether the run is worth anything:
+
+- Set `SURFACE_BASE_REF`, `SURFACE_HEAD_REF`, `SURFACE_PR_NUMBER`,
+  `SURFACE_PR_URL` **and** `SURFACE_CHANGED_PROJECTIONS` (from the same script's
+  `--print-projections`). Without the last one the script hard-fails on
+  `changed projection context mismatch` long before authorization, so the run
+  proves nothing.
+- Point `SURFACE_CATALOG_TOOL_DIR`, `SURFACE_REGEN_CMD`, `SURFACE_TOOLCHAIN_ENV`,
+  `SURFACE_COMPONENT_TOOL_DIR` and `SURFACE_RUST_FACADE_TOOL_DIR` at the
+  **extracted base copies**. Their defaults resolve to the head's, which would
+  build and run the proposed head's own tooling — silently defeating the
+  base-trust boundary the whole exercise depends on.
+- The authorization step will abort again, so replace its `verify` call with
+  `migration_status=3` **in the scratch copy only**. That copy is evidence
+  scaffolding: it is never committed, and the checker in the tree is never
+  touched (§3).
 
 Record the exact commands and results on the PR. "The other checks were green"
 is not evidence about the two that were not.
@@ -155,19 +166,22 @@ it does not reopen it.
 
 The scoping argument is about what merging through a red *leaves behind*:
 
-- For ordinary code, merging through a red gate does not erase the red. The
-  falsifier is still there, it still fails on the next run, and the defect stays
-  visible until someone fixes it. Merging early is a delay, not a deletion.
-- For a protected path, merging through the red **removes the red**. The
-  workflows trust the *base* copy of the governance program, so the moment a
-  weakened program lands it becomes the base — the trusted judge for every
-  subsequent PR is now the thing that was never authorized, and nothing is red
-  any more. The bypass erases its own evidence.
+- For ordinary code, merging through a red does not erase it. The falsifier is
+  still in the tree, it still fails on the next run, and the defect stays visible
+  until someone fixes it. Erasing it takes a **second, separate act** — deleting
+  the test — and that act shows up in a diff someone reads.
+- For a protected path, **no such act is needed**. Each PR is judged by the
+  *base* copy of the governance program, so the moment a weakened program lands
+  it becomes the base: the trusted judge for every subsequent PR, and the
+  trusted falsifiers run against it, are now the thing that was never
+  authorized. Nothing is red any more, and nobody had to delete anything.
 
-That asymmetry is why the control has to act at merge time and cannot be
-deferred to "we will notice later": for this one class of change, there is no
-later. It attaches to exactly the paths `PRODUCTION_POLICY` names and to nothing
-else, and it ends when #608 makes it redundant (§4.1).
+That asymmetry is why the control has to act at merge time and cannot be deferred
+to "we will notice later": for this one class of change there is no *mechanical*
+later. The history can still be reconstructed by hand — §6 is exactly that — but
+the forward-looking signal is gone, and reconstruction depends on somebody
+choosing to look. The rule attaches to exactly the paths `PRODUCTION_POLICY`
+names and to nothing else, and it ends when #608 makes it redundant (§4.1).
 
 ## 6. The incident — 2026-07-31
 
