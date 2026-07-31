@@ -57,7 +57,7 @@ can annotate each row with which local account was tagged.
 Ordinary writes should not force the app to pass a signer repeatedly:
 
 ```swift
-try engine.attachSigner(keychainProvider, for: accountPubkey)
+try engine.registerSigningCapability(keychainProvider, for: accountPubkey)
 let receipt = try engine.publish(.init(
     draft: draft,
     durability: .durable
@@ -102,7 +102,7 @@ The unsigned pending row remains visible to matching queries. Attaching a
 matching provider later resumes the existing obligation:
 
 ```swift
-try engine.attachSigner(reconnectedBunker, for: pubkey)
+try engine.registerSigningCapability(reconnectedProvider, for: pubkey)
 ```
 
 The app does not recreate the intent or mutate the pending row. A provider

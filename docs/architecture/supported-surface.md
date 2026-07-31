@@ -144,11 +144,14 @@ own program, so only the repository owner's protected update procedure can land
 a change to it. Absence of any base governance artifact fails closed instead of
 executing proposed code.
 
-The bootstrap checkpoint intentionally contains no fabricated change-log
-entry. The real PR number/URL, independent reviewer, and signoff can only be
-appended after those facts exist. Future component records for #952 and #824
-are ordinary later catalog obligations, not prerequisites for the current
-two-record bootstrap.
+The bootstrap checkpoint intentionally contained no fabricated change-log
+entry: the real PR number/URL, independent reviewer, and signoff were appended
+only once those facts existed. That one-time catalog bootstrap is complete and
+PR #1171 deleted its dedicated `nmp-core` + `nmp-nip46` transition arm along
+with it. A new protocol or content family is now an ordinary co-located
+namespace record whose `artifact_owner` points at `nmp-core`
+(`docs/surface/components/README.md`), never a second bootstrap record with
+its own artifact.
 
 Steady-state protected-program evolution uses one reusable exact protocol, not
 an issue-specific exception. The base verifier owns the complete protected
