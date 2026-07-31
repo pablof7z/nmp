@@ -157,7 +157,7 @@ private final class TicketedRowPull: NmpRowPull, @unchecked Sendable {
         return FfiFrame(
             deltas: [],
             window: nil,
-            evidence: FfiAcquisitionEvidence(sources: [], shortfall: [])
+            evidence: [FfiAcquisitionEvidence(sources: [], shortfall: [])]
         )
     }
 

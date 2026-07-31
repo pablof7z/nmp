@@ -44,7 +44,7 @@ pub struct AcquisitionEvidence {
     /// One entry per SESSION (relay URL + frozen access context) that
     /// currently covers at least one atom in the query's subtree (interior
     /// `Derived` atoms included — #12). Sorted by session key (relay URL,
-    /// then access) for deterministic equality: `refresh_handle`'s
+    /// then access) for deterministic equality: `refresh_observation`'s
     /// change-detection compare must never spuriously fire on a mere
     /// re-ordering with no actual state change.
     pub sources: Vec<SourceEvidence>,

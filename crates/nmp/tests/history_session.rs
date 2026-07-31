@@ -4,8 +4,8 @@ use nmp::mechanism::core::{
     Effect, EngineCore, EngineMsg, HistoryBatch, HistoryQuery, HistorySessionId, RowDelta,
     WindowLoad,
 };
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
-use nmp_resolver::LiveQuery;
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
 use nostr::{Event, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};

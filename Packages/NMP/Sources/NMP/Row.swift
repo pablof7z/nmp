@@ -172,7 +172,12 @@ public struct AcquisitionEvidence: Sendable, Hashable {
 /// scoped acquisition evidence.
 public struct RowBatch: Sendable {
     public let rows: [Row]
-    public let evidence: AcquisitionEvidence
+    /// This observation's acquisition evidence, ONE entry per canonical query
+    /// branch in branch order (#1108). A single-branch live query carries
+    /// exactly one entry. Branch identity is never erased: two branches that
+    /// resolved the same value keep separate entries, and one branch's
+    /// shortfall is never masked by a sibling's proof.
+    public let evidence: [AcquisitionEvidence]
     /// The window's mechanical growth fact (#485). Always present on a
     /// windowed observation; `nil` on an unbounded one -- there is no
     /// window whose growth could be reported, exactly as
@@ -181,7 +186,7 @@ public struct RowBatch: Sendable {
 
     public init(
         rows: [Row],
-        evidence: AcquisitionEvidence = AcquisitionEvidence(),
+        evidence: [AcquisitionEvidence] = [],
         load: WindowLoad? = nil
     ) {
         self.rows = rows

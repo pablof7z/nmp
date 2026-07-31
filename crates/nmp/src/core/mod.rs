@@ -61,11 +61,11 @@ use nostr::{
 
 use nmp_grammar::{
     fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash,
-    Durability, Freshness, Identity, RelaySessionKey, RoutingEvidence, SourceAuthority,
+    Durability, Freshness, Identity, LiveQuery, RelaySessionKey, RoutingEvidence, SourceAuthority,
     WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
-    CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId, LiveQuery,
+    CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId,
     LocalAcceptResult, QueryHandle, RelayIngestError,
 };
 use nmp_router::{
@@ -551,7 +551,7 @@ pub struct Row {
 /// deltas + coverage only). This is the standard reactive-query contract:
 /// `Effect::EmitRows` NEVER re-sends the query's full
 /// current row set -- only the rows ADDED and REMOVED since that handle's
-/// LAST emit (`refresh_handle`'s job). The FIRST emit for a fresh subscribe
+/// LAST emit (`refresh_observation`'s job). The FIRST emit for a fresh subscribe
 /// is "every currently-matching row, as `Added`" (there is nothing to diff
 /// against yet); an identity re-root (`set_active_pubkey`) that swaps the
 /// whole row set falls out of the SAME diff -- "remove everything old, add
@@ -584,7 +584,7 @@ pub enum RowDelta {
     /// row's FULL current source set are carried (matching `Added`'s own
     /// "whole value, not a patch" shape) -- never fired for a no-op
     /// redelivery, and never fired merely because SOME OTHER handle's
-    /// lifecycle event forced a `refresh_handle` recompute of this one.
+    /// lifecycle event forced a `refresh_observation` recompute of this one.
     SourcesGrew {
         id: EventId,
         sources: BTreeSet<RelayUrl>,
@@ -742,7 +742,7 @@ pub enum AuthEffect {
 /// The read/write/frame vocabulary the reducer consumes (plan §3.4).
 pub enum EngineMsg {
     Subscribe(LiveQuery),
-    Unsubscribe(HandleId),
+    Unsubscribe(ObservationId),
     SubscribeHistory(HistoryQuery),
     /// Declaratively raise this window's row target to at least `usize`,
     /// clamped to the declared `max_rows` (#485). Monotonic and idempotent:
@@ -848,7 +848,8 @@ pub(crate) enum ObservationOpen<Id, Seed> {
 
 pub(crate) struct RowsSeed {
     pub(crate) deltas: Vec<RowDelta>,
-    pub(crate) evidence: AcquisitionEvidence,
+    /// Per-BRANCH acquisition evidence in canonical branch order (#1108).
+    pub(crate) evidence: Vec<AcquisitionEvidence>,
 }
 
 #[cfg(test)]
@@ -923,10 +924,14 @@ pub enum Effect {
         RelayUrl,
         nmp_store::CoverageInterval,
     ),
-    EmitRows(HandleId, Vec<RowDelta>, AcquisitionEvidence),
+    /// One observation's merged row transition plus its per-BRANCH
+    /// acquisition evidence, indexed by canonical branch order (#1108). A
+    /// single-branch live query carries exactly one entry; nothing here is
+    /// ever rolled up into a global verdict across branches.
+    EmitRows(ObservationId, Vec<RowDelta>, Vec<AcquisitionEvidence>),
     /// Ordered observation-scoped execution facts. Runtime folds these into
     /// the same bounded observation mailbox as rows and acquisition facts.
-    EmitObservationEvidence(HandleId, Vec<ObservationEvidence>),
+    EmitObservationEvidence(ObservationId, Vec<ObservationEvidence>),
     EmitHistory(HistorySessionId, HistoryBatch),
     HistoryLoadResult(HistorySessionId, Result<(), HistoryAdvanceError>),
     /// The engine-global diagnostics projection (M5 plan §1.2 step 3),
@@ -1007,19 +1012,52 @@ pub(crate) struct RelayWorkerRequirements {
 /// change-detection compare stays a plain value comparison, as the former
 /// query-evidence aggregate's did. `last_rows` maps each currently-matching
 /// id to the SOURCE SET last emitted for it (#105) -- not just the id --
-/// so `refresh_handle` can detect provenance growth on an already-matching
+/// so `refresh_observation` can detect provenance growth on an already-matching
 /// row the SAME way it already detects `Added`/`Removed`: a plain value
 /// compare against this remembered state, never a second bespoke mechanism.
-struct HandleState {
+struct BranchState {
     _handle: QueryHandle,
     acquisition: HandleAcquisition,
+    observation: ObservationId,
+    /// This branch's index in its observation's canonical branch order. It
+    /// is what keeps a value resolved at one branch from ever being read as
+    /// another branch's evidence.
+    index: usize,
+    execution: ObservationExecutionState,
+}
+
+/// The opaque identity of ONE live observation (#1108).
+///
+/// An observation owns one or more complete [`nmp_grammar::Demand`] branches
+/// and delivers exactly one frame stream for all of them. It is the key every
+/// mailbox, cancellation and emitted row/evidence effect uses; a resolver
+/// `HandleId` names one BRANCH beneath it and is never an app-facing
+/// observation identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ObservationId(pub(crate) u64);
+
+/// One live observation's delivered projection: the merged row union across
+/// its branches, the per-branch acquisition evidence last delivered for it,
+/// and the observation-monotonic execution sequence.
+///
+/// `last_rows` is the state actually delivered — the union of every branch's
+/// matching rows by event id, with provenance merged, after the declared
+/// aggregate result limit is applied ONCE to that union. It is never `N` rows
+/// per branch.
+struct ObservationState {
+    /// Branch handles in canonical branch order. Never empty.
+    branches: Vec<HandleId>,
+    /// The declared bound on the merged row union, applied after the union.
+    aggregate_result_limit: Option<usize>,
     last_rows: BTreeMap<EventId, RememberedRow>,
-    last_evidence: Option<AcquisitionEvidence>,
+    last_evidence: Option<Vec<AcquisitionEvidence>>,
     /// False after any failed full refresh. Direct deltas cannot repair a
     /// possibly missed historical snapshot, so the next affected batch must
     /// retry the full oracle before incremental application resumes.
     projection_complete: bool,
-    execution: ObservationExecutionState,
+    /// Monotonic within the OBSERVATION, never per branch: the app receives
+    /// one ordered execution trace for the whole live query.
+    next_sequence: u64,
 }
 
 /// The immutable opening-time result of every Demand boundary in one
@@ -1061,7 +1099,11 @@ impl HandleAcquisition {
 
 struct HistoryState {
     query: HistoryQuery,
-    acquisition: HandleAcquisition,
+    /// One opening-time acquisition decision per canonical branch, in branch
+    /// order. Branches own independent freshness policy, so one branch may
+    /// suppress remote work from its own persisted coverage while another
+    /// contributes live work; neither borrows the other's decision.
+    acquisitions_by_branch: Vec<HandleAcquisition>,
     /// Resolver handles the session currently holds open: the one live-top
     /// demand (`live_handle_id`) plus at most the *current* advance's
     /// tie-second/older acquisition handles. Older advances' historical
@@ -1069,10 +1111,15 @@ struct HistoryState {
     /// `K` advances never accumulates `O(K)` live relay subscriptions.
     handles: Vec<QueryHandle>,
     handle_ids: BTreeSet<HandleId>,
-    /// The initial, permanent live-top demand opened at
-    /// [`Self::on_subscribe_history`]. It is never a historical acquisition
-    /// and is retired only when the whole session is dropped.
-    live_handle_id: HandleId,
+    /// The initial, permanent live-top demand opened for each canonical
+    /// branch at [`Self::on_subscribe_history`], in branch order. None of
+    /// these is ever a historical acquisition; they are retired only when
+    /// the whole session is dropped.
+    live_handle_ids: Vec<HandleId>,
+    /// Which canonical branch each resolver handle this session holds open
+    /// belongs to — live-top, tie-second and older-range alike. Evidence and
+    /// demand scopes are grouped by this, never by declaration order.
+    branch_of: BTreeMap<HandleId, usize>,
     /// Every engine-owned acquisition handle the session currently holds open,
     /// mapped to `Some(second)` for a tie-second REQ (`since==until==second`)
     /// or `None` for an older-range REQ. The live-top handle is never in this
@@ -1093,7 +1140,8 @@ struct HistoryState {
     /// This makes top/bottom rebalance O(log max_rows), never an O(total)
     /// sort after every committed row mutation.
     order: BTreeSet<(Reverse<u64>, EventId)>,
-    last_evidence: Option<AcquisitionEvidence>,
+    /// Per-BRANCH acquisition evidence in canonical branch order (#1108).
+    last_evidence: Option<Vec<AcquisitionEvidence>>,
     projection_complete: bool,
     load: WindowLoad,
     pending_load: Option<PendingHistoryLoad>,
@@ -1102,7 +1150,7 @@ struct HistoryState {
 struct PendingHistoryLoad {
     prior_target_rows: usize,
     prior_load: WindowLoad,
-    prior_evidence: Option<AcquisitionEvidence>,
+    prior_evidence: Option<Vec<AcquisitionEvidence>>,
     prior_projection_complete: bool,
     acquired_tie_second: Option<u64>,
     opened_handle_ids: Vec<HandleId>,
@@ -1411,7 +1459,13 @@ pub struct EngineCore<S: EventStore> {
     router: Router,
     routing_facts: RoutingFactStore,
     cap: usize,
-    handles: HashMap<HandleId, HandleState>,
+    /// Per-BRANCH bookkeeping for every live observation branch, keyed by
+    /// the resolver handle that owns it.
+    handles: HashMap<HandleId, BranchState>,
+    /// Per-OBSERVATION delivered projection, keyed by the id every mailbox
+    /// and cancellation uses.
+    observations: HashMap<ObservationId, ObservationState>,
+    next_observation_id: u64,
     histories: HashMap<HistorySessionId, HistoryState>,
     history_by_handle: HashMap<HandleId, HistorySessionId>,
     next_history_id: u64,
@@ -1717,6 +1771,8 @@ impl<S: EventStore> EngineCore<S> {
             routing_facts,
             cap,
             handles: HashMap::new(),
+            observations: HashMap::new(),
+            next_observation_id: 0,
             histories: HashMap::new(),
             history_by_handle: HashMap::new(),
             next_history_id: 1,
@@ -2472,7 +2528,7 @@ impl<S: EventStore> EngineCore<S> {
             );
         }
         self.recompile(&mut effects);
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
         if let Some(pk) = pk {
             // The runtime moves its active signer pointer before delivering
@@ -2545,7 +2601,7 @@ impl EngineCore<nmp_store::RedbStore> {
             "benchmark event unexpectedly satisfied a local intent"
         );
         effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
-        self.refresh_handles(ingest.committed.affected_handles, &mut effects);
+        self.refresh_observations_of_branches(ingest.committed.affected_handles, &mut effects);
         effects
     }
 
@@ -2589,7 +2645,7 @@ impl EngineCore<nmp_store::RedbStore> {
         assert!(delta.is_empty(), "benchmark local write changed demand");
         let mut effects = Vec::new();
         self.recompile(&mut effects);
-        self.refresh_all_handles(&mut effects);
+        self.refresh_all_observations(&mut effects);
         effects
     }
 
@@ -2628,7 +2684,7 @@ impl EngineCore<nmp_store::RedbStore> {
             } = committed;
             assert!(delta.is_empty(), "benchmark expiry changed demand");
             self.recompile(&mut effects);
-            self.refresh_all_handles(&mut effects);
+            self.refresh_all_observations(&mut effects);
         } else {
             self.apply_committed_mutation(committed, &mut effects);
         }

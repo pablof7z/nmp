@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nmp::mechanism::core::{EngineCore, EngineMsg};
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IndexedTagName, RelaySessionKey};
-use nmp_resolver::LiveQuery;
 use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{

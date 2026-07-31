@@ -98,6 +98,22 @@ public enum NMPError: Error, Sendable, Equatable {
     /// second, competing bound on the wire filter is refused rather than
     /// silently reconciled.
     case windowSelectionHasLimit
+    /// A windowed `observe` was given a live query that already declares an
+    /// aggregate result limit (#1108) -- the window and the aggregate bound
+    /// would be two competing owners of the merged row count.
+    case windowAggregateResultLimit
+    /// A live query was declared with no demand branches at all (#1108).
+    case emptyQueryUnion
+    /// A live query declared an aggregate result limit of zero (#1108): a
+    /// query that may never contain a row is not a bound.
+    case aggregateResultLimitZero
+    /// A nested live-query branch carried its own aggregate result limit
+    /// (#1108). Branches flatten into one canonical set, so an inner bound
+    /// has no surviving scope and accepting it would silently discard it.
+    case nestedAggregateResultLimit
+    /// A live query declared more branches than the supported hard ceiling
+    /// (#1108). The whole declaration is refused; no subset is installed.
+    case tooManyQueryBranches(requested: UInt64, maximum: UInt64)
     /// No last-good NIP-11 document exists and acquisition failed.
     case relayInformationUnavailable(RelayInformationErrorKind)
     /// #591: `WriteIntent.correlation`/`reattachReceipt(correlation:)` was
@@ -153,6 +169,12 @@ public enum NMPError: Error, Sendable, Equatable {
         case .WindowInitialExceedsMax(let initial, let max):
             self = .windowInitialExceedsMax(initial: initial, max: max)
         case .WindowSelectionHasLimit: self = .windowSelectionHasLimit
+        case .WindowAggregateResultLimit: self = .windowAggregateResultLimit
+        case .EmptyQueryUnion: self = .emptyQueryUnion
+        case .AggregateResultLimitZero: self = .aggregateResultLimitZero
+        case .NestedAggregateResultLimit: self = .nestedAggregateResultLimit
+        case .TooManyQueryBranches(let requested, let maximum):
+            self = .tooManyQueryBranches(requested: requested, maximum: maximum)
         case .RelayInformationUnavailable(let kind):
             self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
         case .InvalidCorrelationToken(let got, let reason):
@@ -246,6 +268,16 @@ extension NMPError: LocalizedError {
             "Window initial \(initial) exceeds max \(max)"
         case .windowSelectionHasLimit:
             "A windowed selection must not also declare a limit"
+        case .windowAggregateResultLimit:
+            "A windowed observation must not also declare an aggregate result limit"
+        case .emptyQueryUnion:
+            "A live query must declare at least one demand branch"
+        case .aggregateResultLimitZero:
+            "An aggregate result limit of zero can never contain a row"
+        case .nestedAggregateResultLimit:
+            "A nested live-query branch must not declare its own aggregate result limit"
+        case .tooManyQueryBranches(let requested, let maximum):
+            "A live query supports at most \(maximum) demand branches; \(requested) were declared"
         case .relayInformationUnavailable(let kind):
             "Relay information unavailable: \(kind)"
         case .invalidCorrelationToken(let got, let reason):

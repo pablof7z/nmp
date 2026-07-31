@@ -45,8 +45,9 @@ impl NmpWorld {
     /// exercises (#937).
     pub async fn open_my_follows_feed_limited(&mut self, limit: usize) {
         self.ensure_started().await;
-        let mut query = my_follows_query();
-        query.0.selection.limit = Some(limit);
+        let mut branch = my_follows_query().branches()[0].clone();
+        branch.selection.limit = Some(limit);
+        let query = nmp::LiveQuery::single(branch);
         let (handle_id, rx) = self
             .handle()
             .subscribe(query)

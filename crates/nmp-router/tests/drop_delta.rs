@@ -9,11 +9,11 @@
 //! diff design (a withdrawn atom just vanishes from `active_demand()`)
 //! together mean the withdrawal reaches the WIRE as a real `Close`.
 
+use nmp_grammar::Demand;
 use std::collections::BTreeSet;
 
 use nmp_grammar::{Binding, Filter};
 use nmp_resolver::testkit::Harness;
-use nmp_resolver::LiveQuery;
 use nostr::Keys;
 
 use nmp_router::{test_relay, FixtureRoutingFacts, Router, RuleRegistry, WireOp};
@@ -40,7 +40,7 @@ fn dropped_handle_close_reaches_wire() {
 
     let mut h = Harness::new();
     let (handle, _open_delta) =
-        h.subscribe(LiveQuery::from_filter(literal_author_filter(&author_hex)));
+        h.subscribe(Demand::from_filter(literal_author_filter(&author_hex)));
 
     let demand_open = h.demand_with_context();
     assert_eq!(demand_open.len(), 1);

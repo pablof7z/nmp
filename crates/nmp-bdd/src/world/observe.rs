@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use nostr::EventId;
 
 use nmp::mechanism::core::{
-    AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact,
+    AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence,
 };
 use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{DiagnosticsHandle, QueryHandle, RowsReceiver};
@@ -41,7 +41,8 @@ pub(super) struct FeedState {
     pub(super) handle: QueryHandle,
     pub(super) rx: RowsReceiver,
     pub(super) rows: BTreeMap<EventId, Row>,
-    pub(super) evidence: AcquisitionEvidence,
+    /// Per-BRANCH acquisition evidence in canonical branch order (#1108).
+    pub(super) evidence: Vec<AcquisitionEvidence>,
 }
 
 impl FeedState {
@@ -51,7 +52,7 @@ impl FeedState {
             handle,
             rx,
             rows: BTreeMap::new(),
-            evidence: AcquisitionEvidence::default(),
+            evidence: Vec::new(),
         }
     }
 
@@ -61,7 +62,7 @@ impl FeedState {
         }
     }
 
-    fn apply(&mut self, deltas: Vec<RowDelta>, evidence: AcquisitionEvidence) {
+    fn apply(&mut self, deltas: Vec<RowDelta>, evidence: Vec<AcquisitionEvidence>) {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
@@ -282,7 +283,7 @@ impl NmpWorld {
 
     pub fn feed_eventually(
         &mut self,
-        pred: impl Fn(&[nostr::Event], &AcquisitionEvidence) -> bool,
+        pred: impl Fn(&[nostr::Event], &[AcquisitionEvidence]) -> bool,
     ) -> bool {
         let feed = self.feed.as_mut().expect("nmp-bdd: no feed is open");
         feed.eventually(EVENTUALLY, |f| {
@@ -306,10 +307,7 @@ impl NmpWorld {
             let mut reporting = 0;
             for watch in self.watches.values_mut() {
                 watch.drain_available();
-                if watch
-                    .evidence
-                    .shortfall
-                    .iter()
+                if branch_shortfall(&watch.evidence)
                     .any(|fact| matches!(fact, ShortfallFact::LocalLimit { .. }))
                 {
                     reporting += 1;
@@ -458,4 +456,23 @@ impl NmpWorld {
         let diag = self.diag.as_ref().expect("nmp-bdd: diagnostics not open");
         diag.get(EVENTUALLY, pred)
     }
+}
+
+/// Every source fact across every canonical branch of one observation.
+///
+/// The frame keeps branch identity; a step that asks "is any planned source
+/// still unproven" asks it of the whole observation, which is the union of
+/// its branches' own scoped facts -- never a rolled-up verdict stored
+/// anywhere.
+pub(crate) fn branch_sources(
+    evidence: &[AcquisitionEvidence],
+) -> impl Iterator<Item = &SourceEvidence> {
+    evidence.iter().flat_map(|branch| branch.sources.iter())
+}
+
+/// Every shortfall fact across every canonical branch of one observation.
+pub(crate) fn branch_shortfall(
+    evidence: &[AcquisitionEvidence],
+) -> impl Iterator<Item = &ShortfallFact> {
+    evidence.iter().flat_map(|branch| branch.shortfall.iter())
 }

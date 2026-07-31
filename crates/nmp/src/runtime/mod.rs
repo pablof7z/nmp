@@ -75,9 +75,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel as cb;
+use nmp_grammar::LiveQuery;
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_network_policy::DestinationPolicy;
-use nmp_resolver::{HandleId, LiveQuery};
 use nmp_router::{SubId, WireDelta, WireOp, WireReq};
 use nmp_signer::{
     PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
@@ -99,7 +99,7 @@ pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, AuthSendCompletion, DiagnosticsSnapshot, Effect, EngineCore,
     EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId,
-    ObservationEvidence, ObservationOpen, PublishError, ReattachOutcome, ReceiptId,
+    ObservationEvidence, ObservationId, ObservationOpen, PublishError, ReattachOutcome, ReceiptId,
     RelayAdmissionPolicy, Row, RowDelta,
 };
 use crate::delivery::{CancelWriteError, CancelWriteOutcome, WriteStatus};
@@ -157,7 +157,11 @@ impl nmp_transport::PoolEventSink for EnginePoolSink {
 /// rebased onto the receiver's previous batch + the query's latest per-source
 /// acquisition evidence (see [`RowsReceiver`] and the module doc's "One
 /// reducer-to-runtime delivery path" note).
-pub type RowsMsg = (Vec<RowDelta>, AcquisitionEvidence, Vec<ObservationEvidence>);
+pub type RowsMsg = (
+    Vec<RowDelta>,
+    Vec<AcquisitionEvidence>,
+    Vec<ObservationEvidence>,
+);
 pub type HistoryMsg = HistoryBatch;
 
 /// Receiver for one bounded, latest-wins history stream.
@@ -317,7 +321,7 @@ mod history_mailbox_tests {
         HistoryBatch {
             rows,
             deltas: Vec::new(),
-            evidence: AcquisitionEvidence::default(),
+            evidence: Vec::new(),
             load: WindowLoad::Idle,
         }
     }
@@ -410,7 +414,7 @@ mod history_mailbox_tests {
         tx.send(HistoryBatch {
             rows: initial_rows,
             deltas: Vec::new(),
-            evidence: AcquisitionEvidence::default(),
+            evidence: Vec::new(),
             load: WindowLoad::Idle,
         });
         let initial = rx.recv().unwrap();
@@ -420,16 +424,16 @@ mod history_mailbox_tests {
         tx.send(HistoryBatch {
             rows: canonical(vec![provenance_grew.clone(), overwritten]),
             deltas: Vec::new(),
-            evidence: AcquisitionEvidence::default(),
+            evidence: Vec::new(),
             load: WindowLoad::Requesting,
         });
 
         provenance_grew.sources.insert(relay);
         let latest_rows = canonical(vec![provenance_grew.clone(), added.clone()]);
-        let latest_evidence = AcquisitionEvidence {
+        let latest_evidence = vec![AcquisitionEvidence {
             sources: Vec::new(),
             shortfall: vec![ShortfallFact::NoResolvedDemand],
-        };
+        }];
         tx.send(HistoryBatch {
             rows: latest_rows.clone(),
             deltas: Vec::new(),
@@ -582,7 +586,7 @@ mod history_mailbox_tests {
 /// borrows into the engine thread — it is exactly the correlation id
 /// [`Handle::unsubscribe`] needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueryHandle(HandleId);
+pub struct QueryHandle(ObservationId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryHandle(HistorySessionId);
@@ -831,7 +835,7 @@ enum Cmd {
     RelayWorkerRetired,
     Subscribe {
         query: LiveQuery,
-        reply: Sender<Result<(HandleId, RowsReceiver), EngineThreadError>>,
+        reply: Sender<Result<(ObservationId, RowsReceiver), EngineThreadError>>,
     },
     SubscribeHistory {
         query: HistoryQuery,
@@ -2849,7 +2853,7 @@ mod relay_worker_reconciliation_tests {
     }
 
     fn protected_query(relay: &RelayUrl, signer: PublicKey, kind: u16) -> LiveQuery {
-        LiveQuery(
+        LiveQuery::single(
             Demand::new(
                 Filter {
                     kinds: Some(BTreeSet::from([kind])),
@@ -4005,7 +4009,7 @@ fn engine_loop<S>(
     let runtime_handle = &runtime_handle;
     let mut core = EngineCore::new_with_routing_facts(store, routing_facts, cap)
         .with_relay_admission(admission);
-    let mut row_channels: HashMap<HandleId, RowsSender> = HashMap::new();
+    let mut row_channels: HashMap<ObservationId, RowsSender> = HashMap::new();
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
@@ -5201,7 +5205,7 @@ fn reduce_and_dispatch_committed_observations<S: EventStore>(
     core: &mut EngineCore<S>,
     frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, RowsSender>,
+    row_channels: &mut HashMap<ObservationId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     registry: &SignerRegistry,
@@ -5262,7 +5266,7 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
     core: &mut EngineCore<S>,
     frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, RowsSender>,
+    row_channels: &mut HashMap<ObservationId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     registry: &SignerRegistry,
@@ -5308,7 +5312,7 @@ fn dispatch_core_effects<S: EventStore>(
     core: &mut EngineCore<S>,
     effects: Vec<Effect>,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, RowsSender>,
+    row_channels: &mut HashMap<ObservationId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     registry: &SignerRegistry,
@@ -5340,7 +5344,7 @@ fn dispatch_relay_open_failure(
     session: RelaySessionKey,
     error: nmp_transport::RelayOpenError,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, RowsSender>,
+    row_channels: &mut HashMap<ObservationId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     registry: &SignerRegistry,
@@ -5495,7 +5499,7 @@ fn dispatch_effects(
     core: &mut EngineCore<impl EventStore>,
     effects: Vec<Effect>,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, RowsSender>,
+    row_channels: &mut HashMap<ObservationId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     registry: &SignerRegistry,
@@ -5523,7 +5527,7 @@ fn dispatch_effect(
     core: &mut EngineCore<impl EventStore>,
     effect: Effect,
     pool: &Pool,
-    row_channels: &mut HashMap<HandleId, RowsSender>,
+    row_channels: &mut HashMap<ObservationId, RowsSender>,
     history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
     diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     registry: &SignerRegistry,

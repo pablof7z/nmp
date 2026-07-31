@@ -5,6 +5,7 @@
 //! would subscribe to, so it is also the only one whose failures a product
 //! person could see directly.
 
+use crate::world::observe::{branch_shortfall, branch_sources};
 use cucumber::then;
 
 use crate::world::NmpWorld;
@@ -78,11 +79,8 @@ async fn empty_result_is_not_claimed_complete(w: &mut NmpWorld) {
     // field is itself structural (there is no such surface to assert on).
     let not_claimed_complete = w.feed_eventually(|rows, evidence| {
         rows.is_empty()
-            && (evidence
-                .sources
-                .iter()
-                .any(|s| s.reconciled_through.is_none())
-                || !evidence.shortfall.is_empty())
+            && (branch_sources(evidence).any(|s| s.reconciled_through.is_none())
+                || branch_shortfall(evidence).next().is_some())
     });
     assert!(
         not_claimed_complete,

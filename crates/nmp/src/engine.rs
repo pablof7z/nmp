@@ -32,8 +32,8 @@ use crate::runtime::{
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
     SignEventOperation, SignerRegistration,
 };
+use nmp_grammar::LiveQuery;
 use nmp_grammar::WriteIntent;
-use nmp_resolver::LiveQuery;
 use nmp_store::{MemoryStore, RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;
@@ -607,8 +607,18 @@ impl Engine {
                         max: max.get(),
                     });
                 }
-                if query.0.selection.limit.is_some() {
+                if query
+                    .branches()
+                    .iter()
+                    .any(|branch| branch.selection.limit.is_some())
+                {
                     return Err(EngineError::WindowSelectionHasLimit);
+                }
+                // A window and an aggregate result limit are two competing
+                // owners of the same row-membership count. Refuse before the
+                // engine is touched, exactly as a branch selection limit is.
+                if query.aggregate_result_limit().is_some() {
+                    return Err(EngineError::WindowAggregateResultLimit);
                 }
                 let history_query = crate::core::HistoryQuery::new(query, initial.get(), max.get());
                 self.with_handle(|handle| {
@@ -1158,7 +1168,7 @@ mod tests {
             ..EngineConfig::default()
         })
         .expect("local relay opt-in must build");
-        let query = LiveQuery(
+        let query = LiveQuery::single(
             crate::Demand::new(
                 crate::Filter {
                     kinds: Some(BTreeSet::from([1])),
@@ -3110,8 +3120,9 @@ mod tests {
                 .err(),
             Some(EngineError::WindowInitialExceedsMax { initial: 5, max: 2 })
         );
-        let mut limited = probe_query();
-        limited.0.selection.limit = Some(3);
+        let mut branch = probe_query().branches()[0].clone();
+        branch.selection.limit = Some(3);
+        let limited = LiveQuery::single(branch);
         assert_eq!(
             engine.observe(limited, Some(window_probe())).err(),
             Some(EngineError::WindowSelectionHasLimit)

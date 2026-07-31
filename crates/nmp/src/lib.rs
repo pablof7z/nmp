@@ -224,9 +224,9 @@ pub use subscription::{
 // `Filter`-only call sites need no source/access reasoning of their own.
 pub use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
-    IdentityField, IndexedTagName, Selector, SetAlgebra, SetOp, SourceAuthority,
+    IdentityField, IndexedTagName, LiveQuery, LiveQueryError, Selector, SetAlgebra, SetOp,
+    SourceAuthority,
 };
-pub use nmp_resolver::LiveQuery;
 
 // Bech32 nostr-entity DECODE (#116) -- npub/nprofile/note/nevent/naddr ->
 // hex id/pubkey + relay hints. A pure codec, unrelated to the two nouns

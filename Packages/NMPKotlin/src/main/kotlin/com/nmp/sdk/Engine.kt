@@ -253,9 +253,21 @@ class NMPEngine(
      * the constructor to reach for once [observe]'s implicit
      * `AuthorOutboxes`/`Public` default isn't enough: declaring
      * `NMPSourceAuthority.Pinned` wire authority, a non-default
-     * `NMPAccessContext`, or a non-`Agnostic` `NMPCacheMode`. Same
-     * cold-`Flow`/teardown discipline as the `NMPFilter` overload. */
-    fun observe(demand: NMPDemand): Flow<RowBatch> = observeQuery(ffi, demand)
+     * `NMPAccessContext`, or a non-`Agnostic` `NMPCacheMode`. One demand is
+     * one branch, so this is exactly `observe(NMPLiveQuery(listOf(demand)))`. */
+    fun observe(demand: NMPDemand): Flow<RowBatch> =
+        observeQuery(ffi, NMPLiveQuery(listOf(demand)))
+
+    /** Open a live, detachable query over several independent `NMPDemand`
+     * branches (#1108). The branches are observed through ONE stream: rows
+     * are unioned by event id with provenance merged, every batch carries one
+     * evidence entry per canonical branch, and one teardown withdraws every
+     * branch exactly once. Throws [NMPError.EmptyQueryUnion],
+     * [NMPError.AggregateResultLimitZero],
+     * [NMPError.NestedAggregateResultLimit] or
+     * [NMPError.TooManyQueryBranches] for a declaration that can never be
+     * observed. */
+    fun observe(query: NMPLiveQuery): Flow<RowBatch> = observeQuery(ffi, query)
 
     /** Open a bounded, growable observation over the SAME read noun --
      * windowing is a policy parameter on `observe`, not a separate verb.
@@ -273,7 +285,15 @@ class NMPEngine(
      * bounded snapshot/growth discipline as the `NMPFilter` overload, for
      * demands that declare wire authority, access context, or cache mode. */
     fun observe(demand: NMPDemand, window: Window): NMPQuery =
-        NMPQuery(nmpRethrowing { ffi.observeDemand(demand.toFfi(), window.toFfi()) })
+        observe(NMPLiveQuery(listOf(demand)), window)
+
+    /** The explicit-`NMPLiveQuery` windowed overload (#1108 x #485): the
+     * window bounds the MERGED union globally, never one window per branch.
+     * A live query that already declares an aggregate result limit is refused
+     * with [NMPError.WindowAggregateResultLimit] -- a window and an aggregate
+     * bound would be two competing owners of the merged row count. */
+    fun observe(query: NMPLiveQuery, window: Window): NMPQuery =
+        NMPQuery(nmpRethrowing { ffi.observeQuery(query.toFfi(), window.toFfi()) })
 
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
     // permanently": per-relay wire-sub count, the exact wire filters sent,
