@@ -115,7 +115,10 @@ normal/build graph and applies the single positive role policy in
 intermediaries, rejects unknown `nmp`/`nmp-*` workspace packages, and reports a
 deterministic canonical shortest path to each forbidden classified target.
 Optional dependencies are therefore visible even when their features are not
-default; dev-only verification assembly is outside this shipped graph.
+default; dev-only verification assembly is outside this shipped graph. The
+`Resolved dependency direction` job in
+`.github/workflows/dependency-direction.yml` runs it, and
+`scripts/test-dependency-direction.sh`, on every pull request.
 
 Family rules automatically classify separately packaged protocol crates.
 `nmp-nip29` is mechanically proved to receive `pure-protocol` from the
