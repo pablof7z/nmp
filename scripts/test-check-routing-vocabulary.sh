@@ -19,7 +19,7 @@ FFI_TYPES=crates/nmp-ffi/src/types.rs
 FFI_CONVERT=crates/nmp-ffi/src/convert.rs
 SWIFT=Packages/NMP/Sources/NMP/WriteIntent.swift
 KOTLIN=Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/WriteIntent.kt
-GROUP_DOOR=crates/nmp/src/group.rs
+GROUP_DOOR=crates/nmp/src/nip29/group.rs
 
 fail() {
   echo "routing-vocabulary test: $*" >&2
@@ -114,7 +114,10 @@ bash "$CHECKER" "$FIXTURE" >/dev/null ||
 # ---- the group door taking a relay ---------------------------------------
 
 reset_fixture
-edit 's/^    fn leave_request(&self, engine: &Engine) -> Result<GroupReceipts, GroupPublishError>;$/    fn leave_request(\&self, engine: \&Engine, relay: RelayUrl) -> Result<GroupReceipts, GroupPublishError>;/' \
+# #1033: the door is inherent methods on `nmp::nip29::Group`, not the deleted
+# `GroupOperations` trait, so the mutation adds a relay parameter to a write
+# verb's multi-line signature rather than rewriting a one-line trait method.
+edit 's/^    pub fn leave_request($/    pub fn leave_request(\n        relay: RelayUrl,/' \
   "$GROUP_DOOR"
 expect_failure "group verb taking a relay" "takes a relay or a routing value"
 
