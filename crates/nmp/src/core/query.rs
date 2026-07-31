@@ -33,20 +33,26 @@ impl<S: EventStore> EngineCore<S> {
 
     // ---- subscribe / unsubscribe / re-root ------------------------------
 
-    /// Open ONE observation over every canonical branch of `query` (#1108).
+    /// Open ONE observation over every canonical branch of `query` (#1108),
+    /// transactionally (#1153).
     ///
-    /// The open is all-or-nothing: if any branch fails to build its graph,
-    /// every branch already opened is withdrawn again before returning, so a
-    /// refused observation leaves no retained graph, atom or wire ownership
-    /// and no mailbox to deliver into. On success the branches share one
-    /// projection, one evidence vector in canonical branch order, and one
-    /// cancellation.
-    pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
+    /// The open is all-or-nothing across two failure classes. A branch whose
+    /// graph cannot be built withdraws every branch already opened; a
+    /// canonical row projection that cannot be read withdraws the whole
+    /// observation. Either way the refusal owns no handle, no demand atom, no
+    /// mailbox and no wire request, and no branch of it was ever installed.
+    /// On success the branches share one projection, one evidence vector in
+    /// canonical branch order, and one cancellation.
+    pub(crate) fn open_observation(
+        &mut self,
+        query: LiveQuery,
+    ) -> ObservationOpen<ObservationId, RowsSeed> {
         let mut effects = Vec::new();
         // Graph construction can read the store (a `Derived` binding resolves
-        // its inner query). On a persistence failure (issue #122) degrade to
-        // read-only and install NO observation rather than panic — the
-        // observer simply receives no rows.
+        // its inner query). The resolver transaction discards every partially
+        // built graph node on failure, so this refusal owns no handle or
+        // demand atom -- and the branches opened BEFORE the failing one are
+        // withdrawn here for the same reason.
         let mut opened: Vec<QueryHandle> = Vec::new();
         for branch in query.branches() {
             match self.resolver.subscribe(branch.clone()) {
@@ -55,8 +61,9 @@ impl<S: EventStore> EngineCore<S> {
                     for handle in opened {
                         let _ = self.resolver.unsubscribe(handle.id());
                     }
+                    let reason = format!("canonical query resolution failed: {error}");
                     self.degrade_store(error, &mut effects);
-                    return effects;
+                    return ObservationOpen::Refused { reason, effects };
                 }
             }
         }
@@ -89,6 +96,27 @@ impl<S: EventStore> EngineCore<S> {
                 next_sequence: 0,
             },
         );
+
+        // Prove the candidate's canonical row union before recompiling the
+        // router or refreshing any sibling. If any branch's read fails,
+        // removing the just-created owners and draining their resolver drops
+        // restores the exact pre-call demand. No wire, relay-admission,
+        // attribution, diagnostics, or sibling-frame effect has yet been
+        // created.
+        let current = match self.observation_rows_for(observation) {
+            Ok(current) => current,
+            Err(error) => {
+                let reason = format!("canonical row projection failed: {error}");
+                self.observations.remove(&observation);
+                for branch in &branches {
+                    drop(self.handles.remove(branch));
+                    let _ = self.resolver.unsubscribe(*branch);
+                }
+                self.degrade_store(error, &mut effects);
+                return ObservationOpen::Refused { reason, effects };
+            }
+        };
+
         for branch in &branches {
             self.reconcile_observation_resolution(*branch, ResolutionCause::Initial, &mut effects);
         }
@@ -96,9 +124,31 @@ impl<S: EventStore> EngineCore<S> {
         // A wire-contributing query can change the capped greedy source plan
         // for every existing query. A suppressed query leaves that plan
         // untouched but still needs its initial cache/evidence frame.
-        self.refresh_all_observations(&mut effects);
+        self.refresh_all_observations_except(observation, &mut effects);
         self.refresh_all_histories(&mut effects);
-        effects
+        let evidence = self.observation_evidence_for(observation);
+        let seed = self
+            .apply_observation_projection(observation, current, evidence)
+            .expect("a new observation has no prior projection and always yields one seed");
+        ObservationOpen::Opened {
+            id: observation,
+            seed,
+            effects,
+        }
+    }
+
+    pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
+        match self.open_observation(query) {
+            ObservationOpen::Opened {
+                id,
+                seed,
+                mut effects,
+            } => {
+                effects.push(Effect::EmitRows(id, seed.deltas, seed.evidence));
+                effects
+            }
+            ObservationOpen::Refused { effects, .. } => effects,
+        }
     }
 
     /// Withdraw one observation and every branch it still owns.
@@ -1205,6 +1255,22 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    pub(super) fn refresh_all_observations_except(
+        &mut self,
+        except: ObservationId,
+        effects: &mut Vec<Effect>,
+    ) {
+        let ids: Vec<ObservationId> = self
+            .observations
+            .keys()
+            .copied()
+            .filter(|id| *id != except)
+            .collect();
+        for id in ids {
+            self.refresh_observation(id, effects);
+        }
+    }
+
     /// Refresh only acquisition evidence after a coverage-only mutation.
     /// Coverage cannot change canonical rows, so a complete projection can
     /// retain its remembered row set and avoid reopening the store's event
@@ -1654,9 +1720,22 @@ impl<S: EventStore> EngineCore<S> {
                 return;
             }
         };
-        let Some(state) = self.observations.get_mut(&id) else {
-            return;
-        };
+        if let Some(seed) = self.apply_observation_projection(id, current, evidence) {
+            effects.push(Effect::EmitRows(id, seed.deltas, seed.evidence));
+        }
+    }
+
+    /// Fold ONE recomputed union into the observation's delivered state and
+    /// return the exact transition, or `None` when nothing changed. Splitting
+    /// this out of [`Self::refresh_observation`] is what lets an open prove
+    /// its canonical projection BEFORE any effect is created (#1153).
+    fn apply_observation_projection(
+        &mut self,
+        id: ObservationId,
+        current: BTreeMap<EventId, Row>,
+        evidence: Vec<AcquisitionEvidence>,
+    ) -> Option<RowsSeed> {
+        let state = self.observations.get_mut(&id)?;
         let current_rows: BTreeMap<EventId, RememberedRow> = current
             .iter()
             .map(|(id, row)| {
@@ -1671,7 +1750,7 @@ impl<S: EventStore> EngineCore<S> {
             .collect();
         state.projection_complete = true;
         if current_rows == state.last_rows && state.last_evidence.as_ref() == Some(&evidence) {
-            return;
+            return None;
         }
         let mut delta: Vec<RowDelta> = Vec::new();
         for (event_id, row) in current {
@@ -1693,7 +1772,10 @@ impl<S: EventStore> EngineCore<S> {
         }
         state.last_rows = current_rows;
         state.last_evidence = Some(evidence.clone());
-        effects.push(Effect::EmitRows(id, delta, evidence));
+        Some(RowsSeed {
+            deltas: delta,
+            evidence,
+        })
     }
 
     fn refresh_observation_evidence(&mut self, id: ObservationId, effects: &mut Vec<Effect>) {
@@ -1747,26 +1829,40 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// The observation's merged current row set plus its per-branch evidence.
+    /// `Ok(None)` means the observation was withdrawn concurrently.
+    fn observation_rows_and_evidence(
+        &self,
+        id: ObservationId,
+    ) -> Result<Option<ObservationProjection>, PersistenceError> {
+        if !self.observations.contains_key(&id) {
+            return Ok(None);
+        }
+        let rows = self.observation_rows_for(id)?;
+        let evidence = self.observation_evidence_for(id);
+        Ok(Some((rows, evidence)))
+    }
+
+    /// The observation's merged current row set.
     ///
     /// Branch rows are unioned by EVENT ID -- the one row-identity the store
     /// and the app already share -- with provenance merged, so a row admitted
     /// by two branches appears once carrying both branches' sources. No
     /// protocol coordinate or resolved scalar ever replaces event-id union
-    /// semantics. `Ok(None)` means the observation was withdrawn concurrently.
-    fn observation_rows_and_evidence(
+    /// semantics. The declared aggregate bound applies to the MERGED union,
+    /// once, in NIP-01 canonical newest-first order -- never N rows per branch
+    /// presented as one N-row result.
+    fn observation_rows_for(
         &self,
         id: ObservationId,
-    ) -> Result<Option<ObservationProjection>, PersistenceError> {
+    ) -> Result<BTreeMap<EventId, Row>, PersistenceError> {
         let Some(state) = self.observations.get(&id) else {
-            return Ok(None);
+            return Ok(BTreeMap::new());
         };
         let branches = state.branches.clone();
         let aggregate_result_limit = state.aggregate_result_limit;
         let mut union: BTreeMap<EventId, Row> = BTreeMap::new();
-        let mut evidence = Vec::with_capacity(branches.len());
         for branch in &branches {
-            let (rows, branch_evidence) = self.rows_and_evidence_for(*branch)?;
-            for (event_id, row) in rows {
+            for (event_id, row) in self.rows_for(*branch)? {
                 match union.entry(event_id) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(row);
@@ -1776,11 +1872,7 @@ impl<S: EventStore> EngineCore<S> {
                     }
                 }
             }
-            evidence.push(branch_evidence);
         }
-        // The declared aggregate bound applies to the MERGED union, once, in
-        // NIP-01 canonical newest-first order -- never N rows per branch
-        // presented as one N-row result.
         if let Some(limit) = aggregate_result_limit {
             if union.len() > limit {
                 let mut ordered: Vec<(u64, EventId)> = union
@@ -1793,7 +1885,7 @@ impl<S: EventStore> EngineCore<S> {
                 union.retain(|event_id, _| keep.contains(event_id));
             }
         }
-        Ok(Some((union, evidence)))
+        Ok(union)
     }
 
     /// The query's current matching row set (by id) + its
@@ -1854,10 +1946,10 @@ impl<S: EventStore> EngineCore<S> {
     /// source identity") -- over any other source there is no pinned relay
     /// set to intersect against, so Strict is a no-op there, identical to
     /// Agnostic.
-    pub(super) fn rows_and_evidence_for(
+    pub(super) fn rows_for(
         &self,
         id: HandleId,
-    ) -> Result<(BTreeMap<EventId, Row>, AcquisitionEvidence), PersistenceError> {
+    ) -> Result<BTreeMap<EventId, Row>, PersistenceError> {
         let root_atoms = self.resolver.root_atoms(id);
         let demand_scopes = self.resolver.demand_scopes(id);
         let pinned_relays: Option<BTreeSet<RelayUrl>> = self
@@ -1921,7 +2013,6 @@ impl<S: EventStore> EngineCore<S> {
                 by_id.retain(|event_id, _| keep.contains(event_id));
             }
         }
-        let evidence = self.branch_evidence_for(id);
-        Ok((by_id, evidence))
+        Ok(by_id)
     }
 }

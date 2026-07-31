@@ -2764,6 +2764,67 @@ mod tests {
         }
     }
 
+    /// #1105: the routing vocabulary crossing this boundary is exactly two
+    /// words, and each word maps to its own twin in BOTH directions.
+    ///
+    /// Written as a match over the pair rather than as two equality
+    /// assertions, deliberately: every variant of both enums is named here,
+    /// so a third `WriteRouting` or `FfiWriteRouting` variant makes this
+    /// test stop COMPILING instead of quietly leaving one word unexercised.
+    /// A runtime assertion could never say that. The same cardinality is
+    /// enforced on the Swift and Kotlin surfaces, which no Rust test can
+    /// see, by `scripts/check-routing-vocabulary.sh`.
+    #[test]
+    fn the_routing_vocabulary_is_two_words_in_both_directions() {
+        let relay = "wss://chosen.example".to_string();
+
+        for outbound in [
+            GWriteRouting::Auto,
+            GWriteRouting::Explicit(vec![parse_relay_url(&relay).expect("a well-formed relay")]),
+        ] {
+            match (&outbound, write_routing_to_ffi(outbound.clone())) {
+                (GWriteRouting::Auto, FfiWriteRouting::Auto) => {}
+                (
+                    GWriteRouting::Explicit(relays),
+                    FfiWriteRouting::Explicit { relays: projected },
+                ) => {
+                    assert_eq!(
+                        relays.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                        projected
+                    );
+                }
+                (GWriteRouting::Auto, projected) | (GWriteRouting::Explicit(_), projected) => {
+                    panic!("a routing word must project as itself, not as {projected:?}")
+                }
+            }
+        }
+
+        for inbound in [
+            FfiWriteRouting::Auto,
+            FfiWriteRouting::Explicit {
+                relays: vec![relay.clone()],
+            },
+        ] {
+            let intent = FfiWriteIntent {
+                routing: inbound.clone(),
+                ..valid_write_intent()
+            };
+            let parsed = write_intent_from_ffi(intent).expect("both words parse");
+            match (&inbound, parsed.routing) {
+                (FfiWriteRouting::Auto, GWriteRouting::Auto) => {}
+                (FfiWriteRouting::Explicit { relays }, GWriteRouting::Explicit(parsed)) => {
+                    assert_eq!(
+                        relays,
+                        &parsed.iter().map(ToString::to_string).collect::<Vec<_>>()
+                    );
+                }
+                (FfiWriteRouting::Auto, _) | (FfiWriteRouting::Explicit { .. }, _) => {
+                    panic!("a routing word must arrive as itself")
+                }
+            }
+        }
+    }
+
     /// #972: an app naming exact relays crosses the boundary verbatim --
     /// same relays, same order, nothing added by the boundary itself.
     #[test]

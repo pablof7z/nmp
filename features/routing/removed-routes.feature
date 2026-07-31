@@ -19,7 +19,15 @@ Feature: The routes that were removed stay removed
   reasons"), and `AuthorRelayList(Kind)`, which was a partial spelling of
   `Auto` with the kind hoisted into the enum.
 
-  Every scenario here is an acceptance criterion for unbuilt work
+  The removals themselves are enforced rather than promised (#1105):
+  `scripts/check-routing-vocabulary.sh` enumerates the Rust, FFI, Swift and
+  Kotlin routing surfaces and requires exactly the two words, and tombstones
+  every retired spelling above -- `GroupHost` and `AuthorRelayList`
+  included -- with the replacement each maps to.
+  `crates/nmp/tests/group_publication_door.rs` is the group door's runtime
+  proof: the app supplies content only, the host alone receives, and the
+  author's own discovered outbox is never contacted. Scenarios still tagged
+  `@designed` remain acceptance criteria for the parts that are not built
   (`docs/internals/routing/removed-routes.md`).
 
   Background:

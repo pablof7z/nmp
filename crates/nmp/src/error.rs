@@ -40,13 +40,13 @@ pub enum EngineError {
     /// engine-start (`Engine::new`) failure only — it never surfaces from an
     /// ordinary operation (#704).
     EngineStartFailed { component: String, reason: String },
-    /// A windowed [`Engine::observe`](crate::Engine::observe) could not open
-    /// its canonical history projection because the store degraded during
-    /// setup. This is the variant's sole production construction site. Relay
-    /// connection or relay-worker failure is ordinary acquisition evidence in
-    /// the observation stream and never constructs this error. It is also
-    /// never a worker-pool-busy, task-admission, permit, or queue-full outcome.
-    /// The engine-closed case is [`Self::EngineClosed`].
+    /// An ordinary or windowed [`Engine::observe`](crate::Engine::observe)
+    /// could not open its initial canonical projection because the store
+    /// degraded during setup. The failed open leaves no observation owner.
+    /// Relay connection or relay-worker failure is ordinary acquisition
+    /// evidence in the observation stream and never constructs this error.
+    /// It is also never a worker-pool-busy, task-admission, permit, or
+    /// queue-full outcome. The engine-closed case is [`Self::EngineClosed`].
     ObservationUnavailable { reason: String },
     /// [`Engine::add_account`](crate::Engine::add_account)'s secret key did
     /// not parse as a valid nostr key (hex or bech32 `nsec`).
@@ -148,6 +148,12 @@ impl EngineError {
                     ),
                 }
             }
+            crate::runtime::EngineThreadError::ObservationUnavailable { reason } => {
+                Self::EngineStartFailed {
+                    component: "initial observation projection".to_string(),
+                    reason,
+                }
+            }
             // The runtime's finite shutdown drain (#8 U4) refuses new work
             // with a typed engine-level error; at this facade it is the same
             // closed-engine fact `EngineClosed` already names.
@@ -155,15 +161,17 @@ impl EngineError {
         }
     }
 
-    /// Map an engine-thread failure returned while opening an observation. The
-    /// only production `ThreadUnavailable` at this call boundary is the
-    /// canonical history-projection failure constructed by
-    /// `runtime::engine_loop`; relay opens deliberately have no error edge into
-    /// this mapping. `RelayBudgetOverflow` is construction-only and
-    /// `EngineShuttingDown` is the closed-engine fact; both remain exhaustive
-    /// defensive arms rather than alternate documented meanings.
+    /// Map an engine-thread failure returned while opening an observation.
+    /// Canonical row/history projection refusal has its own exact internal
+    /// variant; relay opens deliberately have no error edge into this mapping.
+    /// `ThreadUnavailable` and `RelayBudgetOverflow` are construction-only
+    /// defensive arms, while `EngineShuttingDown` remains the closed-engine
+    /// fact.
     pub(crate) fn from_observe_error(error: crate::runtime::EngineThreadError) -> Self {
         match error {
+            crate::runtime::EngineThreadError::ObservationUnavailable { reason } => {
+                Self::ObservationUnavailable { reason }
+            }
             crate::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
                 Self::ObservationUnavailable {
                     reason: format!("{component}: {reason}"),

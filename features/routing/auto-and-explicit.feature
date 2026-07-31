@@ -13,9 +13,11 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
   the same primitive. It executes verbatim, it never widens, and an empty one
   is refused before anything durable exists.
 
-  Every scenario here is an acceptance criterion for unbuilt work
-  (`docs/internals/routing/auto-and-explicit.md`). Today the app surface has
-  exactly one route, `AuthorOutbox`, and none of this is reachable.
+  The design this file specifies (`docs/internals/routing/auto-and-explicit.md`)
+  is built: both words are app-constructible on Rust, the FFI, Swift and
+  Kotlin, and `scripts/check-routing-vocabulary.sh` enumerates every surface
+  to prove there is no third one (#1105). Scenarios still tagged `@designed`
+  remain acceptance criteria for the parts that are not.
 
   Background:
     Given I am logged in as my own account

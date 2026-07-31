@@ -79,7 +79,7 @@ mod affected_handle_invalidation_tests {
 
     fn assert_remembered_rows_match_oracle(core: &EngineCore<MemoryStore>, id: ObservationId) {
         let branch = core.observations[&id].branches[0];
-        let (oracle, _) = core.rows_and_evidence_for(branch).unwrap();
+        let oracle = core.rows_for(branch).unwrap();
         let oracle: BTreeMap<_, _> = oracle
             .into_iter()
             .map(|(event_id, row)| {

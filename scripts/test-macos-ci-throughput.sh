@@ -140,10 +140,10 @@ expect_failure "reintroduced simulator orchestration" "xcodebuild test"
 
 reset_fixture
 sed -i.bak \
-  's/testDurableAuthorOutboxWriteProgressesPastAwaitingRelay/removedDurableAuthorOutboxProof/' \
+  's/testDurableAutoRoutedWriteProgressesPastAwaitingRelay/removedDurableAutoRoutedProof/' \
   "$FIXTURE_ROOT/Packages/NMP/Tests/NMPTests/BoundedRelayTimeSharingTests.swift"
 rm "$FIXTURE_ROOT/Packages/NMP/Tests/NMPTests/BoundedRelayTimeSharingTests.swift.bak"
-expect_failure "removed bounded-session Swift proof" "testDurableAuthorOutboxWriteProgressesPastAwaitingRelay"
+expect_failure "removed bounded-session Swift proof" "testDurableAutoRoutedWriteProgressesPastAwaitingRelay"
 
 reset_fixture
 sed -i.bak \

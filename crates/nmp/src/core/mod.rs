@@ -827,6 +827,45 @@ pub enum EngineMsg {
     Tick(Timestamp),
 }
 
+/// One explicit, serialized observation-opening result.
+///
+/// The reducer proves the initial canonical projection before it commits any
+/// router or sibling-observer effects. Success therefore carries the exact
+/// registered owner and first mailbox value; refusal carries only facts that
+/// remain true after the speculative resolver owner has been rolled back.
+/// Runtime never infers either outcome by searching an effect list.
+pub(crate) enum ObservationOpen<Id, Seed> {
+    Opened {
+        id: Id,
+        seed: Seed,
+        effects: Vec<Effect>,
+    },
+    Refused {
+        reason: String,
+        effects: Vec<Effect>,
+    },
+}
+
+pub(crate) struct RowsSeed {
+    pub(crate) deltas: Vec<RowDelta>,
+    /// Per-BRANCH acquisition evidence in canonical branch order (#1108).
+    pub(crate) evidence: Vec<AcquisitionEvidence>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoreObservationOwnershipCensus {
+    pub(crate) handles: usize,
+    pub(crate) histories: usize,
+    pub(crate) history_handles: usize,
+    pub(crate) resolver_nodes: usize,
+    pub(crate) demand_atoms: usize,
+    pub(crate) planned_sessions: usize,
+    pub(crate) pending_execution_owners: usize,
+    pub(crate) active_execution_owners: usize,
+    pub(crate) live_wire_owners: usize,
+}
+
 /// The row/wire/receipt vocabulary the reducer emits (plan §3.4). `EmitRows`
 /// carries the query's [`AcquisitionEvidence`] alongside its rows
 /// (`docs/design/scoped-evidence-49-12-plan.md`): per-source acquisition
@@ -1914,6 +1953,21 @@ impl<S: EventStore> EngineCore<S> {
     /// `nmp_resolver::Engine::active_demand()` exactly.
     pub fn active_demand(&self) -> BTreeSet<ContextualAtom> {
         self.wire_demand()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
+        CoreObservationOwnershipCensus {
+            handles: self.handles.len(),
+            histories: self.histories.len(),
+            history_handles: self.history_by_handle.len(),
+            resolver_nodes: self.resolver.graph_snapshot().nodes.len(),
+            demand_atoms: self.active_demand().len(),
+            planned_sessions: self.router.plan().reqs.len(),
+            pending_execution_owners: self.pending_request_evidence.len(),
+            active_execution_owners: self.active_request_evidence.len(),
+            live_wire_owners: self.live_wire_requests.len(),
+        }
     }
 
     /// Read-only coverage introspection (test/diagnostic convenience,

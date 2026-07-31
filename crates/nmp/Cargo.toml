@@ -96,6 +96,13 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sy
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+# #1105: `group_publication_door.rs` proves a group write never reaches the
+# AUTHOR'S OWN outbox, which is only a claim worth making when that outbox is
+# real -- discovered from a kind:10002 the engine fetched itself, not
+# configured. That discovery is the optional NIP-65 coordinator, so this
+# crate's own test targets enable it. Test-only: the default feature set a
+# consumer links, and therefore the governed surface snapshot, is unchanged.
+nmp = { path = ".", features = ["nip65"] }
 nmp-test-support.workspace = true
 # In-process test relay for the runtime (C) integration tests: reconnection
 # replay (test 6) and the end-to-end subscribe/publish/reconnect drive.
