@@ -205,12 +205,28 @@ impl RedbStore {
         }
         let read = self.db.begin_read().map_err(persist_err)?;
         let relay_ids = read.open_table(DELIVERY_RELAY_IDS).map_err(persist_err)?;
+        let relays = read.open_table(DELIVERY_RELAYS).map_err(persist_err)?;
         let raw = relay_ids
             .get(relay.as_str().as_bytes())
             .map_err(persist_err)?
             .map(|guard| *guard.value())
             .ok_or_else(|| PersistenceError::invariant("delivery relay is not interned"))?;
         let id = u32::from_be_bytes(raw);
+        let key = relay_key(id);
+        let encoded = relays
+            .get(&key)
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_vec())
+            .ok_or_else(|| {
+                PersistenceError::invariant(
+                    "delivery relay reverse map points at missing dictionary row",
+                )
+            })?;
+        if decode_relay(&encoded).map_err(|error| codec_error("relay", error))? != *relay {
+            return Err(PersistenceError::invariant(
+                "delivery relay dictionary directions disagree",
+            ));
+        }
         self.cache_delivery_relay(id, relay.clone())?;
         Ok(id)
     }
@@ -228,6 +244,7 @@ impl RedbStore {
         }
         let read = self.db.begin_read().map_err(persist_err)?;
         let relays = read.open_table(DELIVERY_RELAYS).map_err(persist_err)?;
+        let relay_ids = read.open_table(DELIVERY_RELAY_IDS).map_err(persist_err)?;
         let key = relay_key(id);
         let encoded = relays
             .get(&key)
@@ -239,6 +256,18 @@ impl RedbStore {
                 ))
             })?;
         let relay = decode_relay(&encoded).map_err(|error| codec_error("relay", error))?;
+        let reverse_id = relay_ids
+            .get(relay.as_str().as_bytes())
+            .map_err(persist_err)?
+            .map(|guard| u32::from_be_bytes(*guard.value()))
+            .ok_or_else(|| {
+                PersistenceError::invariant("delivery relay dictionary is missing reverse row")
+            })?;
+        if reverse_id != id {
+            return Err(PersistenceError::invariant(
+                "delivery relay dictionary directions disagree",
+            ));
+        }
         self.cache_delivery_relay(id, relay.clone())?;
         Ok(relay)
     }
