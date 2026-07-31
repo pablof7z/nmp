@@ -457,6 +457,48 @@ Feature: AST truth
         assert_eq!(record.metadata.as_ref().unwrap().id, "AST-RULE-001");
     }
 
+    /// Gherkin owns tag inheritance; physical adjacency does not. A tag stays
+    /// attached to its Feature or Rule across parser-ignored comment and blank
+    /// trivia, so the lifecycle boundary has to read the AST's own tag lists.
+    #[test]
+    fn feature_and_rule_tags_are_inherited_across_ignored_trivia() {
+        for (feature_trivia, rule_trivia) in [
+            (
+                "# ignored comment before the Feature\n",
+                "    # ignored comment before the Rule\n",
+            ),
+            (
+                "# ignored comment before the Feature\n\n",
+                "    # ignored comment before the Rule\n\n",
+            ),
+        ] {
+            let source = format!(
+                "@requires-network\n{feature_trivia}Feature: inherited across trivia\n  @wip\n{rule_trivia}  Rule: inherited lifecycle\n    # nmp:id=ASTTRIVIA-001\n    # nmp:status=specified\n    # nmp:gap=fixture\n    # nmp:issue=#12\n    Scenario: governed\n      Given truth\n"
+            );
+            let corpus = load_one(&source).unwrap();
+            let record = &corpus.records[0];
+            assert!(
+                record.effective_tags.contains(&"requires-network".into()),
+                "Feature tag lost across trivia: {:?}",
+                record.effective_tags
+            );
+            assert!(
+                record.effective_tags.contains(&"wip".into()),
+                "Rule tag lost across trivia: {:?}",
+                record.effective_tags
+            );
+            assert_eq!(
+                record.metadata.as_ref().unwrap().id,
+                "ASTTRIVIA-001",
+                "metadata attachment broke on inherited-tag trivia"
+            );
+            assert!(crate::validate::validate_tags(record)
+                .unwrap_err()
+                .0
+                .contains("forbidden lifecycle/capability tag"));
+        }
+    }
+
     #[test]
     fn scenario_span_attachment_crosses_only_leading_tag_comment_and_blank_trivia() {
         let corpus = load_one(

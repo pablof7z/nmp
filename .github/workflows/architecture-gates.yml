@@ -216,14 +216,28 @@ jobs:
       issues: read
     env:
       TRACE_MANIFEST: ${{ github.workspace }}/tools/behavior-traceability/Cargo.toml
-      TRACE_TOOLCHAIN: nightly-2026-07-07
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install the exact trusted checker toolchain
+      # #916 keeps one exact compiler pin. The checker deliberately builds from
+      # a neutral directory, so it cannot pick the pin up through directory
+      # inheritance; read the single repository pin instead of respelling it.
+      - name: Read the one repository toolchain pin
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          channel=$(
+            sed -nE \
+              's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*(#.*)?$/\1/p' \
+              "$GITHUB_WORKSPACE/rust-toolchain.toml"
+          )
+          [[ $channel =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          printf 'TRACE_TOOLCHAIN=%s\n' "$channel" >> "$GITHUB_ENV"
+
+      - name: Install the exact pinned checker toolchain
         working-directory: ${{ runner.temp }}
         run: rustup toolchain install "$TRACE_TOOLCHAIN" --profile minimal
 
