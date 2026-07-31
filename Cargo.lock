@@ -2016,6 +2016,7 @@ dependencies = [
  "httpdate",
  "libc",
  "negentropy",
+ "nmp",
  "nmp-executor",
  "nmp-grammar",
  "nmp-local-signer",
