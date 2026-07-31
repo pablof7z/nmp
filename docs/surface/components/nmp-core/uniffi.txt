@@ -3004,6 +3004,89 @@ enum Enum {
                 "#572: an `FfiNip73Target` failed `nmp_nip22::Nip73Target`'s\nconstructor validation (an empty `I`/`K` cell).",
             ),
         },
+        Variant {
+            name: "EmptyRelayScope",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#1033 `FfiRelayScope::on` was called with no host at all\n(`nmp::nip29::RelayScopeError::EmptyRelaySet` mirror). A group must\nbe hosted somewhere -- there is nothing to read from, nothing to\nwrite to, and no honest evidence to report.",
+            ),
+        },
+        Variant {
+            name: "GroupCallerSuppliedContext",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#1033 (`nmp::nip29::GroupContextError::CallerSuppliedContext`\nmirror). An unsigned draft handed to `FfiGroup::publish` already\ncarried an `h` row -- the group id retained by the scope is the only\nsource of that row, so a caller's own is refused whether it matches\nthis group or not.",
+            ),
+        },
+        Variant {
+            name: "GroupCallerSuppliedContextConstraint",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#1033 (`nmp::nip29::GroupContextError::CallerSuppliedContextConstraint`\nmirror). A read selection handed to `FfiGroup::read` already\nconstrained `#h` -- the retained group id is the sole semantic\nsource of that row.",
+            ),
+        },
+        Variant {
+            name: "GroupCallerSuppliedTimeline",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#1033 (`nmp::nip29::GroupContextError::CallerSuppliedTimeline`\nmirror). An unsigned draft already carried a `previous` row, which\nthe group never mints and never accepts from a caller.",
+            ),
+        },
+        Variant {
+            name: "GroupContextMissing",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#1033 (`nmp::nip29::GroupContextError::MissingContext` mirror). A\npre-signed event handed to `FfiGroup::publish_signed`/\n`FfiGroup::validate_context` carries no `h` row at all.",
+            ),
+        },
+        Variant {
+            name: "GroupContextMismatched",
+            discr: None,
+            fields: [
+                Field {
+                    name: "found",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "expected",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#1033 (`nmp::nip29::GroupContextError::MismatchedContext` mirror). A\npre-signed event names a different group than the one publishing or\nvalidating it.",
+            ),
+        },
+        Variant {
+            name: "GroupContextAmbiguous",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#1033 (`nmp::nip29::GroupContextError::AmbiguousContext` mirror). A\npre-signed event carries more than one `h` row, so which group it\nclaims to be in has no single answer.",
+            ),
+        },
     ],
     shape: Error {
         flat: false,
@@ -7152,6 +7235,68 @@ function Function {
 }
 
 function Function {
+    name: "admin_list_includes",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "subjects",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiBinding",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Object {
+            module_path: "nmp_ffi",
+            name: "FfiGroupPredicate",
+            imp: Struct,
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_admin_list_includes",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "subjects",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiBinding",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiGroupPredicate",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Groups whose observed kind:39001 admin-list evidence names `subjects`\n(`nmp::nip29::admin_list_includes` mirror). Evidence-scoped exactly like\n[`member_list_includes`].",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_admin_list_includes",
+    checksum: Some(
+        25813,
+    ),
+}
+
+function Function {
     name: "blossom_delete_authorization_draft",
     module_path: "nmp_ffi",
     is_async: false,
@@ -7792,64 +7937,6 @@ function Function {
 }
 
 function Function {
-    name: "group_discovery_demand",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [
-        Argument {
-            name: "host",
-            type_: String,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-    ],
-    return_type: Some(
-        Record {
-            module_path: "nmp_ffi",
-            name: "FfiDemand",
-        },
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_group_discovery_demand",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "host",
-                type_: RustBuffer(
-                    None,
-                ),
-            },
-        ],
-        return_type: Some(
-            RustBuffer(
-                Some(
-                    ExternalFfiMetadata {
-                        name: "FfiDemand",
-                        module_path: "nmp_ffi",
-                    },
-                ),
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "Group discovery (kind:39000) pinned to `host` (#108,\n`nmp_nip29::group_discovery_demand` mirror). `host` crosses the FFI\nboundary as a raw string, unlike the direct-Rust constructor's\n`RelayUrl` -- fallibility is restored HERE (an FFI caller can supply a\nmalformed URL the direct-Rust singleton-set proof doesn't cover).",
-    ),
-    throws: Some(
-        Enum {
-            module_path: "nmp_ffi",
-            name: "FfiError",
-        },
-    ),
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_group_discovery_demand",
-    checksum: Some(
-        49815,
-    ),
-}
-
-function Function {
     name: "max_query_branches",
     module_path: "nmp_ffi",
     is_async: false,
@@ -7874,6 +7961,68 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_max_query_branches",
     checksum: Some(
         25911,
+    ),
+}
+
+function Function {
+    name: "member_list_includes",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "subjects",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiBinding",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Object {
+            module_path: "nmp_ffi",
+            name: "FfiGroupPredicate",
+            imp: Struct,
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_member_list_includes",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "subjects",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiBinding",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiGroupPredicate",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Groups whose observed kind:39002 member-list evidence names `subjects`\n(`nmp::nip29::member_list_includes` mirror). Inclusion is evidence,\nnever exact state -- absence is not evidence of non-membership.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_member_list_includes",
+    checksum: Some(
+        54766,
     ),
 }
 
@@ -8001,12 +8150,12 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Tolerantly parse Simple-groups-shaped public items out of a raw native\nrow (#863). Infallible, and deliberately kind-agnostic: `row` may carry\nany `kind`, an invented `sig`, and no `sources` at all.\n\nThe result preserves malformed-item and private-content evidence, and\ngrants NO signature, canonical-store, provenance, routing, or mutation\nauthority. To discover NIP-29 groups the app still passes an explicit host\nof its own choosing to `group_discovery_demand`; nothing here authorizes a\nhost or invents a fixed group-content catalog on the app's behalf.",
+        "Tolerantly parse Simple-groups-shaped public items out of a raw native\nrow (#863). Infallible, and deliberately kind-agnostic: `row` may carry\nany `kind`, an invented `sig`, and no `sources` at all.\n\nThe result preserves malformed-item and private-content evidence, and\ngrants NO signature, canonical-store, provenance, routing, or mutation\nauthority. To discover NIP-29 groups the app still passes an explicit host\nset of its own choosing to `FfiRelayScope::on`; nothing here authorizes a\nhost or invents a fixed group-content catalog on the app's behalf.",
     ),
     throws: None,
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_simple_groups_list_tolerant",
     checksum: Some(
-        21750,
+        23498,
     ),
 }
 
@@ -9424,6 +9573,1671 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "A `Binding::Derived` payload mirror -- a UniFFI object (see [`FfiBinding`]'s\ndoc for why): Swift constructs one via `FfiDerived(inner:project:)` and\nreads it back via the `inner()`/`project()` getters. `inner` is a complete\n[`FfiDemand`], matching Rust's `nmp_grammar::Derived`: a nested query owns\nits source, access, cache, and freshness policy independently from the\nouter demand (#714).",
+    ),
+}
+
+object Object {
+    name: "FfiGroup",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "add_user",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "pubkey",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "role",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_add_user",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "pubkey",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "role",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9000 -- add a member, optionally with a role.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_add_user",
+            checksum: Some(
+                42100,
+            ),
+        },
+        Method {
+            name: "create_group",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_create_group",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9007 -- create the group at its hosts.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_create_group",
+            checksum: Some(
+                57701,
+            ),
+        },
+        Method {
+            name: "create_invite",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "code",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_create_invite",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "code",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9009 -- mint an invite code redeemable by\n[`Self::join_request`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_create_invite",
+            checksum: Some(
+                55786,
+            ),
+        },
+        Method {
+            name: "delete_event",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "event_id",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_delete_event",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "event_id",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9005 -- delete one group-hosted event.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_delete_event",
+            checksum: Some(
+                10816,
+            ),
+        },
+        Method {
+            name: "delete_group",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_delete_group",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9008 -- delete the group from its hosts.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_delete_group",
+            checksum: Some(
+                60536,
+            ),
+        },
+        Method {
+            name: "edit_metadata",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "name",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "about",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_edit_metadata",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "name",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "about",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9002 -- set the group's display fields. An omitted field emits\nno tag at all, so it is left untouched rather than cleared.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_edit_metadata",
+            checksum: Some(
+                8907,
+            ),
+        },
+        Method {
+            name: "join_request",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "invite_code",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_join_request",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "invite_code",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9021 -- ask to join. Publishable with no subscription at all.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_join_request",
+            checksum: Some(
+                15189,
+            ),
+        },
+        Method {
+            name: "leave_request",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_leave_request",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9022 -- leave.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_leave_request",
+            checksum: Some(
+                20519,
+            ),
+        },
+        Method {
+            name: "publish",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "builder",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiEventBuilder",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_publish",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "builder",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiEventBuilder",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Publish any unsigned draft into the group, as `author`\n(`nmp::nip29::Group::publish` mirror). `author` is an exact decoded\npubkey, never the active-account selector: a semantic group write\nfreezes who is writing at composition time (#878).",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_publish",
+            checksum: Some(
+                5905,
+            ),
+        },
+        Method {
+            name: "publish_signed",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "event",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSignedEvent",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_publish_signed",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "event",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiSignedEvent",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Publish an ALREADY-SIGNED event into the group\n(`nmp::nip29::Group::publish_signed` mirror). The `h` it already\ncarries is validated, never appended or repaired -- see\n[`Self::validate_context`]'s doc for the exact refusals.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_publish_signed",
+            checksum: Some(
+                16375,
+            ),
+        },
+        Method {
+            name: "read",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "selection",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiFilter",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiLiveQuery",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_read",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "selection",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiFilter",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiLiveQuery",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Mint the read declaration for an app-supplied selection\n(`nmp::nip29::Group::read` mirror). A selection that already\nconstrains `#h` is refused with\n[`FfiError::GroupCallerSuppliedContextConstraint`] -- the retained\ngroup id is the sole semantic source of that row. Hand the result to\n`NmpEngine::observe_query`.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_read",
+            checksum: Some(
+                41504,
+            ),
+        },
+        Method {
+            name: "remove_user",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "pubkey",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_remove_user",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "pubkey",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "kind:9001 -- remove a member.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_remove_user",
+            checksum: Some(
+                31842,
+            ),
+        },
+        Method {
+            name: "validate_context",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "event",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSignedEvent",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_validate_context",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "event",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiSignedEvent",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Ask whether an already-signed event belongs to this group, without\nbuilding a write out of it (`nmp::nip29::Group::validate_context`\nmirror).",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_validate_context",
+            checksum: Some(
+                54071,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffigroup",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiGroup",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiGroup",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffigroup",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiGroup",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "One NIP-29 group, on the relays its scope named (`nmp::nip29::Group`\nmirror). An identity, not a subscription: constructing one (via\n[`FfiRelayScope::group`]) contacts nothing. The same handle serves every\nread and every write for a room's whole lifetime.",
+    ),
+}
+
+object Object {
+    name: "FfiGroupPredicate",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "intersect",
+            object_name: "FfiGroupPredicate",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "others",
+                    type_: Sequence {
+                        inner_type: Object {
+                            module_path: "nmp_ffi",
+                            name: "FfiGroupPredicate",
+                            imp: Struct,
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroupPredicate",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigrouppredicate_intersect",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroupPredicate",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "others",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiGroupPredicate",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Groups matching this predicate AND all of `others`.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigrouppredicate_intersect",
+            checksum: Some(
+                53920,
+            ),
+        },
+        Method {
+            name: "minus",
+            object_name: "FfiGroupPredicate",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "others",
+                    type_: Sequence {
+                        inner_type: Object {
+                            module_path: "nmp_ffi",
+                            name: "FfiGroupPredicate",
+                            imp: Struct,
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroupPredicate",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigrouppredicate_minus",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroupPredicate",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "others",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiGroupPredicate",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Groups matching this predicate and none of `others`.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigrouppredicate_minus",
+            checksum: Some(
+                33932,
+            ),
+        },
+        Method {
+            name: "union",
+            object_name: "FfiGroupPredicate",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "others",
+                    type_: Sequence {
+                        inner_type: Object {
+                            module_path: "nmp_ffi",
+                            name: "FfiGroupPredicate",
+                            imp: Struct,
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroupPredicate",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigrouppredicate_union",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroupPredicate",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "others",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiGroupPredicate",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Groups matching this predicate OR any of `others`.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigrouppredicate_union",
+            checksum: Some(
+                41822,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffigrouppredicate",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiGroupPredicate",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiGroupPredicate",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffigrouppredicate",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiGroupPredicate",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "A composable NIP-29 discovery predicate (`nmp::nip29::GroupPredicate`\nmirror). Opaque by design -- see this module's own doc for why -- built\nwith [`member_list_includes`]/[`admin_list_includes`] and composed with\n[`Self::union`]/[`Self::intersect`]/[`Self::minus`], then handed to\n[`FfiRelayScope::groups_where`].",
+    ),
+}
+
+object Object {
+    name: "FfiRelayScope",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [
+        Constructor {
+            name: "on",
+            object_name: "FfiRelayScope",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [
+                Argument {
+                    name: "hosts",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffirelayscope_on",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "hosts",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiRelayScope",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Name the relays a NIP-29 group lives on (`nmp::nip29::on` mirror).\nEach host is parsed with the same [`FfiError::InvalidRelayUrl`] rule\nevery other relay-URL input in this crate uses; an empty set is\n[`FfiError::EmptyRelayScope`] -- a group must be hosted somewhere.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffirelayscope_on",
+            checksum: Some(
+                30898,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiRelayScope",
+                imp: Struct,
+            },
+        },
+    ],
+    methods: [
+        Method {
+            name: "group",
+            object_name: "FfiRelayScope",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "group_id",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroup",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffirelayscope_group",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiRelayScope",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "group_id",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiGroup",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Narrow to one group id, keeping the same hosts\n(`nmp::nip29::RelayScope::group` mirror). Contacts nothing.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffirelayscope_group",
+            checksum: Some(
+                18720,
+            ),
+        },
+        Method {
+            name: "groups_where",
+            object_name: "FfiRelayScope",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "predicate",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiGroupPredicate",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiLiveQuery",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffirelayscope_groups_where",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiRelayScope",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "predicate",
+                        type_: RustArcPtr(
+                            "FfiGroupPredicate",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiLiveQuery",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Groups on these relays matching a composable discovery predicate\n(`nmp::nip29::RelayScope::groups_where` mirror). One complete branch\nper host, folded into ONE [`FfiLiveQuery`] the ordinary\n`NmpEngine::observe_query` door takes -- never a per-host demand list\nthe app has to merge itself.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffirelayscope_groups_where",
+            checksum: Some(
+                35980,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffirelayscope",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiRelayScope",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiRelayScope",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffirelayscope",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiRelayScope",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "The relays a group lives on -- named once, retained privately inside the\nopaque handle, and never asked for again (`nmp::nip29::RelayScope`\nmirror). `hosts` crosses the boundary as raw strings, unlike the\ndirect-Rust `on`'s `RelayUrl`s: fallibility (an empty set, or a host that\ndoes not parse) is restored HERE, because the boundary widens from one\nhost to a caller-supplied set and a set can be empty where a single host\ncould not be.",
     ),
 }
 
@@ -11333,6 +13147,136 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "Pull-based following-relationship observation handle (#680). Each `next()`\nawaits the engine's waker-driven async row mailbox and folds a complete\nself-contained relationship snapshot inline — no NMP-owned OS thread per\nobservation. `None` is the terminal signal (the demand was withdrawn or the\nengine shut down). `Drop`/`cancel` withdraw the observation.",
+    ),
+}
+
+object Object {
+    name: "NmpGroupReceiptStream",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "cancel",
+            object_name: "NmpGroupReceiptStream",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpgroupreceiptstream_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpGroupReceiptStream",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Withdraw this stream now, rather than waiting for `Drop`. Safe to\ncall more than once; safe to never call at all.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpgroupreceiptstream_cancel",
+            checksum: Some(
+                37332,
+            ),
+        },
+        Method {
+            name: "next",
+            object_name: "NmpGroupReceiptStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiWriteStatus",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpgroupreceiptstream_next",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpGroupReceiptStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the next `WriteStatus`, or `None` once the write has fully\nresolved or the engine has shut down. [`FfiError::ConcurrentNext`] on\nan overlapping call.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpgroupreceiptstream_next",
+            checksum: Some(
+                18388,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmpgroupreceiptstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpGroupReceiptStream",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpGroupReceiptStream",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmpgroupreceiptstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpGroupReceiptStream",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Pull-based receipt stream for a NIP-29 group write (#1033). Unlike\n[`crate::facade::NmpReceiptStream`] this stream carries NO receipt id:\nevery `FfiGroup` write reaches the engine's UNTRACKED `Engine::publish`\ndoor (never `publish_tracked`), because the store-issued receipt-id\nnamespace is a `publish`-door concern the group scope has no reason to\nsurface -- `nmp::nip29::Group::through_the_one_door`'s own doc names the\nsame door. Same ordered `WriteStatus` delivery and cancel/Drop discipline\nas every other pull stream in this crate.",
     ),
 }
 

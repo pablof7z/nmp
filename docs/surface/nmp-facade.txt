@@ -49,7 +49,168 @@ pub use nmp::WriteIntent
 pub use nmp::WritePayload
 pub use nmp::WriteRouting
 pub use nmp::decode_nostr_entity
-pub use nmp::nip29
+pub mod nmp::nip29
+pub use nmp::nip29::GROUP_ADMINS_KIND
+pub use nmp::nip29::GROUP_MEMBERS_KIND
+pub use nmp::nip29::GROUP_METADATA_KIND
+pub use nmp::nip29::GroupContextError
+pub use nmp::nip29::add_user
+pub use nmp::nip29::create_group
+pub use nmp::nip29::create_invite
+pub use nmp::nip29::delete_event
+pub use nmp::nip29::delete_group
+pub use nmp::nip29::edit_metadata
+pub use nmp::nip29::join_request
+pub use nmp::nip29::leave_request
+pub use nmp::nip29::remove_user
+pub enum nmp::nip29::GroupPredicate
+pub nmp::nip29::GroupPredicate::AdminListIncludes(nmp_grammar::binding::Binding)
+pub nmp::nip29::GroupPredicate::Combined
+pub nmp::nip29::GroupPredicate::Combined::op: nmp_grammar::binding::SetAlgebra
+pub nmp::nip29::GroupPredicate::Combined::operands: alloc::vec::Vec<nmp::nip29::GroupPredicate>
+pub nmp::nip29::GroupPredicate::MemberListIncludes(nmp_grammar::binding::Binding)
+impl nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::intersect(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupPredicate>) -> Self
+pub fn nmp::nip29::GroupPredicate::minus(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupPredicate>) -> Self
+pub fn nmp::nip29::GroupPredicate::union(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupPredicate>) -> Self
+impl core::clone::Clone for nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::clone(&self) -> nmp::nip29::GroupPredicate
+impl core::cmp::Eq for nmp::nip29::GroupPredicate
+impl core::cmp::PartialEq for nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::eq(&self, &nmp::nip29::GroupPredicate) -> bool
+impl core::fmt::Debug for nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupPredicate
+impl core::marker::Freeze for nmp::nip29::GroupPredicate
+impl core::marker::Send for nmp::nip29::GroupPredicate
+impl core::marker::Sync for nmp::nip29::GroupPredicate
+impl core::marker::Unpin for nmp::nip29::GroupPredicate
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupPredicate
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupPredicate
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupPredicate
+pub enum nmp::nip29::GroupPublishError
+pub nmp::nip29::GroupPublishError::Context(nmp_nip29::context::GroupContextError)
+pub nmp::nip29::GroupPublishError::Engine(nmp::EngineError)
+impl core::clone::Clone for nmp::nip29::GroupPublishError
+pub fn nmp::nip29::GroupPublishError::clone(&self) -> nmp::nip29::GroupPublishError
+impl core::cmp::Eq for nmp::nip29::GroupPublishError
+impl core::cmp::PartialEq for nmp::nip29::GroupPublishError
+pub fn nmp::nip29::GroupPublishError::eq(&self, &nmp::nip29::GroupPublishError) -> bool
+impl core::convert::From<nmp::EngineError> for nmp::nip29::GroupPublishError
+pub fn nmp::nip29::GroupPublishError::from(nmp::EngineError) -> Self
+impl core::convert::From<nmp_nip29::context::GroupContextError> for nmp::nip29::GroupPublishError
+pub fn nmp::nip29::GroupPublishError::from(nmp_nip29::context::GroupContextError) -> Self
+impl core::error::Error for nmp::nip29::GroupPublishError
+impl core::fmt::Debug for nmp::nip29::GroupPublishError
+pub fn nmp::nip29::GroupPublishError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::nip29::GroupPublishError
+pub fn nmp::nip29::GroupPublishError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupPublishError
+impl core::marker::Freeze for nmp::nip29::GroupPublishError
+impl core::marker::Send for nmp::nip29::GroupPublishError
+impl core::marker::Sync for nmp::nip29::GroupPublishError
+impl core::marker::Unpin for nmp::nip29::GroupPublishError
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupPublishError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupPublishError
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupPublishError
+pub enum nmp::nip29::GroupReadError
+pub nmp::nip29::GroupReadError::Context(nmp_nip29::context::GroupContextError)
+pub nmp::nip29::GroupReadError::Declaration(nmp_grammar::live_query::LiveQueryError)
+impl core::clone::Clone for nmp::nip29::GroupReadError
+pub fn nmp::nip29::GroupReadError::clone(&self) -> nmp::nip29::GroupReadError
+impl core::cmp::Eq for nmp::nip29::GroupReadError
+impl core::cmp::PartialEq for nmp::nip29::GroupReadError
+pub fn nmp::nip29::GroupReadError::eq(&self, &nmp::nip29::GroupReadError) -> bool
+impl core::convert::From<nmp_grammar::live_query::LiveQueryError> for nmp::nip29::GroupReadError
+pub fn nmp::nip29::GroupReadError::from(nmp_grammar::live_query::LiveQueryError) -> Self
+impl core::convert::From<nmp_nip29::context::GroupContextError> for nmp::nip29::GroupReadError
+pub fn nmp::nip29::GroupReadError::from(nmp_nip29::context::GroupContextError) -> Self
+impl core::error::Error for nmp::nip29::GroupReadError
+impl core::fmt::Debug for nmp::nip29::GroupReadError
+pub fn nmp::nip29::GroupReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::nip29::GroupReadError
+pub fn nmp::nip29::GroupReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupReadError
+impl core::marker::Freeze for nmp::nip29::GroupReadError
+impl core::marker::Send for nmp::nip29::GroupReadError
+impl core::marker::Sync for nmp::nip29::GroupReadError
+impl core::marker::Unpin for nmp::nip29::GroupReadError
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupReadError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupReadError
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupReadError
+pub enum nmp::nip29::RelayScopeError
+pub nmp::nip29::RelayScopeError::EmptyRelaySet
+impl core::clone::Clone for nmp::nip29::RelayScopeError
+pub fn nmp::nip29::RelayScopeError::clone(&self) -> nmp::nip29::RelayScopeError
+impl core::cmp::Eq for nmp::nip29::RelayScopeError
+impl core::cmp::PartialEq for nmp::nip29::RelayScopeError
+pub fn nmp::nip29::RelayScopeError::eq(&self, &nmp::nip29::RelayScopeError) -> bool
+impl core::error::Error for nmp::nip29::RelayScopeError
+impl core::fmt::Debug for nmp::nip29::RelayScopeError
+pub fn nmp::nip29::RelayScopeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::nip29::RelayScopeError
+pub fn nmp::nip29::RelayScopeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::RelayScopeError
+impl core::marker::Freeze for nmp::nip29::RelayScopeError
+impl core::marker::Send for nmp::nip29::RelayScopeError
+impl core::marker::Sync for nmp::nip29::RelayScopeError
+impl core::marker::Unpin for nmp::nip29::RelayScopeError
+impl core::marker::UnsafeUnpin for nmp::nip29::RelayScopeError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::RelayScopeError
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::RelayScopeError
+pub struct nmp::nip29::Group
+impl nmp::nip29::Group
+pub fn nmp::nip29::Group::add_user(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::create_group(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::create_invite(&self, &nmp::Engine, nostr::key::public_key::PublicKey, &str) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::delete_event(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nostr::event::id::EventId) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::delete_group(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::edit_metadata(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::join_request(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::leave_request(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::publish(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::publish_signed(&self, &nmp::Engine, nostr::event::Event) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::read(&self, nmp_grammar::binding::Filter) -> core::result::Result<nmp_grammar::live_query::LiveQuery, nmp::nip29::GroupReadError>
+pub fn nmp::nip29::Group::remove_user(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::validate_context(&self, &nostr::event::Event) -> core::result::Result<(), nmp_nip29::context::GroupContextError>
+impl core::clone::Clone for nmp::nip29::Group
+pub fn nmp::nip29::Group::clone(&self) -> nmp::nip29::Group
+impl core::cmp::Eq for nmp::nip29::Group
+impl core::cmp::PartialEq for nmp::nip29::Group
+pub fn nmp::nip29::Group::eq(&self, &nmp::nip29::Group) -> bool
+impl core::fmt::Debug for nmp::nip29::Group
+pub fn nmp::nip29::Group::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::Group
+impl core::marker::Freeze for nmp::nip29::Group
+impl core::marker::Send for nmp::nip29::Group
+impl core::marker::Sync for nmp::nip29::Group
+impl core::marker::Unpin for nmp::nip29::Group
+impl core::marker::UnsafeUnpin for nmp::nip29::Group
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::Group
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::Group
+pub struct nmp::nip29::RelayScope
+impl nmp::nip29::RelayScope
+pub fn nmp::nip29::RelayScope::group(&self, impl core::convert::Into<alloc::string::String>) -> nmp::nip29::Group
+pub fn nmp::nip29::RelayScope::groups_where(&self, &nmp::nip29::GroupPredicate) -> core::result::Result<nmp_grammar::live_query::LiveQuery, nmp::nip29::GroupReadError>
+impl core::clone::Clone for nmp::nip29::RelayScope
+pub fn nmp::nip29::RelayScope::clone(&self) -> nmp::nip29::RelayScope
+impl core::cmp::Eq for nmp::nip29::RelayScope
+impl core::cmp::PartialEq for nmp::nip29::RelayScope
+pub fn nmp::nip29::RelayScope::eq(&self, &nmp::nip29::RelayScope) -> bool
+impl core::fmt::Debug for nmp::nip29::RelayScope
+pub fn nmp::nip29::RelayScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::RelayScope
+impl core::marker::Freeze for nmp::nip29::RelayScope
+impl core::marker::Send for nmp::nip29::RelayScope
+impl core::marker::Sync for nmp::nip29::RelayScope
+impl core::marker::Unpin for nmp::nip29::RelayScope
+impl core::marker::UnsafeUnpin for nmp::nip29::RelayScope
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::RelayScope
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::RelayScope
+pub fn nmp::nip29::admin_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupPredicate
+pub fn nmp::nip29::member_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupPredicate
+pub fn nmp::nip29::on(impl core::iter::traits::collect::IntoIterator<Item = nostr::types::url::RelayUrl>) -> core::result::Result<nmp::nip29::RelayScope, nmp::nip29::RelayScopeError>
+pub type nmp::nip29::GroupReceipts = nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteStatus>
 pub enum nmp::AuthDenialSource
 pub nmp::AuthDenialSource::Policy
 pub nmp::AuthDenialSource::Relay
@@ -254,8 +415,8 @@ pub fn nmp::EngineError::clone(&self) -> nmp::EngineError
 impl core::cmp::Eq for nmp::EngineError
 impl core::cmp::PartialEq for nmp::EngineError
 pub fn nmp::EngineError::eq(&self, &nmp::EngineError) -> bool
-impl core::convert::From<nmp::EngineError> for nmp::GroupPublishError
-pub fn nmp::GroupPublishError::from(nmp::EngineError) -> Self
+impl core::convert::From<nmp::EngineError> for nmp::nip29::GroupPublishError
+pub fn nmp::nip29::GroupPublishError::from(nmp::EngineError) -> Self
 impl core::error::Error for nmp::EngineError
 impl core::fmt::Debug for nmp::EngineError
 pub fn nmp::EngineError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -269,31 +430,6 @@ impl core::marker::Unpin for nmp::EngineError
 impl core::marker::UnsafeUnpin for nmp::EngineError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::EngineError
 impl core::panic::unwind_safe::UnwindSafe for nmp::EngineError
-pub enum nmp::GroupPublishError
-pub nmp::GroupPublishError::Context(nmp_nip29::group::GroupContextError)
-pub nmp::GroupPublishError::Engine(nmp::EngineError)
-impl core::clone::Clone for nmp::GroupPublishError
-pub fn nmp::GroupPublishError::clone(&self) -> nmp::GroupPublishError
-impl core::cmp::Eq for nmp::GroupPublishError
-impl core::cmp::PartialEq for nmp::GroupPublishError
-pub fn nmp::GroupPublishError::eq(&self, &nmp::GroupPublishError) -> bool
-impl core::convert::From<nmp::EngineError> for nmp::GroupPublishError
-pub fn nmp::GroupPublishError::from(nmp::EngineError) -> Self
-impl core::convert::From<nmp_nip29::group::GroupContextError> for nmp::GroupPublishError
-pub fn nmp::GroupPublishError::from(nmp_nip29::group::GroupContextError) -> Self
-impl core::error::Error for nmp::GroupPublishError
-impl core::fmt::Debug for nmp::GroupPublishError
-pub fn nmp::GroupPublishError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for nmp::GroupPublishError
-pub fn nmp::GroupPublishError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for nmp::GroupPublishError
-impl core::marker::Freeze for nmp::GroupPublishError
-impl core::marker::Send for nmp::GroupPublishError
-impl core::marker::Sync for nmp::GroupPublishError
-impl core::marker::Unpin for nmp::GroupPublishError
-impl core::marker::UnsafeUnpin for nmp::GroupPublishError
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::GroupPublishError
-impl core::panic::unwind_safe::UnwindSafe for nmp::GroupPublishError
 pub enum nmp::ReceiptReattachment
 pub nmp::ReceiptReattachment::Attached
 pub nmp::ReceiptReattachment::Attached::id: nmp::ReceiptId
@@ -1286,32 +1422,7 @@ impl !core::panic::unwind_safe::RefUnwindSafe for nmp::WindowHandle
 impl !core::panic::unwind_safe::UnwindSafe for nmp::WindowHandle
 pub trait nmp::AuthPolicy: core::marker::Send
 pub fn nmp::AuthPolicy::evaluate(&self, nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp
-pub trait nmp::GroupOperations
-pub fn nmp::GroupOperations::add_user(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::create_group(&self, &nmp::Engine) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::create_invite(&self, &nmp::Engine, &str) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::delete_event(&self, &nmp::Engine, nostr::event::id::EventId) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::delete_group(&self, &nmp::Engine) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::edit_metadata(&self, &nmp::Engine, core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::join_request(&self, &nmp::Engine, core::option::Option<&str>) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::leave_request(&self, &nmp::Engine) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::publish(&self, &nmp::Engine, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::publish_signed(&self, &nmp::Engine, nostr::event::Event) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp::GroupOperations::remove_user(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-impl nmp::GroupOperations for nmp_nip29::group::Group
-pub fn nmp_nip29::group::Group::add_user(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::create_group(&self, &nmp::Engine) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::create_invite(&self, &nmp::Engine, &str) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::delete_event(&self, &nmp::Engine, nostr::event::id::EventId) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::delete_group(&self, &nmp::Engine) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::edit_metadata(&self, &nmp::Engine, core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::join_request(&self, &nmp::Engine, core::option::Option<&str>) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::leave_request(&self, &nmp::Engine) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::publish(&self, &nmp::Engine, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::publish_signed(&self, &nmp::Engine, nostr::event::Event) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
-pub fn nmp_nip29::group::Group::remove_user(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::GroupReceipts, nmp::GroupPublishError>
 pub type nmp::AuthPolicyResult = core::result::Result<nmp::AuthPolicyDecision, nmp::AuthPolicyError>
-pub type nmp::GroupReceipts = nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteStatus>
 
 # resolved dependency-owned reexports (rustdoc JSON format 60)
 reexport nmp::AccessContext => nmp_grammar::descriptor::AccessContext
@@ -27236,936 +27347,5 @@ reexport nmp::decode_nostr_entity => nmp_grammar::nip19::decode
     }
   },
   "name": "decode",
-  "visibility": "public"
-}
-reexport nmp::nip29 => nmp_nip29
-{
-  "attrs": [],
-  "inner": {
-    "module": {
-      "is_crate": true,
-      "is_stripped": false,
-      "items": [
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "group_discovery_demand",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [
-                          [
-                            "host",
-                            {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "nostr::RelayUrl",
-                                "resolved_item": {
-                                  "definition": {
-                                    "previously_defined": "nostr::types::url::RelayUrl"
-                                  },
-                                  "path": "nostr::types::url::RelayUrl"
-                                }
-                              }
-                            }
-                          ]
-                        ],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::Demand",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::descriptor::Demand"
-                              },
-                              "path": "nmp_grammar::descriptor::Demand"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "group_discovery_demand",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::demand::group_discovery_demand"
-              },
-              "source": "demand::group_discovery_demand"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "Group",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "struct": {
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "kind": {
-                        "plain": {
-                          "fields": [],
-                          "has_stripped_fields": true
-                        }
-                      }
-                    }
-                  },
-                  "name": "Group",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::group::Group"
-              },
-              "source": "group::Group"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "GroupContextError",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "enum": {
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_stripped_variants": false,
-                      "variants": [
-                        {
-                          "attrs": [],
-                          "inner": {
-                            "variant": {
-                              "discriminant": null,
-                              "kind": "plain"
-                            }
-                          },
-                          "name": "CallerSuppliedContext",
-                          "visibility": "default"
-                        },
-                        {
-                          "attrs": [],
-                          "inner": {
-                            "variant": {
-                              "discriminant": null,
-                              "kind": "plain"
-                            }
-                          },
-                          "name": "CallerSuppliedTimeline",
-                          "visibility": "default"
-                        },
-                        {
-                          "attrs": [],
-                          "inner": {
-                            "variant": {
-                              "discriminant": null,
-                              "kind": {
-                                "struct": {
-                                  "fields": [
-                                    {
-                                      "attrs": [],
-                                      "inner": {
-                                        "struct_field": {
-                                          "resolved_path": {
-                                            "args": null,
-                                            "path": "String",
-                                            "resolved_item": {
-                                              "path": "alloc::string::String"
-                                            }
-                                          }
-                                        }
-                                      },
-                                      "name": "expected",
-                                      "visibility": "default"
-                                    }
-                                  ],
-                                  "has_stripped_fields": false
-                                }
-                              }
-                            }
-                          },
-                          "name": "MissingContext",
-                          "visibility": "default"
-                        },
-                        {
-                          "attrs": [],
-                          "inner": {
-                            "variant": {
-                              "discriminant": null,
-                              "kind": {
-                                "struct": {
-                                  "fields": [
-                                    {
-                                      "attrs": [],
-                                      "inner": {
-                                        "struct_field": {
-                                          "resolved_path": {
-                                            "args": null,
-                                            "path": "String",
-                                            "resolved_item": {
-                                              "path": "alloc::string::String"
-                                            }
-                                          }
-                                        }
-                                      },
-                                      "name": "found",
-                                      "visibility": "default"
-                                    },
-                                    {
-                                      "attrs": [],
-                                      "inner": {
-                                        "struct_field": {
-                                          "resolved_path": {
-                                            "args": null,
-                                            "path": "String",
-                                            "resolved_item": {
-                                              "path": "alloc::string::String"
-                                            }
-                                          }
-                                        }
-                                      },
-                                      "name": "expected",
-                                      "visibility": "default"
-                                    }
-                                  ],
-                                  "has_stripped_fields": false
-                                }
-                              }
-                            }
-                          },
-                          "name": "MismatchedContext",
-                          "visibility": "default"
-                        },
-                        {
-                          "attrs": [],
-                          "inner": {
-                            "variant": {
-                              "discriminant": null,
-                              "kind": {
-                                "struct": {
-                                  "fields": [
-                                    {
-                                      "attrs": [],
-                                      "inner": {
-                                        "struct_field": {
-                                          "resolved_path": {
-                                            "args": null,
-                                            "path": "String",
-                                            "resolved_item": {
-                                              "path": "alloc::string::String"
-                                            }
-                                          }
-                                        }
-                                      },
-                                      "name": "expected",
-                                      "visibility": "default"
-                                    }
-                                  ],
-                                  "has_stripped_fields": false
-                                }
-                              }
-                            }
-                          },
-                          "name": "AmbiguousContext",
-                          "visibility": "default"
-                        }
-                      ]
-                    }
-                  },
-                  "name": "GroupContextError",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::group::GroupContextError"
-              },
-              "source": "group::GroupContextError"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "add_user",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [
-                          [
-                            "pubkey",
-                            {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "nostr::PublicKey",
-                                "resolved_item": {
-                                  "definition": {
-                                    "previously_defined": "nostr::key::public_key::PublicKey"
-                                  },
-                                  "path": "nostr::key::public_key::PublicKey"
-                                }
-                              }
-                            }
-                          ],
-                          [
-                            "role",
-                            {
-                              "resolved_path": {
-                                "args": {
-                                  "angle_bracketed": {
-                                    "args": [
-                                      {
-                                        "type": {
-                                          "borrowed_ref": {
-                                            "is_mutable": false,
-                                            "lifetime": null,
-                                            "type": {
-                                              "primitive": "str"
-                                            }
-                                          }
-                                        }
-                                      }
-                                    ],
-                                    "constraints": []
-                                  }
-                                },
-                                "path": "Option",
-                                "resolved_item": {
-                                  "path": "core::option::Option"
-                                }
-                              }
-                            }
-                          ]
-                        ],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "add_user",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::add_user"
-              },
-              "source": "operations::add_user"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "create_group",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "create_group",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::create_group"
-              },
-              "source": "operations::create_group"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "create_invite",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [
-                          [
-                            "code",
-                            {
-                              "borrowed_ref": {
-                                "is_mutable": false,
-                                "lifetime": null,
-                                "type": {
-                                  "primitive": "str"
-                                }
-                              }
-                            }
-                          ]
-                        ],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "create_invite",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::create_invite"
-              },
-              "source": "operations::create_invite"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "delete_event",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [
-                          [
-                            "event_id",
-                            {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "nostr::EventId",
-                                "resolved_item": {
-                                  "definition": {
-                                    "previously_defined": "nostr::event::id::EventId"
-                                  },
-                                  "path": "nostr::event::id::EventId"
-                                }
-                              }
-                            }
-                          ]
-                        ],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "delete_event",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::delete_event"
-              },
-              "source": "operations::delete_event"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "delete_group",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "delete_group",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::delete_group"
-              },
-              "source": "operations::delete_group"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "edit_metadata",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [
-                          [
-                            "name",
-                            {
-                              "resolved_path": {
-                                "args": {
-                                  "angle_bracketed": {
-                                    "args": [
-                                      {
-                                        "type": {
-                                          "borrowed_ref": {
-                                            "is_mutable": false,
-                                            "lifetime": null,
-                                            "type": {
-                                              "primitive": "str"
-                                            }
-                                          }
-                                        }
-                                      }
-                                    ],
-                                    "constraints": []
-                                  }
-                                },
-                                "path": "Option",
-                                "resolved_item": {
-                                  "path": "core::option::Option"
-                                }
-                              }
-                            }
-                          ],
-                          [
-                            "about",
-                            {
-                              "resolved_path": {
-                                "args": {
-                                  "angle_bracketed": {
-                                    "args": [
-                                      {
-                                        "type": {
-                                          "borrowed_ref": {
-                                            "is_mutable": false,
-                                            "lifetime": null,
-                                            "type": {
-                                              "primitive": "str"
-                                            }
-                                          }
-                                        }
-                                      }
-                                    ],
-                                    "constraints": []
-                                  }
-                                },
-                                "path": "Option",
-                                "resolved_item": {
-                                  "path": "core::option::Option"
-                                }
-                              }
-                            }
-                          ]
-                        ],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "edit_metadata",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::edit_metadata"
-              },
-              "source": "operations::edit_metadata"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "join_request",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [
-                          [
-                            "invite_code",
-                            {
-                              "resolved_path": {
-                                "args": {
-                                  "angle_bracketed": {
-                                    "args": [
-                                      {
-                                        "type": {
-                                          "borrowed_ref": {
-                                            "is_mutable": false,
-                                            "lifetime": null,
-                                            "type": {
-                                              "primitive": "str"
-                                            }
-                                          }
-                                        }
-                                      }
-                                    ],
-                                    "constraints": []
-                                  }
-                                },
-                                "path": "Option",
-                                "resolved_item": {
-                                  "path": "core::option::Option"
-                                }
-                              }
-                            }
-                          ]
-                        ],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "join_request",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::join_request"
-              },
-              "source": "operations::join_request"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "leave_request",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "leave_request",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::leave_request"
-              },
-              "source": "operations::leave_request"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "use": {
-              "is_glob": false,
-              "name": "remove_user",
-              "resolved_item": {
-                "definition": {
-                  "attrs": [],
-                  "inner": {
-                    "function": {
-                      "default_unstable": null,
-                      "generics": {
-                        "params": [],
-                        "where_predicates": []
-                      },
-                      "has_body": true,
-                      "header": {
-                        "abi": "Rust",
-                        "is_async": false,
-                        "is_const": false,
-                        "is_unsafe": false
-                      },
-                      "sig": {
-                        "inputs": [
-                          [
-                            "pubkey",
-                            {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "nostr::PublicKey",
-                                "resolved_item": {
-                                  "definition": {
-                                    "previously_defined": "nostr::key::public_key::PublicKey"
-                                  },
-                                  "path": "nostr::key::public_key::PublicKey"
-                                }
-                              }
-                            }
-                          ]
-                        ],
-                        "is_c_variadic": false,
-                        "output": {
-                          "resolved_path": {
-                            "args": null,
-                            "path": "nmp_grammar::EventBuilder",
-                            "resolved_item": {
-                              "definition": {
-                                "previously_defined": "nmp_grammar::write::EventBuilder"
-                              },
-                              "path": "nmp_grammar::write::EventBuilder"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "name": "remove_user",
-                  "visibility": "public"
-                },
-                "path": "nmp_nip29::operations::remove_user"
-              },
-              "source": "operations::remove_user"
-            }
-          },
-          "name": null,
-          "visibility": "public"
-        }
-      ]
-    }
-  },
-  "name": "nmp_nip29",
   "visibility": "public"
 }
