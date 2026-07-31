@@ -171,11 +171,12 @@ grep -qF 'pub struct SignerAdapterRuntime' "$interface_source" ||
   fail "core-minted contextual runtime capability is missing"
 grep -qF 'let _entered = handle.enter();' "$interface_source" ||
   fail "provider futures are not entered in their linked Tokio context on every poll"
-if rg -q 'core-owner|pub unsafe|[Mm]ailbox|CoreSigner(Port|Lease)|pub fn from_core' \
+if grep -qE 'core-owner|pub unsafe|[Mm]ailbox|CoreSigner(Port|Lease)|pub fn from_core' \
   "$interface_source" "$core_signer_source" "$provider_signer_source"; then
   fail "deleted mailbox/unsafe authority or public contextual-runtime minting survives"
 fi
-[[ $(rg -o '\.take_for_install\(\)' "$core_signer_source" | wc -l | tr -d ' ') == 1 ]] ||
+[[ $(awk '{ total += gsub(/\.take_for_install\(\)/, "") } END { print total + 0 }' \
+  "$core_signer_source") == 1 ]] ||
   fail "core signer adapter must have exactly one take-for-install site"
 grep -qF 'pub(crate) fn install_signer_adapter(' "$core_signer_source" ||
   fail "adapter installation is not sealed inside core"

@@ -170,6 +170,9 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    env:
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
     steps:
       - uses: actions/checkout@v4
 
@@ -177,6 +180,9 @@ jobs:
       # rust-toolchain.toml at the repo root.
       - name: Install pinned Rust toolchain
         run: rustup show
+
+      - name: Fetch locked Rust dependencies
+        run: cargo fetch --locked
 
       - name: cargo fmt --check
         run: cargo fmt --all --check
