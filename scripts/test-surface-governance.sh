@@ -569,6 +569,24 @@ rm "$repo/docs/surface/components/beta/uniffi.txt"
 commit_case "$repo" beta-retired
 expect_fail "new record cannot begin retired" "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
 
+# The catalog's one-shot bootstrap transition arm (base has no catalog, head
+# starts one) was deleted with #1171: absence of any base governance artifact
+# must fail closed rather than let a proposed head introduce the catalog for
+# the first time. This exercises `main.rs`'s `(false, true) =>
+# Err(invalid("component catalog is absent from the base"))` arm directly, so
+# a regression that turns it back into an `Ok(...)` bootstrap allowance is
+# caught here rather than shipping unnoticed.
+repo="$TMP/catalog-appears-at-head"; new_repo "$repo"
+rm -r "$repo/docs/surface/components"
+commit_case "$repo" catalog-absent-from-base
+base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/docs/surface/components"
+printf '# Fixture component catalog\n' > "$repo/docs/surface/components/README.md"
+descriptor "$repo" alpha alpha
+commit_case "$repo" catalog-present-at-head
+expect_fail "component catalog absent from base cannot silently begin at head" \
+  "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
 if grep -R -Fq 'SURFACE_OWNER_BOOTSTRAP' \
   "$ROOT/scripts/check-surface-governance.sh" \
   "$ROOT/scripts/run-surface-regeneration-governance.sh"; then
