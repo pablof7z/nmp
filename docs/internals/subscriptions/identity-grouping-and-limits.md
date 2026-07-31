@@ -388,15 +388,22 @@ not written to look for it.
 Not a correctness bug, an operational one: 300 subscriptions against a cap of
 ~20.
 
-### 5.4 Not a bug: duplicate REQs at connect
+### 5.4 Duplicate REQs at connect — CLOSED (#1075)
 
-Measured: 10 subscriptions produce 12 REQ frames; 40 produce 43. Constant, never
-more than two sends of one filter.
+The old path gave reconnect replay two owners: the transport worker retained a
+REQ preamble while `EngineCore` also resent its full plan on
+`RelayConnected`. The first Connected edge could likewise arrive after an
+initial REQ had already been accepted by that still-dialing handle. Both paths
+sent a byte-identical replacement, causing the relay to rerun and restream the
+same query.
 
-This is `apply_replay` behaving as documented: on `RelayConnected` it resends
-`EngineCore`'s full current req list — "even on the very first `Connected` for a
-session" — calling the duplicate "a harmless, idempotent overwrite." Harmless
-client-side; the relay does re-run the query. Not a plan-diff bypass.
+The reducer now remembers the exact accepted `(session, subscription, filter,
+transport generation)`. An unchanged request already accepted on that
+generation mints neither another request revision nor another wire frame. A
+changed filter remains a real NIP-01 replacement. Disconnect retires the
+accepted state, so the fresh generation receives the current request exactly
+once. The transport's automatic reconnect preamble stays empty; replay after
+the ordered Connected edge is reducer-owned.
 
 ---
 

@@ -23,15 +23,14 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::RelayAdmissionPolicy;
-use nmp::mechanism::core::RowDelta;
+use nmp::mechanism::core::{ObservationFact, RelayAdmissionPolicy, RowDelta};
 use nmp::mechanism::outbox::WriteStatus;
 use nmp::mechanism::runtime::{
     EngineThread, FifoReceiver, FifoTryRecvError, ReceiptReattachment, RowsReceiver,
 };
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
-    IdentityField, Selector, SourceAuthority,
+    IdentityField, IndexedTagName, Selector, SourceAuthority,
 };
 use nmp_grammar::{
     CorrelationToken, Durability, Identity, WriteIntent, WritePayload, WriteRouting,
@@ -43,7 +42,10 @@ use nmp_store::{
     sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, MemoryStore,
     RedbStore, RedbStoreResetError, RelayObserved, WriteDurability,
 };
-use nmp_test_support::ConnectionOwner;
+use nmp_test_support::{
+    relays::{AdvertisedLimits, RelayConfig, ScriptedRelay},
+    ConnectionOwner,
+};
 use nmp_transport::PoolConfig;
 use nostr::{
     EventId, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag, Timestamp,
@@ -104,10 +106,28 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 /// test does.
 fn literal_kind1(author_hex: &str) -> LiveQuery {
     LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
+        kinds: Some(BTreeSet::from([1])),
         authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
         ..Filter::default()
     })
+}
+
+fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
+    LiveQuery(
+        Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                tags: BTreeMap::from([(
+                    IndexedTagName::new('p').expect("'p' is an indexed tag name"),
+                    Binding::Literal(BTreeSet::from([value.to_string()])),
+                )]),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            AccessContext::Public,
+        )
+        .expect("a pinned demand over one relay is constructible"),
+    )
 }
 
 /// #565 product-path falsifier: `Freshness::MaxAge` is decided once when
@@ -270,6 +290,34 @@ fn wait_for_rows(
             Err(RecvTimeoutError::Disconnected) => return false,
         }
     }
+}
+
+fn drain_relay_request_evidence(rx: &RowsReceiver) -> Vec<(u64, u64, bool, ConcreteFilter)> {
+    let mut requests = Vec::new();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok((_deltas, _coverage, execution)) => {
+                requests.extend(execution.into_iter().filter_map(|evidence| {
+                    let ObservationFact::RelayRequest {
+                        transport_generation,
+                        request_revision,
+                        filter,
+                        replay,
+                        ..
+                    } = evidence.fact
+                    else {
+                        return None;
+                    };
+                    Some((transport_generation, request_revision, replay, filter))
+                }));
+            }
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("observation disconnected while collecting request evidence")
+            }
+        }
+    }
+    requests
 }
 
 /// Same shape as [`wait_for_rows`], for the receipt-status stream.
@@ -464,6 +512,157 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         .await
         .expect("shut down relay_b connection owner");
     relay_b.shutdown();
+}
+
+/// #1075: one accepted `(session, sub-id, filter, transport generation)`
+/// remains the live wire owner until replacement, close, or disconnect.
+/// Recompiling the same plan cannot make the relay rescan it, while a changed
+/// filter still replaces in place and a fresh connection generation replays
+/// the current request exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unchanged_same_generation_req_is_suppressed_and_reconnect_replays_once() {
+    let relay_config = RelayConfig {
+        // Explicit NIP-11 evidence that NIP-77 is unsupported keeps this
+        // NIP-01 ownership test out of capability-probe handoffs.
+        advertised_limits: Some(AdvertisedLimits::default()),
+        ..RelayConfig::default()
+    };
+    let mut relay = ScriptedRelay::start(&relay_config).await;
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        10,
+        PoolConfig {
+            reconnect_delay_initial: Some(Duration::from_millis(20)),
+            reconnect_jitter_max: Some(Duration::ZERO),
+            ..PoolConfig::default()
+        },
+        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+    )
+    .expect("spawn runtime");
+
+    let (first, first_rows) = handle
+        .subscribe(pinned_tag_value(&relay.url, "alice"))
+        .expect("open first query");
+    relay
+        .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
+        .await;
+    let initial = relay.wire_record();
+    assert_eq!(
+        initial.reqs_naming_tag('p').len(),
+        1,
+        "the first generation must receive one REQ, not a queued send plus \
+         transport/core replays: {initial:#?}"
+    );
+    assert!(
+        initial.redundant_reqs().is_empty(),
+        "the initial Connected edge must not replay a request already handed \
+         to the same generation: {initial:#?}"
+    );
+    let initial_evidence = drain_relay_request_evidence(&first_rows);
+    assert_eq!(
+        initial_evidence.len(),
+        1,
+        "one wire REQ must mint exactly one public request incarnation: \
+         {initial_evidence:#?}"
+    );
+    assert!(
+        !initial_evidence[0].2,
+        "the dialing-generation handoff is the original request, not a replay"
+    );
+
+    let (second, _second_rows) = handle
+        .subscribe(pinned_tag_value(&relay.url, "bob"))
+        .expect("widen the current request");
+    relay
+        .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
+        .await;
+    let widened = relay.wire_record();
+    let widened_reqs = widened.reqs_naming_tag('p');
+    assert_eq!(
+        widened_reqs.len(),
+        2,
+        "a changed filter must produce exactly one replacement REQ: {widened:#?}"
+    );
+    assert_eq!(
+        widened_reqs[0].sub_id, widened_reqs[1].sub_id,
+        "the stable router id must replace in place"
+    );
+    assert!(
+        widened_reqs[1].replaces,
+        "the changed filter must replace the live request, not open a sibling"
+    );
+    assert!(
+        widened.redundant_reqs().is_empty(),
+        "no byte-identical request may be resent on the unchanged generation: \
+         {widened:#?}"
+    );
+    let replacement_evidence = drain_relay_request_evidence(&first_rows);
+    assert_eq!(
+        replacement_evidence.len(),
+        1,
+        "one changed replacement must mint exactly one new request incarnation: \
+         {replacement_evidence:#?}"
+    );
+    assert!(!replacement_evidence[0].2);
+    assert_eq!(
+        replacement_evidence[0].0, initial_evidence[0].0,
+        "a changed filter replaces on the same transport generation"
+    );
+    assert_ne!(
+        replacement_evidence[0].1, initial_evidence[0].1,
+        "a real replacement owns a fresh request revision"
+    );
+    assert_ne!(
+        replacement_evidence[0].3, initial_evidence[0].3,
+        "only a genuinely changed filter may replace the live request"
+    );
+
+    let relay_port = relay.port();
+    relay.disconnect().await;
+    let replacement = ScriptedRelay::start_on_port(relay_port, &relay_config).await;
+    assert!(
+        replacement.wait_contacted(Duration::from_secs(10)).await,
+        "the transport must reconnect to the same relay address"
+    );
+    replacement
+        .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
+        .await;
+    let replay = replacement.wire_record();
+    assert_eq!(
+        replay.reqs_naming_tag('p').len(),
+        1,
+        "the fresh generation must receive exactly one replay: {replay:#?}"
+    );
+    assert!(
+        replay.redundant_reqs().is_empty(),
+        "reconnect replay itself must have one owner: {replay:#?}"
+    );
+    let replay_evidence = drain_relay_request_evidence(&first_rows);
+    assert_eq!(
+        replay_evidence.len(),
+        1,
+        "one reconnect wire REQ must mint exactly one replay incarnation: \
+         {replay_evidence:#?}"
+    );
+    assert!(replay_evidence[0].2);
+    assert_ne!(
+        replay_evidence[0].0, replacement_evidence[0].0,
+        "reconnect replay must name the fresh transport generation"
+    );
+    assert_ne!(
+        replay_evidence[0].1, replacement_evidence[0].1,
+        "reconnect replay must own a fresh request revision"
+    );
+    assert_eq!(
+        replay_evidence[0].3, replacement_evidence[0].3,
+        "reconnect replays the unchanged current filter"
+    );
+
+    handle.unsubscribe(first);
+    handle.unsubscribe(second);
+    handle.shutdown();
+    engine_thread.join();
+    replacement.shutdown();
 }
 
 // ---- #39: the deadline-armed driver (design §3.3) ------------------------

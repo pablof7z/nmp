@@ -1252,6 +1252,10 @@ fn snapshotted_secondary_preamble_is_revoked_before_its_post_binding_write() {
         secondary_snapshot.wait_until_observed(OBSERVATION),
         "relay B must snapshot the broad reconnect preamble before relay A binds"
     );
+    assert!(
+        secondary_snapshot.reconnect_delay_was_controlled(),
+        "the falsifier must own relay B's reconnect schedule instead of racing production jitter"
+    );
 
     allow_primary_handshake_tx.send(()).unwrap();
     let signer = connect_rx
