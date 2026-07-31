@@ -42,7 +42,8 @@ if grep -qE 'pub fn from_core|pub unsafe|core-owner|[Mm]ailbox|CoreSigner(Port|L
   "$interface_source" "$core_source" "$provider_source"; then
   fail "deleted unsafe/mailbox authority or a public runtime minting door survives"
 fi
-[[ $(rg -o '\.take_for_install\(\)' "$core_source" | wc -l | tr -d ' ') == 1 ]] ||
+[[ $(awk '{ total += gsub(/\.take_for_install\(\)/, "") } END { print total + 0 }' \
+  "$core_source") == 1 ]] ||
   fail "the core must consume the provider adapter at exactly one installation site"
 grep -qF 'pub(crate) fn install_signer_adapter(' "$core_source" ||
   fail "the core-owned adapter installation door is missing"
