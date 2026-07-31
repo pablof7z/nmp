@@ -299,7 +299,7 @@ impl Group {
 mod tests {
     use super::*;
     use crate::nip29;
-    use nostr::{Keys, Kind, Tag};
+    use nostr::{Keys, Kind, Tag, Timestamp, UnsignedEvent};
 
     const GROUP: &str = "photographers";
 
@@ -324,6 +324,21 @@ mod tests {
             WriteRouting::Explicit(relays) => relays.clone(),
             WriteRouting::Auto => panic!("a group write is never Auto"),
         }
+    }
+
+    /// One event, correctly contextualized for `GROUP` and signed by
+    /// `signer` -- the fixture PRESIGNEDPUBLICATION-001 and -006 both need to
+    /// exercise a genuine pre-signed event rather than a freshly minted draft.
+    fn signed_event(signer: &Keys) -> Event {
+        UnsignedEvent::new(
+            signer.public_key(),
+            Timestamp::from(1_700_000_000u64),
+            Kind::from(9u16),
+            vec![Tag::parse(["h", GROUP]).unwrap()],
+            "first light".to_string(),
+        )
+        .sign_with_keys(signer)
+        .expect("fixture keys sign cleanly")
     }
 
     /// The multi-relay write contract: EVERY host in the scope, and only
@@ -390,6 +405,65 @@ mod tests {
             ))
         ));
         engine.shutdown();
+    }
+
+    /// PROTOCOL-PRESIGNEDPUBLICATION-001 (direct half): `publish_signed`
+    /// mints its `WriteIntent` at this exact seam -- `Self::intent` with a
+    /// `WritePayload::Signed`, never a `WritePayload::Event`. Proven here,
+    /// with no relay and no engine I/O required to observe it, so the
+    /// end-to-end wire proof in
+    /// `crates/nmp/tests/group_publication_door.rs`'s
+    /// `publish_signed_delivers_the_callers_exact_pre_signed_bytes_to_every_host`
+    /// is checking the SAME mechanism this test pins, not a different one.
+    #[test]
+    fn a_pre_signed_event_is_carried_into_the_minted_intent_byte_for_byte() {
+        let event = signed_event(&Keys::generate());
+        let intent = group([host(1)]).intent(
+            WritePayload::Signed(event.clone()),
+            Identity::Explicit(event.pubkey),
+        );
+        assert_eq!(routed(&intent), vec![host(1)]);
+        match intent.payload {
+            WritePayload::Signed(out) => assert_eq!(
+                out, event,
+                "the minted intent must carry the caller's signed event unchanged -- \
+                 same id, same signature, same tags, same content"
+            ),
+            _ => {
+                panic!("a pre-signed event must mint a Signed payload, not something else")
+            }
+        }
+    }
+
+    /// PROTOCOL-PRESIGNEDPUBLICATION-006 (direct half): the route is the
+    /// group's own host set, minted from the scope the group was
+    /// constructed with -- never derived from whichever key signed the
+    /// event. Two different signers get the identical route and neither
+    /// event is mutated.
+    #[test]
+    fn the_route_follows_the_group_not_whichever_key_signed_the_pre_signed_event() {
+        let alice_signed = signed_event(&Keys::generate());
+        let bob_signed = signed_event(&Keys::generate());
+        assert_ne!(
+            alice_signed.pubkey, bob_signed.pubkey,
+            "the fixture must exercise two genuinely different signers"
+        );
+        let group = group([host(1), host(2)]);
+        for event in [alice_signed, bob_signed] {
+            let intent = group.intent(
+                WritePayload::Signed(event.clone()),
+                Identity::Explicit(event.pubkey),
+            );
+            assert_eq!(
+                routed(&intent),
+                vec![host(1), host(2)],
+                "the route is the group's hosts regardless of who signed the event"
+            );
+            match intent.payload {
+                WritePayload::Signed(out) => assert_eq!(out, event),
+                _ => panic!("a signed event must mint a Signed payload, not something else"),
+            }
+        }
     }
 
     /// Every named operation is an ordinary group publication: same door,
