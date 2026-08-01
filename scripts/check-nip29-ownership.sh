@@ -204,9 +204,26 @@ fi
 # `Group` mints a read declaration and nothing else: the one read door is
 # `Engine::observe`, and a group-shaped stream would be the read-side twin of
 # the `publish_composed` second write lifecycle #838 deleted.
+#
+# PROTOCOL-READSTHROUGHTHEONEDOOR-002 widens this from the two Rust-crate
+# files to every surface an app can hold a group/relay-scope value from: the
+# Rust FFI boundary and both hand-written native wrappers. Each of these
+# three files declares ONLY group/relay-scope/predicate types -- never
+# `Engine`/`NMPEngine`/`FfiEngine` -- so an unqualified keyword grep cannot
+# cross-match the engine's own, legitimate `observe`.
 if grep -nE 'fn observe|fn subscribe|fn stream' \
   crates/nmp-nip29/src/*.rs crates/nmp/src/nip29/*.rs; then
   fail "a second read door for groups appeared; LiveQuery/Engine::observe is the one"
+fi
+if grep -nE 'pub fn observe|pub fn subscribe|pub fn stream' crates/nmp-ffi/src/nip29.rs; then
+  fail "a second read door for groups appeared in the Rust FFI surface"
+fi
+if grep -nE 'func observe|func subscribe|func stream' Packages/NMP/Sources/NMP/NIP29.swift; then
+  fail "a second read door for groups appeared in the Swift surface"
+fi
+if grep -nE 'fun observe|fun subscribe|fun stream' \
+  Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt; then
+  fail "a second read door for groups appeared in the Kotlin surface"
 fi
 
 # One publish door. The group binding composes an intent and hands it over;

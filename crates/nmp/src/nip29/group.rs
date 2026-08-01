@@ -522,4 +522,63 @@ mod tests {
         drop(subscription);
         engine.shutdown();
     }
+
+    /// PROTOCOL-READSTHROUGHTHEONEDOOR-004: one retained `Group` value mints
+    /// several independent ordinary observations, live at once. There is no
+    /// per-group subscription-count limit and no group-owned lifecycle that a
+    /// second `.read(...)` would have to reconstruct or replace -- each call
+    /// mints an ordinary `LiveQuery` and each `engine.observe(...)` call opens
+    /// its own ordinary subscription, exactly like four unrelated reads would.
+    #[test]
+    fn one_group_value_mints_several_independent_simultaneous_observations() {
+        let engine = engine();
+        let group = group([host(1)]);
+
+        let chat = group
+            .read(Filter {
+                kinds: Some(BTreeSet::from([9u16, 9000u16, 9001u16])),
+                ..Filter::default()
+            })
+            .expect("a chat selection scopes");
+        let activity = group
+            .read(Filter {
+                kinds: Some(BTreeSet::from([30315u16])),
+                ..Filter::default()
+            })
+            .expect("an activity selection scopes");
+        let reactions = group
+            .read(Filter {
+                kinds: Some(BTreeSet::from([7u16])),
+                ..Filter::default()
+            })
+            .expect("a reactions selection scopes");
+        let membership = group
+            .read(Filter {
+                kinds: Some(BTreeSet::from([39001u16, 39002u16])),
+                ..Filter::default()
+            })
+            .expect("a membership selection scopes");
+
+        let subscriptions = vec![
+            engine
+                .observe(chat, None)
+                .expect("the chat query opens its own subscription"),
+            engine
+                .observe(activity, None)
+                .expect("the activity query opens its own subscription"),
+            engine
+                .observe(reactions, None)
+                .expect("the reactions query opens its own subscription"),
+            engine
+                .observe(membership, None)
+                .expect("the membership query opens its own subscription"),
+        ];
+        assert_eq!(
+            subscriptions.len(),
+            4,
+            "all four independent observations must be open at once, from the SAME group value"
+        );
+        drop(subscriptions);
+        engine.shutdown();
+    }
 }

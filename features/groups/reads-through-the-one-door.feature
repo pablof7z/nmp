@@ -14,6 +14,12 @@ Feature: Reading a group goes through the one read door
     Given the group "photographers" hosted by relay "wss://relay.groups.example"
     And I am logged in as "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce"
 
+  # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-001
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip29::a_read_branch_pins_the_host_and_scopes_the_app_supplied_selection
+  # nmp:evidence=rust:nmp-nip29::a_read_selection_that_already_constrains_h_is_refused
+  # nmp:evidence=rust:nmp::the_read_half_is_a_live_query_the_ordinary_observe_door_takes
+  # nmp:falsifier=copying only part of the app's selection (or dropping/altering the appended h row) in group_demand_at makes a_read_branch_pins_the_host_and_scopes_the_app_supplied_selection see a wrong kind set, source, or #h binding; silently overwriting instead of refusing a caller-supplied #h makes a_read_selection_that_already_constrains_h_is_refused return Ok instead of CallerSuppliedContextConstraint; and deleting Group::read or its wiring into Engine::observe makes the_read_half_is_a_live_query_the_ordinary_observe_door_takes fail to open a subscription
   @nip29
   Scenario: The group mints a query and the ordinary subscription door observes it
     Given a filter selecting kind 9
@@ -24,6 +30,10 @@ Feature: Reading a group goes through the one read door
     And the request selects exactly kind 9
     And no relay outside "wss://relay.groups.example" was asked
 
+  # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-002
+  # nmp:status=built
+  # nmp:evidence=script:repository::scripts/check-nip29-ownership.sh
+  # nmp:falsifier=adding an observe/subscribe/stream method to a group or relay-scope type on any of the four surfaces this script scans (the two Rust crates, the Rust FFI, Swift, or Kotlin) makes check-nip29-ownership.sh fail with "a second read door for groups appeared"
   @nip29
   Scenario: There is no second way to observe a group
     When I inspect the group's read surface
@@ -31,6 +41,10 @@ Feature: Reading a group goes through the one read door
     And the group exposes no stream, channel or callback of its own
     And every group read in the surface passes through the same observe call
 
+  # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-003
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip29::a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections
+  # nmp:falsifier=having group_demand_at substitute, filter, or reject any kind set instead of copying the caller's kinds through unread makes a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections see a kind set other than the app's own for at least one of the six cases in its table
   @nip29
   Scenario Outline: The app chooses the kinds; the group imposes no catalogue
     Given a filter selecting <kinds>
@@ -49,6 +63,10 @@ Feature: Reading a group goes through the one read door
       | kind 39002           |
       | kind 31337           |
 
+  # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-004
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::one_group_value_mints_several_independent_simultaneous_observations
+  # nmp:falsifier=capping Group to one live observation, or making a second/third/fourth .read()+.observe() call on the same group value fail or silently replace an earlier one, makes one_group_value_mints_several_independent_simultaneous_observations see fewer than four simultaneously open subscriptions
   @nip29
   Scenario: One group serving four simultaneous queries is the normal case
     Given a chat filter selecting kinds 9 and 9000 and 9001
@@ -62,6 +80,11 @@ Feature: Reading a group goes through the one read door
     And the same group instance minted all four
     And no group needed to be reconstructed between them
 
+  # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-005
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::two_group_ids_on_one_host_differ_only_in_their_h_branch
+  # nmp:evidence=rust:nmp::two_group_ids_on_the_same_host_stay_separated_by_h_at_the_wire
+  # nmp:falsifier=dropping the per-group #h scoping from group_demand_at makes two_group_ids_on_one_host_differ_only_in_their_h_branch see identical branches for two different group ids on the same host, and makes two_group_ids_on_the_same_host_stay_separated_by_h_at_the_wire see the other group's own event leak into this group's subscription
   @nip29
   Scenario: Two groups on the same host stay separated by their h scoping
     Given the group "darkroom" also hosted by relay "wss://relay.groups.example"
@@ -71,6 +94,10 @@ Feature: Reading a group goes through the one read door
     When I observe a live query built from the "photographers" group's demand for that filter
     Then the query shows only "first light"
 
+  # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-006
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox
+  # nmp:falsifier=sourcing a group read's Demand from SourceAuthority::AuthorOutboxes instead of Pinned makes a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox see the discovered author-outbox relay contacted alongside or instead of the retained pinned host
   @nip29
   Scenario: The host is a query-declared pinning, not a directory fact
     Given a filter selecting kind 9
@@ -79,6 +106,10 @@ Feature: Reading a group goes through the one read door
     And diagnostics attribute it to no relay-list or operator-configured fact
     And per-source acquisition evidence is reported for "wss://relay.groups.example"
 
+  # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-007
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::an_unproven_host_never_presents_a_group_read_as_authoritatively_empty
+  # nmp:falsifier=the same SourceAuthority::AuthorOutboxes substitution above (with no active identity and no routing facts registered) makes an_unproven_host_never_presents_a_group_read_as_authoritatively_empty see a non-empty shortfall -- the "nothing is even trying" fact -- instead of the honest single Connecting source this scenario requires
   @nip29
   Scenario: An unreachable host does not make the group look empty
     Given relay "wss://relay.groups.example" cannot connect

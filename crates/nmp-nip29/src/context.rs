@@ -489,4 +489,49 @@ mod tests {
             Some(GroupContextError::CallerSuppliedContextConstraint)
         );
     }
+
+    /// PROTOCOL-READSTHROUGHTHEONEDOOR-003: the app chooses the kinds; the
+    /// group imposes no catalogue of its own. Exercised over an arbitrary
+    /// table of kind sets -- including ones NIP-29 itself does not define
+    /// (31337) and ones that belong to other NIPs entirely (7, 30315) -- so
+    /// passing is never explainable by "it happens to be a kind the group
+    /// recognizes". Every case must come back with EXACTLY the app's own
+    /// kind set, still pinned to `host` and still scoped to `GROUP`, and
+    /// `group_demand_at` must never consult, filter, or reject on `kinds` at
+    /// all: the function signature takes a `Filter` and copies it through
+    /// unread except for the one row it owns (`#h`).
+    #[test]
+    fn a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections() {
+        let cases: Vec<BTreeSet<u16>> = vec![
+            BTreeSet::from([9u16]),
+            BTreeSet::from([9u16, 9000u16]),
+            BTreeSet::from([30315u16]),
+            BTreeSet::from([7u16]),
+            BTreeSet::from([39002u16]),
+            BTreeSet::from([31337u16]),
+        ];
+        for kinds in cases {
+            let selection = Filter {
+                kinds: Some(kinds.clone()),
+                ..Filter::default()
+            };
+            let demand = group_demand_at(&host(), GROUP, selection)
+                .unwrap_or_else(|error| panic!("kinds {kinds:?} must scope cleanly: {error}"));
+            assert_eq!(
+                demand.selection.kinds,
+                Some(kinds.clone()),
+                "the app's exact kind set for {kinds:?} must survive untouched"
+            );
+            assert_eq!(
+                demand.source,
+                SourceAuthority::Pinned(BTreeSet::from([host()])),
+                "kinds {kinds:?}: the branch stays pinned to the one host regardless of kind"
+            );
+            assert_eq!(
+                demand.selection.tags.get(&context_tag()),
+                Some(&Binding::Literal(BTreeSet::from([GROUP.to_string()]))),
+                "kinds {kinds:?}: the branch stays scoped to the one group id regardless of kind"
+            );
+        }
+    }
 }

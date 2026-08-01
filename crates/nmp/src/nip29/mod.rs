@@ -308,6 +308,51 @@ mod tests {
         assert_eq!(query.aggregate_result_limit(), None);
     }
 
+    /// PROTOCOL-READSTHROUGHTHEONEDOOR-005 (direct half): two DISTINCT group
+    /// ids narrowed from the SAME single-host scope produce branches that are
+    /// identical in every respect except the one row that names the group --
+    /// same host, same pinning, same kinds -- so a listing over both is
+    /// separated by `#h` alone, never by an accidental difference elsewhere
+    /// in the branch.
+    #[test]
+    fn two_group_ids_on_one_host_differ_only_in_their_h_branch() {
+        let scope = on([host(1)]).expect("one host forms a scope");
+        let selection = nmp_grammar::Filter {
+            kinds: Some(BTreeSet::from([9u16])),
+            ..nmp_grammar::Filter::default()
+        };
+        let photographers = scope
+            .group("photographers")
+            .read_branches(selection.clone())
+            .expect("a plain selection scopes");
+        let darkroom = scope
+            .group("darkroom")
+            .read_branches(selection)
+            .expect("a plain selection scopes");
+        assert_eq!(photographers.len(), 1);
+        assert_eq!(darkroom.len(), 1);
+        let h = IndexedTagName::new('h').expect("h is a single ASCII letter");
+
+        assert_eq!(photographers[0].source, darkroom[0].source, "same host");
+        assert_eq!(
+            photographers[0].selection.kinds, darkroom[0].selection.kinds,
+            "same app-selected kinds"
+        );
+        assert_eq!(
+            photographers[0].selection.tags.get(&h),
+            Some(&Binding::Literal(BTreeSet::from(["photographers".to_string()])))
+        );
+        assert_eq!(
+            darkroom[0].selection.tags.get(&h),
+            Some(&Binding::Literal(BTreeSet::from(["darkroom".to_string()])))
+        );
+        assert_ne!(
+            photographers[0].selection.tags.get(&h),
+            darkroom[0].selection.tags.get(&h),
+            "the only difference between the two branches is the h row"
+        );
+    }
+
     #[test]
     fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
         let scope = on([host(1), host(2)]).expect("two hosts");
