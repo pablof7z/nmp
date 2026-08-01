@@ -953,29 +953,23 @@ impl RedbStore {
             // rather than a decoded row: the whole point of testing here is
             // to skip decoding rows that will be dropped. Both halves of
             // that one rule are asked in cost order — first "did a pinned
-            // relay serve it", then, only when nothing pinned did, "has ANY
-            // relay served it at all". A row no relay has served is not
-            // another host's row; it is a locally accepted write still in
-            // the outbound publication queue, and it is ours to show.
+            // relay carry it", then, only when nothing pinned did, "is this
+            // row OURS" (an `EVENT_LOCAL` entry exists iff
+            // `Provenance.local` is `Some`). A row this node accepted itself
+            // is never another host's row, whoever has carried it since.
+            let mut local_value = None;
             if let Some(pinned) = &pinned_relay_keys {
-                let mut served_by_pinned = false;
+                let mut carried_by_pinned = false;
                 for relay_key in pinned {
                     let key = observation_key(event_key, *relay_key);
                     if observations.get(&key).map_err(persist_err)?.is_some() {
-                        served_by_pinned = true;
+                        carried_by_pinned = true;
                         break;
                     }
                 }
-                if !served_by_pinned {
-                    let (low, high) = observation_range(event_key);
-                    let served_by_anyone = observations
-                        .range::<&[u8; 12]>(&low..=&high)
-                        .map_err(persist_err)?
-                        .next()
-                        .transpose()
-                        .map_err(persist_err)?
-                        .is_some();
-                    if served_by_anyone {
+                if !carried_by_pinned {
+                    local_value = local.get(event_key).map_err(persist_err)?;
+                    if local_value.is_none() {
                         return Ok(None);
                     }
                 }
@@ -995,7 +989,10 @@ impl RedbStore {
             if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched()) {
                 return Ok(None);
             }
-            let local_value = local.get(event_key).map_err(persist_err)?;
+            let local_value = match local_value {
+                Some(already_read) => Some(already_read),
+                None => local.get(event_key).map_err(persist_err)?,
+            };
             let stored = self.decode_row(
                 event_key,
                 view,

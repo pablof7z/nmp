@@ -620,6 +620,7 @@ mod history_mutation_tests {
                 inserted: vec![nmp_resolver::CommittedCurrentRow {
                     event: inserted,
                     observed_relays: BTreeSet::from([relay.clone()]),
+                    locally_accepted: false,
                 }],
                 removed: vec![removed],
                 provenance_grew: Vec::new(),

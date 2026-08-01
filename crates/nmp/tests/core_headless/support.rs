@@ -1095,6 +1095,8 @@ mod live_queries;
 mod negentropy;
 #[path = "nip29_group_reads.rs"]
 mod nip29_group_reads;
+#[path = "optimistic_publish_projection.rs"]
+mod optimistic_publish_projection;
 #[path = "persistence_failures.rs"]
 mod persistence_failures;
 #[path = "real_corpus_benchmark.rs"]

@@ -150,6 +150,7 @@ fn main() {
                     InsertOutcome::Duplicate {
                         provenance_grew: true,
                         satisfied_intents,
+                        ..
                     } if satisfied_intents.is_empty()
                 )));
             }
@@ -165,6 +166,7 @@ fn main() {
                 InsertOutcome::Duplicate {
                     provenance_grew: false,
                     satisfied_intents,
+                    ..
                 } if satisfied_intents.is_empty()
             )));
             let after_replay = std::fs::metadata(&path).expect("stat after replay").len();
