@@ -247,14 +247,13 @@ pub(super) fn query_newest_ids(
     store.query_ordered_ids(&read_txn, &plan, filter, limit)
 }
 
-pub(super) fn query_newest_observed_by(
+pub(super) fn query_newest_under_pin(
     store: &RedbStore,
     filter: &Filter,
-    relays: &BTreeSet<RelayUrl>,
+    pinned: &BTreeSet<RelayUrl>,
     limit: usize,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
     if limit == 0
-        || relays.is_empty()
         || filter
             .since
             .zip(filter.until)
@@ -265,12 +264,7 @@ pub(super) fn query_newest_observed_by(
     }
     if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
         let mut rows = store.query(filter)?;
-        rows.retain(|row| {
-            row.provenance
-                .seen
-                .keys()
-                .any(|relay| relays.contains(relay))
-        });
+        rows.retain(|row| row.provenance.visible_under_pin(pinned));
         rows.sort_by(|a, b| {
             b.event
                 .created_at
@@ -283,7 +277,7 @@ pub(super) fn query_newest_observed_by(
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
     let plan = plan_ordered_query(&read_txn, filter)?;
-    store.query_ordered(&read_txn, &plan, filter, None, Some(limit), Some(relays))
+    store.query_ordered(&read_txn, &plan, filter, None, Some(limit), Some(pinned))
 }
 
 pub(super) fn query_newest_before(
@@ -325,15 +319,14 @@ pub(super) fn query_newest_before(
     store.query_ordered(&read_txn, &plan, filter, Some(before), Some(limit), None)
 }
 
-pub(super) fn query_newest_before_observed_by(
+pub(super) fn query_newest_before_under_pin(
     store: &RedbStore,
     filter: &Filter,
-    relays: &BTreeSet<RelayUrl>,
+    pinned: &BTreeSet<RelayUrl>,
     before: EventCursor,
     limit: usize,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
     if limit == 0
-        || relays.is_empty()
         || filter
             .since
             .zip(filter.until)
@@ -347,11 +340,7 @@ pub(super) fn query_newest_before_observed_by(
         rows.retain(|row| {
             (row.event.created_at < before.created_at
                 || (row.event.created_at == before.created_at && row.event.id > before.event_id))
-                && row
-                    .provenance
-                    .seen
-                    .keys()
-                    .any(|relay| relays.contains(relay))
+                && row.provenance.visible_under_pin(pinned)
         });
         rows.sort_by(|a, b| {
             b.event
@@ -371,7 +360,7 @@ pub(super) fn query_newest_before_observed_by(
         filter,
         Some(before),
         Some(limit),
-        Some(relays),
+        Some(pinned),
     )
 }
 
@@ -405,19 +394,19 @@ pub(super) fn query_newest_before_any(
     Ok(rows)
 }
 
-pub(super) fn query_newest_before_any_observed_by(
+pub(super) fn query_newest_before_any_under_pin(
     store: &RedbStore,
     filters: &[Filter],
-    relays: &BTreeSet<RelayUrl>,
+    pinned: &BTreeSet<RelayUrl>,
     before: EventCursor,
     limit: usize,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
-    if limit == 0 || filters.is_empty() || relays.is_empty() {
+    if limit == 0 || filters.is_empty() {
         return Ok(Vec::new());
     }
     let mut by_id = BTreeMap::new();
     for filter in filters {
-        for row in store.query_newest_before_observed_by(filter, relays, before, limit)? {
+        for row in store.query_newest_before_under_pin(filter, pinned, before, limit)? {
             by_id.entry(row.event.id).or_insert(row);
         }
     }

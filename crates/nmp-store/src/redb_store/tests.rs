@@ -1714,9 +1714,7 @@ fn strict_ordered_scan_stops_after_requested_eligible_rows() {
     let filter = Filter::new().custom_tag(SingleLetterTag::lowercase(nostr::Alphabet::H), "target");
     let eligible = BTreeSet::from([wanted]);
     store.reset_query_work();
-    let rows = store
-        .query_newest_observed_by(&filter, &eligible, 3)
-        .unwrap();
+    let rows = store.query_newest_under_pin(&filter, &eligible, 3).unwrap();
 
     assert_eq!(
         rows.iter()
