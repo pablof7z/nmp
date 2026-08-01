@@ -340,7 +340,9 @@ mod tests {
         );
         assert_eq!(
             photographers[0].selection.tags.get(&h),
-            Some(&Binding::Literal(BTreeSet::from(["photographers".to_string()])))
+            Some(&Binding::Literal(BTreeSet::from([
+                "photographers".to_string()
+            ])))
         );
         assert_eq!(
             darkroom[0].selection.tags.get(&h),

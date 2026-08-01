@@ -129,7 +129,7 @@ fn two_group_ids_on_the_same_host_stay_separated_by_h_at_the_wire() {
 }
 
 /// PROTOCOL-READSTHROUGHTHEONEDOOR-006: a group read's host comes ONLY from
-/// the retained relay scope. A real, resolvable author-outbox routing fact
+/// the retained relay scope. A real, resolvable author outbox routing fact
 /// for the SAME identity sits in the routing directory the whole time; a
 /// group read must never widen onto it, because `group_demand_at` mints
 /// `SourceAuthority::Pinned`, never `AuthorOutboxes`, and the router cannot
@@ -139,7 +139,8 @@ fn a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbo
     let author = Keys::generate();
     let group_host = RelayUrl::parse("wss://relay.groups.example").unwrap();
     let outbox = RelayUrl::parse("wss://alice-write.example").unwrap();
-    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [outbox.clone()]);
+    let dir =
+        FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [outbox.clone()]);
     let mut core = new_core(dir);
     activate(&mut core, &author);
 

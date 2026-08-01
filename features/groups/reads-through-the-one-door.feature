@@ -32,8 +32,8 @@ Feature: Reading a group goes through the one read door
 
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-002
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-nip29-ownership.sh
-  # nmp:falsifier=adding an observe/subscribe/stream method to a group or relay-scope type on any of the four surfaces this script scans (the two Rust crates, the Rust FFI, Swift, or Kotlin) makes check-nip29-ownership.sh fail with "a second read door for groups appeared"
+  # nmp:evidence=script:repository::scripts/check-nip29-read-door.sh
+  # nmp:falsifier=adding an observe/subscribe/stream method to a group or relay-scope type on any of the four surfaces this script scans (the two Rust crates, the Rust FFI, Swift, or Kotlin) makes check-nip29-read-door.sh fail with "a second read door for groups appeared"
   @nip29
   Scenario: There is no second way to observe a group
     When I inspect the group's read surface
@@ -97,7 +97,7 @@ Feature: Reading a group goes through the one read door
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-006
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox
-  # nmp:falsifier=sourcing a group read's Demand from SourceAuthority::AuthorOutboxes instead of Pinned makes a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox see the discovered author-outbox relay contacted alongside or instead of the retained pinned host
+  # nmp:falsifier=sourcing a group read's Demand from SourceAuthority::AuthorOutboxes instead of Pinned makes a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox see the discovered author outbox relay contacted alongside or instead of the retained pinned host
   @nip29
   Scenario: The host is a query-declared pinning, not a directory fact
     Given a filter selecting kind 9
