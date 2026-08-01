@@ -3790,6 +3790,7 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
             InsertOutcome::Duplicate {
                 provenance_grew: true,
                 satisfied_intents,
+                ..
             } => assert_eq!(
                 satisfied_intents.into_iter().collect::<BTreeSet<_>>(),
                 BTreeSet::from([intent_a, intent_b])

@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 //   * a filter the write does not match -- "optimistic" must not mean
 //     "shown everywhere";
 //   * a restart with the write still in flight;
-//   * and the boundary case where the ONLY host that carried the event is
-//     outside a pinned query's own host set, which withdraws the row.
+//   * and the case where the ONLY host that carried the event is outside a
+//     pinned query's own host set -- ours stays, foreign stays out (#1191).
 //
 // Determinism is the point. Each of these is a statement about an exact
 // intermediate state, and a socket test would be asserting against a race.
@@ -419,40 +419,33 @@ fn a_write_still_in_flight_is_still_in_the_feed_after_a_restart() {
 }
 
 // =========================================================================
-// The boundary: a carrier outside the pin withdraws the row.
+// Ours versus foreign, never carried versus uncarried.
 // =========================================================================
 
-/// The consequence #1182 and #1173 meet at, recorded rather than assumed.
+/// The place #1182 and #1173 meet, and the defect #1191 recorded there.
 ///
-/// While a write has NO relay provenance it is visible under every pin --
-/// that is #1182, and it is what stops a pinned feed from lying about what
-/// the user just did. The moment some relay carries it, the row stops being
-/// unattributable and ordinary provenance intersection resumes (#1173). If
-/// the only relay that carried it is one this query is NOT pinned to, the
-/// intersection is empty and the row is WITHDRAWN -- `RowDelta::Removed`
-/// against a row the same query showed a moment earlier.
+/// An app watching a strict subset of its own write route is ordinary: pin
+/// the read to one host, publish to two. Under the shipped rule the row was
+/// shown while nothing had carried it and WITHDRAWN the moment anything did,
+/// so the answer to "is my message on screen" was decided by a host this
+/// feed is not watching. With the watched host refusing either way, the
+/// message survived if the other host stayed silent
+/// (`an_event_every_host_refused_stays_visible_reporting_zero_relays`) and
+/// vanished if the other host accepted it. The watched host did the same
+/// thing in both cases, so the two answers cannot both be right.
 ///
-/// So an optimistic row is provisional, and an app pinning a read to a
-/// strict subset of its own write route can watch the user's message appear
-/// and then vanish. Reachable through the general `Pinned`/`Explicit`
-/// primitives; NOT reachable through the NIP-29 door, whose read pin and
-/// write scope are the same host set by construction.
+/// The distinction the predicate was missing is ours versus foreign, not
+/// carried versus uncarried. This row entered through the local write door
+/// and keeps its local origin forever; what any relay does with it afterwards
+/// changes its provenance, never its ownership. So it stays, and it reports
+/// the truth: carried by `carrier`, a host this feed is not pinned to.
 ///
-/// This is a CHARACTERIZATION test, not an endorsement. It pins what the
-/// code does today so the boundary is falsifiable rather than emergent, and
-/// so the fix has something to turn red. Paired with
-/// `an_event_every_host_refused_stays_visible_reporting_zero_relays`, it
-/// shows the incoherence: with `watched` refusing either way, the message
-/// survives if the other host stays silent and is withdrawn if the other
-/// host accepts. The pinned host did the same thing in both cases.
-///
-/// Reported as a defect on issue #1191, and governed as
-/// `WRITES-OPTIMISTICPUBLISH-010` (`nmp:status=known-violation`) in
-/// `features/writes/optimistic-publish.feature`, whose English states the
-/// behaviour that SHOULD hold. When #1191 is fixed this test inverts and
-/// that record becomes `built`.
+/// Governed as `WRITES-OPTIMISTICPUBLISH-010` in
+/// `features/writes/optimistic-publish.feature`. Its foreign-data twin
+/// `a_foreign_row_carried_only_outside_the_pin_is_still_invisible` is the
+/// other half of the same rule and must stay green with it.
 #[test]
-fn a_row_whose_only_carrier_is_outside_the_pin_is_withdrawn_from_the_feed() {
+fn the_users_own_row_survives_a_carrier_outside_the_pin_and_reports_it_honestly() {
     let me = Keys::generate();
     let carrier = RelayUrl::parse("wss://carrier.example").unwrap();
     let watched = RelayUrl::parse("wss://watched.example").unwrap();
@@ -525,11 +518,12 @@ fn a_row_whose_only_carrier_is_outside_the_pin_is_withdrawn_from_the_feed() {
     ));
     watched_feed.fold(&ingest, live);
 
-    assert!(
-        watched_feed.rows.is_empty(),
-        "the row is WITHDRAWN from the watched feed once its only carrier is a \
-         host that feed is not pinned to: provenance intersection resumes the \
-         instant provenance exists. saw {:?}",
+    assert_eq!(
+        watched_feed.sources_of(&event.id),
+        Some(&BTreeSet::from([carrier.clone()])),
+        "#1191: the user's own message is NOT withdrawn because a host this \
+         feed is not watching carried it -- it stays, and it names that host \
+         rather than pretending nobody has it. saw {:?}",
         watched_feed.shown()
     );
 
@@ -539,14 +533,16 @@ fn a_row_whose_only_carrier_is_outside_the_pin_is_withdrawn_from_the_feed() {
         &mut core,
         pinned_strict(std::slice::from_ref(&watched), OPTIMISTIC_KIND),
     );
-    assert!(
-        fresh.rows.is_empty(),
-        "a freshly opened identical feed agrees the row is not visible: {:?}",
+    assert_eq!(
+        fresh.sources_of(&event.id),
+        Some(&BTreeSet::from([carrier.clone()])),
+        "a freshly opened identical feed agrees: {:?}",
         fresh.shown()
     );
 
-    // The row itself was never destroyed -- only this pin's view of it. An
-    // unpinned feed still holds the user's own event.
+    // The two rows of #1191's table now agree. `watched` refused in both, and
+    // what `carrier` did decides nothing about visibility -- only about the
+    // source set the row honestly reports.
     let (_, agnostic, _) = open(
         &mut core,
         LiveQuery::from_filter(Filter {
@@ -557,8 +553,78 @@ fn a_row_whose_only_carrier_is_outside_the_pin_is_withdrawn_from_the_feed() {
     assert_eq!(
         agnostic.sources_of(&event.id),
         Some(&BTreeSet::from([carrier.clone()])),
-        "an ordinary unpinned feed still shows it, naming the host that carried \
-         it: withdrawal is a pinned-projection rule, never deletion: {:?}",
+        "an unpinned feed reports exactly the same provenance -- the pin \
+         decides visibility, never what a visible row claims: {:?}",
         agnostic.shown()
+    );
+}
+
+/// The isolation half of the same rule, in the same shape, so the fix above
+/// cannot have been "show more rows under a pin".
+///
+/// A row this node never wrote, delivered only by `carrier`, must stay
+/// invisible to a feed pinned to `watched` -- exactly what #1173 exists for.
+/// The two tests differ in one fact only: who accepted the write. If ours
+/// versus foreign were ever collapsed back into carried versus uncarried,
+/// one of them goes red.
+#[test]
+fn a_foreign_row_carried_only_outside_the_pin_is_still_invisible() {
+    let me = Keys::generate();
+    let someone_else = Keys::generate();
+    let carrier = RelayUrl::parse("wss://foreign-carrier.example").unwrap();
+    let watched = RelayUrl::parse("wss://foreign-watched.example").unwrap();
+    let mut core = new_core(FixtureRoutingFacts::new());
+    activate(&mut core, &me);
+    connect(&mut core, 2, &carrier);
+
+    let (live, mut watched_feed, _) = open(
+        &mut core,
+        pinned_strict(std::slice::from_ref(&watched), OPTIMISTIC_KIND),
+    );
+    let (_carrier_handle, _, opened_carrier) = open(
+        &mut core,
+        pinned_strict(std::slice::from_ref(&carrier), OPTIMISTIC_KIND),
+    );
+
+    let theirs = signed_note(&someone_else, OPTIMISTIC_KIND, 905, "somebody else's note");
+    let (sub_id, _) = req_for(&opened_carrier, &carrier);
+    let sub = wire_sub_string(sub_id);
+    let ingest = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 2,
+            generation: 1,
+        },
+        public_session(&carrier),
+        event_frame(&sub, theirs.clone()),
+    ));
+    watched_feed.fold(&ingest, live);
+
+    assert!(
+        watched_feed.rows.is_empty(),
+        "#1173: a row only the unwatched host served never answers for the \
+         watched one: {:?}",
+        watched_feed.shown()
+    );
+
+    let (_, fresh, _) = open(
+        &mut core,
+        pinned_strict(std::slice::from_ref(&watched), OPTIMISTIC_KIND),
+    );
+    assert!(
+        fresh.rows.is_empty(),
+        "and the snapshot door agrees: {:?}",
+        fresh.shown()
+    );
+
+    let (_, from_the_carrier, _) = open(
+        &mut core,
+        pinned_strict(std::slice::from_ref(&carrier), OPTIMISTIC_KIND),
+    );
+    assert_eq!(
+        from_the_carrier.sources_of(&theirs.id),
+        Some(&BTreeSet::from([carrier.clone()])),
+        "the row is in the store and answers for the host that DID serve it -- \
+         invisibility above is isolation, not absence: {:?}",
+        from_the_carrier.shown()
     );
 }

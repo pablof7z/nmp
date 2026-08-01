@@ -27,8 +27,10 @@ Feature: A message the user just sent is in the feed before any relay has answer
   event appears in the queries whose filters it matches, and in no others,
   exactly like every row that ever came off a relay. And a row ANOTHER host
   served still never answers for a host that did not serve it -- that
-  isolation is about foreign data, and a row nobody has served yet is not
-  foreign data. It is ours, and it is still owed.
+  isolation is about FOREIGN data, and our own write never becomes foreign.
+  Whether a pinned feed shows a row turns on who wrote it, not on who has
+  carried it so far; which relays have carried it is reported, separately
+  and honestly, as the row's provenance.
 
   Background:
     Given I am logged in as my own account
@@ -39,7 +41,7 @@ Feature: A message the user just sent is in the feed before any relay has answer
   # nmp:id=WRITES-OPTIMISTICPUBLISH-001
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relays
-  # nmp:falsifier=withholding a locally accepted row from a pinned projection until some relay has carried it -- dropping the empty-provenance clause from nmp_store::Provenance::visible_under_pin -- makes a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relays time out waiting for a row that can never arrive, because neither host is reachable
+  # nmp:falsifier=withholding a locally accepted row from a pinned projection until some relay has carried it -- dropping the ours clause from nmp_store::Provenance::visible_under_pin -- makes a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relays time out waiting for a row that can never arrive, because neither host is reachable
   Scenario: The message is on screen before any host could possibly have answered
     Given neither "host-a" nor "host-b" can be reached
     And I am watching a feed whose filter the message matches
@@ -80,7 +82,7 @@ Feature: A message the user just sent is in the feed before any relay has answer
   # nmp:id=WRITES-OPTIMISTICPUBLISH-004
   # nmp:status=built
   # nmp:evidence=rust:nmp::an_event_every_host_refused_stays_visible_reporting_zero_relays
-  # nmp:falsifier=treating an empty source set as "nobody will ever carry this, retract it" rather than "nobody has carried this" -- removing the empty-provenance clause from the pinned projection -- makes an_event_every_host_refused_stays_visible_reporting_zero_relays lose the row from both the already-open feed and a freshly opened one, while its per-host rejection receipts still arrive
+  # nmp:falsifier=treating an empty source set as "nobody will ever carry this, retract it" rather than "nobody has carried this" -- removing the ours clause from the pinned projection -- makes an_event_every_host_refused_stays_visible_reporting_zero_relays lose the row from both the already-open feed and a freshly opened one, while its per-host rejection receipts still arrive
   Scenario: A message every host refused is still the user's message
     # The only outcome in which the source set stays empty permanently rather
     # than momentarily, which is what makes it the case that asks whether
@@ -157,7 +159,7 @@ Feature: A message the user just sent is in the feed before any relay has answer
   # nmp:status=built
   # nmp:evidence=rust:nmp-store::a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound
   # nmp:evidence=rust:nmp::a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group
-  # nmp:falsifier=widening the empty-provenance clause to admit rows with ANY provenance under a pin that did not serve them makes a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound return the foreign row it asserts is invisible, and makes a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group see one host's evidence answer for another host over two live relays
+  # nmp:falsifier=widening the ours clause to admit rows this node never wrote under a pin that did not serve them makes a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound return the foreign row it asserts is invisible, and makes a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group see one host's evidence answer for another host over two live relays
   Scenario: A row another host served still never answers for a host that did not serve it
     # The isolation this must not cost. It was always a rule about FOREIGN
     # data -- one host's cached rows answering a question about a different
@@ -185,36 +187,36 @@ Feature: A message the user just sent is in the feed before any relay has answer
     Then it holds exactly 2 rows
     And my unsent message is the first of them
 
-  # ---- where this is not yet true ---------------------------------------
+  # ---- ours versus foreign ----------------------------------------------
 
   # nmp:id=WRITES-OPTIMISTICPUBLISH-010
-  # nmp:status=known-violation
-  # nmp:issue=1191
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::the_users_own_row_survives_a_carrier_outside_the_pin_and_reports_it_honestly
+  # nmp:evidence=rust:nmp::a_foreign_row_carried_only_outside_the_pin_is_still_invisible
+  # nmp:falsifier=restoring the carried-versus-uncarried predicate -- admitting a row under a pin because NO relay has carried it rather than because this node accepted it -- makes the_users_own_row_survives_a_carrier_outside_the_pin_and_reports_it_honestly find the user's message gone from the watched feed the instant the unwatched host carries it, through both the delta and the snapshot door; widening the ours clause to admit every row makes a_foreign_row_carried_only_outside_the_pin_is_still_invisible see somebody else's note answer for a host that never served it
   Scenario: The user's own message is not withdrawn because of what an unrelated host did
-    # NOT CURRENT BEHAVIOUR. Today the message is withdrawn, and what decides
-    # it is a host the feed is not even watching.
+    # Visibility under a pin asks whether a row is OURS, never whether some
+    # relay has carried it yet. A locally accepted write keeps its local
+    # origin forever, so the answer cannot change under it: with "host-b"
+    # refusing either way, "host-a" staying silent and "host-a" accepting
+    # give the same feed. Only the reported provenance differs, which is the
+    # one thing "host-a" is entitled to change.
     #
-    # A row is shown under every pin while no relay has carried it. The
-    # instant one does, ordinary provenance intersection resumes, and if the
-    # only carrier is outside this feed's own host set the row is retracted.
-    # For foreign data that is exactly right. For the author's own accepted
-    # write it produces two different answers to one question: with "host-b"
-    # refusing either way, the message stays on screen if "host-a" stays
-    # silent and vanishes if "host-a" accepts it. The pinned host did the
-    # same thing in both cases.
-    #
-    # Reachable through the general pinned/explicit primitives whenever an app
-    # watches a strict subset of the hosts it publishes to; not reachable
-    # through the group door, whose read pin and write scope are one host set
-    # by construction. Reproduction and the proposed distinction -- ours
-    # versus foreign, rather than carried versus uncarried -- are on #1191.
+    # The alternative reading -- shown while uncarried, withdrawn once
+    # carried -- gave two answers to that one question, and the deciding
+    # fact was a host the feed was not even watching. Reachable through the
+    # general pinned/explicit primitives whenever an app watches a strict
+    # subset of the hosts it publishes to; it was never reachable through
+    # the group door, whose read pin and write scope are one host set by
+    # construction, which is why it survived #1173 and #1182 both.
     Given I am watching a feed pinned to "host-b" alone
     And I send a message routed to both "host-a" and "host-b"
     And the feed shows the message naming zero relays
     When "host-b" refuses the message
     And "host-a" accepts the message
     Then the feed still shows the message
-    And the row does not disappear because of what "host-a" did
+    And the row names "host-a" as its source
+    And a row I did not write, carried only by "host-a", is still not shown
 
   # ---- and none of it belongs to a protocol -----------------------------
 

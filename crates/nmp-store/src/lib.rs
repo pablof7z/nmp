@@ -226,29 +226,45 @@ impl Provenance {
     /// Two facts that must not be conflated: whether a row APPEARS in a
     /// projection, and whether a relay CARRIED it.
     ///
-    /// A row some relay has served answers only for the relays that served
-    /// it. That is the cross-host isolation a pinned read exists for: one
-    /// host's cached rows never answer for a host that did not serve them.
+    /// A FOREIGN row — one that reached this node because some relay
+    /// delivered it — answers only for the relays that delivered it. That is
+    /// the cross-host isolation a pinned read exists for: one host's cached
+    /// rows never answer for a host that did not serve them.
     ///
-    /// A row NO relay has served yet is a different case entirely. It is not
-    /// some other host's row — it entered through
-    /// [`EventStore::accept_write`], it sits in the outbound publication
-    /// queue, and it is ours. Withholding it until a relay ACKs would make
-    /// every pinned live query lie about what the user just did. It is
-    /// served, and its provenance is reported honestly: in the cache, zero
-    /// relays. The instant a relay delivers it, `seen` is non-empty and this
-    /// predicate reverts to ordinary provenance intersection — which is
-    /// exactly "as relays accept or reject it, where the event loaded from
-    /// is reflected".
+    /// OUR OWN row is not that case at all. It entered through
+    /// [`EventStore::accept_write`], it is in the outbound publication queue,
+    /// and it is ours whatever any relay subsequently does with it.
+    /// Withholding it would make every pinned live query lie about what the
+    /// user just did, and withdrawing it later would be worse: the feed would
+    /// delete the user's own text on the strength of a host it is not even
+    /// watching. Its provenance is still reported honestly — the relays that
+    /// carried it, which may be none of them, may be all of them, and may be
+    /// none of the pinned ones.
     ///
-    /// Empty `seen` is the exact spelling of "no relay has carried this
-    /// yet" — the same fact an app's "sending…" chip resolves off, never
-    /// `local`'s presence (a row keeps its local origin forever, including
-    /// long after relay provenance arrives).
+    /// So the distinction is ours versus foreign, spelled `local.is_some()`
+    /// — never carried versus uncarried. A row keeps its local origin
+    /// forever, including long after relay provenance arrives, which is
+    /// exactly the property this needs: publishing to two hosts and watching
+    /// one of them must not make the answer depend on the other (#1191).
+    /// Empty `seen` remains what it always was, the fact an app's "sending…"
+    /// chip resolves off, and it decides nothing here.
     #[must_use]
     pub fn visible_under_pin(&self, pinned: &BTreeSet<RelayUrl>) -> bool {
-        self.seen.is_empty() || self.seen.keys().any(|relay| pinned.contains(relay))
+        visible_under_pin(self.local.is_some(), self.seen.keys(), pinned)
     }
+}
+
+/// [`Provenance::visible_under_pin`] for the callers that hold its two
+/// inputs without holding a whole [`Provenance`]: a projected committed row,
+/// or a persistent backend testing visibility against its index rather than
+/// against a decoded row. One rule, one spelling, three call sites.
+#[must_use]
+pub fn visible_under_pin<'a>(
+    ours: bool,
+    carried_by: impl IntoIterator<Item = &'a RelayUrl>,
+    pinned: &BTreeSet<RelayUrl>,
+) -> bool {
+    ours || carried_by.into_iter().any(|relay| pinned.contains(relay))
 }
 
 /// The sentinel signature every pending row's frozen body carries until
@@ -656,6 +672,14 @@ pub enum InsertOutcome {
         /// each matching obligation exactly once; an empty set is the common
         /// ordinary-dedup case.
         satisfied_intents: Vec<IntentId>,
+        /// Whether the row this delivery merged into is one this node
+        /// accepted itself (`Provenance.local.is_some()`). A relay echo never
+        /// changes it, and it is not `!satisfied_intents.is_empty()`: an
+        /// already-signed row, and a row whose owners were all compensated
+        /// away, satisfy no intent and are still ours. Pinned projections
+        /// need it to evaluate [`Provenance::visible_under_pin`] over the
+        /// committed delta without re-reading the row.
+        locally_accepted: bool,
     },
     /// A replaceable/addressable winner changed. `replaced` is the evicted
     /// row itself, handed back whole: the store is holding it at the exact

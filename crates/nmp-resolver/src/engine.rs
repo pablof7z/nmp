@@ -88,10 +88,16 @@ pub struct LocalAcceptResult {
 /// One canonical current row together with every relay in this writer batch
 /// that observed it. For a new row this is its complete initial source set;
 /// for provenance growth callers union these sources into remembered state.
+///
+/// `locally_accepted` is `Provenance.local.is_some()` for the committed row:
+/// whether this node accepted the write itself. A pinned projection needs it
+/// alongside `observed_relays` to evaluate
+/// [`nmp_store::Provenance::visible_under_pin`] without re-reading the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedCurrentRow {
     pub event: nostr::Event,
     pub observed_relays: BTreeSet<RelayUrl>,
+    pub locally_accepted: bool,
 }
 
 /// Net canonical event changes after consolidating transient rows inside one
@@ -109,6 +115,7 @@ fn committed_current_row(row: &StoredEvent) -> CommittedCurrentRow {
     CommittedCurrentRow {
         event: row.event.clone(),
         observed_relays: row.provenance.seen.keys().cloned().collect(),
+        locally_accepted: row.provenance.local.is_some(),
     }
 }
 
@@ -129,6 +136,7 @@ fn committed_row_changes(
                 prior
                     .observed_relays
                     .extend(current.observed_relays.iter().cloned());
+                prior.locally_accepted |= current.locally_accepted;
             })
             .or_insert(current);
     }
@@ -756,6 +764,10 @@ impl<S: EventStore> Engine<S> {
         let mut inserted: Vec<nostr::Event> = Vec::new();
         let mut removed: Vec<nostr::Event> = Vec::new();
         let mut provenance_grew: Vec<nostr::Event> = Vec::new();
+        // Rows this delivery merged into that this node accepted itself. A
+        // relay-inserted row is new by construction and never ours, so only
+        // the dedup path can add to this.
+        let mut locally_accepted_ids = BTreeSet::<nostr::EventId>::new();
         let mut satisfied_intents = Vec::new();
         let mut current_candidate_ids = Vec::with_capacity(events.len());
         let mut observed_by_id =
@@ -819,9 +831,13 @@ impl<S: EventStore> Engine<S> {
                 InsertOutcome::Duplicate {
                     provenance_grew: grew,
                     satisfied_intents: owners,
+                    locally_accepted,
                 } => {
                     current_candidate_ids.push(Some(event.id));
                     if grew {
+                        if locally_accepted {
+                            locally_accepted_ids.insert(event.id);
+                        }
                         provenance_grew.push(clone_relay_ingest_event(&event));
                     }
                     satisfied_intents.extend(
@@ -854,6 +870,8 @@ impl<S: EventStore> Engine<S> {
                     CommittedCurrentRow {
                         event: clone_relay_ingest_event(event),
                         observed_relays: observed_relays.clone(),
+                        // A relay insert is a row this node had never held.
+                        locally_accepted: false,
                     }
                 })
                 .collect(),
@@ -874,6 +892,7 @@ impl<S: EventStore> Engine<S> {
                     CommittedCurrentRow {
                         event: clone_relay_ingest_event(event),
                         observed_relays: observed_relays.clone(),
+                        locally_accepted: locally_accepted_ids.contains(&event_id),
                     }
                 })
                 .collect(),

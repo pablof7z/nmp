@@ -37,6 +37,7 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
             // own sentinel forever (`event` here is, by this door's own
             // contract, always a genuine relay delivery, never our OWN
             // sentinel, so its signature is always safe to adopt).
+            let locally_accepted = local.is_some();
             let needs_adoption = local
                 .as_ref()
                 .is_some_and(|l| l.sig_state == SigState::Pending);
@@ -65,6 +66,7 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
             InsertOutcome::Duplicate {
                 provenance_grew: grew,
                 satisfied_intents,
+                locally_accepted,
             }
         } else if tombstone_refuses(tables, &event)? {
             // Tombstone check, AFTER dedup-by-id, BEFORE storage
