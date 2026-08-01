@@ -169,13 +169,13 @@ impl EventStore for RedbStore {
         event_ops::query_newest_ids(self, filter, limit)
     }
 
-    fn query_newest_observed_by(
+    fn query_newest_under_pin(
         &self,
         filter: &Filter,
-        relays: &BTreeSet<RelayUrl>,
+        pinned: &BTreeSet<RelayUrl>,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        event_ops::query_newest_observed_by(self, filter, relays, limit)
+        event_ops::query_newest_under_pin(self, filter, pinned, limit)
     }
 
     fn query_newest_before(
@@ -187,14 +187,14 @@ impl EventStore for RedbStore {
         event_ops::query_newest_before(self, filter, before, limit)
     }
 
-    fn query_newest_before_observed_by(
+    fn query_newest_before_under_pin(
         &self,
         filter: &Filter,
-        relays: &BTreeSet<RelayUrl>,
+        pinned: &BTreeSet<RelayUrl>,
         before: EventCursor,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        event_ops::query_newest_before_observed_by(self, filter, relays, before, limit)
+        event_ops::query_newest_before_under_pin(self, filter, pinned, before, limit)
     }
 
     fn query_newest_before_any(
@@ -206,14 +206,14 @@ impl EventStore for RedbStore {
         event_ops::query_newest_before_any(self, filters, before, limit)
     }
 
-    fn query_newest_before_any_observed_by(
+    fn query_newest_before_any_under_pin(
         &self,
         filters: &[Filter],
-        relays: &BTreeSet<RelayUrl>,
+        pinned: &BTreeSet<RelayUrl>,
         before: EventCursor,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        event_ops::query_newest_before_any_observed_by(self, filters, relays, before, limit)
+        event_ops::query_newest_before_any_under_pin(self, filters, pinned, before, limit)
     }
 
     fn remove(

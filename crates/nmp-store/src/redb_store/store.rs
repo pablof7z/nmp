@@ -916,7 +916,7 @@ impl RedbStore {
         filter: &Filter,
         before: Option<EventCursor>,
         limit: Option<usize>,
-        observed_by: Option<&BTreeSet<RelayUrl>>,
+        pinned: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let local = read_txn.open_table(EVENT_LOCAL).map_err(persist_err)?;
@@ -934,9 +934,9 @@ impl RedbStore {
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
         let mut relay_cache = HashMap::new();
-        let eligible_relay_keys = if let Some(eligible) = observed_by {
+        let pinned_relay_keys = if let Some(pinned) = pinned {
             let mut keys = BTreeSet::new();
-            for relay in eligible {
+            for relay in pinned {
                 if let Some(key) = relay_keys.get(relay.as_str()).map_err(persist_err)? {
                     keys.insert(key.value());
                 }
@@ -949,17 +949,35 @@ impl RedbStore {
         let mut materialize_if_visible = |event_key: EventKey,
                                           _event_id: EventId|
          -> Result<Option<StoredEvent>, PersistenceError> {
-            if let Some(eligible) = &eligible_relay_keys {
-                let mut observed = false;
-                for relay_key in eligible {
+            // `Provenance::visible_under_pin`, evaluated against the index
+            // rather than a decoded row: the whole point of testing here is
+            // to skip decoding rows that will be dropped. Both halves of
+            // that one rule are asked in cost order — first "did a pinned
+            // relay serve it", then, only when nothing pinned did, "has ANY
+            // relay served it at all". A row no relay has served is not
+            // another host's row; it is a locally accepted write still in
+            // the outbound publication queue, and it is ours to show.
+            if let Some(pinned) = &pinned_relay_keys {
+                let mut served_by_pinned = false;
+                for relay_key in pinned {
                     let key = observation_key(event_key, *relay_key);
                     if observations.get(&key).map_err(persist_err)?.is_some() {
-                        observed = true;
+                        served_by_pinned = true;
                         break;
                     }
                 }
-                if !observed {
-                    return Ok(None);
+                if !served_by_pinned {
+                    let (low, high) = observation_range(event_key);
+                    let served_by_anyone = observations
+                        .range::<&[u8; 12]>(&low..=&high)
+                        .map_err(persist_err)?
+                        .next()
+                        .transpose()
+                        .map_err(persist_err)?
+                        .is_some();
+                    if served_by_anyone {
+                        return Ok(None);
+                    }
                 }
             }
             #[cfg(any(test, feature = "bench-instrumentation"))]

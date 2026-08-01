@@ -354,7 +354,7 @@ fn normalized_state(
             .expect("cursor query")
     });
     let strict = store
-        .query_newest_observed_by(&all_filter, &BTreeSet::from([primary_relay.clone()]), 1_000)
+        .query_newest_under_pin(&all_filter, &BTreeSet::from([primary_relay.clone()]), 1_000)
         .expect("strict provenance query");
 
     let coverage = context

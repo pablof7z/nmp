@@ -147,15 +147,16 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 /// branch only when its own provenance names that branch's host.
 ///
 /// The consequence is intended, and is the same statement of per-relay
-/// authority: a row that no host in this branch served does not appear in this
-/// branch. For the relay-signed discovery kinds nothing else is even possible
-/// -- an app never authors a 39000/39001/39002. For group CONTENT it means a
-/// just-published event surfaces under a host once that host has actually
-/// carried it, rather than appearing under every host on the strength of a
-/// local write no relay has accepted. Partial publication -- accepted by A,
-/// rejected by B -- is routine in NIP-29, and showing the event under B
-/// anyway would be exactly the confidently-wrong answer this door exists to
-/// prevent.
+/// authority: a row that ANOTHER host served does not appear in this branch.
+/// For the relay-signed discovery kinds nothing else is even possible -- an
+/// app never authors a 39000/39001/39002.
+///
+/// It says nothing whatsoever about a row NO host has served yet. A locally
+/// accepted write is not foreign data to be isolated; it is in the outbound
+/// publication queue and it appears immediately in every query it matches,
+/// reporting zero relays until one carries it. That is general engine
+/// behaviour (`nmp_store::Provenance::visible_under_pin`), it is not
+/// NIP-29's to decide, and nothing in this crate implements or varies it.
 ///
 /// Infallible for the same reason the deleted single-host door was, and for
 /// that reason ONLY: a one-element pinned set cannot be empty, and the source

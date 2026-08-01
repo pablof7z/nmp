@@ -831,7 +831,7 @@ impl<S: EventStore> EngineCore<S> {
                 // many newer witnesses in that same branch, so it can never
                 // belong to the global newest `target_rows` either.
                 let rows = match pinned_relays {
-                    Some(relays) => self.resolver.store().query_newest_observed_by(
+                    Some(relays) => self.resolver.store().query_newest_under_pin(
                         &filter,
                         relays,
                         state.target_rows,
@@ -939,7 +939,7 @@ impl<S: EventStore> EngineCore<S> {
                     Some(relays) => self
                         .resolver
                         .store()
-                        .query_newest_before_observed_by(&filter, relays, before, needed)?,
+                        .query_newest_before_under_pin(&filter, relays, before, needed)?,
                     None => self
                         .resolver
                         .store()
@@ -1071,10 +1071,16 @@ impl<S: EventStore> EngineCore<S> {
             (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays.clone()),
             _ => None,
         };
-        let eligible = |sources: &BTreeSet<RelayUrl>| {
-            pinned_relays
-                .as_ref()
-                .is_none_or(|relays| sources.iter().any(|relay| relays.contains(relay)))
+        // `nmp_store::Provenance::visible_under_pin` over the committed
+        // row's projected source set (`CommittedCurrentRow::observed_relays`
+        // IS `Provenance::seen`'s keys). An empty set is the exact spelling
+        // of "no relay has carried this yet": a locally accepted write in
+        // the outbound publication queue, ours to show, never another host's
+        // row leaking across a pin.
+        let visible_under_pin = |sources: &BTreeSet<RelayUrl>| {
+            pinned_relays.as_ref().is_none_or(|pinned| {
+                sources.is_empty() || sources.iter().any(|relay| pinned.contains(relay))
+            })
         };
         let target_rows = state.target_rows;
         let original_boundary =
@@ -1091,7 +1097,7 @@ impl<S: EventStore> EngineCore<S> {
         if pinned_relays.is_some() {
             for changed in &changes.provenance_grew {
                 if !matches(&changed.event)
-                    || !eligible(&changed.observed_relays)
+                    || !visible_under_pin(&changed.observed_relays)
                     || state.last_rows.contains_key(&changed.event.id)
                 {
                     continue;
@@ -1163,7 +1169,7 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
             for row in &changes.inserted {
-                if !matches(&row.event) || !eligible(&row.observed_relays) {
+                if !matches(&row.event) || !visible_under_pin(&row.observed_relays) {
                     continue;
                 }
                 let event_id = row.event.id;
@@ -1198,16 +1204,17 @@ impl<S: EventStore> EngineCore<S> {
                         .expect("provenance target was checked above")
                         .sources
                         .extend(row.observed_relays.iter().cloned());
-                } else if pinned_relays.is_some() && eligible(&row.observed_relays) {
-                    // An event already cached from an ineligible relay can
+                } else if pinned_relays.is_some() && visible_under_pin(&row.observed_relays) {
+                    // An event already cached from an unpinned relay can
                     // enter a Strict projection when this committed duplicate
-                    // is its first eligible observation. Treat that transition
-                    // as an affected-row insertion, then let the same bounded
-                    // order rebalance decide whether it belongs in top-N.
+                    // is its first observation by a pinned one. Treat that
+                    // transition as an affected-row insertion, then let the
+                    // same bounded order rebalance decide whether it belongs
+                    // in top-N.
                     remember(row.event.id, state, &mut before);
                     let projected = strict_promotions
                         .remove(&row.event.id)
-                        .expect("eligible Strict promotion was prefetched");
+                        .expect("a Strict promotion visible under the pin was prefetched");
                     state.order.insert((
                         Reverse(projected.event.created_at.as_secs()),
                         projected.event.id,
@@ -1229,7 +1236,7 @@ impl<S: EventStore> EngineCore<S> {
             self.history_store_queries
                 .set(self.history_store_queries.get().saturating_add(1));
             let queried = match pinned_relays.as_ref() {
-                Some(relays) => self.resolver.store().query_newest_before_any_observed_by(
+                Some(relays) => self.resolver.store().query_newest_before_any_under_pin(
                     &filters,
                     relays,
                     boundary,

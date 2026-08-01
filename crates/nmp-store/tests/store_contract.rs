@@ -528,7 +528,7 @@ fn query_newest_before_pages_same_second_rows_without_gaps_or_duplicates() {
 }
 
 #[test]
-fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
+fn strict_ordered_pages_count_only_rows_visible_under_the_pin() {
     for_each_backend(|store| {
         let k = keys();
         let wanted = RelayUrl::parse("wss://wanted.example").unwrap();
@@ -551,9 +551,7 @@ fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
 
         let filter = Filter::new().kind(Kind::TextNote).author(k.public_key());
         let eligible = BTreeSet::from([wanted]);
-        let first = store
-            .query_newest_observed_by(&filter, &eligible, 2)
-            .unwrap();
+        let first = store.query_newest_under_pin(&filter, &eligible, 2).unwrap();
         assert_eq!(
             first
                 .iter()
@@ -564,7 +562,7 @@ fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
         );
 
         let older = store
-            .query_newest_before_observed_by(
+            .query_newest_before_under_pin(
                 &filter,
                 &eligible,
                 EventCursor::from_event(&first[0].event),
@@ -628,7 +626,7 @@ fn union_replacement_page_is_global_deduplicated_exclusive_and_strict_eligible()
         );
 
         let strict = store
-            .query_newest_before_any_observed_by(&filters, &BTreeSet::from([wanted]), before, 2)
+            .query_newest_before_any_under_pin(&filters, &BTreeSet::from([wanted]), before, 2)
             .unwrap();
         assert_eq!(
             strict.iter().map(|row| row.event.id).collect::<Vec<_>>(),
@@ -1989,5 +1987,125 @@ fn query_returns_same_rows_after_indexing() {
             .unwrap();
         assert_eq!(addr.len(), 1);
         assert_eq!(addr[0].event.id, alice_addressable_id);
+    });
+}
+
+/// #1182: a row NO relay has served is visible under EVERY pin, and it counts
+/// against a pinned page bound exactly like any other visible row.
+///
+/// The bound half is the subtle one, and it is the same subtlety that makes
+/// these doors exist at all: visibility is decided BEFORE the limit, never
+/// after. If a locally accepted row were filtered out of an
+/// already-truncated page, a pinned page would silently under-fill; if it
+/// were admitted but not counted, the page would over-fill. This asserts the
+/// de-duplicated UNION door too, where the bound applies once to the merged
+/// set -- the place a per-filter bound would be wrong.
+///
+/// The foreign half of the same rule is unchanged and re-asserted here: a row
+/// another relay served is still invisible under a pin that relay is not in
+/// (PR #1173's fix, which this must not regress).
+#[test]
+fn a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound() {
+    for_each_backend(|store| {
+        let k = keys();
+        let pinned_relay = RelayUrl::parse("wss://pinned-1182.example").unwrap();
+        let other = RelayUrl::parse("wss://other-1182.example").unwrap();
+        let pin = BTreeSet::from([pinned_relay.clone()]);
+
+        // Newest: ours, accepted locally, carried by nobody.
+        let mine = regular_event_at(&k, "mine, still in the outbound queue", 500);
+        let mine_id = mine.id;
+        let frozen = Event::new(
+            mine.id,
+            mine.pubkey,
+            mine.created_at,
+            mine.kind,
+            mine.tags.clone(),
+            mine.content.clone(),
+            sentinel_signature(),
+        );
+        store
+            .accept_write(AcceptWrite {
+                frozen,
+                replaceable_base: None,
+                monotonic_stamp: false,
+                expected_pubkey: k.public_key(),
+                signing_identity_ref: "optimistic-1182".into(),
+                durability: WriteDurability::Durable,
+                routing: "optimistic-1182".into(),
+                sig_state: IntentSigState::Pending,
+                accepted_at: Timestamp::from(500u64),
+                correlation: None,
+            })
+            .expect("a locally accepted write enters the store");
+
+        // Middle: served ONLY by a relay outside the pin. Foreign, invisible.
+        let foreign = regular_event_at(&k, "another host's row", 400);
+        store
+            .insert(
+                foreign.clone(),
+                RelayObserved::new(other, Timestamp::from(600u64)),
+            )
+            .unwrap();
+
+        // Oldest: served by the pinned relay itself. Ordinarily visible.
+        let served = regular_event_at(&k, "the pinned host served this", 300);
+        store
+            .insert(
+                served.clone(),
+                RelayObserved::new(pinned_relay.clone(), Timestamp::from(600u64)),
+            )
+            .unwrap();
+
+        let filter = Filter::new().kind(Kind::TextNote).author(k.public_key());
+
+        let page = store.query_newest_under_pin(&filter, &pin, 2).unwrap();
+        assert_eq!(
+            page.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            vec![mine_id, served.id],
+            "the newest page must hold OUR unsent row and the pinned host's row -- \
+             the foreign row must neither appear nor consume the bound"
+        );
+        assert!(
+            page[0].provenance.seen.is_empty(),
+            "our row reports zero relays: nothing has carried it yet"
+        );
+
+        let older = store
+            .query_newest_before_under_pin(
+                &filter,
+                &pin,
+                EventCursor::from_event(&page[0].event),
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            older.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            vec![served.id],
+            "paging past our row reaches the pinned host's row, never the foreign one"
+        );
+
+        // The union door: the bound applies ONCE to the de-duplicated merge,
+        // and only visible rows may consume it. The broad third root overlaps
+        // the first two deliberately.
+        let filters = vec![
+            filter.clone(),
+            Filter::new().kind(Kind::TextNote),
+            Filter::new().author(k.public_key()),
+        ];
+        let union = store
+            .query_newest_before_any_under_pin(
+                &filters,
+                &pin,
+                EventCursor::new(Timestamp::from(600u64), mine_id),
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            union.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+            vec![mine_id, served.id],
+            "the union page must not under-fill: our zero-relay row is visible and \
+             counted once, and the foreign row cannot consume the bound"
+        );
     });
 }
