@@ -17,12 +17,13 @@
 //! | `cancelling_a_union_keeps_work_a_sibling_observation_still_owns` | withdraw every branch's atoms unconditionally |
 //! | `an_over_cap_union_refuses_the_whole_declaration` | truncate to the ceiling instead of refusing |
 //! | `a_window_bounds_the_union_globally` | give each branch its own window target |
+//! | `only_the_branch_tells_two_identical_resolver_facts_apart` | drop or fix the canonical branch on an observation fact |
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp::mechanism::core::{
-    AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, ObservationId, RowDelta,
-    ShortfallFact,
+    AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, ObservationEvidence,
+    ObservationId, RowDelta, ShortfallFact,
 };
 use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, Filter, IdentityField, LiveQuery, LiveQueryError,
@@ -658,5 +659,62 @@ fn a_shortfall_only_reaches_the_branch_that_has_it() {
     assert_ne!(
         evidence[0], evidence[1],
         "an empty-evidence branch and a shortfall branch are different facts"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Falsifier: "Erase branch identity while aggregating acquisition evidence" --
+// the execution-trace half. Row evidence is per branch (above); so is the
+// ordered diagnostic trace, and here nothing BUT the branch distinguishes the
+// two facts.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn only_the_branch_tells_two_identical_resolver_facts_apart() {
+    let (a, b) = (relay("a"), relay("b"));
+    let mut core = core();
+
+    // Two branches differing ONLY in pinned host: same selection, so both
+    // resolve a byte-identical concrete filter at the same path, same
+    // revision, same fingerprint, same cause.
+    let effects = core.handle(EngineMsg::Subscribe(union_of(
+        [host_branch(&a), host_branch(&b)],
+        None,
+    )));
+    let id = observation(&effects);
+    let trace: Vec<&ObservationEvidence> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitObservationEvidence(candidate, facts) if *candidate == id => Some(facts),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    assert_eq!(
+        trace.len(),
+        2,
+        "each branch contributes its own resolution fact: {trace:?}"
+    );
+    assert_eq!(
+        trace[0].fact, trace[1].fact,
+        "the two facts are deliberately identical in every field a diagnostic \
+         consumer can read -- path, revision, filter, fingerprint and cause"
+    );
+    assert_eq!(
+        trace
+            .iter()
+            .map(|fact| fact.branch)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([Some(0), Some(1)]),
+        "so the CANONICAL BRANCH is the only thing that tells them apart; \
+         dropping or fixing it collapses two branches' traces into one \
+         indistinguishable pair: {trace:?}"
+    );
+    assert_eq!(
+        trace.iter().map(|fact| fact.sequence).collect::<Vec<_>>(),
+        vec![1, 2],
+        "and the sequence is monotonic across the WHOLE observation, never \
+         restarted per branch"
     );
 }
