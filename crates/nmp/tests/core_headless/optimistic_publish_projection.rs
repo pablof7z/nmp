@@ -204,8 +204,22 @@ fn an_event_every_host_refused_stays_visible_reporting_zero_relays() {
 
     mark_written(&mut core, &accepted, &host_a);
     mark_written(&mut core, &accepted, &host_b);
-    let first = verdict(&mut core, 0, &host_a, &event, false, "blocked: refused by a");
-    let second = verdict(&mut core, 1, &host_b, &event, false, "blocked: refused by b");
+    let first = verdict(
+        &mut core,
+        0,
+        &host_a,
+        &event,
+        false,
+        "blocked: refused by a",
+    );
+    let second = verdict(
+        &mut core,
+        1,
+        &host_b,
+        &event,
+        false,
+        "blocked: refused by b",
+    );
     projected.fold(&first, handle);
     projected.fold(&second, handle);
 
@@ -390,7 +404,8 @@ fn a_write_still_in_flight_is_still_in_the_feed_after_a_restart() {
     }
 
     let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
     let _ = core.recover_on_boot();
     activate(&mut core, &me);
     let (_, recovered, _) = open(&mut core, pinned_strict(&pin, OPTIMISTIC_KIND));
@@ -461,7 +476,12 @@ fn a_row_whose_only_carrier_is_outside_the_pin_is_withdrawn_from_the_feed() {
         pinned_strict(std::slice::from_ref(&carrier), OPTIMISTIC_KIND),
     );
 
-    let event = signed_note(&me, OPTIMISTIC_KIND, 904, "carried only by the unwatched host");
+    let event = signed_note(
+        &me,
+        OPTIMISTIC_KIND,
+        904,
+        "carried only by the unwatched host",
+    );
     let (_receipt, accepted) =
         publish_signed_explicit(&mut core, event.clone(), [carrier.clone(), watched.clone()]);
     watched_feed.fold(&accepted, live);
