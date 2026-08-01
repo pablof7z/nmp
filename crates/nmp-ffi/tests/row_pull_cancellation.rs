@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::future::{poll_fn, Future};
+use std::pin::Pin;
 use std::sync::{Arc, Barrier};
 use std::task::Poll;
 use std::time::Duration;
@@ -80,6 +81,88 @@ async fn next_committed(stream: &NmpRowStream) -> Option<FfiFrame> {
     pull.commit()
         .expect("foreign completion commits the ticket");
     frame
+}
+
+type ReceiveFuture =
+    Pin<Box<dyn Future<Output = Result<Option<FfiFrame>, FfiRowPullError>> + Send>>;
+
+/// Return a ticket whose `receive()` is *observably* parked on an empty
+/// mailbox, plus that in-flight future.
+///
+/// An observation delivers its initial current-state frame on open, and engine
+/// startup can produce further frames after it. Asserting "the first poll is
+/// Pending" therefore encodes a scheduling assumption rather than a property
+/// (that is the shape #1166 tracks). This helper instead *establishes* the
+/// parked state by observation: it commits whatever is already available and
+/// retries, so it is the arrival of a frame, never the loaded runner, that
+/// decides when the loop stops.
+async fn parked_ticket(stream: &NmpRowStream) -> (Arc<NmpRowPull>, ReceiveFuture) {
+    for _ in 0..64 {
+        let pull = stream.begin_next().expect("stream ticket is available");
+        let owned = pull.clone();
+        let mut receiving: ReceiveFuture = Box::pin(async move { owned.receive().await });
+        match poll_fn(|cx| Poll::Ready(receiving.as_mut().poll(cx))).await {
+            Poll::Pending => return (pull, receiving),
+            Poll::Ready(delivered) => {
+                delivered.expect("an already-available frame is a valid delivery");
+                drop(receiving);
+                pull.commit().expect("the already-available frame commits");
+            }
+        }
+    }
+    panic!("the observation never reached an empty mailbox");
+}
+
+/// Consume every already-available frame, then release the claim through the
+/// exact wrapper order (generated free of the Rust future, then `abort`).
+async fn drain(stream: &NmpRowStream) {
+    let (pull, receiving) = parked_ticket(stream).await;
+    drop(receiving);
+    pull.abort();
+}
+
+/// Wait until the engine has composed `expected` matching rows, observed
+/// through an *independent* observation.
+///
+/// A write receipt reports local acceptance; it does not report that some other
+/// observation's reducer has already folded that row into its mailbox. A test
+/// that publishes and then immediately asserts a composed-successor frame is
+/// therefore racing the producer, not testing composition -- which is how
+/// `repeated_ready_cancellation_keeps_one_claim_and_one_composed_successor`
+/// could report 128 rows instead of 129 on a loaded runner. This is the same
+/// family as #1166: establish the precondition by observation.
+async fn await_rows_composed(engine: &NmpEngine, expected: usize) {
+    let witness = engine
+        .observe(note_query(), None)
+        .expect("witness observation opens");
+    let mut ids = BTreeSet::new();
+    for _ in 0..256 {
+        let Some(frame) = next_committed(&witness).await else {
+            break;
+        };
+        apply_ids(&mut ids, &frame);
+        if ids.len() >= expected {
+            witness.cancel();
+            return;
+        }
+    }
+    witness.cancel();
+    panic!(
+        "the engine never composed {expected} rows (an independent observation saw {})",
+        ids.len()
+    );
+}
+
+/// A windowed frame carries its whole view in `window`, not as deltas.
+fn window_row_ids(frame: &FfiFrame) -> BTreeSet<String> {
+    frame
+        .window
+        .as_ref()
+        .expect("a windowed frame carries its view")
+        .rows
+        .iter()
+        .map(|row| row.id.clone())
+        .collect()
 }
 
 fn apply_ids(ids: &mut BTreeSet<String>, frame: &FfiFrame) {
@@ -183,6 +266,11 @@ async fn repeated_ready_cancellation_keeps_one_claim_and_one_composed_successor(
     }
 
     let retained = retained.expect("one baseline frame was retained");
+    // Settle the producer through an independent witness, so the assertion
+    // below is about composition being bounded rather than about whether the
+    // last write had reached this observation yet.
+    await_rows_composed(&engine, 129).await;
+
     let final_ticket = stream.begin_next().expect("final retry begins");
     assert_eq!(receive(&final_ticket).await, Some(retained.clone()));
     final_ticket
@@ -204,38 +292,44 @@ async fn repeated_ready_cancellation_keeps_one_claim_and_one_composed_successor(
     engine.shutdown();
 }
 
+/// Start-once is a state invariant, not a scheduling one (#1166).
+///
+/// The refusal is the same in every phase after the first `receive` starts, so
+/// the property is "one ticket admits exactly one receive, whatever the first
+/// one is doing" -- true under every interleaving. The earlier spelling asserted
+/// instead that the first receive was *parked* at the moment the second began,
+/// which is not a property of the ticket at all: it required the mailbox to be
+/// empty, which a single warm-up pull does not establish, so engine startup
+/// work on a loaded runner could make it fail on branches touching no row-pull
+/// code. Both halves below establish their starting state by observation.
 #[tokio::test]
-async fn one_ticket_receive_is_start_once_while_pending_and_after_ready() {
+async fn one_ticket_admits_exactly_one_receive_whatever_the_first_is_doing() {
+    // Half one: the first receive has started and has not resolved.
     let engine = test_engine();
     let stream = engine
         .observe(note_query(), None)
         .expect("observation opens");
-    let _ = next_committed(&stream).await;
-
-    let pending = stream.begin_next().expect("pending ticket begins");
-    let mut first_receive = Box::pin(pending.receive());
-    let first_poll = poll_fn(|cx| Poll::Ready(first_receive.as_mut().poll(cx))).await;
-    assert!(
-        first_poll.is_pending(),
-        "the first receive is deterministically parked before the second starts"
-    );
+    let (pending, first_receive) = parked_ticket(&stream).await;
     assert_eq!(
         pending.receive().await.unwrap_err(),
         FfiRowPullError::ReceiveAlreadyStarted,
-        "one ticket cannot start two Rust futures while the first is pending"
+        "one ticket cannot start a second Rust future alongside the first"
     );
     stream.cancel();
     assert_eq!(
-        first_receive.await,
+        tokio::time::timeout(Duration::from_secs(5), first_receive)
+            .await
+            .expect("cancellation wakes the accepted receiver within five seconds"),
         Ok(None),
         "stream cancellation wakes the one accepted receiver"
     );
 
+    // Half two: the first receive has already resolved with a frame.
     let engine = test_engine();
     let stream = engine
         .observe(note_query(), None)
         .expect("observation opens");
-    let _ = next_committed(&stream).await;
+    drain(&stream).await;
     publish_note(&engine, 1).await;
     let ready = stream.begin_next().expect("ready ticket begins");
     assert!(receive(&ready).await.is_some());
@@ -286,30 +380,56 @@ async fn commit_refusals_are_typed_and_leave_the_candidate_unchanged() {
     engine.shutdown();
 }
 
+/// The same restatement as the start-once falsifier above (#1166): assert what
+/// the next delivery *is*, not which scheduling phase it was in.
+///
+/// A windowed frame carries the whole current view, so aborting one discards it
+/// rather than retaining it. That is observable without any timing assumption:
+/// abort a view, publish another row, and require the next ticket to return the
+/// grown view. A wrongly retained snapshot would hand back the smaller one.
 #[tokio::test]
 async fn abort_does_not_replay_a_self_contained_window_snapshot() {
     let engine = test_engine();
     let stream = engine
         .observe(
             note_query(),
-            Some(FfiWindow::Expandable { initial: 1, max: 2 }),
+            Some(FfiWindow::Expandable { initial: 2, max: 2 }),
         )
         .expect("windowed observation opens");
-    let first = stream.begin_next().expect("snapshot ticket begins");
-    let snapshot = receive(&first).await.expect("initial snapshot arrives");
-    assert!(snapshot.window.is_some());
-    assert!(snapshot.deltas.is_empty());
-    first.abort();
+    publish_note(&engine, 1).await;
+
+    // Establish the aborted view by observation: pull until the engine's view
+    // actually holds the first row, then abort exactly that snapshot.
+    let mut aborted_view = BTreeSet::new();
+    for _ in 0..64 {
+        let ticket = stream.begin_next().expect("snapshot ticket begins");
+        let frame = receive(&ticket).await.expect("a window snapshot arrives");
+        let view = window_row_ids(&frame);
+        if view.len() == 1 {
+            aborted_view = view;
+            ticket.abort();
+            break;
+        }
+        ticket.commit().expect("an earlier view commits");
+    }
+    assert_eq!(
+        aborted_view.len(),
+        1,
+        "the aborted snapshot is the view holding exactly the first row"
+    );
+
+    publish_note(&engine, 2).await;
 
     let retry = stream.begin_next().expect("abort releases the ticket");
-    let mut receive_again = Box::pin(retry.receive());
-    let first_poll = poll_fn(|cx| Poll::Ready(receive_again.as_mut().poll(cx))).await;
+    let fresh = receive(&retry).await.expect("a current view arrives");
+    retry.commit().expect("the current view commits");
+    let fresh_view = window_row_ids(&fresh);
     assert!(
-        first_poll.is_pending(),
-        "a self-contained snapshot is not retained or replayed after abort"
+        fresh_view.is_superset(&aborted_view) && fresh_view.len() == 2,
+        "the next ticket returns the engine's current view, never the aborted snapshot replayed"
     );
+
     stream.cancel();
-    assert_eq!(receive_again.await, Ok(None));
     engine.shutdown();
 }
 
@@ -372,4 +492,148 @@ async fn commit_abort_cancel_race_never_resurrects_or_duplicates_a_delta() {
         );
         engine.shutdown();
     }
+}
+
+/// An app killed mid-pull releases the ticket object without a word: no
+/// `commit`, no `abort`, no chance to run cleanup. `Drop` must roll the
+/// transition back exactly as an explicit rollback does, or that app loses a
+/// row forever.
+#[tokio::test]
+async fn dropping_a_ticket_without_settling_rolls_the_delta_back_like_abort() {
+    let engine = test_engine();
+    let stream = engine
+        .observe(note_query(), None)
+        .expect("observation opens");
+    drain(&stream).await;
+    publish_note(&engine, 1).await;
+
+    let first = {
+        let ticket = stream.begin_next().expect("first ticket begins");
+        receive(&ticket)
+            .await
+            .expect("the delta reaches Rust READY")
+        // Neither committed nor aborted: the ticket is simply released.
+    };
+    assert!(!first.deltas.is_empty());
+
+    let retry = stream
+        .begin_next()
+        .expect("dropping the ticket released the claim");
+    assert_eq!(
+        receive(&retry).await,
+        Some(first),
+        "Drop restores the exact undelivered transition"
+    );
+    retry.commit().expect("the replayed delta commits");
+
+    engine.shutdown();
+}
+
+/// Cancelling a pull that had nothing to deliver is the common case (a screen
+/// closes while the query is idle). It must leave the observation able to
+/// deliver a row produced afterwards, and must not hold the claim.
+#[tokio::test]
+async fn abandoning_a_parked_ticket_loses_no_row_produced_afterwards() {
+    let engine = test_engine();
+    let stream = engine
+        .observe(note_query(), None)
+        .expect("observation opens");
+
+    let (parked, receiving) = parked_ticket(&stream).await;
+    drop(receiving); // generated free of the Rust future
+    parked.abort(); // wrapper `finally`
+    drop(parked);
+
+    publish_note(&engine, 1).await;
+
+    let retry = stream
+        .begin_next()
+        .expect("the abandoned ticket released the claim");
+    let frame = receive(&retry)
+        .await
+        .expect("a row produced after the abandonment still arrives");
+    assert!(
+        !frame.deltas.is_empty(),
+        "abandoning an idle pull loses no later row"
+    );
+    retry.commit().expect("the delta commits");
+
+    engine.shutdown();
+}
+
+/// Rollback can win while the Rust receive is still resolving. The transition
+/// that arrives in that window belongs to the next pull, and the cancelled
+/// caller learns the outcome through a typed refusal rather than a frame it
+/// must decide whether to trust.
+#[tokio::test]
+async fn aborting_a_waiting_ticket_retains_the_delta_that_arrives_meanwhile() {
+    let engine = test_engine();
+    let stream = engine
+        .observe(note_query(), None)
+        .expect("observation opens");
+
+    let (parked, receiving) = parked_ticket(&stream).await;
+    parked.abort();
+    publish_note(&engine, 1).await;
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), receiving)
+        .await
+        .expect("the waiting receive resolves within five seconds");
+    assert_eq!(
+        outcome,
+        Err(FfiRowPullError::Aborted),
+        "a rollback that wins mid-flight is a typed refusal, never a delivery"
+    );
+
+    let retry = stream
+        .begin_next()
+        .expect("the aborted ticket released the claim");
+    let frame = receive(&retry)
+        .await
+        .expect("the delta that arrived during the rollback is retained");
+    assert!(
+        !frame.deltas.is_empty(),
+        "a row produced during the rollback window is not lost"
+    );
+    retry.commit().expect("the retained delta commits");
+
+    engine.shutdown();
+}
+
+/// Engine shutdown and observation withdrawal are different facts. Withdrawal
+/// discards a retained candidate on purpose; shutdown must not, or a transition
+/// the engine already produced disappears between the app's last two pulls.
+#[tokio::test]
+async fn a_retained_delta_survives_engine_shutdown_and_precedes_the_terminal_result() {
+    let engine = test_engine();
+    let stream = engine
+        .observe(note_query(), None)
+        .expect("observation opens");
+    drain(&stream).await;
+    publish_note(&engine, 1).await;
+
+    let ticket = stream.begin_next().expect("ticket begins");
+    let retained = receive(&ticket).await.expect("the delta reaches READY");
+    assert!(!retained.deltas.is_empty());
+    ticket.abort();
+
+    engine.shutdown();
+
+    let replay = stream
+        .begin_next()
+        .expect("shutdown is not observation withdrawal");
+    assert_eq!(
+        receive(&replay).await,
+        Some(retained),
+        "a transition the engine already produced is still delivered after shutdown"
+    );
+    replay.commit().expect("the retained delta commits");
+
+    let terminal = stream.begin_next().expect("terminal ticket begins");
+    assert_eq!(
+        receive(&terminal).await,
+        None,
+        "end of stream follows the retained transition, never precedes it"
+    );
+    terminal.commit().expect("the terminal result commits");
 }
