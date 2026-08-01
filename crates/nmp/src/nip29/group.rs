@@ -388,6 +388,25 @@ mod tests {
         engine.shutdown();
     }
 
+    /// PROTOCOL-KINDBLINDNESS-004 (supported-facade half): an unfamiliar
+    /// kind -- one NIP-29 does not define and no other well-known NIP names
+    /// either -- is published, not questioned. The publish door accepts it
+    /// exactly like an ordinary kind:9; nothing about the kind being
+    /// unrecognised produces a refusal.
+    #[test]
+    fn an_unfamiliar_kind_is_published_not_questioned() {
+        let engine = engine();
+        let receipts = group([host(1)])
+            .publish(
+                &engine,
+                author(),
+                EventBuilder::new(Kind::from(44815u16)).content("whatever this is"),
+            )
+            .expect("an unfamiliar kind must be accepted by the publish door like any other");
+        drop(receipts);
+        engine.shutdown();
+    }
+
     /// A caller error is decided BEFORE the door: no receipt stream is even
     /// returned, which is what "no write intent was accepted" means.
     #[test]
