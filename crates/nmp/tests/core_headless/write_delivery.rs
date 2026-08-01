@@ -555,6 +555,177 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
 }
 
 #[test]
+fn accepted_explicit_route_ignores_later_directory_fact_across_restart() {
+    let author = Keys::generate();
+    let chosen = RelayUrl::parse("wss://chosen-archive.example").unwrap();
+    let learned = RelayUrl::parse("wss://later-outbox.example").unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("explicit-route.redb");
+
+    let receipt = {
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            RedbStore::open(&path).unwrap(),
+            FixtureRoutingFacts::new(),
+            10,
+        );
+        activate(&mut core, &author);
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(draft(94, "for the archive")),
+            durability: Durability::Durable,
+            routing: WriteRouting::Explicit(vec![chosen.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let (id, generation, unsigned) = find_sign_request(&accepted);
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+        let ensured = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EnsureWriteRelay(session) => Some(session.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            ensured,
+            BTreeSet::from([signer_session(&chosen, author.public_key())]),
+            "offline acceptance must mint exactly the explicit destination"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::PublishEvent(..))),
+            "the chosen destination is still offline"
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                receipt,
+                WriteStatus::Routed {
+                    relays,
+                    complete: true
+                }
+            ) if *receipt == id && relays == &BTreeSet::from([chosen.clone()])
+        )));
+        id
+    };
+
+    {
+        let store = RedbStore::open(&path).unwrap();
+        let intents = store.recover_delivery().expect("recover explicit write");
+        assert_eq!(intents.len(), 1, "one publish owns one durable intent");
+        let durable = store
+            .recover_route_revisions(intents[0].intent_id)
+            .unwrap()
+            .into_iter()
+            .flat_map(|revision| revision.relays)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            durable,
+            BTreeSet::from([chosen.clone()]),
+            "only the app-named destination may survive acceptance"
+        );
+    }
+
+    // This is learned only after acceptance. An Explicit strategy has no
+    // author-directory input, so recovery must not append it to the durable
+    // route or ask the transport to open it.
+    let changed =
+        FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [learned.clone()]);
+    let mut recovered =
+        EngineCore::new_with_fixture_routing_facts(RedbStore::open(&path).unwrap(), changed, 10);
+    let recovery = recovered.recover_on_boot();
+    let ensured = recovery
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EnsureWriteRelay(session) => Some(session.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ensured,
+        BTreeSet::from([signer_session(&chosen, author.public_key())]),
+        "recovery must retain the explicit route verbatim"
+    );
+    assert!(
+        !recovery.iter().any(|effect| matches!(
+            effect,
+            Effect::EnsureWriteRelay(session) if session.relay == learned
+        )),
+        "a later author-directory fact must not become a destination"
+    );
+
+    let connected = connect_signer(&mut recovered, 0, &chosen, author.public_key());
+    assert!(!connected.iter().any(|effect| matches!(
+        effect,
+        Effect::EnsureWriteRelay(session) | Effect::PublishEvent(session, ..)
+            if session.relay == learned
+    )));
+    let effects = release_author_probe(
+        &mut recovered,
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        &chosen,
+        author.public_key(),
+    );
+    let event = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PublishEvent(session, event, _)
+                if session == &signer_session(&chosen, event.pubkey) =>
+            {
+                Some(event.clone())
+            }
+            _ => None,
+        })
+        .expect("the recovered write publishes to its explicit destination");
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EnsureWriteRelay(session) | Effect::PublishEvent(session, ..)
+                if session.relay == learned
+        )),
+        "delivery must never widen to the later author outbox"
+    );
+
+    mark_written(&mut recovered, &effects, &chosen);
+    let acked = recovered.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        signer_session(&chosen, event.pubkey),
+        RelayFrame::from(RelayMessage::ok(event.id, true, "")),
+    ));
+    assert!(acked.iter().any(
+        |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::Acked(relay))
+            if *id == receipt && relay == &chosen)
+    ));
+
+    let replay = recovered.reattach_receipt(receipt);
+    assert!(replay.is_attached());
+    assert!(
+        !replay.facts.iter().any(|status| match status {
+            WriteStatus::Routed { relays, .. } => relays.contains(&learned),
+            WriteStatus::AwaitingRelay { relay }
+            | WriteStatus::AwaitingAuth { relay }
+            | WriteStatus::Acked(relay)
+            | WriteStatus::GaveUp(relay)
+            | WriteStatus::PersistenceBlocked(relay)
+            | WriteStatus::RoutePersistenceBlocked(relay) => relay == &learned,
+            WriteStatus::RetryEligible { relay, .. }
+            | WriteStatus::HandoffAmbiguous { relay, .. }
+            | WriteStatus::Sent { relay, .. }
+            | WriteStatus::Rejected(relay, _) => relay == &learned,
+            _ => false,
+        }),
+        "no durable or receipt fact may name the later directory relay"
+    );
+}
+
+#[test]
 fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_volatile() {
     let author = Keys::generate();
     let old = RelayUrl::parse("wss://old-outbox.example").unwrap();
