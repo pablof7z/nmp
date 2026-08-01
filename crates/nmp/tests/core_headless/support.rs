@@ -1093,6 +1093,8 @@ mod derived_tag_fanout;
 mod live_queries;
 #[path = "negentropy.rs"]
 mod negentropy;
+#[path = "nip29_group_reads.rs"]
+mod nip29_group_reads;
 #[path = "persistence_failures.rs"]
 mod persistence_failures;
 #[path = "real_corpus_benchmark.rs"]
