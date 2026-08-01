@@ -1228,20 +1228,15 @@ impl<S: EventStore> Engine<S> {
         let nostr_filter = filter.to_nostr();
         let strict_relays = self.graph.strict_projection_relays(filter_id, cache);
         let rows = match (strict_relays.as_ref(), filter.limit) {
-            (Some(relays), Some(limit)) => {
+            (Some(pinned), Some(limit)) => {
                 self.store
-                    .query_newest_observed_by(&nostr_filter, relays, limit)?
+                    .query_newest_under_pin(&nostr_filter, pinned, limit)?
             }
-            (Some(relays), None) => self
+            (Some(pinned), None) => self
                 .store
                 .query(&nostr_filter)?
                 .into_iter()
-                .filter(|row| {
-                    row.provenance
-                        .seen
-                        .keys()
-                        .any(|relay| relays.contains(relay))
-                })
+                .filter(|row| row.provenance.visible_under_pin(pinned))
                 .collect(),
             (None, Some(limit)) => self.store.query_newest(&nostr_filter, limit)?,
             (None, None) => self.store.query(&nostr_filter)?,

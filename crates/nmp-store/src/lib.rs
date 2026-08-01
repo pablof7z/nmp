@@ -220,6 +220,35 @@ impl Provenance {
             Some(_) => false,
         }
     }
+
+    /// Whether a projection pinned to `pinned` may serve this row.
+    ///
+    /// Two facts that must not be conflated: whether a row APPEARS in a
+    /// projection, and whether a relay CARRIED it.
+    ///
+    /// A row some relay has served answers only for the relays that served
+    /// it. That is the cross-host isolation a pinned read exists for: one
+    /// host's cached rows never answer for a host that did not serve them.
+    ///
+    /// A row NO relay has served yet is a different case entirely. It is not
+    /// some other host's row — it entered through
+    /// [`EventStore::accept_write`], it sits in the outbound publication
+    /// queue, and it is ours. Withholding it until a relay ACKs would make
+    /// every pinned live query lie about what the user just did. It is
+    /// served, and its provenance is reported honestly: in the cache, zero
+    /// relays. The instant a relay delivers it, `seen` is non-empty and this
+    /// predicate reverts to ordinary provenance intersection — which is
+    /// exactly "as relays accept or reject it, where the event loaded from
+    /// is reflected".
+    ///
+    /// Empty `seen` is the exact spelling of "no relay has carried this
+    /// yet" — the same fact an app's "sending…" chip resolves off, never
+    /// `local`'s presence (a row keeps its local origin forever, including
+    /// long after relay provenance arrives).
+    #[must_use]
+    pub fn visible_under_pin(&self, pinned: &BTreeSet<RelayUrl>) -> bool {
+        self.seen.is_empty() || self.seen.keys().any(|relay| pinned.contains(relay))
+    }
 }
 
 /// The sentinel signature every pending row's frozen body carries until
@@ -1570,31 +1599,27 @@ pub trait EventStore {
             .collect())
     }
 
-    /// Return the first `limit` canonical newest rows whose canonical relay
-    /// provenance intersects `relays`.
+    /// Return the first `limit` canonical newest rows visible under a pin on
+    /// `pinned` — [`Provenance::visible_under_pin`] is the one rule that
+    /// decides which those are.
     ///
     /// This is the store-side projection required by a Strict pinned cache:
-    /// the bound applies *after* provenance eligibility, never before it.
-    /// Filtering an already-limited agnostic page can under-fill the result
-    /// even when older eligible rows exist. Persistent backends should test
-    /// provenance while walking their ordered index and stop only after
-    /// `limit` eligible rows have been accepted.
-    fn query_newest_observed_by(
+    /// the bound applies *after* visibility, never before it. Filtering an
+    /// already-limited agnostic page can under-fill the result even when
+    /// older visible rows exist. Persistent backends should test visibility
+    /// while walking their ordered index and stop only after `limit` visible
+    /// rows have been accepted.
+    fn query_newest_under_pin(
         &self,
         filter: &Filter,
-        relays: &BTreeSet<RelayUrl>,
+        pinned: &BTreeSet<RelayUrl>,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        if limit == 0 || relays.is_empty() {
+        if limit == 0 {
             return Ok(Vec::new());
         }
         let mut rows = self.query(filter)?;
-        rows.retain(|row| {
-            row.provenance
-                .seen
-                .keys()
-                .any(|relay| relays.contains(relay))
-        });
+        rows.retain(|row| row.provenance.visible_under_pin(pinned));
         rows.sort_by(|a, b| {
             b.event
                 .created_at
@@ -1636,28 +1661,21 @@ pub trait EventStore {
         Ok(rows)
     }
 
-    /// Strict-provenance counterpart of [`EventStore::query_newest_before`].
-    /// The cursor remains exact and exclusive, while `limit` counts only
-    /// rows observed from at least one relay in `relays`.
-    fn query_newest_before_observed_by(
+    /// Pinned counterpart of [`EventStore::query_newest_before`]. The cursor
+    /// remains exact and exclusive, while `limit` counts only rows visible
+    /// under a pin on `pinned` ([`Provenance::visible_under_pin`]).
+    fn query_newest_before_under_pin(
         &self,
         filter: &Filter,
-        relays: &BTreeSet<RelayUrl>,
+        pinned: &BTreeSet<RelayUrl>,
         before: EventCursor,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        if limit == 0 || relays.is_empty() {
+        if limit == 0 {
             return Ok(Vec::new());
         }
         let mut rows = self.query(filter)?;
-        rows.retain(|row| {
-            before.admits(&row.event)
-                && row
-                    .provenance
-                    .seen
-                    .keys()
-                    .any(|relay| relays.contains(relay))
-        });
+        rows.retain(|row| before.admits(&row.event) && row.provenance.visible_under_pin(pinned));
         rows.sort_by(|a, b| {
             b.event
                 .created_at
@@ -1707,29 +1725,23 @@ pub trait EventStore {
         Ok(rows)
     }
 
-    /// Strict-provenance counterpart of
-    /// [`EventStore::query_newest_before_any`]. The page bound counts only
-    /// de-duplicated union rows observed by at least one eligible relay.
-    fn query_newest_before_any_observed_by(
+    /// Pinned counterpart of [`EventStore::query_newest_before_any`]. The
+    /// page bound counts only de-duplicated union rows visible under a pin
+    /// on `pinned` ([`Provenance::visible_under_pin`]).
+    fn query_newest_before_any_under_pin(
         &self,
         filters: &[Filter],
-        relays: &BTreeSet<RelayUrl>,
+        pinned: &BTreeSet<RelayUrl>,
         before: EventCursor,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        if limit == 0 || filters.is_empty() || relays.is_empty() {
+        if limit == 0 || filters.is_empty() {
             return Ok(Vec::new());
         }
         let mut by_id = BTreeMap::new();
         for filter in filters {
             for row in self.query(filter)? {
-                if before.admits(&row.event)
-                    && row
-                        .provenance
-                        .seen
-                        .keys()
-                        .any(|relay| relays.contains(relay))
-                {
+                if before.admits(&row.event) && row.provenance.visible_under_pin(pinned) {
                     by_id.entry(row.event.id).or_insert(row);
                 }
             }

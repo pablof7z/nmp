@@ -528,7 +528,7 @@ fn query_newest_before_pages_same_second_rows_without_gaps_or_duplicates() {
 }
 
 #[test]
-fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
+fn strict_ordered_pages_count_only_rows_visible_under_the_pin() {
     for_each_backend(|store| {
         let k = keys();
         let wanted = RelayUrl::parse("wss://wanted.example").unwrap();
@@ -551,9 +551,7 @@ fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
 
         let filter = Filter::new().kind(Kind::TextNote).author(k.public_key());
         let eligible = BTreeSet::from([wanted]);
-        let first = store
-            .query_newest_observed_by(&filter, &eligible, 2)
-            .unwrap();
+        let first = store.query_newest_under_pin(&filter, &eligible, 2).unwrap();
         assert_eq!(
             first
                 .iter()
@@ -564,7 +562,7 @@ fn strict_ordered_pages_count_only_rows_observed_by_eligible_relays() {
         );
 
         let older = store
-            .query_newest_before_observed_by(
+            .query_newest_before_under_pin(
                 &filter,
                 &eligible,
                 EventCursor::from_event(&first[0].event),
@@ -628,7 +626,7 @@ fn union_replacement_page_is_global_deduplicated_exclusive_and_strict_eligible()
         );
 
         let strict = store
-            .query_newest_before_any_observed_by(&filters, &BTreeSet::from([wanted]), before, 2)
+            .query_newest_before_any_under_pin(&filters, &BTreeSet::from([wanted]), before, 2)
             .unwrap();
         assert_eq!(
             strict.iter().map(|row| row.event.id).collect::<Vec<_>>(),

@@ -1927,10 +1927,11 @@ impl<S: EventStore> EngineCore<S> {
     /// only its honest projection.
     ///
     /// #107: `CacheMode::Strict` applies the root Demand's pinned cache
-    /// projection here --
-    /// a cached row is returned only when its unioned provenance set
-    /// intersects the handle's own pinned relay set (`Row.sources`, #105's
-    /// existing field; no new store mechanism). This is read off THIS
+    /// projection here -- a cached row is returned only when
+    /// `nmp_store::Provenance::visible_under_pin` admits it against the
+    /// handle's own pinned relay set (`Row.sources`, #105's existing field;
+    /// no new store mechanism, and no second way to say where a row came
+    /// from). This is read off THIS
     /// handle's own `QueryHandle::cache()`, never the shared graph node's --
     /// two handles sharing the identical (cache-free-deduped) acquisition
     /// key may still disagree on `cache` (Fable's ruling: cache is excluded
@@ -1979,13 +1980,8 @@ impl<S: EventStore> EngineCore<S> {
                 None => self.resolver.store().query(&filter)?,
             };
             for se in rows {
-                if let Some(relays) = &pinned_relays {
-                    if !se
-                        .provenance
-                        .seen
-                        .keys()
-                        .any(|relay| relays.contains(relay))
-                    {
+                if let Some(pinned) = &pinned_relays {
+                    if !se.provenance.visible_under_pin(pinned) {
                         continue;
                     }
                 }
