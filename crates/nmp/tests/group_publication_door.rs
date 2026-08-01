@@ -1012,3 +1012,176 @@ async fn a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_
     host_a.shutdown();
     host_b.shutdown();
 }
+
+// ===========================================================================
+// PROTOCOL-PUBLISHINGTHROUGHTHEGROUP-005 -- two DIFFERENT groups, each on its
+// own host, never bleed into each other: publishing into one never reaches
+// the other's host, and each host receives only the event carrying its own
+// group's h.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_groups_on_two_hosts_never_bleed_into_each_other_at_the_wire() {
+    let keys = Keys::generate();
+    let photographers_host = ScriptedRelay::start(&RelayConfig::default()).await;
+    let darkroom_host = ScriptedRelay::start(&RelayConfig::default()).await;
+    let engine = engine_with_signer(&keys);
+
+    let photographers = nip29::on([photographers_host.url.clone()])
+        .expect("one host forms a scope")
+        .group("photographers");
+    let darkroom = nip29::on([darkroom_host.url.clone()])
+        .expect("one host forms a scope")
+        .group("darkroom");
+
+    let photographers_receipts = photographers
+        .publish(
+            &engine,
+            keys.public_key(),
+            EventBuilder::new(Kind::from(GROUP_KIND)).content("first light"),
+        )
+        .expect("the photographers publication is accepted");
+    let darkroom_receipts = darkroom
+        .publish(
+            &engine,
+            keys.public_key(),
+            EventBuilder::new(Kind::from(GROUP_KIND)).content("still wet"),
+        )
+        .expect("the darkroom publication is accepted");
+    drain_until(&photographers_receipts, |status| {
+        matches!(status, WriteStatus::Acked(_))
+    });
+    drain_until(&darkroom_receipts, |status| {
+        matches!(status, WriteStatus::Acked(_))
+    });
+
+    let at_photographers = wait_for_events(&photographers_host, 1);
+    let at_darkroom = wait_for_events(&darkroom_host, 1);
+    assert_eq!(
+        at_photographers.len(),
+        1,
+        "the photographers host receives exactly one event"
+    );
+    assert_eq!(
+        at_darkroom.len(),
+        1,
+        "the darkroom host receives exactly one event"
+    );
+    assert_eq!(
+        h_rows(&at_photographers[0]),
+        vec!["photographers".to_string()],
+        "the photographers host's event carries only the photographers h"
+    );
+    assert_eq!(
+        h_rows(&at_darkroom[0]),
+        vec!["darkroom".to_string()],
+        "the darkroom host's event carries only the darkroom h"
+    );
+    assert_eq!(at_photographers[0].content, "first light");
+    assert_eq!(at_darkroom[0].content, "still wet");
+
+    // Give a late, WRONG delivery (the exact shape a cross-scope leak would
+    // produce) a real chance to arrive before the negative assertion runs.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        photographers_host.admitted_events().len(),
+        1,
+        "the photographers host must never also receive the darkroom event"
+    );
+    assert_eq!(
+        darkroom_host.admitted_events().len(),
+        1,
+        "the darkroom host must never also receive the photographers event"
+    );
+
+    engine.shutdown();
+    photographers_host.shutdown();
+    darkroom_host.shutdown();
+}
+
+// ===========================================================================
+// PROTOCOL-PUBLISHINGTHROUGHTHEGROUP-006/-007 -- a multi-host group write
+// preserves EXACT per-host outcomes, never flattened into "the host": one
+// host acking and another rejecting the SAME publish call are two
+// independent, separately observable ordinary facts, and neither host's
+// outcome is tried anywhere outside the scope.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_anything_outside_the_scope(
+) {
+    let keys = Keys::generate();
+    let acking_host = ScriptedRelay::start(&RelayConfig::default()).await;
+    let rejecting_host = ScriptedRelay::start(&RelayConfig {
+        reject_writes: Some("blocked: this host refuses every event".to_string()),
+        ..RelayConfig::default()
+    })
+    .await;
+    let engine = engine_with_signer(&keys);
+    let group = nip29::on([acking_host.url.clone(), rejecting_host.url.clone()])
+        .expect("two hosts form a scope")
+        .group(GROUP_ID);
+
+    let receipts = group
+        .publish(
+            &engine,
+            keys.public_key(),
+            EventBuilder::new(Kind::from(GROUP_KIND)).content("first light"),
+        )
+        .expect("the publish door accepts a two-host group write");
+
+    // Drain until BOTH a per-host Acked and a per-host Rejected have landed,
+    // as two SEPARATE ordinary facts -- never one flattened into the other.
+    let deadline = Instant::now() + SETTLE;
+    let mut seen = Vec::new();
+    let (mut saw_ack, mut saw_reject) = (false, false);
+    while !(saw_ack && saw_reject) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "never saw both an Acked and a Rejected fact; saw {seen:?}"
+        );
+        let status = receipts
+            .recv_timeout(remaining)
+            .unwrap_or_else(|error| panic!("receipt stream ended early ({error:?}); saw {seen:?}"));
+        match &status {
+            WriteStatus::Acked(relay) if *relay == acking_host.url => saw_ack = true,
+            WriteStatus::Rejected(relay, _) if *relay == rejecting_host.url => saw_reject = true,
+            _ => {}
+        }
+        seen.push(status);
+    }
+
+    assert!(
+        seen.iter()
+            .any(|status| matches!(status, WriteStatus::Acked(relay) if *relay == acking_host.url)),
+        "the acking host's own outcome must be an ordinary Acked fact: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|status| matches!(
+            status,
+            WriteStatus::Rejected(relay, message)
+                if *relay == rejecting_host.url && message.contains("this host refuses")
+        )),
+        "the rejecting host's own outcome must be an ordinary Rejected fact carrying its own \
+         message, never merged into the acking host's outcome: {seen:?}"
+    );
+    assert_eq!(
+        relays_named_by(&seen),
+        BTreeSet::from([acking_host.url.clone(), rejecting_host.url.clone()]),
+        "every relay fact this write produced names exactly the scope's two hosts -- nothing \
+         tried outside it because one host rejected"
+    );
+
+    let delivered = wait_for_events(&acking_host, 1);
+    assert_eq!(delivered.len(), 1, "the acking host admitted the event");
+    assert_eq!(
+        rejecting_host.wire_record().event_ids.len(),
+        1,
+        "the rejecting host was attempted exactly once, never retried elsewhere"
+    );
+
+    engine.shutdown();
+    acking_host.shutdown();
+    rejecting_host.shutdown();
+}

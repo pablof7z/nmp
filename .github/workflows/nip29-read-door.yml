@@ -1,0 +1,32 @@
+# #1123 (PROTOCOL-READSTHROUGHTHEONEDOOR-002): a NIP-29 group/relay-scope
+# value exposes no observe/subscribe/stream operation of its own, on every
+# surface an app can hold one from -- the two Rust crates, the Rust FFI
+# boundary, Swift, and Kotlin.
+#
+# This is its own top-level workflow file, mirroring
+# `behavioral-traceability.yml`'s own reasoning, because
+# `.github/workflows/architecture-gates.yml` is a protected path
+# (`docs/internals/conventions/protected-path-signoff.md`) and this check
+# must run directly (not via `bash`) so its exact executable path is this
+# job's own #1074 evidence locator
+# (`script:repository::scripts/check-nip29-read-door.sh`,
+# `features/groups/reads-through-the-one-door.feature`).
+
+name: NIP-29 read door
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  nip29-read-door:
+    name: NIP-29 read door has no second observe/subscribe/stream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: A group value exposes no read door of its own, on any surface
+        run: scripts/check-nip29-read-door.sh
