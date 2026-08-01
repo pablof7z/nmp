@@ -471,9 +471,9 @@ async fn optimistic_publication_is_general_and_owes_nothing_to_nip29() {
         let known_id = event.id;
 
         let query = LiveQuery::union(
-            hosts
-                .iter()
-                .map(|host| LiveQuery::single(pinned_strict_branch(&[host.clone()], kind))),
+            hosts.iter().map(|host| {
+                LiveQuery::single(pinned_strict_branch(std::slice::from_ref(host), kind))
+            }),
             None,
         )
         .expect("a two-branch pinned union is constructible");
@@ -486,7 +486,7 @@ async fn optimistic_publication_is_general_and_owes_nothing_to_nip29() {
             .publish(WriteIntent {
                 payload: WritePayload::Signed(event),
                 durability: Durability::Durable,
-                routing: WriteRouting::Explicit(hosts.iter().cloned().collect()),
+                routing: WriteRouting::Explicit(hosts.to_vec()),
                 identity: Identity::Explicit(me.public_key()),
                 correlation: None,
             })
