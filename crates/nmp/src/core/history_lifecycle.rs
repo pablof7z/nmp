@@ -1071,15 +1071,15 @@ impl<S: EventStore> EngineCore<S> {
             (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays.clone()),
             _ => None,
         };
-        // `nmp_store::Provenance::visible_under_pin` over the committed
-        // row's projected source set (`CommittedCurrentRow::observed_relays`
-        // IS `Provenance::seen`'s keys). An empty set is the exact spelling
-        // of "no relay has carried this yet": a locally accepted write in
-        // the outbound publication queue, ours to show, never another host's
-        // row leaking across a pin.
-        let visible_under_pin = |sources: &BTreeSet<RelayUrl>| {
+        // The one rule, `nmp_store::visible_under_pin`, over the committed
+        // row's two projected facts: whether this node accepted the write
+        // itself, and which relays carried it
+        // (`CommittedCurrentRow::observed_relays` IS `Provenance::seen`'s
+        // keys). Our own row is shown under every pin whatever any host has
+        // since done with it; another host's row never leaks across one.
+        let visible_under_pin = |row: &CommittedCurrentRow| {
             pinned_relays.as_ref().is_none_or(|pinned| {
-                sources.is_empty() || sources.iter().any(|relay| pinned.contains(relay))
+                nmp_store::visible_under_pin(row.locally_accepted, &row.observed_relays, pinned)
             })
         };
         let target_rows = state.target_rows;
@@ -1097,7 +1097,7 @@ impl<S: EventStore> EngineCore<S> {
         if pinned_relays.is_some() {
             for changed in &changes.provenance_grew {
                 if !matches(&changed.event)
-                    || !visible_under_pin(&changed.observed_relays)
+                    || !visible_under_pin(changed)
                     || state.last_rows.contains_key(&changed.event.id)
                 {
                     continue;
@@ -1169,7 +1169,7 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
             for row in &changes.inserted {
-                if !matches(&row.event) || !visible_under_pin(&row.observed_relays) {
+                if !matches(&row.event) || !visible_under_pin(row) {
                     continue;
                 }
                 let event_id = row.event.id;
@@ -1204,7 +1204,7 @@ impl<S: EventStore> EngineCore<S> {
                         .expect("provenance target was checked above")
                         .sources
                         .extend(row.observed_relays.iter().cloned());
-                } else if pinned_relays.is_some() && visible_under_pin(&row.observed_relays) {
+                } else if pinned_relays.is_some() && visible_under_pin(row) {
                     // An event already cached from an unpinned relay can
                     // enter a Strict projection when this committed duplicate
                     // is its first observation by a pinned one. Treat that

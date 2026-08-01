@@ -1397,12 +1397,14 @@ impl EventStore for MemoryStore {
         if self.by_id.contains_key(&event.id) {
             let mut fan_out: Option<(BTreeSet<IntentId>, Event)> = None;
             let grew;
+            let locally_accepted;
             {
                 let existing = self
                     .by_id
                     .get_mut(&event.id)
                     .expect("just checked this id exists");
                 grew = existing.provenance.merge_observation(&from);
+                locally_accepted = existing.provenance.local.is_some();
                 // Architecture review requirement (issue #2 P0
                 // correction, codex-nova ruling): a relay delivering the
                 // real signed event for a still-PENDING local draft is
@@ -1438,6 +1440,7 @@ impl EventStore for MemoryStore {
             return Ok(InsertOutcome::Duplicate {
                 provenance_grew: grew,
                 satisfied_intents,
+                locally_accepted,
             });
         }
 

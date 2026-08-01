@@ -755,6 +755,7 @@ fn provenance_merges_across_relays() {
             InsertOutcome::Duplicate {
                 provenance_grew: true,
                 satisfied_intents: Vec::new(),
+                locally_accepted: false,
             }
         );
 
@@ -780,6 +781,7 @@ fn provenance_does_not_grow_on_earlier_or_equal_redelivery_from_same_relay() {
             InsertOutcome::Duplicate {
                 provenance_grew: false,
                 satisfied_intents: Vec::new(),
+                locally_accepted: false,
             }
         );
         assert_eq!(
@@ -787,6 +789,7 @@ fn provenance_does_not_grow_on_earlier_or_equal_redelivery_from_same_relay() {
             InsertOutcome::Duplicate {
                 provenance_grew: false,
                 satisfied_intents: Vec::new(),
+                locally_accepted: false,
             }
         );
         assert_eq!(
@@ -794,6 +797,7 @@ fn provenance_does_not_grow_on_earlier_or_equal_redelivery_from_same_relay() {
             InsertOutcome::Duplicate {
                 provenance_grew: true,
                 satisfied_intents: Vec::new(),
+                locally_accepted: false,
             }
         );
 

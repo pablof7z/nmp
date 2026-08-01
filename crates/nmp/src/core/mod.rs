@@ -65,8 +65,8 @@ use nmp_grammar::{
     WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
-    CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine, HandleId,
-    LocalAcceptResult, QueryHandle, RelayIngestError,
+    CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine,
+    HandleId, LocalAcceptResult, QueryHandle, RelayIngestError,
 };
 use nmp_router::{
     AdvertisedRelayLimits, AuthorRouteState, AuthorRoutes, CompileBudget, RelayPlan, Router,
