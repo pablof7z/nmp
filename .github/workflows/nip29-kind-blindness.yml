@@ -1,0 +1,33 @@
+# #1124 (PROTOCOL-KINDBLINDNESS-001..005): the NIP-29 group publication/read
+# path stays kind-blind -- no kind constant it does not itself define, and no
+# branch anywhere that reads an app-selected kind.
+#
+# This is its own top-level workflow file, mirroring `nip29-read-door.yml`'s
+# own reasoning, because `.github/workflows/architecture-gates.yml` is a
+# protected path (`docs/internals/conventions/protected-path-signoff.md`) and
+# this check must run directly (not via a step embedded in that file) so its
+# exact executable path is this job's own #1074 evidence locator
+# (`script:repository::scripts/check-nip29-kind-blindness.sh`,
+# `features/groups/kind-blindness.feature`).
+
+name: NIP-29 kind blindness
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  nip29-kind-blindness:
+    name: NIP-29 owns no kind it does not itself define
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The checker's self-test proves it can fail against real mutated fixtures
+        run: scripts/test-nip29-kind-blindness.sh
+
+      - name: The group publication/read path stays kind-blind
+        run: scripts/check-nip29-kind-blindness.sh

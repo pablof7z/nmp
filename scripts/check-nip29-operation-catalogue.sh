@@ -20,6 +20,14 @@
 # and its exact per-surface parameter shape, across Rust, the FFI, Swift AND
 # Kotlin -- the width #1122 asks for.
 #
+# #1124 (PROTOCOL-WHATTHEAPPNEVERDOES-002/003) widens (012)'s exact-shape
+# check to the group's own general escape hatch and read door --
+# `publish`/`publishSigned`/`read` -- so "no write or read operation accepts
+# a per-call relay, route, or raw context tag" is proven for EVERY way an
+# app can reach a group write or read, not only the nine named operations.
+# `on`/`group`/`groupsWhere` stay excluded, as before: naming hosts once at
+# scope construction is the one legal exception this claim is not about.
+#
 # #1074 evidence for PROTOCOL-NIP29OPERATIONS-012/013
 # (features/groups/one-typed-group-door.feature).
 set -euo pipefail
@@ -113,6 +121,25 @@ check_signature_shape() {
   fi
 }
 
+# Narrower than check_signature_shape, deliberately: `publish`/`publishSigned`
+# are the general kind-blind escape hatch, so a caller-supplied kind and raw
+# tags are LEGAL there (that is the whole reason the escape hatch exists --
+# "Legal general capabilities that must remain legal", #1124). What must
+# still never appear is a per-call relay, route or host -- naming one of
+# those again after `RelayScope`/`Group` construction is exactly what
+# WHATTHEAPPNEVERDOES-002/003 forbids.
+check_no_routing_parameter() {
+  local file=$1 keyword=$2 name=$3
+  local block
+  block=$(signature_block "$file" "$keyword" "$name")
+  [[ -n $block ]] || fail "$file: infrastructure operation \`$name\` has no resolvable signature"
+  if grep -qE '(^|[^A-Za-z0-9_])RelayUrl([^A-Za-z0-9_]|$)' <<<"$block" ||
+    grep -qiE '(^|[^A-Za-z0-9_])(relay|route|host)[A-Za-z0-9_]*[ \t]*:' <<<"$block"; then
+    printf '%s\n' "$block" >&2
+    fail "$file: infrastructure operation \`$name\` takes a per-call relay, route or host parameter"
+  fi
+}
+
 # (012): the nine names, on every surface, take semantic fields plus the
 # retained engine/author capability alone.
 RUST_OPS=(join_request leave_request add_user remove_user edit_metadata delete_event create_group delete_group create_invite)
@@ -125,6 +152,28 @@ done
 for op in "${CAMEL_OPS[@]}"; do
   check_signature_shape "$SWIFT" "public func" "$op"
   check_signature_shape "$KOTLIN" "fun" "$op"
+done
+
+# #1124 (PROTOCOL-WHATTHEAPPNEVERDOES-002/003): the group's own general
+# escape hatch and its read door -- `publish`/`publishSigned`/`read`, on
+# every surface -- take no per-call relay, route or raw context/tag
+# parameter EITHER, the same shape check (012) already proves for the nine
+# named operations. `on` is deliberately excluded: it is the one legal place
+# an app names hosts, ONCE, at scope construction (#1033); this claim is
+# that a group WRITE or READ never takes one again, not that host
+# construction is illegal. `group`/`groupsWhere` are likewise excluded: a
+# group id (a `String`) and a `GroupPredicate` value are not a relay, route,
+# or raw context tag.
+RUST_INFRA_OPS=(publish publish_signed read)
+CAMEL_INFRA_OPS=(publish publishSigned read)
+
+for op in "${RUST_INFRA_OPS[@]}"; do
+  check_no_routing_parameter "$RUST_FACADE" "pub fn" "$op"
+  check_no_routing_parameter "$RUST_FFI" "pub fn" "$op"
+done
+for op in "${CAMEL_INFRA_OPS[@]}"; do
+  check_no_routing_parameter "$SWIFT" "public func" "$op"
+  check_no_routing_parameter "$KOTLIN" "fun" "$op"
 done
 
 # (013): those nine names are the WHOLE named-operation catalogue -- no
