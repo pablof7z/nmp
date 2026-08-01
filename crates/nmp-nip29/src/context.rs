@@ -220,6 +220,37 @@ mod tests {
         Tag::parse([RESERVED_TIMELINE_TAG, "deadbeef"]).expect("a two-value row is well-formed")
     }
 
+    /// PROTOCOL-KINDBLINDNESS-001 (write half) and PROTOCOL-KINDBLINDNESS-004
+    /// (direct half): a table of kinds NIP-29 itself defines (9021), kinds
+    /// other NIPs define (7, 30315), and a kind nothing defines at all
+    /// (44815) all take the IDENTICAL contextualization path -- the same
+    /// single appended `h` row, no refusal, no branch, no special case.
+    /// Passing on 44815 alone would not prove kind-blindness (an
+    /// allow-list could pass that too); the point is that every row in
+    /// this table is handled by the exact same code, which
+    /// `check-nip29-kind-blindness.sh` additionally proves structurally by
+    /// showing that code never reads `.kind` at all.
+    #[test]
+    fn contextualize_takes_the_identical_path_for_every_kind_familiar_or_not() {
+        for kind in [9021u16, 7, 30315, 44815, 20, 1] {
+            let built = contextualize(
+                GROUP,
+                EventBuilder::new(Kind::from(kind)).content("whatever this is"),
+            )
+            .unwrap_or_else(|error| panic!("kind {kind} must contextualize cleanly: {error}"));
+            assert_eq!(
+                built.kind,
+                Kind::from(kind),
+                "kind {kind} must survive unchanged"
+            );
+            assert_eq!(
+                rows(&built),
+                vec![vec!["h".to_string(), GROUP.to_string()]],
+                "kind {kind} must get exactly the one appended h row, nothing else"
+            );
+        }
+    }
+
     /// NIP-29 owns neither the kind nor the schema of what it carries, so a
     /// complete draft survives byte-for-byte except for one appended `h` row
     /// -- in the caller's original tag order.

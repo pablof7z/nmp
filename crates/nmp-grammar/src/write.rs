@@ -374,6 +374,24 @@ pub enum WriteRouting {
 mod tests {
     use super::*;
 
+    /// #1124 (PROTOCOL-WHATTHEAPPNEVERDOES-003, general-capabilities half):
+    /// the claim that a group write cannot set the `h` context tag is about
+    /// the semantic NIP-29 door specifically, not about `EventBuilder`
+    /// throughout the repository. The ordinary builder validates nothing —
+    /// `tag(Tag)` is the one intentional exact/raw escape (#1034's audits)
+    /// and stays exactly that permissive outside a `Group`, including for a
+    /// tag shaped like `h`.
+    #[test]
+    fn the_ordinary_builder_accepts_an_h_shaped_tag_with_no_validation() {
+        let built = EventBuilder::new(nostr::Kind::TextNote)
+            .tag(Tag::parse(["h", "anything-at-all"]).unwrap());
+        assert_eq!(
+            built.tags[0].as_slice(),
+            &["h".to_string(), "anything-at-all".to_string()],
+            "the general escape hatch is not aware of, and does not refuse, an h row"
+        );
+    }
+
     /// The routing vocabulary is exactly two words, and `Explicit` carries
     /// the caller's relay list verbatim — same order, same entries, nothing
     /// added. There is no third variant to reach for and no widen operation
