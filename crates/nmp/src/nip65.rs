@@ -151,9 +151,15 @@ fn apply_updates<S: nmp_store::EventStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Row;
-    use nmp_store::MemoryStore;
-    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use crate::core::{ReceiptId, Row};
+    use crate::delivery::WriteStatus;
+    use nmp_grammar::{
+        AccessContext, Durability, Identity, RelaySessionKey, WriteIntent, WritePayload,
+        WriteRouting,
+    };
+    use nmp_store::{EventStore, MemoryStore, RedbStore};
+    use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
+    use nostr::{EventBuilder, EventId, Keys, Kind, RelayMessage, Tag, Timestamp};
 
     fn author() -> PublicKey {
         Keys::generate().public_key()
@@ -161,6 +167,54 @@ mod tests {
 
     fn relay(port: u16) -> RelayUrl {
         RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("valid test relay")
+    }
+
+    fn publish_auto<S: EventStore>(
+        core: &mut EngineCore<S>,
+        author: &Keys,
+        created_at: u64,
+        content: &str,
+    ) -> (ReceiptId, EventId, Vec<Effect>) {
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: content.to_string(),
+                created_at: Some(Timestamp::from(created_at)),
+            }),
+            durability: Durability::Durable,
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let (receipt, generation, unsigned) = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("accepted write requests its frozen signature");
+        let signed = unsigned
+            .sign_with_keys(author)
+            .expect("test author signs the accepted write");
+        let event_id = signed.id;
+        let effects = core.handle(EngineMsg::SignerCompleted(receipt, generation, Ok(signed)));
+        (receipt, event_id, effects)
+    }
+
+    fn awaiting_route<S: EventStore>(core: &mut EngineCore<S>, receipt: ReceiptId) -> String {
+        let replay = core.reattach_receipt(receipt);
+        assert!(replay.is_attached(), "the durable receipt must reattach");
+        replay
+            .facts
+            .iter()
+            .find_map(|fact| match fact {
+                WriteStatus::AwaitingRoute { detail } => Some(detail.clone()),
+                _ => None,
+            })
+            .expect("the receipt must remain visibly parked on route knowledge")
     }
 
     #[test]
@@ -247,5 +301,170 @@ mod tests {
             1,
             "re-delivering the unchanged current winner must not recount it"
         );
+    }
+
+    /// `ROUTING-COLDSTARTPARK-003`: a cold-recovered unresolved `Auto`
+    /// obligation and a freshly accepted one are the same lifecycle state.
+    /// A signed kind:10002 learned after both exist must wake both exact event
+    /// ids; recovery may not grant the older row a stronger survival path.
+    #[test]
+    fn fresh_and_recovered_auto_writes_share_one_later_author_route() {
+        let author = Keys::generate();
+        let source = RelayUrl::parse("wss://indexer.example").unwrap();
+        let outbox = RelayUrl::parse("wss://outbox.example").unwrap();
+        let dir = tempfile::tempdir().expect("temporary redb directory");
+        let path = dir.path().join("cold-start-park.redb");
+
+        let (recovered_receipt, recovered_event) = {
+            let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 8);
+            core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+            let (receipt, event, effects) = publish_auto(&mut core, &author, 1, "from before");
+            assert!(
+                effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::EmitReceipt(id, WriteStatus::AwaitingRoute { .. })
+                        if *id == receipt
+                )),
+                "a first-install Auto write must park instead of dying: {effects:?}"
+            );
+            (receipt, event)
+        };
+
+        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 8);
+        core.recover_on_boot();
+        let recovered_detail = awaiting_route(&mut core, recovered_receipt);
+        assert!(
+            recovered_detail.contains(&author.public_key().to_hex()),
+            "the recovered park names the exact missing author route: {recovered_detail}"
+        );
+
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        let (fresh_receipt, fresh_event, fresh_effects) =
+            publish_auto(&mut core, &author, 2, "from now");
+        assert!(
+            fresh_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::EmitReceipt(id, WriteStatus::AwaitingRoute { .. })
+                    if *id == fresh_receipt
+            )),
+            "the fresh write must enter the same visible park: {fresh_effects:?}"
+        );
+        let fresh_detail = awaiting_route(&mut core, fresh_receipt);
+        assert_eq!(
+            recovered_detail, fresh_detail,
+            "fresh and recovered obligations in the same unknown directory state must report the same park"
+        );
+
+        let relay_list = EventBuilder::new(Kind::RelayList, "")
+            .tag(
+                Tag::parse(["r".to_string(), outbox.to_string(), "write".to_string()])
+                    .expect("valid write-marked relay tag"),
+            )
+            .custom_created_at(Timestamp::from(3u64))
+            .sign_with_keys(&author)
+            .expect("truthful kind:10002 fixture signs");
+        let row = RowDelta::Added(Row {
+            event: relay_list,
+            sources: BTreeSet::from([source.clone()]),
+        });
+        let mut assembly = RuntimeAssembly::new([source]);
+        let opened = assembly.sync(&mut core, BTreeSet::from([author.public_key()]));
+        let handle = assembly
+            .handle
+            .expect("the exact author-route need opens one provider query");
+        assert!(
+            opened
+                .iter()
+                .any(|effect| matches!(effect, Effect::EmitRows(id, ..) if *id == handle)),
+            "provider acquisition must run through the ordinary query owner"
+        );
+        let route_effects = assembly
+            .consume_rows(&mut core, handle, std::slice::from_ref(&row))
+            .expect("the current provider row belongs to this assembly");
+        let routed_receipts = route_effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EmitReceipt(
+                    id,
+                    WriteStatus::Routed {
+                        relays,
+                        complete: true,
+                    },
+                ) if relays == &BTreeSet::from([outbox.clone()]) => Some(*id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            routed_receipts,
+            BTreeSet::from([recovered_receipt, fresh_receipt]),
+            "the learned route must rewrite both open obligations: {route_effects:?}"
+        );
+
+        for receipt in [recovered_receipt, fresh_receipt] {
+            let replay = core.reattach_receipt(receipt);
+            assert!(replay.is_attached());
+            assert!(
+                replay.facts.iter().any(|fact| matches!(
+                    fact,
+                    WriteStatus::AwaitingRelay { relay } if relay == &outbox
+                )),
+                "receipt {receipt:?} must own exactly the newly learned lane: {:?}",
+                replay.facts
+            );
+        }
+
+        let transport = RelayHandle {
+            slot: 0,
+            generation: 1,
+        };
+        let session =
+            RelaySessionKey::new(outbox.clone(), AccessContext::Nip42(author.public_key()));
+        let mut delivery = core.handle(EngineMsg::RelayConnected(transport, session.clone()));
+        delivery.extend(core.handle(EngineMsg::RelayInformationResolved(outbox.clone(), None)));
+        delivery.extend(core.handle(EngineMsg::AuthProbeReleased(transport, session.clone())));
+        let mut published = BTreeSet::new();
+        loop {
+            let attempts = std::mem::take(&mut delivery)
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    Effect::PublishEvent(actual_session, event, correlation)
+                        if actual_session == session =>
+                    {
+                        Some((event.id, correlation))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if attempts.is_empty() {
+                break;
+            }
+            for (event_id, correlation) in attempts {
+                assert!(
+                    published.insert(event_id),
+                    "one obligation may start only one attempt before its OK"
+                );
+                delivery.extend(
+                    core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written)),
+                );
+                delivery.extend(core.handle(EngineMsg::RelayFrame(
+                    transport,
+                    session.clone(),
+                    RelayFrame::from(RelayMessage::ok(event_id, true, "saved")),
+                )));
+            }
+        }
+        assert_eq!(
+            published,
+            BTreeSet::from([recovered_event, fresh_event]),
+            "one later author route must release both exact obligations on its one lane"
+        );
+        for receipt in [recovered_receipt, fresh_receipt] {
+            let replay = core.reattach_receipt(receipt);
+            assert!(
+                replay.facts.contains(&WriteStatus::Acked(outbox.clone())),
+                "receipt {receipt:?} must retain delivery to the one learned lane: {:?}",
+                replay.facts
+            );
+        }
     }
 }
