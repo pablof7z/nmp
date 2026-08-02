@@ -220,3 +220,39 @@ Feature: One live query can watch several sources at once
       But relay "a" stays live for the unrelated query
       And the unrelated query still reports relay "a" as its own planned source
       And the cancelled query receives no further frames
+
+  Rule: Faults and restarts keep the whole query honest
+
+    # nmp:id=QUERIES-COMPOSED-018
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed
+    # nmp:evidence=rust:nmp::a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it
+    # nmp:falsifier=Keep the branches that were already opened when a later one fails; the refused query's first branch keeps its demand atom and is handed a relay request on the very next recompile, and the branch abandoned before any handle existed keeps its graph nodes.
+    Scenario: A branch that cannot be opened leaves nothing behind
+      Given a query whose second branch cannot read its initial local view
+      When I try to open it
+      Then opening is refused without a handle
+      And the first branch's relay request and reserved work are released too
+
+    # nmp:id=QUERIES-COMPOSED-019
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::one_branchs_refresh_failure_retracts_no_sibling_row
+    # nmp:falsifier=Refresh from whichever branches could be read and drop the one that failed; the branch nothing could be read about has all of its rows reported as removed, so the app watches half its list blink out because one source hiccuped.
+    Scenario: One branch failing to refresh never retracts another branch's rows
+      Given a live query over two hosts that has already delivered rows
+      When one branch's local read fails while the query refreshes
+      Then I keep every row and every piece of evidence I already had
+      And no row is reported as removed
+      And the failure is reported as a diagnostic instead
+
+    # nmp:id=QUERIES-COMPOSED-020
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::each_redeclared_branch_decides_freshness_from_its_own_stored_coverage
+    # nmp:evidence=rust:nmp::a_redeclared_window_starts_again_at_its_initial_size
+    # nmp:falsifier=Make one freshness decision for the whole query and give it to every branch, and let anything carry a window's grown target across the restart; a branch whose own host was never reconciled then rides on a sibling's stored coverage and is never asked, and the redeclared window opens at the size the previous observation had grown to.
+    Scenario: Redeclaring the query after a restart starts each branch afresh
+      Given a query over two hosts whose window I had already grown
+      When the app restarts and declares exactly the same query again
+      Then each branch decides for itself whether it needs the relay, from its own stored coverage
+      And the window starts again at its initial size
+      And nothing durable had been kept that continues the previous observation
