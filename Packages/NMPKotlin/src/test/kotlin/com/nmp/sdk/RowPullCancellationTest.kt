@@ -15,13 +15,33 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
+import uniffi.nmp_ffi.FfiAccountRegistration
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
+import uniffi.nmp_ffi.FfiAuthPolicyCallback
+import uniffi.nmp_ffi.FfiAuthPolicyRegistration
+import uniffi.nmp_ffi.FfiCancelWriteOutcome
+import uniffi.nmp_ffi.FfiCorrelationReattachment
+import uniffi.nmp_ffi.FfiFilter
 import uniffi.nmp_ffi.FfiFrame
+import uniffi.nmp_ffi.FfiLiveQuery
+import uniffi.nmp_ffi.FfiReceiptReattachment
+import uniffi.nmp_ffi.FfiRelayInformation
+import uniffi.nmp_ffi.FfiRelayInformationCachePolicy
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiRowDelta
 import uniffi.nmp_ffi.FfiRowPullException
+import uniffi.nmp_ffi.FfiSignEventRequest
+import uniffi.nmp_ffi.FfiWindow
+import uniffi.nmp_ffi.FfiWriteIntent
+import uniffi.nmp_ffi.NmpEngineInterface
+import uniffi.nmp_ffi.NmpDiagnosticsStream
+import uniffi.nmp_ffi.NmpFollowActionStream
+import uniffi.nmp_ffi.NmpFollowStream
+import uniffi.nmp_ffi.NmpReceiptStream
 import uniffi.nmp_ffi.NmpRowPull
 import uniffi.nmp_ffi.NmpRowStream
+import uniffi.nmp_ffi.NmpSignEventHandle
 import uniffi.nmp_ffi.NoPointer
 import uniffi.nmp_ffi.UNIFFI_RUST_FUTURE_POLL_READY
 import uniffi.nmp_ffi.UniffiRustFutureContinuationCallback
@@ -90,8 +110,9 @@ class RowPullCancellationTest {
 
     /**
      * #1192: the second half of #762's guarantee. [nextCommittedRowFrame]
-     * commits (acknowledges) a frame before returning it, but [rowFlow]'s own
-     * pull loop still applies/folds the delta and `emit`s it afterward. If the
+     * commits (acknowledges) a frame before returning it, but `Query.kt`'s
+     * private pull loop, reached here through the public [observeQuery]
+     * door, still applies/folds the delta and `emit`s it afterward. If the
      * collecting coroutine is cancelled in that window --
      * after commit, before emit -- the acknowledged transition must not just
      * disappear: `finally { handle.cancel() }` must withdraw the whole
@@ -127,6 +148,7 @@ class RowPullCancellationTest {
                 )
             val pull = AcknowledgeThenCancelPull(frame)
             val stream = AcknowledgeThenCancelStream(pull)
+            val engine = ScriptedRowFlowEngine(stream)
             val dispatcher = ManualDispatcher()
             val collected = mutableListOf<RowBatch>()
 
@@ -134,7 +156,15 @@ class RowPullCancellationTest {
             job =
                 launch(dispatcher) {
                     try {
-                        rowFlow { stream }.collect { collected.add(it) }
+                        // The public entry point, not the private pull loop
+                        // directly: `Query.kt`'s `rowFlow` is deliberately
+                        // not exposed even as `internal` -- touching it for
+                        // testability would land inside the governed
+                        // `kotlin_sources` component path for no real surface
+                        // reason. Driving through `observeQuery` exercises
+                        // the exact same commit-then-fold-then-emit loop
+                        // through the one door an app actually uses.
+                        observeQuery(engine, NMPFilter()).collect { collected.add(it) }
                     } catch (_: CancellationException) {
                         // Expected: cancellation lands after acknowledgement,
                         // before this collector ever sees the row.
@@ -205,6 +235,65 @@ class RowPullCancellationTest {
         }
 
         override fun requestRows(atLeast: ULong) = Unit
+    }
+
+    /** A minimal [NmpEngineInterface] whose only live behaviour is
+     * `observe`, so [cancellingAfterCommitButBeforeEmitWithdrawsTheWholeObservation]
+     * can drive the real public [observeQuery] door instead of reaching into
+     * `Query.kt`'s private pull loop. Every other member is unreachable from
+     * that one collection and fails loudly if that ever stops being true. */
+    private class ScriptedRowFlowEngine(
+        private val stream: NmpRowStream,
+    ) : NmpEngineInterface {
+        override fun `activeAccount`(): String? = unusedByThisFalsifier()
+
+        override fun `addAccount`(`secretKey`: String): FfiAccountRegistration = unusedByThisFalsifier()
+
+        override fun `addAuthPolicy`(
+            `expectedPublicKey`: String,
+            `callback`: FfiAuthPolicyCallback,
+        ): FfiAuthPolicyRegistration = unusedByThisFalsifier()
+
+        override fun `cancel`(`receiptId`: ULong): FfiCancelWriteOutcome = unusedByThisFalsifier()
+
+        override fun `follow`(`target`: String): NmpFollowActionStream = unusedByThisFalsifier()
+
+        override fun `observe`(`query`: FfiFilter, `window`: FfiWindow?): NmpRowStream = stream
+
+        override fun `observeDiagnostics`(): NmpDiagnosticsStream = unusedByThisFalsifier()
+
+        override fun `observeFollowing`(`target`: String): NmpFollowStream = unusedByThisFalsifier()
+
+        override fun `observeQuery`(`query`: FfiLiveQuery, `window`: FfiWindow?): NmpRowStream =
+            unusedByThisFalsifier()
+
+        override fun `publish`(`intent`: FfiWriteIntent): NmpReceiptStream = unusedByThisFalsifier()
+
+        override fun `reattachByCorrelation`(`correlation`: String): FfiCorrelationReattachment =
+            unusedByThisFalsifier()
+
+        override fun `reattachReceipt`(`receiptId`: ULong): FfiReceiptReattachment = unusedByThisFalsifier()
+
+        override suspend fun `relayInformation`(
+            `relay`: String,
+            `policy`: FfiRelayInformationCachePolicy,
+        ): FfiRelayInformation = unusedByThisFalsifier()
+
+        override fun `removeAccount`(`registration`: FfiAccountRegistration): Boolean = unusedByThisFalsifier()
+
+        override fun `removeAuthPolicy`(`registration`: FfiAuthPolicyRegistration): Boolean =
+            unusedByThisFalsifier()
+
+        override fun `setActiveAccount`(`pubkey`: String?): Unit = unusedByThisFalsifier()
+
+        override fun `shutdown`(): Unit = unusedByThisFalsifier()
+
+        override fun `signEvent`(`event`: FfiSignEventRequest): NmpSignEventHandle = unusedByThisFalsifier()
+
+        override fun `unfollow`(`target`: String): NmpFollowActionStream = unusedByThisFalsifier()
+
+        private fun unusedByThisFalsifier(): Nothing =
+            error("ScriptedRowFlowEngine only scripts observe(); this falsifier never reaches anything else")
     }
 
     private class GeneratedReadySeam {
