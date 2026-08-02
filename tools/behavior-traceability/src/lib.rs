@@ -45,17 +45,19 @@ mod tests {
     /// names any other issue is a real traceability bug this test must
     /// catch, not silently pass.
     ///
-    /// Empty as of #1122's `PROTOCOL-GROUPISANIDENTITY-*`/door-shape-
-    /// dependent `PROTOCOL-NIP29OPERATIONS-*` records going `built` against
-    /// the landed #1033 relay-scope/group facade: no governed scenario
-    /// names an open issue any more.
+    /// One entry as of #1214: `QUERIES-COMPOSED-027` names #1215, the open
+    /// gap that no runtime test can assert the native live query's branch
+    /// storage stays private and unforgeable.
     struct KnownLiveIssues;
 
     impl IssueLookup for KnownLiveIssues {
         fn state(&self, issue: u64) -> Result<IssueState, TraceError> {
-            Err(TraceError(format!(
-                "real fixture unexpectedly requested untracked issue #{issue}"
-            )))
+            match issue {
+                1215 => Ok(IssueState::Open),
+                _ => Err(TraceError(format!(
+                    "real fixture unexpectedly requested untracked issue #{issue}"
+                ))),
+            }
         }
     }
 
