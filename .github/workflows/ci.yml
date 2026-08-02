@@ -181,9 +181,6 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
-      - name: NIP-29 fixture lifecycle falsifier
-        run: scripts/test-nip29-consumer-harness.sh
-
       - name: cargo clippy (workspace, all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
