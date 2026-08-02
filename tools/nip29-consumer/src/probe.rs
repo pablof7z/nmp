@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::num::NonZeroUsize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nmp::{
-    nip29, AccessContext, Binding, CacheMode, Demand, Derived, Engine, EngineConfig, EventBuilder,
-    Filter, IdentityField, Kind, PublicKey, RelayUrl, Selector, SourceAuthority, SourceStatus, Tag,
-    Window, WriteStatus,
+    nip29, AccessContext, Binding, CacheMode, Demand, Derived, DiagnosticsSnapshot, Engine,
+    EngineConfig, EventBuilder, Filter, IdentityField, Kind, LiveQuery, PublicKey, RelayUrl,
+    Selector, SourceAuthority, SourceStatus, Tag, Window, WriteStatus,
 };
 
 use crate::args::{Args, Mode};
@@ -17,12 +17,15 @@ const SINGLE_GROUP: &str = "solo-a";
 const MIXED_GROUP: &str = "one-sided";
 const SHARED_CHAT: &str = "shared chat observed at both hosts";
 const RELAY_B_CHAT: &str = "relay B chat";
+const LIVE_CHAT: &str = "shared live chat after sibling cancellation";
 
 pub fn run(args: Args) -> Result<(), String> {
     match args.mode {
         Mode::Online => online(args),
+        Mode::LiveAdversarial => live_adversarial(args),
         Mode::ProvenanceGrowth => provenance_growth(args),
         Mode::Restart => restart(args),
+        Mode::RestartConflict => restart_conflict(args),
     }
 }
 
@@ -178,35 +181,13 @@ fn online(args: Args) -> Result<(), String> {
 }
 
 fn verify_metadata_conflict(context: &Context, scope: &nip29::RelayScope) -> Result<(), String> {
-    // Relay-signed discovery records are keyed by `d`, unlike group content's
-    // `h`. Positive member-list evidence at each relay selects both records.
-    let subjects = Binding::Literal(BTreeSet::from([
-        context.followed.to_hex(),
-        context.outsider.to_hex(),
-    ]));
-    let query = scope
-        .groups_where(&nip29::member_list_includes(subjects))
-        .map_err(display)?;
+    let query = metadata_query(context, scope)?;
     let subscription = context.engine.observe(query, None).map_err(display)?;
     let mut observed = Observed::default();
     wait_until(&subscription, context.settle, &mut observed, |state| {
         state.rows_of_kind(39000).len() == 2
     })?;
-    let names_by_source: BTreeMap<_, _> = observed
-        .rows_of_kind(39000)
-        .into_iter()
-        .map(|row| {
-            let source = row
-                .sources
-                .iter()
-                .next()
-                .cloned()
-                .ok_or_else(|| "relay metadata row had no source".to_string())?;
-            let name = tag_value(row, "name")
-                .ok_or_else(|| "relay metadata row had no name".to_string())?;
-            Ok((source, name))
-        })
-        .collect::<Result<_, String>>()?;
+    let names_by_source = metadata_names(&observed)?;
     ensure(
         names_by_source.get(&context.relay_a).map(String::as_str) == Some("Bitcoin Cash")
             && names_by_source.get(&context.relay_b).map(String::as_str) == Some("Bitcoin (real)"),
@@ -222,6 +203,60 @@ fn verify_metadata_conflict(context: &Context, scope: &nip29::RelayScope) -> Res
 }
 
 fn verify_follows_discovery(context: &Context, scope: &nip29::RelayScope) -> Result<(), String> {
+    let query = follows_discovery_query(context, scope)?;
+    let subscription = context.engine.observe(query, None).map_err(display)?;
+    let mut observed = Observed::default();
+    wait_until(&subscription, context.settle, &mut observed, |state| {
+        discovery_has_group(state, &context.followed)
+    })?;
+    ensure(
+        observed.rows.values().all(|row| {
+            tag_value(row, "d").as_deref() == Some(GROUP)
+                && row.sources == BTreeSet::from([context.relay_a.clone()])
+        }),
+        "follows-derived discovery crossed relay authority or returned another group",
+    )?;
+    println!(
+        "PROOF discovery predicate=member_list_includes(follows_of_active_viewer) group={GROUP} viewer={} followed={} evidence_source={}",
+        context.viewer, context.followed, context.relay_a
+    );
+    Ok(())
+}
+
+fn metadata_query(context: &Context, scope: &nip29::RelayScope) -> Result<LiveQuery, String> {
+    // Relay-signed discovery records are keyed by `d`, unlike group content's
+    // `h`. Positive member-list evidence at each relay selects both records.
+    let subjects = Binding::Literal(BTreeSet::from([
+        context.followed.to_hex(),
+        context.outsider.to_hex(),
+    ]));
+    scope
+        .groups_where(&nip29::member_list_includes(subjects))
+        .map_err(display)
+}
+
+fn metadata_names(observed: &Observed) -> Result<BTreeMap<RelayUrl, String>, String> {
+    observed
+        .rows_of_kind(39000)
+        .into_iter()
+        .map(|row| {
+            let source = row
+                .sources
+                .iter()
+                .next()
+                .cloned()
+                .ok_or_else(|| "relay metadata row had no source".to_string())?;
+            let name = tag_value(row, "name")
+                .ok_or_else(|| "relay metadata row had no name".to_string())?;
+            Ok((source, name))
+        })
+        .collect()
+}
+
+fn follows_discovery_query(
+    context: &Context,
+    scope: &nip29::RelayScope,
+) -> Result<LiveQuery, String> {
     let mut follows_demand = Demand::new(
         Filter {
             kinds: Some(BTreeSet::from([3])),
@@ -241,33 +276,20 @@ fn verify_follows_discovery(context: &Context, scope: &nip29::RelayScope) -> Res
         project: Selector::Tag("p".to_string()),
     }));
     let predicate = nip29::member_list_includes(follows);
-    let query = scope.groups_where(&predicate).map_err(display)?;
-    let subscription = context.engine.observe(query, None).map_err(display)?;
-    let mut observed = Observed::default();
-    wait_until(&subscription, context.settle, &mut observed, |state| {
-        state.rows.values().any(|row| {
-            row.event.kind.as_u16() == 39002
-                && tag_value(row, "d").as_deref() == Some(GROUP)
-                && row.event.tags.iter().any(|tag| {
-                    let values = tag.as_slice();
-                    values.first().map(String::as_str) == Some("p")
-                        && values.get(1).map(String::as_str)
-                            == Some(context.followed.to_hex().as_str())
-                })
-        })
-    })?;
-    ensure(
-        observed.rows.values().all(|row| {
-            tag_value(row, "d").as_deref() == Some(GROUP)
-                && row.sources == BTreeSet::from([context.relay_a.clone()])
-        }),
-        "follows-derived discovery crossed relay authority or returned another group",
-    )?;
-    println!(
-        "PROOF discovery predicate=member_list_includes(follows_of_active_viewer) group={GROUP} viewer={} followed={} evidence_source={}",
-        context.viewer, context.followed, context.relay_a
-    );
-    Ok(())
+    scope.groups_where(&predicate).map_err(display)
+}
+
+fn discovery_has_group(observed: &Observed, followed: &PublicKey) -> bool {
+    let followed_hex = followed.to_hex();
+    observed.rows.values().any(|row| {
+        row.event.kind.as_u16() == 39002
+            && tag_value(row, "d").as_deref() == Some(GROUP)
+            && row.event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().map(String::as_str) == Some("p")
+                    && values.get(1).map(String::as_str) == Some(followed_hex.as_str())
+            })
+    })
 }
 
 fn verify_window(context: &Context, group: &nip29::Group) -> Result<(), String> {
@@ -395,6 +417,193 @@ fn verify_publications(context: &Context, scope: &nip29::RelayScope) -> Result<(
     Ok(())
 }
 
+fn live_adversarial(args: Args) -> Result<(), String> {
+    let context = Context::open(&args)?;
+    let scope = context.scope()?;
+    let group = scope.group(GROUP);
+
+    let metadata_subscription = context
+        .engine
+        .observe(metadata_query(&context, &scope)?, None)
+        .map_err(display)?;
+    let mut metadata = Observed::default();
+    wait_until(
+        &metadata_subscription,
+        context.settle,
+        &mut metadata,
+        |state| state.rows_of_kind(39000).len() == 2,
+    )?;
+
+    let discovery_subscription = context
+        .engine
+        .observe(follows_discovery_query(&context, &scope)?, None)
+        .map_err(display)?;
+    let mut discovery = Observed::default();
+    wait_until(
+        &discovery_subscription,
+        context.settle,
+        &mut discovery,
+        |state| discovery_has_group(state, &context.followed),
+    )?;
+
+    let chat_query = group.read(kinds([9])).map_err(display)?;
+    let cancelled_subscription = context
+        .engine
+        .observe(chat_query.clone(), None)
+        .map_err(display)?;
+    let surviving_subscription = context.engine.observe(chat_query, None).map_err(display)?;
+    let mut cancelled_rows = Observed::default();
+    let mut surviving_rows = Observed::default();
+    wait_until(
+        &cancelled_subscription,
+        context.settle,
+        &mut cancelled_rows,
+        |state| state.rows_of_kind(9).len() >= 27,
+    )?;
+    wait_until(
+        &surviving_subscription,
+        context.settle,
+        &mut surviving_rows,
+        |state| state.rows_of_kind(9).len() >= 27,
+    )?;
+
+    let shared_wire = wait_for_group_filter_counts(&context, 1)?;
+    drop(cancelled_subscription);
+    let after_one_cancel = wait_for_group_filter_counts(&context, 1)?;
+    ensure(
+        shared_wire == after_one_cancel,
+        format!(
+            "cancelling one shared observation changed the surviving wire demand: before={shared_wire:?} after={after_one_cancel:?}"
+        ),
+    )?;
+
+    stage_round_trip(&args, "mutate-live-inputs")?;
+    wait_until(
+        &metadata_subscription,
+        context.settle,
+        &mut metadata,
+        |state| {
+            metadata_names(state).is_ok_and(|names| {
+                names.get(&context.relay_a).map(String::as_str) == Some("Bitcoin Cash live")
+                    && names.get(&context.relay_b).map(String::as_str)
+                        == Some("Bitcoin (real) live")
+            })
+        },
+    )?;
+    wait_until(
+        &surviving_subscription,
+        context.settle,
+        &mut surviving_rows,
+        |state| state.has_source_count(LIVE_CHAT, 2),
+    )?;
+    wait_until(
+        &discovery_subscription,
+        context.settle,
+        &mut discovery,
+        |state| !discovery_has_group(state, &context.followed),
+    )?;
+    println!(
+        "PROOF live_mutation metadata={:?} follows_removed=true surviving_chat_sources=2 shared_wire={after_one_cancel:?}",
+        metadata_names(&metadata)?
+    );
+
+    stage_round_trip(&args, "restore-follow")?;
+    wait_until(
+        &discovery_subscription,
+        context.settle,
+        &mut discovery,
+        |state| discovery_has_group(state, &context.followed),
+    )?;
+    println!("PROOF live_follow_readded group={GROUP} observation_reused=true");
+
+    drop(surviving_subscription);
+    let after_last_cancel = wait_for_group_filter_counts(&context, 0)?;
+    println!(
+        "PROOF shared_cancellation before={shared_wire:?} after_one={after_one_cancel:?} after_last={after_last_cancel:?}"
+    );
+    println!("PASS live-adversarial");
+    drop(metadata_subscription);
+    drop(discovery_subscription);
+    context.shutdown();
+    Ok(())
+}
+
+fn wait_for_group_filter_counts(
+    context: &Context,
+    expected_per_relay: usize,
+) -> Result<BTreeMap<RelayUrl, usize>, String> {
+    let deadline = Instant::now() + context.settle;
+    loop {
+        let snapshot = context
+            .engine
+            .observe_diagnostics()
+            .map_err(display)?
+            .recv()
+            .ok_or_else(|| "diagnostics ended before its current snapshot".to_string())?;
+        let counts = group_filter_counts(&snapshot, context);
+        if counts.len() == 2 && counts.values().all(|count| *count == expected_per_relay) {
+            return Ok(counts);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "group wire-filter count did not reach {expected_per_relay} per relay: {counts:?}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn group_filter_counts(
+    snapshot: &DiagnosticsSnapshot,
+    context: &Context,
+) -> BTreeMap<RelayUrl, usize> {
+    snapshot
+        .relays
+        .iter()
+        .filter(|relay| relay.relay == context.relay_a || relay.relay == context.relay_b)
+        .map(|relay| {
+            let count = relay
+                .filters
+                .iter()
+                .filter(|filter| {
+                    filter.contains("\"kinds\":[9]")
+                        && filter.contains("#h")
+                        && filter.contains(GROUP)
+                })
+                .count();
+            (relay.relay.clone(), count)
+        })
+        .collect()
+}
+
+fn stage_round_trip(args: &Args, name: &str) -> Result<(), String> {
+    let stage_dir = args
+        .stage_dir
+        .as_ref()
+        .ok_or_else(|| format!("{name} requires --stage-dir"))?;
+    fs::create_dir_all(stage_dir).map_err(|error| {
+        format!(
+            "could not create stage directory {}: {error}",
+            stage_dir.display()
+        )
+    })?;
+    let ready = stage_dir.join(format!("{name}.ready"));
+    let proceed = stage_dir.join(format!("{name}.continue"));
+    fs::write(&ready, b"ready\n")
+        .map_err(|error| format!("could not write stage file {}: {error}", ready.display()))?;
+    let deadline = Instant::now() + Duration::from_secs(args.settle_secs.saturating_mul(2).max(1));
+    while !proceed.is_file() {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for stage continuation {}",
+                proceed.display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
 fn provenance_growth(args: Args) -> Result<(), String> {
     let context = Context::open(&args)?;
     let group = context.scope()?.group(GROUP);
@@ -494,6 +703,58 @@ fn restart(args: Args) -> Result<(), String> {
     drop(subscription);
     context.shutdown();
     Ok(())
+}
+
+fn restart_conflict(args: Args) -> Result<(), String> {
+    let context = Context::open(&args)?;
+    let scope = context.scope()?;
+    let subscription = context
+        .engine
+        .observe(metadata_query(&context, &scope)?, None)
+        .map_err(display)?;
+    let mut observed = Observed::default();
+    wait_until(&subscription, context.settle, &mut observed, |state| {
+        let statuses = source_statuses(state);
+        metadata_names(state).is_ok_and(|names| {
+            names.get(&context.relay_a).map(String::as_str) == Some("Bitcoin Cash live")
+                && names.get(&context.relay_b).map(String::as_str) == Some("Bitcoin (real) live")
+                && statuses.get(&context.relay_a) == Some(&SourceStatus::Requesting)
+                && statuses.contains_key(&context.relay_b)
+                && statuses.get(&context.relay_b) != Some(&SourceStatus::Requesting)
+        })
+    })?;
+    let before = source_statuses(&observed);
+    ensure(
+        before.get(&context.relay_b) != Some(&SourceStatus::Requesting),
+        format!("relay B was expected offline before restart proof: {before:?}"),
+    )?;
+    signal_ready(&args)?;
+    println!(
+        "PROOF restart_conflict_offline metadata={:?} cached_sources=2 statuses={before:?}",
+        metadata_names(&observed)?
+    );
+
+    wait_until(&subscription, context.settle, &mut observed, |state| {
+        source_statuses(state).get(&context.relay_b) == Some(&SourceStatus::Requesting)
+    })?;
+    println!(
+        "PROOF restart_conflict_reconnected metadata={:?} statuses={:?}",
+        metadata_names(&observed)?,
+        source_statuses(&observed)
+    );
+    println!("PASS restart-conflict");
+    drop(subscription);
+    context.shutdown();
+    Ok(())
+}
+
+fn source_statuses(observed: &Observed) -> BTreeMap<RelayUrl, SourceStatus> {
+    observed
+        .evidence
+        .iter()
+        .flat_map(|branch| branch.sources.iter())
+        .map(|source| (source.relay.clone(), source.status))
+        .collect()
 }
 
 fn wait_for_write(

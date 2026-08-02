@@ -78,6 +78,34 @@ cargo run --quiet -p nmp-consumer-nip29 -- online \
     "${common[@]}" --store "$evidence_dir/online.redb" \
     | tee "$evidence_dir/online.log"
 
+stage_dir="$evidence_dir/live-stages"
+mkdir -p "$stage_dir"
+cargo run --quiet -p nmp-consumer-nip29 -- live-adversarial \
+    "${common[@]}" --store "$evidence_dir/adversarial.redb" --stage-dir "$stage_dir" \
+    >"$evidence_dir/live-adversarial.log" 2>&1 &
+adversarial_pid=$!
+wait_for_ready "$stage_dir/mutate-live-inputs.ready" "$adversarial_pid" live-adversarial
+"$harness" metadata-conflict "$run_dir" | tee "$evidence_dir/metadata-conflict.log"
+"$harness" follow-remove "$run_dir" | tee "$evidence_dir/follow-remove.log"
+"$harness" chat-append "$run_dir" | tee "$evidence_dir/chat-append.log"
+: > "$stage_dir/mutate-live-inputs.continue"
+wait_for_ready "$stage_dir/restore-follow.ready" "$adversarial_pid" live-adversarial
+"$harness" follow-add "$run_dir" | tee "$evidence_dir/follow-add.log"
+: > "$stage_dir/restore-follow.continue"
+wait "$adversarial_pid"
+sed -n '/^PROOF\|^PASS\|^FAIL/p' "$evidence_dir/live-adversarial.log"
+
+"$harness" relay-down b "$run_dir" | tee "$evidence_dir/conflict-relay-b-down.log"
+conflict_ready="$evidence_dir/restart-conflict.ready"
+cargo run --quiet -p nmp-consumer-nip29 -- restart-conflict \
+    "${common[@]}" --store "$evidence_dir/adversarial.redb" --ready-file "$conflict_ready" \
+    >"$evidence_dir/restart-conflict.log" 2>&1 &
+conflict_pid=$!
+wait_for_ready "$conflict_ready" "$conflict_pid" restart-conflict
+"$harness" relay-up b "$run_dir" | tee "$evidence_dir/conflict-relay-b-up.log"
+wait "$conflict_pid"
+sed -n '/^PROOF\|^PASS\|^FAIL/p' "$evidence_dir/restart-conflict.log"
+
 "$harness" relay-down b "$run_dir" | tee "$evidence_dir/relay-b-down.log"
 growth_ready="$evidence_dir/provenance-growth.ready"
 cargo run --quiet -p nmp-consumer-nip29 -- provenance-growth \
@@ -107,6 +135,8 @@ cleanup_needed=0
 
 sed -n '/^PROOF\|^PASS\|^FAIL/p' \
     "$evidence_dir/online.log" \
+    "$evidence_dir/live-adversarial.log" \
+    "$evidence_dir/restart-conflict.log" \
     "$evidence_dir/provenance-growth.log" \
     "$evidence_dir/restart.log" \
     > "$evidence_dir/proof-lines.txt"

@@ -35,6 +35,23 @@ func withTimeout<T: Sendable>(
     }
 }
 
+func pollUntil(
+    seconds: UInt64,
+    predicate: @escaping @Sendable () async throws -> Bool
+) async throws {
+    try await withTimeout(seconds: seconds) {
+        while !(try await predicate()) {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+}
+
+func waitForFile(_ path: String, seconds: UInt64) async throws {
+    try await pollUntil(seconds: seconds) {
+        FileManager.default.fileExists(atPath: path)
+    }
+}
+
 func waitForRows(
     _ query: NMPQuery,
     seconds: UInt64,

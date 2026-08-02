@@ -3,8 +3,10 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Online,
+    LiveAdversarial,
     ProvenanceGrowth,
     Restart,
+    RestartConflict,
 }
 
 #[derive(Debug)]
@@ -18,6 +20,7 @@ pub struct Args {
     pub writer_secret_file: PathBuf,
     pub store_path: PathBuf,
     pub ready_file: Option<PathBuf>,
+    pub stage_dir: Option<PathBuf>,
     pub settle_secs: u64,
 }
 
@@ -37,8 +40,10 @@ impl Args {
         let mut values = argv;
         let mode = match values.next().as_deref() {
             Some("online") => Mode::Online,
+            Some("live-adversarial") => Mode::LiveAdversarial,
             Some("provenance-growth") => Mode::ProvenanceGrowth,
             Some("restart") => Mode::Restart,
+            Some("restart-conflict") => Mode::RestartConflict,
             Some("--help" | "-h" | "help") => {
                 usage();
                 std::process::exit(0);
@@ -55,6 +60,7 @@ impl Args {
         let mut writer_secret_file = None;
         let mut store_path = None;
         let mut ready_file = None;
+        let mut stage_dir = None;
         let mut settle_secs = 20;
         while let Some(flag) = values.next() {
             let value = values
@@ -69,6 +75,7 @@ impl Args {
                 "--writer-secret-file" => writer_secret_file = Some(value.into()),
                 "--store" => store_path = Some(value.into()),
                 "--ready-file" => ready_file = Some(value.into()),
+                "--stage-dir" => stage_dir = Some(value.into()),
                 "--settle-secs" => {
                     settle_secs = value
                         .parse::<u64>()
@@ -88,6 +95,7 @@ impl Args {
             writer_secret_file: required("--writer-secret-file", writer_secret_file)?,
             store_path: required("--store", store_path)?,
             ready_file,
+            stage_dir,
             settle_secs,
         })
     }
@@ -98,11 +106,13 @@ fn required<T>(name: &str, value: Option<T>) -> Result<T, String> {
 }
 
 fn usage() {
-    eprintln!("usage: nmp-nip29-consumer <online|provenance-growth|restart>");
+    eprintln!(
+        "usage: nmp-nip29-consumer <online|live-adversarial|provenance-growth|restart|restart-conflict>"
+    );
     eprintln!("  --relay-a <ws-url> --relay-b <ws-url>");
     eprintln!("  --viewer <hex> --followed <hex> --outsider <hex>");
     eprintln!("  --writer-secret-file <path> --store <path>");
-    eprintln!("  [--ready-file <path>] [--settle-secs <seconds>]");
+    eprintln!("  [--ready-file <path>] [--stage-dir <path>] [--settle-secs <seconds>]");
 }
 
 #[cfg(test)]
