@@ -44,18 +44,8 @@ jobs:
 
       - name: Build the core XCFramework once
         id: apple_components
-        run: scripts/build-swift-xcframework.sh ${{ steps.apple_scope.outputs.mode }}
-
-      - name: Build the Swift package
-        id: swift_package
-        if: ${{ !cancelled() && steps.apple_components.outcome == 'success' }}
-        run: swift build
-        working-directory: Packages/NMP
-
-      - name: Test the Swift package
-        if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
         run: |
-          swift test --package-path Packages/NMP
+          scripts/build-swift-xcframework.sh ${{ steps.apple_scope.outputs.mode }}
           [[ -f tools/nip29-consumer-swift/Package.swift ]] || exit 0
           case "$(uname -m)" in
             x86_64)
@@ -93,3 +83,13 @@ jobs:
             tools/nip29-consumer-swift/run-capstone.sh \
             "$RUNNER_TEMP/nmp-nip29-swift-run" \
             "$RUNNER_TEMP/nmp-nip29-swift-evidence"
+
+      - name: Build the Swift package
+        id: swift_package
+        if: ${{ !cancelled() && steps.apple_components.outcome == 'success' }}
+        run: swift build
+        working-directory: Packages/NMP
+
+      - name: Test the Swift package
+        if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
+        run: swift test --package-path Packages/NMP

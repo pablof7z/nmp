@@ -59,8 +59,13 @@ enum Probe {
 
         let chatQuery = try context.engine.observe(group.read(NMPFilter(kinds: [9])))
         try await Task.sleep(nanoseconds: 1_200_000_000)
-        let chats = try await waitForRows(chatQuery, seconds: args.settleSeconds) {
-            rows($0, kind: 9).count >= 27 && hasContent($0, sharedChat, sourceCount: 2)
+        let chats = try await waitForRows(chatQuery, seconds: args.settleSeconds) { batch in
+            let kindRows = rows(batch, kind: 9)
+            let sharedSources = kindRows
+                .first(where: { $0.content == sharedChat })?
+                .sources.count ?? 0
+            print("TRACE swift_kind9 distinct=\(kindRows.count) shared_sources=\(sharedSources) evidence_sources=\(sourceEvidence(batch).map { "\($0.relay):\($0.status)" })")
+            return kindRows.count >= 27 && sharedSources == 2
         }
         chatQuery.cancel()
         try require(rows(chats, kind: 9).count == 27,
