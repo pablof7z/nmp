@@ -21,6 +21,9 @@ members = [
     "crates/nmp",
     "crates/nmp-consumer-check",
     "crates/nmp-demo",
+    # #1201: a real-relay application falsifier for the supported NIP-29
+    # facade. It deliberately names `nmp` as its only Rust dependency.
+    "tools/nip29-consumer",
     "crates/nmp-ffi",
     "crates/nmp-bdd",
     "crates/nmp-parity",

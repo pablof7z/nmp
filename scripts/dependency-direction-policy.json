@@ -86,6 +86,7 @@
       "nmp-nip65-consumer-check": "application",
       "nmp-ffi": "sdk",
       "nmp-consumer-check": "application",
+      "nmp-consumer-nip29": "application",
       "nmp-demo": "application",
       "nmp-bdd": "verification",
       "nmp-parity": "verification",
