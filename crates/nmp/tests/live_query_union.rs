@@ -18,22 +18,44 @@
 //! | `an_over_cap_union_refuses_the_whole_declaration` | truncate to the ceiling instead of refusing |
 //! | `a_window_bounds_the_union_globally` | give each branch its own window target |
 //! | `only_the_branch_tells_two_identical_resolver_facts_apart` | drop or fix the canonical branch on an observation fact |
+//! | `a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed` | keep the branches installed before the failing one |
+//! | `one_branchs_refresh_failure_retracts_no_sibling_row` | project the branches whose read succeeded and drop the one that failed |
+//! | `each_redeclared_branch_decides_freshness_from_its_own_stored_coverage` | make ONE freshness decision for the observation and give it to every branch |
+//! | `a_redeclared_window_starts_again_at_its_initial_size` | carry a window's grown target across the restart |
+//!
+//! The graph-construction half of the partial-open rollback is proved by
+//! `nmp::core::history_load_failure_tests::a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it`,
+//! which needs the crate-internal ownership census: a branch abandoned before
+//! its handle is registered leaves residue only in the resolver graph, which
+//! `active_demand` (computed from the handle table) reports as absent.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use nmp::mechanism::core::{
     AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, ObservationEvidence,
     ObservationId, RowDelta, ShortfallFact,
 };
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, Demand, Filter, IdentityField, LiveQuery, LiveQueryError,
-    SourceAuthority,
+    AccessContext, Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField,
+    LiveQuery, LiveQueryError, SourceAuthority,
 };
 use nmp_router::{FixtureRoutingFacts, WireOp};
-use nmp_store::{EventStore, MemoryStore, RelayObserved};
-use nostr::{EventId, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
+use nmp_store::{
+    AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
+    CoverageInterval, CoverageKey, DeliveryAttempt, DeliveryIntent, DeliveryReceipt,
+    DeliveryRouteRevision, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
+    IntentId, MemoryStore, PersistenceError, PromoteOutcome, RedbStore, RelayObserved,
+    RetractReason, StoredEvent,
+};
+use nostr::{Event, EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
 
 const KIND: u16 = 39_000;
+/// The second branch's selection. Distinct from [`KIND`] so a fault can be
+/// aimed at ONE branch's canonical read by what it asks for, rather than by
+/// which read happens to come first.
+const OTHER_KIND: u16 = 39_001;
 
 fn relay(host: &str) -> RelayUrl {
     RelayUrl::parse(&format!("wss://{host}.example")).expect("fixture relay url")
@@ -48,8 +70,12 @@ fn core_over(store: MemoryStore) -> EngineCore<MemoryStore> {
 }
 
 fn selection() -> Filter {
+    selection_of(KIND)
+}
+
+fn selection_of(kind: u16) -> Filter {
     Filter {
-        kinds: Some(BTreeSet::from([KIND])),
+        kinds: Some(BTreeSet::from([kind])),
         ..Filter::default()
     }
 }
@@ -58,8 +84,12 @@ fn selection() -> Filter {
 /// only rows that host actually served (`CacheMode::Strict`). This is the
 /// shape a host-scoped protocol helper lowers to.
 fn host_branch(host: &RelayUrl) -> Demand {
+    host_branch_of_kind(host, KIND)
+}
+
+fn host_branch_of_kind(host: &RelayUrl, kind: u16) -> Demand {
     let mut demand = Demand::new(
-        selection(),
+        selection_of(kind),
         SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
         AccessContext::Public,
     )
@@ -83,10 +113,21 @@ fn store_event(
     identifier: &str,
     served_by: &[&RelayUrl],
 ) -> EventId {
+    store_event_of_kind(store, keys, KIND, created_at, identifier, served_by)
+}
+
+fn store_event_of_kind<S: EventStore>(
+    store: &mut S,
+    keys: &Keys,
+    kind: u16,
+    created_at: u64,
+    identifier: &str,
+    served_by: &[&RelayUrl],
+) -> EventId {
     let event = UnsignedEvent::new(
         keys.public_key(),
         Timestamp::from(created_at),
-        Kind::from_u16(KIND),
+        Kind::from_u16(kind),
         vec![nostr::Tag::identifier(identifier)],
         String::new(),
     )
@@ -716,5 +757,524 @@ fn only_the_branch_tells_two_identical_resolver_facts_apart() {
         vec![1, 2],
         "and the sequence is monotonic across the WHOLE observation, never \
          restarted per branch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fault injection for the three proofs below.
+//
+// The existing single-branch rollback proof
+// (`observation_open_failures_are_typed_leak_free_and_leave_runtime_usable`)
+// arms a fault that fails the NEXT canonical read, so on a union it can only
+// ever fail branch 0 and nothing is rolled back. This store instead fails the
+// read that asks for ONE named kind, and delegates every other door to a
+// healthy `MemoryStore`. Because canonical branch order sorts on the
+// selection first, aiming the fault at `OTHER_KIND` fails a LATER branch with
+// the earlier one already opened -- the case a per-branch subscribe-and-merge
+// implementation gets wrong.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct BranchReadFault(Rc<Cell<Option<u16>>>);
+
+impl BranchReadFault {
+    fn aim_at(&self, kind: u16) {
+        self.0.set(Some(kind));
+    }
+
+    fn disarm(&self) {
+        self.0.set(None);
+    }
+
+    fn strikes(&self, filter: &nostr::Filter) -> bool {
+        let Some(armed) = self.0.get() else {
+            return false;
+        };
+        filter
+            .kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.contains(&Kind::from_u16(armed)))
+    }
+}
+
+struct BranchReadFailureStore {
+    inner: MemoryStore,
+    fault: BranchReadFault,
+}
+
+impl BranchReadFailureStore {
+    fn new(inner: MemoryStore, fault: BranchReadFault) -> Self {
+        Self { inner, fault }
+    }
+}
+
+impl EventStore for BranchReadFailureStore {
+    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if self.fault.strikes(filter) {
+            return Err(PersistenceError::invariant(
+                "injected branch canonical read failure",
+            ));
+        }
+        self.inner.query(filter)
+    }
+
+    fn query_newest_before(
+        &self,
+        filter: &nostr::Filter,
+        before: EventCursor,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        if self.fault.strikes(filter) {
+            return Err(PersistenceError::invariant(
+                "injected branch canonical read failure",
+            ));
+        }
+        self.inner.query_newest_before(filter, before, limit)
+    }
+
+    fn insert(
+        &mut self,
+        event: Event,
+        from: RelayObserved,
+    ) -> Result<InsertOutcome, PersistenceError> {
+        self.inner.insert(event, from)
+    }
+    fn remove(
+        &mut self,
+        id: EventId,
+        reason: RetractReason,
+    ) -> Result<Option<StoredEvent>, PersistenceError> {
+        self.inner.remove(id, reason)
+    }
+    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
+        self.inner.expire_due(now)
+    }
+    fn next_expiration(&self) -> Option<Timestamp> {
+        self.inner.next_expiration()
+    }
+    fn record_coverage(
+        &mut self,
+        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
+    ) -> Result<(), PersistenceError> {
+        self.inner.record_coverage(claims)
+    }
+    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
+        self.inner.get_coverage(key, relay)
+    }
+    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
+        self.inner.gc(claims)
+    }
+    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
+        self.inner.accept_write(accept)
+    }
+    fn accept_ephemeral(
+        &mut self,
+        frozen_id: EventId,
+        expected_pubkey: PublicKey,
+    ) -> Result<u64, PersistenceError> {
+        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
+    }
+    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
+        self.inner.mark_ephemeral_signed(receipt_id)
+    }
+    fn cancel_ephemeral_receipt(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
+        self.inner.cancel_ephemeral_receipt(receipt_id)
+    }
+    fn promote_signed(
+        &mut self,
+        intent_id: IntentId,
+        sig: nostr::secp256k1::schnorr::Signature,
+    ) -> Result<PromoteOutcome, PersistenceError> {
+        self.inner.promote_signed(intent_id, sig)
+    }
+    fn compensate_write(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write(intent_id)
+    }
+    fn compensate_write_with_state(
+        &mut self,
+        intent_id: IntentId,
+        reason: CompensationReason,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        self.inner.compensate_write_with_state(intent_id, reason)
+    }
+    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
+        self.inner.recover_delivery()
+    }
+    fn reattach_receipt(
+        &self,
+        receipt_id: u64,
+    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
+        self.inner.reattach_receipt(receipt_id)
+    }
+    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+        self.inner.lookup_correlation(token)
+    }
+    fn record_route_revision(
+        &mut self,
+        intent_id: IntentId,
+        relays: BTreeSet<RelayUrl>,
+    ) -> Result<DeliveryRouteRevision, PersistenceError> {
+        self.inner.record_route_revision(intent_id, relays)
+    }
+    fn recover_route_revisions(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
+        self.inner.recover_route_revisions(intent_id)
+    }
+    fn recover_attempts(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
+        self.inner.recover_attempts(intent_id)
+    }
+}
+
+fn degraded(effects: &[Effect]) -> Option<String> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::EmitDiagnostics(snapshot) => snapshot.store_degraded.clone(),
+        _ => None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Falsifier: "branch K's open failure rolls back 0..K-1 with no wire owner."
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed() {
+    let (a, b, c) = (relay("a"), relay("b"), relay("c"));
+    let fault = BranchReadFault::default();
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        BranchReadFailureStore::new(MemoryStore::new(), fault.clone()),
+        FixtureRoutingFacts::new(),
+        10,
+    );
+
+    let first = host_branch_of_kind(&a, KIND);
+    let failing = host_branch_of_kind(&b, OTHER_KIND);
+    let query = union_of([first.clone(), failing.clone()], None);
+    assert_eq!(
+        query
+            .branches()
+            .iter()
+            .position(|branch| branch == &failing),
+        Some(1),
+        "the fault must be aimed at a LATER branch: a failure at branch 0 has \
+         nothing to roll back and proves nothing about a union"
+    );
+
+    fault.aim_at(OTHER_KIND);
+    let refused = core.handle(EngineMsg::Subscribe(query));
+    fault.disarm();
+
+    assert_eq!(
+        degraded(&refused).as_deref(),
+        Some("durable-store persistence failure: injected branch canonical read failure"),
+        "the injected read must actually have fired; without this the rest of \
+         this test would pass over a perfectly healthy open"
+    );
+    assert!(
+        !refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitRows(..))),
+        "a refused open owns no observation and delivers no frame"
+    );
+    assert!(
+        refused
+            .iter()
+            .all(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
+        "a refused open stages no wire, relay, attribution or sibling-frame \
+         effect: {refused:?}"
+    );
+
+    // The absence of residue, proved positively rather than by asserting the
+    // open failed. The first branch WAS installed before the second failed, so
+    // an implementation that forgets to withdraw it keeps its demand atom
+    // here...
+    assert_eq!(
+        core.active_demand(),
+        BTreeSet::new(),
+        "no branch of a refused union retains a handle or its demand atom"
+    );
+    // ...and hands relay "a" a REQ on the very next recompile, which an
+    // unrelated observation over relay "c" forces.
+    let later = core.handle(EngineMsg::Subscribe(LiveQuery::single(host_branch(&c))));
+    assert_eq!(
+        requested_relays(&later),
+        BTreeSet::from([c]),
+        "the first branch's relay request was RELEASED, not merely left \
+         un-emitted by the refusal itself"
+    );
+    assert!(
+        !closed_relays(&later).contains(&a),
+        "nothing was ever opened for relay \"a\", so nothing is closed for it \
+         either -- a CLOSE here would mean a wire owner had survived the refusal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Falsifier: "emit successful reads after a sibling store failure."
+// ---------------------------------------------------------------------------
+
+#[test]
+fn one_branchs_refresh_failure_retracts_no_sibling_row() {
+    let (a, b) = (relay("a"), relay("b"));
+    let keys = Keys::generate();
+    let fault = BranchReadFault::default();
+    let mut store = BranchReadFailureStore::new(MemoryStore::new(), fault.clone());
+    let from_a = store_event_of_kind(&mut store, &keys, KIND, 200, "a", &[&a]);
+    let from_b = store_event_of_kind(&mut store, &keys, OTHER_KIND, 201, "b", &[&b]);
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
+
+    let opened = core.handle(EngineMsg::Subscribe(union_of(
+        [
+            host_branch_of_kind(&a, KIND),
+            host_branch_of_kind(&b, OTHER_KIND),
+        ],
+        None,
+    )));
+    let id = observation(&opened);
+    let mut projection = Projection::default();
+    projection.apply(&opened, id);
+    assert_eq!(
+        projection.rows.keys().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([from_a, from_b]),
+        "the fixture must actually deliver both branches' rows first"
+    );
+    let prior_rows = projection.rows.clone();
+    let prior_evidence = projection.evidence.clone();
+    assert_eq!(prior_evidence.len(), 2);
+
+    // One branch's local read fails while the whole query refreshes.
+    fault.aim_at(OTHER_KIND);
+    let refreshed = core.handle(EngineMsg::SetActivePubkey(Some(
+        Keys::generate().public_key(),
+    )));
+    fault.disarm();
+
+    let retracted: Vec<EventId> = frames(&refreshed, id)
+        .iter()
+        .flat_map(|(deltas, _)| deltas.iter())
+        .filter_map(|delta| match delta {
+            RowDelta::Removed(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        retracted.is_empty(),
+        "a branch that could not be read is a branch NOTHING is known about; \
+         projecting only the branches that succeeded blinks its rows out as \
+         Removed: {retracted:?}"
+    );
+
+    projection.apply(&refreshed, id);
+    assert_eq!(
+        projection.rows, prior_rows,
+        "the app keeps every row it already had"
+    );
+    assert_eq!(
+        projection.evidence, prior_evidence,
+        "and both branches' evidence, byte-identical -- including the failing \
+         branch's own prior entry, which is not replaced by an empty one"
+    );
+    assert_eq!(
+        degraded(&refreshed).as_deref(),
+        Some("durable-store persistence failure: injected branch canonical read failure"),
+        "the failure is reported as an ordinary degraded diagnostic instead"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Falsifier: "restart redeclaration reuses cache/coverage honestly, re-decides
+// freshness, and resets Window."
+// ---------------------------------------------------------------------------
+
+/// A branch pinned to one host that will go to the relay unless its OWN
+/// persisted coverage already satisfies it.
+fn max_age_branch(host: &RelayUrl, keys: &Keys) -> Demand {
+    let mut demand = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([KIND])),
+            authors: Some(Binding::Literal(BTreeSet::from([keys
+                .public_key()
+                .to_hex()]))),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
+        AccessContext::Public,
+    )
+    .expect("a one-relay pinned set is nonempty");
+    demand.freshness = Freshness::MaxAge { seconds: 3_600 };
+    demand
+}
+
+fn branch_atom(host: &RelayUrl, keys: &Keys) -> ContextualAtom {
+    ContextualAtom {
+        filter: nmp_grammar::ConcreteFilter {
+            kinds: Some(BTreeSet::from([KIND])),
+            authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
+            ..nmp_grammar::ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
+}
+
+#[test]
+fn each_redeclared_branch_decides_freshness_from_its_own_stored_coverage() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("union-restart-coverage.redb");
+    let keys = Keys::generate();
+    let (a, b) = (relay("a"), relay("b"));
+
+    // Only branch A's own scoped coverage is durable. Branch B's host was
+    // never reconciled.
+    {
+        let mut store = RedbStore::open(&path).expect("create durable store");
+        store
+            .record_coverage(&[(
+                branch_atom(&a, &keys),
+                a.clone(),
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(99_000u64)),
+            )])
+            .expect("fixture coverage");
+    }
+
+    let mut restarted = EngineCore::new(RedbStore::open(&path).expect("reopen durable store"), 10);
+    assert!(
+        restarted.recover_on_boot().is_empty(),
+        "a live query is ephemeral: nothing durable continues the previous \
+         observation across a restart"
+    );
+    restarted.handle(EngineMsg::Tick(Timestamp::from(100_000u64)));
+
+    let query = union_of([max_age_branch(&a, &keys), max_age_branch(&b, &keys)], None);
+    let covered = query
+        .branches()
+        .iter()
+        .position(|branch| branch == &max_age_branch(&a, &keys))
+        .expect("the covered branch survives canonicalization");
+    let effects = restarted.handle(EngineMsg::Subscribe(query));
+
+    assert_eq!(
+        requested_relays(&effects),
+        BTreeSet::from([b.clone()]),
+        "each branch re-decides freshness from ITS OWN persisted coverage: \
+         relay \"a\" is already fresh enough, relay \"b\" was never reconciled \
+         and must still be asked"
+    );
+
+    let id = observation(&effects);
+    let mut projection = Projection::default();
+    projection.apply(&effects, id);
+    assert_eq!(projection.evidence.len(), 2);
+    assert_eq!(
+        projection.evidence[covered]
+            .sources
+            .iter()
+            .map(|source| (source.relay.clone(), source.reconciled_through))
+            .collect::<Vec<_>>(),
+        vec![(a, Some(Timestamp::from(99_000u64)))],
+        "the reopened branch carries its own durable watermark"
+    );
+    assert!(
+        projection.evidence[1 - covered]
+            .sources
+            .iter()
+            .all(|source| source.reconciled_through.is_none()),
+        "and its sibling borrows none of it: {:?}",
+        projection.evidence[1 - covered]
+    );
+}
+
+#[test]
+fn a_redeclared_window_starts_again_at_its_initial_size() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("union-restart-window.redb");
+    let keys = Keys::generate();
+    let (a, b) = (relay("a"), relay("b"));
+    let window = || {
+        HistoryQuery::new(
+            union_of(
+                [
+                    host_branch_of_kind(&a, KIND),
+                    host_branch_of_kind(&b, OTHER_KIND),
+                ],
+                None,
+            ),
+            2,
+            6,
+        )
+    };
+    // The window's CURRENT contents: an advance emits its `Requesting` beat
+    // and then its settled frame in one turn, so the last frame of a turn is
+    // the window as the app now holds it.
+    let batch = |effects: &[Effect]| {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EmitHistory(id, batch) => Some((*id, batch.rows.len())),
+                _ => None,
+            })
+            .next_back()
+            .expect("a windowed turn emits at least one batch")
+    };
+
+    let (before_session, grown) = {
+        let mut store = RedbStore::open(&path).expect("create durable store");
+        for index in 0..3u64 {
+            store_event_of_kind(
+                &mut store,
+                &keys,
+                KIND,
+                200 + index * 2,
+                &format!("a{index}"),
+                &[&a],
+            );
+            store_event_of_kind(
+                &mut store,
+                &keys,
+                OTHER_KIND,
+                201 + index * 2,
+                &format!("b{index}"),
+                &[&b],
+            );
+        }
+        let mut core = EngineCore::new(store, 10);
+        let opened = core.handle(EngineMsg::SubscribeHistory(window()));
+        let (session, rows) = batch(&opened);
+        assert_eq!(rows, 2, "the window opens at its declared initial size");
+        core.handle(EngineMsg::RequestRows(session, 4));
+        let committed = core.handle(EngineMsg::CommitHistoryLoad(session));
+        (session, batch(&committed).1)
+    };
+    assert_eq!(
+        grown, 4,
+        "the fixture must actually have grown the window before the restart"
+    );
+
+    let mut restarted = EngineCore::new(RedbStore::open(&path).expect("reopen durable store"), 10);
+    assert!(restarted.recover_on_boot().is_empty());
+    let redeclared = restarted.handle(EngineMsg::SubscribeHistory(window()));
+    let (after_session, rows) = batch(&redeclared);
+
+    assert_eq!(
+        rows, 2,
+        "redeclaring the same window after a restart starts it again at its \
+         INITIAL size; carrying the grown target across would return {grown}"
+    );
+    assert_eq!(
+        after_session, before_session,
+        "and the session identity is minted afresh from zero -- no durable \
+         composite continuation, branch id or query receipt was kept"
     );
 }
