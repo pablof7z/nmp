@@ -49,6 +49,7 @@ kind allow-list.
 
 ```sh
 tools/nip29-consumer-harness/harness.sh metadata-conflict /tmp/nmp-nip29-run
+tools/nip29-consumer-harness/harness.sh chat-append /tmp/nmp-nip29-run
 tools/nip29-consumer-harness/harness.sh follow-remove /tmp/nmp-nip29-run
 tools/nip29-consumer-harness/harness.sh follow-add /tmp/nmp-nip29-run
 tools/nip29-consumer-harness/harness.sh relay-down a /tmp/nmp-nip29-run

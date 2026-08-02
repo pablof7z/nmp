@@ -23,6 +23,7 @@ usage:
   harness.sh start [--port-a PORT] [--port-b PORT] RUN_DIR
   harness.sh status RUN_DIR
   harness.sh metadata-conflict RUN_DIR
+  harness.sh chat-append RUN_DIR
   harness.sh follow-remove RUN_DIR
   harness.sh follow-add RUN_DIR
   harness.sh relay-down a|b RUN_DIR
@@ -515,6 +516,19 @@ metadata_conflict_command() {
     note "published divergent metadata changes at $now"
 }
 
+chat_append_command() {
+    local run_dir
+    run_dir=$(canonical_existing_run_dir "$1")
+    local relay_a relay_b now
+    relay_a=$(state_value "$run_dir" '.relays.a.ws')
+    relay_b=$(state_value "$run_dir" '.relays.b.ws')
+    now=$(next_mutation_time "$run_dir")
+    sign_and_publish "$run_dir" writer "$run_dir/seed/shared-kind-9-live-$now.json" \
+        "$relay_a,$relay_b" --created-at "$now" -k 9 -h bitcoin \
+        -c 'shared live chat after sibling cancellation'
+    note "published shared live chat mutation at $now"
+}
+
 follow_command() {
     local action=$1
     local run_dir
@@ -595,6 +609,10 @@ main() {
         metadata-conflict)
             (($# == 1)) || die "metadata-conflict requires RUN_DIR"
             metadata_conflict_command "$1"
+            ;;
+        chat-append)
+            (($# == 1)) || die "chat-append requires RUN_DIR"
+            chat_append_command "$1"
             ;;
         follow-remove)
             (($# == 1)) || die "follow-remove requires RUN_DIR"
