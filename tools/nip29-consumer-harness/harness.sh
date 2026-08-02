@@ -282,13 +282,30 @@ host_process_is_owned() {
     [[ "$command_line" == *"$run_dir/bin/croissant"* ]]
 }
 
-wait_for_host_process_exit() {
+wait_for_host_process_ownership() {
     local run_dir=$1
     local suffix=$2
     local attempts=100
     local index
     for ((index = 0; index < attempts; index += 1)); do
-        if ! host_process_is_owned "$run_dir" "$suffix"; then
+        if host_process_is_owned "$run_dir" "$suffix"; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    return 1
+}
+
+wait_for_host_process_exit() {
+    local pid=$1
+    local attempts=100
+    local index state
+    for ((index = 0; index < attempts; index += 1)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        state=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+        if [[ "$state" == Z* ]]; then
             return 0
         fi
         sleep 0.05
@@ -325,7 +342,7 @@ start_host_relay() {
         OWNER_PUBLIC_KEY="$owner_public_key" \
         "$run_dir/bin/croissant" >> "$log_file" 2>&1 </dev/null &
     printf '%s\n' "$!" > "$pid_file"
-    if ! host_process_is_owned "$run_dir" "$suffix"; then
+    if ! wait_for_host_process_ownership "$run_dir" "$suffix"; then
         report_host_relay_log "$run_dir" "$suffix"
         die "host relay $suffix exited before ownership could be verified"
     fi
@@ -507,7 +524,7 @@ stop_host_relay() {
         host_process_is_owned "$run_dir" "$suffix" \
             || die "refusing to stop unowned process recorded for relay $suffix"
         kill "$pid"
-        wait_for_host_process_exit "$run_dir" "$suffix" \
+        wait_for_host_process_exit "$pid" \
             || die "host relay $suffix did not exit after SIGTERM"
     fi
     rm -f "$pid_file"
