@@ -376,9 +376,9 @@ public final class NMPEngine: Sendable {
     /// `AuthorOutboxes`/`Public` default isn't enough: declaring `.pinned`
     /// wire authority, a non-default `NMPAccessContext`, or a non-
     /// `.agnostic` `NMPCacheMode`. One demand is one branch, so this is
-    /// exactly `observe(NMPLiveQuery(branches: [demand]))`.
+    /// exactly `observe(.single(demand))`.
     public func observe(_ demand: NMPDemand, window: Window? = nil) throws -> NMPQuery {
-        try observe(NMPLiveQuery(branches: [demand]), window: window)
+        try observe(.single(demand), window: window)
     }
 
     /// Open a live, detachable query over several independent `NMPDemand`
