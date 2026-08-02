@@ -60,8 +60,13 @@ fun observeQuery(engine: NmpEngineInterface, query: NMPLiveQuery): Flow<RowBatch
 /** Shared pull loop for the unbounded (delta-folding) row observations.
  * `open` is the ONE difference between the `NMPFilter` and `NMPDemand` entry
  * points (which `NmpEngineInterface` verb actually opens the subscription),
- * run lazily per collection so the `Flow` stays cold. */
-private fun rowFlow(open: () -> NmpRowStream): Flow<RowBatch> =
+ * run lazily per collection so the `Flow` stays cold.
+ *
+ * `internal`, not `private`, for the same reason as [nextCommittedRowFrame]
+ * and [applyRowDelta] below: #1192 exercises this exact commit-then-fold-
+ * then-emit ordering against a scripted [NmpRowStream] with a real cancelled
+ * `Job`, which needs this loop directly rather than a live engine. */
+internal fun rowFlow(open: () -> NmpRowStream): Flow<RowBatch> =
     flow {
         val handle = open()
         try {

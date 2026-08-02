@@ -90,9 +90,9 @@ class RowPullCancellationTest {
 
     /**
      * #1192: the second half of #762's guarantee. [nextCommittedRowFrame]
-     * commits (acknowledges) a frame before returning it, but [NMPQuery.frames]
-     * and `Query.kt`'s own pull loop still apply/fold the delta and `emit` it
-     * afterward. If the collecting coroutine is cancelled in that window --
+     * commits (acknowledges) a frame before returning it, but [rowFlow]'s own
+     * pull loop still applies/folds the delta and `emit`s it afterward. If the
+     * collecting coroutine is cancelled in that window --
      * after commit, before emit -- the acknowledged transition must not just
      * disappear: `finally { handle.cancel() }` must withdraw the whole
      * observation, so no later pull ever continues from a step the collector
@@ -127,7 +127,6 @@ class RowPullCancellationTest {
                 )
             val pull = AcknowledgeThenCancelPull(frame)
             val stream = AcknowledgeThenCancelStream(pull)
-            val query = NMPQuery(stream)
             val dispatcher = ManualDispatcher()
             val collected = mutableListOf<RowBatch>()
 
@@ -135,7 +134,7 @@ class RowPullCancellationTest {
             job =
                 launch(dispatcher) {
                     try {
-                        query.frames.collect { collected.add(it) }
+                        rowFlow { stream }.collect { collected.add(it) }
                     } catch (_: CancellationException) {
                         // Expected: cancellation lands after acknowledgement,
                         // before this collector ever sees the row.
