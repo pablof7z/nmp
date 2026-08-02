@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 CROISSANT_REPOSITORY="https://github.com/pablof7z/croissant.git"
 CROISSANT_COMMIT="9c4c93e84852bd9aa6824060b74c56ab2ce812c2"
-GO_IMAGE="golang:1.25"
+GO_IMAGE="golang:1.25-bookworm"
+HARNESS_BACKEND="${NMP_NIP29_HARNESS_BACKEND:-docker}"
 DEFAULT_PORT_A=19888
 DEFAULT_PORT_B=19889
 MARKER_NAME=".nmp-nip29-consumer-harness"
@@ -41,12 +42,33 @@ require_command() {
 
 require_common_commands() {
     require_command curl
-    require_command docker
     require_command git
     require_command jq
     require_command nak
-    require_command sha256sum
-    require_command timeout
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        require_command shasum
+    fi
+    if ! command -v timeout >/dev/null 2>&1; then
+        require_command perl
+    fi
+}
+
+run_with_timeout() {
+    local seconds=$1
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    else
+        perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+    fi
+}
+
+short_hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -c1-12
+    else
+        shasum -a 256 | cut -c1-12
+    fi
 }
 
 validate_port() {
@@ -113,7 +135,7 @@ next_mutation_time() {
 
 port_is_open() {
     local port=$1
-    timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" >/dev/null 2>&1
+    run_with_timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" >/dev/null 2>&1
 }
 
 require_port_free() {
@@ -144,7 +166,7 @@ wait_for_group_snapshot() {
     local attempts=80
     local index
     for ((index = 0; index < attempts; index += 1)); do
-        if timeout 2 nak -q req -k 39000 -d "$group_id" "$relay" 2>/dev/null \
+        if run_with_timeout 2 nak -q req -k 39000 -d "$group_id" "$relay" 2>/dev/null \
             | jq -e 'select(.kind == 39000)' >/dev/null 2>&1; then
             return 0
         fi
@@ -178,15 +200,41 @@ build_croissant() {
     [[ "$(git -C "$source_dir" rev-parse HEAD)" == "$CROISSANT_COMMIT" ]] \
         || die "Croissant checkout did not resolve to the pinned commit"
 
-    docker run --rm \
-        --user "$(id -u):$(id -g)" \
-        -e GOCACHE=/tmp/go-build \
-        -e GOMODCACHE=/tmp/go-mod \
-        -v "$source_dir:/src:ro" \
-        -v "$output_dir:/out" \
-        -w /src \
-        "$GO_IMAGE" \
-        sh -c "go build -trimpath -ldflags='-X main.currentVersion=nmp-harness-$CROISSANT_COMMIT' -o /out/croissant ."
+    if [[ "$HARNESS_BACKEND" == docker ]]; then
+        require_command docker
+        docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e GOCACHE=/tmp/go-build \
+            -e GOMODCACHE=/tmp/go-mod \
+            -v "$source_dir:/src:ro" \
+            -v "$output_dir:/out" \
+            -w /src \
+            "$GO_IMAGE" \
+            sh -c "go build -trimpath -ldflags='-X main.currentVersion=nmp-harness-$CROISSANT_COMMIT' -o /out/croissant ."
+    elif [[ "$HARNESS_BACKEND" == host ]]; then
+        if command -v go >/dev/null 2>&1; then
+            (
+                cd "$source_dir"
+                go build -trimpath \
+                    -ldflags="-X main.currentVersion=nmp-harness-$CROISSANT_COMMIT" \
+                    -o "$output_dir/croissant" .
+            )
+        elif command -v docker >/dev/null 2>&1; then
+            docker run --rm \
+                --user "$(id -u):$(id -g)" \
+                -e GOCACHE=/tmp/go-build \
+                -e GOMODCACHE=/tmp/go-mod \
+                -v "$source_dir:/src:ro" \
+                -v "$output_dir:/out" \
+                -w /src \
+                "$GO_IMAGE" \
+                sh -c "go build -trimpath -ldflags='-X main.currentVersion=nmp-harness-$CROISSANT_COMMIT' -o /out/croissant ."
+        else
+            die "host backend requires Go (Docker may supply the build only)"
+        fi
+    else
+        die "unknown harness backend: $HARNESS_BACKEND (expected docker or host)"
+    fi
     [[ -x "$output_dir/croissant" ]] || die "Croissant build produced no executable"
 }
 
@@ -211,6 +259,62 @@ start_container() {
         --env "OWNER_PUBLIC_KEY=$owner_public_key" \
         "$GO_IMAGE" \
         /usr/local/bin/croissant >/dev/null
+}
+
+backend_for_run() {
+    state_value "$1" '.backend // "docker"'
+}
+
+host_pid_file() {
+    printf '%s/relay-%s.pid\n' "$1" "$2"
+}
+
+host_process_is_owned() {
+    local run_dir=$1
+    local suffix=$2
+    local pid_file pid command_line
+    pid_file=$(host_pid_file "$run_dir" "$suffix")
+    [[ -f "$pid_file" ]] || return 1
+    IFS= read -r pid < "$pid_file"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    [[ "$command_line" == *"$run_dir/bin/croissant"* ]]
+}
+
+start_host_relay() {
+    local run_dir=$1
+    local suffix=$2
+    local port=$3
+    local owner_public_key=$4
+    local relay_dir="$run_dir/relay-$suffix"
+    local log_file="$run_dir/witness/relay-$suffix.log"
+    local pid_file
+    pid_file=$(host_pid_file "$run_dir" "$suffix")
+    require_command nohup
+    mkdir -p "$relay_dir" "$run_dir/witness"
+    nohup env \
+        PORT="$port" \
+        HOST=127.0.0.1 \
+        DOMAIN="127.0.0.1:$port" \
+        DATAPATH="$relay_dir" \
+        OWNER_PUBLIC_KEY="$owner_public_key" \
+        "$run_dir/bin/croissant" >> "$log_file" 2>&1 </dev/null &
+    printf '%s\n' "$!" > "$pid_file"
+    host_process_is_owned "$run_dir" "$suffix" \
+        || die "host relay $suffix exited before ownership could be verified"
+}
+
+start_relay() {
+    local run_dir=$1
+    local suffix=$2
+    local port=$3
+    local owner_public_key=$4
+    case "$(backend_for_run "$run_dir")" in
+        docker) start_container "$run_dir" "$suffix" "$port" "$owner_public_key" ;;
+        host) start_host_relay "$run_dir" "$suffix" "$port" "$owner_public_key" ;;
+        *) die "run has unknown harness backend" ;;
+    esac
 }
 
 sign_event() {
@@ -333,7 +437,7 @@ capture_seed_snapshot() {
     local suffix=$2
     local relay
     relay=$(state_value "$run_dir" ".relays.$suffix.ws")
-    timeout 10 nak -q req -k 3 -k 9 -k 30023 -k 39000 -k 39001 -k 39002 \
+    run_with_timeout 10 nak -q req -k 3 -k 9 -k 30023 -k 39000 -k 39001 -k 39002 \
         "$relay" > "$run_dir/seed/relay-$suffix.jsonl"
 }
 
@@ -366,6 +470,22 @@ capture_container_logs() {
     done
 }
 
+stop_host_relay() {
+    local run_dir=$1
+    local suffix=$2
+    local pid_file pid
+    pid_file=$(host_pid_file "$run_dir" "$suffix")
+    [[ -f "$pid_file" ]] || return 0
+    IFS= read -r pid < "$pid_file"
+    if kill -0 "$pid" 2>/dev/null; then
+        host_process_is_owned "$run_dir" "$suffix" \
+            || die "refusing to stop unowned process recorded for relay $suffix"
+        kill "$pid"
+        wait "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+}
+
 stop_containers() {
     local run_dir=$1
     capture_container_logs "$run_dir"
@@ -377,6 +497,18 @@ stop_containers() {
             docker rm "$container_name" >/dev/null 2>&1 || true
         fi
     done
+}
+
+stop_relays() {
+    local run_dir=$1
+    case "$(backend_for_run "$run_dir")" in
+        docker) stop_containers "$run_dir" ;;
+        host)
+            stop_host_relay "$run_dir" a
+            stop_host_relay "$run_dir" b
+            ;;
+        *) die "run has unknown harness backend" ;;
+    esac
 }
 
 start_command() {
@@ -404,6 +536,8 @@ start_command() {
         esac
     done
     (($# == 1)) || die "start requires exactly one RUN_DIR"
+    [[ "$HARNESS_BACKEND" == docker || "$HARNESS_BACKEND" == host ]] \
+        || die "NMP_NIP29_HARNESS_BACKEND must be docker or host"
     validate_port "$port_a"
     validate_port "$port_b"
     [[ "$port_a" != "$port_b" ]] || die "relay ports must be distinct"
@@ -423,12 +557,13 @@ start_command() {
     followed=$(generate_identity "$run_dir" followed)
     outsider=$(generate_identity "$run_dir" outsider)
     writer=$(generate_identity "$run_dir" writer)
-    harness_id=$(printf '%s' "$run_dir" | sha256sum | cut -c1-12)
+    harness_id=$(printf '%s' "$run_dir" | short_hash)
 
     jq -n \
         --arg run_dir "$run_dir" \
         --arg commit "$CROISSANT_COMMIT" \
         --arg image "$GO_IMAGE" \
+        --arg backend "$HARNESS_BACKEND" \
         --arg container_a "nmp-nip29-a-$harness_id" \
         --arg container_b "nmp-nip29-b-$harness_id" \
         --arg ws_a "ws://127.0.0.1:$port_a" \
@@ -438,6 +573,7 @@ start_command() {
         --argjson port_a "$port_a" \
         --argjson port_b "$port_b" \
         '{run_dir: $run_dir, croissant_commit: $commit, go_image: $image,
+          backend: $backend,
           containers: {a: $container_a, b: $container_b},
           relays: {
             a: {ws: $ws_a, http: $http_a, port: $port_a},
@@ -470,9 +606,9 @@ start_command() {
         }' > "$run_dir/manifest.json"
 
     build_croissant "$run_dir"
-    start_container "$run_dir" a "$port_a" "$owner_a"
-    start_container "$run_dir" b "$port_b" "$owner_b"
-    trap 'stop_containers "$run_dir"' ERR INT TERM
+    start_relay "$run_dir" a "$port_a" "$owner_a"
+    start_relay "$run_dir" b "$port_b" "$owner_b"
+    trap 'stop_relays "$run_dir"' ERR INT TERM
 
     wait_for_relay "http://127.0.0.1:$port_a" || die "relay A did not become ready"
     wait_for_relay "http://127.0.0.1:$port_b" || die "relay B did not become ready"
@@ -481,7 +617,13 @@ start_command() {
         '.last_mutation_timestamp = $timestamp' "$run_dir/state.json" \
         > "$run_dir/state.json.seeded"
     mv "$run_dir/state.json.seeded" "$run_dir/state.json"
-    docker image inspect "$GO_IMAGE" --format '{{.Id}}' > "$run_dir/go-image-id.txt"
+    if [[ "$HARNESS_BACKEND" == docker ]]; then
+        docker image inspect "$GO_IMAGE" --format '{{.Id}}' > "$run_dir/go-image-id.txt"
+    elif command -v go >/dev/null 2>&1; then
+        go version > "$run_dir/go-version.txt"
+    else
+        docker image inspect "$GO_IMAGE" --format '{{.Id}}' > "$run_dir/go-image-id.txt"
+    fi
     trap - ERR INT TERM
 
     note "started and seeded unrestricted relays"
@@ -494,11 +636,22 @@ status_command() {
     local run_dir
     run_dir=$(canonical_existing_run_dir "$1")
     local suffix container_name
-    for suffix in a b; do
-        container_name=$(state_value "$run_dir" ".containers.$suffix")
-        docker container inspect "$container_name" \
-            --format "$suffix\t{{.State.Status}}\t{{.State.Running}}"
-    done
+    if [[ "$(backend_for_run "$run_dir")" == docker ]]; then
+        require_command docker
+        for suffix in a b; do
+            container_name=$(state_value "$run_dir" ".containers.$suffix")
+            docker container inspect "$container_name" \
+                --format "$suffix\t{{.State.Status}}\t{{.State.Running}}"
+        done
+    else
+        for suffix in a b; do
+            if host_process_is_owned "$run_dir" "$suffix"; then
+                printf '%s\trunning\ttrue\n' "$suffix"
+            else
+                printf '%s\tstopped\tfalse\n' "$suffix"
+            fi
+        done
+    fi
     jq '{relays, groups, policy, identities}' "$run_dir/manifest.json"
 }
 
@@ -556,13 +709,28 @@ relay_lifecycle_command() {
     local run_dir
     [[ "$suffix" == a || "$suffix" == b ]] || die "relay must be a or b"
     run_dir=$(canonical_existing_run_dir "$3")
-    local container_name
-    container_name=$(state_value "$run_dir" ".containers.$suffix")
+    local backend
+    backend=$(backend_for_run "$run_dir")
+    if [[ "$backend" == docker ]]; then
+        require_command docker
+        local container_name
+        container_name=$(state_value "$run_dir" ".containers.$suffix")
+        if [[ "$action" == down ]]; then
+            docker stop --time 5 "$container_name" >/dev/null
+        else
+            docker start "$container_name" >/dev/null
+        fi
+    elif [[ "$action" == down ]]; then
+        stop_host_relay "$run_dir" "$suffix"
+    else
+        local port owner_public_key
+        port=$(state_value "$run_dir" ".relays.$suffix.port")
+        owner_public_key=$(public_value "$run_dir" "owner_$suffix")
+        start_host_relay "$run_dir" "$suffix" "$port" "$owner_public_key"
+    fi
     if [[ "$action" == down ]]; then
-        docker stop --time 5 "$container_name" >/dev/null
         note "relay $suffix stopped"
     else
-        docker start "$container_name" >/dev/null
         local relay_http
         relay_http=$(state_value "$run_dir" ".relays.$suffix.http")
         wait_for_relay "$relay_http" || die "relay $suffix did not become ready after restart"
@@ -576,17 +744,21 @@ stop_command() {
     local port_a port_b
     port_a=$(state_value "$run_dir" '.relays.a.port')
     port_b=$(state_value "$run_dir" '.relays.b.port')
-    stop_containers "$run_dir"
+    local backend
+    backend=$(backend_for_run "$run_dir")
+    stop_relays "$run_dir"
     if port_is_open "$port_a" || port_is_open "$port_b"; then
         die "one or more relay ports remain open after teardown"
     fi
     jq -n \
         --arg stopped_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg backend "$backend" \
         --argjson port_a "$port_a" \
         --argjson port_b "$port_b" \
-        '{stopped_at: $stopped_at, containers_removed: true,
+        '{stopped_at: $stopped_at, backend: $backend,
+          containers_removed: ($backend == "docker"), relay_processes_stopped: true,
           released_ports: [$port_a, $port_b]}' > "$run_dir/teardown.json"
-    note "stopped relays, removed containers, and released ports $port_a/$port_b"
+    note "stopped $backend relays and released ports $port_a/$port_b"
     note "retained evidence: $run_dir"
 }
 

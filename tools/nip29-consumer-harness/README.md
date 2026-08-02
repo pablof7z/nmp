@@ -13,15 +13,23 @@ and signed events to the public manifest and seed artifacts.
 
 ## Requirements
 
-- Docker
+- Docker (default backend), or Go for the host-process backend
 - Git
 - `nak` 0.19.5 or newer (fixture seeding and independent relay inspection only)
-- `curl`, `jq`, `sha256sum`, and `timeout`
+- `curl` and `jq`; either `sha256sum` or `shasum`; and either `timeout` or Perl
 
 ## One-command start and seed
 
 ```sh
 tools/nip29-consumer-harness/harness.sh start /tmp/nmp-nip29-run
+```
+
+On a host without Docker, including the macOS qualification runner, use the
+same pinned Croissant binary as two directly owned processes:
+
+```sh
+NMP_NIP29_HARNESS_BACKEND=host \
+  tools/nip29-consumer-harness/harness.sh start /tmp/nmp-nip29-run
 ```
 
 The command starts relays at `ws://127.0.0.1:19888` and
@@ -66,7 +74,7 @@ group ids, branch evidence, or union results into NMP.
 tools/nip29-consumer-harness/harness.sh stop /tmp/nmp-nip29-run
 ```
 
-`stop` captures each relay's stdout/wire log, removes both containers, verifies
-that both public ports are released, and retains the run directory for the
-evidence report. Delete that explicit directory only after its evidence is no
-longer needed.
+`stop` captures each relay's stdout/wire log, removes both containers or stops
+both owned host processes, verifies that both public ports are released, and
+retains the run directory for the evidence report. Delete that explicit
+directory only after its evidence is no longer needed.

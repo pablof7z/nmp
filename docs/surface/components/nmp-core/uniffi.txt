@@ -7937,6 +7937,84 @@ function Function {
 }
 
 function Function {
+    name: "live_query_union",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "branches",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiLiveQuery",
+                },
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "aggregate_result_limit",
+            type_: Optional {
+                inner_type: UInt32,
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiLiveQuery",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_live_query_union",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "branches",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+            FfiArgument {
+                name: "aggregate_result_limit",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiLiveQuery",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "`nmp::LiveQuery::union` as a free function, so a hand-written Swift or\nKotlin live-query value can be built by the SAME construction that decides\nRust's identity instead of a native re-implementation of it.\n\nCanonical branch order is not decoration: it is the order every frame's\nper-branch evidence is indexed by. A native sort that merely deduplicates\nwould still let `branches[0]` name a different branch than evidence entry\n0, and any drift in `Demand`'s ordering would silently desynchronize two\nhand-written sorts from the Rust one. Delegating leaves exactly one\nimplementation of \"same query\".\n\nInput branches are themselves live queries, so a nested aggregate result\nlimit is reachable and refused here rather than being quietly discarded.\nEvery refusal is the typed [`FfiError`] Rust produces for the same input.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_live_query_union",
+    checksum: Some(
+        64469,
+    ),
+}
+
+function Function {
     name: "max_query_branches",
     module_path: "nmp_ffi",
     is_async: false,
