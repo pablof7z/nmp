@@ -354,13 +354,11 @@ fn per_branch_evidence_is_indexed_by_canonical_branch_order() {
         let mut projection = Projection::default();
         projection.apply(&effects, id);
 
-        let reported: Vec<BTreeSet<RelayUrl>> = projection
-            .evidence
-            .iter()
-            .map(evidence_relays)
-            .collect();
+        let reported: Vec<BTreeSet<RelayUrl>> =
+            projection.evidence.iter().map(evidence_relays).collect();
         assert_eq!(
-            reported, declared,
+            reported,
+            declared,
             "evidence entry i must report on branches()[i]; indexing by the \
              order the caller typed instead swaps these two entries for one of \
              the two declarations: {:?}",
