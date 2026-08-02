@@ -68,7 +68,7 @@ enum Probe {
         print("PROOF swift_kind9 distinct=27 shared_sources=2 slow_consumer=true")
 
         let articleQuery = try context.engine.observe(group.read(NMPFilter(kinds: [30023])))
-        let articles = try await waitForRows(articleQuery, seconds: args.settleSeconds) {
+        _ = try await waitForRows(articleQuery, seconds: args.settleSeconds) {
             rows($0, kind: 30023).count == 3
                 && hasContent($0, "shared long-form event", sourceCount: 2)
         }
