@@ -13,7 +13,12 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiFrame
+import uniffi.nmp_ffi.FfiRow
+import uniffi.nmp_ffi.FfiRowDelta
 import uniffi.nmp_ffi.FfiRowPullException
 import uniffi.nmp_ffi.NmpRowPull
 import uniffi.nmp_ffi.NmpRowStream
@@ -82,6 +87,126 @@ class RowPullCancellationTest {
                 "generated free completed before the SDK settled its ticket",
             )
         }
+
+    /**
+     * #1192: the second half of #762's guarantee. [nextCommittedRowFrame]
+     * commits (acknowledges) a frame before returning it, but [NMPQuery.frames]
+     * and `Query.kt`'s own pull loop still apply/fold the delta and `emit` it
+     * afterward. If the collecting coroutine is cancelled in that window --
+     * after commit, before emit -- the acknowledged transition must not just
+     * disappear: `finally { handle.cancel() }` must withdraw the whole
+     * observation, so no later pull ever continues from a step the collector
+     * never received.
+     *
+     * This is not a timing race. [AcknowledgeThenCancelPull.commit] cancels
+     * the collecting [Job] itself, synchronously, from inside the exact call
+     * that acknowledges the row -- deterministic ordering, not a scheduling
+     * claim. [ManualDispatcher] guarantees the [Job] reference is captured
+     * before any of its body runs, so there is no window in which `commit()`
+     * could observe a not-yet-stored job.
+     */
+    @Test
+    fun cancellingAfterCommitButBeforeEmitWithdrawsTheWholeObservation() =
+        runBlocking<Unit> {
+            val row =
+                FfiRow(
+                    id = "row-1",
+                    pubkey = "pk",
+                    createdAt = 1uL,
+                    kind = 1u,
+                    tags = emptyList(),
+                    content = "ticketed",
+                    sig = "sig",
+                    sources = listOf("wss://cancel-window.example"),
+                )
+            val frame =
+                FfiFrame(
+                    deltas = listOf(FfiRowDelta.Added(row)),
+                    window = null,
+                    evidence = listOf(FfiAcquisitionEvidence(emptyList(), emptyList())),
+                )
+            val pull = AcknowledgeThenCancelPull(frame)
+            val stream = AcknowledgeThenCancelStream(pull)
+            val query = NMPQuery(stream)
+            val dispatcher = ManualDispatcher()
+            val collected = mutableListOf<RowBatch>()
+
+            lateinit var job: Job
+            job =
+                launch(dispatcher) {
+                    try {
+                        query.frames.collect { collected.add(it) }
+                    } catch (_: CancellationException) {
+                        // Expected: cancellation lands after acknowledgement,
+                        // before this collector ever sees the row.
+                    }
+                }
+            pull.onCommit = { job.cancel() }
+
+            dispatcher.drain()
+            withTimeout(5_000) { job.join() }
+
+            assertTrue(job.isCancelled, "the collecting coroutine was cancelled")
+            assertEquals(
+                1,
+                pull.commitCount.get(),
+                "the frame was acknowledged before cancellation could be observed",
+            )
+            assertEquals(
+                1,
+                stream.cancelCount.get(),
+                "cancellation after acknowledgement withdrew the whole observation exactly once",
+            )
+            assertTrue(
+                collected.isEmpty(),
+                "the acknowledged-but-unapplied frame was never delivered to the collector",
+            )
+            assertEquals(
+                1,
+                stream.beginCount.get(),
+                "no later pull began on the withdrawn observation",
+            )
+        }
+
+    /** Always acknowledges [frame], then runs [onCommit] -- the SDK's own
+     * commit-before-anything-else ordering, with a hook for the test to
+     * trigger cancellation from inside the acknowledgement itself. */
+    private class AcknowledgeThenCancelPull(
+        private val frame: FfiFrame,
+    ) : NmpRowPull(NoPointer) {
+        val commitCount = AtomicInteger()
+        val abortCount = AtomicInteger()
+        var onCommit: () -> Unit = {}
+
+        override suspend fun receive(): FfiFrame? = frame
+
+        override fun commit() {
+            commitCount.incrementAndGet()
+            onCommit()
+        }
+
+        override fun abort() {
+            abortCount.incrementAndGet()
+        }
+    }
+
+    private class AcknowledgeThenCancelStream(
+        private val pull: NmpRowPull,
+    ) : NmpRowStream(NoPointer) {
+        val beginCount = AtomicInteger()
+        val cancelCount = AtomicInteger()
+
+        override fun beginNext(): NmpRowPull {
+            beginCount.incrementAndGet()
+            return pull
+        }
+
+        override fun cancel() {
+            cancelCount.incrementAndGet()
+        }
+
+        override fun requestRows(atLeast: ULong) = Unit
+    }
 
     private class GeneratedReadySeam {
         val completeCount = AtomicInteger()
