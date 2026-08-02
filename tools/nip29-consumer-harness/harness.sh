@@ -282,6 +282,30 @@ host_process_is_owned() {
     [[ "$command_line" == *"$run_dir/bin/croissant"* ]]
 }
 
+wait_for_host_process_exit() {
+    local run_dir=$1
+    local suffix=$2
+    local attempts=100
+    local index
+    for ((index = 0; index < attempts; index += 1)); do
+        if ! host_process_is_owned "$run_dir" "$suffix"; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    return 1
+}
+
+report_host_relay_log() {
+    local run_dir=$1
+    local suffix=$2
+    local log_file="$run_dir/witness/relay-$suffix.log"
+    if [[ -s "$log_file" ]]; then
+        printf 'nip29-consumer-harness: relay %s log tail:\n' "$suffix" >&2
+        tail -n 40 "$log_file" >&2
+    fi
+}
+
 start_host_relay() {
     local run_dir=$1
     local suffix=$2
@@ -301,8 +325,10 @@ start_host_relay() {
         OWNER_PUBLIC_KEY="$owner_public_key" \
         "$run_dir/bin/croissant" >> "$log_file" 2>&1 </dev/null &
     printf '%s\n' "$!" > "$pid_file"
-    host_process_is_owned "$run_dir" "$suffix" \
-        || die "host relay $suffix exited before ownership could be verified"
+    if ! host_process_is_owned "$run_dir" "$suffix"; then
+        report_host_relay_log "$run_dir" "$suffix"
+        die "host relay $suffix exited before ownership could be verified"
+    fi
 }
 
 start_relay() {
@@ -481,7 +507,8 @@ stop_host_relay() {
         host_process_is_owned "$run_dir" "$suffix" \
             || die "refusing to stop unowned process recorded for relay $suffix"
         kill "$pid"
-        wait "$pid" 2>/dev/null || true
+        wait_for_host_process_exit "$run_dir" "$suffix" \
+            || die "host relay $suffix did not exit after SIGTERM"
     fi
     rm -f "$pid_file"
 }
