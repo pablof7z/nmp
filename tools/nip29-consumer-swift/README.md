@@ -24,5 +24,11 @@ and live recovery. Every query/status/diagnostics handle is explicitly
 cancelled and the engine is explicitly shut down; deinit remains only the
 safety net.
 
+The capstone also keeps observations alive while relay metadata and a
+follows-derived binding change, proves that cancelling one of two identical
+observations preserves their shared wire demand until the last cancellation,
+and reopens the persisted conflicting metadata with one source offline before
+that source reconnects.
+
 Croissant and `nak` are fixture infrastructure only. All product claims in
 `proof-lines.txt` are values delivered by the public `NMP` Swift wrapper.
