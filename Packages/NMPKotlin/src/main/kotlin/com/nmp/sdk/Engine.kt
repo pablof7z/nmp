@@ -254,9 +254,9 @@ class NMPEngine(
      * `AuthorOutboxes`/`Public` default isn't enough: declaring
      * `NMPSourceAuthority.Pinned` wire authority, a non-default
      * `NMPAccessContext`, or a non-`Agnostic` `NMPCacheMode`. One demand is
-     * one branch, so this is exactly `observe(NMPLiveQuery(listOf(demand)))`. */
+     * one branch, so this is exactly `observe(NMPLiveQuery.single(demand))`. */
     fun observe(demand: NMPDemand): Flow<RowBatch> =
-        observeQuery(ffi, NMPLiveQuery(listOf(demand)))
+        observeQuery(ffi, NMPLiveQuery.single(demand))
 
     /** Open a live, detachable query over several independent `NMPDemand`
      * branches (#1108). The branches are observed through ONE stream: rows
@@ -285,7 +285,7 @@ class NMPEngine(
      * bounded snapshot/growth discipline as the `NMPFilter` overload, for
      * demands that declare wire authority, access context, or cache mode. */
     fun observe(demand: NMPDemand, window: Window): NMPQuery =
-        observe(NMPLiveQuery(listOf(demand)), window)
+        observe(NMPLiveQuery.single(demand), window)
 
     /** The explicit-`NMPLiveQuery` windowed overload (#1108 x #485): the
      * window bounds the MERGED union globally, never one window per branch.

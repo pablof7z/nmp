@@ -174,21 +174,59 @@ extension NMPDemand {
 /// cross-product; handing an app a list of demands makes the app own the
 /// aggregate observation. This is neither: it is one read noun.
 ///
-/// The Rust constructor canonicalizes the branches -- sorted, exact
-/// duplicates collapsed -- so permuted or repeated input yields the same
-/// observation and the same per-branch evidence order.
+/// A value's branches are always canonical -- sorted, exact duplicates
+/// collapsed, never empty -- because `single` and `union` are the only ways to
+/// make one, and `union` canonicalizes through the same Rust construction the
+/// engine itself uses. Two declarations of the same branches are therefore one
+/// value with one hash whatever order they were typed in, `branches` is
+/// exactly what the observation will open, and `branches[i]` names the branch
+/// each delivered `RowBatch.evidence[i]` reports on.
 public struct NMPLiveQuery: Sendable, Hashable {
-    /// The demand branches. Must be nonempty and at most `maxBranches`;
-    /// both are typed refusals at `observe`, never silent truncation.
-    public var branches: [NMPDemand]
+    private let canonicalBranches: [NMPDemand]
+    private let mergedRowBound: UInt32?
+
+    private init(canonicalBranches: [NMPDemand], mergedRowBound: UInt32?) {
+        self.canonicalBranches = canonicalBranches
+        self.mergedRowBound = mergedRowBound
+    }
+
+    /// The canonical demand branches, in the one order this observation's
+    /// per-branch evidence is indexed by. Never empty.
+    public var branches: [NMPDemand] { canonicalBranches }
+
     /// Bound on the MERGED row union, applied after branch rows are merged by
     /// event id -- never `N` rows per branch. Distinct from a branch's own
     /// `NMPFilter.limit`, which bounds only that branch's selection.
-    public var aggregateResultLimit: UInt32?
+    public var aggregateResultLimit: UInt32? { mergedRowBound }
 
-    public init(branches: [NMPDemand], aggregateResultLimit: UInt32? = nil) {
-        self.branches = branches
-        self.aggregateResultLimit = aggregateResultLimit
+    /// One complete demand observed on its own -- already canonical, so this
+    /// cannot be refused. Identical in lifecycle, frame shape and evidence
+    /// shape to a union of one.
+    public static func single(_ branch: NMPDemand) -> NMPLiveQuery {
+        NMPLiveQuery(canonicalBranches: [branch], mergedRowBound: nil)
+    }
+
+    /// Compose independent live queries into ONE canonical declaration.
+    ///
+    /// Inputs flatten, duplicates collapse and order is canonicalized, so
+    /// permutations of the same inputs are the same value.
+    /// `aggregateResultLimit` bounds the merged row union globally.
+    ///
+    /// Throws `NMPError.emptyQueryUnion` for no branches at all,
+    /// `.aggregateResultLimitZero` for a bound that can never contain a row,
+    /// `.nestedAggregateResultLimit` when an input already carries its own
+    /// aggregate bound, and `.tooManyQueryBranches` above `maxBranches` --
+    /// the whole declaration is refused, never a silently installed subset.
+    public static func union(
+        _ branches: [NMPLiveQuery],
+        aggregateResultLimit: UInt32? = nil
+    ) throws -> NMPLiveQuery {
+        NMPLiveQuery(try nmpRethrowing {
+            try liveQueryUnion(
+                branches: branches.map { $0.toFfi() },
+                aggregateResultLimit: aggregateResultLimit
+            )
+        })
     }
 
     /// The hard ceiling on branches in one observation. Exceeding it refuses
@@ -199,15 +237,20 @@ public struct NMPLiveQuery: Sendable, Hashable {
 extension NMPLiveQuery {
     func toFfi() -> FfiLiveQuery {
         FfiLiveQuery(
-            branches: branches.map { $0.toFfi() },
-            aggregateResultLimit: aggregateResultLimit
+            branches: canonicalBranches.map { $0.toFfi() },
+            aggregateResultLimit: mergedRowBound
         )
     }
 
+    /// Lift a live query Rust already built (`union`'s own result, and every
+    /// protocol-composed read such as `NMPNIP29.groupsWhere`). It is canonical
+    /// by construction there, so this never re-canonicalizes -- and being
+    /// non-public, it is not a door an app can forge a noncanonical value
+    /// through.
     init(_ ffi: FfiLiveQuery) {
         self.init(
-            branches: ffi.branches.map(NMPDemand.init),
-            aggregateResultLimit: ffi.aggregateResultLimit
+            canonicalBranches: ffi.branches.map(NMPDemand.init),
+            mergedRowBound: ffi.aggregateResultLimit
         )
     }
 }
