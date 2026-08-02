@@ -334,6 +334,35 @@ pub fn max_query_branches() -> u32 {
     nmp::LiveQuery::MAX_BRANCHES as u32
 }
 
+/// `nmp::LiveQuery::union` as a free function, so a hand-written Swift or
+/// Kotlin live-query value can be built by the SAME construction that decides
+/// Rust's identity instead of a native re-implementation of it.
+///
+/// Canonical branch order is not decoration: it is the order every frame's
+/// per-branch evidence is indexed by. A native sort that merely deduplicates
+/// would still let `branches[0]` name a different branch than evidence entry
+/// 0, and any drift in `Demand`'s ordering would silently desynchronize two
+/// hand-written sorts from the Rust one. Delegating leaves exactly one
+/// implementation of "same query".
+///
+/// Input branches are themselves live queries, so a nested aggregate result
+/// limit is reachable and refused here rather than being quietly discarded.
+/// Every refusal is the typed [`FfiError`] Rust produces for the same input.
+#[uniffi::export]
+pub fn live_query_union(
+    branches: Vec<FfiLiveQuery>,
+    aggregate_result_limit: Option<u32>,
+) -> Result<FfiLiveQuery, crate::convert::FfiError> {
+    let branches = branches
+        .into_iter()
+        .map(crate::convert::live_query_from_ffi)
+        .collect::<Result<Vec<_>, _>>()?;
+    let aggregate_result_limit = aggregate_result_limit.map(|limit| limit as usize);
+    nmp::LiveQuery::union(branches, aggregate_result_limit)
+        .map(crate::convert::live_query_to_ffi)
+        .map_err(crate::convert::FfiError::from)
+}
+
 /// One delivered observation frame (`nmp::Frame` mirror) -- the ONE
 /// vocabulary both observation modes share. Delivery is DERIVED from
 /// boundedness, never a knob, and never carried twice on the wire:
@@ -1141,4 +1170,82 @@ pub enum FfiNostrEntity {
         identifier: String,
         relays: Vec<String>,
     },
+}
+
+#[cfg(test)]
+mod live_query_union_tests {
+    use super::*;
+    use crate::convert::FfiError;
+
+    fn branch(relay: &str) -> FfiLiveQuery {
+        FfiLiveQuery {
+            branches: vec![FfiDemand {
+                selection: FfiFilter {
+                    kinds: Some(vec![1]),
+                    authors: None,
+                    ids: None,
+                    tags: HashMap::new(),
+                    since: None,
+                    until: None,
+                    limit: None,
+                },
+                source: FfiSourceAuthority::Pinned {
+                    relays: vec![format!("wss://{relay}.example.com")],
+                },
+                access: FfiAccessContext::Public,
+                cache: FfiCacheMode::Agnostic,
+                freshness: FfiFreshness::Live,
+            }],
+            aggregate_result_limit: None,
+        }
+    }
+
+    /// The door a hand-written SDK factory calls: permuting the declaration
+    /// must produce byte-identical canonical output, since that output IS the
+    /// native value's identity and its evidence indexing.
+    #[test]
+    fn permuted_declarations_produce_one_canonical_value() {
+        let one_way = live_query_union(vec![branch("a"), branch("b")], None).unwrap();
+        let other_way = live_query_union(vec![branch("b"), branch("a")], None).unwrap();
+        assert_eq!(one_way, other_way);
+        assert_eq!(one_way.branches.len(), 2);
+    }
+
+    #[test]
+    fn a_repeated_branch_owns_exactly_one_canonical_entry() {
+        let query = live_query_union(vec![branch("a"), branch("a")], None).unwrap();
+        assert_eq!(query.branches.len(), 1);
+    }
+
+    #[test]
+    fn the_aggregate_bound_survives_canonicalization() {
+        let query = live_query_union(vec![branch("a"), branch("b")], Some(7)).unwrap();
+        assert_eq!(query.aggregate_result_limit, Some(7));
+    }
+
+    #[test]
+    fn every_refusal_is_the_typed_error_rust_produces() {
+        assert!(matches!(
+            live_query_union(Vec::new(), None),
+            Err(FfiError::EmptyQueryUnion)
+        ));
+        assert!(matches!(
+            live_query_union(vec![branch("a")], Some(0)),
+            Err(FfiError::AggregateResultLimitZero)
+        ));
+        let bounded = live_query_union(vec![branch("a")], Some(3)).unwrap();
+        assert!(matches!(
+            live_query_union(vec![bounded], None),
+            Err(FfiError::NestedAggregateResultLimit)
+        ));
+        let maximum = max_query_branches() as usize;
+        let over_cap: Vec<_> = (0..=maximum).map(|k| branch(&k.to_string())).collect();
+        assert!(matches!(
+            live_query_union(over_cap, None),
+            Err(FfiError::TooManyQueryBranches {
+                requested,
+                maximum: reported,
+            }) if requested as usize == maximum + 1 && reported as usize == maximum
+        ));
+    }
 }
