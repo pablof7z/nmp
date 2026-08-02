@@ -175,6 +175,17 @@ Feature: A cancelled row pull loses no transition and repeats none
 
   Rule: The handshake stays out of the app's way
 
+    # nmp:id=QUERIES-ROWPULL-016
+    # nmp:status=built
+    # nmp:evidence=swift:NMP::testCancellingAfterAcknowledgementWithdrawsTheWholeObservationBeforeDelivery
+    # nmp:evidence=kotlin:NMPKotlin::cancellingAfterCommitButBeforeEmitWithdrawsTheWholeObservation
+    # nmp:falsifier=Let cancellation that lands after acknowledgement return without withdrawing the observation; a later pull then continues from a transition the app never applied.
+    Scenario: Cancelling after a row is acknowledged ends the observation rather than skipping the row
+      Given the app's toolkit has acknowledged a transition on the app's behalf
+      When the app is cancelled before that transition reaches it
+      Then the whole observation is withdrawn
+      And no later pull continues from a transition the app never applied
+
     # nmp:id=QUERIES-ROWPULL-017
     # nmp:status=built
     # nmp:evidence=swift:NMP::testRowTicketCommitsBeforeSwiftMapsTheFrame
