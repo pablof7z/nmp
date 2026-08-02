@@ -34,6 +34,7 @@ fn connect_and_prove_nip77<S: EventStore>(core: &mut EngineCore<S>, relay: &Rela
 /// real reconciliation protocol rather than fabricating its internal state.
 fn finish_neg_with_remote_event<S: EventStore>(
     core: &mut EngineCore<S>,
+    slot: u32,
     relay: &RelayUrl,
     neg_sub_id: &SubId,
     initial_hex: &str,
@@ -57,7 +58,7 @@ fn finish_neg_with_remote_event<S: EventStore>(
             .expect("server-side reconciliation");
         let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
-                slot: 0,
+                slot,
                 generation: 1,
             },
             public_session(relay),
@@ -95,6 +96,94 @@ fn finish_neg_with_remote_event<S: EventStore>(
             })
             .expect("reconciliation either continues or opens missing-id backfill");
     }
+}
+
+/// A row learned from relay A must not be advertised as a local holding to
+/// relay B's NIP-77 reconciliation. Doing so makes the shared id compare as
+/// equal, suppresses B's backfill, and permanently loses B provenance.
+#[test]
+fn negentropy_local_snapshot_is_scoped_to_the_reconciling_relay() {
+    let original_author = Keys::generate();
+    let widening_author = Keys::generate();
+    let relay_a = RelayUrl::parse("wss://neg-source-a.example.com").unwrap();
+    let relay_b = RelayUrl::parse("wss://neg-source-b.example.com").unwrap();
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(
+            original_author.public_key(),
+            [relay_a.clone(), relay_b.clone()],
+        )
+        .with_outbound_routes(
+            widening_author.public_key(),
+            [relay_a.clone(), relay_b.clone()],
+        );
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &original_author.public_key().to_hex(),
+    )));
+    let relay_a_sub = req_for(&initial, &relay_a).0.clone();
+    let _ = connect(&mut core, 0, &relay_a);
+    let relay_b_connected = connect(&mut core, 1, &relay_b);
+    let relay_b_probe = relay_b_connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartProbe(url, sub_id, ..) if url == &relay_b => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("relay B begins its NIP-77 capability probe");
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        public_session(&relay_b),
+        neg_msg_frame(&wire_sub_string(&relay_b_probe), "6100"),
+    ));
+
+    let shared = nmp_resolver::testkit::kind1(
+        &original_author,
+        "same verified event exists at both relays",
+        100,
+    );
+    let _ = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay_a),
+        event_frame(&wire_sub_string(&relay_a_sub), shared.clone()),
+    ));
+
+    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &widening_author.public_key().to_hex(),
+    )));
+    let relay_b_live = req_for(&widened, &relay_b).0.clone();
+    let opened = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 1,
+            generation: 1,
+        },
+        public_session(&relay_b),
+        eose_frame(&wire_sub_string(&relay_b_live)),
+    ));
+    let (neg_sub_id, initial_hex) = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, sub_id, _, initial_hex) => {
+                Some((sub_id.clone(), initial_hex.clone()))
+            }
+            _ => None,
+        })
+        .expect("relay B's live barrier opens its reconciliation");
+
+    let backfill =
+        finish_neg_with_remote_event(&mut core, 1, &relay_b, &neg_sub_id, &initial_hex, &shared);
+    assert_ne!(
+        backfill, relay_b_live,
+        "relay B must request the shared id because NMP has not observed its copy"
+    );
 }
 
 fn has_request_terminal(effects: &[Effect], terminal: RequestTerminal) -> bool {
@@ -722,7 +811,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
 
     let missing = nmp_resolver::testkit::kind1(&b, "missing from local store", 100);
     let backfill =
-        finish_neg_with_remote_event(&mut core, &relay, &neg_sub_id, &initial_hex, &missing);
+        finish_neg_with_remote_event(&mut core, 0, &relay, &neg_sub_id, &initial_hex, &missing);
     let backfill_wire = wire_sub_string(&backfill);
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
     let failed = core.handle(EngineMsg::RelayFrame(
