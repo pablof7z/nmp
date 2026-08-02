@@ -276,7 +276,7 @@ Feature: One live query can watch several sources at once
     # nmp:status=built
     # nmp:evidence=rust:nmp::per_branch_evidence_is_indexed_by_canonical_branch_order
     # nmp:evidence=swift:NMP::testDeclarationOrderDoesNotChangeIdentity
-    # nmp:falsifier=Report the evidence in the order the branches were typed, or put the branches in that order after deciding what the query is; the two hosts' entries then swap for one of the two typings, and I read relay "b"'s sources, its shortfall and its diagnostics as relay "a"'s, with no count, no total and no other reading disagreeing.
+    # nmp:falsifier=Order the branches a second time anywhere after the query has decided what it is -- a per-platform re-implementation of the composing rule, or the order the observation assembles its branches in -- so that the order I read and the order evidence arrives in can drift apart; the two hosts' entries swap, and I read relay "b"'s sources, its shortfall and its diagnostics as relay "a"'s, with no count, no total and no other reading disagreeing.
     Scenario: Which branch a piece of evidence belongs to does not depend on how I typed the query
       Given one branch asking relay "a" and one branch asking relay "b"
       When I declare them in one order, and again in the other, and open both
@@ -318,7 +318,7 @@ Feature: One live query can watch several sources at once
     # nmp:status=built
     # nmp:evidence=rust:nmp-grammar::a_single_query_is_one_branch_with_no_aggregate_bound
     # nmp:evidence=swift:NMP::testDuplicateBranchAppearsOnce
-    # nmp:falsifier=Build the one-branch declaration through the composing door and hand back that door's failure; the one declaration that can violate nothing now returns an error with no cause, every call site is written as though it always succeeds, and the first new refusal the composing door ever gains becomes a crash in code that never had a reason to handle one.
+    # nmp:falsifier=Build the one-branch declaration the same way several branches are composed, and hand back the failure that way can produce; the one declaration that can violate nothing now returns an error with no cause, every call site is written as though it always succeeds, and the first new refusal composing ever gains becomes a crash in code that never had a reason to handle one.
     Scenario: Declaring a single branch cannot fail, and composing it alone is the same query
       Given one branch
       When I declare a query of just that branch

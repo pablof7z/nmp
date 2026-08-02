@@ -338,6 +338,11 @@ fn per_branch_evidence_is_indexed_by_canonical_branch_order() {
         "the same two branches typed either way are one query"
     );
 
+    // These two ARE one value once the assertion above holds -- construction
+    // canonicalizes, so caller order never survives to reach the engine. Both
+    // are still driven so that a regression which let insertion order leak
+    // into the value fails HERE, on the branch-to-evidence mapping, rather
+    // than only on the equality assertion above.
     for query in [one_way, other_way] {
         let declared: Vec<BTreeSet<RelayUrl>> = query
             .branches()
