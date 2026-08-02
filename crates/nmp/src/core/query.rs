@@ -883,10 +883,14 @@ impl<S: EventStore> EngineCore<S> {
             limit: None,
             ..filter
         };
-        // Seeding the reconciler reads the local store's holdings for this
-        // shape. On an I/O failure (issue #122) degrade to read-only and do
-        // not open the session rather than panic — the `Close` pushed above
-        // still stands, so the sub-id is simply released.
+        // Seeding the reconciler reads only holdings already observed from
+        // THIS relay. A row learned from relay A is locally available, but
+        // advertising it to relay B would make a shared id compare equal and
+        // suppress B's backfill before NMP has ever verified B's copy. That
+        // permanently loses B provenance. On an I/O failure (issue #122)
+        // degrade to read-only and do not open the session rather than panic
+        // — the `Close` pushed above still stands, so the sub-id is simply
+        // released.
         let local_rows = match self.resolver.store().query(&neg_filter.to_nostr()) {
             Ok(rows) => rows,
             Err(e) => {
@@ -904,6 +908,7 @@ impl<S: EventStore> EngineCore<S> {
         };
         let local_ids: Vec<(u64, EventId)> = local_rows
             .into_iter()
+            .filter(|stored| stored.provenance.seen.contains_key(probed.url()))
             .map(|se| (se.event.created_at.as_secs(), se.event.id))
             .collect();
         let (reconciler, initial_hex) = Reconciler::open(&local_ids);
