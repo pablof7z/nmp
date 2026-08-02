@@ -105,10 +105,13 @@ mod tests {
     }
 
     /// `validate::validate` always constructs an `EvidenceResolver`, which
-    /// requires its root to be a real (if minimal) Cargo workspace. None of
-    /// these falsifier scenarios cite Rust evidence, so an empty no-op
-    /// package is enough — it keeps these tests fast and independent of the
-    /// product workspace.
+    /// requires its root to be a real (if minimal) Cargo workspace with a
+    /// readable, repository-owned `.github/workflows` directory — `new`
+    /// loads workflows unconditionally, before any locator is resolved, so
+    /// the directory must exist even though none of these falsifier
+    /// scenarios cite workflow evidence. An empty no-op package plus an
+    /// empty workflow directory is enough: it keeps these tests fast and
+    /// independent of the product workspace.
     fn minimal_cargo_root() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -124,6 +127,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(scratch.join("src/lib.rs"), "").unwrap();
+        std::fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
         temp
     }
 
@@ -196,11 +200,7 @@ mod tests {
     fn nonexistent_issue_fails_by_name_not_as_a_fixture_error() {
         let temp = tempfile::tempdir().unwrap();
         let issues_path = temp.path().join("issues.tsv");
-        std::fs::write(
-            &issues_path,
-            "nmp-behavior-issue-snapshot-v1\n1189\topen\n",
-        )
-        .unwrap();
+        std::fs::write(&issues_path, "nmp-behavior-issue-snapshot-v1\n1189\topen\n").unwrap();
         let snapshot = crate::IssueSnapshot::from_path(&issues_path).unwrap();
 
         let error = snapshot.state(9999).unwrap_err();
