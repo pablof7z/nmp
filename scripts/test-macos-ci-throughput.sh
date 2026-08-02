@@ -126,7 +126,7 @@ expect_failure "removed full master packaging" "aarch64-apple-ios aarch64-apple-
 
 reset_fixture
 sed -i.bak \
-  '/run: scripts\/build-swift-xcframework.sh/a\
+  '/scripts\/build-swift-xcframework.sh/a\
           scripts/build-swift-xcframework.sh' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"

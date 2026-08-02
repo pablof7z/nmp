@@ -44,7 +44,45 @@ jobs:
 
       - name: Build the core XCFramework once
         id: apple_components
-        run: scripts/build-swift-xcframework.sh ${{ steps.apple_scope.outputs.mode }}
+        run: |
+          scripts/build-swift-xcframework.sh ${{ steps.apple_scope.outputs.mode }}
+          [[ -f tools/nip29-consumer-swift/Package.swift ]] || exit 0
+          case "$(uname -m)" in
+            x86_64)
+              asset=nak-v0.19.5-darwin-amd64
+              digest=0a1d0bed1296e30e00673427fb9ae726b377f6596b965b6212371b51eb061239
+              go_asset=go1.25.0.darwin-amd64.tar.gz
+              go_digest=5bd60e823037062c2307c71e8111809865116714d6f6b410597cf5075dfd80ef
+              ;;
+            arm64)
+              asset=nak-v0.19.5-darwin-arm64
+              digest=78d171d92d196bf5969b4ffd6ee6a04e7252852d79b1d6ffd6df1d63f1ee5524
+              go_asset=go1.25.0.darwin-arm64.tar.gz
+              go_digest=544932844156d8172f7a28f77f2ac9c15a23046698b6243f633b0a0b00c0749c
+              ;;
+            *)
+              echo "unsupported macOS runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/nak-bin"
+          curl --fail --location --retry 3 \
+            "https://github.com/fiatjaf/nak/releases/download/v0.19.5/$asset" \
+            --output "$RUNNER_TEMP/nak-bin/nak"
+          printf '%s  %s\n' "$digest" "$RUNNER_TEMP/nak-bin/nak" | shasum -a 256 -c -
+          chmod +x "$RUNNER_TEMP/nak-bin/nak"
+          curl --fail --location --retry 3 \
+            "https://go.dev/dl/$go_asset" \
+            --output "$RUNNER_TEMP/$go_asset"
+          printf '%s  %s\n' "$go_digest" "$RUNNER_TEMP/$go_asset" | shasum -a 256 -c -
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/$go_asset"
+          export PATH="$RUNNER_TEMP/nak-bin:$RUNNER_TEMP/go/bin:$PATH"
+          go version
+          NMP_NIP29_HARNESS_BACKEND=host \
+          NMP_NIP29_SKIP_SWIFT_FFI_BUILD=1 \
+            tools/nip29-consumer-swift/run-capstone.sh \
+            "$RUNNER_TEMP/nmp-nip29-swift-run" \
+            "$RUNNER_TEMP/nmp-nip29-swift-evidence"
 
       - name: Build the Swift package
         id: swift_package
@@ -54,6 +92,4 @@ jobs:
 
       - name: Test the Swift package
         if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
-        run: swift test
-        working-directory: Packages/NMP
-
+        run: swift test --package-path Packages/NMP

@@ -124,7 +124,11 @@ require_text "$MACOS_WORKFLOW" "      - name: Build the Swift package"
 require_text "$MACOS_WORKFLOW" "      - name: Test the Swift package"
 require_text "$MACOS_WORKFLOW" "        run: swift build"
 require_text "$MACOS_WORKFLOW" "working-directory: Packages/NMP"
-swift_test_count=$(grep -F -c "        run: swift test" "$MACOS_WORKFLOW" || true)
+swift_test_count=$(
+  grep -E -c \
+    '^[[:space:]]+(run:[[:space:]]+)?swift test([[:space:]]|$)' \
+    "$MACOS_WORKFLOW" || true
+)
 [[ "$swift_test_count" -eq 1 ]] ||
   fail "expected exactly one Swift test invocation, found $swift_test_count"
 
