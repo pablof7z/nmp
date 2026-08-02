@@ -95,7 +95,7 @@ extension Probe {
         let discoveryQuery = try context.engine.observe(
             context.scope.groupsWhere(try followsPredicate(context))
         )
-        let chatDemand = group.read(NMPFilter(kinds: [9]))
+        let chatDemand = try group.read(NMPFilter(kinds: [9]))
         let cancelledQuery = try context.engine.observe(chatDemand)
         let survivingQuery = try context.engine.observe(chatDemand)
 
