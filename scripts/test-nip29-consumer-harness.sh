@@ -102,3 +102,68 @@ kill -0 "$relay_pid" 2>/dev/null \
 
 printf '%s\n' \
     'NIP-29 consumer harness test: cross-shell restart lifecycle passed'
+
+# --- the seed readback refuses a fixture that did not seed what it claims ----
+#
+# `write_seed_summary` reads what the relays actually serve, so it is the one
+# place a mis-seed can still be caught: a relay can answer a publish with
+# `OK: false` without failing nak, and a shared event missing from one relay
+# then looks exactly like NMP losing a source. Driven against hand-written
+# snapshots, so this needs no relay, no Docker and no network.
+#
+# The harness runs `main` on load, and `--help` is its one argument that
+# returns without doing anything, which is what makes the function reachable
+# here without inventing a command for the test's benefit.
+# shellcheck source=/dev/null
+source "$HARNESS" --help >/dev/null
+
+SEED_RUN="$TEMP_ROOT/seed-run"
+mkdir -p "$SEED_RUN/seed"
+
+event_line() {
+    printf '{"id":"%s","kind":%s,"tags":[["h","%s"]]}\n' "$1" "$2" "$3"
+}
+
+# 14 kind 9 in "bitcoin" per relay, exactly one of them shared, plus one shared
+# kind 30023 each side -- the same shape the real seed produces, and the shape
+# the consumers assert on.
+write_snapshots() {
+    local omit=${1:-}
+    local suffix index
+    for suffix in a b; do
+        : > "$SEED_RUN/seed/relay-$suffix.jsonl"
+        if [[ $omit != "kind9-b" || $suffix != b ]]; then
+            event_line shared-kind-9 9 bitcoin >> "$SEED_RUN/seed/relay-$suffix.jsonl"
+        fi
+        if [[ $omit != "kind30023-b" || $suffix != b ]]; then
+            event_line shared-kind-30023 30023 bitcoin >> "$SEED_RUN/seed/relay-$suffix.jsonl"
+        fi
+        event_line "chat-$suffix" 9 bitcoin >> "$SEED_RUN/seed/relay-$suffix.jsonl"
+        for ((index = 0; index < 12; index += 1)); do
+            event_line "stress-$suffix-$index" 9 bitcoin \
+                >> "$SEED_RUN/seed/relay-$suffix.jsonl"
+        done
+    done
+}
+
+write_snapshots
+write_seed_summary "$SEED_RUN" \
+    || fail "a correctly seeded readback must be accepted"
+[[ $(jq '.group_bitcoin_kind_9.distinct' "$SEED_RUN/seed/summary.json") == 27 ]] \
+    || fail "a correctly seeded readback must record 27 distinct kind 9 rows"
+
+for omission in kind9-b kind30023-b; do
+    write_snapshots "$omission"
+    if refusal=$(write_seed_summary "$SEED_RUN" 2>&1); then
+        fail "a readback missing the shared $omission seed was accepted"
+    fi
+    case "$omission" in
+        kind9-b) missing_class='kind 9' ;;
+        kind30023-b) missing_class='kind 30023' ;;
+    esac
+    [[ $refusal == *"$missing_class events present at both relays"* ]] \
+        || fail "the refusal for $omission did not name the missing seed class"
+done
+
+printf '%s\n' \
+    'NIP-29 consumer harness test: seed readback verification passed'
