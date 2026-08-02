@@ -56,6 +56,10 @@ wait_for_ready() {
     die "$label did not reach its staged boundary"
 }
 
+print_proof_lines() {
+    sed -n -e '/^PROOF/p' -e '/^PASS/p' -e '/^FAIL/p' "$@"
+}
+
 if [[ ${NMP_NIP29_SKIP_SWIFT_FFI_BUILD:-0} == 1 ]]; then
     printf '%s\n' 'reused XCFramework built earlier in this job' > "$evidence_dir/build-ffi.log"
 else
@@ -102,7 +106,7 @@ wait_for_ready "$stage_dir/restore-follow.ready" "$adversarial_pid" live-adversa
 "$harness" follow-add "$run_dir" | tee "$evidence_dir/follow-add.log"
 : > "$stage_dir/restore-follow.continue"
 wait "$adversarial_pid"
-sed -n '/^PROOF\|^PASS\|^FAIL/p' "$evidence_dir/live-adversarial.log"
+print_proof_lines "$evidence_dir/live-adversarial.log"
 
 "$harness" relay-down b "$run_dir" | tee "$evidence_dir/conflict-relay-b-down.log"
 conflict_ready="$evidence_dir/restart-conflict.ready"
@@ -113,7 +117,7 @@ conflict_pid=$!
 wait_for_ready "$conflict_ready" "$conflict_pid" restart-conflict
 "$harness" relay-up b "$run_dir" | tee "$evidence_dir/conflict-relay-b-up.log"
 wait "$conflict_pid"
-sed -n '/^PROOF\|^PASS\|^FAIL/p' "$evidence_dir/restart-conflict.log"
+print_proof_lines "$evidence_dir/restart-conflict.log"
 
 "$harness" relay-down b "$run_dir" | tee "$evidence_dir/relay-b-down.log"
 growth_ready="$evidence_dir/provenance-growth.ready"
@@ -124,7 +128,7 @@ growth_pid=$!
 wait_for_ready "$growth_ready" "$growth_pid" provenance-growth
 "$harness" relay-up b "$run_dir" | tee "$evidence_dir/relay-b-up.log"
 wait "$growth_pid"
-sed -n '/^PROOF\|^PASS\|^FAIL/p' "$evidence_dir/provenance-growth.log"
+print_proof_lines "$evidence_dir/provenance-growth.log"
 
 "$harness" relay-down a "$run_dir" | tee "$evidence_dir/restart-relay-a-down.log"
 "$harness" relay-down b "$run_dir" | tee "$evidence_dir/restart-relay-b-down.log"
@@ -137,11 +141,11 @@ wait_for_ready "$restart_ready" "$restart_pid" restart
 "$harness" relay-up a "$run_dir" | tee "$evidence_dir/restart-relay-a-up.log"
 "$harness" relay-up b "$run_dir" | tee "$evidence_dir/restart-relay-b-up.log"
 wait "$restart_pid"
-sed -n '/^PROOF\|^PASS\|^FAIL/p' "$evidence_dir/restart.log"
+print_proof_lines "$evidence_dir/restart.log"
 
 "$harness" stop "$run_dir" | tee "$evidence_dir/harness-stop.log"
 cleanup_needed=0
-sed -n '/^PROOF\|^PASS\|^FAIL/p' \
+print_proof_lines \
     "$evidence_dir/online.log" \
     "$evidence_dir/live-adversarial.log" \
     "$evidence_dir/restart-conflict.log" \
