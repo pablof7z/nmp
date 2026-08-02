@@ -2093,6 +2093,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-consumer-nip29"
+version = "0.1.0"
+dependencies = [
+ "nmp",
+]
+
+[[package]]
 name = "nmp-content"
 version = "0.1.0"
 dependencies = [

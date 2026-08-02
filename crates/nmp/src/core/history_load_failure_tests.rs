@@ -377,6 +377,92 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
     engine.join();
 }
 
+/// #1108's "branch K open failure rolls back 0..K-1", for the failure class
+/// the caller-visible census above cannot see.
+///
+/// A branch's graph is built BEFORE any handle is registered, so a branch
+/// opened and then abandoned mid-open leaves residue only in the resolver.
+/// `active_demand` is computed from `self.handles` and would report that
+/// residue as absent; only the ownership census counts the graph nodes
+/// themselves. Deleting the withdrawal loop in `open_observation`'s branch
+/// construction must turn this red -- the union's FIRST branch is fully built
+/// when its second one fails, and nothing else in the suite opens a branch
+/// that is later abandoned.
+#[test]
+fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
+    let control = ReadFailureControl::default();
+    let mut core = EngineCore::new(
+        FailingReadStore::new(MemoryStore::new(), control.clone()),
+        20,
+    );
+    let baseline = core.observation_ownership_census();
+
+    // The first branch resolves without touching the store; the second must
+    // read it to resolve its `Derived` inner query, so the injected failure
+    // can only strike the LATER branch. Canonical branch order sorts on the
+    // selection first, and 1 < 2.
+    let first = nmp_grammar::Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1])),
+        ..Filter::default()
+    });
+    let failing = nmp_grammar::Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([2])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner: nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([3])),
+                ..Filter::default()
+            }),
+            project: Selector::Tag("p".to_owned()),
+        }))),
+        ..Filter::default()
+    });
+    let query = LiveQuery::union(
+        [
+            LiveQuery::single(first.clone()),
+            LiveQuery::single(failing.clone()),
+        ],
+        None,
+    )
+    .expect("a two-branch union is constructible");
+    assert_eq!(
+        query
+            .branches()
+            .iter()
+            .position(|branch| branch == &failing),
+        Some(1),
+        "the fault must be injectable at a LATER branch; a failure at branch 0 \
+         has nothing to roll back"
+    );
+
+    control.fail_query("second branch graph construction failed");
+    let effects = match core.open_observation(query) {
+        ObservationOpen::Refused { reason, effects } => {
+            assert!(
+                reason.contains("second branch graph construction failed"),
+                "unexpected refusal: {reason}"
+            );
+            effects
+        }
+        ObservationOpen::Opened { .. } => panic!("injected resolution failure was ignored"),
+    };
+
+    assert_only_refusal_diagnostic(
+        &effects,
+        "durable-store persistence failure: second branch graph construction failed",
+    );
+    assert_eq!(
+        core.observation_ownership_census(),
+        baseline,
+        "the branch built BEFORE the failing one must be withdrawn too; its \
+         graph nodes are the residue nothing else observes"
+    );
+
+    assert!(matches!(
+        core.open_observation(LiveQuery::single(first)),
+        ObservationOpen::Opened { .. }
+    ));
+}
+
 #[test]
 fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() {
     {

@@ -1,0 +1,15 @@
+[package]
+name = "nmp-consumer-nip29"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nmp-nip29-consumer"
+path = "src/main.rs"
+
+# This is an application-boundary proof: needing any Rust dependency besides
+# the supported facade is itself a failure of the experiment.
+[dependencies]
+nmp.workspace = true
