@@ -61,10 +61,14 @@ jobs:
             x86_64)
               asset=nak-v0.19.5-darwin-amd64
               digest=0a1d0bed1296e30e00673427fb9ae726b377f6596b965b6212371b51eb061239
+              go_asset=go1.25.0.darwin-amd64.tar.gz
+              go_digest=5bd60e823037062c2307c71e8111809865116714d6f6b410597cf5075dfd80ef
               ;;
             arm64)
               asset=nak-v0.19.5-darwin-arm64
               digest=78d171d92d196bf5969b4ffd6ee6a04e7252852d79b1d6ffd6df1d63f1ee5524
+              go_asset=go1.25.0.darwin-arm64.tar.gz
+              go_digest=544932844156d8172f7a28f77f2ac9c15a23046698b6243f633b0a0b00c0749c
               ;;
             *)
               echo "unsupported macOS runner architecture: $(uname -m)" >&2
@@ -77,7 +81,12 @@ jobs:
             --output "$RUNNER_TEMP/nak-bin/nak"
           printf '%s  %s\n' "$digest" "$RUNNER_TEMP/nak-bin/nak" | shasum -a 256 -c -
           chmod +x "$RUNNER_TEMP/nak-bin/nak"
-          export PATH="$RUNNER_TEMP/nak-bin:$PATH"
+          curl --fail --location --retry 3 \
+            "https://go.dev/dl/$go_asset" \
+            --output "$RUNNER_TEMP/$go_asset"
+          printf '%s  %s\n' "$go_digest" "$RUNNER_TEMP/$go_asset" | shasum -a 256 -c -
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/$go_asset"
+          export PATH="$RUNNER_TEMP/nak-bin:$RUNNER_TEMP/go/bin:$PATH"
           go version
           NMP_NIP29_HARNESS_BACKEND=host \
           NMP_NIP29_SKIP_SWIFT_FFI_BUILD=1 \
