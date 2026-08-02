@@ -2,8 +2,10 @@ import Foundation
 
 enum Mode: String, Sendable {
     case online
+    case liveAdversarial = "live-adversarial"
     case provenanceGrowth = "provenance-growth"
     case restart
+    case restartConflict = "restart-conflict"
 }
 
 struct Args: Sendable {
@@ -16,6 +18,7 @@ struct Args: Sendable {
     let writerSecretFile: String
     let storePath: String
     let readyFile: String?
+    let stageDir: String?
     let settleSeconds: UInt64
 
     static func parse() throws -> Args {
@@ -61,6 +64,7 @@ struct Args: Sendable {
             writerSecretFile: try required("--writer-secret-file"),
             storePath: try required("--store"),
             readyFile: options["--ready-file"],
+            stageDir: options["--stage-dir"],
             settleSeconds: settle
         )
     }
