@@ -1,6 +1,7 @@
 # NIP-29 real-relay consumer capstone
 
-Status: **passed and merged** on `master` at `0ef5e1c7`.
+Status: **passed and merged** on `master`. The consumer capstone landed at
+`0ef5e1c7`; the final host-fixture restart correction landed at `308e1757`.
 
 This is the completion report for #1140 and #1203. It records what the direct
 Rust and downstream Swift consumers proved through NMP's public facade. The
@@ -17,7 +18,7 @@ product result.
 | downstream Swift consumer | #1202 | #1208 | hand-written `NMP` wrapper proof; no `NMPFFI` import |
 | live/restart adversarials | #1209 | #1213 | Rust and Swift proof on the final tree |
 | per-relay NIP-77 provenance repair | #1216 | #1221 | product defect found by the capstone and fixed |
-| host relay restart ownership | #1219 | #1220 | fixture lifecycle defect found by the hosted run and fixed |
+| host relay restart lifecycle | #1219 | #1220, #1225 | fixture shutdown and transient ownership-sampling defects found by hosted runs and fixed |
 
 The final exact-head Swift run is the hosted macOS qualification job for #1213:
 
@@ -260,10 +261,14 @@ snapshot to rows already seen from the relay being reconciled. Its deterministic
 headless test was red before the fix; afterward `cargo test -p nmp`, 30/30
 optimized direct-FFI/Redb runs, and hosted Swift all passed with two sources.
 
-The hosted run also found a fixture-only lifecycle race: `relay-down` attempted
-to shell-`wait` for a process owned by an earlier shell and returned before the
-process exited. #1220 replaced that with ownership-aware exit polling and
-preserved logs for genuine early exits.
+The hosted runs also found fixture-only lifecycle races. First, `relay-down`
+attempted to shell-`wait` for a process owned by an earlier shell and returned
+before the process exited. #1220 replaced that wait. The report PR's first
+hosted run then exposed a second false-negative: the restarted relay was already
+serving NMP requests, but one transient `ps` sample made the harness declare
+that it did not own the process. #1225 retries startup ownership verification,
+waits for confirmed PID exit after shutdown, and injects both transient
+inspection failures in the lifecycle falsifier.
 
 No required capstone scenario was skipped. The open #1211 BDD quiet-window
 flake is a separate 300-group scripted-world settlement problem, not a skip or
