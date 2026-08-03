@@ -653,7 +653,6 @@ pub(super) fn gc(
         if let Some((_, event)) = pending.take() {
             consider(event, None)?;
         }
-        drop(consider);
 
         for event in &victims {
             remove_row_in_txn(txn, event.id, |_| true)?.ok_or_else(|| {

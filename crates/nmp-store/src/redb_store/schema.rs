@@ -331,15 +331,6 @@ pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ID: TableDefinition<&[u8; 64], &[u8]>
 pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ADDR: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("publish_queue_suppress_by_addr");
 
-/// One [`EVENTS`] key: `[event_key:u64-be | col:u8 | rest]`.
-pub(super) fn event_key_bytes(event_key: EventKey, column: u8, rest: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(9 + rest.len());
-    key.extend_from_slice(&event_key.to_be_bytes());
-    key.push(column);
-    key.extend_from_slice(rest);
-    key
-}
-
 /// The [`EVENT_COL_ROW`] key of one event.
 pub(super) fn event_row_key(event_key: EventKey) -> [u8; 9] {
     let mut key = [0u8; 9];
