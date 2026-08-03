@@ -3,11 +3,36 @@
 //! The positive fact comes from the facade receipt. The negative “never
 //! attempted again” fact comes from the scripted relay's raw websocket tap,
 //! so the engine is not allowed to corroborate its own claim.
+//!
+//! The policy fixture itself lives here too, rather than beside the world's
+//! own fields: it is the app-owned half of this plane, and a reader chasing
+//! what a denial MEANS wants the policy that produced it in the same file as
+//! the observations of it.
 
 use nmp::mechanism::delivery::{AuthDenialSource, WriteStatus};
 
 use super::budgets::NEVER;
 use super::{AuthDenialObservation, NmpWorld};
+
+/// One app-owned policy for the active account, with per-relay answers.
+///
+/// The fixture is deliberately installed through the public facade and sees
+/// the real challenge request. It does not inject an answer into the reducer;
+/// the scripted relay must first challenge the exact websocket session.
+pub(super) struct StagedAuthPolicy {
+    pub(super) denied: Vec<(nostr::RelayUrl, String)>,
+}
+
+impl nmp::AuthPolicy for StagedAuthPolicy {
+    fn evaluate(&self, request: nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp {
+        self.denied
+            .iter()
+            .find(|(relay, _)| relay == request.relay())
+            .map_or_else(nmp::AuthPolicyOp::allow, |(_, reason)| {
+                nmp::AuthPolicyOp::deny(reason.clone())
+            })
+    }
+}
 
 impl NmpWorld {
     /// Observe an exact policy denial, retaining its first live-process fact

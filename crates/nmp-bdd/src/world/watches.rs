@@ -26,8 +26,9 @@ use nmp_router::RelayUrl;
 
 use nmp_test_support::relays::WireRecord;
 
+use super::acquisition::{every_source_has_proven_its_subtree, unproven_report};
 use super::budgets::{INGEST_RESOLVED, WIRE_QUIET, WIRE_SETTLE};
-use super::observe::{every_source_has_proven_its_subtree, FeedState};
+use super::observe::FeedState;
 use super::queries::{
     authored_note_query, my_group_state_query, tagged_note_query, tagged_note_query_values,
     WatchShape, GROUP_ADMINS_KIND,
@@ -257,7 +258,7 @@ impl NmpWorld {
                 "nmp-bdd: watch {key:?} resolves its own filters from rows it must ingest \
                  first, and no source proved its subtree within {INGEST_RESOLVED:?}, so no \
                  wire count taken now would be a fact: {}",
-                watch.unproven_report()
+                unproven_report(&watch.evidence)
             );
         }
     }
