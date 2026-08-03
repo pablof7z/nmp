@@ -350,8 +350,7 @@ async fn an_admin_with_no_role_is_not_reported_as_a_member() {
     .await;
 
     let engine = bare_engine();
-    let group =
-        nip29::group([host.url.clone()], GROUP_ID).expect("one host forms a scope");
+    let group = nip29::group([host.url.clone()], GROUP_ID).expect("one host forms a scope");
     let watching = group
         .observe(&engine, [GroupRecord::Admins, GroupRecord::Members])
         .expect("the records observation opens");
@@ -459,8 +458,7 @@ async fn the_group_scoped_door_delivers_one_snapshot_from_the_first_delivery() {
     let host = ScriptedRelay::start(&RelayConfig::default()).await;
 
     let engine = bare_engine();
-    let group =
-        nip29::group([host.url.clone()], GROUP_ID).expect("one host forms a scope");
+    let group = nip29::group([host.url.clone()], GROUP_ID).expect("one host forms a scope");
     let watching = group
         .observe(&engine, [GroupRecord::Metadata, GroupRecord::Members])
         .expect("the records observation opens");

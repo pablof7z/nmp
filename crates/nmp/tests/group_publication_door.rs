@@ -348,7 +348,10 @@ async fn settle_group_snapshot(
     quiet: Duration,
 ) -> GroupSnapshot {
     while let Ok(Some(snapshots)) = watching.next_within(quiet).await {
-        if let Some(found) = snapshots.into_iter().find(|snapshot| snapshot.id == current.id) {
+        if let Some(found) = snapshots
+            .into_iter()
+            .find(|snapshot| snapshot.id == current.id)
+        {
             current = found;
         }
     }
@@ -960,11 +963,10 @@ async fn a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for
         .observe(&engine, predicate, [GroupRecord::Metadata])
         .expect("a two-host listing declares two branches");
 
-    let snapshot = wait_for_group_snapshot(&watching, SETTLE, |snapshot| {
-        snapshot.metadata.is_some()
-    })
-    .await
-    .expect("host A's own group must surface: its own evidence supports it");
+    let snapshot =
+        wait_for_group_snapshot(&watching, SETTLE, |snapshot| snapshot.metadata.is_some())
+            .await
+            .expect("host A's own group must surface: its own evidence supports it");
     // Give a late, WRONG row (the exact shape a cross-host leak produces) a
     // real chance to arrive before the negative assertion runs.
     let snapshot = settle_group_snapshot(&watching, snapshot, Duration::from_millis(500)).await;
@@ -989,10 +991,7 @@ async fn a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for
         "nothing observed at host B supports this group, so host B has no record here"
     );
     assert_ne!(
-        snapshot
-            .metadata
-            .as_ref()
-            .map(|record| record.event_id),
+        snapshot.metadata.as_ref().map(|record| record.event_id),
         Some(host_b_metadata.id),
         "host B's own kind:39000 must never be the record an app is shown"
     );

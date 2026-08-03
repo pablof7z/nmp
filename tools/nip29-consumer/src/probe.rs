@@ -3,14 +3,15 @@ use std::fs;
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
+use nmp::nip29::GroupAvailability;
 use nmp::{
     nip29, AccessContext, Binding, CacheMode, Demand, Derived, DiagnosticsSnapshot, Engine,
-    EngineConfig, EventBuilder, Filter, IdentityField, Kind, LiveQuery, PublicKey, RelayUrl,
-    Selector, SourceAuthority, SourceStatus, Tag, Window, WriteStatus,
+    EngineConfig, EventBuilder, Filter, IdentityField, Kind, PublicKey, RelayUrl, Selector,
+    SourceAuthority, SourceStatus, Tag, Window, WriteStatus,
 };
 
 use crate::args::{Args, Mode};
-use crate::observe::{tag_value, wait_until, Observed};
+use crate::observe::{wait_until, Observed};
 
 const GROUP: &str = "bitcoin";
 const SINGLE_GROUP: &str = "solo-a";
@@ -181,40 +182,60 @@ fn online(args: Args) -> Result<(), String> {
 }
 
 fn verify_metadata_conflict(context: &Context, scope: &nip29::RelayScope) -> Result<(), String> {
-    let query = metadata_query(context, scope)?;
-    let subscription = context.engine.observe(query, None).map_err(display)?;
-    let mut observed = Observed::default();
-    wait_until(&subscription, context.settle, &mut observed, |state| {
-        state.rows_of_kind(39000).len() == 2
+    let watching = metadata_observation(context, scope)?;
+    let snapshots = wait_for_snapshots(context, &watching, "metadata conflict", |snapshots| {
+        bitcoin(snapshots).is_some_and(|snapshot| snapshot.per_host.len() == 2)
     })?;
-    let names_by_source = metadata_names(&observed)?;
+    let snapshot = bitcoin(&snapshots).expect("the predicate proved it is there");
+    let names_by_source = metadata_names(snapshot)?;
     ensure(
         names_by_source.get(&context.relay_a).map(String::as_str) == Some("Bitcoin Cash")
             && names_by_source.get(&context.relay_b).map(String::as_str) == Some("Bitcoin (real)"),
         format!("conflicting relay metadata was not preserved: {names_by_source:?}"),
     )?;
+    // The aggregate is ONE relay's whole record, not a blend of the two, and
+    // the app is told the two disagree so it can decide what to show.
+    let shown = snapshot
+        .metadata
+        .as_ref()
+        .ok_or_else(|| "no metadata was shown at all".to_string())?;
+    ensure(
+        names_by_source
+            .values()
+            .any(|name| Some(name.as_str()) == shown.name.as_deref()),
+        format!("the shown name {:?} is not either relay's own", shown.name),
+    )?;
+    ensure(
+        snapshot.differs(nip29::GroupRecord::Metadata),
+        "two relays published different metadata and the app was not told they disagree",
+    )?;
     let display_winner = names_by_source
         .get(&context.relay_b)
         .expect("relay B's asserted row exists");
     println!(
-        "PROOF metadata_conflict preserved=2 app_winner={display_winner:?} policy=prefer_relay_b"
+        "PROOF metadata_conflict preserved=2 shown_host={} shown_name={:?} differs=true \
+         app_winner={display_winner:?} policy=prefer_relay_b",
+        shown.host, shown.name
     );
     Ok(())
 }
 
 fn verify_follows_discovery(context: &Context, scope: &nip29::RelayScope) -> Result<(), String> {
-    let query = follows_discovery_query(context, scope)?;
-    let subscription = context.engine.observe(query, None).map_err(display)?;
-    let mut observed = Observed::default();
-    wait_until(&subscription, context.settle, &mut observed, |state| {
-        discovery_has_group(state, &context.followed)
+    let watching = follows_discovery_observation(context, scope)?;
+    let snapshots = wait_for_snapshots(context, &watching, "follows discovery", |snapshots| {
+        bitcoin(snapshots).is_some_and(|snapshot| lists_followed(snapshot, &context.followed))
     })?;
     ensure(
-        observed.rows.values().all(|row| {
-            tag_value(row, "d").as_deref() == Some(GROUP)
-                && row.sources == BTreeSet::from([context.relay_a.clone()])
-        }),
-        "follows-derived discovery crossed relay authority or returned another group",
+        snapshots.len() == 1,
+        format!(
+            "follows-derived discovery returned another group: {:?}",
+            snapshots.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+        ),
+    )?;
+    let snapshot = bitcoin(&snapshots).expect("the predicate proved it is there");
+    ensure(
+        snapshot.per_host.keys().cloned().collect::<Vec<_>>() == vec![context.relay_a.clone()],
+        "follows-derived discovery crossed relay authority",
     )?;
     println!(
         "PROOF discovery predicate=member_list_includes(follows_of_active_viewer) group={GROUP} viewer={} followed={} evidence_source={}",
@@ -223,40 +244,56 @@ fn verify_follows_discovery(context: &Context, scope: &nip29::RelayScope) -> Res
     Ok(())
 }
 
-fn metadata_query(context: &Context, scope: &nip29::RelayScope) -> Result<LiveQuery, String> {
-    // Relay-signed discovery records are keyed by `d`, unlike group content's
-    // `h`. Positive member-list evidence at each relay selects both records.
+/// The member list NMP handed back names the followed subject -- read off the
+/// typed snapshot, with no `p`-tag walking anywhere in this application.
+fn lists_followed(snapshot: &nip29::GroupSnapshot, followed: &PublicKey) -> bool {
+    snapshot
+        .members
+        .iter()
+        .any(|subject| &subject.pubkey == followed)
+}
+
+fn metadata_observation(
+    context: &Context,
+    scope: &nip29::RelayScope,
+) -> Result<nip29::GroupObservation, String> {
+    // Relay-signed group records are keyed by `d`, unlike group content's `h`
+    // -- reaching for them through the content door is refused outright
+    // (#1245). Positive member-list evidence at each relay selects the group.
     let subjects = Binding::Literal(BTreeSet::from([
         context.followed.to_hex(),
         context.outsider.to_hex(),
     ]));
     scope
-        .groups_where(&nip29::member_list_includes(subjects))
+        .observe(
+            &context.engine,
+            nip29::member_list_includes(subjects),
+            [nip29::GroupRecord::Metadata],
+        )
         .map_err(display)
 }
 
-fn metadata_names(observed: &Observed) -> Result<BTreeMap<RelayUrl, String>, String> {
-    observed
-        .rows_of_kind(39000)
-        .into_iter()
-        .map(|row| {
-            let source = row
-                .sources
-                .iter()
-                .next()
-                .cloned()
-                .ok_or_else(|| "relay metadata row had no source".to_string())?;
-            let name = tag_value(row, "name")
-                .ok_or_else(|| "relay metadata row had no name".to_string())?;
-            Ok((source, name))
+/// Exactly what each relay signed, read off the per-host breakdown beside the
+/// aggregate -- no tag walking, and no relay's record folded into another's.
+fn metadata_names(snapshot: &nip29::GroupSnapshot) -> Result<BTreeMap<RelayUrl, String>, String> {
+    snapshot
+        .per_host
+        .iter()
+        .map(|(host, records)| {
+            let name = records
+                .metadata
+                .as_ref()
+                .and_then(|record| record.name.clone())
+                .ok_or_else(|| format!("relay {host} published no group name"))?;
+            Ok((host.clone(), name))
         })
         .collect()
 }
 
-fn follows_discovery_query(
+fn follows_discovery_observation(
     context: &Context,
     scope: &nip29::RelayScope,
-) -> Result<LiveQuery, String> {
+) -> Result<nip29::GroupObservation, String> {
     let mut follows_demand = Demand::new(
         Filter {
             kinds: Some(BTreeSet::from([3])),
@@ -275,21 +312,56 @@ fn follows_discovery_query(
         inner: follows_demand,
         project: Selector::Tag("p".to_string()),
     }));
-    let predicate = nip29::member_list_includes(follows);
-    scope.groups_where(&predicate).map_err(display)
+    scope
+        .observe(
+            &context.engine,
+            nip29::member_list_includes(follows),
+            [nip29::GroupRecord::Members],
+        )
+        .map_err(display)
 }
 
-fn discovery_has_group(observed: &Observed, followed: &PublicKey) -> bool {
-    let followed_hex = followed.to_hex();
-    observed.rows.values().any(|row| {
-        row.event.kind.as_u16() == 39002
-            && tag_value(row, "d").as_deref() == Some(GROUP)
-            && row.event.tags.iter().any(|tag| {
-                let values = tag.as_slice();
-                values.first().map(String::as_str) == Some("p")
-                    && values.get(1).map(String::as_str) == Some(followed_hex.as_str())
-            })
+/// Await the records observation from this synchronous probe.
+///
+/// The probe deliberately depends on `nmp` and nothing else, so it borrows the
+/// engine's own runtime handle rather than growing an async runtime dependency
+/// of its own. `block_on` here runs on the probe's main thread, which is never
+/// one of that runtime's workers.
+fn wait_for_snapshots(
+    context: &Context,
+    watching: &nip29::GroupObservation,
+    what: &str,
+    pred: impl Fn(&[nip29::GroupSnapshot]) -> bool,
+) -> Result<Vec<nip29::GroupSnapshot>, String> {
+    let runtime = context.engine.adapter_runtime().map_err(display)?;
+    let deadline = Instant::now() + context.settle;
+    runtime.block_on(async move {
+        let mut last: Vec<nip29::GroupSnapshot> = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "{what}: no delivery satisfied the condition; last saw {} group(s)",
+                    last.len()
+                ));
+            }
+            match watching.next_within(remaining).await {
+                Ok(Some(snapshots)) => {
+                    last = snapshots;
+                    if pred(&last) {
+                        return Ok(last);
+                    }
+                }
+                Ok(None) => return Err(format!("{what}: the observation was withdrawn")),
+                Err(error) => return Err(format!("{what}: {error}")),
+            }
+        }
     })
+}
+
+/// The one group the probe watches, if the delivery names it.
+fn bitcoin(snapshots: &[nip29::GroupSnapshot]) -> Option<&nip29::GroupSnapshot> {
+    snapshots.iter().find(|snapshot| snapshot.id == GROUP)
 }
 
 fn verify_window(context: &Context, group: &nip29::Group) -> Result<(), String> {
@@ -422,28 +494,19 @@ fn live_adversarial(args: Args) -> Result<(), String> {
     let scope = context.scope()?;
     let group = scope.group(GROUP);
 
-    let metadata_subscription = context
-        .engine
-        .observe(metadata_query(&context, &scope)?, None)
-        .map_err(display)?;
-    let mut metadata = Observed::default();
-    wait_until(
-        &metadata_subscription,
-        context.settle,
-        &mut metadata,
-        |state| state.rows_of_kind(39000).len() == 2,
-    )?;
+    let metadata_watch = metadata_observation(&context, &scope)?;
+    wait_for_snapshots(&context, &metadata_watch, "initial metadata", |snapshots| {
+        bitcoin(snapshots).is_some_and(|snapshot| snapshot.per_host.len() == 2)
+    })?;
 
-    let discovery_subscription = context
-        .engine
-        .observe(follows_discovery_query(&context, &scope)?, None)
-        .map_err(display)?;
-    let mut discovery = Observed::default();
-    wait_until(
-        &discovery_subscription,
-        context.settle,
-        &mut discovery,
-        |state| discovery_has_group(state, &context.followed),
+    let discovery_watch = follows_discovery_observation(&context, &scope)?;
+    wait_for_snapshots(
+        &context,
+        &discovery_watch,
+        "initial discovery",
+        |snapshots| {
+            bitcoin(snapshots).is_some_and(|snapshot| lists_followed(snapshot, &context.followed))
+        },
     )?;
 
     let chat_query = group.read(kinds([9])).map_err(display)?;
@@ -478,42 +541,41 @@ fn live_adversarial(args: Args) -> Result<(), String> {
     )?;
 
     stage_round_trip(&args, "mutate-live-inputs")?;
-    wait_until(
-        &metadata_subscription,
-        context.settle,
-        &mut metadata,
-        |state| {
-            metadata_names(state).is_ok_and(|names| {
+    let mutated = wait_for_snapshots(&context, &metadata_watch, "mutated metadata", |snapshots| {
+        bitcoin(snapshots).is_some_and(|snapshot| {
+            metadata_names(snapshot).is_ok_and(|names| {
                 names.get(&context.relay_a).map(String::as_str) == Some("Bitcoin Cash live")
                     && names.get(&context.relay_b).map(String::as_str)
                         == Some("Bitcoin (real) live")
             })
-        },
-    )?;
+        })
+    })?;
     wait_until(
         &surviving_subscription,
         context.settle,
         &mut surviving_rows,
         |state| state.has_source_count(LIVE_CHAT, 2),
     )?;
-    wait_until(
-        &discovery_subscription,
-        context.settle,
-        &mut discovery,
-        |state| !discovery_has_group(state, &context.followed),
+    // The follow is withdrawn, so the evidence that put this group in the
+    // listing is gone and the group leaves the listing. Absence here is the
+    // predicate no longer matching, never a claim about membership.
+    wait_for_snapshots(
+        &context,
+        &discovery_watch,
+        "follow withdrawn",
+        |snapshots| {
+            !bitcoin(snapshots).is_some_and(|snapshot| lists_followed(snapshot, &context.followed))
+        },
     )?;
     println!(
         "PROOF live_mutation metadata={:?} follows_removed=true surviving_chat_sources=2 shared_wire={after_one_cancel:?}",
-        metadata_names(&metadata)?
+        metadata_names(bitcoin(&mutated).expect("the predicate proved it is there"))?
     );
 
     stage_round_trip(&args, "restore-follow")?;
-    wait_until(
-        &discovery_subscription,
-        context.settle,
-        &mut discovery,
-        |state| discovery_has_group(state, &context.followed),
-    )?;
+    wait_for_snapshots(&context, &discovery_watch, "follow restored", |snapshots| {
+        bitcoin(snapshots).is_some_and(|snapshot| lists_followed(snapshot, &context.followed))
+    })?;
     println!("PROOF live_follow_readded group={GROUP} observation_reused=true");
 
     drop(surviving_subscription);
@@ -522,8 +584,8 @@ fn live_adversarial(args: Args) -> Result<(), String> {
         "PROOF shared_cancellation before={shared_wire:?} after_one={after_one_cancel:?} after_last={after_last_cancel:?}"
     );
     println!("PASS live-adversarial");
-    drop(metadata_subscription);
-    drop(discovery_subscription);
+    drop(metadata_watch);
+    drop(discovery_watch);
     context.shutdown();
     Ok(())
 }
@@ -708,52 +770,64 @@ fn restart(args: Args) -> Result<(), String> {
 fn restart_conflict(args: Args) -> Result<(), String> {
     let context = Context::open(&args)?;
     let scope = context.scope()?;
-    let subscription = context
-        .engine
-        .observe(metadata_query(&context, &scope)?, None)
-        .map_err(display)?;
-    let mut observed = Observed::default();
-    wait_until(&subscription, context.settle, &mut observed, |state| {
-        let statuses = source_statuses(state);
-        metadata_names(state).is_ok_and(|names| {
-            names.get(&context.relay_a).map(String::as_str) == Some("Bitcoin Cash live")
-                && names.get(&context.relay_b).map(String::as_str) == Some("Bitcoin (real) live")
-                && statuses.get(&context.relay_a) == Some(&SourceStatus::Requesting)
-                && statuses.contains_key(&context.relay_b)
-                && statuses.get(&context.relay_b) != Some(&SourceStatus::Requesting)
+    let watching = metadata_observation(&context, &scope)?;
+
+    // Relay B is offline, and its own record survived the restart in the
+    // local store. The app must still SEE what relay B signed -- absence of a
+    // link is not absence of a record -- while being told, per host, that
+    // relay B is not currently proven.
+    let offline = wait_for_snapshots(&context, &watching, "offline restart", |snapshots| {
+        bitcoin(snapshots).is_some_and(|snapshot| {
+            metadata_names(snapshot).is_ok_and(|names| {
+                names.get(&context.relay_a).map(String::as_str) == Some("Bitcoin Cash live")
+                    && names.get(&context.relay_b).map(String::as_str)
+                        == Some("Bitcoin (real) live")
+            }) && host_availability(snapshot, &context.relay_a) == Some(GroupAvailability::Ready)
+                && host_availability(snapshot, &context.relay_b) != Some(GroupAvailability::Ready)
         })
     })?;
-    let before = source_statuses(&observed);
+    let offline = bitcoin(&offline).expect("the predicate proved it is there");
     ensure(
-        before.get(&context.relay_b) != Some(&SourceStatus::Requesting),
-        format!("relay B was expected offline before restart proof: {before:?}"),
+        offline.availability != GroupAvailability::Ready,
+        "one host is unproven, so the hoisted availability must not read Ready",
     )?;
     signal_ready(&args)?;
     println!(
-        "PROOF restart_conflict_offline metadata={:?} cached_sources=2 statuses={before:?}",
-        metadata_names(&observed)?
+        "PROOF restart_conflict_offline metadata={:?} cached_sources=2 hoisted={:?} per_host={:?}",
+        metadata_names(offline)?,
+        offline.availability,
+        host_availabilities(offline)
     );
 
-    wait_until(&subscription, context.settle, &mut observed, |state| {
-        source_statuses(state).get(&context.relay_b) == Some(&SourceStatus::Requesting)
+    let reconnected = wait_for_snapshots(&context, &watching, "reconnected", |snapshots| {
+        bitcoin(snapshots).is_some_and(|snapshot| {
+            host_availability(snapshot, &context.relay_b) == Some(GroupAvailability::Ready)
+        })
     })?;
+    let reconnected = bitcoin(&reconnected).expect("the predicate proved it is there");
     println!(
-        "PROOF restart_conflict_reconnected metadata={:?} statuses={:?}",
-        metadata_names(&observed)?,
-        source_statuses(&observed)
+        "PROOF restart_conflict_reconnected metadata={:?} per_host={:?}",
+        metadata_names(reconnected)?,
+        host_availabilities(reconnected)
     );
     println!("PASS restart-conflict");
-    drop(subscription);
+    drop(watching);
     context.shutdown();
     Ok(())
 }
 
-fn source_statuses(observed: &Observed) -> BTreeMap<RelayUrl, SourceStatus> {
-    observed
-        .evidence
+fn host_availability(
+    snapshot: &nip29::GroupSnapshot,
+    host: &RelayUrl,
+) -> Option<GroupAvailability> {
+    snapshot.at(host).map(|records| records.availability)
+}
+
+fn host_availabilities(snapshot: &nip29::GroupSnapshot) -> BTreeMap<RelayUrl, GroupAvailability> {
+    snapshot
+        .per_host
         .iter()
-        .flat_map(|branch| branch.sources.iter())
-        .map(|source| (source.relay.clone(), source.status))
+        .map(|(host, records)| (host.clone(), records.availability))
         .collect()
 }
 

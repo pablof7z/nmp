@@ -278,8 +278,7 @@ mod tests {
     fn scope_stamps_exact_hosts_on_every_nested_nip29_demand() {
         let scope = on([host(1), host(2)]).expect("two hosts");
         let predicate = member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
-        let branches =
-            scope.records_branches(&predicate, &BTreeSet::from([GroupRecord::Members]));
+        let branches = scope.records_branches(&predicate, &BTreeSet::from([GroupRecord::Members]));
         let d = IndexedTagName::new('d').expect("d is a single ASCII letter");
 
         assert_eq!(branches.len(), 2, "one complete branch per host");

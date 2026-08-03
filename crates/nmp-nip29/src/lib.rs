@@ -65,11 +65,11 @@ pub use discovery::{
     admin_list_includes_at, member_list_includes_at, GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND,
     GROUP_METADATA_KIND,
 };
-pub use records::{
-    group_metadata_at, group_records_at, join_key_of, listed_record_at, GroupMetadata, GroupRecord,
-    ListedRecord, ListedSubject,
-};
 pub use operations::{
     add_user, create_group, create_invite, delete_event, delete_group, edit_metadata, join_request,
     leave_request, remove_user,
+};
+pub use records::{
+    group_metadata_at, group_records_at, join_key_of, listed_record_at, GroupMetadata, GroupRecord,
+    ListedRecord, ListedSubject,
 };

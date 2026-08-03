@@ -102,12 +102,3 @@ pub fn wait_until(
     }
     Ok(())
 }
-
-pub fn tag_value(row: &Row, name: &str) -> Option<String> {
-    row.event.tags.iter().find_map(|tag| {
-        let values = tag.as_slice();
-        (values.first().map(String::as_str) == Some(name))
-            .then(|| values.get(1).cloned())
-            .flatten()
-    })
-}

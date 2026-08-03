@@ -78,11 +78,7 @@ fn predicates_compose_through_union_intersect_and_minus() {
         member.minus(vec![admin]),
     ] {
         let watching = scope
-            .observe_records(
-                engine.clone(),
-                predicate,
-                vec![FfiGroupRecord::Metadata],
-            )
+            .observe_records(engine.clone(), predicate, vec![FfiGroupRecord::Metadata])
             .expect("a composed predicate still opens over every host");
         watching.cancel();
     }

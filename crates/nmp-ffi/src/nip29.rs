@@ -557,7 +557,7 @@ fn subject_to_ffi(subject: &ListedSubject) -> FfiListedSubject {
 fn listed_record_to_ffi(record: &ListedRecord) -> FfiListedRecord {
     FfiListedRecord {
         subjects: record.subjects.iter().map(subject_to_ffi).collect(),
-        as_of: record.as_of.as_u64(),
+        as_of: record.as_of.as_secs(),
         event_id: record.event_id.to_hex(),
         host: record.host.to_string(),
     }
@@ -569,7 +569,7 @@ fn metadata_to_ffi(metadata: &GroupMetadata) -> FfiGroupMetadata {
         about: metadata.about.clone(),
         picture: metadata.picture.clone(),
         tags: metadata.tags.clone(),
-        as_of: metadata.as_of.as_u64(),
+        as_of: metadata.as_of.as_secs(),
         event_id: metadata.event_id.to_hex(),
         host: metadata.host.to_string(),
     }
@@ -777,10 +777,10 @@ mod tests {
         let engine =
             NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
         let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
-        match scope.group("photographers".to_string()).observe_records(
-            engine.clone(),
-            Vec::new(),
-        ) {
+        match scope
+            .group("photographers".to_string())
+            .observe_records(engine.clone(), Vec::new())
+        {
             Err(FfiError::GroupNoRecordSelected) => {}
             Err(other) => panic!("expected GroupNoRecordSelected, got {other:?}"),
             Ok(_) => panic!("an empty record selection must be refused, not opened"),
@@ -860,7 +860,10 @@ mod tests {
             projected.metadata.as_ref().and_then(|m| m.name.as_deref()),
             Some("Photographers")
         );
-        assert_eq!(projected.metadata.as_ref().and_then(|m| m.about.clone()), None);
+        assert_eq!(
+            projected.metadata.as_ref().and_then(|m| m.about.clone()),
+            None
+        );
         assert_eq!(
             projected.metadata.as_ref().map(|m| m.tags.clone()),
             Some(vec![vec!["parent".to_string(), "darkroom".to_string()]]),

@@ -381,12 +381,15 @@ impl Accumulator {
 /// evidence. Mirrors `nmp_nip02::service::availability`'s ladder, narrowed to
 /// the sources that name THIS host.
 fn availability_at(host: &RelayUrl, evidence: &[AcquisitionEvidence]) -> GroupAvailability {
-    let hard_shortfall = evidence.iter().flat_map(|branch| branch.shortfall.iter()).any(|fact| {
-        matches!(
-            fact,
-            ShortfallFact::NoPlannedSource { .. } | ShortfallFact::LocalLimit { .. }
-        )
-    });
+    let hard_shortfall = evidence
+        .iter()
+        .flat_map(|branch| branch.shortfall.iter())
+        .any(|fact| {
+            matches!(
+                fact,
+                ShortfallFact::NoPlannedSource { .. } | ShortfallFact::LocalLimit { .. }
+            )
+        });
     if hard_shortfall {
         return GroupAvailability::SourceUnavailable;
     }
@@ -450,7 +453,9 @@ fn project(
             continue;
         };
         for host in attributed {
-            let Some(host) = hosts.get(host) else { continue };
+            let Some(host) = hosts.get(host) else {
+                continue;
+            };
             folded
                 .entry(id.clone())
                 .or_default()
@@ -562,10 +567,7 @@ fn union(
                 .extend(subject.hosts.iter().cloned());
         }
     }
-    if merged
-        .values()
-        .any(|hosts| hosts.len() != publishing.len())
-    {
+    if merged.values().any(|hosts| hosts.len() != publishing.len()) {
         disagreements.insert(record);
     }
     merged
@@ -591,11 +593,14 @@ impl HostFold {
         match record {
             GroupRecord::Metadata => {
                 let candidate = group_metadata_at(host, event);
-                if self
-                    .metadata
-                    .as_ref()
-                    .is_none_or(|held| newer(candidate.as_of, candidate.event_id, held.as_of, held.event_id))
-                {
+                if self.metadata.as_ref().is_none_or(|held| {
+                    newer(
+                        candidate.as_of,
+                        candidate.event_id,
+                        held.as_of,
+                        held.event_id,
+                    )
+                }) {
                     self.metadata = Some(candidate);
                 }
             }
@@ -606,10 +611,14 @@ impl HostFold {
 }
 
 fn offer_list(slot: &mut Option<ListedRecord>, candidate: ListedRecord) {
-    if slot
-        .as_ref()
-        .is_none_or(|held| newer(candidate.as_of, candidate.event_id, held.as_of, held.event_id))
-    {
+    if slot.as_ref().is_none_or(|held| {
+        newer(
+            candidate.as_of,
+            candidate.event_id,
+            held.as_of,
+            held.event_id,
+        )
+    }) {
         *slot = Some(candidate);
     }
 }

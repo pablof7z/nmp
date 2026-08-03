@@ -31,12 +31,12 @@ use nostr::{Event, EventId, PublicKey, RelayUrl};
 use super::read::{self, GroupReadError};
 use super::records::{GroupObservation, GroupObserveError};
 use crate::delivery::WriteStatus;
-use nmp_nip29::GroupRecord;
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::runtime::FifoReceiver;
 use crate::LiveQuery;
 use nmp_nip29::GroupContextError;
+use nmp_nip29::GroupRecord;
 
 /// Why a group publication never reached the publish door, or what the door
 /// said when it did.
@@ -111,7 +111,7 @@ impl Group {
 
     /// One complete read branch per host, in canonical host order. Split out
     /// for the same reason as
-    /// [`RelayScope::listing_branches`](super::RelayScope::listing_branches):
+    /// [`RelayScope::records_branches`](super::RelayScope::records_branches):
     /// the per-branch scoping property must be assertable for a MULTI-host
     /// group independently of how branches are aggregated.
     pub(crate) fn read_branches(

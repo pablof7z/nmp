@@ -573,10 +573,7 @@ mod tests {
             ),
             // Mixed with ordinary group content: the presence of readable
             // content does not license silently dropping the unmatchable part.
-            (
-                BTreeSet::from([9u16, 39002u16]),
-                BTreeSet::from([39002u16]),
-            ),
+            (BTreeSet::from([9u16, 39002u16]), BTreeSet::from([39002u16])),
         ] {
             let selection = Filter {
                 kinds: Some(kinds.clone()),
