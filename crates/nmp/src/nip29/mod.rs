@@ -46,16 +46,28 @@
 mod group;
 mod predicate;
 mod read;
+mod records;
 
 use std::collections::BTreeSet;
 
 use nmp_grammar::Demand;
 use nostr::RelayUrl;
 
+use crate::engine::Engine;
+
 pub use group::{Group, GroupPublishError, GroupReceipts};
 pub use nmp_nip29::GroupContextError;
-pub use predicate::{admin_list_includes, member_list_includes, GroupPredicate};
+pub use predicate::{admin_list_includes, any_of, member_list_includes, GroupPredicate};
 pub use read::GroupReadError;
+pub use records::{
+    GroupAvailability, GroupObservation, GroupObserveError, GroupSnapshot, GroupWaitError,
+    HostRecords,
+};
+
+// What one relay-signed record SAYS is `nmp-nip29`'s, beside the schema it
+// parses. The facade re-exports the values so an app never imports two crates
+// to read one snapshot.
+pub use nmp_nip29::{GroupMetadata, GroupRecord, ListedRecord, ListedSubject};
 
 // The NIP-29-owned composers, re-exported as themselves. An app that wants
 // the raw builder for a named operation gets it; the group's own methods are
@@ -142,30 +154,60 @@ impl RelayScope {
         Group::new(self.hosts.clone(), group_id.into())
     }
 
-    /// Groups on these relays matching a composable discovery predicate.
+    /// Watch the relay-signed records of every group matching `predicate`.
     ///
-    /// One complete branch per host: at host `H` the listing selects
-    /// 39000/39001/39002 pinned to `H`, keyed on `d` by the predicate lowered
-    /// AT `H`. Evidence observed at one relay therefore never constrains a
-    /// listing at another.
+    /// One complete branch per host: at host `H` the read selects exactly the
+    /// kinds `records` names, pinned to `H`, keyed on `d` by the predicate
+    /// lowered AT `H`. Evidence observed at one relay therefore never
+    /// constrains a listing at another.
+    ///
+    /// Each delivery is a complete [`GroupSnapshot`] per matching group --
+    /// metadata, admins, members, availability, and the per-host breakdown
+    /// beside them. The app never sees a row delta and never walks a `p` row.
     ///
     /// ```text
-    /// let mine = nip29::member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
-    /// engine.observe(relays.groups_where(&mine)?, None)?;
+    /// let watching = nip29::on(hosts)?.observe(
+    ///     &engine,
+    ///     nip29::member_list_includes(Binding::Reactive(IdentityField::ActivePubkey))
+    ///         .union([nip29::any_of(pinned_ids)]),
+    ///     [GroupRecord::Metadata, GroupRecord::Admins, GroupRecord::Members],
+    /// )?;
+    /// while let Some(snapshots) = watching.next().await? { /* ... */ }
     /// ```
-    pub fn groups_where(&self, predicate: &GroupPredicate) -> Result<LiveQuery, GroupReadError> {
-        read::one_live_query(self.listing_branches(predicate))
+    ///
+    /// Branches scale with HOSTS, not groups: a hundred groups on two relays
+    /// is two branches.
+    pub fn observe(
+        &self,
+        engine: &Engine,
+        predicate: GroupPredicate,
+        records: impl IntoIterator<Item = GroupRecord>,
+    ) -> Result<GroupObservation, GroupObserveError> {
+        let records: BTreeSet<GroupRecord> = records.into_iter().collect();
+        if records.is_empty() {
+            return Err(GroupObserveError::NoRecordSelected);
+        }
+        records::observe(
+            engine,
+            self.hosts.clone(),
+            BTreeSet::new(),
+            self.records_branches(&predicate, &records),
+        )
     }
 
-    /// One complete listing branch per host, in canonical host order. Split
+    /// One complete records branch per host, in canonical host order. Split
     /// out so the per-branch source-stamping property is assertable on its own
     /// -- it is the property the whole design exists to guarantee, and it must
     /// be provable for a MULTI-host scope without depending on how branches
     /// are later aggregated into one live query.
-    pub(crate) fn listing_branches(&self, predicate: &GroupPredicate) -> Vec<Demand> {
+    pub(crate) fn records_branches(
+        &self,
+        predicate: &GroupPredicate,
+        records: &BTreeSet<GroupRecord>,
+    ) -> Vec<Demand> {
         self.hosts
             .iter()
-            .map(|host| nmp_nip29::groups_where_at(host, predicate.lower_at(host)))
+            .map(|host| nmp_nip29::group_records_at(host, records, predicate.lower_at(host)))
             .collect()
     }
 
@@ -175,7 +217,17 @@ impl RelayScope {
     }
 }
 
-use crate::LiveQuery;
+/// Name the relays and narrow to one group id in one call.
+///
+/// Sugar over [`on`] plus [`RelayScope::group`], for the overwhelmingly
+/// common case: an app opening one room already knows its id, and should not
+/// have to phrase a discovery predicate to watch it.
+pub fn group(
+    hosts: impl IntoIterator<Item = RelayUrl>,
+    group_id: impl Into<String>,
+) -> Result<Group, RelayScopeError> {
+    Ok(on(hosts)?.group(group_id))
+}
 
 #[cfg(test)]
 mod tests {
@@ -226,7 +278,8 @@ mod tests {
     fn scope_stamps_exact_hosts_on_every_nested_nip29_demand() {
         let scope = on([host(1), host(2)]).expect("two hosts");
         let predicate = member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
-        let branches = scope.listing_branches(&predicate);
+        let branches =
+            scope.records_branches(&predicate, &BTreeSet::from([GroupRecord::Members]));
         let d = IndexedTagName::new('d').expect("d is a single ASCII letter");
 
         assert_eq!(branches.len(), 2, "one complete branch per host");
@@ -358,11 +411,61 @@ mod tests {
     #[test]
     fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
         let scope = on([host(1), host(2)]).expect("two hosts");
-        let query = scope
-            .groups_where(&member_list_includes(Binding::Reactive(
-                IdentityField::ActivePubkey,
-            )))
-            .expect("a two-host listing declares two branches");
+        let query = read::one_live_query(scope.records_branches(
+            &member_list_includes(Binding::Reactive(IdentityField::ActivePubkey)),
+            &BTreeSet::from([GroupRecord::Metadata]),
+        ))
+        .expect("a two-host listing declares two branches");
         assert_eq!(query.branches().len(), 2);
+    }
+
+    /// The record selection is the app's, and only the kinds it named reach
+    /// the wire. A directory screen paying two relays for two lists it never
+    /// renders is a real per-relay cost, so "all three" is not a default.
+    #[test]
+    fn only_the_selected_records_reach_the_wire() {
+        let scope = on([host(1)]).expect("one host");
+        let predicate = member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
+        for (records, expected) in [
+            (BTreeSet::from([GroupRecord::Metadata]), vec![39000u16]),
+            (BTreeSet::from([GroupRecord::Admins]), vec![39001u16]),
+            (BTreeSet::from([GroupRecord::Members]), vec![39002u16]),
+            (
+                BTreeSet::from([GroupRecord::Metadata, GroupRecord::Members]),
+                vec![39000u16, 39002u16],
+            ),
+        ] {
+            let branches = scope.records_branches(&predicate, &records);
+            assert_eq!(
+                branches[0].selection.kinds,
+                Some(expected.iter().copied().collect::<BTreeSet<u16>>()),
+                "selecting {records:?} must ask a relay for exactly {expected:?}"
+            );
+        }
+    }
+
+    /// A scope-wide observation is refused, not opened empty, when the app
+    /// selected no record: an empty kind set matches nothing and would
+    /// deliver a permanently empty snapshot -- the same
+    /// indistinguishable-from-real-emptiness failure #1245 was about.
+    #[test]
+    fn an_empty_record_selection_is_refused_rather_than_observed() {
+        let engine = crate::Engine::new(crate::EngineConfig::default()).expect("an engine");
+        let scope = on([host(1)]).expect("one host");
+        assert_eq!(
+            scope
+                .observe(
+                    &engine,
+                    member_list_includes(Binding::Reactive(IdentityField::ActivePubkey)),
+                    [],
+                )
+                .err(),
+            Some(GroupObserveError::NoRecordSelected)
+        );
+        assert_eq!(
+            scope.group("photographers").observe(&engine, []).err(),
+            Some(GroupObserveError::NoRecordSelected)
+        );
+        engine.shutdown();
     }
 }
