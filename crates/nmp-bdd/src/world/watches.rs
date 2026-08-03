@@ -26,7 +26,7 @@ use nmp_router::RelayUrl;
 
 use nmp_test_support::relays::WireRecord;
 
-use super::budgets::{WIRE_QUIET, WIRE_SETTLE};
+use super::budgets::{INGEST_RESOLVED, WIRE_QUIET, WIRE_SETTLE};
 use super::observe::FeedState;
 use super::queries::{
     authored_note_query, my_group_state_query, tagged_note_query, tagged_note_query_values,
@@ -86,6 +86,18 @@ impl NmpWorld {
             .subscribe(query)
             .expect("nmp-bdd: watch subscription construction");
         self.watches.insert(key, FeedState::new(handle, rx));
+    }
+
+    /// Open a watch whose OUTER wire filters cannot exist until an inner
+    /// demand's rows have been ingested, so every wire assertion taken while
+    /// it is open waits for the engine's own per-source proof first (#1211).
+    async fn open_watch_resolving_from_ingest(&mut self, key: String, query: LiveQuery) {
+        let (handle, rx) = self
+            .handle()
+            .subscribe(query)
+            .expect("nmp-bdd: watch subscription construction");
+        self.watches
+            .insert(key, FeedState::new(handle, rx).resolving_from_ingest());
     }
 
     /// `When I watch for notes tagged <tag> as <value>`, plus the shaped
@@ -197,35 +209,71 @@ impl NmpWorld {
         self.watched_authors.clone()
     }
 
-    /// Block until EVERY started relay's client-to-relay wire has been silent
-    /// for a whole [`WIRE_QUIET`] window. Every wire assertion goes through
-    /// here first: see that constant's doc for why an unsettled count is an
-    /// artifact rather than a fact.
-    pub async fn wire_settled(&self) {
+    /// Block until every open observation whose filters are downstream of its
+    /// own ingested rows has been told, by its OWN per-source acquisition
+    /// evidence, that every atom of its subtree is proven -- then until every
+    /// started relay's client-to-relay wire has been silent for a whole
+    /// [`WIRE_QUIET`] window.
+    ///
+    /// THE TWO HALVES OBSERVE DIFFERENT THINGS AND NEITHER SUBSTITUTES FOR
+    /// THE OTHER. Quiet is about the SOCKET: a REQ handed to the transport
+    /// and the CLOSE that retires its predecessor both have to reach the
+    /// wire before a count read there is a fact rather than a snapshot of a
+    /// handoff in progress. Proof is about INGESTION: a `Derived` binding's
+    /// outer filter cannot be compiled until the inner demand's rows are in
+    /// the store, and the client wire is genuinely silent in the middle of
+    /// that -- inbound EVENTs are not outbound frames, so quiet alone
+    /// declared a partially-resolved derived set settled and read a wire
+    /// carrying only the values ingested so far (#1211: a contiguous prefix
+    /// of a 300-group catalog missing, 4 runs in 6).
+    ///
+    /// Proof comes first because it is the one that can still put frames on
+    /// the wire; quiet then closes the handoff gap the proof does not cover.
+    pub async fn wire_settled(&mut self) {
+        self.ingest_resolved_watches_are_proven();
         for relay in self.relays.values() {
             relay.wait_wire_quiet(WIRE_QUIET, WIRE_SETTLE).await;
+        }
+    }
+
+    /// The proof half of [`Self::wire_settled`], LOUD on timeout.
+    ///
+    /// A settle helper that quietly returns early is how #1211 stayed
+    /// invisible: the assertion downstream failed with a number, and the
+    /// number looked like an engine defect. Exhausting [`INGEST_RESOLVED`]
+    /// here instead names the watch and the unproven source.
+    fn ingest_resolved_watches_are_proven(&mut self) {
+        for (key, watch) in self
+            .watches
+            .iter_mut()
+            .filter(|(_, watch)| watch.resolves_from_ingest)
+        {
+            if watch.eventually(
+                INGEST_RESOLVED,
+                FeedState::every_source_has_proven_its_subtree,
+            ) {
+                continue;
+            }
+            panic!(
+                "nmp-bdd: watch {key:?} resolves its own filters from rows it must ingest \
+                 first, and no source proved its subtree within {INGEST_RESOLVED:?}, so no \
+                 wire count taken now would be a fact: {}",
+                watch.unproven_report()
+            );
         }
     }
 
     /// Settle the wire, then keep re-reading `relay`'s record until `pred`
     /// holds, bounded by [`WIRE_SETTLE`].
     ///
-    /// QUIESCENCE ALONE IS NOT ENOUGH to establish that something downstream
-    /// of an INBOUND frame has happened. `wait_wire_quiet` watches
-    /// CLIENT-TO-RELAY traffic only, so the sequence "seed a kind:39001 ->
-    /// relay pushes the EVENT -> the client ingests it, re-resolves the
-    /// derived set, recompiles and emits a REQ" has a genuinely quiet client
-    /// wire in the MIDDLE of it.
-    ///
-    /// USED FOR SEQUENCING A STIMULUS, NOT FOR TAKING AN ASSERTION. A quiet
-    /// outbound socket cannot prove that an inbound EVENT has traversed
-    /// ingestion, resolution, and recompilation. The subscription-collapse
-    /// feature's ordinary tag/author scenarios now separately exclude the
-    /// NIP-77 capability crossover that caused #1004; its derived-group
-    /// scenario still uses this helper only to make the initial outer REQ
-    /// observable before injecting one more inbound group (§8.1c).
+    /// This exists for a shape [`Self::wire_settled`] does not cover: a
+    /// predicate over the wire RECORD that only some later frame can make
+    /// true, on a relay that no derived watch is resolving from. Where an
+    /// ingestion-resolved watch IS open, `wire_settled` already waits for the
+    /// engine's own per-source proof and this loop's re-reads are redundant
+    /// rather than load-bearing (#1211).
     pub async fn wire_record_when(
-        &self,
+        &mut self,
         relay: &str,
         pred: impl Fn(&WireRecord) -> bool,
     ) -> WireRecord {
@@ -282,8 +330,11 @@ impl NmpWorld {
     pub async fn open_group_state_watch(&mut self) {
         self.ensure_started().await;
         let url = self.watch_relay_url();
-        self.open_watch("group-state".to_string(), my_group_state_query(&url))
-            .await;
+        self.open_watch_resolving_from_ingest(
+            "group-state".to_string(),
+            my_group_state_query(&url),
+        )
+        .await;
     }
 
     /// `When I am made an admin of one more group` -- a LIVE kind:39001,

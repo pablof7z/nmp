@@ -21,6 +21,7 @@ use nostr::EventId;
 use nmp::mechanism::core::{
     AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence,
 };
+
 use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{DiagnosticsHandle, QueryHandle, RowsReceiver};
 
@@ -43,6 +44,10 @@ pub(super) struct FeedState {
     pub(super) rows: BTreeMap<EventId, Row>,
     /// Per-BRANCH acquisition evidence in canonical branch order (#1108).
     pub(super) evidence: Vec<AcquisitionEvidence>,
+    /// Whether this observation's OWN wire filters are downstream of rows it
+    /// has to ingest first (a `Derived` binding). See
+    /// [`Self::every_source_has_proven_its_subtree`].
+    pub(super) resolves_from_ingest: bool,
 }
 
 impl FeedState {
@@ -53,7 +58,71 @@ impl FeedState {
             rx,
             rows: BTreeMap::new(),
             evidence: Vec::new(),
+            resolves_from_ingest: false,
         }
+    }
+
+    /// Mark this observation as one whose outer filters cannot exist until
+    /// an INNER demand's rows have been ingested (#1211).
+    pub(super) fn resolving_from_ingest(mut self) -> Self {
+        self.resolves_from_ingest = true;
+        self
+    }
+
+    /// Has every source that covers any atom of this observation's subtree
+    /// proven all of them?
+    ///
+    /// `SourceEvidence::reconciled_through` is `Some` only when EVERY subtree
+    /// atom that source covers has a durable coverage row at or below the
+    /// query's window floor -- and `#12` put the INTERIOR `Derived` atoms in
+    /// that subtree, so this is `None` until the inner demand's own request
+    /// has settled AND every outer atom the inner rows resolved to has been
+    /// requested and settled too. That is the real "the derived set finished
+    /// resolving" condition, produced by the engine that owns it, rather than
+    /// inferred from a quiet outbound socket that cannot see ingestion at all.
+    ///
+    /// This is a HARNESS-side rollup of per-source facts -- exactly the
+    /// "an app rolls per-source facts into its own progress policy" that
+    /// `crates/nmp/src/core/evidence.rs` reserves to the app. Nothing is added
+    /// to NMP's surface; there is still no `is_complete` anywhere in it.
+    pub(super) fn every_source_has_proven_its_subtree(&self) -> bool {
+        !self.evidence.is_empty()
+            && self.evidence.iter().all(|branch| {
+                !branch.sources.is_empty()
+                    && branch
+                        .sources
+                        .iter()
+                        .all(|source| source.reconciled_through.is_some())
+            })
+    }
+
+    /// Everything the settle wait can say about WHY it gave up, so a timeout
+    /// names the unproven source rather than failing an assertion downstream
+    /// of it.
+    pub(super) fn unproven_report(&self) -> String {
+        if self.evidence.is_empty() {
+            return "no acquisition evidence has been delivered at all".to_owned();
+        }
+        let mut parts = Vec::new();
+        for (branch, evidence) in self.evidence.iter().enumerate() {
+            if evidence.sources.is_empty() {
+                parts.push(format!(
+                    "branch {branch}: no source covers any subtree atom"
+                ));
+            }
+            for source in &evidence.sources {
+                if source.reconciled_through.is_none() {
+                    parts.push(format!(
+                        "branch {branch}: {} ({:?}) has proven nothing yet",
+                        source.relay, source.status
+                    ));
+                }
+            }
+            for fact in &evidence.shortfall {
+                parts.push(format!("branch {branch}: shortfall {fact:?}"));
+            }
+        }
+        parts.join("; ")
     }
 
     pub(super) fn drain_available(&mut self) {
