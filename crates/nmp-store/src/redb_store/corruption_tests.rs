@@ -145,6 +145,57 @@ fn str_table_digest(
         .collect()
 }
 
+fn rewrite_bytes_row(
+    fixture: &Fixture,
+    table: TableDefinition<&[u8], &[u8]>,
+    key: &[u8],
+    value: &[u8],
+) {
+    let db = fixture.raw();
+    let write_txn = db.begin_write().expect("raw begin_write");
+    {
+        let mut open = write_txn.open_table(table).expect("raw open_table");
+        open.insert(key, value).expect("raw insert");
+    }
+    write_txn.commit().expect("raw commit");
+}
+
+/// The first key of a `&[u8]`-keyed table under `prefix`. `tombstones` is one
+/// key space with a leading discriminant, so a corruption falsifier names the
+/// column it damages rather than "whatever sorts first".
+fn first_bytes_key(
+    fixture: &Fixture,
+    table: TableDefinition<&[u8], &[u8]>,
+    prefix: &[u8],
+) -> Vec<u8> {
+    let db = fixture.raw();
+    let read_txn = db.begin_read().expect("raw begin_read");
+    let open = read_txn.open_table(table).expect("raw open_table");
+    open.iter()
+        .expect("raw iter")
+        .map(|entry| entry.expect("raw entry").0.value().to_owned())
+        .find(|key| key.starts_with(prefix))
+        .expect("table has at least one row under the prefix")
+}
+
+/// A stable digest of one `&[u8]`-keyed table, used to prove a refused
+/// mutation left the durable bytes untouched.
+fn bytes_table_digest(
+    fixture: &Fixture,
+    table: TableDefinition<&[u8], &[u8]>,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let db = fixture.raw();
+    let read_txn = db.begin_read().expect("raw begin_read");
+    let open = read_txn.open_table(table).expect("raw open_table");
+    open.iter()
+        .expect("raw iter")
+        .map(|entry| {
+            let (key, value) = entry.expect("raw entry");
+            (key.value().to_owned(), value.value().to_owned())
+        })
+        .collect()
+}
+
 fn rewrite_fixed_row<const N: usize>(
     fixture: &Fixture,
     table: TableDefinition<&'static [u8; N], &'static [u8]>,
@@ -541,9 +592,9 @@ fn insert_reports_a_corrupt_address_tombstone() {
             .expect("insert addressable");
         store.insert(deletion, observed()).expect("insert deletion");
     }
-    let key = first_str_key(&fixture, ADDR_TOMBSTONES);
-    rewrite_str_row(&fixture, ADDR_TOMBSTONES, &key, "{ not a tombstone");
-    let before = str_table_digest(&fixture, ADDR_TOMBSTONES);
+    let key = first_bytes_key(&fixture, TOMBSTONES, &[TOMBSTONE_ADDR]);
+    rewrite_bytes_row(&fixture, TOMBSTONES, &key, b"{ not a tombstone");
+    let before = bytes_table_digest(&fixture, TOMBSTONES);
 
     let later = EventBuilder::new(Kind::Metadata, "later")
         .custom_created_at(Timestamp::from(3_000))
@@ -554,7 +605,7 @@ fn insert_reports_a_corrupt_address_tombstone() {
         assert_typed_refusal("insert", || store.insert(later, observed()));
     }
     assert_eq!(
-        str_table_digest(&fixture, ADDR_TOMBSTONES),
+        bytes_table_digest(&fixture, TOMBSTONES),
         before,
         "a refused ingest commits nothing"
     );

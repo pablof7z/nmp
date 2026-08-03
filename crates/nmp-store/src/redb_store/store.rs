@@ -9,8 +9,8 @@ use super::publish_queue_codec::{
 };
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
-    persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, COVERAGE,
-    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX, POSTINGS_DEAD_KEYS,
+    persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, COVERAGE, EVENTS, EVENT_IDS,
+    EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX, POSTINGS_DEAD_KEYS,
     POSTINGS_DICTIONARIES, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
     POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
@@ -512,7 +512,6 @@ impl RedbStore {
                 write_txn.open_table(ADDR_INDEX)?;
                 write_txn.open_table(COVERAGE)?;
                 write_txn.open_table(TOMBSTONES)?;
-                write_txn.open_table(ADDR_TOMBSTONES)?;
                 write_txn.open_table(EXPIRATION_INDEX)?;
                 write_txn.open_table(POSTINGS_SEGMENTS)?;
                 write_txn.open_table(POSTINGS_DICTIONARIES)?;

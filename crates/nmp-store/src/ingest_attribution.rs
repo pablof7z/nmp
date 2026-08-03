@@ -78,7 +78,6 @@ pub fn reset() {
         &ENCODE_EVENT_NS,
         &ENCODED_EVENT_BYTES,
         &CANONICAL_INSERT_NS,
-        &INDEX_INSERT_NS,
         &MEMORY_INSERT_NS,
         &MEMORY_EVENT_BUILD_NS,
         &MEMORY_EXPIRATION_INDEX_NS,

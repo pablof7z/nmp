@@ -162,23 +162,33 @@ pub(super) const SCHEMA_VERSION: u64 = 13;
 pub(super) const REDB_CACHE_BYTES: usize = 12 * 1024 * 1024;
 pub(super) const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index");
 pub(super) const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
-/// Permanent kind:5 tombstones for individual event ids
-/// (retraction-and-negative-deltas.md §2/§7). Key: `"{id_hex}:{author_hex}"`
-/// -- one row PER CLAIMING AUTHOR, never collapsed to one row per id: the
-/// target's real author is unknown until it actually arrives, so an
-/// unauthorized third party can always name an id someone else has already
-/// (or will later) legitimately delete. A single overwritable row per id
-/// would let that unauthorized claim silently replace -- and so undo -- the
-/// real author's permanent, authorized deletion. Value: the deleting
-/// kind:5's own id hex (diagnostics only; the key alone decides refusal).
+/// Permanent kind:5 deletion facts, for event ids and for
+/// replaceable/addressable addresses alike
+/// (retraction-and-negative-deltas.md §2/§7).
+///
+/// Key: `[kind:u8 | target]`, where `kind` is [`TOMBSTONE_ID`] or
+/// [`TOMBSTONE_ADDR`]. Both were separate trees over the same logical thing —
+/// a permanent deletion target reached by point `get`/`insert`, never ranged,
+/// never iterated, never counted — so neither earned a tree of its own
+/// (#1248). The discriminant keeps them contiguous and disjoint.
+///
+/// An id row is keyed per (target id, CLAIMING AUTHOR) and is never collapsed
+/// to one row per id: the target's real author is unknown until it actually
+/// arrives, so an unauthorized third party can always name an id someone else
+/// has already (or will later) legitimately delete. A single overwritable row
+/// per id would let that unauthorized claim silently replace — and so undo —
+/// the real author's permanent, authorized deletion. Its value is the
+/// deleting kind:5's own raw id (diagnostics only; the key alone decides
+/// refusal).
+///
+/// An address row's value carries the deletion ceiling (highest deleting-event
+/// `created_at` seen for that address) — a candidate with
+/// `created_at <= ceiling` is tombstoned.
+///
 /// Never GC-claimed.
-pub(super) const TOMBSTONES: TableDefinition<&str, &str> = TableDefinition::new("tombstones");
-/// Permanent kind:5 tombstones for replaceable/addressable addresses. Key:
-/// [`crate::address_key::AddressKey::to_redb_key`]. Value carries the
-/// deletion ceiling (highest deleting-event `created_at` seen for that
-/// address) — a candidate with `created_at <= ceiling` is tombstoned.
-pub(super) const ADDR_TOMBSTONES: TableDefinition<&str, &str> =
-    TableDefinition::new("addr_tombstones");
+pub(super) const TOMBSTONES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tombstones");
+pub(super) const TOMBSTONE_ID: u8 = 0;
+pub(super) const TOMBSTONE_ADDR: u8 = 1;
 /// The persistent NIP-40 expiration index (retraction-and-negative-
 /// deltas.md §3.1). Key: `expires_at:u64-be | event_id:[u8;32]`, so ordinary
 /// byte ordering matches numeric deadline order without decimal/hex work;
@@ -295,8 +305,21 @@ pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ID: TableDefinition<&[u8; 64], &[u8]>
 pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ADDR: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("publish_queue_suppress_by_addr");
 
-/// The `tombstones` table's key for one (target id, claiming author) pair —
-/// see [`TOMBSTONES`]'s doc for why this is composite, not just the id.
-pub(super) fn id_tombstone_key(id: &EventId, author: &PublicKey) -> String {
-    format!("{}:{}", id.to_hex(), author.to_hex())
+/// The `tombstones` key for one (target id, claiming author) pair — see
+/// [`TOMBSTONES`]'s doc for why this is composite, not just the id.
+pub(super) fn id_tombstone_key(id: &EventId, author: &PublicKey) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + 32 + 32);
+    key.push(TOMBSTONE_ID);
+    key.extend_from_slice(id.as_bytes());
+    key.extend_from_slice(author.as_bytes());
+    key
+}
+
+/// The `tombstones` key for one replaceable/addressable address, from
+/// [`crate::address_key::AddressKey::to_redb_key`].
+pub(super) fn addr_tombstone_key(address: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + address.len());
+    key.push(TOMBSTONE_ADDR);
+    key.extend_from_slice(address.as_bytes());
+    key
 }

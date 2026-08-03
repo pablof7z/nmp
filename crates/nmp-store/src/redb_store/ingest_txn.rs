@@ -10,7 +10,7 @@ use super::canonical::CanonicalWriteTables;
 use super::postings_store::crash_if_postings;
 use super::postings_store::PostingsBatch;
 use super::schema::{
-    persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, EXPIRATION_INDEX, PUBLISH_QUEUE_DISPLACED,
+    persist_err, EventKey, ADDR_INDEX, EXPIRATION_INDEX, PUBLISH_QUEUE_DISPLACED,
     PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_RECEIPTS,
     PUBLISH_QUEUE_SUPPRESS_BY_ADDR, PUBLISH_QUEUE_SUPPRESS_BY_ID, TOMBSTONES,
 };
@@ -92,17 +92,6 @@ impl GovernedWrite {
     }
 }
 
-/// String-valued governed keyspaces reachable from relay ingest.
-///
-/// The enum is internal physical vocabulary, not an app-facing noun. A
-/// backend implements these maps while `ingest` and `mutation` retain the
-/// only copy of the policy deciding when each map changes.
-#[derive(Clone, Copy)]
-pub(super) enum GovernedStringMap {
-    Tombstones,
-    AddrTombstones,
-}
-
 /// Binary publish-queue maps reached from the same governed mutation.
 #[derive(Clone, Copy)]
 pub(super) enum GovernedPublishQueueMap {
@@ -148,17 +137,10 @@ pub(super) trait GovernedIngestTxn {
     fn expiration_put(&mut self, key: &[u8; 40], value: EventKey) -> Result<(), PersistenceError>;
     fn expiration_remove(&mut self, key: &[u8; 40]) -> Result<(), PersistenceError>;
 
-    fn string_get(
-        &self,
-        map: GovernedStringMap,
-        key: &str,
-    ) -> Result<Option<String>, PersistenceError>;
-    fn string_put(
-        &mut self,
-        map: GovernedStringMap,
-        key: &str,
-        value: &str,
-    ) -> Result<(), PersistenceError>;
+    /// One permanent deletion fact, keyed by [`super::schema::TOMBSTONES`]'s
+    /// discriminated key. Ids and addresses share the key space.
+    fn tombstone_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PersistenceError>;
+    fn tombstone_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), PersistenceError>;
     fn publish_queue_get(
         &self,
         map: GovernedPublishQueueMap,
@@ -181,8 +163,7 @@ pub(super) trait GovernedIngestTxn {
 pub(super) struct RedbIngestTxn<'txn, 'batch> {
     pub(super) canonical: CanonicalWriteTables<'txn>,
     pub(super) addr_index: redb::Table<'txn, &'static str, EventKey>,
-    pub(super) tombstones: redb::Table<'txn, &'static str, &'static str>,
-    pub(super) addr_tombstones: redb::Table<'txn, &'static str, &'static str>,
+    pub(super) tombstones: redb::Table<'txn, &'static [u8], &'static [u8]>,
     pub(super) expiration_index: redb::Table<'txn, &'static [u8; 40], EventKey>,
     pub(super) publish_queue_intents: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
     pub(super) publish_queue_receipts: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
@@ -202,7 +183,6 @@ impl<'txn, 'batch> RedbIngestTxn<'txn, 'batch> {
             canonical: CanonicalWriteTables::open(write_txn)?,
             addr_index: write_txn.open_table(ADDR_INDEX).map_err(persist_err)?,
             tombstones: write_txn.open_table(TOMBSTONES).map_err(persist_err)?,
-            addr_tombstones: write_txn.open_table(ADDR_TOMBSTONES).map_err(persist_err)?,
             expiration_index: write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?,
@@ -322,31 +302,16 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         Ok(())
     }
 
-    fn string_get(
-        &self,
-        map: GovernedStringMap,
-        key: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        let value = match map {
-            GovernedStringMap::Tombstones => self.tombstones.get(key).map_err(persist_err)?,
-            GovernedStringMap::AddrTombstones => {
-                self.addr_tombstones.get(key).map_err(persist_err)?
-            }
-        };
-        Ok(value.map(|guard| guard.value().to_owned()))
+    fn tombstone_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PersistenceError> {
+        Ok(self
+            .tombstones
+            .get(key)
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_owned()))
     }
 
-    fn string_put(
-        &mut self,
-        map: GovernedStringMap,
-        key: &str,
-        value: &str,
-    ) -> Result<(), PersistenceError> {
-        match map {
-            GovernedStringMap::Tombstones => self.tombstones.insert(key, value),
-            GovernedStringMap::AddrTombstones => self.addr_tombstones.insert(key, value),
-        }
-        .map_err(persist_err)?;
+    fn tombstone_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), PersistenceError> {
+        self.tombstones.insert(key, value).map_err(persist_err)?;
         Ok(())
     }
 
