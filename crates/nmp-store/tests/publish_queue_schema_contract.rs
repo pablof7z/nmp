@@ -3,9 +3,10 @@
 //! Two claims live here, and both are falsifiable by a one-line edit to
 //! `schema.rs`:
 //!
-//! 1. A fresh store creates EXACTLY the 40 production tables, named exactly
+//! 1. A fresh store creates EXACTLY the 29 production tables, named exactly
 //!    as listed below. The old spelling of the publish queue (`outbox_*`,
-//!    then `delivery_*`) is gone, not aliased.
+//!    then `delivery_*`) is gone, not aliased, and so is every tree #1248
+//!    folded into a neighbour's key space.
 //! 2. **No table name carries a version suffix.** The single durable epoch
 //!    authority is `SCHEMA_VERSION`; a per-table `_v1`/`_v6`/`_v8` marker
 //!    advertises a coexistence that has never existed and cannot (#1026).
@@ -20,24 +21,30 @@ const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("publish_queue_meta");
 
 /// Every table `RedbStore::open` creates, and nothing else.
-const PRODUCTION_TABLES: [&str; 40] = [
+///
+/// This is a real inventory gate, not a whitelist: it compares by EQUALITY,
+/// so a table added without a reason fails here by name. #1248 §4 asked for
+/// exactly that, because none of the six architecture review gates fires on a
+/// new durable table — a longer-lived and harder-to-reverse commitment than
+/// most public types, since it is bytes on a user's disk under an epoch with
+/// no migration path.
+///
+/// A new entry must name which of the two criteria still available in redb it
+/// satisfies. The other two cannot apply here at all: redb permits one writer
+/// at a time, so splitting a table buys zero concurrency, and there is not one
+/// `delete_table` call in the crate, so no table has an independent lifetime.
+/// What is left is: does this need a DIFFERENT LEADING SORT DIMENSION than its
+/// neighbour, or is it a GENUINELY DISTINCT KEY SPACE? If neither, it is a
+/// column, and it belongs in its neighbour's key space.
+const PRODUCTION_TABLES: [&str; 29] = [
     "addr_index",
-    "addr_tombstones",
     "coverage",
     "event_ids",
     "event_local",
     "event_observations",
-    "event_store_meta",
     "events",
     "expiration_index",
-    "index_cardinality",
-    "index_cardinality_meta",
-    "index_cardinality_sample_meta",
-    "postings_dead_keys",
-    "postings_dictionaries",
-    "postings_meta",
-    "postings_run_by_min",
-    "postings_run_meta",
+    "postings_catalog",
     "postings_segments",
     "publish_queue_attempt_details",
     "publish_queue_attempts",
@@ -55,12 +62,31 @@ const PRODUCTION_TABLES: [&str; 40] = [
     "publish_queue_route_revisions",
     "publish_queue_suppress_by_addr",
     "publish_queue_suppress_by_id",
+    "relay_ids",
+    "relays",
+    "store_meta",
+    "tombstones",
+];
+
+/// Table names #1248 folded away. A fresh store must not create any of them
+/// again: each was a column of a key space a neighbour already owned, or a
+/// scalar row that never needed a tree, and re-creating one under the same
+/// epoch would resurrect a layout nothing reads.
+const FOLDED_AWAY_TABLES: [&str; 14] = [
+    "addr_tombstones",
+    "event_store_meta",
+    "index_cardinality",
+    "index_cardinality_meta",
+    "index_cardinality_sample_meta",
+    "postings_dead_keys",
+    "postings_dictionaries",
+    "postings_meta",
+    "postings_run_by_min",
+    "postings_run_meta",
     "relay_keys",
     "relay_meta",
     "relay_refs",
-    "relays",
     "schema_meta",
-    "tombstones",
 ];
 
 fn fresh_table_names(path: &std::path::Path) -> BTreeSet<String> {
@@ -91,6 +117,13 @@ fn a_fresh_store_creates_exactly_the_named_publish_queue_inventory() {
             .all(|name| !name.starts_with("outbox_") && !name.starts_with("delivery_")),
         "a retired publish-queue namespace survived: {names:?}"
     );
+
+    for folded in FOLDED_AWAY_TABLES {
+        assert!(
+            !names.contains(folded),
+            "{folded} was folded into a neighbour's key space (#1248) and must not return"
+        );
+    }
 
     let database = Database::open(&path).unwrap();
     let read = database.begin_read().unwrap();

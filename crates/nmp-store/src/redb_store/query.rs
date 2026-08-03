@@ -7,7 +7,7 @@ use super::schema::{
     decode_relay_row, RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
     EXPIRATION_INDEX, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_IDS, STORE_META,
 };
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 use super::BTreeSet;
 #[cfg(feature = "bench-instrumentation")]
 use super::Event;
@@ -22,7 +22,7 @@ use super::{BTreeMap, StoredEventView};
 #[cfg(test)]
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
-/// The `addr_tombstones` table's JSON value.
+/// The address column of the `tombstones` table's JSON value.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct AddrTombstoneRecord {
     pub(super) ceiling: u64,

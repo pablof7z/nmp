@@ -9,7 +9,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::sync::Arc;
 
-use redb::{ReadableTable, ReadableTableMetadata};
+use redb::ReadableTable;
+#[cfg(test)]
+use redb::ReadableTableMetadata;
 
 use super::postings::validate_run_metas;
 use super::postings::{

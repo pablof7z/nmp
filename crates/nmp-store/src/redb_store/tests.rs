@@ -240,7 +240,9 @@ fn corrupt_current_schema_rows_fail_as_corruption_not_as_an_old_epoch() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut publish_queue_meta = write_txn.open_table(PUBLISH_QUEUE_META).unwrap();
-        publish_queue_meta.remove(PUBLISH_QUEUE_CODEC_VERSION_KEY).unwrap();
+        publish_queue_meta
+            .remove(PUBLISH_QUEUE_CODEC_VERSION_KEY)
+            .unwrap();
     }
     write_txn.commit().unwrap();
     drop(db);
