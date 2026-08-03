@@ -158,8 +158,8 @@ Feature: A message the user just sent is in the feed before any relay has answer
   # nmp:id=WRITES-OPTIMISTICPUBLISH-008
   # nmp:status=built
   # nmp:evidence=rust:nmp-store::a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound
-  # nmp:evidence=rust:nmp::a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group
-  # nmp:falsifier=widening the ours clause to admit rows this node never wrote under a pin that did not serve them makes a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound return the foreign row it asserts is invisible, and makes a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group see one host's evidence answer for another host over two live relays
+  # nmp:evidence=rust:nmp::a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group
+  # nmp:falsifier=widening the ours clause to admit rows this node never wrote under a pin that did not serve them makes a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound return the foreign row it asserts is invisible, and makes a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group see one host's evidence answer for another host over two live relays
   Scenario: A row another host served still never answers for a host that did not serve it
     # The isolation this must not cost. It was always a rule about FOREIGN
     # data -- one host's cached rows answering a question about a different

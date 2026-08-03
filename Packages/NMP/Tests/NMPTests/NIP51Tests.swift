@@ -50,10 +50,27 @@ final class NIP51Tests: XCTestCase {
         let selected = list.items[0]
         let scope = try NMPRelayScope.on([selected.hostRelay])
         let group = scope.group(selected.groupId)
-        let query = try group.read(NMPFilter(kinds: [39000]))
+        let query = try group.read(NMPFilter(kinds: [9]))
         XCTAssertEqual(query.branches.count, 1)
-        XCTAssertEqual(query.branches[0].selection.kinds, [39000])
+        XCTAssertEqual(query.branches[0].selection.kinds, [9])
 
         XCTAssertEqual(selected.groupId, "group-a")
+    }
+
+    /// #1245: this test used to read kind 39000 through the content door and
+    /// assert the request was built faithfully. No 39000 event carries the
+    /// group-context row, so that request could never have matched anything --
+    /// it is refused now, and the group's own metadata is read through the
+    /// records observation instead.
+    func testTheGroupsOwnRecordsAreNotReachableThroughTheContentDoor() throws {
+        let list = NMP.parseSimpleGroupsListTolerant(fabricatedRow(kind: 10009))
+        let selected = list.items[0]
+        let group = try NMPRelayScope.on([selected.hostRelay]).group(selected.groupId)
+        XCTAssertThrowsError(try group.read(NMPFilter(kinds: [39000]))) { error in
+            guard case NMPError.groupRecordsNotContextScoped(let kinds) = error else {
+                return XCTFail("expected .groupRecordsNotContextScoped, got \(error)")
+            }
+            XCTAssertEqual(kinds, [39000])
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.nmp.sdk
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 
 class NIP51Test {
@@ -59,10 +60,27 @@ class NIP51Test {
         val selected = list.items[0]
         val scope = NMPRelayScope.on(listOf(selected.hostRelay))
         val group = scope.group(selected.groupId)
-        val query = group.read(NMPFilter(kinds = listOf(39000u)))
+        val query = group.read(NMPFilter(kinds = listOf(9u)))
         assertEquals(1, query.branches.size)
-        assertEquals(listOf<UShort>(39000u), query.branches[0].selection.kinds)
+        assertEquals(listOf<UShort>(9u), query.branches[0].selection.kinds)
 
         assertEquals("group-a", selected.groupId)
+    }
+
+    /** #1245: this test used to read kind 39000 through the content door and
+     * assert the request was built faithfully. No 39000 event carries the
+     * group-context row, so that request could never have matched anything --
+     * it is refused now, and the group's own metadata is read through the
+     * records observation instead. */
+    @Test
+    fun theGroupsOwnRecordsAreNotReachableThroughTheContentDoor() {
+        val list = parseSimpleGroupsListTolerant(fabricatedRow(10009u))
+        val selected = list.items[0]
+        val group = NMPRelayScope.on(listOf(selected.hostRelay)).group(selected.groupId)
+        val error =
+            assertThrows(NMPError.GroupRecordsNotContextScoped::class.java) {
+                group.read(NMPFilter(kinds = listOf(39000u)))
+            }
+        assertEquals(listOf<UShort>(39000u), error.kinds)
     }
 }

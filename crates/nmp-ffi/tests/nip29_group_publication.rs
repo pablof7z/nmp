@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use nmp_ffi::convert::FfiError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
-use nmp_ffi::nip29::{admin_list_includes, member_list_includes, FfiRelayScope};
+use nmp_ffi::nip29::{admin_list_includes, member_list_includes, FfiGroupRecord, FfiRelayScope};
 use nmp_ffi::types::{
     FfiAccessContext, FfiBinding, FfiEventBuilder, FfiFilter, FfiIdentityField, FfiSourceAuthority,
 };
@@ -31,20 +31,19 @@ fn engine() -> Arc<NmpEngine> {
 }
 
 /// #1033's own multi-host falsifier, verified through the FFI objects: a
-/// two-host scope's `groups_where` yields ONE `FfiLiveQuery` with one
-/// complete branch per host, each branch pinned to its own host alone --
-/// never `Pinned({A, B})`, never a list the app has to merge.
+/// two-host group `read` yields ONE `FfiLiveQuery` with one complete branch
+/// per host, each branch pinned to its own host alone -- never
+/// `Pinned({A, B})`, never a list the app has to merge.
 #[test]
 fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
     let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
-    let predicate = member_list_includes(FfiBinding::Reactive {
-        field: FfiIdentityField::ActivePubkey,
-    })
-    .expect("a reactive subjects binding needs no hex validation");
-
     let query = scope
-        .groups_where(predicate)
-        .expect("a two-host listing declares two branches");
+        .group("photographers".to_string())
+        .read(FfiFilter {
+            kinds: Some(vec![9]),
+            ..FfiFilter::default()
+        })
+        .expect("a two-host read declares two branches");
 
     assert_eq!(query.branches.len(), 2);
     for (branch, expected_host) in query.branches.iter().zip([host(1), host(2)]) {
@@ -72,16 +71,18 @@ fn predicates_compose_through_union_intersect_and_minus() {
     let member = member_list_includes(me()).expect("reactive subjects are always valid");
     let admin = admin_list_includes(me()).expect("reactive subjects are always valid");
 
+    let engine = engine();
     for predicate in [
         member.clone().union(vec![admin.clone()]),
         member.clone().intersect(vec![admin.clone()]),
         member.minus(vec![admin]),
     ] {
-        let query = scope
-            .groups_where(predicate)
-            .expect("a composed predicate still declares one branch per host");
-        assert_eq!(query.branches.len(), 1);
+        let watching = scope
+            .observe_records(engine.clone(), predicate, vec![FfiGroupRecord::Metadata])
+            .expect("a composed predicate still opens over every host");
+        watching.cancel();
     }
+    engine.shutdown();
 }
 
 /// A group is an identity, not a subscription: forming a `FfiRelayScope`

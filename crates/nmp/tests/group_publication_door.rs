@@ -9,7 +9,7 @@
 //! nip29::on([host_a, host_b])?.group("photographers")
 //!     .publish(&engine, author, builder)          // -> Explicit(hosts)
 //!     .publish_signed(&engine, event)              // -> Explicit(hosts), no mutation
-//! nip29::on([host_a, host_b])?.groups_where(&predicate)  // -> one LiveQuery, one branch per host
+//! nip29::on([host_a, host_b])?.observe(&engine, predicate, records)  // -> one branch per host
 //! ```
 //!
 //! Four claims, each proved end to end over real sockets against real
@@ -26,7 +26,7 @@
 //!   4. the wire-level consequence of per-host demand stamping: one host's
 //!      OWN member-list evidence must never answer for another host's
 //!      listing of the SAME group id --
-//!      `a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group`.
+//!      `a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group`.
 //!
 //! (4) deliberately does not re-check the mutation-level graph shape --
 //! `crates/nmp/src/nip29/mod.rs`'s own
@@ -34,7 +34,7 @@
 //! every nested `Demand` is stamped with the exact host. What THAT test
 //! cannot show is that getting it wrong would actually corrupt an answer:
 //! two relays serving the SAME group id with DIVERGENT member-list evidence,
-//! resolved through one real engine and one real `groups_where` query, prove
+//! resolved through one real engine and one real group-records observation, prove
 //! the cross-host leak this design exists to prevent is not just absent from
 //! the graph shape but absent from the delivered rows.
 //!
@@ -49,18 +49,21 @@
 //! `use nostr_relay_builder::prelude::*` -- `nmp-test-support` owns the
 //! bridge between the two pinned `nostr` versions.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use nmp::mechanism::runtime::FifoReceiver;
-use nmp::nip29::{self, member_list_includes, Group, GroupContextError, GroupPublishError};
+use nmp::nip29::{
+    self, member_list_includes, Group, GroupContextError, GroupObservation, GroupPublishError,
+    GroupRecord, GroupSnapshot,
+};
 use nmp::{
-    Binding, Engine, EngineConfig, EventBuilder, Filter, Row, RowDelta, SignerError, SignerOp,
+    Binding, Engine, EngineConfig, EventBuilder, Filter, RowDelta, SignerError, SignerOp,
     SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, WriteStatus,
 };
 use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
-use nostr::{EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
+use nostr::{JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 const GROUP_ID: &str = "photographers";
 const GROUP_KIND: u16 = 9;
@@ -98,7 +101,7 @@ fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
 }
 
 /// A bare engine with no indexer at all -- the shape a purely `Explicit`
-/// (`publish_signed`) or purely `Pinned` (`groups_where`) call needs, and
+/// (`publish_signed`) or purely `Pinned` (records observation) call needs, and
 /// nothing more: neither operation ever consults a directory.
 fn bare_engine() -> Engine {
     Engine::new(EngineConfig {
@@ -309,69 +312,48 @@ fn tag2(name: &str, value: &str) -> Tag {
     Tag::parse([name, value]).expect("a two-value row is well-formed")
 }
 
-/// The accumulated row-set projection an app builds from a raw delta stream
-/// -- same discipline as `runtime_integration.rs`'s `wait_for_rows`, kept at
-/// the `Row` (event + sources) level because falsifier 4 needs `sources`,
-/// not just the event.
-fn wait_for_group_rows(
-    subscription: &nmp::Subscription,
+/// The accumulated projection an app builds from the records door -- same
+/// discipline as `runtime_integration.rs`'s `wait_for_rows`, at the
+/// `GroupSnapshot` level because that is what this door delivers.
+///
+/// Await deliveries until exactly one group's snapshot satisfies `pred`.
+async fn wait_for_group_snapshot(
+    watching: &GroupObservation,
     timeout: Duration,
-    pred: impl Fn(&BTreeMap<EventId, Row>) -> bool,
-) -> BTreeMap<EventId, Row> {
+    pred: impl Fn(&GroupSnapshot) -> bool,
+) -> Option<GroupSnapshot> {
     let deadline = Instant::now() + timeout;
-    let mut current: BTreeMap<EventId, Row> = BTreeMap::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            panic!(
-                "group rows never satisfied the predicate; saw {:?}",
-                current.keys().collect::<Vec<_>>()
-            );
+            return None;
         }
-        match subscription.recv_timeout(remaining) {
-            Ok(frame) => {
-                apply(&mut current, frame.deltas);
-                if pred(&current) {
-                    return current;
+        match watching.next_within(remaining).await {
+            Ok(Some(snapshots)) => {
+                if let Some(found) = snapshots.into_iter().find(&pred) {
+                    return Some(found);
                 }
             }
-            Err(error) => panic!(
-                "subscription ended before the predicate was satisfied ({error:?}); saw {:?}",
-                current.keys().collect::<Vec<_>>()
-            ),
-        }
-    }
-}
-
-fn apply(current: &mut BTreeMap<EventId, Row>, deltas: Vec<RowDelta>) {
-    for delta in deltas {
-        match delta {
-            RowDelta::Added(row) => {
-                current.insert(row.event.id, row);
-            }
-            RowDelta::SourcesGrew { id, sources } => {
-                if let Some(row) = current.get_mut(&id) {
-                    row.sources = sources;
-                }
-            }
-            RowDelta::Removed(id) => {
-                current.remove(&id);
-            }
+            Ok(None) | Err(_) => return None,
         }
     }
 }
 
 /// After `pred` first holds, keep draining for a bounded quiet window so a
-/// LATE, WRONG row (the exact shape a cross-host leak would produce) has a
-/// real chance to arrive before the negative assertion runs. Never blocks
-/// past `quiet` once nothing new shows up.
-fn settle_group_rows(
-    subscription: &nmp::Subscription,
-    mut current: BTreeMap<EventId, Row>,
+/// LATE, WRONG delivery (the exact shape a cross-host leak would produce) has
+/// a real chance to arrive before the negative assertion runs.
+async fn settle_group_snapshot(
+    watching: &GroupObservation,
+    mut current: GroupSnapshot,
     quiet: Duration,
-) -> BTreeMap<EventId, Row> {
-    while let Ok(frame) = subscription.recv_timeout(quiet) {
-        apply(&mut current, frame.deltas);
+) -> GroupSnapshot {
+    while let Ok(Some(snapshots)) = watching.next_within(quiet).await {
+        if let Some(found) = snapshots
+            .into_iter()
+            .find(|snapshot| snapshot.id == current.id)
+        {
+            current = found;
+        }
     }
     current
 }
@@ -902,7 +884,7 @@ async fn a_host_rejection_of_a_pre_signed_event_is_an_ordinary_receipt_tied_to_i
 /// Two hosts both serve a group named `photographers`, but NIP-29 authority
 /// is per-relay -- these are two independent groups that happen to share a
 /// name. Host A's own kind:39002 evidence names `member`; host B's does not.
-/// A `groups_where(member_list_includes(member))` listing over BOTH hosts
+/// An `observe(member_list_includes(member))` records listing over BOTH hosts
 /// must surface host A's `photographers` and must NEVER let host A's
 /// evidence answer for host B's -- host B's row must not appear, because
 /// nothing observed AT host B supports it.
@@ -931,7 +913,7 @@ async fn a_host_rejection_of_a_pre_signed_event_is_an_ordinary_receipt_tied_to_i
 /// host -- an app would receive a confidently WRONG row set, not a merely
 /// malformed `Demand`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group() {
+async fn a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group() {
     let host_a_signer = Keys::generate(); // stands in for host A's own relay-signed records
     let host_b_signer = Keys::generate(); // stands in for host B's own relay-signed records
     let member = Keys::generate().public_key(); // the subject the predicate asks about
@@ -977,35 +959,41 @@ async fn a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_
     let scope =
         nip29::on([host_a.url.clone(), host_b.url.clone()]).expect("two hosts form a scope");
     let predicate = member_list_includes(Binding::Literal(BTreeSet::from([member.to_hex()])));
-    let query = scope
-        .groups_where(&predicate)
+    let watching = scope
+        .observe(&engine, predicate, [GroupRecord::Metadata])
         .expect("a two-host listing declares two branches");
-    let subscription = engine
-        .observe(query, None)
-        .expect("a NIP-29 listing is an ordinary live query");
 
-    let rows = wait_for_group_rows(&subscription, SETTLE, |rows| {
-        rows.contains_key(&host_a_metadata.id)
-    });
+    let snapshot =
+        wait_for_group_snapshot(&watching, SETTLE, |snapshot| snapshot.metadata.is_some())
+            .await
+            .expect("host A's own group must surface: its own evidence supports it");
     // Give a late, WRONG row (the exact shape a cross-host leak produces) a
     // real chance to arrive before the negative assertion runs.
-    let rows = settle_group_rows(&subscription, rows, Duration::from_millis(500));
+    let snapshot = settle_group_snapshot(&watching, snapshot, Duration::from_millis(500)).await;
 
-    assert!(
-        rows.contains_key(&host_a_metadata.id),
-        "host A's own group must surface: its own evidence supports it. saw {:?}",
-        rows.keys().collect::<Vec<_>>()
+    assert_eq!(snapshot.id, GROUP_ID);
+    assert_eq!(
+        snapshot
+            .metadata
+            .as_ref()
+            .map(|record| (record.event_id, record.host.clone())),
+        Some((host_a_metadata.id, host_a.url.clone())),
+        "the metadata shown must be host A's own record, signed by host A"
     );
     assert_eq!(
-        rows[&host_a_metadata.id].sources,
-        BTreeSet::from([host_a.url.clone()]),
-        "host A's row must be sourced from host A alone"
+        snapshot.per_host.keys().cloned().collect::<Vec<_>>(),
+        vec![host_a.url.clone()],
+        "host B's group must NOT surface: host A's member evidence must never answer for \
+         host B's listing of the same group id"
     );
     assert!(
-        !rows.contains_key(&host_b_metadata.id),
-        "host B's group must NOT surface: host A's member evidence must never answer for \
-         host B's listing of the same group id. saw {:?}",
-        rows.keys().collect::<Vec<_>>()
+        snapshot.at(&host_b.url).is_none(),
+        "nothing observed at host B supports this group, so host B has no record here"
+    );
+    assert_ne!(
+        snapshot.metadata.as_ref().map(|record| record.event_id),
+        Some(host_b_metadata.id),
+        "host B's own kind:39000 must never be the record an app is shown"
     );
 
     engine.shutdown();

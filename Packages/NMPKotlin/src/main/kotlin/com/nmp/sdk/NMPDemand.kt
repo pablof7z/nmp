@@ -234,7 +234,7 @@ class NMPLiveQuery private constructor(
             from(nmpRethrowing { liveQueryUnion(branches.map { it.toFfi() }, aggregateResultLimit) })
 
         /** Lift a live query Rust already built ([union]'s own result, and
-         * every protocol-composed read such as `NMPNIP29.groupsWhere`). It is
+         * every protocol-composed read such as `NMPGroup.read`). It is
          * canonical by construction there, so this never re-canonicalizes --
          * and being internal, it is not a door an app can forge a
          * noncanonical value through. */
