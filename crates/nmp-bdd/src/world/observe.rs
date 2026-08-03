@@ -19,11 +19,12 @@ use std::time::{Duration, Instant};
 use nostr::EventId;
 
 use nmp::mechanism::core::{
-    AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence,
+    AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact,
 };
 use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{DiagnosticsHandle, QueryHandle, RowsReceiver};
 
+use super::acquisition::branch_shortfall;
 use super::budgets::{EVENTUALLY, NEVER};
 use super::NmpWorld;
 
@@ -43,6 +44,11 @@ pub(super) struct FeedState {
     pub(super) rows: BTreeMap<EventId, Row>,
     /// Per-BRANCH acquisition evidence in canonical branch order (#1108).
     pub(super) evidence: Vec<AcquisitionEvidence>,
+    /// Whether this observation's OWN wire filters are downstream of rows it
+    /// has to ingest first (a `Derived` binding), so a wire assertion taken
+    /// while it is open must first wait for
+    /// [`super::acquisition::every_source_has_proven_its_subtree`] (#1211).
+    pub(super) resolves_from_ingest: bool,
 }
 
 impl FeedState {
@@ -53,7 +59,15 @@ impl FeedState {
             rx,
             rows: BTreeMap::new(),
             evidence: Vec::new(),
+            resolves_from_ingest: false,
         }
+    }
+
+    /// Mark this observation as one whose outer filters cannot exist until
+    /// an INNER demand's rows have been ingested (#1211).
+    pub(super) fn resolving_from_ingest(mut self) -> Self {
+        self.resolves_from_ingest = true;
+        self
     }
 
     pub(super) fn drain_available(&mut self) {
@@ -456,23 +470,4 @@ impl NmpWorld {
         let diag = self.diag.as_ref().expect("nmp-bdd: diagnostics not open");
         diag.get(EVENTUALLY, pred)
     }
-}
-
-/// Every source fact across every canonical branch of one observation.
-///
-/// The frame keeps branch identity; a step that asks "is any planned source
-/// still unproven" asks it of the whole observation, which is the union of
-/// its branches' own scoped facts -- never a rolled-up verdict stored
-/// anywhere.
-pub(crate) fn branch_sources(
-    evidence: &[AcquisitionEvidence],
-) -> impl Iterator<Item = &SourceEvidence> {
-    evidence.iter().flat_map(|branch| branch.sources.iter())
-}
-
-/// Every shortfall fact across every canonical branch of one observation.
-pub(crate) fn branch_shortfall(
-    evidence: &[AcquisitionEvidence],
-) -> impl Iterator<Item = &ShortfallFact> {
-    evidence.iter().flat_map(|branch| branch.shortfall.iter())
 }

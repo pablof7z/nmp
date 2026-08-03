@@ -1,6 +1,6 @@
 //! What a group promises as an IDENTITY: construction costs nothing, a write needs no read, and one value serves a whole room.
 
-use crate::world::observe::{branch_shortfall, branch_sources};
+use crate::world::acquisition::{branch_shortfall, branch_sources};
 use cucumber::then;
 
 use super::delivery::published_delivered_to;
