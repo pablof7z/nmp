@@ -1,6 +1,16 @@
 use super::publish_queue_codec::PUBLISH_QUEUE_CODEC_VERSION_KEY;
 use super::*;
 
+/// The refcount half of one `relays` row, for falsifiers that assert
+/// reference counting rather than URL interning.
+fn relay_refs_of(db: &Database, relay_key: RelayKey) -> Option<u64> {
+    let read_txn = db.begin_read().expect("read relay row");
+    let relays = read_txn.open_table(RELAYS).expect("open relays");
+    let row = relays.get(relay_key).expect("get relay row")?;
+    let (refs, _url) = decode_relay_row(relay_key, row.value()).expect("decode relay row");
+    Some(refs)
+}
+
 /// #867: NMP defines ONE current Redb schema epoch and carries no
 /// persistent-schema compatibility obligation. Anything that is not exactly
 /// that epoch -- a database whose tables predate the schema marker, and a
@@ -777,33 +787,28 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
 
     let first_relay_key = {
         let read_txn = store.db.begin_read().unwrap();
-        let relay_keys = read_txn.open_table(RELAY_KEYS).unwrap();
-        let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
-        let relay_key = relay_keys.get(relay.as_str()).unwrap().unwrap().value();
-        assert_eq!(relay_refs.get(relay_key).unwrap().unwrap().value(), 2);
+        let relay_ids = read_txn.open_table(RELAY_IDS).unwrap();
+        let relay_key = relay_ids.get(relay.as_str()).unwrap().unwrap().value();
+        drop(read_txn);
+        assert_eq!(relay_refs_of(&store.db, relay_key), Some(2));
         relay_key
     };
     assert_canonical_integrity(&store.db);
 
     store.remove(first.id, RetractReason::Deleted).unwrap();
-    {
-        let read_txn = store.db.begin_read().unwrap();
-        let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
-        assert_eq!(relay_refs.get(first_relay_key).unwrap().unwrap().value(), 1);
-    }
+    assert_eq!(relay_refs_of(&store.db, first_relay_key), Some(1));
     assert_canonical_integrity(&store.db);
 
     store.remove(second.id, RetractReason::Deleted).unwrap();
     {
         let read_txn = store.db.begin_read().unwrap();
         assert!(read_txn
-            .open_table(RELAY_KEYS)
+            .open_table(RELAY_IDS)
             .unwrap()
             .get(relay.as_str())
             .unwrap()
             .is_none());
         assert_eq!(read_txn.open_table(RELAYS).unwrap().len().unwrap(), 0);
-        assert_eq!(read_txn.open_table(RELAY_REFS).unwrap().len().unwrap(), 0);
         assert_eq!(
             read_txn
                 .open_table(EVENT_OBSERVATIONS)
@@ -824,7 +829,7 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
         .unwrap();
     let read_txn = store.db.begin_read().unwrap();
     let new_relay_key = read_txn
-        .open_table(RELAY_KEYS)
+        .open_table(RELAY_IDS)
         .unwrap()
         .get(relay.as_str())
         .unwrap()
@@ -878,20 +883,20 @@ fn canonical_relay_aliases_fold_to_latest_timestamp_on_read_and_mutation() {
         let event_ids = write_txn.open_table(EVENT_IDS).unwrap();
         let event_key = event_ids.get(event.id.as_bytes()).unwrap().unwrap().value();
         let mut relays = write_txn.open_table(RELAYS).unwrap();
-        let mut relay_keys = write_txn.open_table(RELAY_KEYS).unwrap();
-        let canonical_key = relay_keys
+        let mut relay_ids = write_txn.open_table(RELAY_IDS).unwrap();
+        let canonical_key = relay_ids
             .get(canonical_relay.as_str())
             .unwrap()
             .unwrap()
             .value();
         let alias_key = canonical_key + 1;
-        let mut relay_refs = write_txn.open_table(RELAY_REFS).unwrap();
         let mut store_meta = write_txn.open_table(STORE_META).unwrap();
         let mut observations = write_txn.open_table(EVENT_OBSERVATIONS).unwrap();
 
-        relays.insert(alias_key, STORED_ALIAS).unwrap();
-        relay_keys.insert(STORED_ALIAS, alias_key).unwrap();
-        relay_refs.insert(alias_key, 1).unwrap();
+        relays
+            .insert(alias_key, encode_relay_row(1, STORED_ALIAS).as_slice())
+            .unwrap();
+        relay_ids.insert(STORED_ALIAS, alias_key).unwrap();
         observations
             .insert(&observation_key(event_key, alias_key), 20)
             .unwrap();
@@ -950,27 +955,18 @@ fn batch_relay_refcounts_flush_once_per_distinct_relay() {
         }
         assert_eq!(canonical.relay_ref_counts.len(), 1);
         assert_eq!(canonical.relay_ref_counts[&relay_key], 1_114);
+        let durable_refs = |canonical: &CanonicalWriteTables<'_>| {
+            let row = canonical.relays.get(relay_key).unwrap().unwrap();
+            decode_relay_row(relay_key, row.value()).unwrap().0
+        };
         assert_eq!(
-            canonical
-                .relay_refs
-                .get(relay_key)
-                .unwrap()
-                .unwrap()
-                .value(),
+            durable_refs(&canonical),
             0,
             "the durable hot row stays untouched until the batch flush"
         );
         canonical.flush_pending().unwrap();
         assert!(canonical.relay_ref_counts.is_empty());
-        assert_eq!(
-            canonical
-                .relay_refs
-                .get(relay_key)
-                .unwrap()
-                .unwrap()
-                .value(),
-            1_114
-        );
+        assert_eq!(durable_refs(&canonical), 1_114);
     }
     // This is a white-box write-coalescing proof, not a valid canonical
     // store state, so abort rather than committing the synthetic count.
@@ -1013,19 +1009,11 @@ fn batch_net_zero_observation_reclaims_new_relay_dictionary_row() {
     assert_canonical_integrity(&store.db);
 
     let read_txn = store.db.begin_read().unwrap();
-    let relay_keys = read_txn.open_table(RELAY_KEYS).unwrap();
-    assert!(relay_keys.get(old_relay.as_str()).unwrap().is_none());
-    let winner_key = relay_keys.get(new_relay.as_str()).unwrap().unwrap().value();
-    assert_eq!(
-        read_txn
-            .open_table(RELAY_REFS)
-            .unwrap()
-            .get(winner_key)
-            .unwrap()
-            .unwrap()
-            .value(),
-        1
-    );
+    let relay_ids = read_txn.open_table(RELAY_IDS).unwrap();
+    assert!(relay_ids.get(old_relay.as_str()).unwrap().is_none());
+    let winner_key = relay_ids.get(new_relay.as_str()).unwrap().unwrap().value();
+    drop(read_txn);
+    assert_eq!(relay_refs_of(&store.db, winner_key), Some(1));
 }
 
 #[test]
@@ -1071,18 +1059,12 @@ fn later_same_relay_updates_only_one_timestamp_value() {
     assert_eq!(before[0].1, 10);
     assert_eq!(after[0].1, 20);
     let read_txn = store.db.begin_read().unwrap();
-    let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
-    assert_eq!(
-        relay_refs
-            .iter()
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .1
-            .value(),
-        1
-    );
+    let relays = read_txn.open_table(RELAYS).unwrap();
+    let (relay_key, row) = {
+        let entry = relays.iter().unwrap().next().unwrap().unwrap();
+        (entry.0.value(), entry.1.value().to_vec())
+    };
+    assert_eq!(decode_relay_row(relay_key, &row).unwrap().0, 1);
 }
 
 #[test]

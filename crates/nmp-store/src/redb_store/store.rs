@@ -9,16 +9,16 @@ use super::publish_queue_codec::{
 };
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
-    persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, COVERAGE, EVENTS, EVENT_IDS,
-    EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX, POSTINGS_DEAD_KEYS,
+    decode_relay_row, persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, COVERAGE,
+    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX, POSTINGS_DEAD_KEYS,
     POSTINGS_DICTIONARIES, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
     POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
     PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS,
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
     PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS_BY_ADDR,
-    PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
-    SCHEMA_VERSION, SCHEMA_VERSION_KEY, STORE_META, TOMBSTONES,
+    PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_IDS, SCHEMA_VERSION,
+    SCHEMA_VERSION_KEY, STORE_META, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -507,8 +507,7 @@ impl RedbStore {
                 write_txn.open_table(EVENT_LOCAL)?;
                 write_txn.open_table(EVENT_OBSERVATIONS)?;
                 write_txn.open_table(RELAYS)?;
-                write_txn.open_table(RELAY_KEYS)?;
-                write_txn.open_table(RELAY_REFS)?;
+                write_txn.open_table(RELAY_IDS)?;
                 write_txn.open_table(ADDR_INDEX)?;
                 write_txn.open_table(COVERAGE)?;
                 write_txn.open_table(TOMBSTONES)?;
@@ -676,7 +675,7 @@ impl RedbStore {
         event_key: EventKey,
         local_bytes: Option<&[u8]>,
         observations: &redb::ReadOnlyTable<&'static [u8; 12], u64>,
-        relays: &redb::ReadOnlyTable<RelayKey, &'static str>,
+        relays: &redb::ReadOnlyTable<RelayKey, &'static [u8]>,
         relay_cache: &mut HashMap<RelayKey, RelayUrl>,
     ) -> Result<Provenance, PersistenceError> {
         let local = local_bytes
@@ -699,13 +698,13 @@ impl RedbStore {
             let relay = if let Some(relay) = relay_cache.get(&relay_key) {
                 relay.clone()
             } else {
-                let encoded_relay =
-                    relays.get(relay_key).map_err(persist_err)?.ok_or_else(|| {
-                        PersistenceError::invariant(format!(
-                            "observation points at missing relay {relay_key}"
-                        ))
-                    })?;
-                let relay = RelayUrl::parse(encoded_relay.value()).map_err(|error| {
+                let row = relays.get(relay_key).map_err(persist_err)?.ok_or_else(|| {
+                    PersistenceError::invariant(format!(
+                        "observation points at missing relay {relay_key}"
+                    ))
+                })?;
+                let (_refs, url) = decode_relay_row(relay_key, row.value())?;
+                let relay = RelayUrl::parse(url).map_err(|error| {
                     PersistenceError::invariant(format!(
                         "decode interned relay URL {relay_key}: {error}"
                     ))
@@ -724,7 +723,7 @@ impl RedbStore {
         view: StoredEventView<'_>,
         local_bytes: Option<&[u8]>,
         observations: &redb::ReadOnlyTable<&'static [u8; 12], u64>,
-        relays: &redb::ReadOnlyTable<RelayKey, &'static str>,
+        relays: &redb::ReadOnlyTable<RelayKey, &'static [u8]>,
         relay_cache: &mut HashMap<RelayKey, RelayUrl>,
     ) -> Result<StoredEvent, PersistenceError> {
         #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -856,7 +855,7 @@ impl RedbStore {
             .open_table(EVENT_OBSERVATIONS)
             .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
-        let relay_keys = read_txn.open_table(RELAY_KEYS).map_err(persist_err)?;
+        let relay_ids = read_txn.open_table(RELAY_IDS).map_err(persist_err)?;
         let publish_queue_suppress_by_id = read_txn
             .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
@@ -869,7 +868,7 @@ impl RedbStore {
         let pinned_relay_keys = if let Some(pinned) = pinned {
             let mut keys = BTreeSet::new();
             for relay in pinned {
-                if let Some(key) = relay_keys.get(relay.as_str()).map_err(persist_err)? {
+                if let Some(key) = relay_ids.get(relay.as_str()).map_err(persist_err)? {
                     keys.insert(key.value());
                 }
             }

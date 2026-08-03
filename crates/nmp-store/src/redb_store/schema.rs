@@ -112,9 +112,16 @@ pub(super) const EVENT_IDS: TableDefinition<&[u8; 32], EventKey> =
     TableDefinition::new("event_ids");
 pub(super) const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> =
     TableDefinition::new("event_local");
-pub(super) const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays");
-pub(super) const RELAY_KEYS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_keys");
-pub(super) const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs");
+/// The relay dictionary: surrogate -> (observation refcount, canonical URL).
+///
+/// The refcount was a second tree keyed by the same surrogate — a column, not
+/// a key space (#1248). Folding it in also makes "this URL is interned and N
+/// observations reference it" one row rather than two rows that can disagree.
+/// Value: `refs:u64-be | url utf8`, via [`encode_relay_row`].
+pub(super) const RELAYS: TableDefinition<RelayKey, &[u8]> = TableDefinition::new("relays");
+/// The reverse direction, URL -> surrogate. A genuinely distinct key space:
+/// it is ordered and looked up by URL, which [`RELAYS`] cannot answer.
+pub(super) const RELAY_IDS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_ids");
 /// Fixed-width key: `event_key:u64-be | relay_key:u32-be`; value is the
 /// greatest observation timestamp in seconds.
 pub(super) const EVENT_OBSERVATIONS: TableDefinition<&[u8; 12], u64> =
@@ -317,6 +324,38 @@ pub(super) fn id_tombstone_key(id: &EventId, author: &PublicKey) -> Vec<u8> {
 
 /// The `tombstones` key for one replaceable/addressable address, from
 /// [`crate::address_key::AddressKey::to_redb_key`].
+/// Encode one [`RELAYS`] row. The refcount leads so it can be read without
+/// scanning the URL.
+pub(super) fn encode_relay_row(refs: u64, url: &str) -> Vec<u8> {
+    let mut value = Vec::with_capacity(8 + url.len());
+    value.extend_from_slice(&refs.to_be_bytes());
+    value.extend_from_slice(url.as_bytes());
+    value
+}
+
+/// Decode one [`RELAYS`] row. Fallible rather than panicking: this runs
+/// inside open write transactions and on the query read path, so a malformed
+/// row must refuse the operation, not defeat a `debug_assert`.
+pub(super) fn decode_relay_row(
+    relay_key: RelayKey,
+    value: &[u8],
+) -> Result<(u64, &str), PersistenceError> {
+    if value.len() < 8 {
+        return Err(PersistenceError::invariant(format!(
+            "interned relay {relay_key} row is {} bytes, expected at least 8",
+            value.len()
+        )));
+    }
+    let (refs, url) = value.split_at(8);
+    let refs = u64::from_be_bytes(refs.try_into().expect("split_at yields eight bytes"));
+    let url = std::str::from_utf8(url).map_err(|error| {
+        PersistenceError::invariant(format!(
+            "interned relay {relay_key} URL is not UTF-8: {error}"
+        ))
+    })?;
+    Ok((refs, url))
+}
+
 pub(super) fn addr_tombstone_key(address: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + address.len());
     key.push(TOMBSTONE_ADDR);

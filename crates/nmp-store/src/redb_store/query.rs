@@ -4,8 +4,8 @@ use super::canonical::{observation_event_key, observation_relay_key};
 use super::schema::EventKey;
 #[cfg(test)]
 use super::schema::{
-    RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX,
-    NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_REFS, STORE_META,
+    decode_relay_row, RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
+    EXPIRATION_INDEX, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_IDS, STORE_META,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::BTreeSet;
@@ -198,8 +198,7 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         .open_table(EVENT_OBSERVATIONS)
         .expect("audit event observations");
     let relays = read_txn.open_table(RELAYS).expect("audit relays");
-    let relay_keys = read_txn.open_table(RELAY_KEYS).expect("audit relay keys");
-    let relay_refs = read_txn.open_table(RELAY_REFS).expect("audit relay refs");
+    let relay_ids = read_txn.open_table(RELAY_IDS).expect("audit relay ids");
 
     let mut canonical = BTreeMap::new();
     for entry in events.iter().expect("iterate audit events") {
@@ -268,44 +267,33 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         expected_relay_refs.len() as u64
     );
     assert_eq!(
-        relay_keys.len().expect("count audit relay keys"),
-        expected_relay_refs.len() as u64
-    );
-    assert_eq!(
-        relay_refs.len().expect("count audit relay refs"),
+        relay_ids.len().expect("count audit relay ids"),
         expected_relay_refs.len() as u64
     );
     for entry in relays.iter().expect("iterate audit relays") {
-        let (relay_key, encoded_url) = entry.expect("read audit relay");
+        let (relay_key, row) = entry.expect("read audit relay");
         let relay_key = relay_key.value();
-        RelayUrl::parse(encoded_url.value()).expect("interned relay is canonical");
+        let (refs, url) = decode_relay_row(relay_key, row.value()).expect("audit relay row");
+        RelayUrl::parse(url).expect("interned relay is canonical");
         assert_eq!(
-            relay_keys
-                .get(encoded_url.value())
+            relay_ids
+                .get(url)
                 .expect("audit reverse relay lookup")
                 .expect("relay has reverse key")
                 .value(),
             relay_key
         );
-        assert_eq!(
-            relay_refs
-                .get(relay_key)
-                .expect("audit relay ref lookup")
-                .expect("relay has refcount")
-                .value(),
-            expected_relay_refs[&relay_key]
-        );
+        assert_eq!(refs, expected_relay_refs[&relay_key]);
     }
-    for entry in relay_keys.iter().expect("iterate audit reverse relays") {
+    for entry in relay_ids.iter().expect("iterate audit reverse relays") {
         let (encoded_url, relay_key) = entry.expect("read audit reverse relay");
-        assert_eq!(
-            relays
-                .get(relay_key.value())
-                .expect("audit forward relay lookup")
-                .expect("reverse relay has forward row")
-                .value(),
-            encoded_url.value()
-        );
+        let relay_key = relay_key.value();
+        let row = relays
+            .get(relay_key)
+            .expect("audit forward relay lookup")
+            .expect("reverse relay has forward row");
+        let (_refs, url) = decode_relay_row(relay_key, row.value()).expect("audit relay row");
+        assert_eq!(url, encoded_url.value());
     }
     if let Some(max_key) = expected_relay_refs.keys().next_back() {
         let next = store_meta

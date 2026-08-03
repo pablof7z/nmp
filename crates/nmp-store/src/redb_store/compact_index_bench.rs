@@ -14,7 +14,7 @@ use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
 use super::schema::{
     EventKey, EVENTS, EVENT_IDS, EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS,
-    RELAY_KEYS, RELAY_REFS,
+    RELAY_IDS,
 };
 use super::store_bench::{
     duration_ns, nearest_rank, prepared_array, StoreBenchPreparedCorpus, StoreBenchPreparedMetrics,
@@ -67,9 +67,7 @@ fn init_database(path: &Path) -> Result<Database, String> {
     txn.open_table(EVENT_OBSERVATIONS)
         .map_err(|error| error.to_string())?;
     txn.open_table(RELAYS).map_err(|error| error.to_string())?;
-    txn.open_table(RELAY_KEYS)
-        .map_err(|error| error.to_string())?;
-    txn.open_table(RELAY_REFS)
+    txn.open_table(RELAY_IDS)
         .map_err(|error| error.to_string())?;
     txn.open_table(COMPACT_BY_CREATED_AT)
         .map_err(|error| error.to_string())?;
@@ -115,11 +113,8 @@ pub fn run_prepared_redb_compact_index_bench(
             .open_table(EVENT_OBSERVATIONS)
             .map_err(|error| error.to_string())?;
         let mut relays = txn.open_table(RELAYS).map_err(|error| error.to_string())?;
-        let mut relay_keys = txn
-            .open_table(RELAY_KEYS)
-            .map_err(|error| error.to_string())?;
-        let mut relay_refs = txn
-            .open_table(RELAY_REFS)
+        let mut relay_ids = txn
+            .open_table(RELAY_IDS)
             .map_err(|error| error.to_string())?;
         let mut by_created_at = txn
             .open_table(COMPACT_BY_CREATED_AT)
@@ -166,23 +161,14 @@ pub fn run_prepared_redb_compact_index_bench(
                 }
                 StoreBenchPreparedTable::Relays => {
                     let key = u32::from_be_bytes(prepared_array(&record.key, "relay key")?);
-                    let value = std::str::from_utf8(&record.value).map_err(|e| e.to_string())?;
                     relays
-                        .insert(key, value)
+                        .insert(key, record.value.as_slice())
                         .map_err(|error| error.to_string())?;
                 }
-                StoreBenchPreparedTable::RelayKeys => {
+                StoreBenchPreparedTable::RelayIds => {
                     let key = std::str::from_utf8(&record.key).map_err(|e| e.to_string())?;
                     let value = u32::from_be_bytes(prepared_array(&record.value, "relay id")?);
-                    relay_keys
-                        .insert(key, value)
-                        .map_err(|error| error.to_string())?;
-                }
-                StoreBenchPreparedTable::RelayRefs => {
-                    let key = u32::from_be_bytes(prepared_array(&record.key, "relay ref key")?);
-                    let value =
-                        u64::from_be_bytes(prepared_array(&record.value, "relay ref value")?);
-                    relay_refs
+                    relay_ids
                         .insert(key, value)
                         .map_err(|error| error.to_string())?;
                 }
@@ -264,8 +250,7 @@ pub fn run_prepared_redb_compact_index_bench(
         drop(by_kind);
         drop(by_author);
         drop(by_created_at);
-        drop(relay_refs);
-        drop(relay_keys);
+        drop(relay_ids);
         drop(relays);
         drop(observations);
         drop(event_ids);
@@ -297,12 +282,7 @@ pub fn run_prepared_redb_compact_index_bench(
             .map_err(|e| e.to_string())?
             .len(),
         read.open_table(RELAYS).map_err(|e| e.to_string())?.len(),
-        read.open_table(RELAY_KEYS)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read.open_table(RELAY_REFS)
-            .map_err(|e| e.to_string())?
-            .len(),
+        read.open_table(RELAY_IDS).map_err(|e| e.to_string())?.len(),
         read.open_table(COMPACT_BY_CREATED_AT)
             .map_err(|e| e.to_string())?
             .len(),
