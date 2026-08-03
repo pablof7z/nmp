@@ -264,7 +264,7 @@ impl GroupObservation {
                     .accumulator
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
-                accumulator.apply(frame.deltas, &self.hosts);
+                accumulator.apply(frame.deltas);
                 Ok(Some(project(
                     &self.hosts,
                     &self.seed_ids,
@@ -348,28 +348,44 @@ pub(super) fn observe(
 }
 
 /// The folded row set. Keyed by event id exactly like `nmp_nip02`'s, because
-/// that is what a `RowDelta` stream is keyed by.
+/// that is what a `RowDelta` stream is keyed by, and carrying beside each
+/// event the relays the engine says served it.
+///
+/// # Labelling, never a visibility rule (#1182)
+///
+/// That relay set is read to ANSWER "which relay's record is this", which is
+/// the per-relay authority NIP-29 owns and the read-side statement of the
+/// `CacheMode::Strict` its demands already carry. It is never tested, never
+/// filtered on, and never intersected with anything: nothing here decides
+/// whether a row may be SEEN. A row is folded in exactly as delivered and
+/// labelled with exactly what the engine reported about it -- including a row
+/// reporting no relay at all, whose per-host breakdown is then empty because
+/// no relay has carried it, which is the true statement rather than a policy.
+///
+/// Whether a locally accepted write appears here at all, and what it reports
+/// while no relay has carried it, stays entirely the engine's general rule.
 #[derive(Default)]
 struct Accumulator {
     rows: BTreeMap<EventId, (Event, BTreeSet<RelayUrl>)>,
 }
 
 impl Accumulator {
-    fn apply(&mut self, deltas: Vec<RowDelta>, hosts: &BTreeSet<RelayUrl>) {
+    fn apply(&mut self, deltas: Vec<RowDelta>) {
         for delta in deltas {
             match delta {
                 RowDelta::Added(Row { event, sources }) => {
-                    self.rows.insert(event.id, (event, &sources & hosts));
+                    self.rows.insert(event.id, (event, sources));
                 }
                 RowDelta::Removed(id) => {
                     self.rows.remove(&id);
                 }
-                // A second host serving a record the first already served is
+                // A second relay serving a record the first already served is
                 // real attribution news: the entry it produced must now name
-                // both. `sources` only ever grows, so this is a widening.
+                // both. The engine's set only ever grows, so this is a
+                // widening, and it is taken verbatim.
                 RowDelta::SourcesGrew { id, sources } => {
                     if let Some((_, attributed)) = self.rows.get_mut(&id) {
-                        *attributed = &sources & hosts;
+                        *attributed = sources;
                     }
                 }
             }
@@ -394,27 +410,24 @@ fn availability_at(host: &RelayUrl, evidence: &[AcquisitionEvidence]) -> GroupAv
         return GroupAvailability::SourceUnavailable;
     }
 
-    let sources = || {
+    // A BRANCH's per-relay acquisition facts, not any row's provenance.
+    let reported = || {
         evidence
             .iter()
             .flat_map(|branch| branch.sources.iter())
-            .filter(|source| &source.relay == host)
+            .filter(|fact| &fact.relay == host)
     };
-    if sources().any(|source| {
-        matches!(
-            source.status,
-            SourceStatus::AuthDenied | SourceStatus::Error
-        )
-    }) {
+    if reported().any(|fact| matches!(fact.status, SourceStatus::AuthDenied | SourceStatus::Error))
+    {
         return GroupAvailability::SourceUnavailable;
     }
-    if sources().next().is_none() || sources().any(|source| source.reconciled_through.is_none()) {
+    if reported().next().is_none() || reported().any(|fact| fact.reconciled_through.is_none()) {
         return GroupAvailability::Acquiring;
     }
-    if sources().any(|source| source.status == SourceStatus::Disconnected) {
+    if reported().any(|fact| fact.status == SourceStatus::Disconnected) {
         return GroupAvailability::CachedOnly;
     }
-    if sources().all(|source| source.status == SourceStatus::Requesting) {
+    if reported().all(|fact| fact.status == SourceStatus::Requesting) {
         GroupAvailability::Ready
     } else {
         GroupAvailability::Acquiring
@@ -446,16 +459,18 @@ fn project(
         .collect();
 
     for (event, attributed) in accumulator.rows.values() {
+        // Which of NIP-29's records this is, and which group it keys itself
+        // to. Both come off the event's own schema; an event that is neither
+        // describes no group and has nothing to contribute to any snapshot.
         let Some(record) = GroupRecord::of_kind(event.kind.as_u16()) else {
             continue;
         };
         let Some(id) = join_key_of(event) else {
             continue;
         };
+        // Labelled with exactly the relays the engine reported, whatever they
+        // are -- never narrowed to the scope, never tested, never filtered.
         for host in attributed {
-            let Some(host) = hosts.get(host) else {
-                continue;
-            };
             folded
                 .entry(id.clone())
                 .or_default()

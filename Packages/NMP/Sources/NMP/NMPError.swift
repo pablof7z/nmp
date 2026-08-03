@@ -144,6 +144,14 @@ public enum NMPError: Error, Sendable, Equatable {
     /// #1033: an already-signed event carried more than one distinct `h`
     /// tag, so which group it belongs to is ambiguous.
     case groupContextAmbiguous(expected: String)
+    /// #1245: a group content read named one of NIP-29's own relay-signed
+    /// group records. Those identify themselves a different way, so an
+    /// `h`-scoped read of them can only ever match nothing -- read them
+    /// through `NMPGroup.observeRecords(engine:records:)` instead.
+    case groupRecordsNotContextScoped(kinds: [UInt16])
+    /// #1233: a records observation named none of the three records, which
+    /// would deliver a permanently empty state.
+    case groupNoRecordSelected
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -207,6 +215,10 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .groupContextMismatched(found: found, expected: expected)
         case .GroupContextAmbiguous(let expected):
             self = .groupContextAmbiguous(expected: expected)
+        case .GroupRecordsNotContextScoped(let kinds):
+            self = .groupRecordsNotContextScoped(kinds: kinds)
+        case .GroupNoRecordSelected:
+            self = .groupNoRecordSelected
         }
     }
 }
@@ -319,6 +331,10 @@ extension NMPError: LocalizedError {
             "Event's h tag \(found.debugDescription) does not match expected group \(expected.debugDescription)"
         case .groupContextAmbiguous(let expected):
             "Event carries more than one distinct h tag; expected exactly group \(expected.debugDescription)"
+        case .groupRecordsNotContextScoped(let kinds):
+            "Kinds \(kinds) are NIP-29's own relay-signed group records: they key themselves by d, never by h, so no such event could ever match a group content read; observe the group's records instead"
+        case .groupNoRecordSelected:
+            "A group records observation must name at least one of the three relay-signed records"
         }
     }
 }
