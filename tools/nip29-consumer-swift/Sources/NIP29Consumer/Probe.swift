@@ -91,28 +91,72 @@ enum Probe {
     }
 
     static func verifyMetadata(_ context: Context) async throws {
-        let subjects = NMPBinding.literal(Set([context.args.followed, context.args.outsider]))
-        let predicate = try NMPGroupPredicate.memberListIncludes(subjects)
-        let query = try context.engine.observe(context.scope.groupsWhere(predicate))
-        let batch = try await waitForRows(query, seconds: context.args.settleSeconds) {
-            rows($0, kind: 39000).count == 2
-        }
-        query.cancel()
-        var names: [String: String] = [:]
-        for row in rows(batch, kind: 39000) {
-            guard let source = row.sources.first, let name = tagValue(row, "name") else {
-                throw ProbeError.message("metadata row lacked source or name")
-            }
-            names[source] = name
-        }
+        let observation = try metadataObservation(context)
+        defer { observation.cancel() }
+        let snapshot = try await waitForSnapshot(
+            observation,
+            seconds: context.args.settleSeconds
+        ) { $0.perHost.count == 2 }
+        let names = try metadataNames(snapshot)
         try require(names[context.args.relayA] == "Bitcoin Cash",
                     "relay A metadata was not preserved")
         try require(names[context.args.relayB] == "Bitcoin (real)",
                     "relay B metadata was not preserved")
-        print("PROOF swift_metadata preserved=2 app_winner=\(names[context.args.relayB]!) policy=prefer_relay_b")
+        // The aggregate is ONE relay's whole record, never a blend of the two,
+        // and the app is told the two disagree so it can decide what to show.
+        guard let shown = snapshot.metadata else {
+            throw ProbeError.message("no metadata was shown at all")
+        }
+        try require(names.values.contains { $0 == shown.name },
+                    "the shown name is not either relay's own")
+        try require(snapshot.differs(NMPGroupRecord.metadata),
+                    "two relays published different metadata and the app was not told")
+        print("PROOF swift_metadata preserved=2 shown_host=\(shown.host) shown_name=\(shown.name ?? "nil") differs=true app_winner=\(names[context.args.relayB]!) policy=prefer_relay_b")
+    }
+
+    /// The relay-signed group records are keyed by `d`, unlike group content's
+    /// `h` -- reaching for them through the content door is refused outright
+    /// (#1245). Positive member-list evidence at each relay selects the group.
+    static func metadataObservation(_ context: Context) throws -> NMPGroupRecordsObservation {
+        let subjects = NMPBinding.literal(Set([context.args.followed, context.args.outsider]))
+        return try context.scope.observeRecords(
+            engine: context.engine,
+            matching: try NMPGroupPredicate.memberListIncludes(subjects),
+            records: [.metadata]
+        )
+    }
+
+    /// Exactly what each relay signed, read off the per-host breakdown beside
+    /// the aggregate -- no tag walking, and no relay's record folded into
+    /// another's.
+    static func metadataNames(_ snapshot: NMPGroupSnapshot) throws -> [String: String] {
+        var names: [String: String] = [:]
+        for records in snapshot.perHost {
+            guard let name = records.metadata?.name else {
+                throw ProbeError.message("relay \(records.host) published no group name")
+            }
+            names[records.host] = name
+        }
+        return names
     }
 
     static func verifyFollowsDiscovery(_ context: Context) async throws {
+        let observation = try followsDiscoveryObservation(context)
+        defer { observation.cancel() }
+        let snapshot = try await waitForSnapshot(
+            observation,
+            seconds: context.args.settleSeconds
+        ) { listsFollowed($0, context.args.followed) }
+        try require(snapshot.id == groupID,
+                    "follows-derived discovery returned another group")
+        try require(snapshot.perHost.map { $0.host } == [context.args.relayA],
+                    "follows-derived discovery crossed relay authority")
+        print("PROOF swift_discovery predicate=member_list_includes(follows_of_active_viewer) group=\(groupID) source=\(context.args.relayA)")
+    }
+
+    static func followsDiscoveryObservation(
+        _ context: Context
+    ) throws -> NMPGroupRecordsObservation {
         let follows = NMPBinding.derived(
             inner: NMPDemand(
                 selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
@@ -121,19 +165,33 @@ enum Probe {
             ),
             project: .tag("p")
         )
-        let predicate = try NMPGroupPredicate.memberListIncludes(follows)
-        let query = try context.engine.observe(context.scope.groupsWhere(predicate))
-        let batch = try await waitForRows(query, seconds: context.args.settleSeconds) { batch in
-            rows(batch, kind: 39002).contains { row in
-                tagValue(row, "d") == groupID
-                    && row.tags.contains(["p", context.args.followed])
+        return try context.scope.observeRecords(
+            engine: context.engine,
+            matching: try NMPGroupPredicate.memberListIncludes(follows),
+            records: [.members]
+        )
+    }
+
+    /// The member list NMP handed back names the followed subject -- read off
+    /// the typed snapshot, with no `p`-tag walking anywhere in this app.
+    static func listsFollowed(_ snapshot: NMPGroupSnapshot, _ followed: String) -> Bool {
+        snapshot.members.contains { $0.pubkey == followed }
+    }
+
+    /// Await deliveries until this group's snapshot satisfies `predicate`.
+    static func waitForSnapshot(
+        _ observation: NMPGroupRecordsObservation,
+        seconds: UInt64,
+        _ predicate: @escaping @Sendable (NMPGroupSnapshot) -> Bool
+    ) async throws -> NMPGroupSnapshot {
+        try await withTimeout(seconds: seconds) {
+            for try await snapshots in observation {
+                if let found = snapshots.first(where: { $0.id == groupID && predicate($0) }) {
+                    return found
+                }
             }
+            throw ProbeError.message("the records observation ended before the condition held")
         }
-        query.cancel()
-        try require(batch.rows.allSatisfy {
-            tagValue($0, "d") == groupID && $0.sources == [context.args.relayA]
-        }, "follows-derived discovery crossed relay authority")
-        print("PROOF swift_discovery predicate=member_list_includes(follows_of_active_viewer) group=\(groupID) source=\(context.args.relayA)")
     }
 
     static func verifyWindow(_ context: Context, _ group: NMPGroup) async throws {

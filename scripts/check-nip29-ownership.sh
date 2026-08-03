@@ -188,9 +188,15 @@ grep -qF 'scope_stamps_exact_hosts_on_every_nested_nip29_demand' \
 # test that asserts one stays gone. (`docs/surface-change-log.md` and
 # `docs/surface/*` are append-only surface history and are deliberately not
 # scanned: they record withdrawn spellings as facts of the past.)
+# `tools/` is scanned too (#1233): the two NIP-29 consumer probes live there
+# and are the application-boundary proof, so a spelling this repo deleted
+# surviving in one of them is exactly the same defect as it surviving in a
+# crate. `tools/nip29-consumer-swift` is a Swift package outside the cargo
+# workspace, so nothing else in the local loop compiles it -- it was found
+# only by macOS CI, which is late.
 tombstones=$(grep -RInE \
   'contextualize_group_event|GroupPublication|group_discovery_demand|groupDiscoveryDemand|pinned_demand|groups_where|groupsWhere' \
-  crates/ Packages/ skills/ || true)
+  crates/ Packages/ skills/ tools/ || true)
 if [[ -n $tombstones ]]; then
   printf '%s\n' "$tombstones"
   fail "a deleted NIP-29 publication/discovery spelling reappeared"
@@ -201,7 +207,7 @@ fi
 # possibly partial) cannot establish. Bounded so it does not also flag
 # `member_list_includes`/`admin_list_includes`.
 overclaiming=$(grep -RInE '(^|[^A-Za-z0-9_])(member_is|admin_is|memberIs|adminIs)\(' \
-  crates/ Packages/ skills/ || true)
+  crates/ Packages/ skills/ tools/ || true)
 if [[ -n $overclaiming ]]; then
   printf '%s\n' "$overclaiming"
   fail "an overclaiming exact-membership/admin spelling reappeared; use the evidence-scoped name"
