@@ -1,8 +1,6 @@
 use super::schema::{
     persist_err, EventKey, RelayKey, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
-    EVENT_STORE_META, INDEX_CARDINALITY, INDEX_CARDINALITY_SAMPLE_KEY,
-    INDEX_CARDINALITY_SAMPLE_META, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META,
-    RELAY_REFS,
+    EVENT_STORE_META, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
 };
 use super::{
     binary_event, BTreeMap, Event, EventId, HashMap, LocalOrigin, PersistenceError, Provenance,
@@ -112,7 +110,6 @@ pub(super) struct CanonicalWriteTables<'txn> {
     pub(super) relay_keys: redb::Table<'txn, &'static str, RelayKey>,
     pub(super) relay_refs: redb::Table<'txn, RelayKey, u64>,
     pub(super) relay_meta: redb::Table<'txn, &'static str, RelayKey>,
-    pub(super) cardinality: redb::Table<'txn, &'static [u8], u64>,
     /// Surrogate allocators are loaded once per write transaction and only
     /// flushed if consumed. A large ingest batch therefore writes each hot
     /// metadata row once, in the same atomic commit as its events/indexes.
@@ -123,11 +120,6 @@ pub(super) struct CanonicalWriteTables<'txn> {
     /// Effective counts touched by this transaction. Busy batches commonly
     /// share one relay, so the durable hot row is read and written once.
     pub(super) relay_ref_counts: HashMap<RelayKey, u64>,
-    /// Net live-row changes by ordered-index prefix. A governed batch can
-    /// touch the same busy room/kind hundreds of times; persisting once per
-    /// prefix keeps the single-writer transaction cheap.
-    pub(super) cardinality_deltas: HashMap<Vec<u8>, i64>,
-    pub(super) cardinality_sample_key: [u8; 32],
 }
 
 impl<'txn> CanonicalWriteTables<'txn> {
@@ -146,21 +138,6 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .map_err(persist_err)?
             .map(|guard| guard.value())
             .unwrap_or(1);
-        let cardinality_sample_meta = write_txn
-            .open_table(INDEX_CARDINALITY_SAMPLE_META)
-            .map_err(persist_err)?;
-        let cardinality_sample_key = cardinality_sample_meta
-            .get(INDEX_CARDINALITY_SAMPLE_KEY)
-            .map_err(persist_err)?
-            .ok_or_else(|| {
-                PersistenceError::invariant("missing cardinality sample key".to_owned())
-            })?
-            .value()
-            .try_into()
-            .map_err(|_| {
-                PersistenceError::invariant("invalid cardinality sample key length".to_owned())
-            })?;
-        drop(cardinality_sample_meta);
         Ok(Self {
             events: write_txn.open_table(EVENTS).map_err(persist_err)?,
             event_ids: write_txn.open_table(EVENT_IDS).map_err(persist_err)?,
@@ -173,16 +150,11 @@ impl<'txn> CanonicalWriteTables<'txn> {
             relay_keys: write_txn.open_table(RELAY_KEYS).map_err(persist_err)?,
             relay_refs: write_txn.open_table(RELAY_REFS).map_err(persist_err)?,
             relay_meta,
-            cardinality: write_txn
-                .open_table(INDEX_CARDINALITY)
-                .map_err(persist_err)?,
             next_event_key,
             next_relay_key,
             event_allocator_dirty: false,
             relay_allocator_dirty: false,
             relay_ref_counts: HashMap::new(),
-            cardinality_deltas: HashMap::new(),
-            cardinality_sample_key,
         })
     }
 
@@ -360,21 +332,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
         Ok(())
     }
 
-    pub(super) fn adjust_cardinality(
-        &mut self,
-        key: Vec<u8>,
-        delta: i64,
-    ) -> Result<(), PersistenceError> {
-        let current = self.cardinality_deltas.entry(key).or_default();
-        *current = current.checked_add(delta).ok_or_else(|| {
-            PersistenceError::invariant("index cardinality delta overflow".to_owned())
-        })?;
-        Ok(())
-    }
-
     /// Flush every transaction-local mutation exactly once before the caller
-    /// commits: surrogate high-water marks, relay refcounts, and index
-    /// cardinalities remain part of the same crash-atomic event transaction.
+    /// commits: surrogate high-water marks and relay refcounts remain part of
+    /// the same crash-atomic event transaction.
     pub(super) fn flush_pending(&mut self) -> Result<(), PersistenceError> {
         if self.event_allocator_dirty {
             self.store_meta
@@ -424,36 +384,6 @@ impl<'txn> CanonicalWriteTables<'txn> {
             self.relay_keys
                 .remove(relay.as_str())
                 .map_err(persist_err)?;
-        }
-        for (key, delta) in std::mem::take(&mut self.cardinality_deltas) {
-            if delta == 0 {
-                continue;
-            }
-            let persisted = self
-                .cardinality
-                .get(key.as_slice())
-                .map_err(persist_err)?
-                .map(|guard| guard.value())
-                .unwrap_or(0);
-            let effective = if delta > 0 {
-                persisted.checked_add(delta as u64)
-            } else {
-                persisted.checked_sub(delta.unsigned_abs())
-            }
-            .ok_or_else(|| {
-                PersistenceError::invariant(format!(
-                    "index cardinality underflow/overflow for prefix {key:?}"
-                ))
-            })?;
-            if effective == 0 {
-                self.cardinality
-                    .remove(key.as_slice())
-                    .map_err(persist_err)?;
-            } else {
-                self.cardinality
-                    .insert(key.as_slice(), effective)
-                    .map_err(persist_err)?;
-            }
         }
         Ok(())
     }

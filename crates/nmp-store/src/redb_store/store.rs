@@ -11,8 +11,6 @@ use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
     persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, COVERAGE,
     EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META, EXPIRATION_INDEX,
-    INDEX_CARDINALITY, INDEX_CARDINALITY_META, INDEX_CARDINALITY_SAMPLE_KEY,
-    INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION, INDEX_CARDINALITY_VERSION_KEY,
     POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN,
     POSTINGS_RUN_META, POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
@@ -477,34 +475,6 @@ impl RedbStore {
                 if version != Some(SCHEMA_VERSION) {
                     return Err(unsupported_schema(ownership.target(), version));
                 }
-                let cardinality_meta = read_txn.open_table(INDEX_CARDINALITY_META)?;
-                // Inside the current epoch these rows are an invariant, not a
-                // compatibility question: the create path writes both in the
-                // same transaction as the schema marker. A marker that says
-                // "current" while they disagree is corruption of the current
-                // epoch, and must stay typed as corruption so it is never
-                // mistaken for an old epoch or silently rebuilt.
-                if cardinality_meta
-                    .get(INDEX_CARDINALITY_VERSION_KEY)?
-                    .map(|guard| guard.value())
-                    != Some(INDEX_CARDINALITY_VERSION)
-                {
-                    return Err(redb::Error::Corrupted(
-                        "current schema is missing its index-cardinality epoch".to_owned(),
-                    )
-                    .into());
-                }
-                let cardinality_sample_meta = read_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
-                if cardinality_sample_meta
-                    .get(INDEX_CARDINALITY_SAMPLE_KEY)?
-                    .map(|value| value.value().len())
-                    != Some(32)
-                {
-                    return Err(redb::Error::Corrupted(
-                        "current schema is missing its cardinality sample key".to_owned(),
-                    )
-                    .into());
-                }
                 let publish_queue_meta = read_txn.open_table(PUBLISH_QUEUE_META)?;
                 let codec_version = publish_queue_meta
                     .get(PUBLISH_QUEUE_CODEC_VERSION_KEY)?
@@ -553,15 +523,6 @@ impl RedbStore {
                 write_txn.open_table(POSTINGS_DEAD_KEYS)?;
                 let mut postings_meta = write_txn.open_table(POSTINGS_META)?;
                 postings_meta.insert(POSTINGS_READY, 1)?;
-                write_txn.open_table(INDEX_CARDINALITY)?;
-                let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
-                cardinality_meta
-                    .insert(INDEX_CARDINALITY_VERSION_KEY, INDEX_CARDINALITY_VERSION)?;
-                let sample_key = nostr::SecretKey::generate().to_secret_bytes();
-                let mut cardinality_sample_meta =
-                    write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
-                cardinality_sample_meta
-                    .insert(INDEX_CARDINALITY_SAMPLE_KEY, sample_key.as_slice())?;
                 write_txn.open_table(PUBLISH_QUEUE_INTENTS)?;
                 write_txn.open_table(PUBLISH_QUEUE_DISPLACED)?;
                 write_txn.open_table(PUBLISH_QUEUE_ATTEMPTS)?;

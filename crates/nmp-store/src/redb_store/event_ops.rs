@@ -181,7 +181,7 @@ pub(super) fn query(
         return Ok(out);
     }
 
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, None, None, None)
 }
 
@@ -216,7 +216,7 @@ pub(super) fn query_newest(
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
 
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, None, Some(limit), None)
 }
 
@@ -243,7 +243,7 @@ pub(super) fn query_newest_ids(
     }
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered_ids(&read_txn, &plan, filter, limit)
 }
 
@@ -276,7 +276,7 @@ pub(super) fn query_newest_under_pin(
     }
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, None, Some(limit), Some(pinned))
 }
 
@@ -315,7 +315,7 @@ pub(super) fn query_newest_before(
     }
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, Some(before), Some(limit), None)
 }
 
@@ -353,7 +353,7 @@ pub(super) fn query_newest_before_under_pin(
     }
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(
         &read_txn,
         &plan,

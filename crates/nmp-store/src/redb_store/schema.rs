@@ -225,21 +225,23 @@ pub(super) const POSTINGS_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
 pub(super) const POSTINGS_META: TableDefinition<&str, u64> = TableDefinition::new("postings_meta");
 pub(super) const POSTINGS_NEXT_RUN_ID: &str = "next_run_id";
 pub(super) const POSTINGS_READY: &str = "query_ready";
-/// Uniform sampled live-row counts for every ordered-index prefix. Keys are
-/// namespaced binary prefixes (global, author, kind, or tag/value); values
-/// count sampled physical rows in that bucket. Sampling is
-/// sufficient for choosing an index and avoids one durable row for nearly
-/// every unique author/tag while never changing query correctness.
+/// Sampled live-row counts per ordered-index prefix. Keys are namespaced
+/// binary prefixes (global, author, kind, or tag/value); values count sampled
+/// physical rows in that bucket.
+///
+/// Comparison-only, exactly like [`BY_CREATED_AT`]: [`crate::RedbStore`] never
+/// creates, opens, or reads this table and is not part of the current schema
+/// epoch. The planner it once fed chose between indexes that all return the
+/// same rows (`plan.index` only picks a scan order; the post-index mask is
+/// derived from the chosen index, never from an estimate), so the durable
+/// estimate could only make a query slower, never wrong — and packed postings
+/// already carry an exact per-prefix `posting_count` in their segment headers.
+/// It survives solely so benchmark variants can measure the alternative
+/// physical shape that motivated it.
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const INDEX_CARDINALITY: TableDefinition<&[u8], u64> =
     TableDefinition::new("index_cardinality");
-pub(super) const INDEX_CARDINALITY_META: TableDefinition<&str, u64> =
-    TableDefinition::new("index_cardinality_meta");
-pub(super) const INDEX_CARDINALITY_VERSION_KEY: &str = "version";
-pub(super) const INDEX_CARDINALITY_VERSION: u64 = 3;
-pub(super) const INDEX_CARDINALITY_SAMPLE_META: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("index_cardinality_sample_meta");
-pub(super) const INDEX_CARDINALITY_SAMPLE_KEY: &str = "key";
-/// Fresh publish-queue v1 namespace (#1027). The key widths are the
+/// Fresh publish-queue namespace (#1027). The key widths are the
 /// semantic contract, not redb's numeric layout:
 ///
 /// - intent/receipt: `u64-be`;

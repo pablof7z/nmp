@@ -118,7 +118,6 @@ pub struct StoreBenchAttribution {
     pub commit_ns: u64,
     pub encode_event_ns: u64,
     pub canonical_insert_ns: u64,
-    pub index_insert_ns: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -833,7 +832,6 @@ fn run_full(
             commit_ns: snapshot.commit_ns,
             encode_event_ns: snapshot.encode_event_ns,
             canonical_insert_ns: snapshot.canonical_insert_ns,
-            index_insert_ns: snapshot.index_insert_ns,
         }),
     })
 }

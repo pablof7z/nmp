@@ -9,7 +9,6 @@ use super::canonical::CanonicalWriteTables;
 #[cfg(test)]
 use super::postings_store::crash_if_postings;
 use super::postings_store::PostingsBatch;
-use super::query::{insert_query_cardinalities, remove_query_cardinalities};
 use super::schema::{
     persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, EXPIRATION_INDEX, PUBLISH_QUEUE_DISPLACED,
     PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_RECEIPTS,
@@ -284,13 +283,11 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
     }
 
     fn insert_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError> {
-        insert_query_cardinalities(&mut self.canonical, event)?;
         self.postings.insert(event, key);
         Ok(())
     }
 
-    fn remove_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError> {
-        remove_query_cardinalities(&mut self.canonical, event)?;
+    fn remove_indexes(&mut self, _event: &Event, key: EventKey) -> Result<(), PersistenceError> {
         self.postings.remove(key);
         Ok(())
     }
