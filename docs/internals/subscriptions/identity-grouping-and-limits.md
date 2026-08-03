@@ -757,6 +757,39 @@ what the second scenario means for §6: the subscription-budget feature
 asserts a COUNT, which is exactly the quantity this interleaving perturbs, so
 it is structurally the most exposed assertion in the suite.
 
+### 8.1d CLOSED (#1211) — the derived read now waits on the engine's own proof
+
+§8.1c ends by saying that proving the derived case live "requires giving the
+harness a way to await a specific plan generation rather than a quiet socket."
+The await already existed; the harness simply was not reading it. #12 put the
+INTERIOR `Derived` atoms into the subtree that a source's
+`SourceEvidence::reconciled_through` is computed over, so that watermark is
+`None` until the inner demand's own request has settled AND every outer atom
+its rows resolved to has itself been requested and settled. That is not a plan
+generation counter, and it is better than one: it is a durable per-source
+coverage fact, produced by the component that owns coverage, and it is already
+delivered to every subscriber on every frame.
+
+`nmp_bdd::world::wire_settled` now waits on that for any watch whose filters
+are compiled from rows it must ingest first, and only then waits out the
+outbound handoff. `WIRE_QUIET`'s doc no longer claims to bound recompilation;
+it bounds the socket, which is all it can see.
+
+What the 400ms window was actually doing was measured before the change, by
+dumping the derived `#d` set's successive resolutions on the 300-group
+catalog. It grows as a contiguous SUFFIX of the seeded range — `{300}`,
+`{290..300}`, `{244..300}`, `{53..300}`, `{1..300}` — because the fixtures
+carry strictly increasing `created_at` and the relay replays stored events
+newest-first. A wire count taken part-way through therefore misses a
+contiguous LOW-numbered prefix, which is exactly the shape #1211 reported
+(`group-0001..group-{N}`, N varying 12/47/123/197/206/220/223/233 across
+runs). The suite failed 2 runs in 4 locally on `1d2ea5fc` and 4 in 6 on the
+issue's `8d51d069`; it does not fail now.
+
+This closes the derived-set half of §8.1c. The COUNT-interleaving residue in
+that section is a different mechanism (two compiles that did not group
+identically, leaving a transient second subscription) and is untouched here.
+
 ### 8.2 CLOSED — the Close/reopen straggler race (#932)
 
 The coverage ruling assumed a Close leaves pending snapshots to be "harmlessly
