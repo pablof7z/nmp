@@ -10,14 +10,14 @@ use std::sync::{Arc, Mutex};
 
 use nmp_grammar::ContextualAtom;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AuthDenial, CancelEphemeralOutcome, CloseIntentOutcome,
-    CompensateOutcome, CompensationReason, CoverageInterval, CoverageKey, EventStore, GcReport,
-    GcRetentionSet, InsertOutcome, IntentId, PersistenceError, PersistenceFault, PromoteOutcome,
+    AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome, CompensateOutcome,
+    CompensationReason, CoverageInterval, CoverageKey, EventStore, GcReport, GcRetentionSet,
+    InsertOutcome, IntentId, PersistenceError, PersistenceFault, PromoteOutcome,
     PublishQueueAttempt, PublishQueueAttemptDetails, PublishQueueAttemptHandoff,
     PublishQueueAttemptOutcome, PublishQueueDeadline, PublishQueueIntent, PublishQueueLane,
     PublishQueueLaneKey, PublishQueuePostHandoffState, PublishQueueReceipt,
-    PublishQueueRouteRevision, PublishQueueTransientCause, RelayObserved, RetractReason,
-    StoredEvent,
+    PublishQueueRouteRevision, PublishQueueTransientCause, RefuseReason, RelayObserved,
+    RemoveQueueEntryOutcome, RetractReason, StoredEvent,
 };
 use nostr::{Event, Event as SignedEvent, EventId, PublicKey, RelayUrl, Timestamp};
 
@@ -244,15 +244,6 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write_with_state(intent_id, reason)
     }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
-    }
     fn insert(
         &mut self,
         event: Event,
@@ -329,11 +320,24 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
-    fn accept_ephemeral(
+    fn enumerate_publish_queue_receipts(
+        &self,
+    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
+        self.inner.enumerate_publish_queue_receipts()
+    }
+    fn remove_publish_queue_entry(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<RemoveQueueEntryOutcome, PersistenceError> {
+        self.inner.remove_publish_queue_entry(receipt_id)
+    }
+    fn accept_refused(
         &mut self,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        reason: RefuseReason,
     ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
+        self.inner
+            .accept_refused(frozen_id, expected_pubkey, reason)
     }
 }

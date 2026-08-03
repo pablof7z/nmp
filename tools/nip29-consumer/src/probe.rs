@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     nip29, AccessContext, Binding, CacheMode, Demand, Derived, DiagnosticsSnapshot, Engine,
-    EngineConfig, EventBuilder, Filter, IdentityField, Kind, LiveQuery, PublicKey, RelayUrl,
-    Selector, SourceAuthority, SourceStatus, Tag, Window, WriteStatus,
+    EngineConfig, EventBuilder, Filter, IdentityField, Kind, LiveQuery, PublicKey, RelayState,
+    RelayUrl, Selector, SourceAuthority, SourceStatus, Tag, Window, WriteFact,
 };
 
 use crate::args::{Args, Mode};
@@ -410,7 +410,7 @@ fn verify_publications(context: &Context, scope: &nip29::RelayScope) -> Result<(
     let mixed_statuses = wait_for_write(&mixed, context.settle, |statuses| {
         acked(statuses, &context.relay_a)
             && statuses.iter().any(
-                |status| matches!(status, WriteStatus::Rejected(relay, _) if relay == &context.relay_b),
+                |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if relay == &context.relay_b),
             )
     })?;
     println!("PROOF publish mixed_group={MIXED_GROUP} outcomes={mixed_statuses:?}");
@@ -758,10 +758,10 @@ fn source_statuses(observed: &Observed) -> BTreeMap<RelayUrl, SourceStatus> {
 }
 
 fn wait_for_write(
-    receipts: &nmp::FifoReceiver<WriteStatus>,
+    receipts: &nmp::FifoReceiver<WriteFact>,
     timeout: Duration,
-    predicate: impl Fn(&[WriteStatus]) -> bool,
-) -> Result<Vec<WriteStatus>, String> {
+    predicate: impl Fn(&[WriteFact]) -> bool,
+) -> Result<Vec<WriteFact>, String> {
     let deadline = std::time::Instant::now() + timeout;
     let mut statuses = Vec::new();
     while !predicate(&statuses) {
@@ -778,10 +778,10 @@ fn wait_for_write(
     Ok(statuses)
 }
 
-fn acked(statuses: &[WriteStatus], relay: &RelayUrl) -> bool {
+fn acked(statuses: &[WriteFact], relay: &RelayUrl) -> bool {
     statuses
         .iter()
-        .any(|status| matches!(status, WriteStatus::Acked(candidate) if candidate == relay))
+        .any(|status| matches!(status, WriteFact::Relay { relay: candidate, state: RelayState::Published } if candidate == relay))
 }
 
 fn signal_ready(args: &Args) -> Result<(), String> {

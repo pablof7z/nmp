@@ -6,19 +6,18 @@
 //! inputs and its answer are separate concerns, and a reader chasing "why did
 //! this route come out wrong" wants one or the other, never both at once.
 //!
-//! Almost everything here reads the receipt's own `WriteStatus::Routed` /
-//! `AwaitingRoute`. The two exceptions are named where they appear: a COUNT of
-//! what a relay actually admitted, and the engine's PLANNED sessions -- both
-//! needed because a relay nobody staged has no name a contact log could be
-//! asked about, and "offered exactly once" is not a claim any receipt makes.
+//! Almost everything here reads the receipt's own `WriteFact::Destinations`
+//! -- the intended relay set and whether resolution can still change its
+//! mind -- and its terminal `WriteOutcome::NoDestination`. The two exceptions
+//! are named where they appear: a COUNT of what a relay actually admitted,
+//! and the engine's PLANNED sessions -- both needed because a relay nobody
+//! staged has no name a contact log could be asked about, and "offered
+//! exactly once" is not a claim any receipt makes.
 //!
-//! Two reads here are deliberately waits rather than reads, and both were bugs
-//! first. A park's REASON converges -- a write is parked on "nobody has looked
-//! yet" before it is parked on "there is nothing to find" -- so reading the
-//! first reason to arrive asserts the opposite of what a settled-absence
-//! scenario says. And a receipt beat and a socket write are not the same
-//! instant, so counting a relay's copies the moment routing named it says only
-//! that nothing has arrived YET.
+//! One read here is deliberately a wait rather than a read, and it was a bug
+//! first: a receipt beat and a socket write are not the same instant, so
+//! counting a relay's copies the moment routing named it says only that
+//! nothing has arrived YET.
 
 use std::collections::BTreeSet;
 
@@ -27,10 +26,24 @@ use nostr::Timestamp;
 use nmp_router::RelayUrl;
 
 use nmp::mechanism::core::{DiagnosticsSnapshot, StalledWriteStage};
-use nmp::mechanism::publish_queue::WriteStatus;
+use nmp::mechanism::publish_queue::{RelayState, WriteFact, WriteOutcome};
 
 use super::budgets::EVENTUALLY;
+use super::observe::is_failure_fact;
 use super::NmpWorld;
+
+/// The receipt's own spelling of a write parked with nowhere to go yet: the
+/// destination set is empty and resolution has NOT finished, so nothing
+/// expires it and a later fact can still name a relay.
+fn parked_open(fact: &WriteFact) -> bool {
+    matches!(
+        fact,
+        WriteFact::Destinations {
+            relays,
+            complete: false
+        } if relays.is_empty()
+    )
+}
 
 impl NmpWorld {
     // ---- Then: where the write was routed -------------------------------
@@ -45,7 +58,7 @@ impl NmpWorld {
     pub fn routed_exactly(&mut self, names: &[String]) -> bool {
         let wanted = self.urls_of(names);
         self.receipt_eventually(
-            |seen| matches!(seen.iter().rev().find(|s| matches!(s, WriteStatus::Routed { .. })), Some(WriteStatus::Routed { relays, .. }) if *relays == wanted),
+            |seen| matches!(seen.iter().rev().find(|s| matches!(s, WriteFact::Destinations { .. })), Some(WriteFact::Destinations { relays, .. }) if *relays == wanted),
         )
     }
 
@@ -54,8 +67,9 @@ impl NmpWorld {
     pub fn routed_to(&mut self, name: &str) -> bool {
         let url = self.relay_url(name);
         self.receipt_eventually(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.contains(&url)))
+            seen.iter().any(
+                |s| matches!(s, WriteFact::Destinations { relays, .. } if relays.contains(&url)),
+            )
         })
     }
 
@@ -65,8 +79,9 @@ impl NmpWorld {
     pub fn never_routed_to(&mut self, name: &str) -> bool {
         let url = self.relay_url(name);
         self.receipt_never(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.contains(&url)))
+            seen.iter().any(
+                |s| matches!(s, WriteFact::Destinations { relays, .. } if relays.contains(&url)),
+            )
         })
     }
 
@@ -75,7 +90,7 @@ impl NmpWorld {
     pub fn routing_is_complete(&mut self) -> bool {
         self.receipt_eventually(|seen| {
             seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { complete: true, .. }))
+                .any(|s| matches!(s, WriteFact::Destinations { complete: true, .. }))
         })
     }
 
@@ -83,7 +98,7 @@ impl NmpWorld {
     pub fn routing_stays_open(&mut self) -> bool {
         self.receipt_never(|seen| {
             seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { complete: true, .. }))
+                .any(|s| matches!(s, WriteFact::Destinations { complete: true, .. }))
         })
     }
 
@@ -92,7 +107,7 @@ impl NmpWorld {
     pub fn routed_nowhere(&mut self) -> bool {
         self.receipt_never(|seen| {
             seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if !relays.is_empty()))
+                .any(|s| matches!(s, WriteFact::Destinations { relays, .. } if !relays.is_empty()))
         })
     }
 
@@ -104,13 +119,13 @@ impl NmpWorld {
         // nothing.
         let _ = self.receipt_eventually_at(ordinal, |seen| {
             seen.iter()
-                .any(|s| matches!(s, WriteStatus::Routed { complete: true, .. }))
+                .any(|s| matches!(s, WriteFact::Destinations { complete: true, .. }))
         });
         self.receipt_statuses_at(ordinal)
             .iter()
             .rev()
             .find_map(|s| match s {
-                WriteStatus::Routed { relays, .. } => Some(relays.clone()),
+                WriteFact::Destinations { relays, .. } => Some(relays.clone()),
                 _ => None,
             })
             .unwrap_or_default()
@@ -118,20 +133,29 @@ impl NmpWorld {
 
     // ---- Then: the refusal ----------------------------------------------
 
-    /// Bounded wait for a park whose reason contains `needle`.
+    /// Bounded wait for the write to be PARKED with nowhere to go: an empty
+    /// destination set that resolution has not closed. Reads the REATTACHED
+    /// stream after a restart, because on the far side of a process boundary
+    /// that is the only stream that exists.
+    pub fn parked_without_destination(&mut self) -> bool {
+        let matches = |seen: &[WriteFact]| seen.iter().any(parked_open);
+        if self.restarted_receipt.is_some() {
+            return self.restarted_receipt_eventually(matches);
+        }
+        self.receipt_eventually(matches)
+    }
+
+    /// Bounded wait for the write to END with nowhere to publish: resolution
+    /// finished -- knowledge is exhausted -- and named zero relays.
     ///
-    /// A wait rather than a read, because a park's REASON converges: the same
-    /// write is first parked on "nobody has looked yet" and later, once every
-    /// source has finished, on "there is nothing to find". Both are true in
-    /// turn and the second is the one a scenario about settled absence means,
-    /// so reading the first reason to arrive would assert the opposite of
-    /// what the scenario says.
-    pub fn park_reason_contains(&mut self, needle: &str) -> bool {
-        let owned = needle.to_string();
-        let matches = move |seen: &[WriteStatus]| {
+    /// This is the terminal, and it is what separates "there is nothing to
+    /// work with" from "we have not learned where this goes yet"; the latter
+    /// parks forever and is [`Self::parked_without_destination`]. Reads the
+    /// reattached stream after a restart for the same reason as above.
+    pub fn no_destination_settled(&mut self) -> bool {
+        let matches = |seen: &[WriteFact]| {
             seen.iter()
-                .filter_map(park_reason)
-                .any(|reason| reason.contains(&owned))
+                .any(|s| matches!(s, WriteFact::Outcome(WriteOutcome::NoDestination)))
         };
         if self.restarted_receipt.is_some() {
             return self.restarted_receipt_eventually(matches);
@@ -139,57 +163,47 @@ impl NmpWorld {
         self.receipt_eventually(matches)
     }
 
-    /// Every park reason this write has reported so far, newest last -- for
-    /// assertion MESSAGES and for the diagnostics cross-check, never as a
-    /// substitute for the bounded wait above. Reads the REATTACHED stream
-    /// after a restart, because on the far side of a process boundary that is
-    /// the only stream that exists.
-    pub fn park_reasons(&mut self) -> Vec<String> {
-        let reasoned = |seen: &[WriteStatus]| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::AwaitingRoute { .. }))
-        };
+    /// Every fact the write under discussion has reported, from whichever
+    /// stream is the live one -- for assertion MESSAGES, never as a
+    /// substitute for a bounded wait.
+    pub fn routing_facts_reported(&mut self) -> Vec<WriteFact> {
         if self.restarted_receipt.is_some() {
-            let _ = self.restarted_receipt_eventually(reasoned);
-            return self
-                .restarted_receipt_statuses()
-                .iter()
-                .filter_map(park_reason)
-                .collect();
+            return self.restarted_receipt_statuses();
         }
-        let _ = self.receipt_eventually(reasoned);
         self.receipt_statuses()
-            .iter()
-            .filter_map(park_reason)
-            .collect()
     }
 
     /// `Then the publish reports no routing problem` -- the negative form,
     /// costing its own budget: nothing ever parked this write.
     pub fn never_parked(&mut self) -> bool {
-        self.receipt_never(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::AwaitingRoute { .. }))
-        })
+        self.receipt_never(|seen| seen.iter().any(parked_open))
     }
 
     /// `Then the note is never reported as sent`.
+    ///
+    /// Both halves of "sent" are covered: transport proving a socket write
+    /// (`Sent`) and the relay itself acking (`Published`). The old
+    /// `HandoffAmbiguous` third arm went with `AtMostOnce` and has no
+    /// successor -- there is no longer a state in which NMP does not know
+    /// whether a frame left.
     pub fn never_sent(&mut self) -> bool {
         self.receipt_never(|seen| {
             seen.iter().any(|s| {
                 matches!(
                     s,
-                    WriteStatus::Sent { .. }
-                        | WriteStatus::Acked(_)
-                        | WriteStatus::HandoffAmbiguous { .. }
+                    WriteFact::Relay {
+                        state: RelayState::Sent { .. } | RelayState::Published,
+                        ..
+                    }
                 )
             })
         })
     }
 
-    /// `Then the publish has not failed`.
+    /// `Then the publish has not failed` -- and, since a refusal at the door
+    /// is now the OTHER way a publish fails, the door must have taken it too.
     pub fn never_failed(&mut self) -> bool {
-        self.receipt_never(|seen| seen.iter().any(|s| matches!(s, WriteStatus::Failed(_))))
+        self.publish_was_accepted() && self.receipt_never(|seen| seen.iter().any(is_failure_fact))
     }
 
     // ---- Then: what reached a socket ------------------------------------
@@ -332,12 +346,5 @@ impl NmpWorld {
     /// had as long to do the wrong thing as any positive assertion allows.
     pub async fn settle(&mut self) {
         tokio::time::sleep(EVENTUALLY).await;
-    }
-}
-
-fn park_reason(status: &WriteStatus) -> Option<String> {
-    match status {
-        WriteStatus::AwaitingRoute { detail } => Some(detail.clone()),
-        _ => None,
     }
 }

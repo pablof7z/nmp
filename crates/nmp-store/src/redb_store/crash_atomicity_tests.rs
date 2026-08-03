@@ -94,7 +94,6 @@ fn accept(frozen: Event) -> AcceptWrite {
         monotonic_stamp: false,
         expected_pubkey: keys().public_key(),
         signing_identity_ref: "u5-fixed-key".into(),
-        durability: WriteDurability::Durable,
         routing: "u5-fixed-route".into(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(1_000),

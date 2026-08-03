@@ -1,7 +1,7 @@
 //! A waker-aware FIFO fact channel (#680).
 //!
 //! Unlike the latest-wins single-slot mailbox (`diagnostics_channel.rs`), this
-//! preserves **every** value in order. Receipt (`WriteStatus`) and
+//! preserves **every** value in order. Receipt (`WriteFact`) and
 //! follow-action-status transitions are per-lane facts where a later value does
 //! not subsume an earlier one (`Sent{relay}`, `AwaitingAuth`, per-attempt
 //! ordinals …), so they must not conflate.

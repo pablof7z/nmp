@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use nostr::{EventId, Timestamp};
 
-use nmp::mechanism::publish_queue::WriteStatus;
-use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp::mechanism::publish_queue::{RefuseReason, SigningState, WriteFact, WriteOutcome};
+use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use super::budgets::EVENTUALLY;
 use super::observe::{FeedState, ReceiptState};
@@ -64,25 +64,21 @@ impl NmpWorld {
         self.ensure_started().await;
         let pubkey = self.person(owner).public_key();
         let routing = WriteRouting::Explicit([self.relay_url(OTHER_DEVICE)].into_iter().collect());
-        let statuses = self
-            .handle()
-            .publish(WriteIntent {
-                payload: WritePayload::Event(EventBuilder {
-                    kind: nostr::Kind::ContactList,
-                    tags: Vec::new(),
-                    content: String::new(),
-                    created_at: Some(at),
-                }),
-                durability: Durability::Durable,
-                routing,
-                identity: Identity::Explicit(pubkey),
-                correlation: None,
-            })
-            .expect("BDD receipt correlation namespace must be available");
+        let result = self.handle().publish(WriteIntent {
+            payload: WritePayload::Event(EventBuilder {
+                kind: nostr::Kind::ContactList,
+                tags: Vec::new(),
+                content: String::new(),
+                created_at: Some(at),
+            }),
+            routing,
+            identity: Identity::Explicit(pubkey),
+            correlation: None,
+        });
         // A fixture winner is still a publish, so it takes its place in the
         // world's one ordered receipt list (#995) rather than opening a
         // private stream nothing else can see.
-        self.receipts.push(ReceiptState::new(statuses));
+        self.receipts.push(ReceiptState::from_publish(result));
         let frozen = self.frozen_id_of_last_publish().unwrap_or_else(|| {
             panic!(
                 "nmp-bdd: staging a stored winner must be accepted and frozen; saw {:?}",
@@ -175,42 +171,48 @@ impl NmpWorld {
             .take()
             .expect("nmp-bdd: no replacement was composed for this step to publish");
         self.ensure_started().await;
-        let statuses = self
-            .handle()
-            .publish(WriteIntent {
-                payload: WritePayload::ReplaceableEdit {
-                    builder,
-                    expected_base,
-                },
-                durability: Durability::Durable,
-                routing: WriteRouting::Auto,
-                identity,
-                correlation: None,
-            })
-            .expect("BDD receipt correlation namespace must be available");
+        let result = self.handle().publish(WriteIntent {
+            payload: WritePayload::ReplaceableEdit {
+                builder,
+                expected_base,
+            },
+            routing: WriteRouting::Auto,
+            identity,
+            correlation: None,
+        });
         self.last_publish_was_auto = true;
         self.last_receipt_text = None;
-        self.receipts.push(ReceiptState::new(statuses));
+        self.receipts.push(ReceiptState::from_publish(result));
     }
 
     // ---- Then: the row, the conflict, the stamp --------------------------
 
-    /// `Then the write is accepted`.
+    /// `Then the write is accepted` -- `publish()` returning `Ok`.
     pub fn replacement_accepted(&mut self) -> bool {
-        self.receipt_eventually(|seen| seen.iter().any(|s| matches!(s, WriteStatus::Accepted)))
+        self.publish_was_accepted()
     }
 
-    /// `Then the write is refused with a replaceable conflict` -- and the
-    /// conflict is FIRST, so nothing was ever accepted on top of a stale
-    /// base.
+    /// `Then the write is refused with a replaceable conflict`.
+    ///
+    /// A stale base takes CUSTODY and then ends refused -- it is one queue
+    /// entry the app can read back and remove, not a door refusal. What the
+    /// scenario is protecting is that nothing was ever written on top of the
+    /// stale base, and the observable for that is the write never obtaining
+    /// an event id: no signature, no id, no row.
     pub fn replacement_conflicted(&mut self) -> bool {
         self.receipt_eventually(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::ReplaceableConflict { .. }))
+            seen.iter().any(|s| {
+                matches!(
+                    s,
+                    WriteFact::Outcome(WriteOutcome::Refused(
+                        RefuseReason::ReplaceableBaseChanged { .. }
+                    ))
+                )
+            })
         }) && !self
             .receipt_statuses()
             .iter()
-            .any(|s| matches!(s, WriteStatus::Accepted))
+            .any(|s| matches!(s, WriteFact::Signing(SigningState::Signed { .. })))
     }
 
     /// `Then the conflict names "<a>" as expected and "<b>" as actual`.
@@ -220,8 +222,9 @@ impl NmpWorld {
         self.receipt_statuses().iter().any(|s| {
             matches!(
                 s,
-                WriteStatus::ReplaceableConflict { expected: e, actual: a }
-                    if *e == Some(expected) && *a == Some(actual)
+                WriteFact::Outcome(WriteOutcome::Refused(
+                    RefuseReason::ReplaceableBaseChanged { expected: e, actual: a }
+                )) if *e == Some(expected) && *a == Some(actual)
             )
         })
     }
@@ -232,11 +235,14 @@ impl NmpWorld {
     }
 
     /// The body id the world's most recent publish froze, waited for.
-    /// `WriteStatus::Signed(id)` is the only place an app learns it.
+    /// `SigningState::Signed` is the only place an app learns it.
     pub(super) fn frozen_id_of_last_publish(&mut self) -> Option<EventId> {
-        self.receipt_eventually(|seen| seen.iter().any(|s| matches!(s, WriteStatus::Signed(_))));
+        self.receipt_eventually(|seen| {
+            seen.iter()
+                .any(|s| matches!(s, WriteFact::Signing(SigningState::Signed { .. })))
+        });
         self.receipt_statuses().iter().find_map(|s| match s {
-            WriteStatus::Signed(id) => Some(*id),
+            WriteFact::Signing(SigningState::Signed { event_id }) => Some(*event_id),
             _ => None,
         })
     }

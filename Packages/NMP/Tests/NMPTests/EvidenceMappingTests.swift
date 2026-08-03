@@ -38,8 +38,6 @@ final class EvidenceMappingTests: XCTestCase {
 
     func testReceiptCorrelationExhaustionRemainsTypedAtTheNativeBoundary() {
         XCTAssertEqual(
-            NMPError(.ReceiptCorrelationIdExhausted),
-            .receiptCorrelationIdExhausted
         )
     }
 

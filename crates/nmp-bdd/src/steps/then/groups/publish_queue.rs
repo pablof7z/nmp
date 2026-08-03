@@ -39,8 +39,13 @@ pub(super) async fn published_delivered_to(w: &mut NmpWorld, relay: String) {
     let url = w.relay_url(&relay);
     let wrote_it = w.receipt_eventually(|seen| {
         seen.iter().any(|s| {
-            matches!(s, WriteStatus::Sent { relay, .. } if *relay == url)
-                || matches!(s, WriteStatus::Acked(u) if *u == url)
+            matches!(
+                s,
+                WriteFact::Relay {
+                    relay,
+                    state: RelayState::Sent { .. } | RelayState::Published,
+                } if *relay == url
+            )
         })
     });
     assert!(

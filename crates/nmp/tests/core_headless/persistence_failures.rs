@@ -57,15 +57,6 @@ impl EventStore for FailIngestStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write_with_state(intent_id, reason)
     }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
-    }
     fn insert(
         &mut self,
         event: nostr::Event,
@@ -171,13 +162,7 @@ impl EventStore for FailIngestStore {
     ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
-    fn accept_ephemeral(
-        &mut self,
-        frozen_id: nostr::EventId,
-        expected_pubkey: nostr::PublicKey,
-    ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
-    }
+    delegate_publish_queue_door!(inner);
 }
 
 /// Door-level falsifier (issue #122): the `insert` ingest door surfaces a
@@ -927,15 +912,6 @@ impl EventStore for WakeLaneProbeStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write_with_state(intent_id, reason)
     }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
-    }
     fn insert(
         &mut self,
         event: nostr::Event,
@@ -1133,13 +1109,7 @@ impl EventStore for WakeLaneProbeStore {
     ) -> Result<nmp_store::CloseIntentOutcome, PersistenceError> {
         self.inner.close_terminal_intent(intent_id)
     }
-    fn accept_ephemeral(
-        &mut self,
-        frozen_id: nostr::EventId,
-        expected_pubkey: nostr::PublicKey,
-    ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
-    }
+    delegate_publish_queue_door!(inner);
 }
 
 /// Falsifier (epic #507 finding E5): a single relay-connected event for
@@ -1168,7 +1138,6 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     for (i, relay) in relays.iter().enumerate() {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(100 + i as u64, &format!("falsifier {i}"))),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1240,7 +1209,6 @@ fn unchanged_worker_demand_reads_zero_publish_queue_lanes() {
     for (i, relay) in relays.iter().enumerate() {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(300 + i as u64, &format!("worker projection {i}"))),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1312,7 +1280,6 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     // writes contribute nothing" from "this core computes nothing at all".
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(400, "parked control")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![routed_relay.clone()]),
         identity: Identity::Active,
         correlation: None,
@@ -1332,7 +1299,6 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     for i in 0..PARKED {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(500 + i as u64, &format!("parked {i}"))),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![parked_relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1415,7 +1381,6 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(600, "unproven lane creation")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(relays.to_vec()),
         identity: Identity::Active,
         correlation: None,
@@ -1429,7 +1394,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
     // delivery owner publishes every receipt fact as an effect, so the whole
     // accept-and-sign sequence is the exact status stream a receipt observer
     // would have seen.
-    let statuses: Vec<WriteStatus> = receipt_statuses(&accepted)
+    let statuses: Vec<WriteFact> = receipt_statuses(&accepted)
         .into_iter()
         .chain(receipt_statuses(&signed_effects))
         .collect();
@@ -1437,7 +1402,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
         assert!(
             statuses
                 .iter()
-                .any(|status| status == &WriteStatus::PersistenceBlocked(relay.clone())),
+                .any(|status| status == &attempt_stalled(relay)),
             "the fixture must actually take the failed-creation path for {relay}: {statuses:?}"
         );
     }
@@ -1487,7 +1452,6 @@ fn relay_worker_projection_redb_benchmark() {
                 10_000 + i as u64,
                 &format!("worker benchmark {i}"),
             )),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1549,7 +1513,6 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     // -- the reducer must degrade rather than pretend it has no lanes.
     let accepted1 = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(200, "degraded 1")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
         correlation: None,
@@ -1558,12 +1521,12 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     let signed1 = u1.sign_with_keys(&author).unwrap();
     let signed_effects1 = core.handle(EngineMsg::SignerCompleted(id1, gen1, Ok(signed1)));
     assert!(
-        signed_effects1.iter().any(|e| matches!(
-            e,
-            Effect::EmitReceipt(rid, WriteStatus::PersistenceBlocked(r))
-                if *rid == id1 && r == &relay
-        )),
-        "the injected bootstrap failure must surface as PersistenceBlocked, got {signed_effects1:?}"
+        signed_effects1
+            .iter()
+            .any(|e| matches!(e, Effect::EmitReceipt(rid, fact)
+                if *rid == id1 && fact == &attempt_stalled(&relay))),
+        "the injected bootstrap failure must surface as a persistence stall, got \
+         {signed_effects1:?}"
     );
 
     // Intent #2: an ordinary write to the SAME relay accepted right after --
@@ -1571,7 +1534,6 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     // the index DOES learn its lane.
     let accepted2 = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(201, "degraded 2")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
         correlation: None,
@@ -1582,7 +1544,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     assert!(
         signed_effects2.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::AwaitingRelay { relay: r })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, state: RelayState::Waiting(RelayWaiting::NotConnected) })
                 if *rid == id2 && r == &relay
         )),
         "the second write must bootstrap normally and land in WaitingConnection, \
@@ -1695,7 +1657,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         effects_a.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::RetryEligible { relay, attempt: 1, .. })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
                 if *rid == receipt_a && relay == &relay_a
         )),
         "receipt_for_intent must resolve intent_a's due AckTimeout back to \
@@ -1705,7 +1667,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         !effects_a.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::RetryEligible { relay, .. })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { .. }) })
                 if relay == &relay_b || *rid == receipt_b
         )),
         "relay_b's deadline is not yet due -- it must not fire early, got {effects_a:?}"
@@ -1715,7 +1677,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         effects_b.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::RetryEligible { relay, attempt: 1, .. })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
                 if *rid == receipt_b && relay == &relay_b
         )),
         "receipt_for_intent must resolve intent_b's due AckTimeout back to \
@@ -1782,7 +1744,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::RetryEligible { relay, attempt: 1, .. })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
                 if *rid == receipt2 && relay == &relay2
         )),
         "an earlier, unrelated pending removal (write #1's close) must not \

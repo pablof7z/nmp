@@ -277,29 +277,36 @@ fn healthy_current_schema_reopen_starts_no_application_write_transaction() {
 }
 
 #[test]
-fn pending_ephemeral_count_gates_one_recovery_write_then_returns_to_fast_reopen() {
+fn a_refused_receipt_needs_no_recovery_write_on_reopen() {
+    // Deleting the ephemeral mode deleted the only reason `open()` ever
+    // wrote on the reopen path. A refused entry is TERMINAL AT BIRTH, so
+    // there is no crash-abandoned state to reconcile and a reopen stays a
+    // pure read.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ephemeral-recovery.redb");
+    let path = dir.path().join("refused-reopen.redb");
     let keys = nostr::Keys::generate();
     let frozen_id = EventId::from_byte_array([7; 32]);
 
     let mut store = RedbStore::open(&path).unwrap();
     let receipt_id = store
-        .accept_ephemeral(frozen_id, keys.public_key())
+        .accept_refused(
+            frozen_id,
+            keys.public_key(),
+            crate::RefuseReason::Tombstoned,
+        )
         .unwrap();
     drop(store);
 
     let recovered = RedbStore::open(&path).unwrap();
-    assert_eq!(recovered.open_write_transactions(), 1);
+    assert_eq!(recovered.open_write_transactions(), 0);
     let receipt = recovered
         .reattach_receipt(receipt_id)
         .unwrap()
-        .expect("retained ephemeral receipt");
-    assert_eq!(receipt.state, ReceiptState::Abandoned);
-    drop(recovered);
-
-    let healthy = RedbStore::open(&path).unwrap();
-    assert_eq!(healthy.open_write_transactions(), 0);
+        .expect("retained refused receipt");
+    assert_eq!(
+        receipt.state,
+        ReceiptState::Refused(crate::RefuseReason::Tombstoned)
+    );
 }
 
 #[test]
@@ -370,7 +377,6 @@ fn accepted_signed(
             monotonic_stamp: false,
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "range-proof".into(),
-            durability: WriteDurability::Durable,
             routing: "range-proof".into(),
             sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(created_at),
@@ -1222,7 +1228,6 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
             monotonic_stamp: false,
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "integrity".into(),
-            durability: WriteDurability::Durable,
             routing: "integrity".into(),
             sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(80u64),

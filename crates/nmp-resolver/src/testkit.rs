@@ -9,9 +9,7 @@
 use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom, DemandDelta};
-use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, IntentSigState, MemoryStore, WriteDurability,
-};
+use nmp_store::{sentinel_signature, AcceptOutcome, AcceptWrite, IntentSigState, MemoryStore};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
 use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle};
@@ -266,7 +264,6 @@ pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {
         replaceable_base: None,
         monotonic_stamp: false,
         signing_identity_ref: "local".to_string(),
-        durability: WriteDurability::Durable,
         routing: "auto".to_string(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),

@@ -36,7 +36,6 @@ fn publish_signed<S: EventStore>(
 ) -> ReceiptId {
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(builder),
-        durability: Durability::Durable,
         routing,
         identity: Identity::Active,
         correlation: None,
@@ -48,10 +47,12 @@ fn publish_signed<S: EventStore>(
 }
 
 /// A write whose route resolved to nothing is exactly the population the
-/// receipt cannot describe to anyone who is not holding it: the park's own
-/// reason is what the global list carries, word for word.
+/// receipt cannot describe to anyone who is not holding it. The receipt
+/// itself now says only that its destination set is EMPTY and still OPEN --
+/// a park, not a verdict -- so the sentence explaining why belongs to the
+/// global list, and the list is the only place it exists.
 #[test]
-fn an_unroutable_write_is_listed_with_the_reason_its_receipt_was_parked_with() {
+fn an_unroutable_write_parks_on_an_open_empty_destination_set_and_is_listed() {
     let author = Keys::generate();
     let mut core =
         EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
@@ -59,7 +60,6 @@ fn an_unroutable_write_is_listed_with_the_reason_its_receipt_was_parked_with() {
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(1, "cold start")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -68,17 +68,26 @@ fn an_unroutable_write_is_listed_with_the_reason_its_receipt_was_parked_with() {
     let signed = unsigned.sign_with_keys(&author).unwrap();
     let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
 
-    let parked = effects
-        .iter()
-        .find_map(|effect| match effect {
-            Effect::EmitReceipt(receipt, WriteStatus::AwaitingRoute { detail })
-                if *receipt == id =>
-            {
-                Some(detail.clone())
-            }
-            _ => None,
-        })
-        .expect("a write with nothing to route to parks");
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                receipt,
+                WriteFact::Destinations {
+                    relays,
+                    complete: false
+                }
+            ) if *receipt == id && relays.is_empty()
+        )),
+        "a write with nothing to route to parks on an empty, still-open destination set: {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(receipt, WriteFact::Outcome(_)) if *receipt == id
+        )),
+        "parking is not a verdict -- nothing here was proved undeliverable: {effects:?}"
+    );
 
     let rows = stalled(&core);
     assert_eq!(
@@ -88,9 +97,8 @@ fn an_unroutable_write_is_listed_with_the_reason_its_receipt_was_parked_with() {
     );
     assert_eq!(rows[0].stage, StalledWriteStage::Unroutable);
     assert_eq!(
-        rows[0].detail, parked,
-        "the global list carries the receipt's own recorded reason rather than a second, \
-         separately-derived sentence that could drift from it"
+        rows[0].detail, "no destination has been resolved yet",
+        "the global list is where the reason for the park is stated at all"
     );
     let totals = core.diagnostics_snapshot().stalled_write_totals;
     assert_eq!(totals.unroutable, 1);
@@ -112,7 +120,6 @@ fn an_unsignable_write_names_the_frozen_author_across_an_account_switch() {
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(2, "nobody can sign this")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -272,7 +279,6 @@ fn two_receipts_for_the_same_bytes_get_distinct_descriptors() {
     for _ in 0..2 {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(7, "the same bytes twice")),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,

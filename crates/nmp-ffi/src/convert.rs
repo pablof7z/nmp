@@ -16,14 +16,17 @@ use nmp::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding,
     CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome, CorrelationToken,
     CoverageInterval, Demand as GDemand, DemandError as GDemandError, Derived as GDerived,
-    DiagnosticsSnapshot, Durability as GDurability, EventBuilder as GEventBuilder,
-    Filter as GFilter, FilterCoverageEntry, Frame, Freshness as GFreshness, Identity as GIdentity,
-    IdentityField as GIdentityField, IndexedTagName, Lane, RelayDiagnosticsSnapshot,
+    DiagnosticsSnapshot, EventBuilder as GEventBuilder, Filter as GFilter, FilterCoverageEntry,
+    Frame, Freshness as GFreshness, Identity as GIdentity, IdentityField as GIdentityField,
+    IndexedTagName, Lane, NotSentReason as GNotSentReason, PublishQueueEntry as GPublishQueueEntry,
+    RefuseReason as GRefuseReason, RelayDiagnosticsSnapshot, RelayState as GRelayState,
+    RelayWaiting as GRelayWaiting, RemoveQueueEntryError as GRemoveQueueEntryError,
     RequestRowsError, RetryCause as GRetryCause, Row, RowDelta, Selector as GSelector,
-    SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact, SourceAuthority as GSourceAuthority,
-    SourceEvidence, SourceStatus, StalledWrite, StalledWriteStage, StalledWriteTotals, Window,
-    WindowLoad, WriteIntent as GWriteIntent, WritePayload as GWritePayload,
-    WriteRouting as GWriteRouting, WriteStatus as GWriteStatus,
+    SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact, SigningState as GSigningState,
+    SourceAuthority as GSourceAuthority, SourceEvidence, SourceStatus, StalledWrite,
+    StalledWriteStage, StalledWriteTotals, Window, WindowLoad, WriteFact as GWriteStatus,
+    WriteIntent as GWriteIntent, WriteOutcome as GWriteOutcome, WritePayload as GWritePayload,
+    WriteRouting as GWriteRouting,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
@@ -31,14 +34,15 @@ use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, T
 use crate::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthDiagnostics,
     FfiAuthPhase, FfiBinding, FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome,
-    FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiDurability,
-    FfiEventBuilder, FfiFilter, FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity,
-    FfiIdentityField, FfiKindCount, FfiLaneCount, FfiLiveQuery, FfiRelayDiagnostics,
-    FfiRelayInformationErrorKind, FfiRetryCause, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra,
-    FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent,
-    FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage,
-    FfiStalledWriteTotals, FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteIntent,
-    FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiEventBuilder, FfiFilter,
+    FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
+    FfiLaneCount, FfiLiveQuery, FfiNotSentReason, FfiPublishQueueEntry, FfiQueueRelayState,
+    FfiRefuseReason, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRelayState,
+    FfiRelayWaiting, FfiRemoveQueueEntryError, FfiRetryCause, FfiRow, FfiRowDelta, FfiSelector,
+    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest,
+    FfiSignedEvent, FfiSigningState, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
+    FfiStalledWrite, FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow, FfiWindowContents,
+    FfiWindowLoad, FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -93,9 +97,19 @@ pub enum FfiError {
     InvalidSignRequest {
         reason: String,
     },
-    /// No upper-half correlation id remains for a publish rejected before
-    /// durable acceptance. No receipt or status stream was created.
-    ReceiptCorrelationIdExhausted,
+    /// `publish` refused the call outright: either NMP could not write
+    /// anything down, or the instruction could not resolve (no active
+    /// account, a signature that does not verify, an explicit identity
+    /// contradicting a signed payload's author, a reserved kind, an empty
+    /// explicit route). Nothing durable exists and there is no queue entry
+    /// to inspect.
+    ///
+    /// Everything else takes CUSTODY and fails in the queue where the app
+    /// can see it — including a stale replaceable base, which succeeds here
+    /// and arrives as `FfiWriteOutcome::Refused`.
+    PublishRefused {
+        reason: String,
+    },
     /// `NmpEngine::new`'s `store_path` pointed at a file `RedbStore::open`
     /// could not open.
     StoreOpenFailed {
@@ -168,7 +182,7 @@ pub enum FfiError {
     /// boundary (#52 Unit B). That guarantee moved to
     /// `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary
     /// (Unit A0/#56) so it holds for every entry point, not only this one;
-    /// it surfaces on the `WriteStatus` receipt stream as `Failed` instead.
+    /// it surfaces on the `WriteFact` receipt stream as `Failed` instead.
     EngineClosed,
     /// `decode_nostr_entity`'s input was not valid bech32, had an
     /// unrecognized HRP prefix, or (for `nprofile`/`nevent`/`naddr`) had a
@@ -408,6 +422,7 @@ pub enum FfiRowPullError {
 impl From<nmp::EngineError> for FfiError {
     fn from(err: nmp::EngineError) -> Self {
         match err {
+            nmp::EngineError::PublishRefused { reason } => Self::PublishRefused { reason },
             nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
             nmp::EngineError::StoreAlreadyOpen { path } => Self::StoreAlreadyOpen { path },
@@ -431,7 +446,6 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::AuthCapabilityInstanceExhausted => {
                 Self::AuthCapabilityInstanceExhausted
             }
-            nmp::EngineError::ReceiptCorrelationIdExhausted => Self::ReceiptCorrelationIdExhausted,
             nmp::EngineError::EngineClosed => Self::EngineClosed,
             nmp::EngineError::WindowInitialExceedsMax { initial, max } => {
                 Self::WindowInitialExceedsMax {
@@ -488,9 +502,7 @@ impl std::fmt::Display for FfiError {
             Self::InvalidSignRequest { reason } => {
                 write!(f, "invalid sign request: {reason}")
             }
-            Self::ReceiptCorrelationIdExhausted => {
-                write!(f, "receipt correlation id namespace exhausted")
-            }
+            Self::PublishRefused { reason } => write!(f, "{reason}"),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreAlreadyOpen { path } => {
                 write!(f, "persistent store is already open: {path}")
@@ -755,16 +767,6 @@ impl From<GDemandError> for FfiError {
 #[cfg(test)]
 mod engine_error_tests {
     use super::*;
-
-    #[test]
-    fn receipt_correlation_exhaustion_remains_a_typed_ffi_error() {
-        let error = FfiError::from(nmp::EngineError::ReceiptCorrelationIdExhausted);
-        assert_eq!(error, FfiError::ReceiptCorrelationIdExhausted);
-        assert_eq!(
-            error.to_string(),
-            "receipt correlation id namespace exhausted"
-        );
-    }
 
     #[test]
     fn live_store_reset_refusal_remains_a_typed_ffi_error() {
@@ -1473,110 +1475,178 @@ fn coverage_interval_to_ffi(i: CoverageInterval) -> FfiCoverageInterval {
     }
 }
 
-pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteStatus {
-    match s.0 {
-        GWriteStatus::Accepted => FfiWriteStatus::Accepted,
-        GWriteStatus::Cancelled => FfiWriteStatus::Cancelled,
-        GWriteStatus::Superseded => FfiWriteStatus::Superseded,
-        GWriteStatus::AwaitingCapability { pubkey } => FfiWriteStatus::AwaitingCapability {
+fn signing_state_to_ffi(state: &GSigningState) -> FfiSigningState {
+    match state {
+        GSigningState::AwaitingSigner { pubkey } => FfiSigningState::AwaitingSigner {
             pubkey: pubkey.to_hex(),
         },
-        GWriteStatus::Signed(id) => FfiWriteStatus::Signed {
-            event_id: id.to_hex(),
+        GSigningState::Signed { event_id } => FfiSigningState::Signed {
+            event_id: event_id.to_hex(),
         },
-        GWriteStatus::AwaitingRoute { detail } => FfiWriteStatus::AwaitingRoute {
-            detail: detail.clone(),
-        },
-        GWriteStatus::Routed { relays, complete } => FfiWriteStatus::Routed {
-            relays: relays.iter().map(RelayUrl::to_string).collect(),
-            complete: *complete,
-        },
-        GWriteStatus::AwaitingRelay { relay } => FfiWriteStatus::AwaitingRelay {
-            relay: relay.to_string(),
-        },
-        GWriteStatus::AwaitingAuth { relay } => FfiWriteStatus::AwaitingAuth {
-            relay: relay.to_string(),
-        },
-        GWriteStatus::AuthDenied {
-            relay,
-            pubkey,
-            source,
-            reason,
-        } => FfiWriteStatus::AuthDenied {
-            relay: relay.to_string(),
-            pubkey: pubkey.to_hex(),
-            source: match source {
-                GAuthDenialSource::Policy => FfiAuthDenialSource::Policy,
-                GAuthDenialSource::Signer => FfiAuthDenialSource::Signer,
-                GAuthDenialSource::Relay => FfiAuthDenialSource::Relay,
-            },
+        GSigningState::Refused { reason } => FfiSigningState::Refused {
             reason: reason.clone(),
         },
-        GWriteStatus::RetryEligible {
-            relay,
-            attempt,
-            eligible_at,
-            cause,
-            detail,
-        } => FfiWriteStatus::RetryEligible {
-            relay: relay.to_string(),
-            attempt: *attempt,
-            eligible_at: eligible_at.as_secs(),
-            cause: match cause {
-                GRetryCause::Interrupted => FfiRetryCause::Interrupted,
-                GRetryCause::AckTimeout => FfiRetryCause::AckTimeout,
-                GRetryCause::ConnectionLost => FfiRetryCause::ConnectionLost,
-                GRetryCause::RelayRateLimited => FfiRetryCause::RelayRateLimited,
-                GRetryCause::RelayError => FfiRetryCause::RelayError,
+    }
+}
+
+fn auth_denial_source_to_ffi(source: GAuthDenialSource) -> FfiAuthDenialSource {
+    match source {
+        GAuthDenialSource::Policy => FfiAuthDenialSource::Policy,
+        GAuthDenialSource::Signer => FfiAuthDenialSource::Signer,
+        GAuthDenialSource::Relay => FfiAuthDenialSource::Relay,
+    }
+}
+
+fn retry_cause_to_ffi(cause: GRetryCause) -> FfiRetryCause {
+    match cause {
+        GRetryCause::Interrupted => FfiRetryCause::Interrupted,
+        GRetryCause::AckTimeout => FfiRetryCause::AckTimeout,
+        GRetryCause::ConnectionLost => FfiRetryCause::ConnectionLost,
+        GRetryCause::RelayRateLimited => FfiRetryCause::RelayRateLimited,
+        GRetryCause::RelayError => FfiRetryCause::RelayError,
+    }
+}
+
+pub fn relay_state_to_ffi(state: &GRelayState) -> FfiRelayState {
+    match state {
+        GRelayState::Waiting(waiting) => FfiRelayState::Waiting {
+            waiting: match waiting {
+                GRelayWaiting::NotConnected => FfiRelayWaiting::NotConnected,
+                GRelayWaiting::NeedsAuth => FfiRelayWaiting::NeedsAuth,
+                GRelayWaiting::BackingOff {
+                    attempt,
+                    eligible_at,
+                    cause,
+                    detail,
+                } => FfiRelayWaiting::BackingOff {
+                    attempt: *attempt,
+                    eligible_at: eligible_at.as_secs(),
+                    cause: retry_cause_to_ffi(*cause),
+                    detail: detail.clone(),
+                },
+                GRelayWaiting::PersistenceStalled { detail } => {
+                    FfiRelayWaiting::PersistenceStalled {
+                        detail: detail.clone(),
+                    }
+                }
             },
-            detail: detail.clone(),
         },
-        GWriteStatus::HandoffAmbiguous {
-            relay,
-            attempt,
-            observed_at,
-        } => FfiWriteStatus::HandoffAmbiguous {
-            relay: relay.to_string(),
-            attempt: *attempt,
-            observed_at: observed_at.as_secs(),
-        },
-        GWriteStatus::Sent {
-            relay,
+        GRelayState::Sent {
             attempt,
             written_at,
-        } => FfiWriteStatus::Sent {
-            relay: relay.to_string(),
+        } => FfiRelayState::Sent {
             attempt: *attempt,
             written_at: written_at.as_secs(),
         },
-        GWriteStatus::Acked(relay) => FfiWriteStatus::Acked {
-            relay: relay.to_string(),
-        },
-        GWriteStatus::Rejected(relay, reason) => FfiWriteStatus::Rejected {
-            relay: relay.to_string(),
+        GRelayState::Published => FfiRelayState::Published,
+        GRelayState::Rejected { reason } => FfiRelayState::Rejected {
             reason: reason.clone(),
         },
-        GWriteStatus::GaveUp(relay) => FfiWriteStatus::GaveUp {
-            relay: relay.to_string(),
+        GRelayState::AuthFailed {
+            pubkey,
+            source,
+            reason,
+        } => FfiRelayState::AuthFailed {
+            pubkey: pubkey.to_hex(),
+            source: auth_denial_source_to_ffi(*source),
+            reason: reason.clone(),
         },
-        GWriteStatus::PersistenceBlocked(relay) => FfiWriteStatus::PersistenceBlocked {
-            relay: relay.to_string(),
-        },
-        GWriteStatus::RoutePersistenceBlocked(relay) => FfiWriteStatus::RoutePersistenceBlocked {
-            relay: relay.to_string(),
-        },
-        GWriteStatus::OutcomeUnknown(relay) => FfiWriteStatus::OutcomeUnknown {
-            relay: relay.to_string(),
-        },
-        GWriteStatus::ReplaceableConflict { expected, actual } => {
-            FfiWriteStatus::ReplaceableConflict {
+        GRelayState::GaveUp => FfiRelayState::GaveUp,
+    }
+}
+
+fn refuse_reason_to_ffi(reason: GRefuseReason) -> FfiRefuseReason {
+    match reason {
+        GRefuseReason::AlreadyExpired => FfiRefuseReason::AlreadyExpired,
+        GRefuseReason::Tombstoned => FfiRefuseReason::Tombstoned,
+        GRefuseReason::ReplaceableBaseOnRegularEvent => {
+            FfiRefuseReason::ReplaceableBaseOnRegularEvent
+        }
+        GRefuseReason::ReplaceableBaseChanged { expected, actual } => {
+            FfiRefuseReason::ReplaceableBaseChanged {
                 expected: expected.map(|id| id.to_hex()),
                 actual: actual.map(|id| id.to_hex()),
             }
         }
-        GWriteStatus::Failed(reason) => FfiWriteStatus::Failed {
-            reason: reason.clone(),
+    }
+}
+
+fn write_outcome_to_ffi(outcome: &GWriteOutcome) -> FfiWriteOutcome {
+    match outcome {
+        GWriteOutcome::Settled => FfiWriteOutcome::Settled,
+        GWriteOutcome::NoDestination => FfiWriteOutcome::NoDestination,
+        GWriteOutcome::NotSent(reason) => FfiWriteOutcome::NotSent {
+            reason: match reason {
+                GNotSentReason::Cancelled => FfiNotSentReason::Cancelled,
+                GNotSentReason::Superseded => FfiNotSentReason::Superseded,
+            },
         },
+        GWriteOutcome::Refused(reason) => FfiWriteOutcome::Refused {
+            reason: refuse_reason_to_ffi(*reason),
+        },
+    }
+}
+
+pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteFact {
+    match s.0 {
+        GWriteStatus::Signing(state) => FfiWriteFact::Signing {
+            state: signing_state_to_ffi(state),
+        },
+        GWriteStatus::Relay { relay, state } => FfiWriteFact::Relay {
+            relay: relay.to_string(),
+            state: relay_state_to_ffi(state),
+        },
+        GWriteStatus::Destinations { relays, complete } => FfiWriteFact::Destinations {
+            relays: relays.iter().map(RelayUrl::to_string).collect(),
+            complete: *complete,
+        },
+        GWriteStatus::Outcome(outcome) => FfiWriteFact::Outcome {
+            outcome: write_outcome_to_ffi(outcome),
+        },
+    }
+}
+
+pub fn publish_queue_entry_to_ffi(entry: &GPublishQueueEntry) -> FfiPublishQueueEntry {
+    FfiPublishQueueEntry {
+        receipt_id: entry.receipt_id.0,
+        event_id: entry.event_id.to_hex(),
+        pubkey: entry.pubkey.to_hex(),
+        accepted_at: entry.accepted_at.as_secs(),
+        signing: signing_state_to_ffi(&entry.signing),
+        relays: entry.relays.iter().map(RelayUrl::to_string).collect(),
+        route_complete: entry.route_complete,
+        relay_states: entry
+            .relay_states
+            .iter()
+            .map(|(relay, state)| FfiQueueRelayState {
+                relay: relay.to_string(),
+                state: relay_state_to_ffi(state),
+            })
+            .collect(),
+        outcome: entry.outcome.as_ref().map(write_outcome_to_ffi),
+        persistence_fault: entry.persistence_fault.clone(),
+    }
+}
+
+pub fn remove_queue_entry_error_to_ffi(error: GRemoveQueueEntryError) -> FfiRemoveQueueEntryError {
+    match error {
+        GRemoveQueueEntryError::UnknownReceipt { receipt_id } => {
+            FfiRemoveQueueEntryError::UnknownReceipt {
+                receipt_id: receipt_id.0,
+            }
+        }
+        GRemoveQueueEntryError::StillActive { receipt_id } => {
+            FfiRemoveQueueEntryError::StillActive {
+                receipt_id: receipt_id.0,
+            }
+        }
+        GRemoveQueueEntryError::PersistenceFailed { receipt_id, reason } => {
+            FfiRemoveQueueEntryError::PersistenceFailed {
+                receipt_id: receipt_id.0,
+                reason,
+            }
+        }
+        GRemoveQueueEntryError::EngineClosed => FfiRemoveQueueEntryError::EngineClosed,
     }
 }
 
@@ -1602,11 +1672,9 @@ pub fn cancel_write_error_to_ffi(error: CancelWriteError) -> FfiCancelWriteError
                 receipt_id: receipt_id.0,
             }
         }
-        CancelWriteError::AlreadyAbandoned { receipt_id } => {
-            FfiCancelWriteError::AlreadyAbandoned {
-                receipt_id: receipt_id.0,
-            }
-        }
+        CancelWriteError::AlreadyRefused { receipt_id } => FfiCancelWriteError::AlreadyRefused {
+            receipt_id: receipt_id.0,
+        },
         CancelWriteError::PersistenceFailed { receipt_id, reason } => {
             FfiCancelWriteError::PersistenceFailed {
                 receipt_id: receipt_id.0,
@@ -1764,236 +1832,267 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
     }
 }
 
-/// Newtype wrapper so `write_status_to_ffi` can take `&WriteStatus` without
-/// this crate needing a `From<&WriteStatus>` orphan impl.
+/// Newtype wrapper so `write_status_to_ffi` can take `&WriteFact` without
+/// this crate needing a `From<&WriteFact>` orphan impl.
 pub struct WriteStatusRef<'a>(pub &'a GWriteStatus);
 
 #[cfg(test)]
-mod write_status_tests {
+mod write_fact_tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    /// Every arm of the write vocabulary crosses the boundary as ITSELF.
+    ///
+    /// The falsifier this pins is the one #1237 was filed about: an
+    /// `AuthFailed` folded into `Rejected` would tell a user a relay refused
+    /// them when their own client declined to ask, and a `Settled` collapsed
+    /// into silence would leave an app unable to tell a finished write from
+    /// a dropped subscription.
     #[test]
-    fn every_write_status_variant_maps_without_terminal_rollup() {
+    fn every_write_fact_maps_without_terminal_rollup() {
         let relay = RelayUrl::parse("wss://status.example").unwrap();
         let event_id = EventId::from_hex(&"00".repeat(32)).unwrap();
         let pubkey = nostr::Keys::generate().public_key();
         let cases = vec![
-            (GWriteStatus::Accepted, FfiWriteStatus::Accepted),
-            (GWriteStatus::Cancelled, FfiWriteStatus::Cancelled),
-            (GWriteStatus::Superseded, FfiWriteStatus::Superseded),
             (
-                GWriteStatus::AwaitingCapability { pubkey },
-                FfiWriteStatus::AwaitingCapability {
-                    pubkey: pubkey.to_hex(),
+                GWriteStatus::Signing(GSigningState::AwaitingSigner { pubkey }),
+                FfiWriteFact::Signing {
+                    state: FfiSigningState::AwaitingSigner {
+                        pubkey: pubkey.to_hex(),
+                    },
                 },
             ),
             (
-                GWriteStatus::Signed(event_id),
-                FfiWriteStatus::Signed {
-                    event_id: event_id.to_hex(),
+                GWriteStatus::Signing(GSigningState::Signed { event_id }),
+                FfiWriteFact::Signing {
+                    state: FfiSigningState::Signed {
+                        event_id: event_id.to_hex(),
+                    },
                 },
             ),
             (
-                GWriteStatus::AwaitingRoute {
-                    detail: "no route is known yet for beef".to_string(),
-                },
-                FfiWriteStatus::AwaitingRoute {
-                    detail: "no route is known yet for beef".to_string(),
+                GWriteStatus::Signing(GSigningState::Refused {
+                    reason: "signer said no".into(),
+                }),
+                FfiWriteFact::Signing {
+                    state: FfiSigningState::Refused {
+                        reason: "signer said no".into(),
+                    },
                 },
             ),
             (
-                GWriteStatus::Routed {
+                GWriteStatus::Destinations {
                     relays: BTreeSet::from([relay.clone()]),
                     complete: false,
                 },
-                FfiWriteStatus::Routed {
+                FfiWriteFact::Destinations {
                     relays: vec![relay.to_string()],
                     complete: false,
                 },
             ),
             (
-                GWriteStatus::Routed {
-                    relays: BTreeSet::from([relay.clone()]),
+                GWriteStatus::Destinations {
+                    relays: BTreeSet::new(),
                     complete: true,
                 },
-                FfiWriteStatus::Routed {
-                    relays: vec![relay.to_string()],
+                FfiWriteFact::Destinations {
+                    relays: Vec::new(),
                     complete: true,
                 },
             ),
             (
-                GWriteStatus::AwaitingRelay {
+                GWriteStatus::Relay {
                     relay: relay.clone(),
+                    state: GRelayState::Waiting(GRelayWaiting::NotConnected),
                 },
-                FfiWriteStatus::AwaitingRelay {
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
+                    state: FfiRelayState::Waiting {
+                        waiting: FfiRelayWaiting::NotConnected,
+                    },
                 },
             ),
             (
-                GWriteStatus::AwaitingAuth {
+                GWriteStatus::Relay {
                     relay: relay.clone(),
+                    state: GRelayState::Waiting(GRelayWaiting::NeedsAuth),
                 },
-                FfiWriteStatus::AwaitingAuth {
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
+                    state: FfiRelayState::Waiting {
+                        waiting: FfiRelayWaiting::NeedsAuth,
+                    },
                 },
             ),
             (
-                GWriteStatus::AuthDenied {
+                // #1032's second half: a backoff that cannot say WHY is a
+                // silently reverted fix.
+                GWriteStatus::Relay {
                     relay: relay.clone(),
-                    pubkey,
-                    source: GAuthDenialSource::Policy,
-                    reason: "account not permitted".into(),
+                    state: GRelayState::Waiting(GRelayWaiting::BackingOff {
+                        attempt: 4,
+                        eligible_at: Timestamp::from(99u64),
+                        cause: GRetryCause::RelayRateLimited,
+                        detail: Some("slow down".into()),
+                    }),
                 },
-                FfiWriteStatus::AuthDenied {
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
-                    pubkey: pubkey.to_hex(),
-                    source: FfiAuthDenialSource::Policy,
-                    reason: "account not permitted".into(),
+                    state: FfiRelayState::Waiting {
+                        waiting: FfiRelayWaiting::BackingOff {
+                            attempt: 4,
+                            eligible_at: 99,
+                            cause: FfiRetryCause::RelayRateLimited,
+                            detail: Some("slow down".into()),
+                        },
+                    },
                 },
             ),
             (
-                GWriteStatus::RetryEligible {
+                GWriteStatus::Relay {
                     relay: relay.clone(),
-                    attempt: 3,
-                    eligible_at: Timestamp::from(41),
-                    cause: GRetryCause::RelayRateLimited,
-                    detail: Some("rate-limited: slow down".into()),
+                    state: GRelayState::Waiting(GRelayWaiting::PersistenceStalled {
+                        detail: "disk".into(),
+                    }),
                 },
-                FfiWriteStatus::RetryEligible {
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
-                    attempt: 3,
-                    eligible_at: 41,
-                    cause: FfiRetryCause::RelayRateLimited,
-                    detail: Some("rate-limited: slow down".into()),
+                    state: FfiRelayState::Waiting {
+                        waiting: FfiRelayWaiting::PersistenceStalled {
+                            detail: "disk".into(),
+                        },
+                    },
                 },
             ),
             (
-                GWriteStatus::HandoffAmbiguous {
+                GWriteStatus::Relay {
                     relay: relay.clone(),
-                    attempt: 4,
-                    observed_at: Timestamp::from(42),
+                    state: GRelayState::Sent {
+                        attempt: 40,
+                        written_at: Timestamp::from(7u64),
+                    },
                 },
-                FfiWriteStatus::HandoffAmbiguous {
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
-                    attempt: 4,
-                    observed_at: 42,
+                    state: FfiRelayState::Sent {
+                        attempt: 40,
+                        written_at: 7,
+                    },
                 },
             ),
             (
-                GWriteStatus::Sent {
+                GWriteStatus::Relay {
                     relay: relay.clone(),
-                    attempt: 5,
-                    written_at: Timestamp::from(43),
+                    state: GRelayState::Published,
                 },
-                FfiWriteStatus::Sent {
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
-                    attempt: 5,
-                    written_at: 43,
+                    state: FfiRelayState::Published,
                 },
             ),
             (
-                GWriteStatus::Acked(relay.clone()),
-                FfiWriteStatus::Acked {
+                GWriteStatus::Relay {
+                    relay: relay.clone(),
+                    state: GRelayState::Rejected {
+                        reason: "no".into(),
+                    },
+                },
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
+                    state: FfiRelayState::Rejected {
+                        reason: "no".into(),
+                    },
                 },
             ),
             (
-                GWriteStatus::Rejected(relay.clone(), "no".into()),
-                FfiWriteStatus::Rejected {
+                // NOT `Rejected`. Folding an app's own decision not to
+                // authenticate into the relay's rejection tells the user a
+                // relay refused them when their own client declined to ask.
+                GWriteStatus::Relay {
+                    relay: relay.clone(),
+                    state: GRelayState::AuthFailed {
+                        pubkey,
+                        source: GAuthDenialSource::Policy,
+                        reason: "policy declined".into(),
+                    },
+                },
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
-                    reason: "no".into(),
+                    state: FfiRelayState::AuthFailed {
+                        pubkey: pubkey.to_hex(),
+                        source: FfiAuthDenialSource::Policy,
+                        reason: "policy declined".into(),
+                    },
                 },
             ),
             (
-                GWriteStatus::GaveUp(relay.clone()),
-                FfiWriteStatus::GaveUp {
+                GWriteStatus::Relay {
+                    relay: relay.clone(),
+                    state: GRelayState::GaveUp,
+                },
+                FfiWriteFact::Relay {
                     relay: relay.to_string(),
+                    state: FfiRelayState::GaveUp,
                 },
             ),
             (
-                GWriteStatus::PersistenceBlocked(relay.clone()),
-                FfiWriteStatus::PersistenceBlocked {
-                    relay: relay.to_string(),
+                GWriteStatus::Outcome(GWriteOutcome::Settled),
+                FfiWriteFact::Outcome {
+                    outcome: FfiWriteOutcome::Settled,
                 },
             ),
             (
-                GWriteStatus::RoutePersistenceBlocked(relay.clone()),
-                FfiWriteStatus::RoutePersistenceBlocked {
-                    relay: relay.to_string(),
+                GWriteStatus::Outcome(GWriteOutcome::NoDestination),
+                FfiWriteFact::Outcome {
+                    outcome: FfiWriteOutcome::NoDestination,
                 },
             ),
             (
-                GWriteStatus::OutcomeUnknown(relay.clone()),
-                FfiWriteStatus::OutcomeUnknown {
-                    relay: relay.to_string(),
+                GWriteStatus::Outcome(GWriteOutcome::NotSent(GNotSentReason::Cancelled)),
+                FfiWriteFact::Outcome {
+                    outcome: FfiWriteOutcome::NotSent {
+                        reason: FfiNotSentReason::Cancelled,
+                    },
                 },
             ),
             (
-                GWriteStatus::ReplaceableConflict {
-                    expected: Some(EventId::all_zeros()),
-                    actual: None,
-                },
-                FfiWriteStatus::ReplaceableConflict {
-                    expected: Some(EventId::all_zeros().to_hex()),
-                    actual: None,
+                GWriteStatus::Outcome(GWriteOutcome::NotSent(GNotSentReason::Superseded)),
+                FfiWriteFact::Outcome {
+                    outcome: FfiWriteOutcome::NotSent {
+                        reason: FfiNotSentReason::Superseded,
+                    },
                 },
             ),
             (
-                GWriteStatus::Failed("failed".into()),
-                FfiWriteStatus::Failed {
-                    reason: "failed".into(),
+                // Both ids survive the crossing. Reduced to a string, an app
+                // could only tell the user to redo the edit by hand.
+                GWriteStatus::Outcome(GWriteOutcome::Refused(
+                    GRefuseReason::ReplaceableBaseChanged {
+                        expected: Some(event_id),
+                        actual: None,
+                    },
+                )),
+                FfiWriteFact::Outcome {
+                    outcome: FfiWriteOutcome::Refused {
+                        reason: FfiRefuseReason::ReplaceableBaseChanged {
+                            expected: Some(event_id.to_hex()),
+                            actual: None,
+                        },
+                    },
+                },
+            ),
+            (
+                GWriteStatus::Outcome(GWriteOutcome::Refused(GRefuseReason::Tombstoned)),
+                FfiWriteFact::Outcome {
+                    outcome: FfiWriteOutcome::Refused {
+                        reason: FfiRefuseReason::Tombstoned,
+                    },
                 },
             ),
         ];
         for (source, expected) in cases {
             assert_eq!(write_status_to_ffi(WriteStatusRef(&source)), expected);
         }
-    }
-
-    #[test]
-    fn every_cancel_refusal_maps_without_impossible_states() {
-        let id = nmp::ReceiptId(41);
-        assert_eq!(
-            cancel_write_error_to_ffi(CancelWriteError::UnknownReceipt { receipt_id: id }),
-            FfiCancelWriteError::UnknownReceipt { receipt_id: 41 }
-        );
-        assert_eq!(
-            cancel_write_error_to_ffi(CancelWriteError::AlreadySigned {
-                receipt_id: id,
-                event_id: EventId::all_zeros(),
-            }),
-            FfiCancelWriteError::AlreadySigned {
-                receipt_id: 41,
-                event_id: EventId::all_zeros().to_hex(),
-            }
-        );
-        assert_eq!(
-            cancel_write_error_to_ffi(CancelWriteError::AlreadyCompensated { receipt_id: id }),
-            FfiCancelWriteError::AlreadyCompensated { receipt_id: 41 }
-        );
-        assert_eq!(
-            cancel_write_error_to_ffi(CancelWriteError::AlreadySuperseded { receipt_id: id }),
-            FfiCancelWriteError::AlreadySuperseded { receipt_id: 41 }
-        );
-        assert_eq!(
-            cancel_write_error_to_ffi(CancelWriteError::AlreadyAbandoned { receipt_id: id }),
-            FfiCancelWriteError::AlreadyAbandoned { receipt_id: 41 }
-        );
-        assert_eq!(
-            cancel_write_error_to_ffi(CancelWriteError::PersistenceFailed {
-                receipt_id: id,
-                reason: "disk full".to_string(),
-            }),
-            FfiCancelWriteError::PersistenceFailed {
-                receipt_id: 41,
-                reason: "disk full".to_string(),
-            }
-        );
-        assert_eq!(
-            cancel_write_error_to_ffi(CancelWriteError::EngineClosed),
-            FfiCancelWriteError::EngineClosed
-        );
     }
 }
 
@@ -2026,8 +2125,9 @@ pub fn parse_event_id(hex: &str) -> Result<EventId, FfiError> {
 /// The RESTATEMENT check (`Explicit` != a signed payload's author)
 /// deliberately does NOT live here: like `Signed`'s verify (see
 /// `signed_event_from_ffi`'s doc), it runs at the engine's acceptance
-/// boundary so the guarantee holds for every entry point, surfacing as
-/// `WriteStatus::Failed` on the receipt stream with no `Accepted` before it.
+/// boundary so the guarantee holds for every entry point, refusing the
+/// `publish` CALL itself as [`FfiError::PublishRefused`] — nothing is taken
+/// into custody, so no receipt and no queue entry exist for it.
 fn identity_from_ffi(identity: FfiIdentity) -> Result<GIdentity, FfiError> {
     Ok(match identity {
         FfiIdentity::Active => GIdentity::Active,
@@ -2127,14 +2227,6 @@ pub(crate) fn event_builder_to_ffi(builder: GEventBuilder) -> FfiEventBuilder {
 
 /// The durability a protocol module chose, projected totally for the same
 /// reason routing and payload are.
-pub(crate) fn durability_to_ffi(durability: GDurability) -> FfiDurability {
-    match durability {
-        GDurability::Durable => FfiDurability::Durable,
-        GDurability::Ephemeral => FfiDurability::Ephemeral,
-        GDurability::AtMostOnce => FfiDurability::AtMostOnce,
-    }
-}
-
 /// A malformed raw tag array (empty, or otherwise unparseable) REJECTS the
 /// whole intent rather than being silently dropped: a signer that drops one
 /// tag from a template can sign a DIFFERENT event than the app composed
@@ -2169,7 +2261,7 @@ pub(crate) fn event_builder_from_ffi(builder: FfiEventBuilder) -> Result<GEventB
 /// A0/#56) so the guarantee holds for every entry point, not only the one
 /// that happens to verify locally -- a non-verifying (e.g. tampered) event
 /// still parses fine at THIS boundary and is rejected downstream instead,
-/// surfacing as `WriteStatus::Failed` on the receipt stream.
+/// refusing the `publish` call as [`FfiError::PublishRefused`].
 pub(crate) fn signed_event_from_ffi(
     id: String,
     pubkey: String,
@@ -2230,12 +2322,6 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
         }
     };
 
-    let durability = match intent.durability {
-        FfiDurability::Durable => GDurability::Durable,
-        FfiDurability::Ephemeral => GDurability::Ephemeral,
-        FfiDurability::AtMostOnce => GDurability::AtMostOnce,
-    };
-
     // Both routing words project, because both are app vocabulary: an app
     // saying "publish this event to relay: [user input]" is the same
     // primitive a wiki, DM, or group crate uses, and there is no third word
@@ -2255,7 +2341,6 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
 
     Ok(GWriteIntent {
         payload,
-        durability,
         routing,
         identity,
         correlation,
@@ -2917,7 +3002,6 @@ mod tests {
                     created_at: Some(100),
                 },
             },
-            durability: FfiDurability::Ephemeral,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
@@ -3182,7 +3266,7 @@ mod tests {
     /// gets, naming the offending string -- synchronously, before any engine
     /// call, so no receipt stream ever exists for it (the
     /// well-formed-but-CONTRADICTORY case on a signed payload is the
-    /// acceptance boundary's `WriteStatus::Failed`, not this error).
+    /// acceptance boundary's `FfiError::PublishRefused`, not this error).
     #[test]
     fn a_malformed_identity_is_a_typed_error_not_a_panic() {
         for garbage in ["not-a-pubkey", "npub1notvalidbech32"] {
@@ -3266,7 +3350,6 @@ mod tests {
                 content: event.content.clone(),
                 sig: event.sig.to_string(),
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
@@ -3322,10 +3405,10 @@ mod tests {
     /// succeeds. The verify that used to reject this here moved to
     /// `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary
     /// (Unit A0/#56); `NmpEngine::publish`'s own test
-    /// (`facade::tests::ffi_tampered_signed_publish_fails_closed_on_receipt_stream`)
-    /// proves the rejection still happens, just downstream and
-    /// asynchronously (`WriteStatus::Failed` on the receipt stream) rather
-    /// than as a synchronous `FfiError` here.
+    /// (`facade::tests::ffi_tampered_signed_publish_is_refused_by_publish_itself`)
+    /// proves the rejection still happens, just downstream — as
+    /// `FfiError::PublishRefused` from the engine's acceptance boundary
+    /// rather than from this parse.
     #[test]
     fn tampered_signed_event_still_parses_verify_moved_downstream() {
         let (_original, mut intent) = signed_write_intent();

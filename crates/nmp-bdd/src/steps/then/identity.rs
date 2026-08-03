@@ -54,7 +54,7 @@ async fn named_write_authored_by(w: &mut NmpWorld, text: String, pubkey: String)
     );
 }
 
-/// Read off the signer itself, not off the receipt: `WriteStatus::Signed` is
+/// Read off the signer itself, not off the receipt: `SigningState::Signed` is
 /// a lifecycle beat the engine emits for an already-signed payload too, so it
 /// says nothing about whether a local capability was approached.
 #[then(regex = r#"^it was signed by that account's signer$"#)]
@@ -141,23 +141,17 @@ async fn frozen_body_unchanged(w: &mut NmpWorld) {
 
 #[then(regex = r#"^the write is refused for having no identity to publish as$"#)]
 async fn refused_for_having_no_identity(w: &mut NmpWorld) {
-    nothing_to_observe!(
-        w.identity_receipt_reported_anything(None),
-        "the publish reported no status at all, so it was neither refused nor accepted"
-    );
     assert!(
         w.write_refused_before_acceptance(None),
-        "expected Failed to be the FIRST and only status; saw {:?}",
+        "expected the publish door itself to refuse, never to take custody; saw {:?}",
         w.identity_receipt_statuses(None)
     );
-    let named_the_reason = w
-        .identity_receipt_statuses(None)
-        .iter()
-        .any(|s| matches!(s, nmp::mechanism::publish_queue::WriteStatus::Failed(r) if r.contains("active account")));
+    let reason = w
+        .write_refusal_reason(None)
+        .expect("a refused publish carries the error it refused with");
     assert!(
-        named_the_reason,
-        "the refusal must say WHICH instruction could not resolve; saw {:?}",
-        w.identity_receipt_statuses(None)
+        reason.contains("active account"),
+        "the refusal must say WHICH instruction could not resolve; it said {reason:?}"
     );
 }
 
@@ -165,7 +159,8 @@ async fn refused_for_having_no_identity(w: &mut NmpWorld) {
 async fn never_reports_accepted(w: &mut NmpWorld) {
     assert!(
         w.write_never_reported_accepted(None),
-        "a refused publish must never report Accepted; saw {:?}",
+        "a refused publish must never be taken into custody; the door answered Ok and the \
+         receipt showed {:?}",
         w.identity_receipt_statuses(None)
     );
 }
@@ -207,7 +202,7 @@ async fn write_reports_accepted(w: &mut NmpWorld) {
 async fn receipt_reports_awaiting_signer(w: &mut NmpWorld, pubkey: String) {
     assert!(
         w.write_awaiting_signer_for(&pubkey, None),
-        "expected the receipt to report AwaitingCapability for {pubkey}; saw {:?}",
+        "expected the receipt to report AwaitingSigner for {pubkey}; saw {:?}",
         w.identity_receipt_statuses(None)
     );
 }

@@ -39,6 +39,6 @@ pub use live_query::{LiveQuery, LiveQueryError};
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};
 pub use selector::{IdentityField, Selector};
 pub use write::{
-    CorrelationToken, CorrelationTokenError, Durability, EventBuilder, Identity, WriteIntent,
-    WritePayload, WriteRouting,
+    CorrelationToken, CorrelationTokenError, EventBuilder, Identity, WriteIntent, WritePayload,
+    WriteRouting,
 };

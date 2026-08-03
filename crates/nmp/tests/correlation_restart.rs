@@ -17,14 +17,18 @@
 
 use std::borrow::Cow;
 
+use std::collections::BTreeSet;
+
 use nmp::mechanism::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::publish_queue::WriteStatus;
+use nmp::mechanism::publish_queue::{
+    NotSentReason, RelayState, SigningState, WriteFact, WriteOutcome,
+};
 use nmp_grammar::{
-    AccessContext, CorrelationToken, Durability, Identity, RelaySessionKey, WriteIntent,
-    WritePayload, WriteRouting,
+    AccessContext, CorrelationToken, Identity, RelaySessionKey, WriteIntent, WritePayload,
+    WriteRouting,
 };
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, RedbStore};
@@ -37,10 +41,12 @@ fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::EmitReceipt(id, _) | Effect::ReplayReceipt(id, _) => Some(*id),
+            Effect::WriteAccepted(id)
+            | Effect::EmitReceipt(id, _)
+            | Effect::ReplayReceipt(id, _) => Some(*id),
             _ => None,
         })
-        .expect("every publish emits a receipt id")
+        .expect("every accepted publish owns a receipt id")
 }
 
 fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureRoutingFacts {
@@ -119,7 +125,6 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
                 100,
                 "kill-after-accept",
             ))),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: Some(token(tok)),
@@ -127,7 +132,7 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
         let id = receipt_id(&effects);
         assert!(effects
             .iter()
-            .any(|e| matches!(e, Effect::EmitReceipt(r, WriteStatus::Accepted) if *r == id)));
+            .any(|e| matches!(e, Effect::WriteAccepted(r) if *r == id)));
         // The process dies right here -- `id` is known only to this stack
         // frame, never durably recorded by the "app" (this test never
         // writes it to its own storage).
@@ -144,9 +149,12 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
     assert_eq!(
         replay.facts.as_slice(),
         [
-            WriteStatus::Accepted,
-            WriteStatus::AwaitingCapability {
+            WriteFact::Signing(SigningState::AwaitingSigner {
                 pubkey: keys.public_key()
+            }),
+            WriteFact::Destinations {
+                relays: BTreeSet::new(),
+                complete: false
             },
         ]
     );
@@ -184,7 +192,6 @@ fn terminal_convergence_survives_restart_and_replays_by_token() {
                 200,
                 "terminal correlation",
             ))),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: Some(token(tok)),
@@ -199,7 +206,12 @@ fn terminal_convergence_survives_restart_and_replays_by_token() {
     let (replay, resolved_id) = core.reattach_by_correlation(tok.to_string());
     assert_eq!(replay.outcome, ReattachOutcome::Attached);
     assert!(resolved_id.is_some());
-    assert_eq!(replay.facts, vec![WriteStatus::Cancelled]);
+    assert_eq!(
+        replay.facts,
+        vec![WriteFact::Outcome(WriteOutcome::NotSent(
+            NotSentReason::Cancelled
+        ))]
+    );
 }
 
 /// Boundary 5: a caller that does not know whether its first publish
@@ -229,7 +241,6 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
                 300,
                 "first body",
             ))),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: Some(token(tok)),
@@ -250,7 +261,6 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
             301,
             "second, different body",
         ))),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: Some(token(tok)),
@@ -270,9 +280,12 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
     assert_eq!(
         retry_statuses,
         vec![
-            WriteStatus::Accepted,
-            WriteStatus::AwaitingCapability {
+            WriteFact::Signing(SigningState::AwaitingSigner {
                 pubkey: keys.public_key()
+            }),
+            WriteFact::Destinations {
+                relays: BTreeSet::new(),
+                complete: false
             },
         ],
         "the retry's sink must see the ORIGINAL obligation's replayed facts, \
@@ -435,7 +448,6 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
         authenticate(&mut core, handle, &session, &keys);
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event.clone()),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: Some(token(tok)),
@@ -461,7 +473,7 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
         ));
         assert!(acked.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(_, WriteStatus::Acked(acked_relay)) if acked_relay == &relay
+            Effect::EmitReceipt(_, WriteFact::Relay { relay: acked_relay, state: RelayState::Published }) if acked_relay == &relay
         )));
         // The process dies right here, before persisting the receipt id.
     }
@@ -480,7 +492,7 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
     assert!(
         statuses
             .iter()
-            .any(|status| matches!(status, WriteStatus::Acked(acked_relay) if acked_relay == &relay)),
+            .any(|status| matches!(status, WriteFact::Relay { relay: acked_relay, state: RelayState::Published } if acked_relay == &relay)),
         "the token must replay the SAME partial per-relay ACK evidence after restart, got {statuses:?}"
     );
 }
@@ -519,7 +531,6 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
         authenticate(&mut core, handle, &session, &keys);
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event.clone()),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: Some(token(tok)),
@@ -545,7 +556,7 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
         ));
         assert!(rejected.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(_, WriteStatus::Rejected(rejected_relay, reason))
+            Effect::EmitReceipt(_, WriteFact::Relay { relay: rejected_relay, state: RelayState::Rejected { reason } })
                 if rejected_relay == &relay && reason == "rate-limited"
         )));
         // The process dies right here, before persisting the receipt id.
@@ -565,7 +576,7 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
     assert!(
         statuses.iter().any(|status| matches!(
             status,
-            WriteStatus::Rejected(rejected_relay, reason)
+            WriteFact::Relay { relay: rejected_relay, state: RelayState::Rejected { reason } }
                 if rejected_relay == &relay && reason == "rate-limited"
         )),
         "the token must replay the SAME partial per-relay REJECT evidence after restart, got {statuses:?}"

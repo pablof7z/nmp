@@ -17,16 +17,16 @@ use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpReceiptStream};
 use nmp_ffi::types::{
-    FfiDurability, FfiIdentity, FfiReceiptReattachment, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting, FfiWriteStatus,
+    FfiIdentity, FfiReceiptReattachment, FfiRelayState, FfiSigningState, FfiWriteFact,
+    FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 use nmp_store::{
     AcceptWrite, EventStore, HandoffEvidence, IntentSigState, PublishQueueAttemptHandoff,
     PublishQueueAttemptOutcome, PublishQueueLaneKey, PublishQueuePostHandoffState,
-    PublishQueueTransientCause, WriteDurability,
+    PublishQueueTransientCause,
 };
 
-async fn next_status(stream: &Arc<NmpReceiptStream>) -> Option<FfiWriteStatus> {
+async fn next_status(stream: &Arc<NmpReceiptStream>) -> Option<FfiWriteFact> {
     tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
         .expect("a receipt status must arrive within 5s")
@@ -41,8 +41,8 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("activate account");
 
-    // A durable write. With no signer capability ever attaching, it settles into
-    // a retained Accepted + AwaitingCapability durable steady state.
+    // A durable write. With no signer capability attached yet it parks in a
+    // retained `Signing { AwaitingSigner }` steady state.
     let receipt = engine
         .publish(FfiWriteIntent {
             payload: FfiWritePayload::Event {
@@ -53,7 +53,6 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
                     created_at: Some(nostr::Timestamp::now().as_secs()),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
@@ -63,16 +62,28 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
     assert!(receipt_id > 0);
 
     // Observe only the FIRST fact, then DETACH (drop the live stream) BEFORE the
-    // write reaches its retained steady state.
-    assert_eq!(next_status(&receipt).await, Some(FfiWriteStatus::Accepted));
+    // write reaches its terminal.
+    //
+    // (#1237: acceptance is `publish` returning Ok, not a stream item, so the
+    // park itself is now the first fact. The fact that must accrue AFTER the
+    // detach is therefore the signature, driven by attaching the signer below.)
+    let parked = FfiWriteFact::Signing {
+        state: FfiSigningState::AwaitingSigner {
+            pubkey: keys.public_key().to_hex(),
+        },
+    };
+    assert_eq!(next_status(&receipt).await, Some(parked.clone()));
     drop(receipt);
 
-    // Let the engine advance the write past the detach point (the
-    // AwaitingCapability fact accrues while NO consumer is attached).
+    // Advance the write past the detach point: the signer arrives, so the
+    // `Signed` fact accrues while NO consumer is attached.
+    engine
+        .add_account(keys.secret_key().to_secret_hex())
+        .expect("register the signer for the frozen identity");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Reattach through a FRESH stream. It replays the FULL durable prefix from
-    // the persisted store — including the fact that accrued after the detach —
+    // Reattach through a FRESH stream. It replays the durable prefix from the
+    // persisted store — including the fact that accrued after the detach —
     // proving the store, not the dropped live channel, is the source of truth.
     let replay = match engine
         .reattach_receipt(receipt_id)
@@ -85,23 +96,32 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
         }
     };
 
-    assert_eq!(
-        next_status(&replay).await,
-        Some(FfiWriteStatus::Accepted),
-        "replay reconstructs the Accepted fact from the store"
-    );
-    assert_eq!(
-        next_status(&replay).await,
-        Some(FfiWriteStatus::AwaitingCapability {
-            pubkey: keys.public_key().to_hex()
-        }),
+    // The replayed prefix is reconstructed from the durable STATE, so the park
+    // — which is no longer true of this write — is not re-emitted: signing is
+    // "one signature, one author, one answer", not an append-only log. What
+    // matters, and what the dropped in-memory channel could never supply, is
+    // that the fact which accrued AFTER the detach is there.
+    let replayed = next_status(&replay).await;
+    assert!(
+        matches!(
+            replayed,
+            Some(FfiWriteFact::Signing {
+                state: FfiSigningState::Signed { .. }
+            })
+        ),
         "the fact that accrued AFTER detach is recovered from the persisted store, \
-         not from any retained in-memory channel"
+         not from any retained in-memory channel; got {replayed:?}"
+    );
+    assert_ne!(
+        replayed,
+        Some(parked),
+        "the reattached stream must not resurrect a signing state the store has \
+         already superseded"
     );
 
     eprintln!(
-        "#680 receipt durability: detached before terminal, reattached and replayed the full \
-         durable prefix (Accepted, AwaitingCapability) from the persisted store."
+        "#680 receipt durability: detached while parked, reattached and replayed the durable \
+         prefix (Signed, accrued after the detach) from the persisted store."
     );
 
     engine.shutdown();
@@ -139,7 +159,6 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
                 monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "ffi-paged-replay".into(),
-                durability: WriteDurability::Durable,
                 routing: "auto".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: nostr::Timestamp::from(1_000u64),
@@ -254,15 +273,25 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
         "public FFI traversal must cross at least one internal page"
     );
     assert!(
-        replay
-            .iter()
-            .any(|status| matches!(status, FfiWriteStatus::Sent { attempt: 40, .. })),
+        replay.iter().any(|status| matches!(
+            status,
+            FfiWriteFact::Relay {
+                state: FfiRelayState::Sent { attempt: 40, .. },
+                ..
+            }
+        )),
         "the final durable ordinal must survive transparent page transitions"
     );
     assert_eq!(
         replay
             .iter()
-            .filter(|status| matches!(status, FfiWriteStatus::Sent { .. }))
+            .filter(|status| matches!(
+                status,
+                FfiWriteFact::Relay {
+                    state: FfiRelayState::Sent { .. },
+                    ..
+                }
+            ))
             .count(),
         40,
         "every persisted handoff must arrive exactly once"

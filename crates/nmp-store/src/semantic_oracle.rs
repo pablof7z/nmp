@@ -21,7 +21,7 @@ use crate::{
     GcRetentionSet, HandoffEvidence, InsertOutcome, IntentId, IntentSigState, MemoryStore,
     PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueLaneKey,
     PublishQueuePostHandoffState, PublishQueueTransientCause, RedbStore, RefuseReason,
-    RelayObserved, StoredEvent, WriteDurability,
+    RelayObserved, StoredEvent,
 };
 
 const ALICE_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -255,7 +255,6 @@ fn accept_correlated(
         monotonic_stamp: false,
         expected_pubkey: keys.public_key(),
         signing_identity_ref: "semantic-oracle-key".into(),
-        durability: WriteDurability::Durable,
         routing: "semantic-oracle-route".into(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
@@ -435,7 +434,6 @@ fn normalized_recovery_state(store: &dyn EventStore, context: &OracleContext) ->
                 "frozen_json": intent.frozen.as_json(),
                 "expected_pubkey": intent.expected_pubkey.to_hex(),
                 "signing_identity_ref": intent.signing_identity_ref,
-                "durability": format!("{:?}", intent.durability),
                 "routing": intent.routing,
                 "sig_state": format!("{:?}", intent.sig_state),
                 "displaced": intent.displaced.as_ref().map(canonical_row),
@@ -1040,7 +1038,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
                 result: HandoffEvidence::Ambiguous,
             },
             PublishQueuePostHandoffState::Terminal {
-                outcome: PublishQueueAttemptOutcome::OutcomeUnknown,
+                outcome: PublishQueueAttemptOutcome::GaveUp,
                 finished_at: Timestamp::from(293),
             },
         )

@@ -16,7 +16,6 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(10, "accepted body")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -26,7 +25,16 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == accepted_id)));
-    assert_eq!(receipt_statuses(&effects), [WriteStatus::Accepted]);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::WriteAccepted(rid) if *rid == id)),
+        "publish takes custody of the write"
+    );
+    assert!(
+        receipt_statuses(&effects).is_empty(),
+        "acceptance is the Ok return, never a fact on the stream"
+    );
 
     let tampered = signed_draft(&draft(10, "different signer output"), &a);
     let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(tampered)));
@@ -38,7 +46,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
         .any(|delta| matches!(delta, RowDelta::Removed(event_id) if *event_id == accepted_id)));
     assert!(matches!(
         receipt_statuses(&effects).last(),
-        Some(WriteStatus::Failed(_))
+        Some(WriteFact::Signing(SigningState::Refused { .. }))
     ));
 }
 
@@ -64,7 +72,6 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     let older = older_unsigned.sign_with_keys(&a).unwrap();
     core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(older.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -76,7 +83,6 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     let newer_id = signed_draft(&newer_unsigned, &a).id;
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(newer_unsigned.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -96,7 +102,9 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     );
     assert_eq!(
         receipt_statuses(&effects).last(),
-        Some(&WriteStatus::Cancelled)
+        Some(&WriteFact::Outcome(WriteOutcome::NotSent(
+            NotSentReason::Cancelled
+        )))
     );
     assert!(all_row_deltas(&effects)
         .iter()
@@ -116,7 +124,6 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
 
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(10, "cancel typed")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -138,7 +145,12 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
         .is_empty());
     let mut statuses = receipt_statuses(&published);
     statuses.extend(receipt_statuses(&first_cancelled));
-    assert_eq!(statuses, [WriteStatus::Accepted, WriteStatus::Cancelled]);
+    assert_eq!(
+        statuses,
+        [WriteFact::Outcome(WriteOutcome::NotSent(
+            NotSentReason::Cancelled
+        ))]
+    );
     assert!(matches!(
         core.cancel_write(ReceiptId(u64::MAX)).0,
         Err(nmp::mechanism::publish_queue::CancelWriteError::UnknownReceipt { .. })
@@ -147,7 +159,6 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     let signed_event = signed_draft(&draft(11, "already signed"), &a);
     let signed_publish = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed_event.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -155,7 +166,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     let signed_receipt = signed_publish
         .iter()
         .find_map(|effect| match effect {
-            Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+            Effect::WriteAccepted(id) => Some(*id),
             _ => None,
         })
         .unwrap();
@@ -179,7 +190,6 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     )));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(1, "awaiting signer")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -189,7 +199,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     let effects = core.handle(EngineMsg::SignerUnavailable(id, generation));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability { pubkey })
+        Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::AwaitingSigner { pubkey }))
             if *rid == id && *pubkey == a.public_key()
     )));
     let fresh = core.handle(EngineMsg::Subscribe(literal_query(
@@ -218,15 +228,11 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
     let as_b = draft(47, "published as b while a is active");
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(as_b),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(b.public_key()),
         correlation: None,
     }));
-    assert!(matches!(
-        effects.first(),
-        Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
-    ));
+    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(_))));
     let (id, generation, template) = find_sign_request(&effects);
     assert_eq!(
         template.pubkey,
@@ -240,7 +246,7 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
     assert!(
         effects.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(rid, WriteStatus::Signed(event_id))
+            Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::Signed { event_id }))
                 if *rid == id && *event_id == expected_id
         )),
         "the frozen B-authored body must promote to Signed under B's key"
@@ -250,15 +256,11 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
     // (`Identity::Active`) publish is still accepted and roots on A.
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(48, "default path still roots on a")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
-    assert!(matches!(
-        effects.first(),
-        Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
-    ));
+    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(_))));
 }
 
 /// #47 falsifier (b), restated for a payload that cannot state an author.
@@ -275,14 +277,12 @@ fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(1, "as whoever is active")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
-    assert_eq!(
-        receipt_statuses(&effects),
-        [WriteStatus::Accepted],
+    assert!(
+        matches!(effects.first(), Some(Effect::WriteAccepted(_))),
         "a kind and content, published as the active account, is the whole story"
     );
     let (_, _, template) = find_sign_request(&effects);
@@ -295,17 +295,16 @@ fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
     core.handle(EngineMsg::SetActivePubkey(None));
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(2, "logged out, no identity named")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
-    assert_eq!(
-        receipt_statuses(&effects),
-        [WriteStatus::Failed(
-            "publishing as the active account requires an active account".to_string()
-        )],
-        "nothing is pinned, so nothing may park"
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PublishFailed(PublishError::NoActiveAccount)]
+        ),
+        "nothing is pinned, so nothing may park -- got {effects:?}"
     );
     assert!(!effects
         .iter()
@@ -327,12 +326,11 @@ fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(1, "as b, while a is active")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(b.public_key()),
         correlation: None,
     }));
-    assert_eq!(receipt_statuses(&effects), [WriteStatus::Accepted]);
+    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(_))));
     let (_, _, template) = find_sign_request(&effects);
     assert_eq!(
         template.pubkey,
@@ -344,52 +342,22 @@ fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
     let signed = signed_draft(&draft(2, "signed by a"), &a);
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(b.public_key()),
         correlation: None,
     }));
-    assert_eq!(
-        receipt_statuses(&effects),
-        [WriteStatus::Failed(format!(
-            "explicit identity {} does not match the signed event author {}",
-            b.public_key(),
-            a.public_key()
-        ))]
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PublishFailed(
+                PublishError::IdentityContradictsSignedAuthor { identity, author }
+            )] if *identity == b.public_key() && *author == a.public_key()
+        ),
+        "a contradiction has no correct resolution -- got {effects:?}"
     );
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-}
-
-#[test]
-fn ephemeral_is_receipt_only_and_never_creates_a_pending_row() {
-    let a = Keys::generate();
-    let relay = RelayUrl::parse("wss://write.example.com").unwrap();
-    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
-    let mut core = new_core(dir);
-    activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(literal_query(
-        &[1],
-        &a.public_key().to_hex(),
-    )));
-    let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Event(draft(1, "ephemeral")),
-        durability: Durability::Ephemeral,
-        routing: WriteRouting::Auto,
-        identity: Identity::Active,
-        correlation: None,
-    }));
-    assert!(matches!(
-        effects.first(),
-        Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
-    ));
-    assert!(all_row_deltas(&effects).is_empty());
-    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
-        &[1],
-        &a.public_key().to_hex(),
-    )));
-    assert!(all_row_deltas(&fresh).is_empty());
 }
 
 #[test]
@@ -408,7 +376,6 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     let signed = signed_draft(&draft(1, "signed cache truth"), &a);
     core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(signed.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -455,7 +422,6 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
     let base_id = base.id;
     core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(base.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -467,7 +433,6 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
     let middle_id = signed_draft(&middle, &a).id;
     let middle_effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(middle.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -480,7 +445,6 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
     let newest_id = signed_draft(&newest, &a).id;
     let newest_effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(newest.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -516,7 +480,7 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
 }
 
 #[test]
-fn expired_local_acceptance_is_first_and_only_failed_with_no_side_effects() {
+fn expired_local_acceptance_is_refused_in_custody_with_no_side_effects() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
@@ -529,15 +493,23 @@ fn expired_local_acceptance_is_first_and_only_failed_with_no_side_effects() {
     let expired = nmp_resolver::testkit::expiring_kind1(&a, "expired", 100, 150);
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(expired),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::EmitReceipt(_, WriteStatus::Failed(_))]
-    ));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::WriteAccepted(accepted),
+                Effect::EmitReceipt(
+                    emitted,
+                    WriteFact::Outcome(WriteOutcome::Refused(RefuseReason::AlreadyExpired))
+                )
+            ] if accepted == emitted
+        ),
+        "the store answered no, so the write is in custody as a permanently failed entry -- got {effects:?}"
+    );
 }
 
 #[test]
@@ -551,7 +523,6 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
 
     let first = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -559,7 +530,6 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
     let (first_id, first_generation, first_template) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -578,12 +548,12 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
     ));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::Signed(event_id))
+        Effect::EmitReceipt(id, WriteFact::Signing(SigningState::Signed { event_id }))
             if *id == first_id && *event_id == signed.id
     )));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::Signed(event_id))
+        Effect::EmitReceipt(id, WriteFact::Signing(SigningState::Signed { event_id }))
             if *id == second_id && *event_id == signed.id
     )));
 
@@ -616,7 +586,6 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
 
     let first = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![ack.clone(), drop_relay.clone()]),
         identity: Identity::Active,
         correlation: None,
@@ -624,7 +593,6 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     let (id_a, generation_a, to_sign) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![nack.clone()]),
         identity: Identity::Active,
         correlation: None,
@@ -662,7 +630,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::Acked(relay)) if *id == id_a && relay == &ack
+        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published }) if *id == id_a && relay == &ack
     )));
     assert!(!acked
         .iter()
@@ -678,7 +646,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     ));
     assert!(nacked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::Rejected(relay, _)) if *id == id_b && relay == &nack
+        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Rejected { reason: _ } }) if *id == id_b && relay == &nack
     )));
 
     let dropped = core.handle(EngineMsg::RelayDisconnected(
@@ -690,7 +658,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
         DisconnectReason::Error,
     ));
     assert!(!dropped.iter().any(
-        |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::GaveUp(_)) if *id == id_a)
+        |effect| matches!(effect, Effect::EmitReceipt(id, WriteFact::Relay { relay: _, state: RelayState::GaveUp }) if *id == id_a)
     ));
     assert!(
         core.next_deadline().is_some(),
@@ -713,7 +681,6 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     let template = draft(1, "relay wins signing race");
     let first = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -721,7 +688,6 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     let (id_a, generation_a, signer_a) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -739,7 +705,7 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
     for id in [id_a, id_b] {
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(receipt, WriteStatus::Signed(event_id))
+            Effect::EmitReceipt(receipt, WriteFact::Signing(SigningState::Signed { event_id }))
                 if *receipt == id && *event_id == signed.id
         )));
     }
@@ -797,7 +763,6 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
     activate(&mut core, &a);
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(1, "one operation")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -835,7 +800,7 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
     let completed = core.handle(EngineMsg::SignerCompleted(id, next_generation, Ok(signed)));
     assert!(completed.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(rid, WriteStatus::Signed(_)) if *rid == id
+        Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::Signed { event_id: _ })) if *rid == id
     )));
 }
 
@@ -851,7 +816,6 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         activate(&mut core, &a);
         let published = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(1, "survives signer loss")),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -861,7 +825,7 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         let waiting = core.handle(EngineMsg::SignerCompleted(id, generation, Err(error)));
         assert!(waiting.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(rid, WriteStatus::AwaitingCapability { pubkey })
+            Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::AwaitingSigner { pubkey }))
                 if *rid == id && *pubkey == a.public_key()
         )));
         assert!(waiting.iter().any(|effect| matches!(
@@ -870,9 +834,9 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
         )));
         assert_eq!(
             receipt_statuses(&waiting).last(),
-            Some(&WriteStatus::AwaitingCapability {
+            Some(&WriteFact::Signing(SigningState::AwaitingSigner {
                 pubkey: a.public_key()
-            })
+            }))
         );
 
         let rearmed = core.handle(EngineMsg::SignerAttached(a.public_key()));
@@ -903,7 +867,6 @@ fn terminal_signer_errors_compensate_the_write() {
         activate(&mut core, &a);
         let published = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(1, "terminal signer answer")),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -913,7 +876,8 @@ fn terminal_signer_errors_compensate_the_write() {
         let failed = core.handle(EngineMsg::SignerCompleted(id, generation, Err(error)));
         assert!(failed.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(rid, WriteStatus::Failed(_)) if *rid == id
+            Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::Refused { .. }))
+                if *rid == id
         )));
         assert!(core
             .handle(EngineMsg::SignerAttached(a.public_key()))
@@ -933,7 +897,6 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     )));
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(1, "must remain pending")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -949,7 +912,10 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
         )),
     ));
     assert!(failed_compensation.is_empty(), "no terminal fact committed");
-    assert_eq!(receipt_statuses(&published), [WriteStatus::Accepted]);
+    assert!(
+        receipt_statuses(&published).is_empty(),
+        "the accepted write has learned nothing yet -- least of all a terminal"
+    );
     let fresh = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
@@ -964,7 +930,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
         Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert!(retried.iter().any(
-        |effect| matches!(effect, Effect::EmitReceipt(rid, WriteStatus::Cancelled) if *rid == id)
+        |effect| matches!(effect, Effect::EmitReceipt(rid, WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled))) if *rid == id)
     ));
     assert!(all_row_deltas(&retried)
         .iter()
@@ -982,7 +948,6 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
     )));
     let published = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(2, "cancel must commit first")),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -1002,7 +967,10 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
         effects.is_empty(),
         "a refused cancel must emit no terminal fact"
     );
-    assert_eq!(receipt_statuses(&published), [WriteStatus::Accepted]);
+    assert!(
+        receipt_statuses(&published).is_empty(),
+        "the accepted write has learned nothing yet -- least of all a terminal"
+    );
 
     let fresh = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -1018,21 +986,26 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
         Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert!(effects.iter().any(
-        |effect| matches!(effect, Effect::EmitReceipt(rid, WriteStatus::Cancelled) if *rid == id)
+        |effect| matches!(effect, Effect::EmitReceipt(rid, WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled))) if *rid == id)
     ));
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(removed) if *removed == event_id)));
     let mut statuses = receipt_statuses(&published);
     statuses.extend(receipt_statuses(&effects));
-    assert_eq!(statuses, [WriteStatus::Accepted, WriteStatus::Cancelled]);
+    assert_eq!(
+        statuses,
+        [WriteFact::Outcome(WriteOutcome::NotSent(
+            NotSentReason::Cancelled
+        ))]
+    );
 }
 
 /// #52 Q2 smoking gun: `EngineCore::on_publish` is the ONE place every
 /// publish converges (FFI, direct-Rust, `nmp-bdd`'s `EngineThread`), so a
 /// `WritePayload::Signed` whose content was tampered with after signing
-/// (id/sig stale relative to the new content) must be rejected there,
-/// before `WriteStatus::Accepted` is ever emitted and before any
+/// (id/sig stale relative to the new content) must be rejected there: the
+/// call itself refuses, nothing is taken into custody, and no
 /// `Effect::PublishEvent` is produced -- regardless of caller, with no FFI
 /// verify layer anywhere in the loop.
 #[test]
@@ -1064,7 +1037,6 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(forged),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -1073,9 +1045,9 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::EmitReceipt(_, WriteStatus::Failed(_))]
+            [Effect::PublishFailed(PublishError::SignatureInvalid { .. })]
         ),
-        "a forged Signed publish must terminate as the ONLY effect, as Failed -- got {effects:?}"
+        "a forged Signed publish must refuse the call as the ONLY effect -- got {effects:?}"
     );
     assert!(
         !effects
@@ -1083,10 +1055,9 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
             .any(|e| matches!(e, Effect::PublishEvent(..))),
         "a forged Signed publish must never produce Effect::PublishEvent"
     );
-    let statuses = receipt_statuses(&effects);
     assert!(
-        matches!(statuses.as_slice(), [WriteStatus::Failed(_)]),
-        "the sink must see Failed and nothing else -- never Accepted -- got {statuses:?}"
+        receipt_statuses(&effects).is_empty(),
+        "nothing was taken into custody, so there is no receipt stream to say anything"
     );
 }
 
@@ -1107,18 +1078,14 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(genuine.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
 
     assert!(
-        matches!(
-            effects.first(),
-            Some(Effect::EmitReceipt(_, WriteStatus::Accepted))
-        ),
-        "a valid Signed publish must still be Accepted first"
+        matches!(effects.first(), Some(Effect::WriteAccepted(_))),
+        "a valid Signed publish must still be taken into custody first"
     );
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::RequestSign(..))),

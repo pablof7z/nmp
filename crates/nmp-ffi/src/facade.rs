@@ -25,18 +25,20 @@ use crate::auth::{
 };
 use crate::convert::{
     cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, diagnostics_snapshot_to_ffi,
-    filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_pubkey, relay_information_error_kind,
-    sign_event_failure, sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi,
-    window_from_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError,
-    FfiRowPullError, WriteStatusRef,
+    filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_pubkey, publish_queue_entry_to_ffi,
+    relay_information_error_kind, remove_queue_entry_error_to_ffi, sign_event_failure,
+    sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi, window_from_ffi,
+    write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError, FfiRowPullError,
+    WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
-    FfiFilter, FfiFrame, FfiLiveQuery, FfiReceiptReattachment, FfiRelayInformation,
-    FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
-    FfiRelayInformationLimitations, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent,
-    FfiWindow, FfiWriteIntent, FfiWriteStatus,
+    FfiFilter, FfiFrame, FfiLiveQuery, FfiPublishQueueEntry, FfiReceiptReattachment,
+    FfiRelayInformation, FfiRelayInformationCachePolicy, FfiRelayInformationDocument,
+    FfiRelayInformationFreshness, FfiRelayInformationLimitations, FfiRemoveQueueEntryError,
+    FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow, FfiWriteFact,
+    FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -168,6 +170,7 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             app_relays: config.app_relays,
             fallback_relays: config.fallback_relays,
             allowed_local_relay_hosts: config.allowed_local_relay_hosts,
+            max_publish_attempts: nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             max_relays: config.max_relays as usize,
             max_auth_capabilities: config.max_auth_capabilities as usize,
         }
@@ -300,9 +303,10 @@ impl NmpEngine {
     /// Re-root every reactive query AND the active signing capability
     /// together onto `pubkey` (`None` -> logged-out / read-only). `pubkey`
     /// need not have been added via [`Self::add_account`] -- read-only
-    /// browsing of an account this app holds no key for is legal; any
-    /// publish attempted while active in that state terminates
-    /// `WriteStatus::Failed`, never a panic (M4 plan §5).
+    /// browsing of an account this app holds no key for is legal; a write
+    /// published while active in that state parks on
+    /// `FfiSigningState::AwaitingSigner` until a signer for THAT key
+    /// attaches, never a panic (M4 plan §5).
     pub fn set_active_account(&self, pubkey: Option<String>) -> Result<(), FfiError> {
         let pk = pubkey.as_deref().map(parse_pubkey).transpose()?;
         self.engine.set_active_account(pk)?;
@@ -435,16 +439,16 @@ impl NmpEngine {
 
     /// Enqueue a write (#680). The returned [`NmpReceiptStream`] exposes the
     /// stable receipt id ([`NmpReceiptStream::id`]) and streams every
-    /// `WriteStatus` this intent ever reaches (ledger #9 -- enqueue is not
+    /// `WriteFact` this intent ever reaches (ledger #9 -- enqueue is not
     /// converged; the first value is never a terminal for a durable/
     /// at-most-once intent) via `async fn next()`. A caller-supplied `Signed`
     /// payload that fails verification is no longer a synchronous error here
     /// (that guarantee moved to `nmp-engine::core::EngineCore::on_publish`'s
     /// acceptance boundary, Unit A0/#56, so it holds for every entry point) --
-    /// it surfaces as `WriteStatus::Failed`, the FIRST and only status the
-    /// stream delivers, with no preceding `Accepted`. Exhaustion of the
-    /// pre-acceptance correlation namespace instead returns a typed `FfiError`
-    /// synchronously: no receipt id or stream exists.
+    /// it refuses THIS CALL as `FfiError::PublishRefused`, taking nothing
+    /// into custody, so no receipt, no stream and no queue entry exist for
+    /// it. Exhaustion of the pre-acceptance correlation namespace is the
+    /// same shape: a typed `FfiError` and no receipt id.
     pub fn publish(&self, intent: FfiWriteIntent) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let write_intent = write_intent_from_ffi(intent)?;
         let receipt = self.engine.publish_tracked(write_intent)?;
@@ -454,7 +458,7 @@ impl NmpEngine {
     /// Attach to a retained receipt without collapsing corrupt durable
     /// evidence into the same result as an unknown id (#680). The `Attached`
     /// variant carries an [`NmpReceiptStream`] that transparently traverses
-    /// durable `WriteStatus` facts in finite pages and streams onward,
+    /// durable `WriteFact` facts in finite pages and streams onward,
     /// delivered pull-based via `async fn next()`.
     pub fn reattach_receipt(&self, receipt_id: u64) -> Result<FfiReceiptReattachment, FfiError> {
         let result = self.engine.reattach_receipt(nmp::ReceiptId(receipt_id))?;
@@ -516,6 +520,28 @@ impl NmpEngine {
             outcome,
             receipt_id,
         })
+    }
+
+    /// Read the app's own publish queue back (#1039).
+    ///
+    /// INSPECTION, never waiting: this returns what NMP knows right now and
+    /// never blocks on settlement.
+    pub fn publish_queue(&self) -> Result<Vec<FfiPublishQueueEntry>, FfiRemoveQueueEntryError> {
+        self.engine
+            .publish_queue()
+            .map(|entries| entries.iter().map(publish_queue_entry_to_ffi).collect())
+            .map_err(remove_queue_entry_error_to_ffi)
+    }
+
+    /// Forget one queue entry (#1039). The only way a write parked forever
+    /// on a missing signer, or a permanently-failed refused entry, ever ends.
+    pub fn remove_publish_queue_entry(
+        &self,
+        receipt_id: u64,
+    ) -> Result<(), FfiRemoveQueueEntryError> {
+        self.engine
+            .remove_publish_queue_entry(nmp::ReceiptId(receipt_id))
+            .map_err(remove_queue_entry_error_to_ffi)
     }
 
     /// Explicitly cancel one accepted unsigned write. A successful outcome
@@ -1008,7 +1034,7 @@ impl Drop for NmpDiagnosticsStream {
 /// The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]
 /// and the `Attached` reattachment, #680). It
 /// exposes the stable store-issued receipt id via [`Self::id`] and delivers
-/// ordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite
+/// ordered `WriteFact` facts via `async fn next()`. Live delivery is a finite
 /// FIFO that reports typed lag. Receipt facts are durable: the persisted
 /// publish-queue Redb store is the source of truth, so a dropped or lagged stream can
 /// be reattached and traverse retained facts through finite pages.
@@ -1025,7 +1051,7 @@ pub struct NmpReceiptStream {
 
 enum ReceiptDelivery {
     Active {
-        receiver: Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>,
+        receiver: Arc<nmp::AsyncFifoReceiver<nmp::WriteFact>>,
         next_cursor: Option<nmp::ReceiptReplayCursor>,
     },
     Cancelled,
@@ -1047,7 +1073,7 @@ impl NmpReceiptStream {
     fn from_reattachment(
         engine: Arc<nmp::Engine>,
         id: nmp::ReceiptId,
-        statuses: nmp::FifoReceiver<nmp::WriteStatus>,
+        statuses: nmp::FifoReceiver<nmp::WriteFact>,
         next_cursor: Option<nmp::ReceiptReplayCursor>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -1064,7 +1090,7 @@ impl NmpReceiptStream {
     fn current_receiver(
         &self,
     ) -> Option<(
-        Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>,
+        Arc<nmp::AsyncFifoReceiver<nmp::WriteFact>>,
         Option<nmp::ReceiptReplayCursor>,
     )> {
         let delivery = self.delivery.lock().unwrap();
@@ -1079,8 +1105,8 @@ impl NmpReceiptStream {
 
     fn install_page(
         &self,
-        prior: &Arc<nmp::AsyncFifoReceiver<nmp::WriteStatus>>,
-        statuses: nmp::FifoReceiver<nmp::WriteStatus>,
+        prior: &Arc<nmp::AsyncFifoReceiver<nmp::WriteFact>>,
+        statuses: nmp::FifoReceiver<nmp::WriteFact>,
         next_cursor: Option<nmp::ReceiptReplayCursor>,
     ) -> bool {
         let replacement = Arc::new(statuses.into_async());
@@ -1111,10 +1137,10 @@ impl NmpReceiptStream {
         self.id.0
     }
 
-    /// Await the next `WriteStatus`, or `None` once the intent has fully
+    /// Await the next `WriteFact`, or `None` once the intent has fully
     /// resolved or the engine has shut down. [`FfiError::ConcurrentNext`] on an
     /// overlapping call.
-    pub async fn next(&self) -> Result<Option<FfiWriteStatus>, FfiError> {
+    pub async fn next(&self) -> Result<Option<FfiWriteFact>, FfiError> {
         use std::sync::atomic::Ordering;
 
         if self.reading.swap(true, Ordering::AcqRel) {
@@ -1242,10 +1268,10 @@ impl Drop for NmpSignEventHandle {
 mod tests {
     use super::*;
     use crate::types::{
-        FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiDurability, FfiFilter, FfiFrame,
-        FfiIdentity, FfiLiveQuery, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest,
-        FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWritePayload, FfiWriteRouting,
-        FfiWriteStatus,
+        FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiIdentity,
+        FfiLiveQuery, FfiNotSentReason, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest,
+        FfiSigningState, FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWriteFact,
+        FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
     };
     use redb::ReadableTable;
     use std::collections::BTreeSet;
@@ -1332,7 +1358,7 @@ mod tests {
 
     /// Await the next receipt status within the lifecycle bound. `None` is the
     /// terminal signal (the intent fully resolved / engine shutdown).
-    async fn next_status(stream: &NmpReceiptStream) -> Option<FfiWriteStatus> {
+    async fn next_status(stream: &NmpReceiptStream) -> Option<FfiWriteFact> {
         tokio::time::timeout(Duration::from_secs(10), stream.next())
             .await
             .expect("a status must arrive within the lifecycle bound")
@@ -1960,12 +1986,13 @@ mod tests {
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
     }
 
-    /// #52's headline falsifier through the FFI boundary: a tampered
-    /// `FfiWritePayload::Signed` is no longer a synchronous `FfiError` --
-    /// `NmpEngine::publish` accepts it and the rejection surfaces on the receipt
-    /// stream as `WriteStatus::Failed`, the FIRST and only status delivered.
+    /// #52's headline falsifier through the FFI boundary, re-expressed for
+    /// #1237: a tampered `FfiWritePayload::Signed` is an INSTRUCTION THAT
+    /// CANNOT RESOLVE, so `NmpEngine::publish` refuses the call itself. No
+    /// receipt, no stream, and no queue entry exist to inspect -- the write
+    /// was never taken into custody, which is what "fails closed" now means.
     #[tokio::test]
-    async fn ffi_tampered_signed_publish_fails_closed_on_receipt_stream() {
+    async fn ffi_tampered_signed_publish_is_refused_by_publish_itself() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
 
         let keys = nostr::Keys::generate();
@@ -1984,30 +2011,25 @@ mod tests {
                 content: "tampered".to_string(),
                 sig: event.sig.to_string(),
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
         };
 
-        let receipt = engine
+        let error = engine
             .publish(intent)
-            .expect("a well-formed (if tampered) Signed payload must parse at the FFI boundary");
-        assert!(
-            receipt.id() > 0,
-            "publish must expose its stable receipt id"
-        );
-
-        match next_status(&receipt)
-            .await
-            .expect("a Durable intent must yield a status")
-        {
-            FfiWriteStatus::Failed { .. } => {}
-            other => panic!("expected FfiWriteStatus::Failed, got {other:?}"),
+            .err()
+            .expect("a tampered Signed payload must be refused by publish itself");
+        match error {
+            FfiError::PublishRefused { reason } => assert!(
+                reason.contains("signature"),
+                "the refusal must name the unverifiable signature, got {reason:?}"
+            ),
+            other => panic!("expected FfiError::PublishRefused, got {other:?}"),
         }
         assert!(
-            next_status(&receipt).await.is_none(),
-            "Failed must be the sole terminal status -- the stream then ends"
+            engine.publish_queue().expect("engine is open").is_empty(),
+            "a refused call takes no custody -- there is no queue entry to inspect"
         );
 
         engine.shutdown();
@@ -2015,8 +2037,8 @@ mod tests {
 
     /// #47 through the FFI boundary: an `Identity::Explicit` naming a
     /// pubkey with NO registered signer capability is accepted and PARKED as
-    /// `AwaitingCapability`. It must never silently terminate: after
-    /// `AwaitingCapability` the stream stays open (a timeout, never `None`).
+    /// `Signing { AwaitingSigner }`. It must never silently terminate: after
+    /// `AwaitingSigner` the stream stays open (a timeout, never `None`).
     #[tokio::test]
     async fn ffi_explicit_identity_for_unregistered_pubkey_parks_awaiting_capability() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
@@ -2035,7 +2057,6 @@ mod tests {
                     created_at: Some(nostr::Timestamp::now().as_secs()),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Explicit {
                 pubkey: overridden.public_key().to_hex(),
@@ -2051,15 +2072,14 @@ mod tests {
             "publish must expose its stable receipt id"
         );
 
+        // Acceptance is `publish` returning Ok, not a stream item; the first
+        // fact is the park itself.
         assert_eq!(
             next_status(&receipt).await,
-            Some(FfiWriteStatus::Accepted),
-            "must observe Accepted"
-        );
-        assert_eq!(
-            next_status(&receipt).await,
-            Some(FfiWriteStatus::AwaitingCapability {
-                pubkey: overridden.public_key().to_hex()
+            Some(FfiWriteFact::Signing {
+                state: FfiSigningState::AwaitingSigner {
+                    pubkey: overridden.public_key().to_hex()
+                }
             }),
             "the parked pubkey must be the frozen override, never the active account"
         );
@@ -2090,22 +2110,26 @@ mod tests {
                     created_at: Some(10),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
         };
+        // `publish` returning Ok IS acceptance -- no stream item to await.
         let receipt = engine.publish(intent).unwrap();
         let receipt_id = receipt.id();
-        assert_eq!(next_status(&receipt).await, Some(FfiWriteStatus::Accepted));
 
         assert_eq!(
             engine.cancel(receipt_id),
             Ok(FfiCancelWriteOutcome::Cancelled)
         );
+        let cancelled = FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::NotSent {
+                reason: FfiNotSentReason::Cancelled,
+            },
+        };
         let mut observed = false;
         while let Some(status) = next_status(&receipt).await {
-            if status == FfiWriteStatus::Cancelled {
+            if status == cancelled {
                 observed = true;
                 break;
             }
@@ -2154,9 +2178,9 @@ mod tests {
     }
 
     /// #99 end-to-end reattach: a real durable intent (no signer ever attaches,
-    /// so it settles into a retained `Accepted`+`AwaitingCapability` steady
-    /// state) is reattached through a SECOND, independent stream that replays the
-    /// identical durable `WriteStatus` prefix.
+    /// so it parks in a retained `Signing { AwaitingSigner }` steady state) is
+    /// reattached through a SECOND, independent stream that replays the
+    /// identical durable `WriteFact` prefix.
     #[tokio::test]
     async fn ffi_reattach_replays_real_receipt_facts_through_a_fresh_stream() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
@@ -2174,7 +2198,6 @@ mod tests {
                     created_at: Some(nostr::Timestamp::now().as_secs()),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
@@ -2187,17 +2210,12 @@ mod tests {
         assert!(receipt_id > 0, "publish must expose its stable receipt id");
 
         // Block for the exact retained steady state on the ORIGINAL stream first.
-        assert_eq!(
-            next_status(&receipt).await,
-            Some(FfiWriteStatus::Accepted),
-            "must observe Accepted"
-        );
-        assert_eq!(
-            next_status(&receipt).await,
-            Some(FfiWriteStatus::AwaitingCapability {
-                pubkey: keys.public_key().to_hex()
-            })
-        );
+        let parked = FfiWriteFact::Signing {
+            state: FfiSigningState::AwaitingSigner {
+                pubkey: keys.public_key().to_hex(),
+            },
+        };
+        assert_eq!(next_status(&receipt).await, Some(parked.clone()));
 
         // Reattach through a FRESH stream -- exercises the real durable-prefix
         // replay in `NmpEngine::reattach_receipt`.
@@ -2214,14 +2232,8 @@ mod tests {
 
         assert_eq!(
             next_status(&replay).await,
-            Some(FfiWriteStatus::Accepted),
-            "replay must deliver Accepted"
-        );
-        assert_eq!(
-            next_status(&replay).await,
-            Some(FfiWriteStatus::AwaitingCapability {
-                pubkey: keys.public_key().to_hex()
-            })
+            Some(parked),
+            "replay must reconstruct the identical durable prefix from the store"
         );
 
         engine.shutdown();
@@ -2265,7 +2277,6 @@ mod tests {
                         created_at: Some(nostr::Timestamp::now().as_secs()),
                     },
                 },
-                durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::Auto,
                 identity: FfiIdentity::Active,
                 correlation: None,
@@ -2276,8 +2287,12 @@ mod tests {
             let receipt_id = receipt.id();
             assert_eq!(
                 next_status(&receipt).await,
-                Some(FfiWriteStatus::Accepted),
-                "must observe Accepted"
+                Some(FfiWriteFact::Signing {
+                    state: FfiSigningState::AwaitingSigner {
+                        pubkey: keys.public_key().to_hex()
+                    }
+                }),
+                "the write must have a durable retained fact before it is corrupted"
             );
             engine.shutdown();
             receipt_id
@@ -2421,7 +2436,6 @@ mod tests {
                         content: unsigned.content.clone(),
                         created_at: Some(unsigned.created_at),
                     }),
-                    durability: nmp::Durability::Durable,
                     routing: nmp::WriteRouting::Auto,
                     identity: nmp::Identity::Active,
                     correlation: None,
@@ -2469,27 +2483,29 @@ mod tests {
     }
 
     /// #125's falsifier ported to the pull path: a receipt stream must terminate
-    /// in `None` when its `WriteStatus` sender is dropped (here via a tampered
-    /// `Signed` payload whose `Failed` is the sole terminal), after real delivery.
+    /// in `None` when its `WriteFact` sender is dropped, after real delivery.
+    ///
+    /// The old vehicle was a tampered `Signed` payload, which #1237 moved to a
+    /// synchronous `publish` refusal that creates no stream at all. The
+    /// property under test is about a stream that ENDS, so it now rides on a
+    /// real whole-write terminal: an explicit cancellation.
     #[tokio::test]
     async fn ffi_receipt_stream_ends_with_none_when_sender_dropped() {
         let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
 
         let keys = nostr::Keys::generate();
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9999), "original")
-            .sign_with_keys(&keys)
-            .expect("test fixture must sign cleanly");
+        engine
+            .set_active_account(Some(keys.public_key().to_hex()))
+            .expect("account must activate");
         let intent = FfiWriteIntent {
-            payload: FfiWritePayload::Signed {
-                id: event.id.to_hex(),
-                pubkey: event.pubkey.to_hex(),
-                created_at: event.created_at.as_secs(),
-                kind: event.kind.as_u16(),
-                tags: event.tags.iter().map(|t| t.clone().to_vec()).collect(),
-                content: "tampered".to_string(),
-                sig: event.sig.to_string(),
+            payload: FfiWritePayload::Event {
+                builder: crate::types::FfiEventBuilder {
+                    kind: 9999,
+                    tags: vec![],
+                    content: "stream terminal".to_string(),
+                    created_at: Some(nostr::Timestamp::now().as_secs()),
+                },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
@@ -2497,16 +2513,25 @@ mod tests {
 
         let receipt = engine
             .publish(intent)
-            .expect("a well-formed (if tampered) Signed payload must parse at the FFI boundary");
+            .expect("a well-formed unsigned intent must enqueue");
+        engine
+            .cancel(receipt.id())
+            .expect("an unsigned write cancels");
 
         // The stream is genuinely active first (the terminal fact arrives).
-        match next_status(&receipt)
-            .await
-            .expect("a Durable intent must yield a status")
-        {
-            FfiWriteStatus::Failed { .. } => {}
-            other => panic!("expected FfiWriteStatus::Failed, got {other:?}"),
+        let cancelled = FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::NotSent {
+                reason: FfiNotSentReason::Cancelled,
+            },
+        };
+        let mut observed = false;
+        while let Some(status) = next_status(&receipt).await {
+            if status == cancelled {
+                observed = true;
+                break;
+            }
         }
+        assert!(observed, "the whole-write terminal must be delivered");
 
         assert!(
             next_status(&receipt).await.is_none(),

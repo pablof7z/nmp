@@ -13,8 +13,7 @@ use std::time::{Duration, Instant};
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::types::{
-    FfiDurability, FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting,
+    FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -78,7 +77,6 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
                         created_at: Some(1_700_000_000 + i as u64),
                     },
                 },
-                durability: FfiDurability::Durable,
                 routing: FfiWriteRouting::Auto,
                 identity: FfiIdentity::Active,
                 correlation: None,

@@ -2,12 +2,10 @@ use super::canonical::{fold_seen_at, observation_key, observation_range, observa
 use super::commit::commit_prepared;
 use super::postings::Family;
 use super::postings_store::{scan_packed, PackedScan};
-use super::publish_queue::{
-    is_suppressed_in_txn, reconcile_ephemeral_receipts_in_txn, replace_lane_in_txn,
-};
+use super::publish_queue::{is_suppressed_in_txn, replace_lane_in_txn};
 use super::publish_queue_codec::{
     codec_error, decode_meta_u64, decode_relay, encode_meta_u64, relay_key, PublishQueueRelayId,
-    PENDING_EPHEMERAL_RECEIPTS_KEY, PUBLISH_QUEUE_CODEC_VERSION, PUBLISH_QUEUE_CODEC_VERSION_KEY,
+    PUBLISH_QUEUE_CODEC_VERSION, PUBLISH_QUEUE_CODEC_VERSION_KEY,
 };
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
@@ -466,7 +464,7 @@ impl RedbStore {
 
         let mut _open_write_transactions = 0;
         if has_schema_marker {
-            let pending_ephemeral = {
+            {
                 let read_txn = db.begin_read()?;
                 let schema_meta = read_txn.open_table(SCHEMA_META)?;
                 let version = schema_meta
@@ -523,46 +521,7 @@ impl RedbStore {
                     ))
                     .into());
                 }
-                let pending_ephemeral = publish_queue_meta
-                    .get(PENDING_EPHEMERAL_RECEIPTS_KEY)?
-                    .map(|guard| decode_meta_u64(guard.value(), "pending ephemeral receipt count"))
-                    .transpose()
-                    .map_err(|err| {
-                        redb::Error::Corrupted(format!(
-                            "invalid pending ephemeral receipt count: {err}"
-                        ))
-                    })?
-                    .unwrap_or(0);
-                pending_ephemeral
             };
-            // The one remaining write on the reopen path is CURRENT-epoch
-            // crash recovery (crash-abandoned ephemeral receipts), not schema
-            // work: it reconciles rows this exact schema wrote and is bounded
-            // by a count this exact schema maintains.
-            if pending_ephemeral > 0 {
-                let write_txn = db.begin_write()?;
-                {
-                    let mut publish_queue_receipts =
-                        write_txn.open_table(PUBLISH_QUEUE_RECEIPTS)?;
-                    let reconciled =
-                        reconcile_ephemeral_receipts_in_txn(&mut publish_queue_receipts)
-                            .map_err(|error| redb::Error::Corrupted(error.message().to_owned()))?
-                            as u64;
-                    if reconciled != pending_ephemeral {
-                        return Err(redb::Error::Corrupted(format!(
-                            "pending ephemeral receipt count is {pending_ephemeral}, found {reconciled} recoverable rows"
-                        ))
-                        .into());
-                    }
-                    let mut publish_queue_meta = write_txn.open_table(PUBLISH_QUEUE_META)?;
-                    publish_queue_meta.insert(
-                        PENDING_EPHEMERAL_RECEIPTS_KEY,
-                        encode_meta_u64(0).as_slice(),
-                    )?;
-                }
-                write_txn.commit()?;
-                _open_write_transactions += 1;
-            }
         } else {
             // A nonempty database without the exact current marker is never
             // treated as fresh and is never mutated: initializing over it

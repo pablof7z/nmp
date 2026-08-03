@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use nmp::mechanism::publish_queue::WriteStatus;
+use nmp::mechanism::publish_queue::{WriteFact, WriteOutcome};
 use nmp_store::{EventStore, RedbStore};
 
 use super::{NmpWorld, ME};
@@ -27,12 +27,11 @@ async fn past_tense_publish_observes_settled_absence_before_restart() {
         .publish_note_after_settled_own_absence("into the delayed void")
         .await;
 
-    let me = world.my_pubkey_hex();
-    let wanted = format!("author routes are Absent for {me}");
     assert!(
-        world.receipt_statuses().iter().any(
-            |status| matches!(status, WriteStatus::AwaitingRoute { detail } if detail.contains(&wanted))
-        ),
+        world
+            .receipt_statuses()
+            .iter()
+            .any(|status| matches!(status, WriteFact::Outcome(WriteOutcome::NoDestination))),
         "the setup returned before its causal settled-absence receipt revision"
     );
 
@@ -67,7 +66,7 @@ async fn past_tense_publish_observes_settled_absence_before_restart() {
     drop(store);
 
     world.restart_engine(Some(ME.to_string())).await;
-    let settled_after_restart = world.park_reason_contains(&wanted);
+    let settled_after_restart = world.no_destination_settled();
     let queries_after_restart = world
         .indexer_names
         .iter()
@@ -93,6 +92,6 @@ async fn past_tense_publish_observes_settled_absence_before_restart() {
         "the observed settled-absence revision did not survive receipt reattachment; \
          indexer queries before restart {queries_before_restart:?}, after restart \
          {queries_after_restart:?}; receipt {:?}",
-        world.park_reasons()
+        world.routing_facts_reported()
     );
 }

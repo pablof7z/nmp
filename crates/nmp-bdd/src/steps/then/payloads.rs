@@ -19,7 +19,7 @@
 
 use cucumber::then;
 
-use nmp::mechanism::publish_queue::WriteStatus;
+use nmp::mechanism::publish_queue::{RelayState, SigningState, WriteFact, WriteOutcome};
 use nostr::JsonUtil;
 
 use crate::world::{format_stated_time, NmpWorld};
@@ -113,15 +113,21 @@ async fn published_tags_are_exactly_those(w: &mut NmpWorld) {
 #[then(regex = r#"^nothing refused it for being an unrecognised kind$"#)]
 async fn nothing_refused_the_kind(w: &mut NmpWorld) {
     let last = last_index(w);
-    let refusals: Vec<String> = w
-        .composed_statuses(last)
-        .iter()
-        .filter_map(|s| match s {
-            WriteStatus::Failed(reason) => Some(reason.clone()),
-            WriteStatus::Rejected(_, reason) => Some(reason.clone()),
-            _ => None,
-        })
-        .collect();
+    let mut refusals: Vec<String> = w.publish_refusal().into_iter().collect();
+    refusals.extend(
+        w.composed_statuses(last)
+            .iter()
+            .filter_map(|s| match s {
+                WriteFact::Signing(SigningState::Refused { reason })
+                | WriteFact::Relay {
+                    state: RelayState::Rejected { reason },
+                    ..
+                } => Some(reason.clone()),
+                WriteFact::Outcome(WriteOutcome::Refused(reason)) => Some(format!("{reason:?}")),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+    );
     assert!(
         refusals.is_empty(),
         "a builder holds no whitelist of allowed kinds; a kind nobody wrote a module for \
@@ -260,55 +266,38 @@ async fn received_event_keeps_its_own_fields(w: &mut NmpWorld) {
 
 #[then(regex = r#"^the write is refused for failing verification$"#)]
 async fn refused_for_failing_verification(w: &mut NmpWorld) {
-    nothing_to_observe!(
-        w.identity_receipt_reported_anything(None),
-        "the publish reported no status at all, so it was neither refused nor accepted"
-    );
     assert!(
         w.write_refused_before_acceptance(None),
-        "verified verbatim means verified, and the refusal must come BEFORE acceptance; \
-         saw {:?}",
+        "verified verbatim means verified, and the refusal must come BEFORE acceptance -- \
+         `publish()` itself answers Err; saw {:?}",
         w.identity_receipt_statuses(None)
     );
 }
 
 #[then(regex = r#"^nothing was refused for want of an active account$"#)]
 async fn nothing_refused_for_want_of_an_account(w: &mut NmpWorld) {
-    let refusals: Vec<String> = w
-        .identity_receipt_statuses(None)
-        .iter()
-        .filter_map(|s| match s {
-            WriteStatus::Failed(reason) => Some(reason.clone()),
-            _ => None,
-        })
-        .collect();
+    let refusal = w.write_refusal_reason(None);
     assert!(
-        refusals.is_empty(),
+        refusal.is_none(),
         "a signed event needs no signer, so it needs no active account, so being logged \
-         out is not a reason to refuse it -- but it was refused with {refusals:?}"
+         out is not a reason to refuse it -- but it was refused with {refusal:?}"
     );
 }
 
 #[then(regex = r#"^the write is refused as a consent and author contradiction$"#)]
 async fn refused_as_a_consent_contradiction(w: &mut NmpWorld) {
-    nothing_to_observe!(
-        w.identity_receipt_reported_anything(None),
-        "the publish reported no status at all, so it was neither refused nor accepted"
-    );
     assert!(
         w.write_refused_before_acceptance(None),
         "there is no resolution that honours both statements, so it fails closed BEFORE \
          acceptance; saw {:?}",
         w.identity_receipt_statuses(None)
     );
-    let named_both = w
-        .identity_receipt_statuses(None)
-        .iter()
-        .any(|s| matches!(s, WriteStatus::Failed(reason) if reason.contains("does not match")));
+    let reason = w
+        .write_refusal_reason(None)
+        .expect("a refused publish carries the error it refused with");
     assert!(
-        named_both,
-        "the refusal must say which two statements contradict; saw {:?}",
-        w.identity_receipt_statuses(None)
+        reason.contains("does not match"),
+        "the refusal must say which two statements contradict; it said {reason:?}"
     );
 }
 

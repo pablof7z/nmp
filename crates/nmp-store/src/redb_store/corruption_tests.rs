@@ -29,10 +29,7 @@ use tempfile::TempDir;
 
 use super::postings::Family;
 use super::*;
-use crate::{
-    sentinel_signature, AcceptWrite, DurabilityOutcome, IntentSigState, PersistenceFault,
-    WriteDurability,
-};
+use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, IntentSigState, PersistenceFault};
 
 const RELAY: &str = "wss://corruption-proof.example";
 
@@ -75,7 +72,6 @@ fn accept_of(frozen: Event) -> AcceptWrite {
         monotonic_stamp: false,
         expected_pubkey,
         signing_identity_ref: "local".to_owned(),
-        durability: WriteDurability::Durable,
         routing: "auto".to_owned(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(1_000),

@@ -28,11 +28,11 @@ use std::time::{Duration, Instant};
 
 use nostr::{Event, EventId, JsonUtil, Tag, Timestamp};
 
-use nmp::mechanism::publish_queue::WriteStatus;
-use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp::mechanism::publish_queue::{SigningState, WriteFact};
+use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use super::budgets::{EVENTUALLY, NEVER};
-use super::observe::ReceiptState;
+use super::observe::{is_outcome_fact, ReceiptState};
 use super::NmpWorld;
 
 /// One builder this scenario published: exactly what the app handed over,
@@ -77,16 +77,12 @@ impl NmpWorld {
             .take()
             .expect("nmp-bdd: nothing was composed for this step to publish");
         self.ensure_started().await;
-        let statuses = self
-            .handle()
-            .publish(WriteIntent {
-                payload: WritePayload::Event(builder.clone()),
-                durability: Durability::Durable,
-                routing: WriteRouting::Auto,
-                identity: Identity::Active,
-                correlation: None,
-            })
-            .expect("BDD receipt correlation namespace must be available");
+        let result = self.handle().publish(WriteIntent {
+            payload: WritePayload::Event(builder.clone()),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        });
         self.last_publish_was_auto = true;
         // Not keyed by the text it says: `event-builder.feature` publishes the
         // same word twice on purpose ("the same logical event composed twice
@@ -99,7 +95,7 @@ impl NmpWorld {
             builder,
             receipt: self.receipts.len(),
         });
-        self.receipts.push(ReceiptState::new(statuses));
+        self.receipts.push(ReceiptState::from_publish(result));
     }
 
     /// The one-line form: compose and publish in a single step.
@@ -147,33 +143,38 @@ impl NmpWorld {
             .collect()
     }
 
-    /// Every status the `n`th composed publish has reported, waited out to
-    /// its full settle window so a negative claim is not vacuous.
-    pub fn composed_statuses(&mut self, index: usize) -> Vec<WriteStatus> {
+    /// Every fact the `n`th composed publish has reported, read once the
+    /// write has ENDED so a negative claim is not vacuous.
+    ///
+    /// Exactly one `Outcome` closes every receipt stream, so this stops on a
+    /// fact where it used to stop on the stream going quiet -- and falls back
+    /// to the full settle window for a write that legitimately never ends
+    /// (one parked on a route or a missing signer).
+    pub fn composed_statuses(&mut self, index: usize) -> Vec<WriteFact> {
         let receipt = self.composed_receipt(index);
-        receipt.eventually_within(NEVER, |_| false);
+        receipt.eventually_within(NEVER, |seen| seen.iter().any(is_outcome_fact));
         receipt.seen.clone()
     }
 
-    /// `Then the write is accepted` / `Then both events are accepted`.
+    /// `Then the write is accepted` / `Then both events are accepted` --
+    /// `publish()` returning `Ok` IS acceptance, so this is an immediate read
+    /// of what the door answered rather than a wait for a fact.
     pub fn composed_accepted(&mut self, index: usize) -> bool {
-        self.composed_receipt(index)
-            .eventually_within(EVENTUALLY, |seen| {
-                seen.iter().any(|s| matches!(s, WriteStatus::Accepted))
-            })
+        self.composed_receipt(index).refusal.is_none()
     }
 
     /// The id the engine froze for the `n`th composed publish, waited for.
-    /// `WriteStatus::Signed(id)` is the only place an app learns it, and it
-    /// is what makes "the published event" a thing a `Then` can point at even
+    /// `SigningState::Signed` is the only place an app learns it, and it is
+    /// what makes "the published event" a thing a `Then` can point at even
     /// when two publishes say the same words.
     pub fn composed_event_id(&mut self, index: usize) -> Option<EventId> {
         let receipt = self.composed_receipt(index);
         receipt.eventually_within(EVENTUALLY, |seen| {
-            seen.iter().any(|s| matches!(s, WriteStatus::Signed(_)))
+            seen.iter()
+                .any(|s| matches!(s, WriteFact::Signing(SigningState::Signed { .. })))
         });
         receipt.seen.iter().find_map(|s| match s {
-            WriteStatus::Signed(id) => Some(*id),
+            WriteFact::Signing(SigningState::Signed { event_id }) => Some(*event_id),
             _ => None,
         })
     }
@@ -279,19 +280,15 @@ impl NmpWorld {
         let routing = WriteRouting::Explicit([self.relay_url(relay)].into_iter().collect());
         self.handed_over = Some(event.clone());
         self.republished = Some(event.clone());
-        let statuses = self
-            .handle()
-            .publish(WriteIntent {
-                payload: WritePayload::Signed(event),
-                durability: Durability::Durable,
-                routing,
-                identity,
-                correlation: None,
-            })
-            .expect("BDD receipt correlation namespace must be available");
+        let result = self.handle().publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            routing,
+            identity,
+            correlation: None,
+        });
         self.last_publish_was_auto = false;
         self.last_receipt_text = None;
-        self.receipts.push(ReceiptState::new(statuses));
+        self.receipts.push(ReceiptState::from_publish(result));
     }
 
     /// The one id word this scenario bound, for the `When I publish IT as-is`
@@ -412,9 +409,12 @@ impl NmpWorld {
 
     /// The id of the note the world's one "the publish" stream froze.
     pub fn last_published_id(&mut self) -> Option<EventId> {
-        self.receipt_eventually(|seen| seen.iter().any(|s| matches!(s, WriteStatus::Signed(_))));
+        self.receipt_eventually(|seen| {
+            seen.iter()
+                .any(|s| matches!(s, WriteFact::Signing(SigningState::Signed { .. })))
+        });
         self.receipt_statuses().iter().find_map(|s| match s {
-            WriteStatus::Signed(id) => Some(*id),
+            WriteFact::Signing(SigningState::Signed { event_id }) => Some(*event_id),
             _ => None,
         })
     }

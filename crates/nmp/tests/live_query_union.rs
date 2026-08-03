@@ -43,11 +43,11 @@ use nmp_grammar::{
 };
 use nmp_router::{FixtureRoutingFacts, WireOp};
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
-    CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet,
-    InsertOutcome, IntentId, MemoryStore, PersistenceError, PromoteOutcome, PublishQueueAttempt,
-    PublishQueueIntent, PublishQueueReceipt, PublishQueueRouteRevision, RedbStore, RelayObserved,
-    RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
+    CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId,
+    MemoryStore, PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent,
+    PublishQueueReceipt, PublishQueueRouteRevision, RedbStore, RefuseReason, RelayObserved,
+    RemoveQueueEntryOutcome, RetractReason, StoredEvent,
 };
 use nostr::{Event, EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
 
@@ -921,21 +921,25 @@ impl EventStore for BranchReadFailureStore {
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         self.inner.accept_write(accept)
     }
-    fn accept_ephemeral(
+    fn enumerate_publish_queue_receipts(
+        &self,
+    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
+        self.inner.enumerate_publish_queue_receipts()
+    }
+    fn remove_publish_queue_entry(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<RemoveQueueEntryOutcome, PersistenceError> {
+        self.inner.remove_publish_queue_entry(receipt_id)
+    }
+    fn accept_refused(
         &mut self,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        reason: RefuseReason,
     ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
-    }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
+        self.inner
+            .accept_refused(frozen_id, expected_pubkey, reason)
     }
     fn promote_signed(
         &mut self,

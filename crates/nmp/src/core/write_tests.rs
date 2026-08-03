@@ -7,23 +7,8 @@ mod receipt_allocator_tests {
     use super::*;
 
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{MemoryStore, RedbStore};
+    use nmp_store::{MemoryStore, RedbStore, RefuseReason};
     use nostr::{Keys, Kind};
-
-    fn rejected_intent(created_at: u64) -> WriteIntent {
-        WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::TextNote,
-                tags: (vec![]).into_iter().collect(),
-                content: ("no active account").into(),
-                created_at: Some(Timestamp::from(created_at)),
-            }),
-            durability: Durability::Durable,
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: None,
-        }
-    }
 
     fn frozen_note(author: PublicKey) -> SignedEvent {
         let created_at = Timestamp::from(1_700_000_000);
@@ -42,7 +27,7 @@ mod receipt_allocator_tests {
     }
 
     #[test]
-    fn stale_replaceable_edit_surfaces_a_typed_conflict_before_acceptance() {
+    fn stale_replaceable_edit_is_refused_into_custody_keeping_both_event_ids() {
         use nmp_store::RelayObserved;
         use nostr::EventBuilder;
 
@@ -82,56 +67,42 @@ mod receipt_allocator_tests {
                 },
                 expected_base: Some(base.id),
             },
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
         }));
 
-        let expected = WriteStatus::ReplaceableConflict {
-            expected: Some(base.id),
-            actual: Some(concurrent.id),
-        };
-        assert!(effects
+        // CUSTODY, not a refused call: the store was working and said no,
+        // so the write becomes a permanently-failed queue entry the app can
+        // read back. Both event ids survive verbatim -- that pair is what
+        // lets an app fetch `actual`, reapply the change and resubmit
+        // without ever troubling the user.
+        let receipt = effects
             .iter()
-            .any(|effect| matches!(effect, Effect::EmitReceipt(_, status) if *status == expected)));
-        assert!(core.pending.is_empty());
-        assert!(core
-            .resolver
-            .store()
-            .recover_publish_queue()
-            .expect("recover delivery")
-            .is_empty());
-    }
-
-    #[test]
-    fn last_upper_half_id_is_issued_once_then_exhaustion_is_stable_and_typed() {
-        const FIRST_UNACCEPTED_ID: u64 = 1u64 << 63;
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
-        core.set_next_unaccepted_receipt_for_test(Some(FIRST_UNACCEPTED_ID));
-
-        let last = core.handle(EngineMsg::Publish(rejected_intent(1)));
-        assert!(last.iter().any(|effect| {
-            matches!(
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(id) => Some(*id),
+                _ => None,
+            })
+            .expect("a store-refused write is still taken into custody");
+        let expected = WriteFact::Outcome(WriteOutcome::Refused(
+            RefuseReason::ReplaceableBaseChanged {
+                expected: Some(base.id),
+                actual: Some(concurrent.id),
+            },
+        ));
+        assert!(
+            effects.iter().any(|effect| matches!(
                 effect,
-                Effect::EmitReceipt(ReceiptId(id), WriteStatus::Failed(_))
-                    if *id == FIRST_UNACCEPTED_ID
-            )
-        }));
-        for created_at in [2, 3] {
-            let exhausted = core.handle(EngineMsg::Publish(rejected_intent(created_at)));
-            assert!(matches!(
-                exhausted.as_slice(),
-                [Effect::PublishFailed(
-                    PublishError::ReceiptCorrelationIdExhausted
-                )]
-            ));
-            assert!(!exhausted
+                Effect::EmitReceipt(id, status) if *id == receipt && *status == expected
+            )),
+            "the refusal must name BOTH event ids: {effects:?}"
+        );
+        assert!(
+            !effects
                 .iter()
-                .any(|effect| matches!(effect, Effect::EmitReceipt(..))));
-        }
-
-        assert_eq!(FIRST_UNACCEPTED_ID - 1, u64::MAX >> 1);
+                .any(|effect| matches!(effect, Effect::PublishFailed(_))),
+            "a stale base is never a refused call: {effects:?}"
+        );
         assert!(core.pending.is_empty());
         assert!(core
             .resolver
@@ -177,7 +148,6 @@ mod receipt_allocator_tests {
                 content: ("correlation boundary").into(),
                 created_at: Some(Timestamp::from(93u64)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -191,7 +161,7 @@ mod receipt_allocator_tests {
                 _ => None,
             })
             .expect("accepted unsigned intent requests signing");
-        let intent = core.pending[&receipt].intent_id.unwrap();
+        let intent = core.pending[&receipt].intent_id;
         core.set_next_attempt_correlation_for_test(None);
 
         let effects = core.handle(EngineMsg::SignerCompleted(
@@ -260,11 +230,37 @@ mod receipt_allocator_tests {
     }
 
     #[test]
-    fn every_zero_destination_author_state_remains_a_provider_need() {
+    fn a_zero_destination_answer_separates_still_looking_from_finished_looking() {
+        // The whole of #1236, as a type rather than a string. `complete` is a
+        // statement about KNOWLEDGE EXHAUSTION, never about delivery, and a
+        // zero-destination answer is where that earns its keep: an app must
+        // show "determining destinations" for one and "nowhere to publish"
+        // for the other, and collapsing them makes both unactionable.
         let author = Keys::generate().public_key();
         let event = frozen_note(author);
-        let cases = [
-            ("Unknown", "Unknown", FixtureRoutingFacts::new()),
+
+        // Still looking: nobody has finished the lookup, so nothing has been
+        // learned yet and NOTHING may expire this.
+        let core = EngineCore::new_with_fixture_routing_facts(
+            MemoryStore::new(),
+            FixtureRoutingFacts::new(),
+            10,
+        );
+        let unknown = core.resolve_routes(&WriteRouting::Auto, &event);
+        assert!(
+            unknown.relays.is_empty() && !unknown.complete,
+            "an unsettled author must park, not terminate: {unknown:?}"
+        );
+        assert_eq!(
+            unknown.author_route_needs,
+            BTreeSet::from([author]),
+            "a parked write keeps its contributor declared, because a later positive replacement is the only unpark signal"
+        );
+
+        // Finished looking, twice over. A settled-but-empty list and a
+        // settled absence are both answers, and an answer that names nobody
+        // means there is nowhere to publish.
+        for (label, detail_label, facts) in [
             (
                 "Present empty",
                 "Present outbound",
@@ -275,27 +271,24 @@ mod receipt_allocator_tests {
                 "Absent",
                 FixtureRoutingFacts::new().with_author_absent(author),
             ),
-        ];
-
-        for (label, detail_label, facts) in cases {
+        ] {
             let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10);
             let answer = core.resolve_routes(&WriteRouting::Auto, &event);
 
             assert!(
-                answer.relays.is_empty() && !answer.complete,
-                "{label} with no operator route must park: {answer:?}"
+                answer.relays.is_empty() && answer.complete,
+                "{label} with no operator route is knowledge EXHAUSTED, so the write has nowhere to go rather than something to wait for: {answer:?}"
             );
-            assert_eq!(
-                answer.author_route_needs,
-                BTreeSet::from([author]),
-                "{label} remains a provider need because a later positive replacement is the only unpark signal"
+            assert!(
+                answer.author_route_needs.is_empty(),
+                "{label} has nothing left to look up, so it must not hold a provider open on a question already answered: {answer:?}"
             );
             assert!(
                 answer
                     .detail
                     .as_deref()
                     .is_some_and(|detail| detail.contains(detail_label)),
-                "the receipt must distinguish {label} truthfully: {answer:?}"
+                "the answer must still distinguish {label} truthfully: {answer:?}"
             );
         }
     }
@@ -360,7 +353,6 @@ mod receipt_allocator_tests {
                     content: ("recover my route need").into(),
                     created_at: Some(Timestamp::from(100u64)),
                 }),
-                durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity: Identity::Active,
                 correlation: None,

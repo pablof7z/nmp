@@ -19,7 +19,7 @@ use std::time::Instant;
 use nmp_grammar::CorrelationToken;
 use nmp_store::{
     sentinel_signature, AcceptWrite, EventStore, HandoffEvidence, IntentSigState,
-    PublishQueueAttemptHandoff, PublishQueuePostHandoffState, RedbStore, WriteDurability,
+    PublishQueueAttemptHandoff, PublishQueuePostHandoffState, RedbStore,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use serde::Serialize;
@@ -275,7 +275,6 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
                 monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "delivery-benchmark".into(),
-                durability: WriteDurability::Durable,
                 routing: "fixed-representative-fixture".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(2_000_000 + intent_index as u64),

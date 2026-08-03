@@ -64,7 +64,6 @@ use crate::{
     PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
     PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
-    WriteDurability,
 };
 
 #[cfg(feature = "bench-instrumentation")]
@@ -268,15 +267,17 @@ impl EventStore for RedbStore {
         write_ops::compensate_write_with_state(self, intent_id, reason)
     }
 
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<crate::CancelEphemeralOutcome, PersistenceError> {
-        write_ops::cancel_ephemeral_receipt(self, receipt_id)
+    fn enumerate_publish_queue_receipts(
+        &self,
+    ) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
+        publish_queue_ops::enumerate_publish_queue_receipts(self)
     }
 
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        write_ops::mark_ephemeral_signed(self, receipt_id)
+    fn remove_publish_queue_entry(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<crate::RemoveQueueEntryOutcome, PersistenceError> {
+        publish_queue_ops::remove_publish_queue_entry(self, receipt_id)
     }
 
     fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
@@ -464,12 +465,13 @@ impl EventStore for RedbStore {
         publish_queue_ops::close_terminal_intent(self, intent_id)
     }
 
-    fn accept_ephemeral(
+    fn accept_refused(
         &mut self,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        reason: crate::RefuseReason,
     ) -> Result<u64, PersistenceError> {
-        publish_queue_ops::accept_ephemeral(self, frozen_id, expected_pubkey)
+        publish_queue_ops::accept_refused(self, frozen_id, expected_pubkey, reason)
     }
 }
 

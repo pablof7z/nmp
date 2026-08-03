@@ -1,7 +1,6 @@
 use super::canonical::{
     encode_stored_event_record, record_to_stored_event, stored_event_to_record,
 };
-use super::commit::commit_prepared;
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
@@ -10,22 +9,21 @@ use super::mutation::{
     tombstone_refuses,
 };
 use super::publish_queue::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decrement_pending_ephemeral_in_txn,
-    is_suppressed_in_txn, remove_addr_claimant_in_txn, remove_claimant_in_txn,
-    update_publish_queue_receipt, PublishQueueIntentRecord, PublishQueueReceiptRecord,
-    SuppressClaimRecord,
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, is_suppressed_in_txn,
+    remove_addr_claimant_in_txn, remove_claimant_in_txn, update_publish_queue_receipt,
+    PublishQueueIntentRecord, PublishQueueReceiptRecord, SuppressClaimRecord,
 };
 use super::publish_queue_codec::{
     attempt_range, codec_error, deadline_intent_range, deadline_key, decode_claims,
-    decode_deadline, decode_displaced, decode_intent, decode_receipt, encode_claims,
-    encode_displaced, encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
+    decode_deadline, decode_displaced, decode_intent, encode_claims, encode_displaced,
+    encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
     parse_deadline_by_intent_key, parse_lane_key, receipt_key, route_revision_range,
 };
 use super::query::expiration_key;
 use super::schema::{
     persist_err, EventKey, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
-    PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -226,7 +224,6 @@ pub(super) fn accept_write(
         monotonic_stamp,
         expected_pubkey,
         signing_identity_ref,
-        durability,
         routing,
         mut sig_state,
         accepted_at,
@@ -630,7 +627,6 @@ pub(super) fn accept_write(
                 frozen: frozen.clone(),
                 expected_pubkey,
                 signing_identity_ref,
-                durability,
                 routing,
                 sig_state,
                 accepted_at,
@@ -1200,89 +1196,4 @@ pub(super) fn compensate_write_with_state(
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::CompensateBeforeCommit);
     write.commit_prepared(outcome)
-}
-
-pub(super) fn cancel_ephemeral_receipt(
-    store: &mut RedbStore,
-    receipt_id: u64,
-) -> Result<crate::CancelEphemeralOutcome, PersistenceError> {
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    let outcome = {
-        let mut receipts = write_txn
-            .open_table(PUBLISH_QUEUE_RECEIPTS)
-            .map_err(persist_err)?;
-        let key = receipt_key(receipt_id);
-        let existing = receipts.get(&key).map_err(persist_err)?;
-        let Some(encoded) = existing.map(|guard| guard.value().to_vec()) else {
-            return Ok(crate::CancelEphemeralOutcome::NotFound);
-        };
-        let mut record =
-            decode_receipt(&encoded).map_err(|error| codec_error("ephemeral receipt", error))?;
-        if record.intent_id.is_some() {
-            crate::CancelEphemeralOutcome::NotEphemeral
-        } else {
-            match record.state {
-                ReceiptState::Accepted => {
-                    record.state = ReceiptState::Cancelled;
-                    let encoded = encode_receipt(&record);
-                    receipts
-                        .insert(&key, encoded.as_slice())
-                        .map_err(persist_err)?;
-                    let mut meta = write_txn
-                        .open_table(PUBLISH_QUEUE_META)
-                        .map_err(persist_err)?;
-                    decrement_pending_ephemeral_in_txn(&mut meta)?;
-                    crate::CancelEphemeralOutcome::Cancelled
-                }
-                ReceiptState::Signed => crate::CancelEphemeralOutcome::AlreadySigned,
-                ReceiptState::Cancelled => crate::CancelEphemeralOutcome::AlreadyCancelled,
-                ReceiptState::Abandoned => crate::CancelEphemeralOutcome::AlreadyAbandoned,
-                ReceiptState::Compensated => crate::CancelEphemeralOutcome::AlreadyCompensated,
-                ReceiptState::Superseded => crate::CancelEphemeralOutcome::AlreadySuperseded,
-            }
-        }
-    };
-    if outcome == crate::CancelEphemeralOutcome::Cancelled {
-        commit_prepared(write_txn, outcome)
-    } else {
-        Ok(outcome)
-    }
-}
-
-pub(super) fn mark_ephemeral_signed(
-    store: &mut RedbStore,
-    receipt_id: u64,
-) -> Result<bool, PersistenceError> {
-    let write_txn = store.db.begin_write().map_err(persist_err)?;
-    let changed = {
-        let mut receipts = write_txn
-            .open_table(PUBLISH_QUEUE_RECEIPTS)
-            .map_err(persist_err)?;
-        let key = receipt_key(receipt_id);
-        let existing = receipts.get(&key).map_err(persist_err)?;
-        let Some(encoded) = existing.map(|guard| guard.value().to_vec()) else {
-            return Ok(false);
-        };
-        let mut record =
-            decode_receipt(&encoded).map_err(|error| codec_error("ephemeral receipt", error))?;
-        if record.intent_id.is_some() || record.state != ReceiptState::Accepted {
-            false
-        } else {
-            record.state = ReceiptState::Signed;
-            let encoded = encode_receipt(&record);
-            receipts
-                .insert(&key, encoded.as_slice())
-                .map_err(persist_err)?;
-            let mut meta = write_txn
-                .open_table(PUBLISH_QUEUE_META)
-                .map_err(persist_err)?;
-            decrement_pending_ephemeral_in_txn(&mut meta)?;
-            true
-        }
-    };
-    if changed {
-        commit_prepared(write_txn, changed)
-    } else {
-        Ok(changed)
-    }
 }

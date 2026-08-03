@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::convert::{write_status_to_ffi, FfiError, WriteStatusRef};
-use crate::types::FfiWriteStatus;
+use crate::types::FfiWriteFact;
 use nmp_nip02::{
     AsyncFollowObservation, ComposeFollowError, FollowActionFailure, FollowActionStatus,
     FollowAvailability, FollowRelationship, FollowSnapshot,
@@ -63,7 +63,7 @@ pub enum FfiFollowActionStatus {
     },
     Receipt {
         receipt_id: u64,
-        status: FfiWriteStatus,
+        status: FfiWriteFact,
     },
     Failed {
         failure: FfiFollowActionFailure,

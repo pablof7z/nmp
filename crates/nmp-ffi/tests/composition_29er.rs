@@ -28,8 +28,7 @@ use std::time::Duration;
 use nmp_ffi::facade::{NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::nip02::NmpFollowStream;
 use nmp_ffi::types::{
-    FfiBinding, FfiDurability, FfiFilter, FfiIdentity, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting,
+    FfiBinding, FfiFilter, FfiIdentity, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -211,7 +210,6 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
                     created_at: Some(1_700_000_000),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,

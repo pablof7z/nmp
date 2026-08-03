@@ -21,9 +21,7 @@ use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IndexedTagName};
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::{
-    sentinel_signature, AcceptWrite, IntentSigState, RedbStore, RelayObserved, WriteDurability,
-};
+use nmp_store::{sentinel_signature, AcceptWrite, IntentSigState, RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 struct CountingAllocator;
@@ -191,7 +189,6 @@ fn accept_write(signed: &Event, accepted_at: u64) -> AcceptWrite {
         monotonic_stamp: false,
         expected_pubkey: signed.pubkey,
         signing_identity_ref: "local-mutation-benchmark".to_owned(),
-        durability: WriteDurability::Durable,
         routing: "local-mutation-benchmark".to_owned(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),

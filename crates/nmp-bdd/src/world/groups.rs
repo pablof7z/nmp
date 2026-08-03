@@ -378,11 +378,19 @@ impl NmpWorld {
     /// recomputed the id would be asserting against its own arithmetic.
     pub fn published_event_id(&mut self) -> Option<EventId> {
         self.receipt_eventually(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, nmp::mechanism::publish_queue::WriteStatus::Signed(_)))
+            seen.iter().any(|s| {
+                matches!(
+                    s,
+                    nmp::mechanism::publish_queue::WriteFact::Signing(
+                        nmp::mechanism::publish_queue::SigningState::Signed { .. }
+                    )
+                )
+            })
         });
         self.receipt_statuses().into_iter().find_map(|s| match s {
-            nmp::mechanism::publish_queue::WriteStatus::Signed(id) => Some(id),
+            nmp::mechanism::publish_queue::WriteFact::Signing(
+                nmp::mechanism::publish_queue::SigningState::Signed { event_id },
+            ) => Some(event_id),
             _ => None,
         })
     }

@@ -9,7 +9,7 @@ use nmp_store::{
     PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
     PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
-    PublishQueueTransientCause, RedbStore, WriteDurability,
+    PublishQueueTransientCause, RedbStore,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -38,7 +38,6 @@ fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
         monotonic_stamp: false,
         expected_pubkey: keys.public_key(),
         signing_identity_ref: "lane-contract".into(),
-        durability: WriteDurability::Durable,
         routing: "lane-contract".into(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
@@ -1191,7 +1190,7 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
                     result: HandoffEvidence::Written,
                 },
                 PublishQueuePostHandoffState::Terminal {
-                    outcome: PublishQueueAttemptOutcome::OutcomeUnknown,
+                    outcome: PublishQueueAttemptOutcome::GaveUp,
                     finished_at: Timestamp::from(314),
                 },
             )

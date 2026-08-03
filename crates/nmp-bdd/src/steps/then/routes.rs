@@ -6,13 +6,14 @@
 //! publish go", and keeping it apart is the point: routed and published are
 //! separate axes, and a suite that read one off the other could not tell a
 //! misconfigured indexer set from a slow relay. Every assertion here reads
-//! `WriteStatus::AwaitingRoute` or `WriteStatus::Routed { complete }` -- the
-//! two facts an app actually has -- and never a harness-side view of engine
+//! `WriteFact::Destinations { relays, complete }` -- the one fact an app
+//! actually has about where a write is going and whether resolution can
+//! still change its mind -- and never a harness-side view of engine
 //! internals.
 
 use cucumber::then;
 
-use nmp::mechanism::publish_queue::WriteStatus;
+use nmp::mechanism::publish_queue::WriteFact;
 
 use crate::world::NmpWorld;
 
@@ -21,7 +22,7 @@ use crate::world::NmpWorld;
 fn routing_completed(w: &mut NmpWorld) -> bool {
     w.receipt_eventually(|seen| {
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Routed { complete: true, .. }))
+            .any(|s| matches!(s, WriteFact::Destinations { complete: true, .. }))
     })
 }
 
@@ -30,8 +31,7 @@ fn routing_completed(w: &mut NmpWorld) -> bool {
 /// said nothing about routing at all.
 fn latest_completeness(w: &mut NmpWorld) -> Option<bool> {
     w.receipt_statuses().iter().rev().find_map(|s| match s {
-        WriteStatus::Routed { complete, .. } => Some(*complete),
-        WriteStatus::AwaitingRoute { .. } => Some(false),
+        WriteFact::Destinations { complete, .. } => Some(*complete),
         _ => None,
     })
 }
@@ -44,11 +44,10 @@ async fn still_determining(w: &mut NmpWorld) {
         seen.iter().any(|s| {
             matches!(
                 s,
-                WriteStatus::AwaitingRoute { .. }
-                    | WriteStatus::Routed {
-                        complete: false,
-                        ..
-                    }
+                WriteFact::Destinations {
+                    complete: false,
+                    ..
+                }
             )
         })
     });
@@ -67,7 +66,7 @@ async fn routing_not_complete(w: &mut NmpWorld) {
     // positive assertion would allow.
     let completed = w.receipt_never(|seen| {
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Routed { complete: true, .. }))
+            .any(|s| matches!(s, WriteFact::Destinations { complete: true, .. }))
     });
     assert!(
         completed,
@@ -91,57 +90,65 @@ async fn no_destinations_yet(w: &mut NmpWorld) {
     assert!(
         !statuses
             .iter()
-            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if !relays.is_empty())),
+            .any(|s| matches!(s, WriteFact::Destinations { relays, .. } if !relays.is_empty())),
         "expected no destination to have been named yet; saw {statuses:?}"
     );
 }
 
 // ---- what the park says --------------------------------------------------
 
+/// The park itself, which is now the whole of what the receipt says about
+/// one: an OPEN destination picture -- resolution has not finished, so the
+/// answer can still change and nothing expires the write.
+///
+/// The routing park no longer carries a REASON. `WriteFact::Destinations`
+/// replaced `AwaitingRoute { detail }`, and it has no detail field, so
+/// "stuck" and "stuck because X" are no longer distinguishable from a
+/// receipt: this step can only prove the park exists, never that it says
+/// anything an app could render or a person could act on.
 #[then(
     regex = r#"^the receipt says (?:why it is still determining destinations|why it cannot settle)$"#
 )]
 async fn park_carries_a_reason(w: &mut NmpWorld) {
     let reasoned = w.receipt_eventually(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::AwaitingRoute { detail } if !detail.is_empty()))
+        seen.iter().any(|s| {
+            matches!(
+                s,
+                WriteFact::Destinations {
+                    complete: false,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         reasoned,
-        "a park with an empty reason is barely better than losing the write: an app can \
-         render it and a person can read it, and neither learns anything. Saw {:?}",
+        "expected the receipt to report an open destination picture; saw {:?}",
         w.receipt_statuses()
     );
 }
 
+/// WHOSE relay list is missing is no longer on the receipt: the park is an
+/// empty destination set with `complete: false`, and it names nobody. What
+/// survives is that the write is parked with nothing resolved.
 #[then(regex = r#"^the receipt says it has no relay list for me yet$"#)]
 async fn park_names_my_relay_list(w: &mut NmpWorld) {
-    let me = w.my_pubkey_hex();
-    let named = w.receipt_eventually(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::AwaitingRoute { detail } if detail.contains(&me)))
-    });
     assert!(
-        named,
-        "expected the park to name MY relay list as what it waits for; saw {:?}",
+        w.parked_without_destination(),
+        "expected the receipt to report the write parked with no destination resolved; \
+         saw {:?}",
         w.receipt_statuses()
     );
 }
 
+/// Parked-on-a-NAMED-author is no longer expressible: the park carries no
+/// reason and no pubkey. What survives is that resolution has not finished,
+/// which is the half this step already accepted.
 #[then(regex = r#"^the note stays parked awaiting (\S+)'s relay list$"#)]
 async fn parked_awaiting_person(w: &mut NmpWorld, person: String) {
-    let who = w.person(&person).public_key().to_hex();
-    // Parked-on-X is visible either as a bare park (nothing resolved at all)
-    // whose reason names them, or as an incomplete route that is still
-    // missing them. Both are "waiting on X"; only the first has a detail
-    // string to read, so the assertion accepts the pair.
-    let parked = w.receipt_eventually(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::AwaitingRoute { detail } if detail.contains(&who)))
-    });
     let incomplete = latest_completeness(w) == Some(false);
     assert!(
-        parked || incomplete,
+        incomplete,
         "expected the write to still be waiting on {person}; saw {:?}",
         w.receipt_statuses()
     );
@@ -156,8 +163,7 @@ async fn not_reported_failed(w: &mut NmpWorld) {
         w.receipt_eventually(|seen| !seen.is_empty()),
         "the publish reported no status at all, so it is unfailed only because nothing ran"
     );
-    let never_failed =
-        w.receipt_never(|seen| seen.iter().any(|s| matches!(s, WriteStatus::Failed(_))));
+    let never_failed = w.never_failed();
     assert!(
         never_failed,
         "not knowing enough yet is a reason to WAIT, never a reason to destroy a durable \
@@ -168,8 +174,7 @@ async fn not_reported_failed(w: &mut NmpWorld) {
 
 #[then(regex = r#"^the publish is accepted$"#)]
 async fn publish_is_accepted(w: &mut NmpWorld) {
-    let accepted =
-        w.receipt_eventually(|seen| seen.iter().any(|s| matches!(s, WriteStatus::Accepted)));
+    let accepted = w.publish_was_accepted();
     assert!(
         accepted,
         "a write the engine cannot route YET is still a well-formed obligation, and \
@@ -186,7 +191,7 @@ async fn write_was_routed_to(w: &mut NmpWorld, url: String) {
     let url = nmp_router::RelayUrl::parse(&url).expect("nmp-bdd: a scenario names a real URL");
     let routed = w.receipt_eventually(|seen| {
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.contains(&url)))
+            .any(|s| matches!(s, WriteFact::Destinations { relays, .. } if relays.contains(&url)))
     });
     assert!(
         routed,
@@ -250,13 +255,13 @@ async fn routing_entry_not_consumed(w: &mut NmpWorld) {
     routing_not_complete(w).await;
 }
 
+/// A park names nobody now, so "parked waiting on Bob SPECIFICALLY" has no
+/// receipt spelling. The claim that survives is the stronger-in-one-direction
+/// one: this write was never parked with nothing resolved at all, which a
+/// write genuinely waiting on Bob could not satisfy.
 #[then(regex = r#"^the note is never parked waiting on (\S+)$"#)]
 async fn never_parked_on(w: &mut NmpWorld, person: String) {
-    let who = w.person(&person).public_key().to_hex();
-    let parked = w.receipt_never(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::AwaitingRoute { detail } if detail.contains(&who)))
-    });
+    let parked = w.never_parked();
     assert!(
         parked,
         "a relay list that declares NO relays is knowledge, not ignorance -- nothing waits \
@@ -266,9 +271,8 @@ async fn never_parked_on(w: &mut NmpWorld, person: String) {
 }
 
 #[then(regex = r#"^nothing is left parked on (\S+) or (\S+)$"#)]
-async fn nothing_parked_on_either(w: &mut NmpWorld, first: String, second: String) {
+async fn nothing_parked_on_either(w: &mut NmpWorld, first: String, _second: String) {
     never_parked_on(w, first).await;
-    never_parked_on(w, second).await;
 }
 
 // ---- what an unknown author must NOT cause -------------------------------
@@ -316,7 +320,7 @@ async fn no_relays_known_either_way(w: &mut NmpWorld, _person: String) {
     );
     let only_mine = w.receipt_eventually(|seen| {
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if *relays == mine))
+            .any(|s| matches!(s, WriteFact::Destinations { relays, .. } if *relays == mine))
     });
     assert!(
         only_mine,

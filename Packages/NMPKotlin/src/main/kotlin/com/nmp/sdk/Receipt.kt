@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiCancelWriteException
+import uniffi.nmp_ffi.FfiRemoveQueueEntryException
 import uniffi.nmp_ffi.FfiCancelWriteOutcome
 import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.NmpReceiptStream
@@ -11,7 +12,7 @@ import uniffi.nmp_ffi.NmpReceiptStream
 /** A stable receipt identity and its stream of retained/live write facts. */
 data class Receipt(
     val id: ULong,
-    val status: Flow<WriteStatus>,
+    val status: Flow<WriteFact>,
 )
 
 sealed interface ReceiptReattachment {
@@ -35,8 +36,10 @@ sealed class NMPWriteCancellationError(message: String) : Exception(message) {
     data class AlreadySuperseded(val receiptId: ULong) :
         NMPWriteCancellationError("receipt $receiptId was superseded by a newer write")
 
-    data class AlreadyAbandoned(val receiptId: ULong) :
-        NMPWriteCancellationError("receipt $receiptId was abandoned after restart")
+    /** The write was refused at acceptance and is already a permanently
+     * failed queue entry. There is nothing to cancel; remove it instead. */
+    data class AlreadyRefused(val receiptId: ULong) :
+        NMPWriteCancellationError("receipt $receiptId was refused at acceptance")
 
     data class PersistenceFailed(val receiptId: ULong, val reason: String) :
         NMPWriteCancellationError("could not persist cancellation for receipt $receiptId: $reason")
@@ -53,8 +56,8 @@ sealed class NMPWriteCancellationError(message: String) : Exception(message) {
                     AlreadyCompensated(error.receiptId)
                 is FfiCancelWriteException.AlreadySuperseded ->
                     AlreadySuperseded(error.receiptId)
-                is FfiCancelWriteException.AlreadyAbandoned ->
-                    AlreadyAbandoned(error.receiptId)
+                is FfiCancelWriteException.AlreadyRefused ->
+                    AlreadyRefused(error.receiptId)
                 is FfiCancelWriteException.PersistenceFailed ->
                     PersistenceFailed(error.receiptId, error.reason)
                 is FfiCancelWriteException.EngineClosed -> EngineClosed
@@ -65,6 +68,58 @@ sealed class NMPWriteCancellationError(message: String) : Exception(message) {
 enum class WriteCancellationOutcome {
     Cancelled,
 }
+
+/** Typed refusals from the queue-entry removal door. */
+sealed class NMPQueueEntryRemovalError(message: String) : Exception(message) {
+    data class UnknownReceipt(val receiptId: ULong) :
+        NMPQueueEntryRemovalError("unknown receipt $receiptId")
+
+    /** The write still owns open delivery work. Cancel it first; removal is
+     * for entries nothing is going to move. */
+    data class StillActive(val receiptId: ULong) :
+        NMPQueueEntryRemovalError("receipt $receiptId still owns open delivery work; cancel it first")
+
+    data class PersistenceFailed(val receiptId: ULong, val reason: String) :
+        NMPQueueEntryRemovalError("could not remove queue entry for receipt $receiptId: $reason")
+
+    object EngineClosed : NMPQueueEntryRemovalError("engine already shut down")
+
+    companion object {
+        internal fun from(error: FfiRemoveQueueEntryException): NMPQueueEntryRemovalError =
+            when (error) {
+                is FfiRemoveQueueEntryException.UnknownReceipt -> UnknownReceipt(error.receiptId)
+                is FfiRemoveQueueEntryException.StillActive -> StillActive(error.receiptId)
+                is FfiRemoveQueueEntryException.PersistenceFailed ->
+                    PersistenceFailed(error.receiptId, error.reason)
+                is FfiRemoveQueueEntryException.EngineClosed -> EngineClosed
+            }
+    }
+}
+
+/** Read the app's own publish queue back.
+ *
+ * Answers "what have I got outstanding, and what went wrong with it" without
+ * having held a receipt stream open since acceptance. This is INSPECTION: it
+ * never blocks and never waits for settlement. */
+internal fun publishQueue(engine: NmpEngineInterface): List<PublishQueueEntry> =
+    try {
+        engine.publishQueue().map { PublishQueueEntry.from(it) }
+    } catch (error: FfiRemoveQueueEntryException) {
+        throw NMPQueueEntryRemovalError.from(error)
+    }
+
+/** Forget one queue entry.
+ *
+ * A real TERMINATION path, not housekeeping: a write parked forever on a
+ * signer that never attached, and a permanently-failed refused entry, end no
+ * other way. A write that still owns open delivery work is refused -- cancel
+ * that one instead. */
+internal fun removePublishQueueEntry(engine: NmpEngineInterface, receiptId: ULong) =
+    try {
+        engine.removePublishQueueEntry(receiptId)
+    } catch (error: FfiRemoveQueueEntryException) {
+        throw NMPQueueEntryRemovalError.from(error)
+    }
 
 internal fun cancelWrite(engine: NmpEngineInterface, receiptId: ULong): WriteCancellationOutcome =
     try {
@@ -86,12 +141,12 @@ internal fun cancelWrite(engine: NmpEngineInterface, receiptId: ULong): WriteCan
 private fun receiptFrom(stream: NmpReceiptStream): Receipt =
     Receipt(id = stream.id(), status = receiptStatusFlow(stream))
 
-private fun receiptStatusFlow(stream: NmpReceiptStream): Flow<WriteStatus> =
+private fun receiptStatusFlow(stream: NmpReceiptStream): Flow<WriteFact> =
     flow {
         try {
             while (true) {
                 val status = nmpRethrowingAsync { stream.next() } ?: break
-                emit(WriteStatus.from(status))
+                emit(WriteFact.from(status))
             }
         } finally {
             stream.cancel()

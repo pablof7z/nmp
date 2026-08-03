@@ -12,7 +12,7 @@
 
 use nostr::{PublicKey, Tag};
 
-use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use nmp_test_support::relays::ScriptedRelay;
 
@@ -88,22 +88,18 @@ impl NmpWorld {
             .collect();
         let tags: Vec<Tag> = follow_pks.into_iter().map(Tag::public_key).collect();
         let _ = me_keys;
-        let rx = self
-            .handle()
-            .publish(WriteIntent {
-                payload: WritePayload::Event(EventBuilder {
-                    kind: nostr::Kind::ContactList,
-                    tags,
-                    content: String::new(),
-                    created_at: None,
-                }),
-                durability: Durability::Durable,
-                routing: WriteRouting::Auto,
-                identity: Identity::Active,
-                correlation: None,
-            })
-            .expect("BDD receipt correlation namespace must be available");
-        self.receipts.push(ReceiptState::new(rx));
+        let result = self.handle().publish(WriteIntent {
+            payload: WritePayload::Event(EventBuilder {
+                kind: nostr::Kind::ContactList,
+                tags,
+                content: String::new(),
+                created_at: None,
+            }),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        });
+        self.receipts.push(ReceiptState::from_publish(result));
     }
 
     /// `When I publish a note saying <text>`.
@@ -116,7 +112,6 @@ impl NmpWorld {
         let _ = self.person(&me);
         self.publish_intent(WriteIntent {
             payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -127,20 +122,24 @@ impl NmpWorld {
     /// already finished without finding the author's relay list.
     ///
     /// `publish_tracked` returns after acceptance, before the real indexer
-    /// EOSE that changes the receipt from `Unknown` to settled `Absent` may
-    /// arrive. A process-boundary scenario must observe that causal revision
-    /// before stopping the engine, or it is testing whether scheduler timing
+    /// EOSE that settles the author's routes as `Absent` may arrive. A
+    /// process-boundary scenario must observe that causal revision before
+    /// stopping the engine, or it is testing whether scheduler timing
     /// happened to persist the revision rather than whether the revision
     /// survives restart.
+    ///
+    /// The observable IS the settlement: routing finishing with zero relays
+    /// is `WriteOutcome::NoDestination`, and it is the only fact that
+    /// distinguishes "the author has no relay list" from "nobody has finished
+    /// looking". The receipt no longer carries a park REASON to read the
+    /// distinction out of.
     pub async fn publish_note_after_settled_own_absence(&mut self, text: &str) {
         self.publish_note(text).await;
-        let me = self.my_pubkey_hex();
-        let wanted = format!("author routes are Absent for {me}");
         assert!(
-            self.park_reason_contains(&wanted),
+            self.no_destination_settled(),
             "nmp-bdd: past-tense publish setup requires the background's settled author-route \
              absence before a later process boundary; receipt reported {:?}",
-            self.park_reasons()
+            self.routing_facts_reported()
         );
     }
 
@@ -166,7 +165,6 @@ impl NmpWorld {
         }
         self.publish_intent(WriteIntent {
             payload: WritePayload::Event(builder),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -192,7 +190,6 @@ impl NmpWorld {
         builder.tags = tags;
         self.publish_intent(WriteIntent {
             payload: WritePayload::Event(builder),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -258,7 +255,6 @@ impl NmpWorld {
         self.snapshot_relay_contacts();
         self.publish_intent(WriteIntent {
             payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
-            durability: Durability::Durable,
             routing,
             identity: Identity::Active,
             correlation: None,
@@ -286,7 +282,6 @@ impl NmpWorld {
         self.republished = Some(event.clone());
         self.publish_intent(WriteIntent {
             payload: WritePayload::Signed(event),
-            durability: Durability::Durable,
             routing,
             identity: Identity::Active,
             correlation: None,
@@ -312,6 +307,11 @@ impl NmpWorld {
     /// what became of a write is asking through exactly that id, and a world
     /// that threw it away could only answer about a stream that no longer
     /// exists.
+    ///
+    /// A refusal is recorded rather than raised: `publish()` returning `Err`
+    /// IS the observable several scenarios assert on (an empty explicit
+    /// route, no active account), and there is no receipt id to remember for
+    /// one -- nothing was taken into custody.
     pub(super) fn publish_intent(&mut self, intent: WriteIntent) {
         self.last_publish_was_auto = matches!(intent.routing, WriteRouting::Auto);
         // BEFORE the door, not after: this is the lower bound a diagnostics
@@ -320,12 +320,16 @@ impl NmpWorld {
         // second later than the instant the engine recorded, which would make
         // a correct row look fabricated.
         self.last_publish_at = Some(nostr::Timestamp::now());
-        let stream = self
-            .handle()
-            .publish_tracked(intent)
-            .expect("BDD receipt correlation namespace must be available");
-        self.last_receipt_id = Some(stream.id);
-        self.receipts.push(ReceiptState::new(stream.statuses));
+        match self.handle().publish_tracked(intent) {
+            Ok(stream) => {
+                self.last_receipt_id = Some(stream.id);
+                self.receipts.push(ReceiptState::new(stream.statuses));
+            }
+            Err(error) => {
+                self.last_receipt_id = None;
+                self.receipts.push(ReceiptState::refused(error));
+            }
+        }
     }
 
     /// `When I switch to <person>'s account` (a person already known to the

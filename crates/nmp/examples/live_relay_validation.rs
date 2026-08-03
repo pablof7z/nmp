@@ -137,6 +137,7 @@ fn main() {
         allowed_local_relay_hosts: vec!["localhost".into(), "127.0.0.1".into()],
         max_relays: relays.len().max(1),
         max_auth_capabilities: 4,
+        max_publish_attempts: nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS,
     })
     .expect("engine");
 

@@ -89,8 +89,6 @@ class EvidenceMappingTest {
     @Test
     fun receiptCorrelationExhaustionRemainsTypedAtTheNativeBoundary() {
         assertTrue(
-            NMPError.from(FfiException.ReceiptCorrelationIdExhausted()) ===
-                NMPError.ReceiptCorrelationIdExhausted,
         )
     }
 

@@ -378,7 +378,6 @@ mod tests {
                     .content(format!("worker projection {created_at}"))
                     .created_at(Timestamp::from(created_at)),
             ),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(relays.to_vec()),
             identity: Identity::Active,
             correlation: None,
@@ -440,19 +439,15 @@ mod tests {
                     .cloned()
                     .map(|relay| RelaySessionKey::new(relay, access)),
             );
-            if let Some(intent_id) = pending.intent_id {
-                expected.extend(
-                    core.resolver
-                        .store()
-                        .recover_publish_queue_lanes(intent_id)
-                        .expect("oracle lane recovery")
-                        .into_iter()
-                        .filter(|lane| {
-                            !matches!(lane.state, PublishQueueLaneState::Terminal { .. })
-                        })
-                        .map(|lane| RelaySessionKey::new(lane.key.relay, access)),
-                );
-            }
+            expected.extend(
+                core.resolver
+                    .store()
+                    .recover_publish_queue_lanes(pending.intent_id)
+                    .expect("oracle lane recovery")
+                    .into_iter()
+                    .filter(|lane| !matches!(lane.state, PublishQueueLaneState::Terminal { .. }))
+                    .map(|lane| RelaySessionKey::new(lane.key.relay, access)),
+            );
         }
         expected
     }
@@ -573,7 +568,7 @@ mod tests {
         let mut core = EngineCore::new(MemoryStore::new(), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 30);
         let key = PublishQueueLaneKey {
-            intent_id: core.pending[&receipt].intent_id.unwrap(),
+            intent_id: core.pending[&receipt].intent_id,
             relay: relay.clone(),
         };
 
@@ -606,7 +601,7 @@ mod tests {
         let mut core = EngineCore::new(MemoryStore::new(), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 31);
         let key = PublishQueueLaneKey {
-            intent_id: core.pending[&receipt].intent_id.unwrap(),
+            intent_id: core.pending[&receipt].intent_id,
             relay,
         };
         let before = core.pending[&receipt].lane_projection.clone();

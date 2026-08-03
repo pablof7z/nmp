@@ -27,7 +27,6 @@ use crate::{
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
     PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RefuseReason, RelayObserved, RetiredIntent, RetractReason, SigState, StoredEvent,
-    WriteDurability,
 };
 
 /// One `PUBLISH_QUEUE_INTENTS` row (M3 publish-queue unit, crashsafe-accepted-2-3-
@@ -50,7 +49,6 @@ struct PublishQueueIntentRecord {
     frozen: Event,
     expected_pubkey: PublicKey,
     signing_identity_ref: String,
-    durability: WriteDurability,
     routing: String,
     sig_state: IntentSigState,
     accepted_at: Timestamp,
@@ -452,7 +450,6 @@ impl MemoryStore {
         frozen: Event,
         expected_pubkey: PublicKey,
         signing_identity_ref: String,
-        durability: WriteDurability,
         routing: String,
         sig_state: IntentSigState,
         accepted_at: Timestamp,
@@ -465,7 +462,6 @@ impl MemoryStore {
                 frozen,
                 expected_pubkey,
                 signing_identity_ref,
-                durability,
                 routing,
                 sig_state,
                 accepted_at,
@@ -1756,7 +1752,6 @@ impl EventStore for MemoryStore {
             monotonic_stamp,
             expected_pubkey,
             signing_identity_ref,
-            durability,
             routing,
             sig_state,
             accepted_at,
@@ -1943,7 +1938,6 @@ impl EventStore for MemoryStore {
                 journaled_frozen,
                 expected_pubkey,
                 signing_identity_ref,
-                durability,
                 routing,
                 journaled_sig_state,
                 accepted_at,
@@ -2080,7 +2074,6 @@ impl EventStore for MemoryStore {
             frozen,
             expected_pubkey,
             signing_identity_ref,
-            durability,
             routing,
             sig_state,
             accepted_at,
@@ -2425,38 +2418,28 @@ impl EventStore for MemoryStore {
         Ok(CompensateOutcome::Compensated { restored, revealed })
     }
 
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<crate::CancelEphemeralOutcome, PersistenceError> {
-        let Some(receipt) = self.publish_queue_receipts.get_mut(&receipt_id) else {
-            return Ok(crate::CancelEphemeralOutcome::NotFound);
-        };
-        if receipt.intent_id.is_some() {
-            return Ok(crate::CancelEphemeralOutcome::NotEphemeral);
-        }
-        match receipt.state {
-            ReceiptState::Accepted => {
-                receipt.state = ReceiptState::Cancelled;
-                Ok(crate::CancelEphemeralOutcome::Cancelled)
-            }
-            ReceiptState::Signed => Ok(crate::CancelEphemeralOutcome::AlreadySigned),
-            ReceiptState::Cancelled => Ok(crate::CancelEphemeralOutcome::AlreadyCancelled),
-            ReceiptState::Abandoned => Ok(crate::CancelEphemeralOutcome::AlreadyAbandoned),
-            ReceiptState::Compensated => Ok(crate::CancelEphemeralOutcome::AlreadyCompensated),
-            ReceiptState::Superseded => Ok(crate::CancelEphemeralOutcome::AlreadySuperseded),
-        }
+    fn enumerate_publish_queue_receipts(
+        &self,
+    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
+        Ok(self.publish_queue_receipts.values().cloned().collect())
     }
 
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        let Some(receipt) = self.publish_queue_receipts.get_mut(&receipt_id) else {
-            return Ok(false);
+    fn remove_publish_queue_entry(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<crate::RemoveQueueEntryOutcome, PersistenceError> {
+        let Some(receipt) = self.publish_queue_receipts.get(&receipt_id) else {
+            return Ok(crate::RemoveQueueEntryOutcome::NotFound);
         };
-        if receipt.intent_id.is_some() || receipt.state != ReceiptState::Accepted {
-            return Ok(false);
+        if let Some(intent_id) = receipt.intent_id {
+            if self.publish_queue_intents.contains_key(&intent_id) {
+                return Ok(crate::RemoveQueueEntryOutcome::StillOpen);
+            }
         }
-        receipt.state = ReceiptState::Signed;
-        Ok(true)
+        self.publish_queue_receipts.remove(&receipt_id);
+        self.publish_queue_correlations
+            .retain(|_, journaled| *journaled != receipt_id);
+        Ok(crate::RemoveQueueEntryOutcome::Removed)
     }
 
     fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
@@ -3216,17 +3199,15 @@ impl EventStore for MemoryStore {
         Ok(CloseIntentOutcome::Closed)
     }
 
-    fn accept_ephemeral(
+    fn accept_refused(
         &mut self,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        reason: crate::RefuseReason,
     ) -> Result<u64, PersistenceError> {
-        // Receipt-ONLY: no EVENTS row, no PUBLISH_QUEUE_INTENTS row — nothing
-        // backs `intent_id` at all (`None`). `MemoryStore` never models a
-        // real crash (Q4), so there is no boot-time reconciliation to
-        // `Abandoned` here — an ephemeral receipt just stays `Accepted`
-        // for the life of the process unless the engine transitions it
-        // itself (out of this unit's scope).
+        // Receipt-ONLY and terminal at birth: no EVENTS row, no
+        // PUBLISH_QUEUE_INTENTS row — nothing backs `intent_id` at all
+        // (`None`). The refusal reason IS the receipt's whole content.
         let receipt_id = self.alloc_receipt_id()?;
         self.publish_queue_receipts.insert(
             receipt_id,
@@ -3235,7 +3216,7 @@ impl EventStore for MemoryStore {
                 intent_id: None,
                 frozen_id,
                 expected_pubkey,
-                state: ReceiptState::Accepted,
+                state: ReceiptState::Refused(reason),
             },
         );
         Ok(receipt_id)
@@ -3272,7 +3253,6 @@ mod lane_atomicity_tests {
                 monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "atomic".into(),
-                durability: WriteDurability::Durable,
                 routing: "atomic".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(900u64),

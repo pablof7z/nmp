@@ -308,7 +308,7 @@ pub(crate) fn restamped(frozen: &Event, created_at: Timestamp) -> Event {
 /// transaction fails, the caller receives an acceptance error and no
 /// pending row becomes visible" — architecture review correction).
 /// Realistic runtime failures (disk full, I/O error) at `accept_write`/
-/// `accept_ephemeral`/`promote_signed`/`compensate_write` must never panic
+/// `accept_refused`/`promote_signed`/`compensate_write` must never panic
 /// the embedding app. Neither may a *persisted row that does not decode*
 /// (#790): a malformed, truncated, or schema-incompatible value is a fact
 /// about the file, not a reason to abort the host, so every production
@@ -714,7 +714,12 @@ pub enum InsertOutcome {
 
 /// Why an [`EventStore::insert`] refused an event outright, before it ever
 /// touched an index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialized because a locally-authored write refused at acceptance is
+/// still taken into custody: it becomes a one-row, permanently-failed
+/// publish-queue entry carrying this reason ([`EventStore::accept_refused`]),
+/// so the reason has to survive a restart exactly as it was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefuseReason {
     /// The event's NIP-40 `expiration` tag is already in the past at the
     /// moment of insert (checked against the `RelayObserved` clock the
@@ -751,22 +756,6 @@ pub enum RetractReason {
     Deleted,
     /// Removed because its NIP-40 `expiration` deadline passed.
     Expired,
-}
-
-/// Durability class of a write intent, as store-owned persisted data — the
-/// store never interprets it (retry/backoff policy stays in `nmp-engine`,
-/// crashsafe-accepted-2-3-plan.md §7 Q2's boundary constraint), it only
-/// journals and returns it verbatim. `Ephemeral` is deliberately absent:
-/// per the plan's R4, an `Ephemeral` write never reaches `accept_write` at
-/// all — it keeps today's direct-publish path with no journal row and no
-/// pending store row, but it is NOT receipt-less (VISION-ratified
-/// correction): [`EventStore::accept_ephemeral`] still persists a
-/// reattachable [`PublishQueueReceipt`] with `intent_id: None`, exactly like
-/// any durable-write receipt, just with no backing `PUBLISH_QUEUE_INTENTS` row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WriteDurability {
-    Durable,
-    AtMostOnce,
 }
 
 /// Journal-level signature state of an `PUBLISH_QUEUE_INTENTS` row (Fable
@@ -843,7 +832,6 @@ pub struct AcceptWrite {
     /// gives it real meaning; this frame only pins the persistence hook
     /// (Fable checkpoint Q5).
     pub signing_identity_ref: String,
-    pub durability: WriteDurability,
     /// Opaque, engine-owned routing snapshot at acceptance — persisted and
     /// returned verbatim by `recover_publish_queue`. The store never interprets
     /// routing semantics; §5's append-only-revision ownership stays in
@@ -1130,17 +1118,16 @@ pub enum CompensateOutcome {
     NotFound,
 }
 
-/// Typed result from the receipt-keyed ephemeral cancellation door.
+/// Typed result from the receipt-keyed queue-entry removal door
+/// ([`EventStore::remove_publish_queue_entry`], #1039).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CancelEphemeralOutcome {
-    Cancelled,
+pub enum RemoveQueueEntryOutcome {
+    Removed,
     NotFound,
-    NotEphemeral,
-    AlreadySigned,
-    AlreadyCancelled,
-    AlreadyAbandoned,
-    AlreadyCompensated,
-    AlreadySuperseded,
+    /// The receipt still owns an open `PUBLISH_QUEUE_INTENTS` row. Removal is
+    /// for entries nothing is going to move; an intent with live work is
+    /// cancelled, not removed.
+    StillOpen,
 }
 
 /// One still-open intent replayed by [`EventStore::recover_publish_queue`] on
@@ -1156,7 +1143,6 @@ pub struct PublishQueueIntent {
     pub frozen: Event,
     pub expected_pubkey: PublicKey,
     pub signing_identity_ref: String,
-    pub durability: WriteDurability,
     pub routing: String,
     pub sig_state: IntentSigState,
     /// The predecessor this intent displaced, if any — still durable
@@ -1168,7 +1154,7 @@ pub struct PublishQueueIntent {
 }
 
 /// A durably-retained receipt's coarse status — the STORE-OBSERVABLE
-/// subset of the full receipt stream (`nmp-engine`'s `WriteStatus` owns
+/// subset of the full receipt stream (`nmp-engine`'s `WriteFact` owns
 /// the complete enum, including per-relay `Routed`/`Sent`/`Acked`/
 /// `Rejected`/`GaveUp`/`Failed`; this crate only knows what its OWN four
 /// doors did to a receipt). Retained under `PUBLISH_QUEUE_RECEIPTS` — separately
@@ -1178,8 +1164,7 @@ pub struct PublishQueueIntent {
 /// of `PUBLISH_QUEUE_INTENTS` must never also delete receipt identity/state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReceiptState {
-    /// `accept_write` (durable/`AtMostOnce`) or `accept_ephemeral`
-    /// (`Ephemeral`) ran; nothing else has happened to this receipt yet.
+    /// `accept_write` ran; nothing else has happened to this receipt yet.
     Accepted,
     /// `promote_signed` ran; the row carries a real signature. (Per-relay
     /// delivery evidence beyond this point is a later unit's job — the
@@ -1197,17 +1182,17 @@ pub enum ReceiptState {
     /// coordinate before this obligation started any wire attempt. Terminal:
     /// the receipt is retained, but the old intent is absent from recovery.
     Superseded,
-    /// An `Ephemeral` receipt (see [`EventStore::accept_ephemeral`]) that
-    /// was still `Accepted` when the store reopened after a restart.
-    /// `Ephemeral` writes are NEVER retried after process loss (R4), and
-    /// this unit builds no dispatch/ack tracking that could have advanced
-    /// it past `Accepted` before the crash — so an `Accepted` ephemeral
-    /// receipt surviving to the NEXT `RedbStore::open()` can only mean the
-    /// process died before any further transition was ever recorded.
-    /// `RedbStore::open()` reconciles every such row to `Abandoned` in the
-    /// same boot pass, mirroring how NIP-40 catches up expired-while-dead
-    /// events at boot (retraction-and-negative-deltas.md §3.3). Terminal.
-    Abandoned,
+    /// The acceptance instruction was answered with a semantic no
+    /// ([`EventStore::accept_refused`]): the store was working and said no.
+    /// Terminal at birth — there was never an intent, a journal row, a
+    /// signer request or a relay write, only this one retained receipt.
+    ///
+    /// The write is still in CUSTODY: the app reads the reason back through
+    /// reattachment or enumeration, and a
+    /// [`RefuseReason::ReplaceableBaseChanged`] carries both event ids so
+    /// the app can fetch what is actually there, reapply the user's change
+    /// and resubmit without ever troubling them.
+    Refused(RefuseReason),
 }
 
 /// Backend-extension vocabulary for why the one atomic compensation
@@ -1232,12 +1217,12 @@ pub enum CompensationReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishQueueReceipt {
     pub receipt_id: u64,
-    /// `Some` for a durable/`AtMostOnce` receipt backed by a real (open or
-    /// since-closed) `accept_write` intent. `None` for an `Ephemeral`
-    /// receipt (`accept_ephemeral`): a receipt-ONLY record — VISION's
-    /// "durable OR explicitly non-durable write is still observed through
-    /// a reattachable receipt" promise, without ever entering the
-    /// delivery-retry journal or gaining a query-visible pending row.
+    /// `Some` for a receipt backed by a real (open or since-closed)
+    /// `accept_write` intent. `None` for a receipt-ONLY record
+    /// ([`EventStore::accept_refused`]): a write refused at the acceptance
+    /// door still enters custody as one retained, reattachable receipt,
+    /// without ever gaining a journal row, a pending event row, a signer
+    /// request or a relay write.
     pub intent_id: Option<IntentId>,
     pub frozen_id: EventId,
     pub expected_pubkey: PublicKey,
@@ -1306,7 +1291,6 @@ pub enum PublishQueueTerminalOutcome {
     Acked,
     Rejected(String),
     GaveUp,
-    OutcomeUnknown,
     AuthDenied(AuthDenial),
 }
 
@@ -1319,7 +1303,6 @@ impl PublishQueueTerminalOutcome {
             PublishQueueAttemptOutcome::Acked => Ok(Self::Acked),
             PublishQueueAttemptOutcome::Rejected(reason) => Ok(Self::Rejected(reason)),
             PublishQueueAttemptOutcome::GaveUp => Ok(Self::GaveUp),
-            PublishQueueAttemptOutcome::OutcomeUnknown => Ok(Self::OutcomeUnknown),
         }
     }
 }
@@ -1493,7 +1476,6 @@ pub enum PublishQueueAttemptOutcome {
     Acked,
     Rejected(String),
     GaveUp,
-    OutcomeUnknown,
 }
 
 /// The single mutating door onto the event store.
@@ -1957,18 +1939,27 @@ pub trait EventStore {
         self.compensate_write_with_state(intent_id, CompensationReason::ExplicitCancellation)
     }
 
-    /// Persist cancellation of an accepted unsigned ephemeral receipt. Such
-    /// a receipt has no delivery intent row or pending canonical row to
-    /// compensate, but its terminal fact is still retained and reattachable.
-    fn cancel_ephemeral_receipt(
+    /// Read every retained receipt back out, newest id last (#1039).
+    ///
+    /// The enumeration half of the app's outbox door. Retained receipts
+    /// accumulate without bound (#46 is NOT closed by this); making the
+    /// growth readable is precisely the point.
+    fn enumerate_publish_queue_receipts(
+        &self,
+    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError>;
+
+    /// Forget one retained receipt and every piece of evidence keyed to it
+    /// (#1039). The removal half of the app's outbox door, and a real
+    /// TERMINATION path: a write parked forever on a missing signer, and a
+    /// permanently-failed refused entry, end no other way.
+    ///
+    /// Refuses with [`RemoveQueueEntryOutcome::StillOpen`] while the receipt
+    /// still owns an open `PUBLISH_QUEUE_INTENTS` row — that write is
+    /// cancelled, not removed.
+    fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError>;
-
-    /// Persist that an accepted ephemeral receipt crossed the irreversible
-    /// signature boundary. Returns `false` when it is absent, durable, or no
-    /// longer accepted.
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError>;
+    ) -> Result<RemoveQueueEntryOutcome, PersistenceError>;
 
     /// Backend implementation for the two typed pre-signature compensation
     /// outcomes. Callers use [`Self::compensate_write`] or
@@ -2196,28 +2187,34 @@ pub trait EventStore {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
-    /// Persist a receipt-ONLY record for an `Ephemeral` write (VISION-
-    /// ratified contract clarification, team-lead correction, issue #3):
-    /// `Ephemeral` never enters the publish queue-retry journal (no
-    /// `PUBLISH_QUEUE_INTENTS`/`PUBLISH_QUEUE_ATTEMPTS` row — R4 stays correct, it is
-    /// never retried after process loss) and never gains a query-visible
-    /// pending row (no `EVENTS`/`accept_write` call at all) — but a
-    /// durable OR explicitly non-durable write must still be observable
-    /// through a reattachable receipt, so THIS door writes just the
-    /// `PUBLISH_QUEUE_RECEIPTS` row: `PublishQueueReceipt::intent_id` is `None`
-    /// (nothing backs it — no intent, no journal, no pending event row),
-    /// state starts `Accepted`. See [`ReceiptState::Abandoned`] for what
-    /// happens to it if the process dies before any further transition.
+    /// Take custody of a write the acceptance door REFUSED, as one
+    /// permanently-failed queue entry.
+    ///
+    /// `accept_write` answering [`AcceptOutcome::Refused`] is the store
+    /// working and saying no — a semantic answer, not a failure to write.
+    /// The app must be able to read that answer back, so the refusal is
+    /// recorded rather than thrown: THIS door writes just the
+    /// `PUBLISH_QUEUE_RECEIPTS` row with `intent_id: None` (nothing backs it
+    /// — no intent, no journal, no pending event row, no signer request, no
+    /// relay write) and [`ReceiptState::Refused`] carrying `reason`
+    /// verbatim, including a [`RefuseReason::ReplaceableBaseChanged`]'s two
+    /// event ids.
+    ///
+    /// Terminal at birth. Custody is not viability: the entry exists so the
+    /// app can see the failure and remove it
+    /// ([`Self::remove_publish_queue_entry`]), never because anything will
+    /// retry it.
     ///
     /// Returns the store-allocated receipt id — the same durable
     /// high-water-mark `accept_write` allocates from (architecture review
     /// correction: a caller-side receipt-id counter that resets on
     /// restart has the identical reuse hazard `IntentId` had, now that
     /// receipts are durably retained across restart). Fallible for the
-    /// same reason `accept_write` is.
-    fn accept_ephemeral(
+    /// same reason `accept_write` is: recording a refusal needs the disk.
+    fn accept_refused(
         &mut self,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        reason: RefuseReason,
     ) -> Result<u64, PersistenceError>;
 }

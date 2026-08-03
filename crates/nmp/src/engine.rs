@@ -26,7 +26,7 @@ use crate::runtime::FifoReceiver;
 use std::sync::Mutex;
 
 use crate::core::ReceiptId;
-use crate::publish_queue::WriteStatus;
+use crate::publish_queue::{PublishQueueEntry, RemoveQueueEntryError, WriteFact};
 use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
@@ -94,7 +94,9 @@ pub enum CancelWriteError {
     AlreadySuperseded {
         receipt_id: ReceiptId,
     },
-    AlreadyAbandoned {
+    /// The write was refused at acceptance and is already a permanently
+    /// failed queue entry. There is nothing to cancel; remove it instead.
+    AlreadyRefused {
         receipt_id: ReceiptId,
     },
     PersistenceFailed {
@@ -132,8 +134,8 @@ fn cancel_write_error_from_engine(
         crate::publish_queue::CancelWriteError::AlreadySuperseded { receipt_id } => {
             CancelWriteError::AlreadySuperseded { receipt_id }
         }
-        crate::publish_queue::CancelWriteError::AlreadyAbandoned { receipt_id } => {
-            CancelWriteError::AlreadyAbandoned { receipt_id }
+        crate::publish_queue::CancelWriteError::AlreadyRefused { receipt_id } => {
+            CancelWriteError::AlreadyRefused { receipt_id }
         }
         crate::publish_queue::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
             CancelWriteError::PersistenceFailed { receipt_id, reason }
@@ -164,8 +166,8 @@ impl std::fmt::Display for CancelWriteError {
                     receipt_id.0
                 )
             }
-            Self::AlreadyAbandoned { receipt_id } => {
-                write!(f, "receipt {} was abandoned after restart", receipt_id.0)
+            Self::AlreadyRefused { receipt_id } => {
+                write!(f, "receipt {} was refused at acceptance", receipt_id.0)
             }
             Self::PersistenceFailed { receipt_id, reason } => write!(
                 f,
@@ -297,6 +299,7 @@ impl Engine {
 
         let runtime_config = RuntimeConfig {
             max_auth_capabilities: config.max_auth_capabilities,
+            max_publish_attempts: config.max_publish_attempts,
             #[cfg(feature = "nip65")]
             nip65_sources: build_nip65_sources(&config)?,
         };
@@ -430,6 +433,7 @@ impl Engine {
     {
         let runtime_config = RuntimeConfig {
             max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
+            max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             nip65_sources,
         };
         let (engine_thread, handle) = EngineThread::spawn_with_routing_facts_and_runtime_config(
@@ -638,14 +642,11 @@ impl Engine {
     /// Noun 2: enqueue a write -- the call itself never blocks on routing/
     /// wire/ack, but its return value is not fire-and-forget: the
     /// `Receiver` is the caller's one way to observe how the intent
-    /// resolved, and every `WriteStatus` it ever reaches streams through it
-    /// (ledger #9 -- enqueue is not converged). A tampered
-    /// `WritePayload::Signed` is rejected at the engine's acceptance
-    /// boundary and surfaces here as a `WriteStatus::Failed` with no
-    /// preceding `Accepted` -- see this module's doc.
-    /// Exhaustion of the disjoint pre-acceptance correlation namespace is a
-    /// synchronous [`EngineError::ReceiptCorrelationIdExhausted`], because
-    /// no truthful receipt stream can exist without an id.
+    /// resolved, and every `WriteFact` it ever reaches streams through it
+    /// (ledger #9 -- enqueue is not converged). Returning `Ok` IS
+    /// acceptance, so there is no acceptance fact on the stream. A tampered
+    /// `WritePayload::Signed` cannot resolve, so it is refused by this call
+    /// itself and nothing is taken into custody -- see this module's doc.
     ///
     /// Identity (#47): with [`Identity::Active`] — the default — a builder
     /// payload signs as the CURRENT active account, and fails closed
@@ -655,12 +656,13 @@ impl Engine {
     /// touching the active account: it works even while logged out, and
     /// acceptance pins the key so later [`Self::set_active_account`] calls
     /// cannot retarget the write. A named key with no registered signing
-    /// capability parks durably as `WriteStatus::AwaitingCapability` until
-    /// that exact key's signer attaches. On a `Signed` payload the author
-    /// is already frozen in the bytes, so an explicit identity may only
-    /// RESTATE it: naming anybody else is `WriteStatus::Failed` with no
-    /// `Accepted`.
-    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteStatus>, EngineError> {
+    /// capability parks durably as
+    /// [`SigningState::AwaitingSigner`](crate::SigningState) until that
+    /// exact key's signer attaches. On a `Signed` payload the author is
+    /// already frozen in the bytes, so an explicit identity may only
+    /// RESTATE it: naming anybody else cannot resolve, so this call refuses
+    /// it and takes nothing into custody.
+    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteFact>, EngineError> {
         self.with_handle(|handle| handle.publish(intent))?
             .map_err(EngineError::from_publish_error)
     }
@@ -702,10 +704,40 @@ impl Engine {
         self.with_handle(|handle| handle.reattach_by_correlation(token))
     }
 
+    /// Read the app's own publish queue back (#1039).
+    ///
+    /// Every write NMP still holds a receipt for, with what it knows about
+    /// each one right now: signing state, the intended destination set and
+    /// whether it is closed, per-relay state, the whole-write outcome if it
+    /// has one, and any latched persistence fault.
+    ///
+    /// INSPECTION, never waiting. Nothing here blocks on settlement, and a
+    /// locally accepted write is already visible through the app's own live
+    /// query long before it appears here as settled.
+    pub fn publish_queue(&self) -> Result<Vec<PublishQueueEntry>, RemoveQueueEntryError> {
+        self.with_handle(|handle| handle.publish_queue_entries())
+            .map_err(|_| RemoveQueueEntryError::EngineClosed)?
+    }
+
+    /// Forget one queue entry (#1039).
+    ///
+    /// A real TERMINATION path: a write parked forever on a signer that
+    /// never attached, and a permanently-failed refused entry, end no other
+    /// way. A write that still owns open delivery work is refused — cancel
+    /// that one instead.
+    ///
+    /// This does NOT close #46. Retained receipts and correlation tokens
+    /// still regrow without bound; enumerating them is what makes the growth
+    /// visible.
+    pub fn remove_publish_queue_entry(&self, id: ReceiptId) -> Result<(), RemoveQueueEntryError> {
+        self.with_handle(|handle| handle.remove_publish_queue_entry(id))
+            .map_err(|_| RemoveQueueEntryError::EngineClosed)?
+    }
+
     /// Explicitly cancel one accepted unsigned write by its stable receipt
     /// id. [`CancelWriteOutcome::Cancelled`] means the durable
-    /// [`WriteStatus::Cancelled`] fact committed; signed or otherwise terminal
-    /// receipts return a precise typed refusal.
+    /// not-sent fact committed; signed or otherwise terminal receipts return
+    /// a precise typed refusal.
     pub fn cancel(&self, id: ReceiptId) -> Result<CancelWriteOutcome, CancelWriteError> {
         self.with_handle(|handle| handle.cancel_write(id))
             .map_err(|_| CancelWriteError::EngineClosed)?
@@ -888,8 +920,9 @@ impl Engine {
     /// browsing of an account this app holds no key for is legal. Publishes
     /// attempted in that keyless-active state resolve truthfully, never a
     /// panic: a builder payload published as [`Identity::Active`] is
-    /// accepted and parks durably as `WriteStatus::AwaitingCapability`
-    /// until a matching signing capability attaches (#47).
+    /// accepted and parks durably as
+    /// [`SigningState::AwaitingSigner`](crate::SigningState) until a
+    /// matching signing capability attaches (#47).
     pub fn set_active_account(&self, pubkey: Option<PublicKey>) -> Result<(), EngineError> {
         let mut guard = self
             .inner
@@ -1027,6 +1060,7 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     use super::*;
+    use crate::publish_queue::{NotSentReason, SigningState, WriteOutcome};
     use nostr::Keys;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1402,19 +1436,13 @@ mod tests {
                     content: ("cancel through facade").into(),
                     created_at: Some(Timestamp::from(10)),
                 }),
-                durability: nmp_grammar::Durability::Durable,
                 routing: nmp_grammar::WriteRouting::Auto,
                 identity: Identity::Active,
                 correlation: None,
             })
             .expect("accept write");
-        assert_eq!(
-            receipt
-                .statuses
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .unwrap(),
-            WriteStatus::Accepted
-        );
+        // `publish_tracked` returning `Ok` IS acceptance -- there is no
+        // acceptance fact to wait for on the stream.
 
         assert_eq!(engine.cancel(receipt.id), Ok(CancelWriteOutcome::Cancelled));
         let mut saw_cancelled = false;
@@ -1422,7 +1450,7 @@ mod tests {
             .statuses
             .recv_timeout(std::time::Duration::from_secs(1))
         {
-            if status == WriteStatus::Cancelled {
+            if status == WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled)) {
                 saw_cancelled = true;
                 break;
             }
@@ -1436,7 +1464,10 @@ mod tests {
         else {
             panic!("cancelled receipt must remain reattachable")
         };
-        assert_eq!(replay.recv().unwrap(), WriteStatus::Cancelled);
+        assert_eq!(
+            replay.recv().unwrap(),
+            WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled))
+        );
         assert!(matches!(
             engine.cancel(ReceiptId(u64::MAX)),
             Err(CancelWriteError::UnknownReceipt { .. })
@@ -1464,23 +1495,18 @@ mod tests {
                     content: ("observer lifetime is not write ownership").into(),
                     created_at: Some(Timestamp::from(11)),
                 }),
-                durability: nmp_grammar::Durability::Durable,
                 routing: nmp_grammar::WriteRouting::Auto,
                 identity: Identity::Active,
                 correlation: None,
             })
             .expect("accept write");
         let receipt_id = receipt.id;
-        assert_eq!(receipt.statuses.recv().unwrap(), WriteStatus::Accepted);
         drop(receipt.statuses);
 
-        let ReceiptReattachment::Attached {
-            statuses: replay, ..
-        } = engine.reattach_receipt(receipt_id).unwrap()
+        let ReceiptReattachment::Attached { .. } = engine.reattach_receipt(receipt_id).unwrap()
         else {
             panic!("dropping the observer must not remove the receipt")
         };
-        assert_eq!(replay.recv().unwrap(), WriteStatus::Accepted);
         assert_eq!(engine.cancel(receipt_id), Ok(CancelWriteOutcome::Cancelled));
         engine.shutdown();
     }
@@ -1832,7 +1858,6 @@ mod tests {
                         content: content.to_string(),
                         created_at: Some(Timestamp::from(10)),
                     }),
-                    durability: nmp_grammar::Durability::Durable,
                     routing: nmp_grammar::WriteRouting::Auto,
                     identity: Identity::Active,
                     correlation: None,
@@ -1859,12 +1884,10 @@ mod tests {
         };
 
         let first = publish("cancel cancels the pending signer");
-        assert_eq!(first.statuses.recv().unwrap(), WriteStatus::Accepted);
         assert_eq!(engine.cancel(first.id), Ok(CancelWriteOutcome::Cancelled));
         wait_for_cancellations(1);
 
         let second = publish("a second write cancels the same way");
-        assert_eq!(second.statuses.recv().unwrap(), WriteStatus::Accepted);
         assert_eq!(engine.cancel(second.id), Ok(CancelWriteOutcome::Cancelled));
         wait_for_cancellations(2);
         engine.shutdown();
@@ -1891,7 +1914,6 @@ mod tests {
                             .content(format!("metadata at {created_at}"))
                             .created_at(Timestamp::from(created_at)),
                     ),
-                    durability: nmp_grammar::Durability::Durable,
                     routing: nmp_grammar::WriteRouting::Auto,
                     identity: Identity::Active,
                     correlation: None,
@@ -1913,10 +1935,11 @@ mod tests {
         };
 
         let first = publish(1);
-        assert_eq!(first.statuses.recv().unwrap(), WriteStatus::Accepted);
         let second = publish(2);
-        assert_eq!(first.statuses.recv().unwrap(), WriteStatus::Superseded);
-        assert_eq!(second.statuses.recv().unwrap(), WriteStatus::Accepted);
+        assert_eq!(
+            first.statuses.recv().unwrap(),
+            WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Superseded))
+        );
         wait_for_cancellations(1);
 
         assert_eq!(engine.cancel(second.id), Ok(CancelWriteOutcome::Cancelled));
@@ -2082,7 +2105,7 @@ mod tests {
     // it asserted the removed global native-task capacity refusal
     // (`SignEventError::ExecutorSaturated` + `max_native_tasks`). Sign-event
     // admission no longer surfaces a configurable capacity ceiling.
-    use nmp_grammar::{Durability, Identity, WritePayload, WriteRouting};
+    use nmp_grammar::{Identity, WritePayload, WriteRouting};
     use nostr::ToBech32;
 
     /// `EngineConfig::default()` (no `store_path`) must select the
@@ -2388,23 +2411,20 @@ mod tests {
         // the event otherwise still looks well-formed.
         event.content = "tampered".to_string();
 
-        let rx = engine
-            .publish(WriteIntent {
-                payload: WritePayload::Signed(event),
-                durability: Durability::Durable,
-                routing: WriteRouting::Auto,
-                identity: Identity::Active,
-                correlation: None,
-            })
-            .expect("engine is open");
-
-        match rx.recv().expect("a Durable intent must yield a status") {
-            WriteStatus::Failed(_) => {}
-            other => panic!("expected WriteStatus::Failed, got {other:?}"),
-        }
+        let refused = engine.publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        });
         assert!(
-            rx.recv().is_err(),
-            "Failed must be the sole terminal status -- no Accepted, nothing further"
+            matches!(
+                refused.as_ref().err(),
+                Some(EngineError::PublishRefused { .. })
+            ),
+            "a forged Signed payload must refuse the call itself, taking nothing \
+             into custody -- got {:?}",
+            refused.as_ref().err()
         );
 
         engine.shutdown();
@@ -2413,7 +2433,7 @@ mod tests {
     /// #47 falsifier (a) through the facade: with account A active and B
     /// merely registered ([`Engine::add_account`], never activated), a
     /// builder carrying `Identity::Explicit(B)` reaches
-    /// `WriteStatus::Signed` bearing the exact id of the frozen B-authored
+    /// `WriteFact::Signed` bearing the exact id of the frozen B-authored
     /// body -- which commits cryptographically to author and content --
     /// and [`Engine::active_account`] still answers A afterward: naming B
     /// consented to ONE write, it never re-rooted the engine.
@@ -2453,7 +2473,6 @@ mod tests {
                     content: draft.content.clone(),
                     created_at: Some(draft.created_at),
                 }),
-                durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity: Identity::Explicit(pk_b),
                 correlation: None,
@@ -2464,7 +2483,7 @@ mod tests {
         let mut signed_as_b = false;
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(WriteStatus::Signed(id)) => {
+                Ok(WriteFact::Signing(SigningState::Signed { event_id: id })) => {
                     assert_eq!(
                         id, expected.id,
                         "Signed must carry the frozen B-authored body's exact id"
@@ -2472,8 +2491,11 @@ mod tests {
                     signed_as_b = true;
                     break;
                 }
-                Ok(WriteStatus::Failed(reason)) => {
-                    panic!("override publish must not fail pre-routing: {reason}")
+                Ok(WriteFact::Signing(SigningState::Refused { reason })) => {
+                    panic!("override publish must not be refused by the signer: {reason}")
+                }
+                Ok(WriteFact::Outcome(outcome)) => {
+                    panic!("override publish must not terminate pre-routing: {outcome:?}")
                 }
                 Ok(_) => {}
                 Err(crate::runtime::FifoRecvTimeoutError::Timeout) => {}
@@ -2541,7 +2563,6 @@ mod tests {
                 content: ("unreachable").into(),
                 created_at: Some(nostr::Timestamp::now()),
             }),
-            durability: Durability::Ephemeral,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,

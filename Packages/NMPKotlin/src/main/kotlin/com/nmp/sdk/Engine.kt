@@ -349,6 +349,21 @@ class NMPEngine(
     /** Explicitly cancel an accepted unsigned write by stable receipt id. */
     fun cancel(receiptId: ULong): WriteCancellationOutcome = cancelWrite(ffi, receiptId)
 
+    /** Read the app's own publish queue back.
+     *
+     * Answers "what have I got outstanding, and what went wrong with it"
+     * without having held a receipt stream open since acceptance. This is
+     * INSPECTION: it never blocks and never waits for settlement. */
+    fun publishQueue(): List<PublishQueueEntry> = publishQueue(ffi)
+
+    /** Forget one queue entry.
+     *
+     * A real TERMINATION path, not housekeeping: a write parked forever on a
+     * signer that never attached, and a permanently-failed refused entry, end
+     * no other way. A write that still owns open delivery work is refused --
+     * cancel that one instead. */
+    fun removePublishQueueEntry(receiptId: ULong) = removePublishQueueEntry(ffi, receiptId)
+
     // MARK: - Lifecycle
 
     /** Stop the engine. Idempotent. Also called from `close()` (this class

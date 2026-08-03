@@ -9,7 +9,7 @@
 //! what a denial MEANS wants the policy that produced it in the same file as
 //! the observations of it.
 
-use nmp::mechanism::publish_queue::{AuthDenialSource, WriteStatus};
+use nmp::mechanism::publish_queue::{AuthDenialSource, RelayState, WriteFact};
 
 use super::budgets::NEVER;
 use super::{AuthDenialObservation, NmpWorld};
@@ -39,14 +39,16 @@ impl NmpWorld {
     /// for comparison with replay after reconstruction.
     pub fn receipt_reports_policy_auth_denial(&mut self, relay_name: &str) -> bool {
         let relay = self.relay_url(relay_name);
-        let matches = |seen: &[WriteStatus]| {
+        let matches = |seen: &[WriteFact]| {
             seen.iter().any(|status| {
                 matches!(
                     status,
-                    WriteStatus::AuthDenied {
+                    WriteFact::Relay {
                         relay: denied_relay,
-                        source: AuthDenialSource::Policy,
-                        ..
+                        state: RelayState::AuthFailed {
+                            source: AuthDenialSource::Policy,
+                            ..
+                        },
                     } if *denied_relay == relay
                 )
             })
@@ -67,11 +69,14 @@ impl NmpWorld {
         };
         let Some((pubkey, source, reason)) =
             statuses.iter().rev().find_map(|status| match status {
-                WriteStatus::AuthDenied {
+                WriteFact::Relay {
                     relay: denied_relay,
-                    pubkey,
-                    source,
-                    reason,
+                    state:
+                        RelayState::AuthFailed {
+                            pubkey,
+                            source,
+                            reason,
+                        },
                 } if *denied_relay == relay && *source == AuthDenialSource::Policy => {
                     Some((*pubkey, *source, reason.clone()))
                 }

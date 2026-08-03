@@ -43,7 +43,7 @@ use crate::convert::{
 };
 use crate::facade::NmpEngine;
 use crate::types::{
-    FfiBinding, FfiEventBuilder, FfiFilter, FfiLiveQuery, FfiSignedEvent, FfiWriteStatus,
+    FfiBinding, FfiEventBuilder, FfiFilter, FfiLiveQuery, FfiSignedEvent, FfiWriteFact,
 };
 
 fn parse_host(host: String) -> Result<RelayUrl, FfiError> {
@@ -365,15 +365,15 @@ pub fn admin_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupPredicate
 /// door (never `publish_tracked`), because the store-issued receipt-id
 /// namespace is a `publish`-door concern the group scope has no reason to
 /// surface -- `nmp::nip29::Group::through_the_one_door`'s own doc names the
-/// same door. Same ordered `WriteStatus` delivery and cancel/Drop discipline
+/// same door. Same ordered `WriteFact` delivery and cancel/Drop discipline
 /// as every other pull stream in this crate.
 #[derive(uniffi::Object)]
 pub struct NmpGroupReceiptStream {
-    inner: nmp::AsyncFifoReceiver<nmp::WriteStatus>,
+    inner: nmp::AsyncFifoReceiver<nmp::WriteFact>,
 }
 
 impl NmpGroupReceiptStream {
-    fn new(receipts: nmp::FifoReceiver<nmp::WriteStatus>) -> Arc<Self> {
+    fn new(receipts: nmp::FifoReceiver<nmp::WriteFact>) -> Arc<Self> {
         Arc::new(Self {
             inner: receipts.into_async(),
         })
@@ -382,10 +382,10 @@ impl NmpGroupReceiptStream {
 
 #[uniffi::export]
 impl NmpGroupReceiptStream {
-    /// Await the next `WriteStatus`, or `None` once the write has fully
+    /// Await the next `WriteFact`, or `None` once the write has fully
     /// resolved or the engine has shut down. [`FfiError::ConcurrentNext`] on
     /// an overlapping call.
-    pub async fn next(&self) -> Result<Option<FfiWriteStatus>, FfiError> {
+    pub async fn next(&self) -> Result<Option<FfiWriteFact>, FfiError> {
         match self.inner.next().await {
             Ok(Some(status)) => Ok(Some(write_status_to_ffi(WriteStatusRef(&status)))),
             Ok(None) => Ok(None),

@@ -41,9 +41,8 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::runtime::FifoReceiver;
 use nmp::nip29;
 use nmp::{
-    AccessContext, CacheMode, Demand, Durability, Engine, EngineConfig, Filter, Identity,
-    LiveQuery, Row, RowDelta, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
-    WriteStatus,
+    AccessContext, CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery,
+    RelayState, Row, RowDelta, SourceAuthority, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{EventId, Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
@@ -209,10 +208,10 @@ fn settle(subscription: &nmp::Subscription, observed: &mut Observed, quiet: Dura
 }
 
 fn drain_until(
-    receipts: &FifoReceiver<WriteStatus>,
+    receipts: &FifoReceiver<WriteFact>,
     timeout: Duration,
-    mut pred: impl FnMut(&WriteStatus) -> bool,
-) -> Vec<WriteStatus> {
+    mut pred: impl FnMut(&WriteFact) -> bool,
+) -> Vec<WriteFact> {
     let deadline = Instant::now() + timeout;
     let mut seen = Vec::new();
     loop {
@@ -272,20 +271,14 @@ async fn a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relay
         )
         .expect("a NIP-29 read is an ordinary live query");
 
-    let receipts = group
-        .publish_signed(&engine, event)
-        .expect("a correctly contextualized signed event is accepted");
-
     // The completion signal an app's chat input shows is available at LOCAL
     // acceptance -- "it will publish" -- not at a first ACK that, here, can
-    // never come.
-    let statuses = drain_until(&receipts, SETTLE, |status| {
-        matches!(status, WriteStatus::Accepted)
-    });
-    assert!(
-        statuses.iter().any(|s| matches!(s, WriteStatus::Accepted)),
-        "acceptance into the outbound publication queue is its own fact: {statuses:?}"
-    );
+    // never come. Acceptance IS this call returning `Ok`: there is no
+    // acceptance fact to wait for, and waiting for one would be the very
+    // thing optimistic publishing exists to avoid.
+    let _receipts = group
+        .publish_signed(&engine, event)
+        .expect("a correctly contextualized signed event is accepted");
 
     let mut observed = Observed::default();
     wait_for_rows(&subscription, SETTLE, &mut observed, |rows| {
@@ -396,8 +389,14 @@ async fn an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_
     let mut rejected = false;
     let statuses = drain_until(&receipts, RETRY_SETTLE, |status| {
         match status {
-            WriteStatus::Acked(relay) if relay == &accepting_url => acked = true,
-            WriteStatus::Rejected(relay, _) if relay == &rejecting_url => rejected = true,
+            WriteFact::Relay {
+                relay,
+                state: RelayState::Published,
+            } if relay == &accepting_url => acked = true,
+            WriteFact::Relay {
+                relay,
+                state: RelayState::Rejected { reason: _ },
+            } if relay == &rejecting_url => rejected = true,
             _ => {}
         }
         acked && rejected
@@ -482,23 +481,17 @@ async fn optimistic_publication_is_general_and_owes_nothing_to_nip29() {
             .observe(query, None)
             .expect("an ordinary pinned live query opens");
 
-        let receipts = engine
+        // Acceptance is this call returning `Ok`, for every kind alike.
+        let _receipts = engine
             .publish(WriteIntent {
                 payload: WritePayload::Signed(event),
-                durability: Durability::Durable,
                 routing: WriteRouting::Explicit(hosts.to_vec()),
                 identity: Identity::Explicit(me.public_key()),
                 correlation: None,
             })
-            .expect("an ordinary publish is accepted");
-
-        let statuses = drain_until(&receipts, SETTLE, |status| {
-            matches!(status, WriteStatus::Accepted)
-        });
-        assert!(
-            statuses.iter().any(|s| matches!(s, WriteStatus::Accepted)),
-            "kind:{kind} -- acceptance is its own fact: {statuses:?}"
-        );
+            .unwrap_or_else(|error| {
+                panic!("kind:{kind} -- an ordinary publish is accepted: {error}")
+            });
 
         let mut observed = Observed::default();
         wait_for_rows(&subscription, SETTLE, &mut observed, |rows| {

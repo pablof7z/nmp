@@ -55,8 +55,9 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::runtime::FifoReceiver;
 use nmp::nip29::{self, member_list_includes, Group, GroupContextError, GroupPublishError};
 use nmp::{
-    Binding, Engine, EngineConfig, EventBuilder, Filter, Row, RowDelta, SignerError, SignerOp,
-    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, WriteStatus,
+    Binding, Engine, EngineConfig, EventBuilder, Filter, RelayState, Row, RowDelta, SignerError,
+    SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
+    SigningState, WriteFact,
 };
 use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -179,9 +180,9 @@ fn group(host: &RelayUrl) -> Group {
 /// write never reached the host" and "the write was refused at the door" are
 /// different failures.
 fn drain_until(
-    receipts: &FifoReceiver<WriteStatus>,
-    pred: impl Fn(&WriteStatus) -> bool,
-) -> Vec<WriteStatus> {
+    receipts: &FifoReceiver<WriteFact>,
+    pred: impl Fn(&WriteFact) -> bool,
+) -> Vec<WriteFact> {
     let deadline = Instant::now() + SETTLE;
     let mut seen = Vec::new();
     loop {
@@ -208,9 +209,9 @@ fn drain_until(
 /// sequence rather than true-on-a-single-status, because a multi-host write
 /// acks each host independently and possibly out of order.
 fn drain_until_all_acked(
-    receipts: &FifoReceiver<WriteStatus>,
+    receipts: &FifoReceiver<WriteFact>,
     expected: &BTreeSet<RelayUrl>,
-) -> Vec<WriteStatus> {
+) -> Vec<WriteFact> {
     let deadline = Instant::now() + SETTLE;
     let mut seen = Vec::new();
     let mut acked: BTreeSet<RelayUrl> = BTreeSet::new();
@@ -224,7 +225,11 @@ fn drain_until_all_acked(
         }
         match receipts.recv_timeout(remaining) {
             Ok(status) => {
-                if let WriteStatus::Acked(relay) = &status {
+                if let WriteFact::Relay {
+                    relay,
+                    state: RelayState::Published,
+                } = &status
+                {
                     acked.insert(relay.clone());
                 }
                 seen.push(status);
@@ -264,26 +269,15 @@ fn h_rows(event: &nostr::Event) -> Vec<String> {
         .collect()
 }
 
-fn relays_named_by(statuses: &[WriteStatus]) -> BTreeSet<RelayUrl> {
+fn relays_named_by(statuses: &[WriteFact]) -> BTreeSet<RelayUrl> {
     let mut named = BTreeSet::new();
     for status in statuses {
         match status {
-            WriteStatus::Routed { relays, .. } => named.extend(relays.iter().cloned()),
-            WriteStatus::Sent { relay, .. }
-            | WriteStatus::Acked(relay)
-            | WriteStatus::Rejected(relay, _)
-            | WriteStatus::GaveUp(relay)
-            | WriteStatus::AwaitingRelay { relay }
-            | WriteStatus::AwaitingAuth { relay }
-            | WriteStatus::AuthDenied { relay, .. }
-            | WriteStatus::RetryEligible { relay, .. }
-            | WriteStatus::HandoffAmbiguous { relay, .. }
-            | WriteStatus::PersistenceBlocked(relay)
-            | WriteStatus::RoutePersistenceBlocked(relay)
-            | WriteStatus::OutcomeUnknown(relay) => {
+            WriteFact::Destinations { relays, .. } => named.extend(relays.iter().cloned()),
+            WriteFact::Relay { relay, .. } => {
                 named.insert(relay.clone());
             }
-            _ => {}
+            WriteFact::Signing(_) | WriteFact::Outcome(_) => {}
         }
     }
     named
@@ -403,14 +397,19 @@ async fn a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_aut
             payload: nmp::WritePayload::Event(
                 EventBuilder::new(Kind::TextNote).content("ordinary"),
             ),
-            durability: nmp::Durability::Durable,
             routing: nmp::WriteRouting::Auto,
             identity: nmp::Identity::Active,
             correlation: None,
         })
         .expect("an Auto publish is accepted");
     let auto_statuses = drain_until(&auto_receipts, |status| {
-        matches!(status, WriteStatus::Acked(_))
+        matches!(
+            status,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )
     });
     assert_eq!(
         relays_named_by(&auto_statuses),
@@ -553,11 +552,17 @@ async fn a_caller_supplied_context_is_refused_before_relay_contact_and_differs_f
         )
         .expect("an ordinary draft is accepted at the door");
     let statuses = drain_until(&receipts, |status| {
-        matches!(status, WriteStatus::Rejected(_, _))
+        matches!(
+            status,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Rejected { reason: _ }
+            }
+        )
     });
     assert!(
         statuses.iter().any(
-            |status| matches!(status, WriteStatus::Rejected(relay, message)
+            |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Rejected { reason: message } }
                 if relay == &host.url && message.contains("ordinary relay rejection"))
         ),
         "expected the relay's own rejection message on the receipt: {statuses:?}"
@@ -591,18 +596,23 @@ async fn a_signing_failure_leaves_no_event_frame_and_no_delivery_implying_receip
             EventBuilder::new(Kind::from(GROUP_KIND)).content("first light"),
         )
         .expect("the door accepts the draft; the signer fails afterward");
-    let statuses = drain_until(
-        &receipts,
-        |status| matches!(status, WriteStatus::Failed(reason) if reason.to_lowercase().contains("sign")),
-    );
+    let statuses = drain_until(&receipts, |status| {
+        matches!(
+            status,
+            WriteFact::Signing(SigningState::Refused { reason })
+                if reason.to_lowercase().contains("sign")
+        )
+    });
 
     assert!(
         !statuses.iter().any(|status| matches!(
             status,
-            WriteStatus::Sent { .. }
-                | WriteStatus::Acked(_)
-                | WriteStatus::Rejected(_, _)
-                | WriteStatus::HandoffAmbiguous { .. }
+            WriteFact::Relay {
+                state: RelayState::Sent { .. }
+                    | RelayState::Published
+                    | RelayState::Rejected { .. },
+                ..
+            }
         )),
         "no fact implying relay delivery may appear on a signing failure: {statuses:?}"
     );
@@ -654,7 +664,7 @@ async fn publish_signed_delivers_the_callers_exact_pre_signed_bytes_to_every_hos
         .expect("a correctly-contextualized signed event is accepted");
     let statuses = drain_until(
         &receipts,
-        |status| matches!(status, WriteStatus::Acked(relay) if *relay == host_b.url),
+        |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == host_b.url),
     );
     assert_eq!(
         relays_named_by(&statuses),
@@ -731,7 +741,15 @@ async fn the_pre_signed_event_s_own_id_is_known_before_publication_and_matches_a
     let receipts = group
         .publish_signed(&engine, pre_signed)
         .expect("a correctly contextualized signed event is accepted");
-    drain_until(&receipts, |status| matches!(status, WriteStatus::Acked(_)));
+    drain_until(&receipts, |status| {
+        matches!(
+            status,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )
+    });
 
     let deadline = Instant::now() + SETTLE;
     let mut matched = false;
@@ -798,7 +816,15 @@ async fn a_pre_signed_event_from_another_author_routes_only_to_the_host_never_to
     let receipts = group
         .publish_signed(&engine, pre_signed.clone())
         .expect("a correctly contextualized signed event from another author is accepted");
-    let statuses = drain_until(&receipts, |status| matches!(status, WriteStatus::Acked(_)));
+    let statuses = drain_until(&receipts, |status| {
+        matches!(
+            status,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )
+    });
 
     assert_eq!(
         relays_named_by(&statuses),
@@ -861,25 +887,31 @@ async fn a_host_rejection_of_a_pre_signed_event_is_an_ordinary_receipt_tied_to_i
         .publish_signed(&engine, pre_signed)
         .expect("a correctly contextualized signed event is accepted");
     let statuses = drain_until(&receipts, |status| {
-        matches!(status, WriteStatus::Rejected(_, _))
+        matches!(
+            status,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Rejected { reason: _ }
+            }
+        )
     });
 
     assert!(
         statuses.iter().any(|status| matches!(
             status,
-            WriteStatus::Rejected(relay, message)
+            WriteFact::Relay { relay, state: RelayState::Rejected { reason: message } }
                 if relay == &host.url && message.contains("host refuses every event")
         )),
         "the receipt must carry an ordinary per-relay Rejected fact: {statuses:?}"
     );
-    // `WriteStatus::Signed` is an ordinary lifecycle beat the engine emits
+    // `WriteFact::Signed` is an ordinary lifecycle beat the engine emits
     // for an already-signed payload too, so the falsifiable claim here is
     // narrower and stronger: IF it appears, it must name the exact id the
     // caller already had, never a freshly minted one.
     assert!(
         statuses
             .iter()
-            .all(|status| !matches!(status, WriteStatus::Signed(id) if *id != known_id)),
+            .all(|status| !matches!(status, WriteFact::Signing(SigningState::Signed { event_id: id }) if *id != known_id)),
         "a pre-signed event must never be re-signed into a different id: {statuses:?}"
     );
     assert_eq!(
@@ -1049,10 +1081,22 @@ async fn two_groups_on_two_hosts_never_bleed_into_each_other_at_the_wire() {
         )
         .expect("the darkroom publication is accepted");
     drain_until(&photographers_receipts, |status| {
-        matches!(status, WriteStatus::Acked(_))
+        matches!(
+            status,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )
     });
     drain_until(&darkroom_receipts, |status| {
-        matches!(status, WriteStatus::Acked(_))
+        matches!(
+            status,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )
     });
 
     let at_photographers = wait_for_events(&photographers_host, 1);
@@ -1145,8 +1189,14 @@ async fn a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_a
             .recv_timeout(remaining)
             .unwrap_or_else(|error| panic!("receipt stream ended early ({error:?}); saw {seen:?}"));
         match &status {
-            WriteStatus::Acked(relay) if *relay == acking_host.url => saw_ack = true,
-            WriteStatus::Rejected(relay, _) if *relay == rejecting_host.url => saw_reject = true,
+            WriteFact::Relay {
+                relay,
+                state: RelayState::Published,
+            } if *relay == acking_host.url => saw_ack = true,
+            WriteFact::Relay {
+                relay,
+                state: RelayState::Rejected { reason: _ },
+            } if *relay == rejecting_host.url => saw_reject = true,
             _ => {}
         }
         seen.push(status);
@@ -1154,13 +1204,13 @@ async fn a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_a
 
     assert!(
         seen.iter()
-            .any(|status| matches!(status, WriteStatus::Acked(relay) if *relay == acking_host.url)),
+            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == acking_host.url)),
         "the acking host's own outcome must be an ordinary Acked fact: {seen:?}"
     );
     assert!(
         seen.iter().any(|status| matches!(
             status,
-            WriteStatus::Rejected(relay, message)
+            WriteFact::Relay { relay, state: RelayState::Rejected { reason: message } }
                 if *relay == rejecting_host.url && message.contains("this host refuses")
         )),
         "the rejecting host's own outcome must be an ordinary Rejected fact carrying its own \

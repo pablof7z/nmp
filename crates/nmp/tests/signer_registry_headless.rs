@@ -8,7 +8,7 @@
 //! side's first batch is computed purely from the local store
 //! (`EngineCore::on_subscribe`, zero I/O -- the same fact
 //! `integration_capstone.rs`'s `watermark_cold_start_offline` documents), and
-//! the write side's `WriteStatus::Signed` is delivered by `on_signed` BEFORE
+//! the write side's `WriteFact::Signed` is delivered by `on_signed` BEFORE
 //! routing is even attempted, so a directory with no known write relays
 //! (routing later fails closed) does not stop this test from observing
 //! whether the SIGN step itself used the correct account's key.
@@ -19,13 +19,13 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::RelayAdmissionPolicy;
 use nmp::mechanism::core::RowDelta;
-use nmp::mechanism::publish_queue::WriteStatus;
+use nmp::mechanism::core::{PublishError, RelayAdmissionPolicy};
+use nmp::mechanism::publish_queue::{SigningState, WriteFact};
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IdentityField};
-use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router::FixtureRoutingFacts;
 use nmp_signer::{
@@ -112,9 +112,9 @@ fn wait_for_rows(
 /// Waits until `pred` matches some status on the stream (never assumes the
 /// FIRST value is a terminal -- ledger #9).
 fn wait_for_status(
-    rx: &FifoReceiver<WriteStatus>,
+    rx: &FifoReceiver<WriteFact>,
     timeout: Duration,
-    pred: impl Fn(&WriteStatus) -> bool,
+    pred: impl Fn(&WriteFact) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -242,7 +242,6 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     let receipt_as_b = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned_as_b)),
-            durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -251,7 +250,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     assert!(
         wait_for_status(&receipt_as_b, Duration::from_secs(5), |s| matches!(
             s,
-            WriteStatus::Signed(_)
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
         )),
         "publish after switching active to b must sign successfully with b's OWN key -- \
          the write half of the coupled switch"
@@ -272,7 +271,6 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     let receipt_wrong = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned_as_a_while_b_active)),
-            durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -281,7 +279,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     assert!(
         wait_for_status(&receipt_wrong, Duration::from_secs(5), |s| matches!(
             s,
-            WriteStatus::Signed(_)
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
         )),
         "an author-free body published while B is active signs as B, whatever it was \
          composed alongside"
@@ -299,7 +297,6 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     let receipt_as_a = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned_as_a)),
-            durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -308,7 +305,7 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     assert!(
         wait_for_status(&receipt_as_a, Duration::from_secs(5), |s| matches!(
             s,
-            WriteStatus::Signed(_)
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
         )),
         "A-authored work continues to use A's signer after another read-root change"
     );
@@ -345,19 +342,18 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
         vec![],
         "nobody is active",
     );
-    let receipt_rx = handle
-        .publish(WriteIntent {
-            payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::AtMostOnce,
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: None,
-        })
-        .expect("receipt id allocation");
-
-    assert!(wait_for_status(&receipt_rx, Duration::from_secs(5), |s| {
-        matches!(s, WriteStatus::Failed(_))
-    }));
+    // Nothing is pinned, so nothing may park: the CALL refuses and no
+    // receipt stream is ever created.
+    let refused = handle.publish(WriteIntent {
+        payload: WritePayload::Event(body_of(&unsigned)),
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+        correlation: None,
+    });
+    assert!(
+        matches!(refused.err(), Some(PublishError::NoActiveAccount)),
+        "publishing as the active account with no active account is a refusal"
+    );
 
     handle.shutdown();
     engine_thread.join();
@@ -400,7 +396,6 @@ fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
                 content: ("unauthorized default author").into(),
                 created_at: Some(Timestamp::now()),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -408,15 +403,22 @@ fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
         .expect("receipt id allocation");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
-            matches!(status, WriteStatus::AwaitingRoute { .. })
+            matches!(
+                status,
+                WriteFact::Destinations {
+                    relays,
+                    complete: false
+                } if relays.is_empty()
+            )
         }),
-        "an Auto write with no relay list known yet parks, naming what it waits for"
+        "an Auto write with no relay list known yet parks on an empty, still-open \
+         destination set"
     );
     assert!(
         !wait_for_status(&receipt, Duration::from_millis(500), |status| {
-            matches!(status, WriteStatus::Failed(_))
+            matches!(status, WriteFact::Outcome(_))
         }),
-        "the park is not a terminal failure -- the event is signed, journaled and durable, \
+        "the park is not a terminal -- the event is signed, journaled and durable, \
          and only the directory was young"
     );
 
@@ -467,18 +469,12 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
     let receipt = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(composed_while_a_was_active),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
         })
         .expect("the engine is open");
-    assert!(matches!(
-        receipt
-            .recv_timeout(Duration::from_secs(5))
-            .expect("acceptance must be deterministic"),
-        WriteStatus::Accepted
-    ));
+    // Acceptance is the `Ok` above; the stream carries only what follows it.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline && b_calls.load(Ordering::SeqCst) == 0 {
         let _ = receipt.recv_timeout(Duration::from_millis(100));
@@ -519,7 +515,6 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
                 content: ("reattach me").into(),
                 created_at: Some(Timestamp::now()),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -531,7 +526,7 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
         |status| {
             matches!(
                 status,
-                WriteStatus::AwaitingCapability { pubkey } if *pubkey == a.public_key()
+                WriteFact::Signing(SigningState::AwaitingSigner { pubkey }) if *pubkey == a.public_key()
             )
         }
     ));
@@ -541,7 +536,10 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
         .expect("local signer has a public key");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
-            matches!(status, WriteStatus::Signed(_))
+            matches!(
+                status,
+                WriteFact::Signing(SigningState::Signed { event_id: _ })
+            )
         }),
         "attaching the matching signer must re-arm the durable accepted template"
     );
@@ -574,7 +572,6 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
                 content: ("authored by b").into(),
                 created_at: Some(Timestamp::now()),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -586,7 +583,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
         |status| {
             matches!(
                 status,
-                WriteStatus::AwaitingCapability { pubkey } if *pubkey == b.public_key()
+                WriteFact::Signing(SigningState::AwaitingSigner { pubkey }) if *pubkey == b.public_key()
             )
         }
     ));
@@ -597,7 +594,10 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
         .expect("local signer has a public key");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
-            matches!(status, WriteStatus::Signed(_))
+            matches!(
+                status,
+                WriteFact::Signing(SigningState::Signed { event_id: _ })
+            )
         }),
         "the intent accepted while B was active must stay pinned to B after switching to A"
     );
@@ -640,7 +640,6 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
                 content: ("replacement remains usable").into(),
                 created_at: Some(Timestamp::now()),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -649,7 +648,10 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),
-        |status| matches!(status, WriteStatus::Signed(_))
+        |status| matches!(
+            status,
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
+        )
     ));
 
     assert!(handle.remove_signer(registration_b.clone()));
@@ -667,9 +669,9 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
 /// The #47 no-retarget falsifiers need a bounded NEGATIVE observation: after
 /// a read-root change, a pinned parked intent must emit no progress at all.
 fn assert_no_status_within(
-    rx: &FifoReceiver<WriteStatus>,
+    rx: &FifoReceiver<WriteFact>,
     window: Duration,
-    forbidden: impl Fn(&WriteStatus) -> bool,
+    forbidden: impl Fn(&WriteFact) -> bool,
 ) {
     let deadline = Instant::now() + window;
     loop {
@@ -729,7 +731,6 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
     let receipt = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&draft)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(b.public_key()),
             correlation: None,
@@ -737,7 +738,7 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
         .expect("receipt id allocation");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
-            matches!(status, WriteStatus::Signed(id) if *id == expected.id)
+            matches!(status, WriteFact::Signing(SigningState::Signed { event_id: id }) if *id == expected.id)
         }),
         "the override write must sign as B with the exact frozen body/id"
     );
@@ -789,7 +790,6 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
     let receipt_default = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&a_draft)),
-            durability: Durability::AtMostOnce,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -798,7 +798,10 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
     assert!(wait_for_status(
         &receipt_default,
         Duration::from_secs(5),
-        |status| matches!(status, WriteStatus::Signed(_))
+        |status| matches!(
+            status,
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
+        )
     ));
 
     handle.shutdown();
@@ -839,7 +842,6 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     let receipt = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&draft)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(b.public_key()),
             correlation: None,
@@ -849,7 +851,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
             matches!(
                 status,
-                WriteStatus::AwaitingCapability { pubkey } if *pubkey == b.public_key()
+                WriteFact::Signing(SigningState::AwaitingSigner { pubkey }) if *pubkey == b.public_key()
             )
         }),
         "an override with no registered capability must park, not fail, and the parked pubkey \
@@ -861,7 +863,11 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     // Failed -- silence.
     handle.set_active_account(Some(a.public_key()));
     assert_no_status_within(&receipt, Duration::from_millis(500), |status| {
-        matches!(status, WriteStatus::Signed(_) | WriteStatus::Failed(_))
+        matches!(
+            status,
+            WriteFact::Signing(SigningState::Signed { .. } | SigningState::Refused { .. })
+                | WriteFact::Outcome(_)
+        )
     });
 
     // Registering the override key resumes the SAME intent as B.
@@ -870,7 +876,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
         .expect("local signer has a public key");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
-            matches!(status, WriteStatus::Signed(id) if *id == expected.id)
+            matches!(status, WriteFact::Signing(SigningState::Signed { event_id: id }) if *id == expected.id)
         }),
         "attaching the override key's signer must complete the original write as B"
     );
@@ -910,7 +916,6 @@ fn an_explicit_identity_signs_while_logged_out() {
     let receipt = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&draft)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(b.public_key()),
             correlation: None,
@@ -918,7 +923,7 @@ fn an_explicit_identity_signs_while_logged_out() {
         .expect("receipt id allocation");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
-            matches!(status, WriteStatus::Signed(id) if *id == expected.id)
+            matches!(status, WriteFact::Signing(SigningState::Signed { event_id: id }) if *id == expected.id)
         }),
         "an explicit override must not require an active account"
     );

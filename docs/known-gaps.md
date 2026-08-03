@@ -62,37 +62,59 @@ about current code:
   link-local, and `.onion` targets remain rejected by default, while
   operator-configured and explicit contextual authority keep their separate
   trusted path. Other non-relay limit classes remain open under ledger #17.
-- **Crash-safe acceptance, restart reattachment, bounded retry execution, and
-  governed SDK observation are built.** This does not claim a finite retry
-  count or retained attempt history; #46 owns that retention/GC gap. One transaction
-  owns the intent, stable receipt,
-  frozen body, canonical pending row and displaced state. Rust boot recovery
-  rebuilds ownership without reinsertion, resumes the frozen signer, persists
-  versioned exact-byte `(intent, relay, ordinal)` Started facts before wire,
-  replays Durable in-flight bytes, and converts AtMostOnce ambiguity to
-  `OutcomeUnknown` without resend. A failure to persist `Started` retains the
-  relay as an explicit nonterminal owned lane, emits `PersistenceBlocked`
-  without emitting an untracked wire EVENT. Exact dynamically-resolved relay
-  sets are first committed as append-only route revisions, so restart owns
-  their union even if the live directory is empty or changed. Failure to
-  persist the route revision is reported separately and makes no false claim
-  that the exact URL survived a crash. One typed engine reducer now owns stable
-  due ordering, 32-global/1-per-relay caps, deterministic 3s-to-300s backoff,
-  30s ACK expiry, handoff and standardized relay-result classification, and
-  every eligibility transition. Offline and AUTH waits allocate no attempt and
-  arm no polling deadline; Durable retry advances the persisted ordinal, while
-  AtMostOnce ambiguity becomes terminal `OutcomeUnknown`. The deadline exposed
-  by `next_deadline()` is consumed before it can be rearmed, including bounded
-  batch draining, so there is no zero-timeout busy-spin. Rust, UniFFI, Swift,
-  and Kotlin receipts distinguish relay/AUTH waits, exact-session terminal
-  authentication denial with typed policy/signer/relay source, retry
-  eligibility with the persisted non-AUTH cause, relay detail, attempt ordinal,
-  and time, ambiguous handoff, and proven socket write/flush persisted against
-  an exact lane ordinal. AUTH-required remains resumable and cannot appear as a
-  retry cause; subscription closure cannot terminalize a write; denial commits
-  before receipt emission and replays with the same source/reason. `Sent` is
-  never emitted for queue acceptance, ambiguity, or an ephemeral handoff with
-  no outbox fact.
+- **Crash-safe acceptance, restart reattachment, a real attempt ceiling, and
+  governed SDK observation are built; retention is not.** #46 still owns the
+  retention/GC gap, and #1039's enumeration door makes the growth VISIBLE
+  rather than fixing it: retained receipts and correlation tokens still
+  accumulate without bound, and removing an entry is the app's decision, not a
+  policy NMP applies. One transaction owns the intent, stable receipt, frozen
+  body, canonical pending row and displaced state. Rust boot recovery rebuilds
+  ownership without reinsertion, resumes the frozen signer, persists versioned
+  exact-byte `(intent, relay, ordinal)` Started facts before wire, and replays
+  in-flight bytes — an attempt that crossed a process loss is simply retried,
+  because the resend is the identical frozen event and a relay that did
+  receive it dedupes on the id. A failure to persist `Started` retains the
+  relay as an explicit nonterminal owned lane, emits
+  `RelayWaiting::PersistenceStalled` AND latches it on the queue entry, and
+  emits no untracked wire EVENT. Exact dynamically-resolved relay sets are
+  first committed as append-only route revisions, so restart owns their union
+  even if the live directory is empty or changed; failure to persist the route
+  revision carries its own `detail` and makes no false claim that the exact URL
+  survived a crash. One typed engine reducer owns stable due ordering,
+  32-global/1-per-relay caps, deterministic 3s-to-300s backoff, 30s ACK expiry,
+  handoff and standardized relay-result classification, and every eligibility
+  transition. **The attempt ceiling (#1031) is built and counts observations,
+  never wall-clock** (`EngineConfig::max_publish_attempts`, default 16):
+  reaching it terminalises ONE relay lane as `RelayState::GaveUp` and leaves
+  every other relay alone. Offline and AUTH waits allocate no attempt, so time
+  spent disconnected can never exhaust the ceiling. Deliberately UNCAPPED, and
+  this is the rule rather than an omission: a write whose route is not yet
+  resolved and a write whose signer has not attached have no ceiling of any
+  kind — nothing accumulates there, so a deadline over them would convert
+  ignorance into a verdict. They end when knowledge is exhausted, when the
+  signer arrives, or when the app removes the entry. Rust, UniFFI, Swift, and
+  Kotlin receipts distinguish relay/AUTH waits, exact-session terminal
+  authentication denial with typed policy/signer/relay source (never folded
+  into a relay's rejection of the event), backoff with the persisted non-AUTH
+  cause, relay detail, attempt ordinal and time, and proven socket write/flush
+  persisted against an exact lane ordinal. AUTH-required remains resumable and
+  cannot appear as a retry cause; subscription closure cannot terminalize a
+  write; denial commits before receipt emission and replays with the same
+  source/reason. Every receipt stream ends with exactly one
+  `WriteOutcome`, so an app can always tell a finished write from a dropped
+  subscription.
+- **A `NoDestination` write's open-work row is retained and has no
+  reclamation door.** When routing completes and names zero relays the write
+  terminates as `WriteOutcome::NoDestination` and stays enumerable with that
+  reason, which is the honest report — but its `PUBLISH_QUEUE_INTENTS` row is
+  not closed, because `EventStore::close_terminal_intent` requires a NON-EMPTY
+  terminal lane set and this write owns no lanes at all. Consequence, stated
+  rather than hidden: such an entry is refused by
+  `remove_publish_queue_entry` as still-active, and (once signed) by
+  `cancel_write` as already-signed, so it currently has no removal path and is
+  replayed on every boot. Closing it needs a store door that can retire an
+  intent with zero lanes, distinguished from "not resolved yet" by the
+  engine's own `route_complete` — which the store cannot see today.
 - **The governed sign-only path is built; NMP ships no remote-signer provider and no standard platform vault providers.**
   The protocol-neutral signer contract lives in dependency-free `nmp-signer`,
   and the explicit local-key implementation lives in `nmp-local-signer`. NMP

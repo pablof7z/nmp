@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, CorrelationToken, Demand, Durability, EventBuilder, Filter, Identity,
+    AccessContext, Binding, CorrelationToken, Demand, EventBuilder, Filter, Identity,
     SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::nips::nip65::RelayMetadata;
@@ -241,7 +241,6 @@ fn compose_relay_list_bootstrap(request: BootstrapRelayList) -> WriteIntent {
             content: String::new(),
             created_at: None,
         }),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(bootstrap_relays.into_iter().collect()),
         // The request names the account this bootstrap is FOR, and a
         // builder has no author of its own, so that name is now what

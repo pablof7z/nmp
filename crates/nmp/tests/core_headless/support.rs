@@ -15,22 +15,24 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
-    ObservationFact, ObservationId, ReceiptId, RequestTerminal, RowDelta, ShortfallFact,
-    SourceEvidence, SourceStatus,
+    ObservationFact, ObservationId, PublishError, ReceiptId, RequestTerminal, RowDelta,
+    ShortfallFact, SourceEvidence, SourceStatus,
 };
-use nmp::mechanism::publish_queue::{RetryCause, WriteStatus};
+use nmp::mechanism::publish_queue::{
+    NotSentReason, RelayState, RelayWaiting, RetryCause, SigningState, WriteFact, WriteOutcome,
+};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Durability, Filter, Identity,
-    RelaySessionKey, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, Identity, RelaySessionKey,
+    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
-    CoverageInterval, CoverageKey, DurabilityOutcome, EventStore, GcReport, GcRetentionSet,
-    InsertOutcome, MemoryStore, PersistenceError, PersistenceFault, PromoteOutcome,
-    PublishQueueAttempt, PublishQueueAttemptOutcome, PublishQueueIntent, PublishQueueReceipt,
-    PublishQueueRouteRevision, RedbStore, RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
+    CoverageKey, DurabilityOutcome, EventStore, GcReport, GcRetentionSet, InsertOutcome,
+    MemoryStore, PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttempt,
+    PublishQueueAttemptOutcome, PublishQueueIntent, PublishQueueReceipt, PublishQueueRouteRevision,
+    RedbStore, RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -109,6 +111,13 @@ fn new_core(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
     EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10)
 }
 
+/// A core whose per-relay attempt ceiling (#1031) is deliberately out of the
+/// way. The ceiling is its own falsifier; a test about replay PAGING must not
+/// quietly turn into a test about giving up when its retry loop crosses 16.
+fn new_core_without_attempt_ceiling(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
+    new_core(dir).with_max_publish_attempts(u64::MAX)
+}
+
 fn activate<S: EventStore>(core: &mut EngineCore<S>, keys: &Keys) {
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
 }
@@ -117,6 +126,34 @@ struct FailOnceCompensationStore {
     inner: MemoryStore,
     fail_next_compensation: bool,
     fail_next_attempt_finish: bool,
+}
+
+/// The app-facing outbox door (#1039): enumerate what is outstanding, and
+/// forget one entry. Plus the refusal-into-custody door every acceptance
+/// path needs.
+macro_rules! delegate_publish_queue_door {
+    ($inner:ident) => {
+        fn enumerate_publish_queue_receipts(
+            &self,
+        ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
+            self.$inner.enumerate_publish_queue_receipts()
+        }
+        fn remove_publish_queue_entry(
+            &mut self,
+            receipt_id: u64,
+        ) -> Result<nmp_store::RemoveQueueEntryOutcome, PersistenceError> {
+            self.$inner.remove_publish_queue_entry(receipt_id)
+        }
+        fn accept_refused(
+            &mut self,
+            frozen_id: nostr::EventId,
+            expected_pubkey: nostr::PublicKey,
+            reason: nmp_store::RefuseReason,
+        ) -> Result<u64, PersistenceError> {
+            self.$inner
+                .accept_refused(frozen_id, expected_pubkey, reason)
+        }
+    };
 }
 
 macro_rules! delegate_lane_methods {
@@ -207,6 +244,7 @@ macro_rules! delegate_lane_methods {
         ) -> Result<nmp_store::CloseIntentOutcome, PersistenceError> {
             self.$inner.close_terminal_intent(intent_id)
         }
+        delegate_publish_queue_door!($inner);
     };
 }
 
@@ -301,15 +339,6 @@ impl EventStore for FailOnceCompensationStore {
             self.inner.compensate_write_with_state(intent_id, reason)
         }
     }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
-    }
     fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
         self.inner.recover_publish_queue()
     }
@@ -369,13 +398,6 @@ impl EventStore for FailOnceCompensationStore {
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
     }
-    fn accept_ephemeral(
-        &mut self,
-        frozen_id: nostr::EventId,
-        expected_pubkey: nostr::PublicKey,
-    ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
-    }
 }
 
 struct SharedFailStartStore {
@@ -399,15 +421,6 @@ impl EventStore for SharedFailStartStore {
         reason: CompensationReason,
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write_with_state(intent_id, reason)
-    }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
     }
     fn insert(
         &mut self,
@@ -518,13 +531,6 @@ impl EventStore for SharedFailStartStore {
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
     }
-    fn accept_ephemeral(
-        &mut self,
-        frozen_id: nostr::EventId,
-        expected_pubkey: nostr::PublicKey,
-    ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
-    }
 }
 
 struct RedbFailStartStore {
@@ -558,15 +564,6 @@ impl EventStore for RedbFailStartStore {
         reason: CompensationReason,
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write_with_state(intent_id, reason)
-    }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
     }
     fn insert(
         &mut self,
@@ -681,13 +678,6 @@ impl EventStore for RedbFailStartStore {
     ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
-    }
-    fn accept_ephemeral(
-        &mut self,
-        frozen_id: nostr::EventId,
-        expected_pubkey: nostr::PublicKey,
-    ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
     }
 }
 
@@ -1022,7 +1012,6 @@ fn publish_explicit<S: EventStore>(
     activate(core, author);
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(85, "attempt-start failure")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(Vec::from_iter(relays)),
         identity: Identity::Active,
         correlation: None,
@@ -1037,7 +1026,40 @@ fn publish_explicit<S: EventStore>(
     (id, signed, effects)
 }
 
-fn receipt_statuses(effects: &[Effect]) -> Vec<WriteStatus> {
+/// The two shapes a local-persistence stall takes. They are one variant now
+/// and are told apart by `detail` alone, so the exact sentences are stated
+/// here: a silent change to either one must fail loudly rather than quietly
+/// erase the distinction the two old spellings carried in their names.
+const ATTEMPT_STALL_DETAIL: &str =
+    "the durable attempt fact could not be committed; no wire EVENT was emitted and recovery \
+     rediscovers this exact relay from its committed route revision";
+const ROUTE_STALL_DETAIL: &str =
+    "the append-only route revision could not be committed; this exact relay URL is not claimed \
+     to survive a crash";
+
+/// The attempt-log stall: the relay URL survives a crash, the attempt fact
+/// does not.
+fn attempt_stalled(relay: &RelayUrl) -> WriteFact {
+    WriteFact::Relay {
+        relay: relay.clone(),
+        state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+            detail: ATTEMPT_STALL_DETAIL.to_string(),
+        }),
+    }
+}
+
+/// The route-revision stall: not even the resolved relay URL is claimed to
+/// survive a crash.
+fn route_stalled(relay: &RelayUrl) -> WriteFact {
+    WriteFact::Relay {
+        relay: relay.clone(),
+        state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+            detail: ROUTE_STALL_DETAIL.to_string(),
+        }),
+    }
+}
+
+fn receipt_statuses(effects: &[Effect]) -> Vec<WriteFact> {
     effects
         .iter()
         .filter_map(|effect| match effect {

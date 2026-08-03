@@ -15,10 +15,10 @@ Feature: Which destination failed, and why, one destination at a time
   paraphrasing a message it did not write. A transient failure is
   retry-eligible and says when, so an app can show "retrying shortly" rather
   than an error. A destination given up on has finished trying and says so.
-  And an unknown outcome -- an attempt that crossed a process loss while
-  already in flight -- is the honest answer when the answer cannot be
-  recovered: not a success, not a failure, and never retried on a write that
-  may be attempted at most once.
+  And an attempt that crossed a process loss while already in flight is
+  simply retried: the resend is the IDENTICAL frozen event, never re-signed,
+  so a relay that did receive it dedupes on the id and nothing is published
+  twice.
 
   The second thing an app needs is the shape of the whole. Some destinations
   acked while others are still going is the ordinary case, not an edge case,
@@ -124,19 +124,6 @@ Feature: Which destination failed, and why, one destination at a time
     And no further attempt is made against "wss://one.example"
     And the intent is still durably held
 
-  @designed @ledger-9
-  Scenario: An outcome nobody can recover is reported as unknown
-    # The attempt was in flight when the process died. It may have landed. It
-    # may not have. Reporting either would be a claim NMP cannot support, and
-    # retrying would break an at-most-once write's one guarantee.
-    Given a write that must be attempted at most once
-    And its attempt against "wss://one.example" crossed a process loss
-    When I reattach to the receipt by its stable id
-    Then the receipt reports "wss://one.example" as outcome unknown
-    And "wss://one.example" is not reported as acked
-    And "wss://one.example" is not reported as failed
-    And "wss://one.example" is never attempted again
-
   # ---- four destinations, four answers ----------------------------------
 
   @designed @ledger-9
@@ -177,19 +164,6 @@ Feature: Which destination failed, and why, one destination at a time
     And the receipt reports that no destination is still outstanding
 
   @designed @ledger-9
-  Scenario: An unknown outcome is never counted as sent
-    # The tempting rounding error. Three acked and one unknowable is not four
-    # acked, and an app told "sent" here would be told something false.
-    Given relay "wss://one.example" accepts every event
-    And relay "wss://two.example" accepts every event
-    And relay "wss://three.example" accepts every event
-    And a write that must be attempted at most once
-    And its attempt against "wss://four.example" crossed a process loss
-    When I reattach to the receipt by its stable id
-    Then the receipt reports 3 of 4 destinations acked
-    And the receipt reports 1 destination whose outcome is unknown
-    And the receipt makes no claim that the note is fully sent
-
   # ---- the boundary between the two failures ----------------------------
 
   @designed @ledger-9
@@ -198,8 +172,8 @@ Feature: Which destination failed, and why, one destination at a time
     # event" are different sentences and an app shows different screens for
     # them. A write with no destinations yet has nothing to attribute a
     # delivery failure to, and must not invent one.
-    Given the indexers have settled that Bob has no DM relay list
+    Given nothing is known yet about Bob's DM relay list
     When I publish a direct message to Bob
-    Then the receipt reports the write awaiting a route
+    Then the receipt reports an open destination set naming no relays
     And the receipt reports no destination as failed
     And the receipt reports no destination at all

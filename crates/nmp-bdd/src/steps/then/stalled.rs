@@ -207,14 +207,7 @@ async fn no_conclusion_from_age(w: &mut NmpWorld) {
         !row.detail.is_empty(),
         "an aged entry keeps the reason it was parked with; saw {row:?}"
     );
-    let failed = w.receipt_never(|seen| {
-        seen.iter().any(|status| {
-            matches!(
-                status,
-                nmp::mechanism::publish_queue::WriteStatus::Failed(_)
-            )
-        })
-    });
+    let failed = w.never_failed();
     assert!(
         failed,
         "interpreting the age is deciding to give up, and giving up is the app's decision or \
@@ -225,15 +218,19 @@ async fn no_conclusion_from_age(w: &mut NmpWorld) {
 
 #[then(regex = r#"^nothing abandoned the write on NMP's own initiative$"#)]
 async fn nothing_abandoned_it(w: &mut NmpWorld) {
-    let terminal = w.receipt_never(|seen| {
-        seen.iter().any(|status| {
-            matches!(
-                status,
-                nmp::mechanism::publish_queue::WriteStatus::Failed(_)
-                    | nmp::mechanism::publish_queue::WriteStatus::Cancelled
-            )
-        })
-    });
+    let terminal = w.never_failed()
+        && w.receipt_never(|seen| {
+            seen.iter().any(|status| {
+                matches!(
+                    status,
+                    nmp::mechanism::publish_queue::WriteFact::Outcome(
+                        nmp::mechanism::publish_queue::WriteOutcome::NotSent(
+                            nmp::mechanism::publish_queue::NotSentReason::Cancelled
+                        )
+                    )
+                )
+            })
+        });
     assert!(
         terminal,
         "explicit cancellation is the one abandonment door, and nobody opened it; receipt \
@@ -298,9 +295,13 @@ async fn nothing_durable_was_recorded(w: &mut NmpWorld) {
     );
     let after = w.receipt_statuses_after_settling();
     assert!(
-        !after
-            .iter()
-            .any(|status| matches!(status, nmp::mechanism::publish_queue::WriteStatus::Acked(_))),
+        !after.iter().any(|status| matches!(
+            status,
+            nmp::mechanism::publish_queue::WriteFact::Relay {
+                state: nmp::mechanism::publish_queue::RelayState::Published,
+                ..
+            }
+        )),
         "a read cannot have delivered anything; receipt showed {after:?}"
     );
     w.read_stalled_writes();

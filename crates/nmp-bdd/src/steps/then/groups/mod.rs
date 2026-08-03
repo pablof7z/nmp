@@ -34,7 +34,7 @@ mod route;
 mod signing;
 mod surface;
 
-use nmp::mechanism::publish_queue::WriteStatus;
+use nmp::mechanism::publish_queue::{RelayState, SigningState, WriteFact, WriteOutcome};
 
 use crate::world::NmpWorld;
 
@@ -49,17 +49,10 @@ use crate::world::NmpWorld;
 /// exactly when it matters most.
 async fn settled(w: &mut NmpWorld) {
     if w.receipt_count() > 0 {
-        w.receipt_eventually(|seen| {
-            seen.iter().any(|s| {
-                matches!(
-                    s,
-                    WriteStatus::Acked(_)
-                        | WriteStatus::Rejected(_, _)
-                        | WriteStatus::GaveUp(_)
-                        | WriteStatus::Failed(_)
-                )
-            })
-        });
+        // Exactly one `Outcome` ends every receipt stream, so the terminal
+        // beat is now a single fact rather than a list of per-relay ones
+        // that had to be kept in step with the vocabulary by hand.
+        w.receipt_eventually(|seen| seen.iter().any(|s| matches!(s, WriteFact::Outcome(_))));
     }
     w.wire_settled().await;
 }

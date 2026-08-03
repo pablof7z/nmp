@@ -24,7 +24,7 @@ use tempfile::TempDir;
 use super::store::RedbStore;
 use crate::{
     AcceptWrite, DurabilityOutcome, EventStore, IntentId, IntentSigState, PersistenceError,
-    PersistenceFault, WriteDurability,
+    PersistenceFault,
 };
 
 // ---- fault-injecting storage backend -----------------------------------
@@ -182,7 +182,6 @@ fn attempt_durable_write(store: &mut RedbStore, created_at: u64) -> Result<(), P
             monotonic_stamp: false,
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "durability-proof".into(),
-            durability: WriteDurability::Durable,
             routing: "durability-proof".into(),
             sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(created_at),
@@ -277,7 +276,11 @@ fn no_door_retries_a_commit_against_a_latched_memory() {
         let mut faults = vec![attempt_durable_write(&mut store, 2_100 + round).err()];
         faults.push(
             store
-                .accept_ephemeral(frozen_event(2_200 + round).id, keys().public_key())
+                .accept_refused(
+                    frozen_event(2_200 + round).id,
+                    keys().public_key(),
+                    crate::RefuseReason::Tombstoned,
+                )
                 .err(),
         );
         faults.push(

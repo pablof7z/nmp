@@ -2,14 +2,14 @@ use super::publish_queue_codec::{
     codec_error, deadline_by_intent_key, deadline_key, decode_addr_claimants, decode_claimants,
     decode_lane, decode_meta_u64, decode_receipt, encode_addr_claimants, encode_claimants,
     encode_deadline, encode_lane, encode_meta_u64, encode_receipt, lane_key, receipt_key,
-    PublishQueueRelayId, NEXT_INTENT_ID_KEY, NEXT_RECEIPT_ID_KEY, PENDING_EPHEMERAL_RECEIPTS_KEY,
+    PublishQueueRelayId, NEXT_INTENT_ID_KEY, NEXT_RECEIPT_ID_KEY,
 };
 use super::schema::persist_err;
 use super::{
     address_key_for, Deserialize, Event, EventId, IntentId, IntentSigState, PersistenceError,
     PublicKey, PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, ReadableTable, ReceiptState,
-    Serialize, Timestamp, WriteDurability,
+    Serialize, Timestamp,
 };
 
 pub(super) fn lane_deadline(lane: &PublishQueueLane) -> Option<PublishQueueDeadline> {
@@ -116,7 +116,6 @@ pub(super) struct PublishQueueIntentRecord {
     pub(super) frozen: Event,
     pub(super) expected_pubkey: PublicKey,
     pub(super) signing_identity_ref: String,
-    pub(super) durability: WriteDurability,
     pub(super) routing: String,
     pub(super) sig_state: IntentSigState,
     pub(super) accepted_at: Timestamp,
@@ -175,53 +174,13 @@ pub(super) fn alloc_counter_in_txn(
     Ok(current)
 }
 
-pub(super) fn increment_pending_ephemeral_in_txn(
-    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
-) -> Result<(), PersistenceError> {
-    let current = publish_queue_meta
-        .get(PENDING_EPHEMERAL_RECEIPTS_KEY)
-        .map_err(persist_err)?
-        .map(|guard| decode_meta_u64(guard.value(), "pending ephemeral receipt count"))
-        .transpose()
-        .map_err(|error| codec_error("pending ephemeral receipt count", error))?
-        .unwrap_or(0);
-    let next = current
-        .checked_add(1)
-        .ok_or_else(|| PersistenceError::invariant("pending ephemeral receipt count exhausted"))?;
-    let encoded = encode_meta_u64(next);
-    publish_queue_meta
-        .insert(PENDING_EPHEMERAL_RECEIPTS_KEY, encoded.as_slice())
-        .map_err(persist_err)?;
-    Ok(())
-}
-
-pub(super) fn decrement_pending_ephemeral_in_txn(
-    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
-) -> Result<(), PersistenceError> {
-    let current = publish_queue_meta
-        .get(PENDING_EPHEMERAL_RECEIPTS_KEY)
-        .map_err(persist_err)?
-        .map(|guard| decode_meta_u64(guard.value(), "pending ephemeral receipt count"))
-        .transpose()
-        .map_err(|error| codec_error("pending ephemeral receipt count", error))?
-        .unwrap_or(0);
-    let next = current
-        .checked_sub(1)
-        .ok_or_else(|| PersistenceError::invariant("pending ephemeral receipt count underflow"))?;
-    let encoded = encode_meta_u64(next);
-    publish_queue_meta
-        .insert(PENDING_EPHEMERAL_RECEIPTS_KEY, encoded.as_slice())
-        .map_err(persist_err)?;
-    Ok(())
-}
-
 /// One `PUBLISH_QUEUE_RECEIPTS` row's JSON value (architecture review correction —
 /// see [`crate::ReceiptState`]'s doc). `EventId`/`PublicKey`/`IntentId`/
 /// `ReceiptState` all already derive `Serialize`/`Deserialize`, so this
 /// mirrors `crate::PublishQueueReceipt` field-for-field with no re-encoding.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct PublishQueueReceiptRecord {
-    /// `None` for an `Ephemeral` receipt-only record — see
+    /// `None` for a refused-at-acceptance receipt-only record — see
     /// `crate::PublishQueueReceipt::intent_id`'s doc.
     pub(super) intent_id: Option<IntentId>,
     pub(super) frozen_id: EventId,
@@ -254,37 +213,6 @@ pub(super) fn update_publish_queue_receipt(
         .insert(&key, encoded.as_slice())
         .map_err(persist_err)?;
     Ok(())
-}
-
-/// Boot-time reconciliation: every `Ephemeral` receipt-only record
-/// (`intent_id: None`) still `ReceiptState::Accepted` is flipped to
-/// `Abandoned` — see `ReceiptState::Abandoned`'s doc for why this is sound
-/// without any engine cooperation. `RedbStore::open()` calls this only when
-/// exact metadata reports pending ephemeral receipts, inside the conditional
-/// recovery transaction. Fresh schema creation never calls it. Two passes
-/// (collect then mutate), mirroring `gc`'s victim-collection pattern: `redb`
-/// does not allow mutating a table while iterating it.
-pub(super) fn reconcile_ephemeral_receipts_in_txn(
-    publish_queue_receipts: &mut redb::Table<'_, &'static [u8; 8], &'static [u8]>,
-) -> Result<usize, PersistenceError> {
-    let mut to_abandon: Vec<([u8; 8], PublishQueueReceiptRecord)> = Vec::new();
-    for entry in publish_queue_receipts.iter().map_err(persist_err)? {
-        let (key, value) = entry.map_err(persist_err)?;
-        let record = decode_receipt(value.value())
-            .map_err(|error| codec_error("ephemeral receipt reconciliation", error))?;
-        if record.intent_id.is_none() && record.state == ReceiptState::Accepted {
-            to_abandon.push((*key.value(), record));
-        }
-    }
-    let reconciled = to_abandon.len();
-    for (key, mut record) in to_abandon {
-        record.state = ReceiptState::Abandoned;
-        let encoded = encode_receipt(&record);
-        publish_queue_receipts
-            .insert(&key, encoded.as_slice())
-            .map_err(persist_err)?;
-    }
-    Ok(reconciled)
 }
 
 /// One provisional kind:5 suppression claim, as persisted in

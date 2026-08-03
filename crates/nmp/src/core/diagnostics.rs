@@ -141,11 +141,15 @@ pub enum AuthDiagnosticsPhase {
 /// one wants a reachable relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StalledWriteStage {
-    /// No destination could be computed. The write is parked in
-    /// [`crate::publish_queue::WriteStatus::AwaitingRoute`].
+    /// No destination could be computed. The write is parked on an EMPTY,
+    /// still-OPEN destination set
+    /// ([`crate::publish_queue::WriteFact::Destinations`] with
+    /// `complete: false`) — distinct from
+    /// [`crate::publish_queue::WriteOutcome::NoDestination`], which is
+    /// knowledge exhausted and terminal.
     Unroutable,
     /// No signer answers for the author this obligation was FROZEN to — the
-    /// [`crate::publish_queue::WriteStatus::AwaitingCapability`] park. Never the
+    /// [`crate::publish_queue::SigningState::AwaitingSigner`] park. Never the
     /// mutable active account.
     Unsignable,
     /// Destinations exist and none of them is working: every relay this
@@ -175,11 +179,10 @@ pub struct StalledWrite {
     pub stage: StalledWriteStage,
     /// What this write is waiting for.
     ///
-    /// For [`StalledWriteStage::Unroutable`] this is the receipt's OWN park
-    /// reason, projected verbatim: an operator comparing a diagnostics row
-    /// with the receipt beside it must never have to decide whether two
-    /// differently-worded sentences are the same fact. Never empty — a park
-    /// that says only "stuck" is barely better than losing the write.
+    /// For [`StalledWriteStage::Unroutable`] this list is the ONLY place the
+    /// reason is stated at all: the receipt itself says only that its
+    /// destination set is empty and still open. Never empty — a park that
+    /// says only "stuck" is barely better than losing the write.
     pub detail: String,
     /// When this obligation was ACCEPTED — the durable
     /// `AcceptWrite::accepted_at`, replayed verbatim after a restart.

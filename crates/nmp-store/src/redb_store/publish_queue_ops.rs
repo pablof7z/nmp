@@ -1,7 +1,7 @@
 use super::commit::commit_prepared;
 use super::publish_queue::{
-    alloc_counter_in_txn, alloc_receipt_id_in_txn, increment_pending_ephemeral_in_txn,
-    lane_deadline, replace_lane_in_txn, PublishQueueReceiptRecord,
+    alloc_counter_in_txn, alloc_receipt_id_in_txn, lane_deadline, replace_lane_in_txn,
+    PublishQueueReceiptRecord,
 };
 use super::publish_queue_codec::{
     attempt_key, attempt_range, canonical_route_ids, codec_error, deadline_by_intent_key,
@@ -76,7 +76,6 @@ pub(super) fn recover_publish_queue(
             frozen: record.frozen,
             expected_pubkey: record.expected_pubkey,
             signing_identity_ref: record.signing_identity_ref,
-            durability: record.durability,
             routing: record.routing,
             sig_state: record.sig_state,
             displaced,
@@ -1602,14 +1601,15 @@ pub(super) fn close_terminal_intent(
     commit_prepared(write_txn, result)
 }
 
-pub(super) fn accept_ephemeral(
+pub(super) fn accept_refused(
     store: &mut RedbStore,
     frozen_id: EventId,
     expected_pubkey: PublicKey,
+    reason: crate::RefuseReason,
 ) -> Result<u64, PersistenceError> {
-    // Receipt-ONLY: touches `PUBLISH_QUEUE_RECEIPTS` (+ `PUBLISH_QUEUE_META` for the
-    // id allocation) alone — no `EVENTS` row, no `PUBLISH_QUEUE_INTENTS` row,
-    // `intent_id: None` (nothing backs it).
+    // Receipt-ONLY and terminal at birth: touches `PUBLISH_QUEUE_RECEIPTS`
+    // (+ `PUBLISH_QUEUE_META` for the id allocation) alone — no `EVENTS` row,
+    // no `PUBLISH_QUEUE_INTENTS` row, `intent_id: None` (nothing backs it).
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let receipt_id = {
         let mut publish_queue_meta = write_txn
@@ -1623,15 +1623,156 @@ pub(super) fn accept_ephemeral(
             intent_id: None,
             frozen_id,
             expected_pubkey,
-            state: ReceiptState::Accepted,
+            state: ReceiptState::Refused(reason),
         };
         let encoded = encode_receipt(&record);
         let receipt_key_value = receipt_key(receipt_id);
         publish_queue_receipts
             .insert(&receipt_key_value, encoded.as_slice())
             .map_err(persist_err)?;
-        increment_pending_ephemeral_in_txn(&mut publish_queue_meta)?;
         receipt_id
     };
     commit_prepared(write_txn, receipt_id)
+}
+
+/// Read every retained receipt back out in receipt-id order (#1039).
+pub(super) fn enumerate_publish_queue_receipts(
+    store: &RedbStore,
+) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
+    let read_txn = store.db.begin_read().map_err(persist_err)?;
+    let receipts = match read_txn.open_table(PUBLISH_QUEUE_RECEIPTS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(persist_err(error)),
+    };
+    let mut out = Vec::new();
+    for row in receipts.iter().map_err(persist_err)? {
+        let (key, value) = row.map_err(persist_err)?;
+        let receipt_id = u64::from_be_bytes(*key.value());
+        let record =
+            decode_receipt(value.value()).map_err(|error| codec_error("receipt", error))?;
+        out.push(crate::PublishQueueReceipt {
+            receipt_id,
+            intent_id: record.intent_id,
+            frozen_id: record.frozen_id,
+            expected_pubkey: record.expected_pubkey,
+            state: record.state,
+        });
+    }
+    Ok(out)
+}
+
+/// Forget one retained receipt and every piece of evidence keyed to it
+/// (#1039). Refuses while the receipt still owns an open intent row.
+pub(super) fn remove_publish_queue_entry(
+    store: &mut RedbStore,
+    receipt_id: u64,
+) -> Result<crate::RemoveQueueEntryOutcome, PersistenceError> {
+    let write_txn = store.db.begin_write().map_err(persist_err)?;
+    let outcome = {
+        let mut receipts = write_txn
+            .open_table(PUBLISH_QUEUE_RECEIPTS)
+            .map_err(persist_err)?;
+        let key = receipt_key(receipt_id);
+        let existing = receipts.get(&key).map_err(persist_err)?;
+        let Some(encoded) = existing.map(|guard| guard.value().to_vec()) else {
+            return Ok(crate::RemoveQueueEntryOutcome::NotFound);
+        };
+        let record = decode_receipt(&encoded).map_err(|error| codec_error("receipt", error))?;
+        let intents = write_txn
+            .open_table(PUBLISH_QUEUE_INTENTS)
+            .map_err(persist_err)?;
+        if let Some(intent_id) = record.intent_id {
+            if intents
+                .get(&intent_key(intent_id))
+                .map_err(persist_err)?
+                .is_some()
+            {
+                return Ok(crate::RemoveQueueEntryOutcome::StillOpen);
+            }
+        }
+        receipts.remove(&key).map_err(persist_err)?;
+        // #591 tokens name this receipt id and nothing else; leaving one
+        // behind would reattach a caller to a receipt that no longer exists.
+        let mut correlations = write_txn
+            .open_table(PUBLISH_QUEUE_CORRELATIONS)
+            .map_err(persist_err)?;
+        let mut stale_tokens = Vec::new();
+        for row in correlations.iter().map_err(persist_err)? {
+            let (token, journaled) = row.map_err(persist_err)?;
+            if u64::from_be_bytes(*journaled.value()) == receipt_id {
+                stale_tokens.push(token.value().to_vec());
+            }
+        }
+        for token in stale_tokens {
+            correlations.remove(token.as_slice()).map_err(persist_err)?;
+        }
+        // The intent row itself is already gone (checked above); its retained
+        // per-relay evidence is what this door reclaims. Two passes (collect
+        // then remove) — `redb` does not allow mutating a table while
+        // iterating it.
+        if let Some(intent_id) = record.intent_id {
+            let (attempt_lower, attempt_upper) = attempt_range(intent_id);
+            let mut attempts = write_txn
+                .open_table(PUBLISH_QUEUE_ATTEMPTS)
+                .map_err(persist_err)?;
+            let mut victims: Vec<[u8; 20]> = Vec::new();
+            for row in attempts
+                .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
+                .map_err(persist_err)?
+            {
+                let (key, _) = row.map_err(persist_err)?;
+                victims.push(*key.value());
+            }
+            for key in &victims {
+                attempts.remove(key).map_err(persist_err)?;
+            }
+            let mut details = write_txn
+                .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
+                .map_err(persist_err)?;
+            let mut detail_victims: Vec<[u8; 20]> = Vec::new();
+            for row in details
+                .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
+                .map_err(persist_err)?
+            {
+                let (key, _) = row.map_err(persist_err)?;
+                detail_victims.push(*key.value());
+            }
+            for key in &detail_victims {
+                details.remove(key).map_err(persist_err)?;
+            }
+            let (lane_lower, lane_upper) = lane_range(intent_id);
+            let mut lanes = write_txn
+                .open_table(PUBLISH_QUEUE_LANES)
+                .map_err(persist_err)?;
+            let mut lane_victims: Vec<[u8; 12]> = Vec::new();
+            for row in lanes
+                .range::<&[u8; 12]>(&lane_lower..=&lane_upper)
+                .map_err(persist_err)?
+            {
+                let (key, _) = row.map_err(persist_err)?;
+                lane_victims.push(*key.value());
+            }
+            for key in &lane_victims {
+                lanes.remove(key).map_err(persist_err)?;
+            }
+            let (route_lower, route_upper) = route_revision_range(intent_id);
+            let mut routes = write_txn
+                .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
+                .map_err(persist_err)?;
+            let mut route_victims: Vec<[u8; 16]> = Vec::new();
+            for row in routes
+                .range::<&[u8; 16]>(&route_lower..=&route_upper)
+                .map_err(persist_err)?
+            {
+                let (key, _) = row.map_err(persist_err)?;
+                route_victims.push(*key.value());
+            }
+            for key in &route_victims {
+                routes.remove(key).map_err(persist_err)?;
+            }
+        }
+        crate::RemoveQueueEntryOutcome::Removed
+    };
+    commit_prepared(write_txn, outcome)
 }

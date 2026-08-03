@@ -152,10 +152,9 @@ fn apply_updates<S: nmp_store::EventStore>(
 mod tests {
     use super::*;
     use crate::core::{ReceiptId, Row};
-    use crate::publish_queue::WriteStatus;
+    use crate::publish_queue::{RelayState, RelayWaiting, WriteFact};
     use nmp_grammar::{
-        AccessContext, Durability, Identity, RelaySessionKey, WriteIntent, WritePayload,
-        WriteRouting,
+        AccessContext, Identity, RelaySessionKey, WriteIntent, WritePayload, WriteRouting,
     };
     use nmp_store::{EventStore, MemoryStore, RedbStore};
     use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
@@ -182,7 +181,6 @@ mod tests {
                 content: content.to_string(),
                 created_at: Some(Timestamp::from(created_at)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -204,17 +202,33 @@ mod tests {
         (receipt, event_id, effects)
     }
 
-    fn awaiting_route<S: EventStore>(core: &mut EngineCore<S>, receipt: ReceiptId) -> String {
+    /// The park a write sits in while nothing is known about where it goes:
+    /// an EMPTY destination set that is still OPEN. Distinct from
+    /// `WriteOutcome::NoDestination`, which is knowledge exhausted, and the
+    /// distinction is the whole point -- one waits forever, the other is a
+    /// terminal.
+    fn assert_parked_on_unknown_route<S: EventStore>(core: &mut EngineCore<S>, receipt: ReceiptId) {
         let replay = core.reattach_receipt(receipt);
         assert!(replay.is_attached(), "the durable receipt must reattach");
-        replay
-            .facts
-            .iter()
-            .find_map(|fact| match fact {
-                WriteStatus::AwaitingRoute { detail } => Some(detail.clone()),
-                _ => None,
-            })
-            .expect("the receipt must remain visibly parked on route knowledge")
+        assert!(
+            replay.facts.iter().any(|fact| matches!(
+                fact,
+                WriteFact::Destinations {
+                    relays,
+                    complete: false
+                } if relays.is_empty()
+            )),
+            "the receipt must remain visibly parked on route knowledge: {:?}",
+            replay.facts
+        );
+        assert!(
+            !replay
+                .facts
+                .iter()
+                .any(|fact| matches!(fact, WriteFact::Outcome(_))),
+            "a park is not a terminal: {:?}",
+            replay.facts
+        );
     }
 
     #[test]
@@ -322,8 +336,13 @@ mod tests {
             assert!(
                 effects.iter().any(|effect| matches!(
                     effect,
-                    Effect::EmitReceipt(id, WriteStatus::AwaitingRoute { .. })
-                        if *id == receipt
+                    Effect::EmitReceipt(
+                        id,
+                        WriteFact::Destinations {
+                            relays,
+                            complete: false
+                        }
+                    ) if *id == receipt && relays.is_empty()
                 )),
                 "a first-install Auto write must park instead of dying: {effects:?}"
             );
@@ -331,12 +350,15 @@ mod tests {
         };
 
         let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 8);
-        core.recover_on_boot();
-        let recovered_detail = awaiting_route(&mut core, recovered_receipt);
+        let booted = core.recover_on_boot();
         assert!(
-            recovered_detail.contains(&author.public_key().to_hex()),
-            "the recovered park names the exact missing author route: {recovered_detail}"
+            booted.iter().any(|effect| matches!(
+                effect,
+                Effect::AuthorRouteNeedsChanged(needs) if needs == &BTreeSet::from([author.public_key()])
+            )),
+            "boot must name the exact author route the park is waiting on: {booted:?}"
         );
+        assert_parked_on_unknown_route(&mut core, recovered_receipt);
 
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
         let (fresh_receipt, fresh_event, fresh_effects) =
@@ -344,16 +366,17 @@ mod tests {
         assert!(
             fresh_effects.iter().any(|effect| matches!(
                 effect,
-                Effect::EmitReceipt(id, WriteStatus::AwaitingRoute { .. })
-                    if *id == fresh_receipt
+                Effect::EmitReceipt(
+                    id,
+                    WriteFact::Destinations {
+                        relays,
+                        complete: false
+                    }
+                ) if *id == fresh_receipt && relays.is_empty()
             )),
             "the fresh write must enter the same visible park: {fresh_effects:?}"
         );
-        let fresh_detail = awaiting_route(&mut core, fresh_receipt);
-        assert_eq!(
-            recovered_detail, fresh_detail,
-            "fresh and recovered obligations in the same unknown directory state must report the same park"
-        );
+        assert_parked_on_unknown_route(&mut core, fresh_receipt);
 
         let relay_list = EventBuilder::new(Kind::RelayList, "")
             .tag(
@@ -386,7 +409,7 @@ mod tests {
             .filter_map(|effect| match effect {
                 Effect::EmitReceipt(
                     id,
-                    WriteStatus::Routed {
+                    WriteFact::Destinations {
                         relays,
                         complete: true,
                     },
@@ -406,7 +429,7 @@ mod tests {
             assert!(
                 replay.facts.iter().any(|fact| matches!(
                     fact,
-                    WriteStatus::AwaitingRelay { relay } if relay == &outbox
+                    WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NotConnected) } if relay == &outbox
                 )),
                 "receipt {receipt:?} must own exactly the newly learned lane: {:?}",
                 replay.facts
@@ -461,7 +484,10 @@ mod tests {
         for receipt in [recovered_receipt, fresh_receipt] {
             let replay = core.reattach_receipt(receipt);
             assert!(
-                replay.facts.contains(&WriteStatus::Acked(outbox.clone())),
+                replay.facts.contains(&WriteFact::Relay {
+                    relay: outbox.clone(),
+                    state: RelayState::Published
+                }),
                 "receipt {receipt:?} must retain delivery to the one learned lane: {:?}",
                 replay.facts
             );

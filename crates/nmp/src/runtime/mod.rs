@@ -102,7 +102,10 @@ use crate::core::{
     ObservationEvidence, ObservationId, ObservationOpen, PublishError, ReattachOutcome, ReceiptId,
     RelayAdmissionPolicy, Row, RowDelta,
 };
-use crate::publish_queue::{CancelWriteError, CancelWriteOutcome, WriteStatus};
+use crate::publish_queue::{
+    CancelWriteError, CancelWriteOutcome, PublishQueueEntry, RemoveQueueEntryError, SigningState,
+    WriteFact, WriteOutcome,
+};
 use crate::relay_information_service::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
     RelayInformationSnapshot,
@@ -140,6 +143,7 @@ struct EnginePoolRuntime {
     runtime: Arc<tokio::runtime::Runtime>,
     relay_information: RelayInformationService,
     max_auth_capabilities: usize,
+    max_publish_attempts: u64,
     #[cfg(feature = "nip65")]
     nip65_sources: Vec<RelayUrl>,
 }
@@ -596,7 +600,7 @@ pub struct HistoryHandle(HistorySessionId);
 /// call [`Handle::reattach_receipt`] without replaying acceptance.
 pub struct ReceiptStream {
     pub id: ReceiptId,
-    pub statuses: FifoReceiver<WriteStatus>,
+    pub statuses: FifoReceiver<WriteFact>,
 }
 
 /// Result of looking up retained receipt facts by stable id (or, #591, by a
@@ -609,7 +613,7 @@ pub enum ReceiptReattachment {
     /// id the token resolved to, which the caller could not otherwise learn.
     Attached {
         id: ReceiptId,
-        statuses: FifoReceiver<WriteStatus>,
+        statuses: FifoReceiver<WriteFact>,
         /// Identity-stable durable-replay continuation for the next finite
         /// page. `None` means this receiver is caught up and attached to
         /// live work.
@@ -638,7 +642,7 @@ impl ReceiptDeliveryRegistration {
 
 struct RegisteredReceiptDelivery {
     registration: ReceiptDeliveryRegistration,
-    sender: FifoSender<WriteStatus>,
+    sender: FifoSender<WriteFact>,
     /// Durable replay truth after the last fact this exact FIFO accepted.
     cursor: ReceiptReplayCursor,
 }
@@ -653,7 +657,7 @@ impl ReceiptDeliveryRegistry {
         &mut self,
         id: ReceiptId,
         registration: ReceiptDeliveryRegistration,
-        sender: FifoSender<WriteStatus>,
+        sender: FifoSender<WriteFact>,
         cursor: ReceiptReplayCursor,
     ) {
         self.by_receipt
@@ -664,6 +668,13 @@ impl ReceiptDeliveryRegistry {
                 sender,
                 cursor,
             });
+    }
+
+    /// Drop every delivery for a receipt the app has REMOVED (#1039). The
+    /// entry is gone, so a stream still pointed at it would wait forever on
+    /// facts that can no longer exist.
+    fn forget(&mut self, id: ReceiptId) {
+        self.by_receipt.remove(&id);
     }
 
     fn detach(&mut self, id: ReceiptId, registration: &ReceiptDeliveryRegistration) {
@@ -680,7 +691,7 @@ impl ReceiptDeliveryRegistry {
         &mut self,
         core: &mut EngineCore<impl EventStore>,
         id: ReceiptId,
-        status: WriteStatus,
+        status: WriteFact,
     ) {
         let Some(deliveries) = self.by_receipt.get_mut(&id) else {
             return;
@@ -714,7 +725,7 @@ impl ReceiptDeliveryRegistry {
 }
 
 fn arm_receipt_delivery_close(
-    receiver: &FifoReceiver<WriteStatus>,
+    receiver: &FifoReceiver<WriteFact>,
     inbox: Sender<Cmd>,
     id: ReceiptId,
     registration: ReceiptDeliveryRegistration,
@@ -728,7 +739,7 @@ fn deliver_receipt_replay_page(
     core: &EngineCore<impl EventStore>,
     deliveries: &mut ReceiptDeliveryRegistry,
     id: ReceiptId,
-    sender: FifoSender<WriteStatus>,
+    sender: FifoSender<WriteFact>,
     registration: ReceiptDeliveryRegistration,
     page: core::ReceiptReplayPage,
 ) -> (ReattachOutcome, Option<ReceiptReplayCursor>) {
@@ -755,8 +766,8 @@ fn publish_result(effects: &[Effect]) -> Result<ReceiptId, PublishError> {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::EmitReceipt(id, _) | Effect::ReplayReceipt(id, _) => Some(Ok(*id)),
-            Effect::PublishFailed(err) => Some(Err(*err)),
+            Effect::WriteAccepted(id) | Effect::ReplayReceipt(id, _) => Some(Ok(*id)),
+            Effect::PublishFailed(err) => Some(Err(err.clone())),
             _ => None,
         })
         .expect("every publish produces a receipt id or typed allocation failure")
@@ -786,17 +797,14 @@ mod publish_result_tests {
     #[test]
     fn typed_pre_receipt_failure_is_the_publish_reply() {
         assert_eq!(
-            publish_result(&[Effect::PublishFailed(
-                PublishError::ReceiptCorrelationIdExhausted,
-            )]),
-            Err(PublishError::ReceiptCorrelationIdExhausted)
+            publish_result(&[Effect::PublishFailed(PublishError::NoActiveAccount)]),
+            Err(PublishError::NoActiveAccount)
         );
+        // Custody: `WriteAccepted` is the acceptance answer, and it is not a
+        // fact on the stream. `publish()` returning the id IS the acceptance.
         assert_eq!(
-            publish_result(&[Effect::EmitReceipt(
-                ReceiptId(1u64 << 63),
-                WriteStatus::Failed("rejected".to_string()),
-            )]),
-            Ok(ReceiptId(1u64 << 63))
+            publish_result(&[Effect::WriteAccepted(ReceiptId(7))]),
+            Ok(ReceiptId(7))
         );
     }
 }
@@ -849,14 +857,14 @@ enum Cmd {
     UnsubscribeHistory(HistorySessionId),
     PublishTracked {
         intent: WriteIntent,
-        sender: FifoSender<WriteStatus>,
+        sender: FifoSender<WriteFact>,
         registration: ReceiptDeliveryRegistration,
         reply: Sender<Result<ReceiptId, PublishError>>,
     },
     ReattachReceipt {
         id: ReceiptId,
         cursor: Option<ReceiptReplayCursor>,
-        sender: FifoSender<WriteStatus>,
+        sender: FifoSender<WriteFact>,
         registration: ReceiptDeliveryRegistration,
         reply: Sender<(ReattachOutcome, Option<ReceiptReplayCursor>)>,
     },
@@ -865,7 +873,7 @@ enum Cmd {
     /// could durably record the id `publish_tracked` returned.
     ReattachByCorrelation {
         token: String,
-        sender: FifoSender<WriteStatus>,
+        sender: FifoSender<WriteFact>,
         registration: ReceiptDeliveryRegistration,
         reply: Sender<(
             ReattachOutcome,
@@ -889,6 +897,15 @@ enum Cmd {
     CancelWrite {
         id: ReceiptId,
         reply: Sender<Result<CancelWriteOutcome, CancelWriteError>>,
+    },
+    /// #1039: read the app's own publish queue back.
+    PublishQueueEntries {
+        reply: Sender<Result<Vec<PublishQueueEntry>, RemoveQueueEntryError>>,
+    },
+    /// #1039: forget one queue entry. A termination path, not housekeeping.
+    RemovePublishQueueEntry {
+        id: ReceiptId,
+        reply: Sender<Result<(), RemoveQueueEntryError>>,
     },
     /// Register a new signing capability (M4 §5: `SignerRegistry`). The
     /// reply carries the pubkey the engine thread's registry keyed it under,
@@ -1524,6 +1541,9 @@ const ADAPTER_RUNTIME_WORKERS: usize = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub max_auth_capabilities: usize,
+    /// The publish attempt ceiling (#1031) threaded from
+    /// [`EngineConfig::max_publish_attempts`](crate::EngineConfig).
+    pub max_publish_attempts: u64,
     #[cfg(feature = "nip65")]
     pub(crate) nip65_sources: Vec<RelayUrl>,
 }
@@ -1532,6 +1552,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
+            max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             #[cfg(feature = "nip65")]
             nip65_sources: Vec::new(),
         }
@@ -1746,6 +1767,7 @@ impl EngineThread {
                                 runtime: engine_runtime,
                                 relay_information: engine_relay_information,
                                 max_auth_capabilities: runtime_config.max_auth_capabilities,
+                                max_publish_attempts: runtime_config.max_publish_attempts,
                                 #[cfg(feature = "nip65")]
                                 nip65_sources: runtime_config.nip65_sources,
                             },
@@ -1855,7 +1877,7 @@ impl EngineThread {
 #[cfg(test)]
 mod receipt_delivery_lifecycle_tests {
     use super::*;
-    use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
+    use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind};
 
@@ -1869,7 +1891,6 @@ mod receipt_delivery_lifecycle_tests {
                     content: ("parked receipt delivery lifecycle").into(),
                     created_at: Some(Timestamp::now()),
                 }),
-                durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity: Identity::Active,
                 correlation: None,
@@ -2837,7 +2858,7 @@ mod relay_worker_reconciliation_tests {
     use std::collections::BTreeSet;
 
     use nmp_grammar::{
-        AccessContext, Binding, Demand, Durability, Filter, Identity, SourceAuthority, WriteIntent,
+        AccessContext, Binding, Demand, Filter, Identity, SourceAuthority, WriteIntent,
         WritePayload, WriteRouting,
     };
     use nmp_router::FixtureRoutingFacts;
@@ -3344,7 +3365,6 @@ mod relay_worker_reconciliation_tests {
                     .content("write owns its worker")
                     .created_at(Timestamp::from(1)),
             ),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -3514,6 +3534,7 @@ mod auth_registry_admission_tests {
             RelayAdmissionPolicy::default(),
             RuntimeConfig {
                 max_auth_capabilities: limit,
+                max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
                 #[cfg(feature = "nip65")]
                 nip65_sources: Vec::new(),
             },
@@ -4002,13 +4023,15 @@ fn engine_loop<S>(
         runtime,
         relay_information,
         max_auth_capabilities,
+        max_publish_attempts,
         #[cfg(feature = "nip65")]
         nip65_sources,
     } = pool_runtime;
     let runtime_handle = runtime.handle().clone();
     let runtime_handle = &runtime_handle;
     let mut core = EngineCore::new_with_routing_facts(store, routing_facts, cap)
-        .with_relay_admission(admission);
+        .with_relay_admission(admission)
+        .with_max_publish_attempts(max_publish_attempts);
     let mut row_channels: HashMap<ObservationId, RowsSender> = HashMap::new();
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
@@ -4139,6 +4162,12 @@ fn engine_loop<S>(
                 Cmd::RequestRows { .. } => {}
                 Cmd::PublishTracked { reply, .. } => {
                     let _ = reply.send(Err(PublishError::EngineShuttingDown));
+                }
+                Cmd::PublishQueueEntries { reply } => {
+                    let _ = reply.send(Err(RemoveQueueEntryError::EngineClosed));
+                }
+                Cmd::RemovePublishQueueEntry { reply, .. } => {
+                    let _ = reply.send(Err(RemoveQueueEntryError::EngineClosed));
                 }
                 Cmd::CancelWrite { reply, .. } => {
                     let _ = reply.send(Err(CancelWriteError::EngineClosed));
@@ -4791,6 +4820,21 @@ fn engine_loop<S>(
                     history_channels: history_channels.len(),
                 });
             }
+            Cmd::PublishQueueEntries { reply } => {
+                let _ = reply.send(core.publish_queue_entries().map_err(|error| {
+                    RemoveQueueEntryError::PersistenceFailed {
+                        receipt_id: ReceiptId(0),
+                        reason: error.to_string(),
+                    }
+                }));
+            }
+            Cmd::RemovePublishQueueEntry { id, reply } => {
+                let result = core.remove_publish_queue_entry(id);
+                if result.is_ok() {
+                    receipt_deliveries.borrow_mut().forget(id);
+                }
+                let _ = reply.send(result);
+            }
             Cmd::CancelWrite { id, reply } => {
                 let (result, effects) = core.cancel_write(id);
                 if result == Ok(CancelWriteOutcome::Cancelled) {
@@ -4857,8 +4901,9 @@ fn engine_loop<S>(
                         );
                     }
                 }
+                let accepted = result.as_ref().ok().copied();
                 if reply.send(result).is_err() {
-                    if let Ok(id) = result {
+                    if let Some(id) = accepted {
                         receipt_deliveries.borrow_mut().detach(id, &registration);
                     }
                 }
@@ -5866,7 +5911,8 @@ fn dispatch_effect(
         Effect::EmitReceipt(id, status) => {
             if matches!(
                 &status,
-                WriteStatus::Signed(_) | WriteStatus::Cancelled | WriteStatus::Superseded
+                WriteFact::Signing(SigningState::Signed { .. })
+                    | WriteFact::Outcome(WriteOutcome::NotSent(_))
             ) {
                 registry.cancel_pending_write(id);
             }
@@ -5877,6 +5923,10 @@ fn dispatch_effect(
         }
         Effect::ReplayReceipt(..) => {
             unreachable!("publish replay must be consumed with its fresh delivery target")
+        }
+        Effect::WriteAccepted(..) => {
+            // Custody, not a fact: `publish()` returning `Ok` already said
+            // it, so nothing fans this out to an observer.
         }
         Effect::PublishFailed(..) => {
             // `PublishTracked` consumes this typed pre-receipt failure for
@@ -6109,7 +6159,7 @@ impl DiagnosticsHandle {
 /// - `remove_signer(SignerRegistration) -> bool`
 /// - `sign_event(UnsignedEvent) -> SignEventOperation`
 /// - `set_active_account(Option<PublicKey>)`
-/// - `publish(WriteIntent) -> Receiver<WriteStatus>`
+/// - `publish(WriteIntent) -> Receiver<WriteFact>`
 /// - `observe_diagnostics() -> (DiagnosticsHandle, LatestReceiver<DiagnosticsSnapshot>)`
 /// - `shutdown()`
 ///
@@ -6510,13 +6560,13 @@ impl Handle {
     }
 
     /// Enqueue a write. Fire-and-forget: the returned `Receiver` streams
-    /// every `WriteStatus` this intent ever reaches (ledger #9 — enqueue is
+    /// every `WriteFact` this intent ever reaches (ledger #9 — enqueue is
     /// not converged; the FIRST value is never a terminal for a durable/
     /// at-most-once intent. `Ephemeral` also yields receipt facts, but owns
     /// no publish queue obligation or query-visible pending row. If no
     /// pre-acceptance correlation id remains, this returns a typed error and
     /// creates no receipt stream.
-    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteStatus>, PublishError> {
+    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteFact>, PublishError> {
         self.publish_tracked(intent).map(|receipt| receipt.statuses)
     }
 
@@ -6636,6 +6686,35 @@ impl Handle {
                 ReceiptReattachment::RetainedButUnreadable
             }
         }
+    }
+
+    /// Read the app's own publish queue back (#1039).
+    ///
+    /// Inspection, never waiting: this returns what NMP knows right now and
+    /// never blocks on settlement.
+    pub fn publish_queue_entries(&self) -> Result<Vec<PublishQueueEntry>, RemoveQueueEntryError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::PublishQueueEntries { reply: reply_tx })
+            .map_err(|_| RemoveQueueEntryError::EngineClosed)?;
+        reply_rx
+            .recv()
+            .map_err(|_| RemoveQueueEntryError::EngineClosed)?
+    }
+
+    /// Forget one queue entry (#1039). The only way a write parked forever
+    /// on a missing signer, or a permanently-failed refused entry, ever ends.
+    pub fn remove_publish_queue_entry(&self, id: ReceiptId) -> Result<(), RemoveQueueEntryError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::RemovePublishQueueEntry {
+                id,
+                reply: reply_tx,
+            })
+            .map_err(|_| RemoveQueueEntryError::EngineClosed)?;
+        reply_rx
+            .recv()
+            .map_err(|_| RemoveQueueEntryError::EngineClosed)?
     }
 
     /// Explicitly cancel one accepted unsigned write. A successful outcome

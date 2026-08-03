@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use nmp::mechanism::runtime::FifoReceiver;
 use nmp::nip29;
-use nmp::{Engine, EngineConfig, EventBuilder, Filter, WriteStatus};
+use nmp::{
+    Engine, EngineConfig, EventBuilder, Filter, RelayState, RelayWaiting, SigningState, WriteFact,
+};
 use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, PublicKey, RelayUrl};
@@ -60,9 +62,9 @@ fn author() -> PublicKey {
 }
 
 fn drain_until(
-    receipts: &FifoReceiver<WriteStatus>,
-    pred: impl Fn(&WriteStatus) -> bool,
-) -> Vec<WriteStatus> {
+    receipts: &FifoReceiver<WriteFact>,
+    pred: impl Fn(&WriteFact) -> bool,
+) -> Vec<WriteFact> {
     let deadline = Instant::now() + SETTLE;
     let mut seen = Vec::new();
     loop {
@@ -83,26 +85,15 @@ fn drain_until(
     }
 }
 
-fn relays_named_by(statuses: &[WriteStatus]) -> BTreeSet<RelayUrl> {
+fn relays_named_by(statuses: &[WriteFact]) -> BTreeSet<RelayUrl> {
     let mut named = BTreeSet::new();
     for status in statuses {
         match status {
-            WriteStatus::Routed { relays, .. } => named.extend(relays.iter().cloned()),
-            WriteStatus::Sent { relay, .. }
-            | WriteStatus::Acked(relay)
-            | WriteStatus::Rejected(relay, _)
-            | WriteStatus::GaveUp(relay)
-            | WriteStatus::AwaitingRelay { relay }
-            | WriteStatus::AwaitingAuth { relay }
-            | WriteStatus::AuthDenied { relay, .. }
-            | WriteStatus::RetryEligible { relay, .. }
-            | WriteStatus::HandoffAmbiguous { relay, .. }
-            | WriteStatus::PersistenceBlocked(relay)
-            | WriteStatus::RoutePersistenceBlocked(relay)
-            | WriteStatus::OutcomeUnknown(relay) => {
+            WriteFact::Destinations { relays, .. } => named.extend(relays.iter().cloned()),
+            WriteFact::Relay { relay, .. } => {
                 named.insert(relay.clone());
             }
-            _ => {}
+            WriteFact::Signing(_) | WriteFact::Outcome(_) => {}
         }
     }
     named
@@ -178,7 +169,15 @@ async fn a_join_request_is_publishable_with_no_subscription_at_all() {
     let receipts = group
         .join_request(&engine, writer, Some("dark-slide-42"))
         .expect("a join request is accepted with no prior read");
-    let statuses = drain_until(&receipts, |status| matches!(status, WriteStatus::Acked(_)));
+    let statuses = drain_until(&receipts, |status| {
+        matches!(
+            status,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )
+    });
     assert_eq!(
         relays_named_by(&statuses),
         BTreeSet::from([relay.url.clone()])
@@ -235,7 +234,15 @@ async fn one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_
             EventBuilder::new(Kind::from(9u16)).content("first"),
         )
         .expect("first write, from the retained handle");
-    drain_until(&receipts1, |s| matches!(s, WriteStatus::Acked(_)));
+    drain_until(&receipts1, |s| {
+        matches!(
+            s,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )
+    });
 
     // Read 2, a DIFFERENT filter, same handle -- no reconstruction.
     let query2 = group
@@ -262,7 +269,15 @@ async fn one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_
             EventBuilder::new(Kind::from(10u16)).content("second"),
         )
         .expect("second write, from the retained handle, after both reads were dropped");
-    drain_until(&receipts2, |s| matches!(s, WriteStatus::Acked(_)));
+    drain_until(&receipts2, |s| {
+        matches!(
+            s,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )
+    });
 
     let delivered = wait_for_events(&relay, 2);
     assert_eq!(
@@ -309,12 +324,21 @@ async fn a_moderation_rejection_reports_the_hosts_exact_message_and_is_never_acc
         .expect("the door accepts the intent even though the host will refuse it");
 
     let statuses = drain_until(&receipts, |status| {
-        matches!(status, WriteStatus::Rejected(..))
+        matches!(
+            status,
+            WriteFact::Relay {
+                state: RelayState::Rejected { .. },
+                ..
+            }
+        )
     });
     let rejection = statuses
         .iter()
         .find_map(|status| match status {
-            WriteStatus::Rejected(host, msg) if *host == relay.url => Some(msg.clone()),
+            WriteFact::Relay {
+                relay: host,
+                state: RelayState::Rejected { reason: msg },
+            } if *host == relay.url => Some(msg.clone()),
             _ => None,
         })
         .expect("a Rejected status naming the host must be present");
@@ -323,7 +347,13 @@ async fn a_moderation_rejection_reports_the_hosts_exact_message_and_is_never_acc
         "the receipt carries the host's own rejection message verbatim"
     );
     assert!(
-        !statuses.iter().any(|s| matches!(s, WriteStatus::Acked(_))),
+        !statuses.iter().any(|s| matches!(
+            s,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        )),
         "the removal must never also be reported accepted: saw {statuses:?}"
     );
 
@@ -374,11 +404,17 @@ async fn a_moderation_rejection_is_a_host_fact_not_a_routing_failure() {
         match receipts.recv_timeout(remaining) {
             Ok(status) => {
                 match &status {
-                    WriteStatus::Rejected(relay, msg) if *relay == refusing.url => {
+                    WriteFact::Relay {
+                        relay,
+                        state: RelayState::Rejected { reason: msg },
+                    } if *relay == refusing.url => {
                         assert_eq!(msg, message);
                         rejected = true;
                     }
-                    WriteStatus::Acked(relay) if *relay == accepting.url => accepted = true,
+                    WriteFact::Relay {
+                        relay,
+                        state: RelayState::Published,
+                    } if *relay == accepting.url => accepted = true,
                     _ => {}
                 }
                 seen.push(status);
@@ -390,9 +426,11 @@ async fn a_moderation_rejection_is_a_host_fact_not_a_routing_failure() {
     assert!(
         !seen.iter().any(|s| matches!(
             s,
-            WriteStatus::GaveUp(_)
-                | WriteStatus::Failed(_)
-                | WriteStatus::RoutePersistenceBlocked(_)
+            WriteFact::Relay {
+                state: RelayState::GaveUp
+                    | RelayState::Waiting(RelayWaiting::PersistenceStalled { .. }),
+                ..
+            } | WriteFact::Signing(SigningState::Refused { .. })
         )),
         "a relay-level rejection must never be reported as a routing failure; saw {seen:?}"
     );

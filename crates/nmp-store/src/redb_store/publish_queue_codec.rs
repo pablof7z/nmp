@@ -16,7 +16,7 @@ use crate::{
     PublishQueueAttemptDetails, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
     PublishQueueAttemptTransient, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLaneState, PublishQueueTerminalOutcome, PublishQueueTransientCause, ReceiptState,
-    StoredEvent, WriteDurability,
+    RefuseReason, StoredEvent,
 };
 
 use super::publish_queue::{
@@ -30,7 +30,6 @@ pub(super) const PUBLISH_QUEUE_CODEC_VERSION_KEY: &[u8] = b"codec_version";
 pub(super) const NEXT_INTENT_ID_KEY: &[u8] = b"next_intent_id";
 pub(super) const NEXT_RECEIPT_ID_KEY: &[u8] = b"next_receipt_id";
 pub(super) const NEXT_RELAY_ID_KEY: &[u8] = b"next_relay_id";
-pub(super) const PENDING_EPHEMERAL_RECEIPTS_KEY: &[u8] = b"pending_ephemeral_receipts";
 
 pub(super) const MAX_RELAY_BYTES: usize = 4_096;
 pub(super) const MAX_TEXT_BYTES: usize = 65_536;
@@ -500,24 +499,6 @@ pub(super) fn decode_relay(bytes: &[u8]) -> Result<RelayUrl, PublishQueueCodecEr
     Ok(relay)
 }
 
-fn encode_durability(encoder: &mut Encoder, value: WriteDurability) {
-    encoder.u8(match value {
-        WriteDurability::Durable => 0,
-        WriteDurability::AtMostOnce => 1,
-    });
-}
-
-fn decode_durability(decoder: &mut Decoder<'_>) -> Result<WriteDurability, PublishQueueCodecError> {
-    match decoder.u8()? {
-        0 => Ok(WriteDurability::Durable),
-        1 => Ok(WriteDurability::AtMostOnce),
-        other => Err(PublishQueueCodecError::InvalidTag(
-            "write durability",
-            other,
-        )),
-    }
-}
-
 fn encode_sig_state(encoder: &mut Encoder, value: IntentSigState) {
     encoder.u8(match value {
         IntentSigState::AwaitingSigner => 0,
@@ -550,7 +531,6 @@ pub(super) fn encode_intent(
         MAX_TEXT_BYTES,
         "signing identity reference",
     )?;
-    encode_durability(&mut encoder, record.durability);
     encoder.text(&record.routing, MAX_TEXT_BYTES, "routing strategy")?;
     encode_sig_state(&mut encoder, record.sig_state);
     encoder.u64(record.accepted_at.as_secs());
@@ -565,7 +545,6 @@ pub(super) fn decode_intent(
     let frozen = decoder.event()?;
     let expected_pubkey = decoder.public_key()?;
     let signing_identity_ref = decoder.text(MAX_TEXT_BYTES, "signing identity reference")?;
-    let durability = decode_durability(&mut decoder)?;
     let routing = decoder.text(MAX_TEXT_BYTES, "routing strategy")?;
     let sig_state = decode_sig_state(&mut decoder)?;
     let accepted_at = Timestamp::from(decoder.u64()?);
@@ -575,22 +554,77 @@ pub(super) fn decode_intent(
         frozen,
         expected_pubkey,
         signing_identity_ref,
-        durability,
         routing,
         sig_state,
         accepted_at,
     })
 }
 
+fn encode_optional_event_id(encoder: &mut Encoder, value: Option<EventId>) {
+    match value {
+        None => encoder.u8(0),
+        Some(id) => {
+            encoder.u8(1);
+            encoder.fixed(id.as_bytes());
+        }
+    }
+}
+
+fn decode_optional_event_id(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<EventId>, PublishQueueCodecError> {
+    match decoder.u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(decoder.event_id()?)),
+        other => Err(PublishQueueCodecError::InvalidTag(
+            "optional event id",
+            other,
+        )),
+    }
+}
+
+fn encode_refuse_reason(encoder: &mut Encoder, reason: RefuseReason) {
+    match reason {
+        RefuseReason::AlreadyExpired => encoder.u8(0),
+        RefuseReason::Tombstoned => encoder.u8(1),
+        RefuseReason::ReplaceableBaseOnRegularEvent => encoder.u8(2),
+        // The two ids are the whole point of retaining this reason: they let
+        // an app fetch what is actually at the coordinate, reapply the
+        // user's change and resubmit without troubling them.
+        RefuseReason::ReplaceableBaseChanged { expected, actual } => {
+            encoder.u8(3);
+            encode_optional_event_id(encoder, expected);
+            encode_optional_event_id(encoder, actual);
+        }
+    }
+}
+
+fn decode_refuse_reason(decoder: &mut Decoder<'_>) -> Result<RefuseReason, PublishQueueCodecError> {
+    match decoder.u8()? {
+        0 => Ok(RefuseReason::AlreadyExpired),
+        1 => Ok(RefuseReason::Tombstoned),
+        2 => Ok(RefuseReason::ReplaceableBaseOnRegularEvent),
+        3 => {
+            let expected = decode_optional_event_id(decoder)?;
+            let actual = decode_optional_event_id(decoder)?;
+            Ok(RefuseReason::ReplaceableBaseChanged { expected, actual })
+        }
+        other => Err(PublishQueueCodecError::InvalidTag("refuse reason", other)),
+    }
+}
+
 fn encode_receipt_state(encoder: &mut Encoder, state: ReceiptState) {
-    encoder.u8(match state {
-        ReceiptState::Accepted => 0,
-        ReceiptState::Signed => 1,
-        ReceiptState::Compensated => 2,
-        ReceiptState::Cancelled => 3,
-        ReceiptState::Superseded => 4,
-        ReceiptState::Abandoned => 5,
-    });
+    match state {
+        ReceiptState::Accepted => encoder.u8(0),
+        ReceiptState::Signed => encoder.u8(1),
+        ReceiptState::Compensated => encoder.u8(2),
+        ReceiptState::Cancelled => encoder.u8(3),
+        ReceiptState::Superseded => encoder.u8(4),
+        ReceiptState::Refused(reason) => {
+            encoder.u8(5);
+            encode_refuse_reason(encoder, reason);
+        }
+    }
 }
 
 fn decode_receipt_state(decoder: &mut Decoder<'_>) -> Result<ReceiptState, PublishQueueCodecError> {
@@ -600,7 +634,7 @@ fn decode_receipt_state(decoder: &mut Decoder<'_>) -> Result<ReceiptState, Publi
         2 => Ok(ReceiptState::Compensated),
         3 => Ok(ReceiptState::Cancelled),
         4 => Ok(ReceiptState::Superseded),
-        5 => Ok(ReceiptState::Abandoned),
+        5 => Ok(ReceiptState::Refused(decode_refuse_reason(decoder)?)),
         other => Err(PublishQueueCodecError::InvalidTag("receipt state", other)),
     }
 }
@@ -693,7 +727,6 @@ fn encode_attempt_outcome(
             encoder.text(reason, MAX_REASON_BYTES, "rejection reason")?;
         }
         PublishQueueAttemptOutcome::GaveUp => encoder.u8(3),
-        PublishQueueAttemptOutcome::OutcomeUnknown => encoder.u8(4),
     }
     Ok(())
 }
@@ -708,7 +741,6 @@ fn decode_attempt_outcome(
             decoder.text(MAX_REASON_BYTES, "rejection reason")?,
         )),
         3 => Ok(PublishQueueAttemptOutcome::GaveUp),
-        4 => Ok(PublishQueueAttemptOutcome::OutcomeUnknown),
         other => Err(PublishQueueCodecError::InvalidTag("attempt outcome", other)),
     }
 }
@@ -794,7 +826,6 @@ fn encode_terminal(
             encoder.text(reason, MAX_REASON_BYTES, "terminal rejection reason")?;
         }
         PublishQueueTerminalOutcome::GaveUp => encoder.u8(2),
-        PublishQueueTerminalOutcome::OutcomeUnknown => encoder.u8(3),
         PublishQueueTerminalOutcome::AuthDenied(denial) => {
             encoder.u8(4);
             encode_auth_source(encoder, denial.source);
@@ -817,7 +848,6 @@ fn decode_terminal(
             decoder.text(MAX_REASON_BYTES, "terminal rejection reason")?,
         )),
         2 => Ok(PublishQueueTerminalOutcome::GaveUp),
-        3 => Ok(PublishQueueTerminalOutcome::OutcomeUnknown),
         4 => Ok(PublishQueueTerminalOutcome::AuthDenied(AuthDenial {
             source: decode_auth_source(decoder)?,
             reason: decoder.text(MAX_REASON_BYTES, "authentication denial reason")?,

@@ -1,7 +1,7 @@
 //! The publish-queue door contract (issues #2/#3, Unit U1 —
 //! `docs/design/crashsafe-accepted-2-3-plan.md` + its Fable checkpoint
 //! verdict R1-R8, plus post-build architecture-review corrections:
-//! `IntentId`/receipt-id store allocation, `Ephemeral` receipt-only
+//! `IntentId`/receipt-id store allocation, refused-at-acceptance receipt-only
 //! persistence, intent-KEYED `promote_signed`/`compensate_write` (an
 //! intent's own `PUBLISH_QUEUE_INTENTS` row is the source of truth for its frozen
 //! body, independent of whether a live `EVENTS` row currently exists for
@@ -17,13 +17,13 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome,
-    EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin,
-    MemoryStore, PersistenceFault, PromoteOutcome, PublishQueueAttemptOutcome, ReceiptState,
-    RedbStore, RefuseReason, RelayObserved, RetractReason, SigState, WriteDurability,
+    sentinel_signature, AcceptOutcome, AcceptWrite, CompensateOutcome, EventCursor, EventStore,
+    GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin, MemoryStore, PersistenceFault,
+    PromoteOutcome, PublishQueueAttemptOutcome, ReceiptState, RedbStore, RefuseReason,
+    RelayObserved, RemoveQueueEntryOutcome, RetractReason, SigState,
 };
 use nostr::nips::nip01::Coordinate;
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
+use nostr::{Event, EventBuilder, EventId, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 fn keys() -> Keys {
@@ -94,7 +94,6 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
         monotonic_stamp: false,
         expected_pubkey,
         signing_identity_ref: "local".to_string(),
-        durability: WriteDurability::Durable,
         routing: "auto".to_string(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
@@ -1374,12 +1373,12 @@ fn receipt_id_never_reused_after_terminal_and_restart() {
             .compensate_write(intent2)
             .expect("compensate persistence");
 
-        // An Ephemeral receipt — receipt-only, never backed by an intent
-        // at all — draws from the SAME durable counter.
-        let (frozen_eph, _signed_eph) = compose(&k, Kind::TextNote, "ephemeral", 250);
+        // A refused-at-acceptance receipt — receipt-only, never backed by
+        // an intent at all — draws from the SAME durable counter.
+        let (frozen_eph, _signed_eph) = compose(&k, Kind::TextNote, "refused", 250);
         let receipt3 = store
-            .accept_ephemeral(frozen_eph.id, k.public_key())
-            .expect("accept_ephemeral persistence");
+            .accept_refused(frozen_eph.id, k.public_key(), RefuseReason::Tombstoned)
+            .expect("accept_refused persistence");
 
         // Every intent's open-work row is gone, but all THREE receipts
         // remain durably RETAINED — the exact surviving-retained-set trap
@@ -1536,89 +1535,124 @@ fn terminal_receipt_still_reattachable_after_recover() {
 /// after process loss, so `Accepted`-at-reopen can only mean the process
 /// died before any further transition).
 #[test]
-fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_after_reopen() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt() {
+    // CUSTODY. `accept_write` answering `Refused` is the store WORKING and
+    // saying no — an answer the app is entitled to read back — so the
+    // refusal is recorded as one retained receipt rather than thrown away.
+    // It survives restart, and `ReplaceableBaseChanged` keeps BOTH event ids
+    // so an app can fetch what is actually there, reapply the user's change
+    // and resubmit without ever troubling them.
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.redb");
     let k = keys();
 
-    let (frozen, _signed) = compose(&k, Kind::TextNote, "fire and forget", 100);
+    let (frozen, _signed) = compose(&k, Kind::TextNote, "refused at the door", 100);
     let frozen_id = frozen.id;
+    let expected = Some(EventId::all_zeros());
+    let actual = Some(frozen_id);
+    let reason = RefuseReason::ReplaceableBaseChanged { expected, actual };
 
     let receipt_id = {
         let mut store = RedbStore::open(&path).expect("open redb store");
         let receipt_id = store
-            .accept_ephemeral(frozen_id, k.public_key())
-            .expect("accept_ephemeral persistence");
+            .accept_refused(frozen_id, k.public_key(), reason)
+            .expect("accept_refused persistence");
 
-        // No pending row: `accept_ephemeral` never touches `EVENTS`.
+        // No pending row: `accept_refused` never touches `EVENTS`.
         assert!(store
             .query(&Filter::new().id(frozen_id))
             .unwrap()
             .is_empty());
-        // No open-work/journal row: `recover_publish_queue` (PUBLISH_QUEUE_INTENTS-only)
-        // sees nothing.
+        // No open-work/journal row: nothing will ever retry this.
         assert!(store
             .recover_publish_queue()
-            .expect("recover delivery")
+            .expect("recover publish queue")
             .is_empty());
 
-        // The receipt itself IS there, `Accepted`, receipt-only.
         let receipt = store
             .reattach_receipt(receipt_id)
             .expect("receipt lookup must be readable")
-            .expect("ephemeral receipt persists immediately");
+            .expect("refused receipt persists immediately");
         assert_eq!(receipt.intent_id, None, "receipt-only: nothing backs it");
         assert_eq!(receipt.frozen_id, frozen_id);
-        assert_eq!(receipt.state, ReceiptState::Accepted);
-        // Dropped here with no further transition — simulates the process
-        // dying before any dispatch/ack tracking (out of this unit's
-        // scope) ever advanced this receipt past `Accepted`.
+        assert_eq!(receipt.state, ReceiptState::Refused(reason));
         receipt_id
     };
 
     let store = RedbStore::open(&path).expect("reopen redb store");
-
-    // Still no pending row, still no open-work row, after reopen.
-    assert!(store
-        .query(&Filter::new().id(frozen_id))
-        .unwrap()
-        .is_empty());
-    assert!(store
-        .recover_publish_queue()
-        .expect("recover delivery")
-        .is_empty());
-
-    // But the receipt is reattachable, now correctly `Abandoned` — the
-    // boot-time reconciliation `RedbStore::open()` runs.
     let receipt = store
         .reattach_receipt(receipt_id)
         .expect("receipt lookup must be readable")
-        .expect("ephemeral receipt still reattachable after reopen");
-    assert_eq!(receipt.intent_id, None);
-    assert_eq!(receipt.frozen_id, frozen_id);
-    assert_eq!(receipt.state, ReceiptState::Abandoned);
+        .expect("refused receipt still reattachable after reopen");
+    // The reason survives the restart WITH BOTH IDS. Reduced to a string an
+    // app could only tell the user to redo the edit by hand.
+    match receipt.state {
+        ReceiptState::Refused(RefuseReason::ReplaceableBaseChanged {
+            expected: got_expected,
+            actual: got_actual,
+        }) => {
+            assert_eq!(got_expected, expected);
+            assert_eq!(got_actual, actual);
+        }
+        other => panic!("refusal reason did not survive the restart: {other:?}"),
+    }
 
-    // MemoryStore: same receipt-only shape, but no crash concept — it
-    // stays `Accepted` for the life of the process (Q4: retention, not
-    // restart-survival, is the contract for the volatile backend, and
-    // there is no "reopen" event to reconcile against).
+    // MemoryStore: same receipt-only, terminal-at-birth shape.
     let mut mem = MemoryStore::new();
-    let (frozen2, _signed2) = compose(&k, Kind::TextNote, "fire and forget 2", 200);
-    let frozen2_id = frozen2.id;
+    let (frozen2, _signed2) = compose(&k, Kind::TextNote, "refused 2", 200);
     let receipt2_id = mem
-        .accept_ephemeral(frozen2_id, k.public_key())
-        .expect("accept_ephemeral persistence");
-    assert!(mem.query(&Filter::new().id(frozen2_id)).unwrap().is_empty());
-    assert!(mem
-        .recover_publish_queue()
-        .expect("recover delivery")
-        .is_empty());
+        .accept_refused(frozen2.id, k.public_key(), RefuseReason::Tombstoned)
+        .expect("accept_refused persistence");
+    assert!(mem.query(&Filter::new().id(frozen2.id)).unwrap().is_empty());
     let mem_receipt = mem
         .reattach_receipt(receipt2_id)
         .expect("receipt lookup must be readable")
-        .expect("ephemeral receipt reattachable on MemoryStore too");
+        .expect("refused receipt reattachable on MemoryStore too");
     assert_eq!(mem_receipt.intent_id, None);
-    assert_eq!(mem_receipt.state, ReceiptState::Accepted);
+    assert_eq!(
+        mem_receipt.state,
+        ReceiptState::Refused(RefuseReason::Tombstoned)
+    );
+}
+
+#[test]
+fn removing_a_queue_entry_forgets_it_and_refuses_while_work_is_open() {
+    // #1039's removal half is a TERMINATION path: a permanently-failed entry
+    // and a write parked forever on a missing signer end no other way. A
+    // write that still owns open delivery work is refused instead — that one
+    // is cancelled, not removed.
+    for_each_backend(|store| {
+        let k = keys();
+        let (refused_frozen, _) = compose(&k, Kind::TextNote, "removable", 301);
+        let refused = store
+            .accept_refused(refused_frozen.id, k.public_key(), RefuseReason::Tombstoned)
+            .expect("accept_refused");
+
+        let (open_frozen, _) = compose(&k, Kind::TextNote, "still open", 302);
+        let open_outcome = do_accept(store, accept(open_frozen, k.public_key(), 302));
+        let open_receipt = open_outcome.journaled_receipt_id().expect("journaled");
+
+        assert!(store
+            .enumerate_publish_queue_receipts()
+            .unwrap()
+            .iter()
+            .any(|receipt| receipt.receipt_id == refused));
+
+        assert_eq!(
+            store.remove_publish_queue_entry(open_receipt).unwrap(),
+            RemoveQueueEntryOutcome::StillOpen,
+            "an entry with live work is cancelled, never removed"
+        );
+        assert_eq!(
+            store.remove_publish_queue_entry(refused).unwrap(),
+            RemoveQueueEntryOutcome::Removed
+        );
+        assert!(store.reattach_receipt(refused).unwrap().is_none());
+        assert_eq!(
+            store.remove_publish_queue_entry(refused).unwrap(),
+            RemoveQueueEntryOutcome::NotFound
+        );
+    });
 }
 
 /// Architecture-review blocker: `promote_signed`/`compensate_write` used to
@@ -4378,29 +4412,6 @@ fn explicit_cancellation_is_a_distinct_durable_receipt_fact_on_both_backends() {
             store.cancel_write(intent).unwrap(),
             CompensateOutcome::NotFound
         ));
-    });
-}
-
-#[test]
-fn explicit_ephemeral_cancellation_is_retained_without_a_publish_queue_intent() {
-    for_each_backend(|store| {
-        let k = keys();
-        let (frozen, _) = compose(&k, Kind::TextNote, "cancel ephemeral", 101);
-        let receipt = store
-            .accept_ephemeral(frozen.id, k.public_key())
-            .expect("accept ephemeral");
-
-        assert_eq!(
-            store.cancel_ephemeral_receipt(receipt).unwrap(),
-            CancelEphemeralOutcome::Cancelled
-        );
-        let retained = store.reattach_receipt(receipt).unwrap().unwrap();
-        assert_eq!(retained.intent_id, None);
-        assert_eq!(retained.state, ReceiptState::Cancelled);
-        assert_eq!(
-            store.cancel_ephemeral_receipt(receipt).unwrap(),
-            CancelEphemeralOutcome::AlreadyCancelled
-        );
     });
 }
 
