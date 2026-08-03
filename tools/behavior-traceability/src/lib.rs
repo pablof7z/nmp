@@ -54,15 +54,14 @@ mod tests {
     /// governed `nmp:issue` reference — exactly as a real PR must keep the
     /// CI-built trusted snapshot in step with the corpus it validates.
     ///
-    /// Empty as of #1122's `PROTOCOL-GROUPISANIDENTITY-*`/door-shape-
-    /// dependent `PROTOCOL-NIP29OPERATIONS-*` records going `built` against
-    /// the landed #1033 relay-scope/group facade: no governed scenario
-    /// names an open issue any more.
+    /// One entry as of #1214: `QUERIES-COMPOSED-027` names #1215, the open
+    /// gap that no runtime test can assert the native live query keeps its
+    /// branch storage private and unforgeable.
     struct KnownLiveIssues(BTreeMap<u64, IssueState>);
 
     impl KnownLiveIssues {
         fn current() -> Self {
-            Self(BTreeMap::new())
+            Self(BTreeMap::from([(1215, IssueState::Open)]))
         }
     }
 

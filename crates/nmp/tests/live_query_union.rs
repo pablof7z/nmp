@@ -318,6 +318,60 @@ fn equal_branches_keep_independent_evidence_entries() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Falsifier: "Index per-branch evidence by anything other than the query's own
+// canonical branch order" -- caller insertion order, discovery order, or a
+// second sort that can drift from `Demand`'s.
+// ---------------------------------------------------------------------------
+
+/// `branches()[i]` must name the branch `evidence[i]` reports on. Every
+/// surface indexes per-branch evidence positionally, so a mismatch is silent:
+/// an app reads a source list, a shortfall or a diagnostic and attributes it
+/// to the wrong host with nothing anywhere disagreeing.
+#[test]
+fn per_branch_evidence_is_indexed_by_canonical_branch_order() {
+    let (a, b) = (relay("a"), relay("b"));
+    let one_way = union_of([host_branch(&a), host_branch(&b)], None);
+    let other_way = union_of([host_branch(&b), host_branch(&a)], None);
+    assert_eq!(
+        one_way, other_way,
+        "the same two branches typed either way are one query"
+    );
+
+    // These two ARE one value once the assertion above holds -- construction
+    // canonicalizes, so caller order never survives to reach the engine. Both
+    // are still driven so that a regression which let insertion order leak
+    // into the value fails HERE, on the branch-to-evidence mapping, rather
+    // than only on the equality assertion above.
+    for query in [one_way, other_way] {
+        let declared: Vec<BTreeSet<RelayUrl>> = query
+            .branches()
+            .iter()
+            .map(|branch| match &branch.source {
+                SourceAuthority::Pinned(hosts) => hosts.clone(),
+                other => panic!("fixture branches are pinned to one host: {other:?}"),
+            })
+            .collect();
+
+        let mut core = core();
+        let effects = core.handle(EngineMsg::Subscribe(query.clone()));
+        let id = observation(&effects);
+        let mut projection = Projection::default();
+        projection.apply(&effects, id);
+
+        let reported: Vec<BTreeSet<RelayUrl>> =
+            projection.evidence.iter().map(evidence_relays).collect();
+        assert_eq!(
+            reported,
+            declared,
+            "evidence entry i must report on branches()[i]; indexing by the \
+             order the caller typed instead swaps these two entries for one of \
+             the two declarations: {:?}",
+            query.branches()
+        );
+    }
+}
+
 #[test]
 fn an_unplannable_branch_reports_its_own_shortfall() {
     let host = relay("reachable");
