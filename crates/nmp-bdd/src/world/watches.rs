@@ -27,7 +27,7 @@ use nmp_router::RelayUrl;
 use nmp_test_support::relays::WireRecord;
 
 use super::budgets::{INGEST_RESOLVED, WIRE_QUIET, WIRE_SETTLE};
-use super::observe::FeedState;
+use super::observe::{every_source_has_proven_its_subtree, FeedState};
 use super::queries::{
     authored_note_query, my_group_state_query, tagged_note_query, tagged_note_query_values,
     WatchShape, GROUP_ADMINS_KIND,
@@ -248,10 +248,9 @@ impl NmpWorld {
             .iter_mut()
             .filter(|(_, watch)| watch.resolves_from_ingest)
         {
-            if watch.eventually(
-                INGEST_RESOLVED,
-                FeedState::every_source_has_proven_its_subtree,
-            ) {
+            if watch.eventually(INGEST_RESOLVED, |watch| {
+                every_source_has_proven_its_subtree(&watch.evidence)
+            }) {
                 continue;
             }
             panic!(

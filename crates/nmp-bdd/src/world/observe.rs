@@ -21,7 +21,6 @@ use nostr::EventId;
 use nmp::mechanism::core::{
     AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact, SourceEvidence,
 };
-
 use nmp::mechanism::delivery::WriteStatus;
 use nmp::mechanism::runtime::{DiagnosticsHandle, QueryHandle, RowsReceiver};
 
@@ -67,33 +66,6 @@ impl FeedState {
     pub(super) fn resolving_from_ingest(mut self) -> Self {
         self.resolves_from_ingest = true;
         self
-    }
-
-    /// Has every source that covers any atom of this observation's subtree
-    /// proven all of them?
-    ///
-    /// `SourceEvidence::reconciled_through` is `Some` only when EVERY subtree
-    /// atom that source covers has a durable coverage row at or below the
-    /// query's window floor -- and `#12` put the INTERIOR `Derived` atoms in
-    /// that subtree, so this is `None` until the inner demand's own request
-    /// has settled AND every outer atom the inner rows resolved to has been
-    /// requested and settled too. That is the real "the derived set finished
-    /// resolving" condition, produced by the engine that owns it, rather than
-    /// inferred from a quiet outbound socket that cannot see ingestion at all.
-    ///
-    /// This is a HARNESS-side rollup of per-source facts -- exactly the
-    /// "an app rolls per-source facts into its own progress policy" that
-    /// `crates/nmp/src/core/evidence.rs` reserves to the app. Nothing is added
-    /// to NMP's surface; there is still no `is_complete` anywhere in it.
-    pub(super) fn every_source_has_proven_its_subtree(&self) -> bool {
-        !self.evidence.is_empty()
-            && self.evidence.iter().all(|branch| {
-                !branch.sources.is_empty()
-                    && branch
-                        .sources
-                        .iter()
-                        .all(|source| source.reconciled_through.is_some())
-            })
     }
 
     /// Everything the settle wait can say about WHY it gave up, so a timeout
@@ -544,4 +516,92 @@ pub(crate) fn branch_shortfall(
     evidence: &[AcquisitionEvidence],
 ) -> impl Iterator<Item = &ShortfallFact> {
     evidence.iter().flat_map(|branch| branch.shortfall.iter())
+}
+
+/// Has every source that covers any atom of this observation's subtree proven
+/// all of them?
+///
+/// `SourceEvidence::reconciled_through` is `Some` only when EVERY subtree atom
+/// that source covers has a durable coverage row at or below the query's
+/// window floor -- and #12 put the INTERIOR `Derived` atoms in that subtree,
+/// so it stays `None` until the inner demand's own request has settled AND
+/// every outer atom the inner rows resolved to has been requested and settled
+/// too. That is the real "the derived set finished resolving" condition,
+/// produced by the component that owns coverage, rather than inferred from a
+/// quiet outbound socket that cannot observe ingestion at all (#1211).
+///
+/// A HARNESS-side rollup of per-source facts -- exactly the "an app rolls
+/// per-source facts into its own progress policy" that
+/// `crates/nmp/src/core/evidence.rs` reserves to the app. Nothing is added to
+/// NMP's surface; there is still no `is_complete` anywhere in it.
+///
+/// AN EMPTY VIEW IS NOT A PROVEN ONE. Both emptiness checks are load-bearing:
+/// evidence arrives on a delta channel, so "nothing delivered yet" and "no
+/// source covers anything yet" are both states this is asked about BEFORE the
+/// first REQ has even been planned, and a vacuous `all()` over either would
+/// return exactly the premature `true` this replaced.
+pub(crate) fn every_source_has_proven_its_subtree(evidence: &[AcquisitionEvidence]) -> bool {
+    !evidence.is_empty()
+        && evidence.iter().all(|branch| {
+            !branch.sources.is_empty()
+                && branch
+                    .sources
+                    .iter()
+                    .all(|source| source.reconciled_through.is_some())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use nmp::mechanism::core::SourceStatus;
+    use nostr::{RelayUrl, Timestamp};
+
+    use super::*;
+
+    fn source(reconciled_through: Option<Timestamp>) -> SourceEvidence {
+        SourceEvidence {
+            relay: RelayUrl::parse("ws://hub.test").expect("a literal relay url parses"),
+            access: nmp_grammar::AccessContext::Public,
+            reconciled_through,
+            status: SourceStatus::Requesting,
+        }
+    }
+
+    fn branch(sources: Vec<SourceEvidence>) -> AcquisitionEvidence {
+        AcquisitionEvidence {
+            sources,
+            shortfall: Vec::new(),
+        }
+    }
+
+    /// Falsifier for #1211: a settle that reports "proven" against a view
+    /// nothing has been delivered into yet. Every count downstream of it is
+    /// then taken before the first REQ exists, which is precisely how a
+    /// partially-resolved derived set was read as a finished one.
+    #[test]
+    fn an_undelivered_or_unplanned_view_is_never_proven() {
+        assert!(!every_source_has_proven_its_subtree(&[]));
+        assert!(!every_source_has_proven_its_subtree(&[branch(vec![])]));
+    }
+
+    /// One unproven source is enough, in any branch. A rollup that min'd or
+    /// or'd instead would call a query proven while a whole relay's worth of
+    /// its subtree was still outstanding -- the #12 lie, reintroduced by a
+    /// harness rather than by the surface.
+    #[test]
+    fn one_source_short_of_proof_leaves_the_whole_observation_unproven() {
+        let proven = source(Some(Timestamp::from(1)));
+        assert!(!every_source_has_proven_its_subtree(&[branch(vec![
+            proven.clone(),
+            source(None),
+        ])]));
+        assert!(!every_source_has_proven_its_subtree(&[
+            branch(vec![proven.clone()]),
+            branch(vec![source(None)]),
+        ]));
+        assert!(every_source_has_proven_its_subtree(&[
+            branch(vec![proven.clone()]),
+            branch(vec![proven]),
+        ]));
+    }
 }
