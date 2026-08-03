@@ -7,7 +7,7 @@ date: 2026-07-30
 audience: llms
 scope: binary persistence for accepted write obligations and per-relay delivery
 owns:
-  - execution-side delivery vocabulary
+  - the publish-queue vocabulary
   - the publish_queue_* key and value model
   - schema and codec version refusal
   - relay-surrogate allocation and recovery
@@ -32,10 +32,17 @@ NMP uses two different concepts that used to share the word “outbox”:
 - **publish queue** executes an accepted write against the selected relays.
 
 The routing term remains correct. The execution module, store doors, types,
-diagnostics, fixtures, and current documentation use `delivery`: for example
-`PublishQueueLane`, `PublishQueueAttempt`, `PublishQueueDeadline`, `PublishQueueReceipt`, and
-`recover_publish_queue`. There is no compatibility alias for the retired
-execution-side spelling.
+diagnostics, fixtures, and documentation all use `PublishQueue`: for example
+`PublishQueueLane`, `PublishQueueAttempt`, `PublishQueueDeadline`,
+`PublishQueueReceipt`, and `recover_publish_queue`. There is no compatibility
+alias for either retired execution-side spelling (`outbox_*`, then
+`delivery_*`).
+
+Durable table names carry no version suffix. `SCHEMA_VERSION` is the single
+epoch authority for the whole durable model; a per-table `_v1`/`_v6`/`_v8`
+marker advertised a coexistence that has never existed and that nothing
+reads or branches on. `crates/nmp-store/tests/publish_queue_schema_contract.rs`
+holds the full 40-name inventory and fails on any suffix.
 
 The authority for this cut is the repository owner’s wording:
 
@@ -54,9 +61,9 @@ A nonempty pre-cut database therefore reaches the existing typed
 `RedbStoreOpenError::UnsupportedSchema` refusal before a store handle is
 returned and before any byte is changed. Reset is a separate, explicit,
 offline destructive operator action. Opening an old file cannot look like an
-empty delivery journal, and opening it does not automatically wipe anything.
+empty publish-queue journal, and opening it does not automatically wipe anything.
 
-This is one schema epoch rather than independently migratable delivery tables:
+This is one schema epoch rather than independently migratable publish-queue tables:
 canonical events, coverage, accepted obligations, receipts, correlations,
 routes, lanes, attempts, details, and deadlines share transactions. Carrying a
 partial compatibility decoder would make that atomic model dishonest.
@@ -96,7 +103,7 @@ order. Lengths are `u32` and checked before allocation. Current bounds are
 16 MiB per embedded event, 4,096 relays per route revision, and 65,536
 suppression claimants. Truncation, bad magic, unknown version, nonzero reserved
 bytes, unknown tags, invalid UTF-8, noncanonical relays, overlong fields, and
-trailing bytes all return typed persistence evidence. Durable-delivery
+trailing bytes all return typed persistence evidence. Publish-queue
 persistence uses no `serde_json`, `bincode`, host-width integer, host
 endianness, or backend-specific enum layout.
 
@@ -160,7 +167,7 @@ deadlines, receipts, correlations, and open-work recovery rather than row
 counts.
 
 Process-death tests also hash the recovered semantic projection. Existing
-transaction failpoints now exercise binary delivery rows, including acceptance,
+transaction failpoints now exercise binary publish-queue rows, including acceptance,
 promotion/compensation, route revision, lane/detail/deadline transitions,
 receipt/correlation changes, and close. Each crash has only the door’s exact
 pre-state or exact post-state as an allowed result. Corrupt, missing,
@@ -186,7 +193,7 @@ settled databases. Every run recovered 572,124 normalized semantic bytes and
 the same scheduler-effect digest:
 `9d9aefb66fe1d2efea6fdc85d8f7730fca92f0a7501c6f4af810b654155e9127`.
 
-| Median measure | legacy string/JSON | binary delivery v1 | change |
+| Median measure | legacy string/JSON | binary publish queue | change |
 |---|---:|---:|---:|
 | Logical database bytes after reopen | 5,189,632 | 1,990,656 | -61.6% |
 | Allocated database bytes after reopen | 4,276,224 | 1,564,672 | -63.4% |
@@ -205,12 +212,12 @@ Sampling profiles could not be collected on the evidence host because
 is invented to fill that gap. Attribution is instead bounded to facts the
 fixture and source can prove:
 
-- the base delivery recovery path has 17 production `serde_json::from_str`
+- the base publish-queue recovery path has 17 production `serde_json::from_str`
   sites across intents, receipts, lanes, deadlines, routes, attempts, details,
   and suppression metadata;
 - its `&str` keys make Redb validate UTF-8 during key handling, and relay URLs
   are reconstructed from repeated JSON values;
-- active `delivery.rs`, `publish_queue_ops.rs`, and `publish_queue_codec.rs` have zero
+- active `publish_queue.rs`, `publish_queue_ops.rs`, and `publish_queue_codec.rs` have zero
   `serde_json` use; their ordered keys are fixed byte arrays;
 - the candidate parses four relay dictionary values once per fresh recovery
   process and caches those four canonical identities while recovering 1,000

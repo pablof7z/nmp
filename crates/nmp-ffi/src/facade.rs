@@ -2291,7 +2291,7 @@ mod tests {
         {
             let mut table = tx
                 .open_table(RECEIPTS)
-                .expect("redb: open publish_queue_receipts_v1");
+                .expect("redb: open publish_queue_receipts");
             let key = receipt_id.to_be_bytes();
             let mut value = table
                 .get(&key)
