@@ -102,7 +102,7 @@ use crate::core::{
     ObservationEvidence, ObservationId, ObservationOpen, PublishError, ReattachOutcome, ReceiptId,
     RelayAdmissionPolicy, Row, RowDelta,
 };
-use crate::delivery::{CancelWriteError, CancelWriteOutcome, WriteStatus};
+use crate::publish_queue::{CancelWriteError, CancelWriteOutcome, WriteStatus};
 use crate::relay_information_service::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
     RelayInformationSnapshot,
@@ -6513,7 +6513,7 @@ impl Handle {
     /// every `WriteStatus` this intent ever reaches (ledger #9 — enqueue is
     /// not converged; the FIRST value is never a terminal for a durable/
     /// at-most-once intent. `Ephemeral` also yields receipt facts, but owns
-    /// no durable delivery obligation or query-visible pending row. If no
+    /// no publish queue obligation or query-visible pending row. If no
     /// pre-acceptance correlation id remains, this returns a typed error and
     /// creates no receipt stream.
     pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteStatus>, PublishError> {

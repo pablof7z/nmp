@@ -54,8 +54,12 @@ impl NmpWorld {
     pub async fn publish_and_await_signature(&mut self, text: &str) {
         self.publish_note(text).await;
         let signed = self.receipt_eventually(|seen| {
-            seen.iter()
-                .any(|status| matches!(status, nmp::mechanism::delivery::WriteStatus::Signed(_)))
+            seen.iter().any(|status| {
+                matches!(
+                    status,
+                    nmp::mechanism::publish_queue::WriteStatus::Signed(_)
+                )
+            })
         });
         assert!(
             signed,
@@ -183,7 +187,7 @@ impl NmpWorld {
     /// construction.
     pub fn receipt_statuses_after_settling(
         &mut self,
-    ) -> Vec<nmp::mechanism::delivery::WriteStatus> {
+    ) -> Vec<nmp::mechanism::publish_queue::WriteStatus> {
         let _ = self.receipt_never(|_| false);
         self.receipt_statuses()
     }

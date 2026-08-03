@@ -196,7 +196,7 @@ fn an_unproven_host_never_presents_a_group_read_as_authoritatively_empty() {
     let mut core = new_core(FixtureRoutingFacts::new());
     // Deliberately no `connect(...)`: the session has a planned request but
     // has never completed a connection, the same shape
-    // `crates/nmp/tests/core_headless/write_delivery.rs`'s
+    // `crates/nmp/tests/core_headless/write_publish_queue.rs`'s
     // `an_unreachable_explicit_relay_is_accepted_because_the_door_cannot_know`
     // and `crates/nmp/tests/freshness.rs`'s
     // `nested_max_age_uses_inner_scoped_coverage_only` both use for the same

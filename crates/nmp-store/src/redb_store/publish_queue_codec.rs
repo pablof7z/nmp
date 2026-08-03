@@ -1,4 +1,4 @@
-//! Portable binary codec for durable-delivery control records.
+//! Portable binary codec for publish-queue control records.
 //!
 //! Every value owns an eight-byte envelope (`magic | version | reserved`) and
 //! every integer is big-endian. Lengths are explicit `u32`s with per-field
@@ -12,20 +12,21 @@ use nostr::{Event, EventId, PublicKey, RelayUrl, Timestamp};
 
 use crate::binary_event::{self, StoredEventView};
 use crate::{
-    AuthDenial, AuthDenialSource, DeliveryAttemptDetails, DeliveryAttemptHandoff,
-    DeliveryAttemptOutcome, DeliveryAttemptTransient, DeliveryDeadlineKind, DeliveryInFlightPhase,
-    DeliveryLaneState, DeliveryTerminalOutcome, DeliveryTransientCause, HandoffEvidence, IntentId,
-    IntentSigState, PersistenceError, ReceiptState, StoredEvent, WriteDurability,
+    AuthDenial, AuthDenialSource, HandoffEvidence, IntentId, IntentSigState, PersistenceError,
+    PublishQueueAttemptDetails, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
+    PublishQueueAttemptTransient, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
+    PublishQueueLaneState, PublishQueueTerminalOutcome, PublishQueueTransientCause, ReceiptState,
+    StoredEvent, WriteDurability,
 };
 
-use super::delivery::{
-    AddrClaimant, DeliveryIntentRecord, DeliveryReceiptRecord, SuppressClaimRecord,
+use super::publish_queue::{
+    AddrClaimant, PublishQueueIntentRecord, PublishQueueReceiptRecord, SuppressClaimRecord,
 };
 
-pub(super) type DeliveryRelayId = u32;
+pub(super) type PublishQueueRelayId = u32;
 
-pub(super) const DELIVERY_CODEC_VERSION: u64 = 1;
-pub(super) const DELIVERY_CODEC_VERSION_KEY: &[u8] = b"codec_version";
+pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 1;
+pub(super) const PUBLISH_QUEUE_CODEC_VERSION_KEY: &[u8] = b"codec_version";
 pub(super) const NEXT_INTENT_ID_KEY: &[u8] = b"next_intent_id";
 pub(super) const NEXT_RECEIPT_ID_KEY: &[u8] = b"next_receipt_id";
 pub(super) const NEXT_RELAY_ID_KEY: &[u8] = b"next_relay_id";
@@ -53,7 +54,7 @@ const VALUE_VERSION: u8 = 1;
 const HEADER_LEN: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum DeliveryCodecError {
+pub(super) enum PublishQueueCodecError {
     Truncated,
     BadMagic,
     UnsupportedVersion(u8),
@@ -70,20 +71,20 @@ pub(super) enum DeliveryCodecError {
     BoundExceeded(&'static str),
 }
 
-impl std::fmt::Display for DeliveryCodecError {
+impl std::fmt::Display for PublishQueueCodecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
 
-impl From<DeliveryCodecError> for PersistenceError {
-    fn from(error: DeliveryCodecError) -> Self {
+impl From<PublishQueueCodecError> for PersistenceError {
+    fn from(error: PublishQueueCodecError) -> Self {
         codec_error("record", error)
     }
 }
 
-pub(super) fn codec_error(what: &str, error: DeliveryCodecError) -> PersistenceError {
-    PersistenceError::invariant(format!("decode durable delivery {what}: {error}"))
+pub(super) fn codec_error(what: &str, error: PublishQueueCodecError) -> PersistenceError {
+    PersistenceError::invariant(format!("decode publish queue {what}: {error}"))
 }
 
 struct Encoder {
@@ -120,11 +121,11 @@ impl Encoder {
         value: &[u8],
         bound: usize,
         name: &'static str,
-    ) -> Result<(), DeliveryCodecError> {
+    ) -> Result<(), PublishQueueCodecError> {
         if value.len() > bound {
-            return Err(DeliveryCodecError::BoundExceeded(name));
+            return Err(PublishQueueCodecError::BoundExceeded(name));
         }
-        self.u32(u32::try_from(value.len()).map_err(|_| DeliveryCodecError::LengthOverflow)?);
+        self.u32(u32::try_from(value.len()).map_err(|_| PublishQueueCodecError::LengthOverflow)?);
         self.fixed(value);
         Ok(())
     }
@@ -134,7 +135,7 @@ impl Encoder {
         value: &str,
         bound: usize,
         name: &'static str,
-    ) -> Result<(), DeliveryCodecError> {
+    ) -> Result<(), PublishQueueCodecError> {
         self.bytes(value.as_bytes(), bound, name)
     }
 
@@ -143,7 +144,7 @@ impl Encoder {
         value: Option<&str>,
         bound: usize,
         name: &'static str,
-    ) -> Result<(), DeliveryCodecError> {
+    ) -> Result<(), PublishQueueCodecError> {
         match value {
             None => self.u8(0),
             Some(value) => {
@@ -154,9 +155,9 @@ impl Encoder {
         Ok(())
     }
 
-    fn event(&mut self, event: &Event) -> Result<(), DeliveryCodecError> {
+    fn event(&mut self, event: &Event) -> Result<(), PublishQueueCodecError> {
         let event =
-            binary_event::encode_event(event).map_err(|_| DeliveryCodecError::InvalidEvent)?;
+            binary_event::encode_event(event).map_err(|_| PublishQueueCodecError::InvalidEvent)?;
         self.bytes(&event, MAX_EVENT_BYTES, "event")
     }
 
@@ -171,18 +172,18 @@ struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
-    fn new(bytes: &'a [u8], magic: [u8; 4]) -> Result<Self, DeliveryCodecError> {
+    fn new(bytes: &'a [u8], magic: [u8; 4]) -> Result<Self, PublishQueueCodecError> {
         if bytes.len() < HEADER_LEN {
-            return Err(DeliveryCodecError::Truncated);
+            return Err(PublishQueueCodecError::Truncated);
         }
         if bytes[..4] != magic {
-            return Err(DeliveryCodecError::BadMagic);
+            return Err(PublishQueueCodecError::BadMagic);
         }
         if bytes[4] != VALUE_VERSION {
-            return Err(DeliveryCodecError::UnsupportedVersion(bytes[4]));
+            return Err(PublishQueueCodecError::UnsupportedVersion(bytes[4]));
         }
         if bytes[5..8] != [0, 0, 0] {
-            return Err(DeliveryCodecError::InvalidReserved);
+            return Err(PublishQueueCodecError::InvalidReserved);
         }
         Ok(Self {
             bytes,
@@ -190,82 +191,86 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    fn take(&mut self, len: usize) -> Result<&'a [u8], DeliveryCodecError> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8], PublishQueueCodecError> {
         let end = self
             .cursor
             .checked_add(len)
-            .ok_or(DeliveryCodecError::LengthOverflow)?;
+            .ok_or(PublishQueueCodecError::LengthOverflow)?;
         let value = self
             .bytes
             .get(self.cursor..end)
-            .ok_or(DeliveryCodecError::Truncated)?;
+            .ok_or(PublishQueueCodecError::Truncated)?;
         self.cursor = end;
         Ok(value)
     }
 
-    fn u8(&mut self) -> Result<u8, DeliveryCodecError> {
+    fn u8(&mut self) -> Result<u8, PublishQueueCodecError> {
         Ok(self.take(1)?[0])
     }
 
-    fn u32(&mut self) -> Result<u32, DeliveryCodecError> {
+    fn u32(&mut self) -> Result<u32, PublishQueueCodecError> {
         Ok(u32::from_be_bytes(
             self.take(4)?.try_into().expect("length checked"),
         ))
     }
 
-    fn u64(&mut self) -> Result<u64, DeliveryCodecError> {
+    fn u64(&mut self) -> Result<u64, PublishQueueCodecError> {
         Ok(u64::from_be_bytes(
             self.take(8)?.try_into().expect("length checked"),
         ))
     }
 
-    fn bytes(&mut self, bound: usize, name: &'static str) -> Result<&'a [u8], DeliveryCodecError> {
+    fn bytes(
+        &mut self,
+        bound: usize,
+        name: &'static str,
+    ) -> Result<&'a [u8], PublishQueueCodecError> {
         let len = self.u32()? as usize;
         if len > bound {
-            return Err(DeliveryCodecError::BoundExceeded(name));
+            return Err(PublishQueueCodecError::BoundExceeded(name));
         }
         self.take(len)
     }
 
-    fn text(&mut self, bound: usize, name: &'static str) -> Result<String, DeliveryCodecError> {
+    fn text(&mut self, bound: usize, name: &'static str) -> Result<String, PublishQueueCodecError> {
         std::str::from_utf8(self.bytes(bound, name)?)
             .map(str::to_owned)
-            .map_err(|_| DeliveryCodecError::InvalidUtf8)
+            .map_err(|_| PublishQueueCodecError::InvalidUtf8)
     }
 
     fn optional_text(
         &mut self,
         bound: usize,
         name: &'static str,
-    ) -> Result<Option<String>, DeliveryCodecError> {
+    ) -> Result<Option<String>, PublishQueueCodecError> {
         match self.u8()? {
             0 => Ok(None),
             1 => Ok(Some(self.text(bound, name)?)),
-            other => Err(DeliveryCodecError::InvalidTag("optional text", other)),
+            other => Err(PublishQueueCodecError::InvalidTag("optional text", other)),
         }
     }
 
-    fn event(&mut self) -> Result<Event, DeliveryCodecError> {
+    fn event(&mut self) -> Result<Event, PublishQueueCodecError> {
         StoredEventView::parse(self.bytes(MAX_EVENT_BYTES, "event")?)
             .and_then(|view| view.materialize_event())
-            .map_err(|_| DeliveryCodecError::InvalidEvent)
+            .map_err(|_| PublishQueueCodecError::InvalidEvent)
     }
 
-    fn public_key(&mut self) -> Result<PublicKey, DeliveryCodecError> {
-        PublicKey::from_slice(self.take(32)?).map_err(|_| DeliveryCodecError::InvalidPublicKey)
+    fn public_key(&mut self) -> Result<PublicKey, PublishQueueCodecError> {
+        PublicKey::from_slice(self.take(32)?).map_err(|_| PublishQueueCodecError::InvalidPublicKey)
     }
 
-    fn event_id(&mut self) -> Result<EventId, DeliveryCodecError> {
+    fn event_id(&mut self) -> Result<EventId, PublishQueueCodecError> {
         Ok(EventId::from_byte_array(
             self.take(32)?.try_into().expect("length checked"),
         ))
     }
 
-    fn finish(self) -> Result<(), DeliveryCodecError> {
+    fn finish(self) -> Result<(), PublishQueueCodecError> {
         if self.cursor == self.bytes.len() {
             Ok(())
         } else {
-            Err(DeliveryCodecError::TrailingBytes)
+            Err(PublishQueueCodecError::TrailingBytes)
         }
     }
 }
@@ -274,10 +279,10 @@ pub(super) fn intent_key(id: IntentId) -> [u8; 8] {
     id.0.to_be_bytes()
 }
 
-pub(super) fn parse_intent_key(key: &[u8]) -> Result<IntentId, DeliveryCodecError> {
+pub(super) fn parse_intent_key(key: &[u8]) -> Result<IntentId, PublishQueueCodecError> {
     let raw: [u8; 8] = key
         .try_into()
-        .map_err(|_| DeliveryCodecError::InvalidValue("intent key length"))?;
+        .map_err(|_| PublishQueueCodecError::InvalidValue("intent key length"))?;
     Ok(IntentId(u64::from_be_bytes(raw)))
 }
 
@@ -285,11 +290,11 @@ pub(super) fn receipt_key(id: u64) -> [u8; 8] {
     id.to_be_bytes()
 }
 
-pub(super) fn relay_key(id: DeliveryRelayId) -> [u8; 4] {
+pub(super) fn relay_key(id: PublishQueueRelayId) -> [u8; 4] {
     id.to_be_bytes()
 }
 
-pub(super) fn lane_key(intent_id: IntentId, relay_id: DeliveryRelayId) -> [u8; 12] {
+pub(super) fn lane_key(intent_id: IntentId, relay_id: PublishQueueRelayId) -> [u8; 12] {
     let mut key = [0; 12];
     key[..8].copy_from_slice(&intent_id.0.to_be_bytes());
     key[8..].copy_from_slice(&relay_id.to_be_bytes());
@@ -298,9 +303,9 @@ pub(super) fn lane_key(intent_id: IntentId, relay_id: DeliveryRelayId) -> [u8; 1
 
 pub(super) fn parse_lane_key(
     key: &[u8],
-) -> Result<(IntentId, DeliveryRelayId), DeliveryCodecError> {
+) -> Result<(IntentId, PublishQueueRelayId), PublishQueueCodecError> {
     if key.len() != 12 {
-        return Err(DeliveryCodecError::InvalidValue("lane key length"));
+        return Err(PublishQueueCodecError::InvalidValue("lane key length"));
     }
     Ok((
         IntentId(u64::from_be_bytes(
@@ -313,13 +318,13 @@ pub(super) fn parse_lane_key(
 pub(super) fn lane_range(intent_id: IntentId) -> ([u8; 12], [u8; 12]) {
     (
         lane_key(intent_id, 0),
-        lane_key(intent_id, DeliveryRelayId::MAX),
+        lane_key(intent_id, PublishQueueRelayId::MAX),
     )
 }
 
 pub(super) fn attempt_key(
     intent_id: IntentId,
-    relay_id: DeliveryRelayId,
+    relay_id: PublishQueueRelayId,
     ordinal: u64,
 ) -> [u8; 20] {
     let mut key = [0; 20];
@@ -330,9 +335,9 @@ pub(super) fn attempt_key(
 
 pub(super) fn parse_attempt_key(
     key: &[u8],
-) -> Result<(IntentId, DeliveryRelayId, u64), DeliveryCodecError> {
+) -> Result<(IntentId, PublishQueueRelayId, u64), PublishQueueCodecError> {
     if key.len() != 20 {
-        return Err(DeliveryCodecError::InvalidValue("attempt key length"));
+        return Err(PublishQueueCodecError::InvalidValue("attempt key length"));
     }
     let (intent_id, relay_id) = parse_lane_key(&key[..12])?;
     Ok((
@@ -345,7 +350,7 @@ pub(super) fn parse_attempt_key(
 pub(super) fn attempt_range(intent_id: IntentId) -> ([u8; 20], [u8; 20]) {
     (
         attempt_key(intent_id, 0, 0),
-        attempt_key(intent_id, DeliveryRelayId::MAX, u64::MAX),
+        attempt_key(intent_id, PublishQueueRelayId::MAX, u64::MAX),
     )
 }
 
@@ -356,9 +361,11 @@ pub(super) fn route_revision_key(intent_id: IntentId, ordinal: u64) -> [u8; 16] 
     key
 }
 
-pub(super) fn parse_route_revision_key(key: &[u8]) -> Result<(IntentId, u64), DeliveryCodecError> {
+pub(super) fn parse_route_revision_key(
+    key: &[u8],
+) -> Result<(IntentId, u64), PublishQueueCodecError> {
     if key.len() != 16 {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "route revision key length",
         ));
     }
@@ -380,7 +387,7 @@ pub(super) fn route_revision_range(intent_id: IntentId) -> ([u8; 16], [u8; 16]) 
 pub(super) fn deadline_key(
     at: Timestamp,
     intent_id: IntentId,
-    relay_id: DeliveryRelayId,
+    relay_id: PublishQueueRelayId,
 ) -> [u8; 20] {
     let mut key = [0; 20];
     key[..8].copy_from_slice(&at.as_secs().to_be_bytes());
@@ -392,7 +399,7 @@ pub(super) fn deadline_key(
 pub(super) fn deadline_by_intent_key(
     intent_id: IntentId,
     at: Timestamp,
-    relay_id: DeliveryRelayId,
+    relay_id: PublishQueueRelayId,
 ) -> [u8; 20] {
     let mut key = [0; 20];
     key[..8].copy_from_slice(&intent_id.0.to_be_bytes());
@@ -403,9 +410,9 @@ pub(super) fn deadline_by_intent_key(
 
 pub(super) fn parse_deadline_key(
     key: &[u8],
-) -> Result<(Timestamp, IntentId, DeliveryRelayId), DeliveryCodecError> {
+) -> Result<(Timestamp, IntentId, PublishQueueRelayId), PublishQueueCodecError> {
     if key.len() != 20 {
-        return Err(DeliveryCodecError::InvalidValue("deadline key length"));
+        return Err(PublishQueueCodecError::InvalidValue("deadline key length"));
     }
     Ok((
         Timestamp::from(u64::from_be_bytes(
@@ -420,9 +427,9 @@ pub(super) fn parse_deadline_key(
 
 pub(super) fn parse_deadline_by_intent_key(
     key: &[u8],
-) -> Result<(IntentId, Timestamp, DeliveryRelayId), DeliveryCodecError> {
+) -> Result<(IntentId, Timestamp, PublishQueueRelayId), PublishQueueCodecError> {
     if key.len() != 20 {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "deadline-by-intent key length",
         ));
     }
@@ -440,14 +447,18 @@ pub(super) fn parse_deadline_by_intent_key(
 pub(super) fn deadline_due_range(now: Timestamp) -> ([u8; 20], [u8; 20]) {
     (
         deadline_key(Timestamp::from(0), IntentId(0), 0),
-        deadline_key(now, IntentId(u64::MAX), DeliveryRelayId::MAX),
+        deadline_key(now, IntentId(u64::MAX), PublishQueueRelayId::MAX),
     )
 }
 
 pub(super) fn deadline_intent_range(intent_id: IntentId) -> ([u8; 20], [u8; 20]) {
     (
         deadline_by_intent_key(intent_id, Timestamp::from(0), 0),
-        deadline_by_intent_key(intent_id, Timestamp::from(u64::MAX), DeliveryRelayId::MAX),
+        deadline_by_intent_key(
+            intent_id,
+            Timestamp::from(u64::MAX),
+            PublishQueueRelayId::MAX,
+        ),
     )
 }
 
@@ -462,26 +473,29 @@ pub(super) fn encode_meta_u64(value: u64) -> [u8; 8] {
     value.to_be_bytes()
 }
 
-pub(super) fn decode_meta_u64(bytes: &[u8], what: &'static str) -> Result<u64, DeliveryCodecError> {
+pub(super) fn decode_meta_u64(
+    bytes: &[u8],
+    what: &'static str,
+) -> Result<u64, PublishQueueCodecError> {
     let raw: [u8; 8] = bytes
         .try_into()
-        .map_err(|_| DeliveryCodecError::InvalidValue(what))?;
+        .map_err(|_| PublishQueueCodecError::InvalidValue(what))?;
     Ok(u64::from_be_bytes(raw))
 }
 
-pub(super) fn encode_relay(relay: &RelayUrl) -> Result<Vec<u8>, DeliveryCodecError> {
+pub(super) fn encode_relay(relay: &RelayUrl) -> Result<Vec<u8>, PublishQueueCodecError> {
     let mut encoder = Encoder::new(RELAY_MAGIC);
     encoder.text(relay.as_str(), MAX_RELAY_BYTES, "relay URL")?;
     Ok(encoder.finish())
 }
 
-pub(super) fn decode_relay(bytes: &[u8]) -> Result<RelayUrl, DeliveryCodecError> {
+pub(super) fn decode_relay(bytes: &[u8]) -> Result<RelayUrl, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, RELAY_MAGIC)?;
     let encoded = decoder.text(MAX_RELAY_BYTES, "relay URL")?;
     decoder.finish()?;
-    let relay = RelayUrl::parse(&encoded).map_err(|_| DeliveryCodecError::InvalidRelay)?;
+    let relay = RelayUrl::parse(&encoded).map_err(|_| PublishQueueCodecError::InvalidRelay)?;
     if relay.as_str() != encoded {
-        return Err(DeliveryCodecError::NonCanonicalRelay);
+        return Err(PublishQueueCodecError::NonCanonicalRelay);
     }
     Ok(relay)
 }
@@ -493,11 +507,14 @@ fn encode_durability(encoder: &mut Encoder, value: WriteDurability) {
     });
 }
 
-fn decode_durability(decoder: &mut Decoder<'_>) -> Result<WriteDurability, DeliveryCodecError> {
+fn decode_durability(decoder: &mut Decoder<'_>) -> Result<WriteDurability, PublishQueueCodecError> {
     match decoder.u8()? {
         0 => Ok(WriteDurability::Durable),
         1 => Ok(WriteDurability::AtMostOnce),
-        other => Err(DeliveryCodecError::InvalidTag("write durability", other)),
+        other => Err(PublishQueueCodecError::InvalidTag(
+            "write durability",
+            other,
+        )),
     }
 }
 
@@ -509,19 +526,21 @@ fn encode_sig_state(encoder: &mut Encoder, value: IntentSigState) {
     });
 }
 
-fn decode_sig_state(decoder: &mut Decoder<'_>) -> Result<IntentSigState, DeliveryCodecError> {
+fn decode_sig_state(decoder: &mut Decoder<'_>) -> Result<IntentSigState, PublishQueueCodecError> {
     match decoder.u8()? {
         0 => Ok(IntentSigState::AwaitingSigner),
         1 => Ok(IntentSigState::Pending),
         2 => Ok(IntentSigState::Signed),
-        other => Err(DeliveryCodecError::InvalidTag(
+        other => Err(PublishQueueCodecError::InvalidTag(
             "intent signature state",
             other,
         )),
     }
 }
 
-pub(super) fn encode_intent(record: &DeliveryIntentRecord) -> Result<Vec<u8>, DeliveryCodecError> {
+pub(super) fn encode_intent(
+    record: &PublishQueueIntentRecord,
+) -> Result<Vec<u8>, PublishQueueCodecError> {
     let mut encoder = Encoder::new(INTENT_MAGIC);
     encoder.u64(record.receipt_id);
     encoder.event(&record.frozen)?;
@@ -538,7 +557,9 @@ pub(super) fn encode_intent(record: &DeliveryIntentRecord) -> Result<Vec<u8>, De
     Ok(encoder.finish())
 }
 
-pub(super) fn decode_intent(bytes: &[u8]) -> Result<DeliveryIntentRecord, DeliveryCodecError> {
+pub(super) fn decode_intent(
+    bytes: &[u8],
+) -> Result<PublishQueueIntentRecord, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, INTENT_MAGIC)?;
     let receipt_id = decoder.u64()?;
     let frozen = decoder.event()?;
@@ -549,7 +570,7 @@ pub(super) fn decode_intent(bytes: &[u8]) -> Result<DeliveryIntentRecord, Delive
     let sig_state = decode_sig_state(&mut decoder)?;
     let accepted_at = Timestamp::from(decoder.u64()?);
     decoder.finish()?;
-    Ok(DeliveryIntentRecord {
+    Ok(PublishQueueIntentRecord {
         receipt_id,
         frozen,
         expected_pubkey,
@@ -572,7 +593,7 @@ fn encode_receipt_state(encoder: &mut Encoder, state: ReceiptState) {
     });
 }
 
-fn decode_receipt_state(decoder: &mut Decoder<'_>) -> Result<ReceiptState, DeliveryCodecError> {
+fn decode_receipt_state(decoder: &mut Decoder<'_>) -> Result<ReceiptState, PublishQueueCodecError> {
     match decoder.u8()? {
         0 => Ok(ReceiptState::Accepted),
         1 => Ok(ReceiptState::Signed),
@@ -580,11 +601,11 @@ fn decode_receipt_state(decoder: &mut Decoder<'_>) -> Result<ReceiptState, Deliv
         3 => Ok(ReceiptState::Cancelled),
         4 => Ok(ReceiptState::Superseded),
         5 => Ok(ReceiptState::Abandoned),
-        other => Err(DeliveryCodecError::InvalidTag("receipt state", other)),
+        other => Err(PublishQueueCodecError::InvalidTag("receipt state", other)),
     }
 }
 
-pub(super) fn encode_receipt(record: &DeliveryReceiptRecord) -> Vec<u8> {
+pub(super) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
     let mut encoder = Encoder::new(RECEIPT_MAGIC);
     match record.intent_id {
         None => encoder.u8(0),
@@ -599,18 +620,20 @@ pub(super) fn encode_receipt(record: &DeliveryReceiptRecord) -> Vec<u8> {
     encoder.finish()
 }
 
-pub(super) fn decode_receipt(bytes: &[u8]) -> Result<DeliveryReceiptRecord, DeliveryCodecError> {
+pub(super) fn decode_receipt(
+    bytes: &[u8],
+) -> Result<PublishQueueReceiptRecord, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, RECEIPT_MAGIC)?;
     let intent_id = match decoder.u8()? {
         0 => None,
         1 => Some(IntentId(decoder.u64()?)),
-        other => return Err(DeliveryCodecError::InvalidTag("receipt intent", other)),
+        other => return Err(PublishQueueCodecError::InvalidTag("receipt intent", other)),
     };
     let frozen_id = decoder.event_id()?;
     let expected_pubkey = decoder.public_key()?;
     let state = decode_receipt_state(&mut decoder)?;
     decoder.finish()?;
-    Ok(DeliveryReceiptRecord {
+    Ok(PublishQueueReceiptRecord {
         intent_id,
         frozen_id,
         expected_pubkey,
@@ -618,12 +641,14 @@ pub(super) fn decode_receipt(bytes: &[u8]) -> Result<DeliveryReceiptRecord, Deli
     })
 }
 
-pub(super) fn encode_route(relays: &[DeliveryRelayId]) -> Result<Vec<u8>, DeliveryCodecError> {
+pub(super) fn encode_route(
+    relays: &[PublishQueueRelayId],
+) -> Result<Vec<u8>, PublishQueueCodecError> {
     if relays.len() > MAX_ROUTE_RELAYS {
-        return Err(DeliveryCodecError::BoundExceeded("route relay count"));
+        return Err(PublishQueueCodecError::BoundExceeded("route relay count"));
     }
     if relays.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "route relay ids must be strictly ordered",
         ));
     }
@@ -635,11 +660,13 @@ pub(super) fn encode_route(relays: &[DeliveryRelayId]) -> Result<Vec<u8>, Delive
     Ok(encoder.finish())
 }
 
-pub(super) fn decode_route(bytes: &[u8]) -> Result<Vec<DeliveryRelayId>, DeliveryCodecError> {
+pub(super) fn decode_route(
+    bytes: &[u8],
+) -> Result<Vec<PublishQueueRelayId>, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, ROUTE_MAGIC)?;
     let count = decoder.u32()? as usize;
     if count > MAX_ROUTE_RELAYS {
-        return Err(DeliveryCodecError::BoundExceeded("route relay count"));
+        return Err(PublishQueueCodecError::BoundExceeded("route relay count"));
     }
     let mut relays = Vec::with_capacity(count);
     for _ in 0..count {
@@ -647,7 +674,7 @@ pub(super) fn decode_route(bytes: &[u8]) -> Result<Vec<DeliveryRelayId>, Deliver
     }
     decoder.finish()?;
     if relays.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "route relay ids must be strictly ordered",
         ));
     }
@@ -656,40 +683,40 @@ pub(super) fn decode_route(bytes: &[u8]) -> Result<Vec<DeliveryRelayId>, Deliver
 
 fn encode_attempt_outcome(
     encoder: &mut Encoder,
-    outcome: &DeliveryAttemptOutcome,
-) -> Result<(), DeliveryCodecError> {
+    outcome: &PublishQueueAttemptOutcome,
+) -> Result<(), PublishQueueCodecError> {
     match outcome {
-        DeliveryAttemptOutcome::Started => encoder.u8(0),
-        DeliveryAttemptOutcome::Acked => encoder.u8(1),
-        DeliveryAttemptOutcome::Rejected(reason) => {
+        PublishQueueAttemptOutcome::Started => encoder.u8(0),
+        PublishQueueAttemptOutcome::Acked => encoder.u8(1),
+        PublishQueueAttemptOutcome::Rejected(reason) => {
             encoder.u8(2);
             encoder.text(reason, MAX_REASON_BYTES, "rejection reason")?;
         }
-        DeliveryAttemptOutcome::GaveUp => encoder.u8(3),
-        DeliveryAttemptOutcome::OutcomeUnknown => encoder.u8(4),
+        PublishQueueAttemptOutcome::GaveUp => encoder.u8(3),
+        PublishQueueAttemptOutcome::OutcomeUnknown => encoder.u8(4),
     }
     Ok(())
 }
 
 fn decode_attempt_outcome(
     decoder: &mut Decoder<'_>,
-) -> Result<DeliveryAttemptOutcome, DeliveryCodecError> {
+) -> Result<PublishQueueAttemptOutcome, PublishQueueCodecError> {
     match decoder.u8()? {
-        0 => Ok(DeliveryAttemptOutcome::Started),
-        1 => Ok(DeliveryAttemptOutcome::Acked),
-        2 => Ok(DeliveryAttemptOutcome::Rejected(
+        0 => Ok(PublishQueueAttemptOutcome::Started),
+        1 => Ok(PublishQueueAttemptOutcome::Acked),
+        2 => Ok(PublishQueueAttemptOutcome::Rejected(
             decoder.text(MAX_REASON_BYTES, "rejection reason")?,
         )),
-        3 => Ok(DeliveryAttemptOutcome::GaveUp),
-        4 => Ok(DeliveryAttemptOutcome::OutcomeUnknown),
-        other => Err(DeliveryCodecError::InvalidTag("attempt outcome", other)),
+        3 => Ok(PublishQueueAttemptOutcome::GaveUp),
+        4 => Ok(PublishQueueAttemptOutcome::OutcomeUnknown),
+        other => Err(PublishQueueCodecError::InvalidTag("attempt outcome", other)),
     }
 }
 
 pub(super) fn encode_attempt(
     event: &Event,
-    outcome: &DeliveryAttemptOutcome,
-) -> Result<Vec<u8>, DeliveryCodecError> {
+    outcome: &PublishQueueAttemptOutcome,
+) -> Result<Vec<u8>, PublishQueueCodecError> {
     let mut encoder = Encoder::new(ATTEMPT_MAGIC);
     encoder.event(event)?;
     encode_attempt_outcome(&mut encoder, outcome)?;
@@ -698,14 +725,14 @@ pub(super) fn encode_attempt(
 
 pub(super) fn decode_attempt(
     bytes: &[u8],
-) -> Result<(Event, DeliveryAttemptOutcome), DeliveryCodecError> {
+) -> Result<(Event, PublishQueueAttemptOutcome), PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, ATTEMPT_MAGIC)?;
     let event = decoder.event()?;
     let outcome = decode_attempt_outcome(&mut decoder)?;
     decoder.finish()?;
     event
         .verify()
-        .map_err(|_| DeliveryCodecError::InvalidEvent)?;
+        .map_err(|_| PublishQueueCodecError::InvalidEvent)?;
     Ok((event, outcome))
 }
 
@@ -717,53 +744,58 @@ fn encode_auth_source(encoder: &mut Encoder, source: AuthDenialSource) {
     });
 }
 
-fn decode_auth_source(decoder: &mut Decoder<'_>) -> Result<AuthDenialSource, DeliveryCodecError> {
+fn decode_auth_source(
+    decoder: &mut Decoder<'_>,
+) -> Result<AuthDenialSource, PublishQueueCodecError> {
     match decoder.u8()? {
         0 => Ok(AuthDenialSource::Policy),
         1 => Ok(AuthDenialSource::Signer),
         2 => Ok(AuthDenialSource::Relay),
-        other => Err(DeliveryCodecError::InvalidTag("auth denial source", other)),
+        other => Err(PublishQueueCodecError::InvalidTag(
+            "auth denial source",
+            other,
+        )),
     }
 }
 
-fn encode_transient_cause(encoder: &mut Encoder, cause: DeliveryTransientCause) {
+fn encode_transient_cause(encoder: &mut Encoder, cause: PublishQueueTransientCause) {
     encoder.u8(match cause {
-        DeliveryTransientCause::Interrupted => 0,
-        DeliveryTransientCause::AckTimeout => 1,
-        DeliveryTransientCause::ConnectionLost => 2,
-        DeliveryTransientCause::RelayRateLimited => 3,
-        DeliveryTransientCause::RelayError => 4,
-        DeliveryTransientCause::AuthRequired => 5,
+        PublishQueueTransientCause::Interrupted => 0,
+        PublishQueueTransientCause::AckTimeout => 1,
+        PublishQueueTransientCause::ConnectionLost => 2,
+        PublishQueueTransientCause::RelayRateLimited => 3,
+        PublishQueueTransientCause::RelayError => 4,
+        PublishQueueTransientCause::AuthRequired => 5,
     });
 }
 
 fn decode_transient_cause(
     decoder: &mut Decoder<'_>,
-) -> Result<DeliveryTransientCause, DeliveryCodecError> {
+) -> Result<PublishQueueTransientCause, PublishQueueCodecError> {
     match decoder.u8()? {
-        0 => Ok(DeliveryTransientCause::Interrupted),
-        1 => Ok(DeliveryTransientCause::AckTimeout),
-        2 => Ok(DeliveryTransientCause::ConnectionLost),
-        3 => Ok(DeliveryTransientCause::RelayRateLimited),
-        4 => Ok(DeliveryTransientCause::RelayError),
-        5 => Ok(DeliveryTransientCause::AuthRequired),
-        other => Err(DeliveryCodecError::InvalidTag("transient cause", other)),
+        0 => Ok(PublishQueueTransientCause::Interrupted),
+        1 => Ok(PublishQueueTransientCause::AckTimeout),
+        2 => Ok(PublishQueueTransientCause::ConnectionLost),
+        3 => Ok(PublishQueueTransientCause::RelayRateLimited),
+        4 => Ok(PublishQueueTransientCause::RelayError),
+        5 => Ok(PublishQueueTransientCause::AuthRequired),
+        other => Err(PublishQueueCodecError::InvalidTag("transient cause", other)),
     }
 }
 
 fn encode_terminal(
     encoder: &mut Encoder,
-    outcome: &DeliveryTerminalOutcome,
-) -> Result<(), DeliveryCodecError> {
+    outcome: &PublishQueueTerminalOutcome,
+) -> Result<(), PublishQueueCodecError> {
     match outcome {
-        DeliveryTerminalOutcome::Acked => encoder.u8(0),
-        DeliveryTerminalOutcome::Rejected(reason) => {
+        PublishQueueTerminalOutcome::Acked => encoder.u8(0),
+        PublishQueueTerminalOutcome::Rejected(reason) => {
             encoder.u8(1);
             encoder.text(reason, MAX_REASON_BYTES, "terminal rejection reason")?;
         }
-        DeliveryTerminalOutcome::GaveUp => encoder.u8(2),
-        DeliveryTerminalOutcome::OutcomeUnknown => encoder.u8(3),
-        DeliveryTerminalOutcome::AuthDenied(denial) => {
+        PublishQueueTerminalOutcome::GaveUp => encoder.u8(2),
+        PublishQueueTerminalOutcome::OutcomeUnknown => encoder.u8(3),
+        PublishQueueTerminalOutcome::AuthDenied(denial) => {
             encoder.u8(4);
             encode_auth_source(encoder, denial.source);
             encoder.text(
@@ -778,19 +810,19 @@ fn encode_terminal(
 
 fn decode_terminal(
     decoder: &mut Decoder<'_>,
-) -> Result<DeliveryTerminalOutcome, DeliveryCodecError> {
+) -> Result<PublishQueueTerminalOutcome, PublishQueueCodecError> {
     match decoder.u8()? {
-        0 => Ok(DeliveryTerminalOutcome::Acked),
-        1 => Ok(DeliveryTerminalOutcome::Rejected(
+        0 => Ok(PublishQueueTerminalOutcome::Acked),
+        1 => Ok(PublishQueueTerminalOutcome::Rejected(
             decoder.text(MAX_REASON_BYTES, "terminal rejection reason")?,
         )),
-        2 => Ok(DeliveryTerminalOutcome::GaveUp),
-        3 => Ok(DeliveryTerminalOutcome::OutcomeUnknown),
-        4 => Ok(DeliveryTerminalOutcome::AuthDenied(AuthDenial {
+        2 => Ok(PublishQueueTerminalOutcome::GaveUp),
+        3 => Ok(PublishQueueTerminalOutcome::OutcomeUnknown),
+        4 => Ok(PublishQueueTerminalOutcome::AuthDenied(AuthDenial {
             source: decode_auth_source(decoder)?,
             reason: decoder.text(MAX_REASON_BYTES, "authentication denial reason")?,
         })),
-        other => Err(DeliveryCodecError::InvalidTag(
+        other => Err(PublishQueueCodecError::InvalidTag(
             "lane terminal outcome",
             other,
         )),
@@ -799,27 +831,27 @@ fn decode_terminal(
 
 fn encode_lane_state(
     encoder: &mut Encoder,
-    state: &DeliveryLaneState,
-) -> Result<(), DeliveryCodecError> {
+    state: &PublishQueueLaneState,
+) -> Result<(), PublishQueueCodecError> {
     match state {
-        DeliveryLaneState::WaitingConnection => encoder.u8(0),
-        DeliveryLaneState::WaitingAuth => encoder.u8(1),
-        DeliveryLaneState::Eligible { since } => {
+        PublishQueueLaneState::WaitingConnection => encoder.u8(0),
+        PublishQueueLaneState::WaitingAuth => encoder.u8(1),
+        PublishQueueLaneState::Eligible { since } => {
             encoder.u8(2);
             encoder.u64(since.as_secs());
         }
-        DeliveryLaneState::InFlight { ordinal, phase } => {
+        PublishQueueLaneState::InFlight { ordinal, phase } => {
             encoder.u8(3);
             encoder.u64(*ordinal);
             match phase {
-                DeliveryInFlightPhase::AwaitingHandoff => encoder.u8(0),
-                DeliveryInFlightPhase::AwaitingAck { deadline } => {
+                PublishQueueInFlightPhase::AwaitingHandoff => encoder.u8(0),
+                PublishQueueInFlightPhase::AwaitingAck { deadline } => {
                     encoder.u8(1);
                     encoder.u64(deadline.as_secs());
                 }
             }
         }
-        DeliveryLaneState::Transient {
+        PublishQueueLaneState::Transient {
             ordinal,
             eligible_at,
             cause,
@@ -835,7 +867,7 @@ fn encode_lane_state(
                 "transient raw reason",
             )?;
         }
-        DeliveryLaneState::Terminal { ordinal, outcome } => {
+        PublishQueueLaneState::Terminal { ordinal, outcome } => {
             encoder.u8(5);
             encoder.u64(*ordinal);
             encode_terminal(encoder, outcome)?;
@@ -844,45 +876,47 @@ fn encode_lane_state(
     Ok(())
 }
 
-fn decode_lane_state(decoder: &mut Decoder<'_>) -> Result<DeliveryLaneState, DeliveryCodecError> {
+fn decode_lane_state(
+    decoder: &mut Decoder<'_>,
+) -> Result<PublishQueueLaneState, PublishQueueCodecError> {
     match decoder.u8()? {
-        0 => Ok(DeliveryLaneState::WaitingConnection),
-        1 => Ok(DeliveryLaneState::WaitingAuth),
-        2 => Ok(DeliveryLaneState::Eligible {
+        0 => Ok(PublishQueueLaneState::WaitingConnection),
+        1 => Ok(PublishQueueLaneState::WaitingAuth),
+        2 => Ok(PublishQueueLaneState::Eligible {
             since: Timestamp::from(decoder.u64()?),
         }),
         3 => {
             let ordinal = decoder.u64()?;
             let phase = match decoder.u8()? {
-                0 => DeliveryInFlightPhase::AwaitingHandoff,
-                1 => DeliveryInFlightPhase::AwaitingAck {
+                0 => PublishQueueInFlightPhase::AwaitingHandoff,
+                1 => PublishQueueInFlightPhase::AwaitingAck {
                     deadline: Timestamp::from(decoder.u64()?),
                 },
-                other => return Err(DeliveryCodecError::InvalidTag("in-flight phase", other)),
+                other => return Err(PublishQueueCodecError::InvalidTag("in-flight phase", other)),
             };
-            Ok(DeliveryLaneState::InFlight { ordinal, phase })
+            Ok(PublishQueueLaneState::InFlight { ordinal, phase })
         }
-        4 => Ok(DeliveryLaneState::Transient {
+        4 => Ok(PublishQueueLaneState::Transient {
             ordinal: decoder.u64()?,
             eligible_at: Timestamp::from(decoder.u64()?),
             cause: decode_transient_cause(decoder)?,
             raw_reason: decoder.optional_text(MAX_REASON_BYTES, "transient raw reason")?,
         }),
-        5 => Ok(DeliveryLaneState::Terminal {
+        5 => Ok(PublishQueueLaneState::Terminal {
             ordinal: decoder.u64()?,
             outcome: decode_terminal(decoder)?,
         }),
-        other => Err(DeliveryCodecError::InvalidTag("lane state", other)),
+        other => Err(PublishQueueCodecError::InvalidTag("lane state", other)),
     }
 }
 
 pub(super) fn encode_lane(
     revision: u64,
     last_ordinal: u64,
-    state: &DeliveryLaneState,
-) -> Result<Vec<u8>, DeliveryCodecError> {
+    state: &PublishQueueLaneState,
+) -> Result<Vec<u8>, PublishQueueCodecError> {
     if revision == 0 {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "lane revision must be non-zero",
         ));
     }
@@ -895,50 +929,50 @@ pub(super) fn encode_lane(
 
 pub(super) fn decode_lane(
     bytes: &[u8],
-) -> Result<(u64, u64, DeliveryLaneState), DeliveryCodecError> {
+) -> Result<(u64, u64, PublishQueueLaneState), PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, LANE_MAGIC)?;
     let revision = decoder.u64()?;
     let last_ordinal = decoder.u64()?;
     let state = decode_lane_state(&mut decoder)?;
     decoder.finish()?;
     if revision == 0 {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "lane revision must be non-zero",
         ));
     }
     let state_ordinal = match &state {
-        DeliveryLaneState::InFlight { ordinal, .. }
-        | DeliveryLaneState::Transient { ordinal, .. }
-        | DeliveryLaneState::Terminal { ordinal, .. } => Some(*ordinal),
+        PublishQueueLaneState::InFlight { ordinal, .. }
+        | PublishQueueLaneState::Transient { ordinal, .. }
+        | PublishQueueLaneState::Terminal { ordinal, .. } => Some(*ordinal),
         _ => None,
     };
     if state_ordinal.is_some_and(|ordinal| ordinal != last_ordinal) {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "lane state ordinal disagrees with cursor",
         ));
     }
     Ok((revision, last_ordinal, state))
 }
 
-pub(super) fn encode_deadline(lane_revision: u64, kind: DeliveryDeadlineKind) -> Vec<u8> {
+pub(super) fn encode_deadline(lane_revision: u64, kind: PublishQueueDeadlineKind) -> Vec<u8> {
     let mut encoder = Encoder::new(DEADLINE_MAGIC);
     encoder.u64(lane_revision);
     encoder.u8(match kind {
-        DeliveryDeadlineKind::RetryEligible => 0,
-        DeliveryDeadlineKind::AckTimeout => 1,
+        PublishQueueDeadlineKind::RetryEligible => 0,
+        PublishQueueDeadlineKind::AckTimeout => 1,
     });
     encoder.finish()
 }
 
 pub(super) fn decode_deadline(
     bytes: &[u8],
-) -> Result<(u64, DeliveryDeadlineKind), DeliveryCodecError> {
+) -> Result<(u64, PublishQueueDeadlineKind), PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, DEADLINE_MAGIC)?;
     let lane_revision = decoder.u64()?;
     let kind = match decoder.u8()? {
-        0 => DeliveryDeadlineKind::RetryEligible,
-        1 => DeliveryDeadlineKind::AckTimeout,
-        other => return Err(DeliveryCodecError::InvalidTag("deadline kind", other)),
+        0 => PublishQueueDeadlineKind::RetryEligible,
+        1 => PublishQueueDeadlineKind::AckTimeout,
+        other => return Err(PublishQueueCodecError::InvalidTag("deadline kind", other)),
     };
     decoder.finish()?;
     Ok((lane_revision, kind))
@@ -952,18 +986,23 @@ fn encode_handoff_result(encoder: &mut Encoder, result: HandoffEvidence) {
     });
 }
 
-fn decode_handoff_result(decoder: &mut Decoder<'_>) -> Result<HandoffEvidence, DeliveryCodecError> {
+fn decode_handoff_result(
+    decoder: &mut Decoder<'_>,
+) -> Result<HandoffEvidence, PublishQueueCodecError> {
     match decoder.u8()? {
         0 => Ok(HandoffEvidence::NotHandedOff),
         1 => Ok(HandoffEvidence::Written),
         2 => Ok(HandoffEvidence::Ambiguous),
-        other => Err(DeliveryCodecError::InvalidTag("handoff evidence", other)),
+        other => Err(PublishQueueCodecError::InvalidTag(
+            "handoff evidence",
+            other,
+        )),
     }
 }
 
 pub(super) fn encode_attempt_details(
-    details: &DeliveryAttemptDetails,
-) -> Result<Vec<u8>, DeliveryCodecError> {
+    details: &PublishQueueAttemptDetails,
+) -> Result<Vec<u8>, PublishQueueCodecError> {
     let mut encoder = Encoder::new(DETAIL_MAGIC);
     match details.started_at {
         None => encoder.u8(0),
@@ -1015,52 +1054,62 @@ pub(super) fn decode_attempt_details(
     intent_id: IntentId,
     relay: RelayUrl,
     ordinal: u64,
-) -> Result<DeliveryAttemptDetails, DeliveryCodecError> {
+) -> Result<PublishQueueAttemptDetails, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, DETAIL_MAGIC)?;
     let started_at = match decoder.u8()? {
         0 => None,
         1 => Some(Timestamp::from(decoder.u64()?)),
-        other => return Err(DeliveryCodecError::InvalidTag("attempt start", other)),
+        other => return Err(PublishQueueCodecError::InvalidTag("attempt start", other)),
     };
     let handoff = match decoder.u8()? {
         0 => None,
-        1 => Some(DeliveryAttemptHandoff {
+        1 => Some(PublishQueueAttemptHandoff {
             at: Timestamp::from(decoder.u64()?),
             result: decode_handoff_result(&mut decoder)?,
         }),
-        other => return Err(DeliveryCodecError::InvalidTag("attempt handoff", other)),
+        other => return Err(PublishQueueCodecError::InvalidTag("attempt handoff", other)),
     };
     let transient = match decoder.u8()? {
         0 => None,
-        1 => Some(DeliveryAttemptTransient {
+        1 => Some(PublishQueueAttemptTransient {
             eligible_at: Timestamp::from(decoder.u64()?),
             cause: decode_transient_cause(&mut decoder)?,
             raw_reason: decoder.optional_text(MAX_REASON_BYTES, "transient raw reason")?,
         }),
-        other => return Err(DeliveryCodecError::InvalidTag("attempt transient", other)),
+        other => {
+            return Err(PublishQueueCodecError::InvalidTag(
+                "attempt transient",
+                other,
+            ))
+        }
     };
     let finished_at = match decoder.u8()? {
         0 => None,
         1 => Some(Timestamp::from(decoder.u64()?)),
-        other => return Err(DeliveryCodecError::InvalidTag("attempt finish", other)),
+        other => return Err(PublishQueueCodecError::InvalidTag("attempt finish", other)),
     };
     let terminal = match decoder.u8()? {
         0 => None,
         1 => Some(decode_attempt_outcome(&mut decoder)?),
-        other => return Err(DeliveryCodecError::InvalidTag("attempt terminal", other)),
+        other => {
+            return Err(PublishQueueCodecError::InvalidTag(
+                "attempt terminal",
+                other,
+            ))
+        }
     };
     decoder.finish()?;
-    if terminal == Some(DeliveryAttemptOutcome::Started) {
-        return Err(DeliveryCodecError::InvalidValue(
+    if terminal == Some(PublishQueueAttemptOutcome::Started) {
+        return Err(PublishQueueCodecError::InvalidValue(
             "attempt terminal cannot contain Started",
         ));
     }
     if finished_at.is_some() != terminal.is_some() {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "attempt finish and terminal must coexist",
         ));
     }
-    Ok(DeliveryAttemptDetails {
+    Ok(PublishQueueAttemptDetails {
         version: 1,
         intent_id,
         relay,
@@ -1073,9 +1122,13 @@ pub(super) fn decode_attempt_details(
     })
 }
 
-pub(super) fn encode_claims(claims: &[SuppressClaimRecord]) -> Result<Vec<u8>, DeliveryCodecError> {
+pub(super) fn encode_claims(
+    claims: &[SuppressClaimRecord],
+) -> Result<Vec<u8>, PublishQueueCodecError> {
     if claims.len() > MAX_SUPPRESSION_CLAIMS {
-        return Err(DeliveryCodecError::BoundExceeded("suppression claim count"));
+        return Err(PublishQueueCodecError::BoundExceeded(
+            "suppression claim count",
+        ));
     }
     let mut encoder = Encoder::new(CLAIMS_MAGIC);
     encoder.u32(claims.len() as u32);
@@ -1104,11 +1157,15 @@ pub(super) fn encode_claims(claims: &[SuppressClaimRecord]) -> Result<Vec<u8>, D
     Ok(encoder.finish())
 }
 
-pub(super) fn decode_claims(bytes: &[u8]) -> Result<Vec<SuppressClaimRecord>, DeliveryCodecError> {
+pub(super) fn decode_claims(
+    bytes: &[u8],
+) -> Result<Vec<SuppressClaimRecord>, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, CLAIMS_MAGIC)?;
     let count = decoder.u32()? as usize;
     if count > MAX_SUPPRESSION_CLAIMS {
-        return Err(DeliveryCodecError::BoundExceeded("suppression claim count"));
+        return Err(PublishQueueCodecError::BoundExceeded(
+            "suppression claim count",
+        ));
     }
     let mut claims = Vec::with_capacity(count);
     for _ in 0..count {
@@ -1124,16 +1181,21 @@ pub(super) fn decode_claims(bytes: &[u8]) -> Result<Vec<SuppressClaimRecord>, De
                 ceiling: decoder.u64()?,
                 deleting_author: decoder.public_key()?,
             },
-            other => return Err(DeliveryCodecError::InvalidTag("suppression claim", other)),
+            other => {
+                return Err(PublishQueueCodecError::InvalidTag(
+                    "suppression claim",
+                    other,
+                ))
+            }
         });
     }
     decoder.finish()?;
     Ok(claims)
 }
 
-pub(super) fn encode_claimants(claimants: &[u64]) -> Result<Vec<u8>, DeliveryCodecError> {
+pub(super) fn encode_claimants(claimants: &[u64]) -> Result<Vec<u8>, PublishQueueCodecError> {
     if claimants.len() > MAX_SUPPRESSION_CLAIMS {
-        return Err(DeliveryCodecError::BoundExceeded("claimant count"));
+        return Err(PublishQueueCodecError::BoundExceeded("claimant count"));
     }
     let mut canonical = claimants.to_vec();
     canonical.sort_unstable();
@@ -1146,11 +1208,11 @@ pub(super) fn encode_claimants(claimants: &[u64]) -> Result<Vec<u8>, DeliveryCod
     Ok(encoder.finish())
 }
 
-pub(super) fn decode_claimants(bytes: &[u8]) -> Result<Vec<u64>, DeliveryCodecError> {
+pub(super) fn decode_claimants(bytes: &[u8]) -> Result<Vec<u64>, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, CLAIMANTS_MAGIC)?;
     let count = decoder.u32()? as usize;
     if count > MAX_SUPPRESSION_CLAIMS {
-        return Err(DeliveryCodecError::BoundExceeded("claimant count"));
+        return Err(PublishQueueCodecError::BoundExceeded("claimant count"));
     }
     let mut claimants = Vec::with_capacity(count);
     for _ in 0..count {
@@ -1158,7 +1220,7 @@ pub(super) fn decode_claimants(bytes: &[u8]) -> Result<Vec<u64>, DeliveryCodecEr
     }
     decoder.finish()?;
     if claimants.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "claimants must be strictly ordered",
         ));
     }
@@ -1167,9 +1229,11 @@ pub(super) fn decode_claimants(bytes: &[u8]) -> Result<Vec<u64>, DeliveryCodecEr
 
 pub(super) fn encode_addr_claimants(
     claimants: &[AddrClaimant],
-) -> Result<Vec<u8>, DeliveryCodecError> {
+) -> Result<Vec<u8>, PublishQueueCodecError> {
     if claimants.len() > MAX_SUPPRESSION_CLAIMS {
-        return Err(DeliveryCodecError::BoundExceeded("address claimant count"));
+        return Err(PublishQueueCodecError::BoundExceeded(
+            "address claimant count",
+        ));
     }
     let mut canonical = claimants.to_vec();
     canonical.sort_by_key(|claimant| claimant.intent_id);
@@ -1177,7 +1241,7 @@ pub(super) fn encode_addr_claimants(
         .windows(2)
         .any(|pair| pair[0].intent_id == pair[1].intent_id)
     {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "duplicate address claimant",
         ));
     }
@@ -1190,11 +1254,15 @@ pub(super) fn encode_addr_claimants(
     Ok(encoder.finish())
 }
 
-pub(super) fn decode_addr_claimants(bytes: &[u8]) -> Result<Vec<AddrClaimant>, DeliveryCodecError> {
+pub(super) fn decode_addr_claimants(
+    bytes: &[u8],
+) -> Result<Vec<AddrClaimant>, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, ADDR_CLAIMANTS_MAGIC)?;
     let count = decoder.u32()? as usize;
     if count > MAX_SUPPRESSION_CLAIMS {
-        return Err(DeliveryCodecError::BoundExceeded("address claimant count"));
+        return Err(PublishQueueCodecError::BoundExceeded(
+            "address claimant count",
+        ));
     }
     let mut claimants = Vec::with_capacity(count);
     for _ in 0..count {
@@ -1208,31 +1276,31 @@ pub(super) fn decode_addr_claimants(bytes: &[u8]) -> Result<Vec<AddrClaimant>, D
         .windows(2)
         .any(|pair| pair[0].intent_id >= pair[1].intent_id)
     {
-        return Err(DeliveryCodecError::InvalidValue(
+        return Err(PublishQueueCodecError::InvalidValue(
             "address claimants must be strictly ordered",
         ));
     }
     Ok(claimants)
 }
 
-pub(super) fn encode_displaced(stored: &StoredEvent) -> Result<Vec<u8>, DeliveryCodecError> {
-    let encoded = binary_event::encode(stored).map_err(|_| DeliveryCodecError::InvalidEvent)?;
+pub(super) fn encode_displaced(stored: &StoredEvent) -> Result<Vec<u8>, PublishQueueCodecError> {
+    let encoded = binary_event::encode(stored).map_err(|_| PublishQueueCodecError::InvalidEvent)?;
     if encoded.len() > MAX_EVENT_BYTES {
-        return Err(DeliveryCodecError::BoundExceeded("displaced event"));
+        return Err(PublishQueueCodecError::BoundExceeded("displaced event"));
     }
     Ok(encoded)
 }
 
-pub(super) fn decode_displaced(bytes: &[u8]) -> Result<StoredEvent, DeliveryCodecError> {
+pub(super) fn decode_displaced(bytes: &[u8]) -> Result<StoredEvent, PublishQueueCodecError> {
     if bytes.len() > MAX_EVENT_BYTES {
-        return Err(DeliveryCodecError::BoundExceeded("displaced event"));
+        return Err(PublishQueueCodecError::BoundExceeded("displaced event"));
     }
-    binary_event::decode(bytes).map_err(|_| DeliveryCodecError::InvalidEvent)
+    binary_event::decode(bytes).map_err(|_| PublishQueueCodecError::InvalidEvent)
 }
 
 pub(super) fn canonical_route_ids(
-    relays: impl IntoIterator<Item = DeliveryRelayId>,
-) -> Vec<DeliveryRelayId> {
+    relays: impl IntoIterator<Item = PublishQueueRelayId>,
+) -> Vec<PublishQueueRelayId> {
     relays
         .into_iter()
         .collect::<BTreeSet<_>>()
@@ -1276,20 +1344,20 @@ mod tests {
         for length in 0..encoded.len() {
             assert_eq!(
                 decode_relay(&encoded[..length]),
-                Err(DeliveryCodecError::Truncated)
+                Err(PublishQueueCodecError::Truncated)
             );
         }
         let mut unknown = encoded.clone();
         unknown[4] = 9;
         assert_eq!(
             decode_relay(&unknown),
-            Err(DeliveryCodecError::UnsupportedVersion(9))
+            Err(PublishQueueCodecError::UnsupportedVersion(9))
         );
         let mut trailing = encoded;
         trailing.push(0);
         assert_eq!(
             decode_relay(&trailing),
-            Err(DeliveryCodecError::TrailingBytes)
+            Err(PublishQueueCodecError::TrailingBytes)
         );
     }
 
@@ -1302,7 +1370,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             encode_relay(&overlong),
-            Err(DeliveryCodecError::BoundExceeded("relay URL"))
+            Err(PublishQueueCodecError::BoundExceeded("relay URL"))
         );
 
         let noncanonical_text = b"WSS://RELAY.EXAMPLE";
@@ -1311,7 +1379,7 @@ mod tests {
         noncanonical.extend_from_slice(noncanonical_text);
         assert_eq!(
             decode_relay(&noncanonical),
-            Err(DeliveryCodecError::NonCanonicalRelay)
+            Err(PublishQueueCodecError::NonCanonicalRelay)
         );
 
         let mut invalid_utf8 = b"NMDU\x01\0\0\0".to_vec();
@@ -1319,7 +1387,7 @@ mod tests {
         invalid_utf8.push(0xff);
         assert_eq!(
             decode_relay(&invalid_utf8),
-            Err(DeliveryCodecError::InvalidUtf8)
+            Err(PublishQueueCodecError::InvalidUtf8)
         );
 
         let keys = Keys::generate();
@@ -1329,9 +1397,9 @@ mod tests {
         assert_eq!(
             encode_attempt(
                 &event,
-                &DeliveryAttemptOutcome::Rejected("x".repeat(MAX_REASON_BYTES + 1))
+                &PublishQueueAttemptOutcome::Rejected("x".repeat(MAX_REASON_BYTES + 1))
             ),
-            Err(DeliveryCodecError::BoundExceeded("rejection reason"))
+            Err(PublishQueueCodecError::BoundExceeded("rejection reason"))
         );
     }
 
@@ -1343,7 +1411,7 @@ mod tests {
             .unwrap();
         let encoded = encode_attempt(
             &event,
-            &DeliveryAttemptOutcome::Rejected("blocked".to_owned()),
+            &PublishQueueAttemptOutcome::Rejected("blocked".to_owned()),
         )
         .unwrap();
         let decoded = decode_attempt(&encoded).unwrap();
@@ -1351,7 +1419,7 @@ mod tests {
             decoded,
             (
                 event,
-                DeliveryAttemptOutcome::Rejected("blocked".to_owned())
+                PublishQueueAttemptOutcome::Rejected("blocked".to_owned())
             )
         );
     }

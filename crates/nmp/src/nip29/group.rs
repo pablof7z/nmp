@@ -25,9 +25,9 @@ use nmp_grammar::{
 use nostr::{Event, EventId, PublicKey, RelayUrl};
 
 use super::read::{self, GroupReadError};
-use crate::delivery::WriteStatus;
 use crate::engine::Engine;
 use crate::error::EngineError;
+use crate::publish_queue::WriteStatus;
 use crate::runtime::FifoReceiver;
 use crate::LiveQuery;
 use nmp_nip29::GroupContextError;

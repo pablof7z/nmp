@@ -1,29 +1,29 @@
-use super::delivery_codec::{
+use super::publish_queue_codec::{
     codec_error, deadline_by_intent_key, deadline_key, decode_addr_claimants, decode_claimants,
     decode_lane, decode_meta_u64, decode_receipt, encode_addr_claimants, encode_claimants,
     encode_deadline, encode_lane, encode_meta_u64, encode_receipt, lane_key, receipt_key,
-    DeliveryRelayId, NEXT_INTENT_ID_KEY, NEXT_RECEIPT_ID_KEY, PENDING_EPHEMERAL_RECEIPTS_KEY,
+    PublishQueueRelayId, NEXT_INTENT_ID_KEY, NEXT_RECEIPT_ID_KEY, PENDING_EPHEMERAL_RECEIPTS_KEY,
 };
 use super::schema::persist_err;
 use super::{
-    address_key_for, DeliveryDeadline, DeliveryDeadlineKind, DeliveryInFlightPhase, DeliveryLane,
-    DeliveryLaneKey, DeliveryLaneState, Deserialize, Event, EventId, IntentId, IntentSigState,
-    PersistenceError, PublicKey, ReadableTable, ReceiptState, Serialize, Timestamp,
-    WriteDurability,
+    address_key_for, Deserialize, Event, EventId, IntentId, IntentSigState, PersistenceError,
+    PublicKey, PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
+    PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, ReadableTable, ReceiptState,
+    Serialize, Timestamp, WriteDurability,
 };
 
-pub(super) fn lane_deadline(lane: &DeliveryLane) -> Option<DeliveryDeadline> {
+pub(super) fn lane_deadline(lane: &PublishQueueLane) -> Option<PublishQueueDeadline> {
     let (at, kind) = match lane.state {
-        DeliveryLaneState::Transient { eligible_at, .. } => {
-            (eligible_at, DeliveryDeadlineKind::RetryEligible)
+        PublishQueueLaneState::Transient { eligible_at, .. } => {
+            (eligible_at, PublishQueueDeadlineKind::RetryEligible)
         }
-        DeliveryLaneState::InFlight {
-            phase: DeliveryInFlightPhase::AwaitingAck { deadline },
+        PublishQueueLaneState::InFlight {
+            phase: PublishQueueInFlightPhase::AwaitingAck { deadline },
             ..
-        } => (deadline, DeliveryDeadlineKind::AckTimeout),
+        } => (deadline, PublishQueueDeadlineKind::AckTimeout),
         _ => return None,
     };
-    Some(DeliveryDeadline {
+    Some(PublishQueueDeadline {
         at,
         key: lane.key.clone(),
         lane_revision: lane.revision,
@@ -35,11 +35,11 @@ pub(super) fn replace_lane_in_txn(
     lanes: &mut redb::Table<'_, &'static [u8; 12], &'static [u8]>,
     deadlines: &mut redb::Table<'_, &'static [u8; 20], &'static [u8]>,
     deadlines_by_intent: &mut redb::Table<'_, &'static [u8; 20], &'static [u8]>,
-    key: &DeliveryLaneKey,
-    relay_id: DeliveryRelayId,
+    key: &PublishQueueLaneKey,
+    relay_id: PublishQueueRelayId,
     expected_revision: u64,
-    state: DeliveryLaneState,
-) -> Result<DeliveryLane, PersistenceError> {
+    state: PublishQueueLaneState,
+) -> Result<PublishQueueLane, PersistenceError> {
     let storage_key = lane_key(key.intent_id, relay_id);
     let encoded = lanes
         .get(&storage_key)
@@ -51,7 +51,7 @@ pub(super) fn replace_lane_in_txn(
     if revision != expected_revision {
         return Err(PersistenceError::invariant("stale delivery lane revision"));
     }
-    let current = DeliveryLane {
+    let current = PublishQueueLane {
         version: 1,
         key: key.clone(),
         revision,
@@ -66,7 +66,7 @@ pub(super) fn replace_lane_in_txn(
             .remove(&by_intent_key)
             .map_err(persist_err)?;
     }
-    let lane = DeliveryLane {
+    let lane = PublishQueueLane {
         version: 1,
         key: key.clone(),
         revision: current
@@ -74,9 +74,9 @@ pub(super) fn replace_lane_in_txn(
             .checked_add(1)
             .ok_or_else(|| PersistenceError::invariant("delivery lane revision exhausted"))?,
         last_ordinal: match &state {
-            DeliveryLaneState::InFlight { ordinal, .. }
-            | DeliveryLaneState::Transient { ordinal, .. }
-            | DeliveryLaneState::Terminal { ordinal, .. } => {
+            PublishQueueLaneState::InFlight { ordinal, .. }
+            | PublishQueueLaneState::Transient { ordinal, .. }
+            | PublishQueueLaneState::Terminal { ordinal, .. } => {
                 if *ordinal > current.last_ordinal.saturating_add(1) {
                     return Err(PersistenceError::invariant(
                         "delivery lane state skips an attempt ordinal",
@@ -106,12 +106,12 @@ pub(super) fn replace_lane_in_txn(
     }
     Ok(lane)
 }
-/// One `DELIVERY_INTENTS` row's JSON value — the full acceptance journal
+/// One `PUBLISH_QUEUE_INTENTS` row's JSON value — the full acceptance journal
 /// payload (Fable checkpoint R7), everything issue #3's "one crash-atomic
 /// commit" enumerates besides the pending row itself (which lives in
 /// `EVENTS`, not duplicated here).
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct DeliveryIntentRecord {
+pub(super) struct PublishQueueIntentRecord {
     pub(super) receipt_id: u64,
     pub(super) frozen: Event,
     pub(super) expected_pubkey: PublicKey,
@@ -122,27 +122,27 @@ pub(super) struct DeliveryIntentRecord {
     pub(super) accepted_at: Timestamp,
 }
 
-/// Allocate the next [`IntentId`] from [`DELIVERY_META`]'s durable high-water
+/// Allocate the next [`IntentId`] from [`PUBLISH_QUEUE_META`]'s durable high-water
 /// mark, bumping it in the SAME already-open write transaction the caller
 /// is about to journal the intent in (architecture review correction — see
 /// [`IntentId`]'s doc). Starts at 1 if the row has never been written.
 pub(super) fn alloc_intent_id_in_txn(
-    delivery_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
 ) -> Result<IntentId, PersistenceError> {
     Ok(IntentId(alloc_counter_in_txn(
-        delivery_meta,
+        publish_queue_meta,
         NEXT_INTENT_ID_KEY,
     )?))
 }
 
-/// Allocate the next receipt id from `DELIVERY_META`'s durable high-water
+/// Allocate the next receipt id from `PUBLISH_QUEUE_META`'s durable high-water
 /// mark, same treatment as [`alloc_intent_id_in_txn`] (architecture review
 /// correction: receipt ids have the identical reuse hazard now that
 /// receipts are durably retained across restart).
 pub(super) fn alloc_receipt_id_in_txn(
-    delivery_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
 ) -> Result<u64, PersistenceError> {
-    let id = alloc_counter_in_txn(delivery_meta, NEXT_RECEIPT_ID_KEY)?;
+    let id = alloc_counter_in_txn(publish_queue_meta, NEXT_RECEIPT_ID_KEY)?;
     if id >= (1u64 << 63) {
         return Err(PersistenceError::invariant(
             "durable receipt id namespace exhausted",
@@ -151,14 +151,14 @@ pub(super) fn alloc_receipt_id_in_txn(
     Ok(id)
 }
 
-/// Shared bump-and-return for one `DELIVERY_META` counter row, keyed by
+/// Shared bump-and-return for one `PUBLISH_QUEUE_META` counter row, keyed by
 /// `meta_key` (either [`NEXT_INTENT_ID_KEY`] or [`NEXT_RECEIPT_ID_KEY`]).
 /// Starts at 1 if the row has never been written.
 pub(super) fn alloc_counter_in_txn(
-    delivery_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
     meta_key: &[u8],
 ) -> Result<u64, PersistenceError> {
-    let current = delivery_meta
+    let current = publish_queue_meta
         .get(meta_key)
         .map_err(persist_err)?
         .map(|guard| decode_meta_u64(guard.value(), "delivery counter"))
@@ -169,16 +169,16 @@ pub(super) fn alloc_counter_in_txn(
         .checked_add(1)
         .ok_or_else(|| PersistenceError::invariant("delivery id counter exhausted"))?;
     let encoded = encode_meta_u64(next);
-    delivery_meta
+    publish_queue_meta
         .insert(meta_key, encoded.as_slice())
         .map_err(persist_err)?;
     Ok(current)
 }
 
 pub(super) fn increment_pending_ephemeral_in_txn(
-    delivery_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
 ) -> Result<(), PersistenceError> {
-    let current = delivery_meta
+    let current = publish_queue_meta
         .get(PENDING_EPHEMERAL_RECEIPTS_KEY)
         .map_err(persist_err)?
         .map(|guard| decode_meta_u64(guard.value(), "pending ephemeral receipt count"))
@@ -189,16 +189,16 @@ pub(super) fn increment_pending_ephemeral_in_txn(
         .checked_add(1)
         .ok_or_else(|| PersistenceError::invariant("pending ephemeral receipt count exhausted"))?;
     let encoded = encode_meta_u64(next);
-    delivery_meta
+    publish_queue_meta
         .insert(PENDING_EPHEMERAL_RECEIPTS_KEY, encoded.as_slice())
         .map_err(persist_err)?;
     Ok(())
 }
 
 pub(super) fn decrement_pending_ephemeral_in_txn(
-    delivery_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
 ) -> Result<(), PersistenceError> {
-    let current = delivery_meta
+    let current = publish_queue_meta
         .get(PENDING_EPHEMERAL_RECEIPTS_KEY)
         .map_err(persist_err)?
         .map(|guard| decode_meta_u64(guard.value(), "pending ephemeral receipt count"))
@@ -209,38 +209,38 @@ pub(super) fn decrement_pending_ephemeral_in_txn(
         .checked_sub(1)
         .ok_or_else(|| PersistenceError::invariant("pending ephemeral receipt count underflow"))?;
     let encoded = encode_meta_u64(next);
-    delivery_meta
+    publish_queue_meta
         .insert(PENDING_EPHEMERAL_RECEIPTS_KEY, encoded.as_slice())
         .map_err(persist_err)?;
     Ok(())
 }
 
-/// One `DELIVERY_RECEIPTS` row's JSON value (architecture review correction —
+/// One `PUBLISH_QUEUE_RECEIPTS` row's JSON value (architecture review correction —
 /// see [`crate::ReceiptState`]'s doc). `EventId`/`PublicKey`/`IntentId`/
 /// `ReceiptState` all already derive `Serialize`/`Deserialize`, so this
-/// mirrors `crate::DeliveryReceipt` field-for-field with no re-encoding.
+/// mirrors `crate::PublishQueueReceipt` field-for-field with no re-encoding.
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct DeliveryReceiptRecord {
+pub(super) struct PublishQueueReceiptRecord {
     /// `None` for an `Ephemeral` receipt-only record — see
-    /// `crate::DeliveryReceipt::intent_id`'s doc.
+    /// `crate::PublishQueueReceipt::intent_id`'s doc.
     pub(super) intent_id: Option<IntentId>,
     pub(super) frozen_id: EventId,
     pub(super) expected_pubkey: PublicKey,
     pub(super) state: ReceiptState,
 }
 
-/// Update `DELIVERY_RECEIPTS[receipt_id]`'s `state` in place. Absence or corrupt
+/// Update `PUBLISH_QUEUE_RECEIPTS[receipt_id]`'s `state` in place. Absence or corrupt
 /// bytes are persistence failures: returning success would let promotion or
 /// cancellation fabricate a terminal fact that was never retained.
-pub(super) fn update_delivery_receipt(
-    delivery_receipts: &mut redb::Table<'_, &'static [u8; 8], &'static [u8]>,
+pub(super) fn update_publish_queue_receipt(
+    publish_queue_receipts: &mut redb::Table<'_, &'static [u8; 8], &'static [u8]>,
     receipt_id: u64,
     state: ReceiptState,
 ) -> Result<(), PersistenceError> {
     let key = receipt_key(receipt_id);
     // Two statements, not one chained expression — see `remove_row_in_txn`'s
     // comment on the same `?`-temporary-lifetime-extension quirk.
-    let existing = delivery_receipts.get(&key).map_err(persist_err)?;
+    let existing = publish_queue_receipts.get(&key).map_err(persist_err)?;
     let encoded = existing
         .map(|guard| guard.value().to_vec())
         .ok_or_else(|| {
@@ -250,7 +250,7 @@ pub(super) fn update_delivery_receipt(
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
     record.state = state;
     let encoded = encode_receipt(&record);
-    delivery_receipts
+    publish_queue_receipts
         .insert(&key, encoded.as_slice())
         .map_err(persist_err)?;
     Ok(())
@@ -265,10 +265,10 @@ pub(super) fn update_delivery_receipt(
 /// (collect then mutate), mirroring `gc`'s victim-collection pattern: `redb`
 /// does not allow mutating a table while iterating it.
 pub(super) fn reconcile_ephemeral_receipts_in_txn(
-    delivery_receipts: &mut redb::Table<'_, &'static [u8; 8], &'static [u8]>,
+    publish_queue_receipts: &mut redb::Table<'_, &'static [u8; 8], &'static [u8]>,
 ) -> Result<usize, PersistenceError> {
-    let mut to_abandon: Vec<([u8; 8], DeliveryReceiptRecord)> = Vec::new();
-    for entry in delivery_receipts.iter().map_err(persist_err)? {
+    let mut to_abandon: Vec<([u8; 8], PublishQueueReceiptRecord)> = Vec::new();
+    for entry in publish_queue_receipts.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
         let record = decode_receipt(value.value())
             .map_err(|error| codec_error("ephemeral receipt reconciliation", error))?;
@@ -280,7 +280,7 @@ pub(super) fn reconcile_ephemeral_receipts_in_txn(
     for (key, mut record) in to_abandon {
         record.state = ReceiptState::Abandoned;
         let encoded = encode_receipt(&record);
-        delivery_receipts
+        publish_queue_receipts
             .insert(&key, encoded.as_slice())
             .map_err(persist_err)?;
     }
@@ -288,7 +288,7 @@ pub(super) fn reconcile_ephemeral_receipts_in_txn(
 }
 
 /// One provisional kind:5 suppression claim, as persisted in
-/// `DELIVERY_KIND5_CLAIMS` (architecture review requirement — codex-nova's
+/// `PUBLISH_QUEUE_KIND5_CLAIMS` (architecture review requirement — codex-nova's
 /// suppression-claim model, replacing a withdrawn design that physically
 /// moved a target row into a per-intent stash — see
 /// `crate::AcceptOutcome::Kind5Processed`'s doc for why that was unsound).
@@ -317,7 +317,7 @@ pub(super) enum SuppressClaimRecord {
 }
 
 /// Append `intent_id` to the JSON-encoded `Vec<u64>` claimant set at
-/// `table[key]` (creating it if absent) — shared by `DELIVERY_SUPPRESS_BY_ID`
+/// `table[key]` (creating it if absent) — shared by `PUBLISH_QUEUE_SUPPRESS_BY_ID`
 /// only now (see [`add_addr_claimant_in_txn`] for the ceiling-carrying
 /// address counterpart).
 pub(super) fn add_claimant_in_txn(
@@ -379,7 +379,7 @@ pub(super) fn has_claimants_in_txn(
     Ok(table.get(key).map_err(persist_err)?.is_some())
 }
 
-/// One `(claiming_intent_id, created_at_ceiling)` pair — `DELIVERY_SUPPRESS_BY_ADDR`'s
+/// One `(claiming_intent_id, created_at_ceiling)` pair — `PUBLISH_QUEUE_SUPPRESS_BY_ADDR`'s
 /// value shape (issue #61 P0 correction, mirrors `SuppressClaimRecord::Addr`'s
 /// doc for why a bare claimant list is not enough).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -478,18 +478,18 @@ pub(super) fn addr_has_covering_claimant_in_txn(
 /// file only ever runs inside a write transaction; this is the first
 /// read-only caller.
 pub(super) fn is_suppressed_in_txn(
-    delivery_suppress_by_id: &impl ReadableTable<&'static [u8; 64], &'static [u8]>,
-    delivery_suppress_by_addr: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    publish_queue_suppress_by_id: &impl ReadableTable<&'static [u8; 64], &'static [u8]>,
+    publish_queue_suppress_by_addr: &impl ReadableTable<&'static [u8], &'static [u8]>,
     event: &Event,
 ) -> Result<bool, PersistenceError> {
-    let id_key = super::delivery_codec::id_claim_key(&event.id, &event.pubkey);
-    if has_claimants_in_txn(delivery_suppress_by_id, &id_key)? {
+    let id_key = super::publish_queue_codec::id_claim_key(&event.id, &event.pubkey);
+    if has_claimants_in_txn(publish_queue_suppress_by_id, &id_key)? {
         return Ok(true);
     }
     if let Some(key) = address_key_for(event) {
         let key_bytes = key.to_redb_key().into_bytes();
         if addr_has_covering_claimant_in_txn(
-            delivery_suppress_by_addr,
+            publish_queue_suppress_by_addr,
             &key_bytes,
             event.created_at,
         )? {

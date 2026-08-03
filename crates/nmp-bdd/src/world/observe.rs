@@ -21,7 +21,7 @@ use nostr::EventId;
 use nmp::mechanism::core::{
     AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact,
 };
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::WriteStatus;
 use nmp::mechanism::runtime::{DiagnosticsHandle, QueryHandle, RowsReceiver};
 
 use super::acquisition::branch_shortfall;

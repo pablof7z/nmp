@@ -7,7 +7,7 @@
 use std::thread;
 use std::time::Duration;
 
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::WriteStatus;
 use nmp::mechanism::runtime::fifo_channel;
 
 use super::{NmpWorld, ReceiptState};

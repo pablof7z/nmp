@@ -25,7 +25,7 @@
 //!
 //! Durable write-delivery (`docs/design/crashsafe-accepted-2-3-plan.md`,
 //! issues #2/#3, Fable checkpoint verdict Q2): this crate is now the event
-//! **and** durable-delivery store in the current Redb implementation — one
+//! **and** publish-queue store in the current Redb implementation — one
 //! atomic `redb::Database` boundary. This is an implementation shape, not a
 //! requirement that every backend or platform use one physical engine. A
 //! split implementation must keep each authority internally atomic, persist
@@ -41,7 +41,7 @@
 //! undoes a pre-signature-terminated intent: `remove(id, Rejected)` (no
 //! tombstone — the row was never validly signed) plus a compensating
 //! re-`insert` of whatever it displaced, through the same one door.
-//! [`EventStore::recover_delivery`] replays every still-open intent after a
+//! [`EventStore::recover_publish_queue`] replays every still-open intent after a
 //! restart. Exact resolved relay sets use a separate append-only route-
 //! revision door which commits before any corresponding attempt. Every policy
 //! decision (retry ownership, deadline scheduling, signer orchestration) stays
@@ -52,8 +52,8 @@
 //! [`IntentId`] is allocated by the STORE from a durable high-water mark
 //! bumped inside `accept_write`'s own transaction — never caller-supplied
 //! (see its doc for the reuse hazard this closes); (2) receipt identity/
-//! state is retained under `DELIVERY_RECEIPTS`, independently of
-//! `DELIVERY_INTENTS`'s open-work row, so [`EventStore::reattach_receipt`]
+//! state is retained under `PUBLISH_QUEUE_RECEIPTS`, independently of
+//! `PUBLISH_QUEUE_INTENTS`'s open-work row, so [`EventStore::reattach_receipt`]
 //! keeps answering for a terminal receipt after its open-work row is gone
 //! (see [`ReceiptState`]'s doc).
 //!
@@ -101,19 +101,19 @@ use serde::{Deserialize, Serialize};
 
 /// Stable identifier for a durable write intent, ALLOCATED BY THE STORE
 /// ITSELF from a durable, monotonically-advancing high-water mark
-/// (`DELIVERY_META` for `RedbStore`) bumped inside the SAME `accept_write`
+/// (`PUBLISH_QUEUE_META` for `RedbStore`) bumped inside the SAME `accept_write`
 /// transaction that journals the intent — never inferred from the
 /// currently-open set.
 ///
 /// This is a load-bearing correction (architecture review, post-initial-
 /// build): an earlier revision of this door took a CALLER-assigned
 /// `IntentId` and left allocation to `nmp-engine`. That is unsound the
-/// moment R8-style terminal cleanup exists: `DELIVERY_INTENTS` rows are
+/// moment R8-style terminal cleanup exists: `PUBLISH_QUEUE_INTENTS` rows are
 /// deleted once an intent's open work concludes (`compensate_write` today;
 /// a future all-lanes-terminal path later), so a caller-side allocator that
 /// infers "next free" from the currently-*open* recovered set will
 /// eventually reissue an id that a terminated intent already used —
-/// colliding with that intent's still-*retained* [`DeliveryReceipt`] (see
+/// colliding with that intent's still-*retained* [`PublishQueueReceipt`] (see
 /// [`EventStore::reattach_receipt`]) or any retained per-relay attempt
 /// evidence. Issue #3's "ids remain stable and unique across restart"
 /// means unique for the store's ENTIRE lifetime, not merely among what
@@ -145,7 +145,7 @@ pub enum SigState {
 /// that backs it," which broke the moment a byte-identical `Duplicate`
 /// intent was accepted against an already-locally-owned row — cancelling
 /// the FIRST intent would remove the row out from under a SECOND intent
-/// still durably obligated to deliver it (its own `DELIVERY_INTENTS`/receipt
+/// still durably obligated to deliver it (its own `PUBLISH_QUEUE_INTENTS`/receipt
 /// stayed open with no canonical row to promote or compensate). Every
 /// accepted intent that currently backs this row's existence is a member;
 /// coalescing duplicates into one owner was rejected because it would
@@ -761,15 +761,15 @@ pub enum RetractReason {
 /// all — it keeps today's direct-publish path with no journal row and no
 /// pending store row, but it is NOT receipt-less (VISION-ratified
 /// correction): [`EventStore::accept_ephemeral`] still persists a
-/// reattachable [`DeliveryReceipt`] with `intent_id: None`, exactly like
-/// any durable-write receipt, just with no backing `DELIVERY_INTENTS` row.
+/// reattachable [`PublishQueueReceipt`] with `intent_id: None`, exactly like
+/// any durable-write receipt, just with no backing `PUBLISH_QUEUE_INTENTS` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriteDurability {
     Durable,
     AtMostOnce,
 }
 
-/// Journal-level signature state of an `DELIVERY_INTENTS` row (Fable
+/// Journal-level signature state of an `PUBLISH_QUEUE_INTENTS` row (Fable
 /// checkpoint R1) — a FINER granularity than the row-level [`SigState`]
 /// the app sees: `AwaitingSigner` and `Pending` both project as
 /// `SigState::Pending` to the app (both are "not yet signed"), but the
@@ -804,7 +804,7 @@ pub enum IntentSigState {
 /// across restart" carries the IDENTICAL reuse hazard the moment receipts
 /// are durably retained across restart (architecture review correction) —
 /// an engine-side counter that resets on restart could hand out a receipt
-/// id colliding with a retained `DELIVERY_RECEIPTS` row, making
+/// id colliding with a retained `PUBLISH_QUEUE_RECEIPTS` row, making
 /// `reattach_receipt` ambiguous.
 pub struct AcceptWrite {
     /// The frozen, unsigned NIP-01 body: pubkey/created_at/kind/tags/
@@ -845,7 +845,7 @@ pub struct AcceptWrite {
     pub signing_identity_ref: String,
     pub durability: WriteDurability,
     /// Opaque, engine-owned routing snapshot at acceptance — persisted and
-    /// returned verbatim by `recover_delivery`. The store never interprets
+    /// returned verbatim by `recover_publish_queue`. The store never interprets
     /// routing semantics; §5's append-only-revision ownership stays in
     /// `nmp-engine`.
     pub routing: String,
@@ -872,7 +872,7 @@ pub struct AcceptWrite {
 /// physically moved a target row into a per-intent stash: codex-nova found
 /// that made the target's OWN `promote_signed`/`compensate_write` blind to
 /// it (a stashed row is invisible to anyone searching `EVENTS`/
-/// `DELIVERY_DISPLACED`), and made an exact-`Duplicate` kind:5 intent's
+/// `PUBLISH_QUEUE_DISPLACED`), and made an exact-`Duplicate` kind:5 intent's
 /// promotion unsound (promoting it committed a real, permanent deletion
 /// with no stash of its own to drop). The suppression-claim model fixes
 /// both: rows never move, so every other door keeps working on exactly
@@ -912,7 +912,7 @@ pub enum AcceptOutcome {
         row: StoredEvent,
     },
     /// The pending row won a replaceable/addressable address, evicting
-    /// `replaced` — durably stashed by the caller into `DELIVERY_DISPLACED`
+    /// `replaced` — durably stashed by the caller into `PUBLISH_QUEUE_DISPLACED`
     /// in the SAME transaction, so pre-signature compensation
     /// (`compensate_write`) can restore it (retraction doc §4.2).
     Superseded {
@@ -1034,7 +1034,7 @@ impl AcceptOutcome {
 /// owned row is a CO-OWNER of it, not a row of its own) — sentinel swapped
 /// for `sig` in place, same id, same EVENTS/ADDR_INDEX/BY_AUTHOR/BY_KIND/BY_TAG
 /// entries, zero churn; `intent_id` is a member of some OTHER intent's
-/// `DELIVERY_DISPLACED` stash entry's owner set (chained local supersession
+/// `PUBLISH_QUEUE_DISPLACED` stash entry's owner set (chained local supersession
 /// before this intent could sign — the real signature is synced into that
 /// stash entry too, so a future restore of it never resurrects a stale
 /// sentinel copy of an intent that actually signed); or neither (the row
@@ -1045,7 +1045,7 @@ impl AcceptOutcome {
 ///
 /// codex-nova ruling (issue #2's ownership-set model, tightened after
 /// review): the FIRST owner to sign atomically transitions EVERY other
-/// co-owner's own `DELIVERY_INTENTS`/`DELIVERY_RECEIPTS` row to `Signed`
+/// co-owner's own `PUBLISH_QUEUE_INTENTS`/`PUBLISH_QUEUE_RECEIPTS` row to `Signed`
 /// against the SAME canonical bytes, in this SAME call — never lazily,
 /// deferred until (or unless) each co-owner separately calls
 /// `promote_signed` itself. An offline co-owner signer that never calls
@@ -1058,7 +1058,7 @@ impl AcceptOutcome {
 /// the existing per-intent guard catches it (see `NotFound`'s doc).
 ///
 /// Either way, `SigState`/`IntentSigState` flip to `Signed`, the durable
-/// `DELIVERY_DISPLACED` stash for `intent_id` AND every co-owner named in
+/// `PUBLISH_QUEUE_DISPLACED` stash for `intent_id` AND every co-owner named in
 /// `co_signed` is deleted in the same transaction (R6), and — if this was
 /// a pending kind:5 draft — every owner's suppression claims become
 /// authoritative permanent tombstones together. Boxed for the same reason
@@ -1112,7 +1112,7 @@ pub enum PromoteOutcome {
 /// correctly excluded. Nothing is ever re-inserted for `revealed`: a
 /// suppressed row never left `EVENTS` in the first place — cancelling a
 /// delete brings the content back, not merely closes the journal. The
-/// intent's `DELIVERY_INTENTS`/`DELIVERY_DISPLACED`/suppression-claim rows
+/// intent's `PUBLISH_QUEUE_INTENTS`/`PUBLISH_QUEUE_DISPLACED`/suppression-claim rows
 /// were all deleted in the same transaction. Boxed for the same reason
 /// `InsertOutcome::Superseded` is: keeps the common `NotFound` variant
 /// small.
@@ -1143,14 +1143,14 @@ pub enum CancelEphemeralOutcome {
     AlreadySuperseded,
 }
 
-/// One still-open intent replayed by [`EventStore::recover_delivery`] on
+/// One still-open intent replayed by [`EventStore::recover_publish_queue`] on
 /// boot. The pending row itself is NOT re-inserted — it is already live in
 /// the store (committed atomically at `accept_write` time) and query-visible
 /// from the first post-boot subscription; this is only the journal metadata
 /// `nmp-engine` needs to rebuild its in-memory `PendingWrite`/
 /// `event_to_receipt` bookkeeping (plan §2.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryIntent {
+pub struct PublishQueueIntent {
     pub intent_id: IntentId,
     pub receipt_id: u64,
     pub frozen: Event,
@@ -1160,8 +1160,8 @@ pub struct DeliveryIntent {
     pub routing: String,
     pub sig_state: IntentSigState,
     /// The predecessor this intent displaced, if any — still durable
-    /// (`DELIVERY_DISPLACED` is deleted only by `promote_signed` or
-    /// `compensate_write`, never by `recover_delivery`), so a post-restart
+    /// (`PUBLISH_QUEUE_DISPLACED` is deleted only by `promote_signed` or
+    /// `compensate_write`, never by `recover_publish_queue`), so a post-restart
     /// cancellation can still restore it.
     pub displaced: Option<StoredEvent>,
     pub accepted_at: Timestamp,
@@ -1171,11 +1171,11 @@ pub struct DeliveryIntent {
 /// subset of the full receipt stream (`nmp-engine`'s `WriteStatus` owns
 /// the complete enum, including per-relay `Routed`/`Sent`/`Acked`/
 /// `Rejected`/`GaveUp`/`Failed`; this crate only knows what its OWN four
-/// doors did to a receipt). Retained under `DELIVERY_RECEIPTS` — separately
-/// from `DELIVERY_INTENTS`'s open-work row — precisely so a receipt stays
+/// doors did to a receipt). Retained under `PUBLISH_QUEUE_RECEIPTS` — separately
+/// from `PUBLISH_QUEUE_INTENTS`'s open-work row — precisely so a receipt stays
 /// reattachable via [`EventStore::reattach_receipt`] after the open-work
 /// row is gone (architecture review correction: R8-style terminal cleanup
-/// of `DELIVERY_INTENTS` must never also delete receipt identity/state).
+/// of `PUBLISH_QUEUE_INTENTS` must never also delete receipt identity/state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReceiptState {
     /// `accept_write` (durable/`AtMostOnce`) or `accept_ephemeral`
@@ -1224,13 +1224,13 @@ pub enum CompensationReason {
 }
 
 /// A durably-retained receipt record, independent of whether the intent's
-/// open-work row (`DELIVERY_INTENTS`/[`DeliveryIntent`]) still exists —
+/// open-work row (`PUBLISH_QUEUE_INTENTS`/[`PublishQueueIntent`]) still exists —
 /// see [`ReceiptState`]'s doc for why this separation exists. This unit
 /// builds no pruning policy for these rows (mirrors how the retry-owner
-/// follow-up, not this frame, owns `DELIVERY_ATTEMPTS` retention policy);
+/// follow-up, not this frame, owns `PUBLISH_QUEUE_ATTEMPTS` retention policy);
 /// they simply accumulate until a later unit defines a retention/GC rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryReceipt {
+pub struct PublishQueueReceipt {
     pub receipt_id: u64,
     /// `Some` for a durable/`AtMostOnce` receipt backed by a real (open or
     /// since-closed) `accept_write` intent. `None` for an `Ephemeral`
@@ -1249,18 +1249,18 @@ pub struct DeliveryReceipt {
 /// send with an older ambiguous send, and the exact signed bytes are retained
 /// rather than reconstructed from mutable routing state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryAttempt {
+pub struct PublishQueueAttempt {
     pub version: u8,
     pub intent_id: IntentId,
     pub relay: RelayUrl,
     pub ordinal: u64,
     pub event: Event,
-    pub outcome: DeliveryAttemptOutcome,
+    pub outcome: PublishQueueAttemptOutcome,
 }
 
 /// Stable identity of one durable publication lane.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct DeliveryLaneKey {
+pub struct PublishQueueLaneKey {
     pub intent_id: IntentId,
     pub relay: RelayUrl,
 }
@@ -1269,12 +1269,12 @@ pub struct DeliveryLaneKey {
 /// History remains in the route/attempt/detail tables; this is the bounded
 /// authoritative row recovery and scheduling read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryLane {
+pub struct PublishQueueLane {
     pub version: u8,
-    pub key: DeliveryLaneKey,
+    pub key: PublishQueueLaneKey,
     pub revision: u64,
     pub last_ordinal: u64,
-    pub state: DeliveryLaneState,
+    pub state: PublishQueueLaneState,
 }
 
 /// The typed source of a terminal authentication refusal.
@@ -1299,10 +1299,10 @@ pub struct AuthDenial {
 ///
 /// Unlike an attempt terminal, a true AUTH denial can finish a lane before
 /// the first EVENT attempt exists (ordinal zero). Keeping this separate from
-/// [`DeliveryAttemptOutcome`] makes `Started` structurally impossible in a terminal
+/// [`PublishQueueAttemptOutcome`] makes `Started` structurally impossible in a terminal
 /// lane and avoids inventing an attempt merely to retain a denial.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeliveryTerminalOutcome {
+pub enum PublishQueueTerminalOutcome {
     Acked,
     Rejected(String),
     GaveUp,
@@ -1310,22 +1310,22 @@ pub enum DeliveryTerminalOutcome {
     AuthDenied(AuthDenial),
 }
 
-impl DeliveryTerminalOutcome {
-    fn from_attempt(outcome: DeliveryAttemptOutcome) -> Result<Self, PersistenceError> {
+impl PublishQueueTerminalOutcome {
+    fn from_attempt(outcome: PublishQueueAttemptOutcome) -> Result<Self, PersistenceError> {
         match outcome {
-            DeliveryAttemptOutcome::Started => Err(PersistenceError::invariant(
+            PublishQueueAttemptOutcome::Started => Err(PersistenceError::invariant(
                 "Started is not a terminal lane outcome",
             )),
-            DeliveryAttemptOutcome::Acked => Ok(Self::Acked),
-            DeliveryAttemptOutcome::Rejected(reason) => Ok(Self::Rejected(reason)),
-            DeliveryAttemptOutcome::GaveUp => Ok(Self::GaveUp),
-            DeliveryAttemptOutcome::OutcomeUnknown => Ok(Self::OutcomeUnknown),
+            PublishQueueAttemptOutcome::Acked => Ok(Self::Acked),
+            PublishQueueAttemptOutcome::Rejected(reason) => Ok(Self::Rejected(reason)),
+            PublishQueueAttemptOutcome::GaveUp => Ok(Self::GaveUp),
+            PublishQueueAttemptOutcome::OutcomeUnknown => Ok(Self::OutcomeUnknown),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeliveryLaneState {
+pub enum PublishQueueLaneState {
     WaitingConnection,
     WaitingAuth,
     Eligible {
@@ -1333,22 +1333,22 @@ pub enum DeliveryLaneState {
     },
     InFlight {
         ordinal: u64,
-        phase: DeliveryInFlightPhase,
+        phase: PublishQueueInFlightPhase,
     },
     Transient {
         ordinal: u64,
         eligible_at: Timestamp,
-        cause: DeliveryTransientCause,
+        cause: PublishQueueTransientCause,
         raw_reason: Option<String>,
     },
     Terminal {
         ordinal: u64,
-        outcome: DeliveryTerminalOutcome,
+        outcome: PublishQueueTerminalOutcome,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeliveryInFlightPhase {
+pub enum PublishQueueInFlightPhase {
     AwaitingHandoff,
     AwaitingAck { deadline: Timestamp },
 }
@@ -1356,17 +1356,17 @@ pub enum DeliveryInFlightPhase {
 /// Ordered deadline-index discriminator. Retry eligibility and ACK timeout
 /// share one index but remain impossible to conflate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeliveryDeadlineKind {
+pub enum PublishQueueDeadlineKind {
     RetryEligible,
     AckTimeout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryDeadline {
+pub struct PublishQueueDeadline {
     pub at: Timestamp,
-    pub key: DeliveryLaneKey,
+    pub key: PublishQueueLaneKey,
     pub lane_revision: u64,
-    pub kind: DeliveryDeadlineKind,
+    pub kind: PublishQueueDeadlineKind,
 }
 
 /// Transport handoff evidence, deliberately independent of nmp-transport.
@@ -1380,7 +1380,7 @@ pub enum HandoffEvidence {
 /// Closed persistence vocabulary selected by the engine. The store never
 /// maps transport outcomes into one of these causes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeliveryTransientCause {
+pub enum PublishQueueTransientCause {
     Interrupted,
     AckTimeout,
     ConnectionLost,
@@ -1390,15 +1390,15 @@ pub enum DeliveryTransientCause {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryAttemptHandoff {
+pub struct PublishQueueAttemptHandoff {
     pub at: Timestamp,
     pub result: HandoffEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryAttemptTransient {
+pub struct PublishQueueAttemptTransient {
     pub eligible_at: Timestamp,
-    pub cause: DeliveryTransientCause,
+    pub cause: PublishQueueTransientCause,
     pub raw_reason: Option<String>,
 }
 
@@ -1406,24 +1406,24 @@ pub struct DeliveryAttemptTransient {
 /// attempt in the current schema has exactly one of these; there is no
 /// pre-detail attempt shape to adopt or synthesize a shell for (#867).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryAttemptDetails {
+pub struct PublishQueueAttemptDetails {
     pub version: u8,
     pub intent_id: IntentId,
     pub relay: RelayUrl,
     pub ordinal: u64,
     pub started_at: Option<Timestamp>,
-    pub handoff: Option<DeliveryAttemptHandoff>,
+    pub handoff: Option<PublishQueueAttemptHandoff>,
     #[serde(default)]
-    pub transient: Option<DeliveryAttemptTransient>,
+    pub transient: Option<PublishQueueAttemptTransient>,
     pub finished_at: Option<Timestamp>,
-    pub terminal: Option<DeliveryAttemptOutcome>,
+    pub terminal: Option<PublishQueueAttemptOutcome>,
 }
 
 pub(crate) fn attempt_is_live(
-    attempt: &DeliveryAttempt,
-    details: Option<&DeliveryAttemptDetails>,
+    attempt: &PublishQueueAttempt,
+    details: Option<&PublishQueueAttemptDetails>,
 ) -> bool {
-    if attempt.outcome != DeliveryAttemptOutcome::Started {
+    if attempt.outcome != PublishQueueAttemptOutcome::Started {
         return false;
     }
     match details {
@@ -1431,7 +1431,7 @@ pub(crate) fn attempt_is_live(
         Some(details)
             if matches!(
                 details.handoff,
-                Some(DeliveryAttemptHandoff {
+                Some(PublishQueueAttemptHandoff {
                     result: HandoffEvidence::NotHandedOff,
                     ..
                 })
@@ -1446,7 +1446,7 @@ pub(crate) fn attempt_is_live(
 /// Caller-selected post-handoff persistence state. This is a fact-writing
 /// vocabulary, not a classification policy: the engine chooses the variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeliveryPostHandoffState {
+pub enum PublishQueuePostHandoffState {
     WaitingConnection,
     WaitingAuth,
     Eligible {
@@ -1457,11 +1457,11 @@ pub enum DeliveryPostHandoffState {
     },
     Transient {
         eligible_at: Timestamp,
-        cause: DeliveryTransientCause,
+        cause: PublishQueueTransientCause,
         raw_reason: Option<String>,
     },
     Terminal {
-        outcome: DeliveryAttemptOutcome,
+        outcome: PublishQueueAttemptOutcome,
         finished_at: Timestamp,
     },
 }
@@ -1477,7 +1477,7 @@ pub enum CloseIntentOutcome {
 /// attempt-start cannot erase the lane across restart when dynamic directory
 /// state is empty or has changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryRouteRevision {
+pub struct PublishQueueRouteRevision {
     pub version: u8,
     pub intent_id: IntentId,
     pub ordinal: u64,
@@ -1488,7 +1488,7 @@ pub struct DeliveryRouteRevision {
 /// `PublishEvent` and are never rewritten; terminal variants are overlaid from
 /// the required detail row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeliveryAttemptOutcome {
+pub enum PublishQueueAttemptOutcome {
     Started,
     Acked,
     Rejected(String),
@@ -1859,9 +1859,9 @@ pub trait EventStore {
     /// rules `insert` runs against `accept.frozen`, but stamps
     /// `Provenance::local_origin` instead of a `RelayObserved`, and commits
     /// the resulting row together with `accept`'s full journal payload
-    /// (`DELIVERY_INTENTS` + `DELIVERY_DISPLACED`, if a predecessor was
+    /// (`PUBLISH_QUEUE_INTENTS` + `PUBLISH_QUEUE_DISPLACED`, if a predecessor was
     /// evicted) in ONE transaction (Fable checkpoint R7) — a crash mid-call
-    /// leaves either nothing recoverable or a fully `recover_delivery`-able
+    /// leaves either nothing recoverable or a fully `recover_publish_queue`-able
     /// `Accepted`. `Refused` writes nothing at all (R3). A locally-composed
     /// kind:5 draft additionally runs the identical author-verified
     /// tombstone-write processing `insert` runs for a relay-observed
@@ -1884,9 +1884,9 @@ pub trait EventStore {
     /// Swap the sentinel signature on `intent_id`'s frozen body for the
     /// real `sig` and flip the canonical `SigState`/`IntentSigState` to
     /// `Signed`, in the SAME transaction that durably drops the intent's
-    /// own `DELIVERY_DISPLACED` stash (R6) and updates its retained receipt.
+    /// own `PUBLISH_QUEUE_DISPLACED` stash (R6) and updates its retained receipt.
     /// Keyed by `IntentId`, NOT the frozen event's id (architecture review
-    /// correction — load-bearing): the intent's `DELIVERY_INTENTS.frozen_json`
+    /// correction — load-bearing): the intent's `PUBLISH_QUEUE_INTENTS.frozen_json`
     /// is the durable source of truth for its body regardless of whether a
     /// live `EVENTS` row currently exists for it. Three cases, uniformly:
     /// (a) a live row's owner set CONTAINS `intent_id` (issue #2, team-lead
@@ -1898,14 +1898,14 @@ pub trait EventStore {
     /// different co-owner, so a later distinct owner's promotion can never
     /// overwrite the one real signature with a second one; (b) no live
     /// row, but `intent_id` is a member of some OTHER intent's
-    /// `DELIVERY_DISPLACED` stash entry's owner set (it was superseded by a
+    /// `PUBLISH_QUEUE_DISPLACED` stash entry's owner set (it was superseded by a
     /// later local edit before it could sign) — sync the real signature
     /// into that stash entry too (same already-`Signed` refusal applies),
     /// so a future restore of it never resurrects a stale sentinel copy;
     /// (c) neither (the intent was `Stale`/`Duplicate` at acceptance with
     /// no shared row, or its row was since superseded by a RELAY-observed
     /// event, kind:5-deleted, or NIP-40-expired) — mutate only the durable
-    /// `DELIVERY_INTENTS`/`DELIVERY_RECEIPTS` journal copies; the resulting
+    /// `PUBLISH_QUEUE_INTENTS`/`PUBLISH_QUEUE_RECEIPTS` journal copies; the resulting
     /// signed bytes are still returned so the engine can publish them even
     /// though this intent does not (or no longer) wins any local address.
     /// The caller must have already validated `sig` against the frozen
@@ -1935,11 +1935,11 @@ pub trait EventStore {
     /// predecessor (if any) is then re-`insert`ed through the same one
     /// door — it wins its address back by ordinary supersession, never an
     /// un-supersede operation; (b) no live row, but `intent_id` is a
-    /// member of some OTHER intent's `DELIVERY_DISPLACED` stash entry's
+    /// member of some OTHER intent's `PUBLISH_QUEUE_DISPLACED` stash entry's
     /// owner set — same conditional removal, applied to that stash slot's
     /// owner set instead; (c) neither — nothing to remove or restore in
-    /// `EVENTS`. In every case, this intent's own `DELIVERY_INTENTS`/
-    /// `DELIVERY_DISPLACED` rows are deleted and its retained receipt
+    /// `EVENTS`. In every case, this intent's own `PUBLISH_QUEUE_INTENTS`/
+    /// `PUBLISH_QUEUE_DISPLACED` rows are deleted and its retained receipt
     /// updated to `Compensated`. Fallible for the same reason
     /// `accept_write` is.
     fn compensate_write(
@@ -1997,15 +1997,15 @@ pub trait EventStore {
     /// A caller must never collapse the second into the first, and this door
     /// never returns a partial prefix — an undecodable row fails the whole
     /// call rather than silently shortening the obligation set.
-    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError>;
+    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError>;
 
     /// Look up `receipt_id`'s durably-RETAINED record — independent of
-    /// whether its intent's `DELIVERY_INTENTS` open-work row still exists
+    /// whether its intent's `PUBLISH_QUEUE_INTENTS` open-work row still exists
     /// (architecture review correction: separates "recoverable open work"
     /// from "receipt identity/state", so a terminal receipt stays
     /// reattachable — issue #3's "receipts remain... reattachable" —
     /// rather than disappearing the moment its open-work row is cleaned
-    /// up). Unlike `recover_delivery`, this is an ordinary retained-data
+    /// up). Unlike `recover_publish_queue`, this is an ordinary retained-data
     /// lookup, not a boot-only replay: `MemoryStore` answers it faithfully
     /// for the life of the process (no Q4 "always empty" carve-out here —
     /// that carve-out is specifically about surviving a REAL crash, which
@@ -2013,7 +2013,7 @@ pub trait EventStore {
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<DeliveryReceipt>, PersistenceError>;
+    ) -> Result<Option<PublishQueueReceipt>, PersistenceError>;
 
     /// #591: resolve a caller's [`AcceptWrite::correlation`] token to the
     /// receipt id it was journaled under, if any. `Ok(None)` means the
@@ -2023,7 +2023,7 @@ pub trait EventStore {
     /// whether a token is a first sighting; the engine's
     /// `reattach_by_correlation` lookup door uses it directly to translate
     /// a token into an ordinary [`Self::reattach_receipt`] call. Retained
-    /// forever, exactly like `DELIVERY_RECEIPTS` -- there is no removal door.
+    /// forever, exactly like `PUBLISH_QUEUE_RECEIPTS` -- there is no removal door.
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError>;
 
     /// Append the next canonical resolved-route revision for an open intent.
@@ -2033,48 +2033,48 @@ pub trait EventStore {
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<DeliveryRouteRevision, PersistenceError>;
+    ) -> Result<PublishQueueRouteRevision, PersistenceError>;
 
     /// Recover every resolved-route revision in ascending ordinal order.
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError>;
+    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError>;
 
     /// Read all retained attempt facts for one intent in stable key order.
     fn recover_attempts(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryAttempt>, PersistenceError>;
+    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError>;
 
     /// Idempotently seed every missing lane from bounded route/attempt
     /// ranges. Existing cursors are validated and retained.
-    fn bootstrap_delivery_lanes(
+    fn bootstrap_publish_queue_lanes(
         &mut self,
         _intent_id: IntentId,
-    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
-    fn recover_delivery_lanes(
+    fn recover_publish_queue_lanes(
         &self,
         _intent_id: IntentId,
-    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
     /// Read at most `limit` due rows in stable `(time,intent,relay)` order.
-    fn due_delivery_deadlines(
+    fn due_publish_queue_deadlines(
         &self,
         _now: Timestamp,
         _limit: usize,
-    ) -> Result<Vec<DeliveryDeadline>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueDeadline>, PersistenceError> {
         Err(PersistenceError::invariant(
             "delivery deadlines unsupported",
         ))
     }
 
-    fn next_delivery_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+    fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
         Err(PersistenceError::invariant(
             "delivery deadlines unsupported",
         ))
@@ -2082,31 +2082,31 @@ pub trait EventStore {
 
     fn set_lane_waiting(
         &mut self,
-        _key: &DeliveryLaneKey,
+        _key: &PublishQueueLaneKey,
         _expected_revision: u64,
         _auth: bool,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
     fn set_lane_eligible(
         &mut self,
-        _key: &DeliveryLaneKey,
+        _key: &PublishQueueLaneKey,
         _expected_revision: u64,
         _since: Timestamp,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
     fn set_lane_transient(
         &mut self,
-        _key: &DeliveryLaneKey,
+        _key: &PublishQueueLaneKey,
         _expected_revision: u64,
         _ordinal: u64,
         _eligible_at: Timestamp,
-        _cause: DeliveryTransientCause,
+        _cause: PublishQueueTransientCause,
         _raw_reason: Option<String>,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
@@ -2116,14 +2116,14 @@ pub trait EventStore {
     #[allow(clippy::too_many_arguments)]
     fn suspend_lane_attempt(
         &mut self,
-        _key: &DeliveryLaneKey,
+        _key: &PublishQueueLaneKey,
         _expected_revision: u64,
         _ordinal: u64,
         _at: Timestamp,
-        _cause: DeliveryTransientCause,
+        _cause: PublishQueueTransientCause,
         _raw_reason: Option<String>,
         _auth: bool,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
@@ -2131,11 +2131,11 @@ pub trait EventStore {
     /// and advance an eligible cursor to awaiting handoff.
     fn start_lane_attempt(
         &mut self,
-        _key: &DeliveryLaneKey,
+        _key: &PublishQueueLaneKey,
         _expected_revision: u64,
         _event: Event,
         _started_at: Timestamp,
-    ) -> Result<(DeliveryAttempt, DeliveryLane), PersistenceError> {
+    ) -> Result<(PublishQueueAttempt, PublishQueueLane), PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
@@ -2143,12 +2143,12 @@ pub trait EventStore {
     /// fact, maintaining the typed deadline index in the same commit.
     fn record_lane_handoff(
         &mut self,
-        _key: &DeliveryLaneKey,
+        _key: &PublishQueueLaneKey,
         _expected_revision: u64,
         _ordinal: u64,
-        _detail: DeliveryAttemptHandoff,
-        _next: DeliveryPostHandoffState,
-    ) -> Result<DeliveryLane, PersistenceError> {
+        _detail: PublishQueueAttemptHandoff,
+        _next: PublishQueuePostHandoffState,
+    ) -> Result<PublishQueueLane, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
@@ -2157,12 +2157,12 @@ pub trait EventStore {
     /// newer attempt; detail, cursor, and deadline removal share one commit.
     fn finish_lane_attempt(
         &mut self,
-        _key: &DeliveryLaneKey,
+        _key: &PublishQueueLaneKey,
         _expected_revision: u64,
         _ordinal: u64,
-        _outcome: DeliveryAttemptOutcome,
+        _outcome: PublishQueueAttemptOutcome,
         _finished_at: Timestamp,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
@@ -2171,17 +2171,17 @@ pub trait EventStore {
     /// stale writer can never borrow success from a newer terminal fact.
     fn deny_lane_auth(
         &mut self,
-        _key: &DeliveryLaneKey,
+        _key: &PublishQueueLaneKey,
         _expected_revision: u64,
         _denial: AuthDenial,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
     fn recover_attempt_details(
         &self,
         _intent_id: IntentId,
-    ) -> Result<Vec<DeliveryAttemptDetails>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueAttemptDetails>, PersistenceError> {
         Err(PersistenceError::invariant(
             "delivery attempt details unsupported",
         ))
@@ -2198,13 +2198,13 @@ pub trait EventStore {
 
     /// Persist a receipt-ONLY record for an `Ephemeral` write (VISION-
     /// ratified contract clarification, team-lead correction, issue #3):
-    /// `Ephemeral` never enters the durable delivery-retry journal (no
-    /// `DELIVERY_INTENTS`/`DELIVERY_ATTEMPTS` row — R4 stays correct, it is
+    /// `Ephemeral` never enters the publish queue-retry journal (no
+    /// `PUBLISH_QUEUE_INTENTS`/`PUBLISH_QUEUE_ATTEMPTS` row — R4 stays correct, it is
     /// never retried after process loss) and never gains a query-visible
     /// pending row (no `EVENTS`/`accept_write` call at all) — but a
     /// durable OR explicitly non-durable write must still be observable
     /// through a reattachable receipt, so THIS door writes just the
-    /// `DELIVERY_RECEIPTS` row: `DeliveryReceipt::intent_id` is `None`
+    /// `PUBLISH_QUEUE_RECEIPTS` row: `PublishQueueReceipt::intent_id` is `None`
     /// (nothing backs it — no intent, no journal, no pending event row),
     /// state starts `Accepted`. See [`ReceiptState::Abandoned`] for what
     /// happens to it if the process dies before any further transition.

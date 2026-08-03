@@ -9,7 +9,7 @@
 //! what a denial MEANS wants the policy that produced it in the same file as
 //! the observations of it.
 
-use nmp::mechanism::delivery::{AuthDenialSource, WriteStatus};
+use nmp::mechanism::publish_queue::{AuthDenialSource, WriteStatus};
 
 use super::budgets::NEVER;
 use super::{AuthDenialObservation, NmpWorld};

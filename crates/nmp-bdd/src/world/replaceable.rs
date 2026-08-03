@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use nostr::{EventId, Timestamp};
 
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::WriteStatus;
 use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use super::budgets::EVENTUALLY;

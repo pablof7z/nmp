@@ -182,7 +182,7 @@ Retry is split by domain, with exactly one owner each:
 |---|---|---|
 | Socket connection | transport | reconnect the socket; never buffer durable EVENTs invisibly |
 | One remote-sign request | signer adapter | correlation, AUTH/connect for that operation, exact response validation |
-| One `(intent, relay)` lane | durable delivery | attempt state, eligibility, terminal relay evidence |
+| One `(intent, relay)` lane | publish queue | attempt state, eligibility, terminal relay evidence |
 | Time and concurrency | engine deadline scheduler | wake eligible work without poll loops or per-intent threads |
 
 For every durable relay lane the delivery store persists the exact signed bytes,
@@ -199,7 +199,7 @@ the fleet.
   Policy execution errors, unavailable signers, and subscription `CLOSED`
   auth-required/restricted frames do not have that authority.
 - An authentication denial first commits
-  `DeliveryTerminalOutcome::AuthDenied { source, reason }` against the lane's
+  `PublishQueueTerminalOutcome::AuthDenied { source, reason }` against the lane's
   exact expected revision, then emits `WriteStatus::AuthDenied`. Idempotent
   success is considered only after that revision check, so a stale caller
   cannot mistake a newer equal-looking terminal fact for its own transition.

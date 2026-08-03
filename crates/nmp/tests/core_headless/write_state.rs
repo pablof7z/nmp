@@ -92,7 +92,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     let (outcome, effects) = core.cancel_write(newer_receipt);
     assert_eq!(
         outcome,
-        Ok(nmp::mechanism::delivery::CancelWriteOutcome::Cancelled)
+        Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert_eq!(
         receipt_statuses(&effects).last(),
@@ -127,11 +127,11 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     let (first_outcome, first_cancelled) = core.cancel_write(receipt);
     assert_eq!(
         first_outcome,
-        Ok(nmp::mechanism::delivery::CancelWriteOutcome::Cancelled)
+        Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert_eq!(
         core.cancel_write(receipt).0,
-        Ok(nmp::mechanism::delivery::CancelWriteOutcome::Cancelled)
+        Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert!(core
         .handle(EngineMsg::SignerCompleted(receipt, generation, Ok(signed)))
@@ -141,7 +141,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     assert_eq!(statuses, [WriteStatus::Accepted, WriteStatus::Cancelled]);
     assert!(matches!(
         core.cancel_write(ReceiptId(u64::MAX)).0,
-        Err(nmp::mechanism::delivery::CancelWriteError::UnknownReceipt { .. })
+        Err(nmp::mechanism::publish_queue::CancelWriteError::UnknownReceipt { .. })
     ));
 
     let signed_event = signed_draft(&draft(11, "already signed"), &a);
@@ -161,7 +161,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
         .unwrap();
     assert!(matches!(
         core.cancel_write(signed_receipt).0,
-        Err(nmp::mechanism::delivery::CancelWriteError::AlreadySigned {
+        Err(nmp::mechanism::publish_queue::CancelWriteError::AlreadySigned {
             event_id: id,
             ..
         }) if id == signed_event.id
@@ -961,7 +961,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     let (outcome, retried) = core.cancel_write(id);
     assert_eq!(
         outcome,
-        Ok(nmp::mechanism::delivery::CancelWriteOutcome::Cancelled)
+        Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert!(retried.iter().any(
         |effect| matches!(effect, Effect::EmitReceipt(rid, WriteStatus::Cancelled) if *rid == id)
@@ -993,7 +993,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
     let (refused, effects) = core.cancel_write(id);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::delivery::CancelWriteError::PersistenceFailed {
+        Err(nmp::mechanism::publish_queue::CancelWriteError::PersistenceFailed {
             receipt_id,
             reason,
         }) if receipt_id == id && reason.contains("injected compensation failure")
@@ -1015,7 +1015,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
     let (committed, effects) = core.cancel_write(id);
     assert_eq!(
         committed,
-        Ok(nmp::mechanism::delivery::CancelWriteOutcome::Cancelled)
+        Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert!(effects.iter().any(
         |effect| matches!(effect, Effect::EmitReceipt(rid, WriteStatus::Cancelled) if *rid == id)

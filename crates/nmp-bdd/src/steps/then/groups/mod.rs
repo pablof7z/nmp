@@ -24,17 +24,17 @@
 //! operations carry.
 
 mod blindness;
-mod delivery;
 mod identity;
 mod operations;
 mod presigned;
+mod publish_queue;
 mod reads;
 mod refusals;
 mod route;
 mod signing;
 mod surface;
 
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::WriteStatus;
 
 use crate::world::NmpWorld;
 

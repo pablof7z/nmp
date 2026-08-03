@@ -1,9 +1,9 @@
-//! The durable-delivery door contract (issues #2/#3, Unit U1 —
+//! The publish-queue door contract (issues #2/#3, Unit U1 —
 //! `docs/design/crashsafe-accepted-2-3-plan.md` + its Fable checkpoint
 //! verdict R1-R8, plus post-build architecture-review corrections:
 //! `IntentId`/receipt-id store allocation, `Ephemeral` receipt-only
 //! persistence, intent-KEYED `promote_signed`/`compensate_write` (an
-//! intent's own `DELIVERY_INTENTS` row is the source of truth for its frozen
+//! intent's own `PUBLISH_QUEUE_INTENTS` row is the source of truth for its frozen
 //! body, independent of whether a live `EVENTS` row currently exists for
 //! it — covers `Duplicate`/`Stale` intents, chained local supersession,
 //! relay supersession, kind:5 deletion, and NIP-40 expiry uniformly),
@@ -18,9 +18,9 @@ use std::path::Path;
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome,
-    DeliveryAttemptOutcome, EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState,
-    LocalOrigin, MemoryStore, PersistenceFault, PromoteOutcome, ReceiptState, RedbStore,
-    RefuseReason, RelayObserved, RetractReason, SigState, WriteDurability,
+    EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin,
+    MemoryStore, PersistenceFault, PromoteOutcome, PublishQueueAttemptOutcome, ReceiptState,
+    RedbStore, RefuseReason, RelayObserved, RetractReason, SigState, WriteDurability,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -114,7 +114,7 @@ fn do_accept(store: &mut dyn EventStore, accept: AcceptWrite) -> AcceptOutcome {
 /// Advance one accepted intent past the delivery coalescing safety boundary.
 /// A persisted attempt means a relay may already have observed these bytes,
 /// so a newer replaceable winner must preserve the older obligation.
-fn start_delivery_attempt(
+fn start_publish_queue_attempt(
     store: &mut dyn EventStore,
     intent_id: nmp_store::IntentId,
     signed: Event,
@@ -129,7 +129,7 @@ fn start_delivery_attempt(
         .record_route_revision(intent_id, BTreeSet::from([relay]))
         .expect("record route before attempt");
     let lane = store
-        .bootstrap_delivery_lanes(intent_id)
+        .bootstrap_publish_queue_lanes(intent_id)
         .expect("bootstrap attempt lane")
         .remove(0);
     let lane = store
@@ -193,7 +193,7 @@ fn replaceable_base_precondition_rejects_a_concurrent_winner_atomically() {
             })
         );
         assert!(store
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
         let rows = store
@@ -249,7 +249,7 @@ fn replaceable_base_precondition_on_regular_event_fails_closed() {
             AcceptOutcome::Refused(RefuseReason::ReplaceableBaseOnRegularEvent)
         );
         assert!(store
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
     });
@@ -345,7 +345,7 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
     }
 
     // Before promotion, the intent's displaced stash is still open.
-    let before = store.recover_delivery().expect("recover delivery");
+    let before = store.recover_publish_queue().expect("recover delivery");
     let intent_before = before
         .iter()
         .find(|r| r.intent_id == intent_b)
@@ -379,7 +379,7 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
 
     // R6: the displaced stash is durably cleared in the SAME promote
     // transaction — a boot after this point must never see it.
-    let after = store.recover_delivery().expect("recover delivery");
+    let after = store.recover_publish_queue().expect("recover delivery");
     let intent_after = after.iter().find(|r| r.intent_id == intent_b).expect(
         "intent still open (not yet delivered — only compensate_write/full-delivery closes it)",
     );
@@ -478,7 +478,7 @@ fn refused_accept_leaves_no_journal_residue() {
     });
 
     // RedbStore only: the durable journal itself (not just the row) is
-    // empty — `recover_delivery` finds nothing for this intent.
+    // empty — `recover_publish_queue` finds nothing for this intent.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.redb");
     let mut store = RedbStore::open(&path).expect("open redb store");
@@ -492,7 +492,7 @@ fn refused_accept_leaves_no_journal_residue() {
     );
     do_accept(&mut store, accept(frozen, k.public_key(), 50));
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .is_empty());
 }
@@ -584,7 +584,7 @@ fn accept_crash_is_all_or_nothing() {
 
     let ok_rows = store.query(&Filter::new().id(frozen_ok_id)).unwrap();
     assert_eq!(ok_rows.len(), 1, "the accepted row must survive reopen");
-    let recovered = store.recover_delivery().expect("recover delivery");
+    let recovered = store.recover_publish_queue().expect("recover delivery");
     assert!(
         recovered.iter().any(|r| r.intent_id == ok_intent_id),
         "its journal entry must survive TOGETHER with the row (same transaction)"
@@ -603,7 +603,7 @@ fn accept_crash_is_all_or_nothing() {
 }
 
 #[test]
-fn recover_delivery_reconstructs_inflight_after_reopen() {
+fn recover_publish_queue_reconstructs_inflight_after_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.redb");
 
@@ -623,7 +623,7 @@ fn recover_delivery_reconstructs_inflight_after_reopen() {
     };
 
     let store = RedbStore::open(&path).expect("reopen redb store");
-    let recovered = store.recover_delivery().expect("recover delivery");
+    let recovered = store.recover_publish_queue().expect("recover delivery");
     assert_eq!(recovered.len(), 1);
     let intent = &recovered[0];
     assert_eq!(intent.intent_id, accepted_intent_id);
@@ -715,7 +715,7 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
             .unwrap();
-        let lanes = store.bootstrap_delivery_lanes(older_intent).unwrap();
+        let lanes = store.bootstrap_publish_queue_lanes(older_intent).unwrap();
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].last_ordinal, 0);
 
@@ -745,7 +745,7 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
             ReceiptState::Superseded
         );
         assert!(store
-            .recover_delivery_lanes(older_intent)
+            .recover_publish_queue_lanes(older_intent)
             .unwrap()
             .is_empty());
         assert!(store
@@ -770,7 +770,7 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
 }
 
 #[test]
-fn superseded_receipt_and_pruned_delivery_survive_redb_reopen() {
+fn superseded_receipt_and_pruned_publish_queue_survive_redb_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("replaceable-coalescing.redb");
     let k = keys();
@@ -788,7 +788,7 @@ fn superseded_receipt_and_pruned_delivery_survive_redb_reopen() {
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
             .unwrap();
-        store.bootstrap_delivery_lanes(older_intent).unwrap();
+        store.bootstrap_publish_queue_lanes(older_intent).unwrap();
         let newer = do_accept(&mut store, accept(newer_frozen, k.public_key(), 200));
         (
             older_intent,
@@ -798,7 +798,7 @@ fn superseded_receipt_and_pruned_delivery_survive_redb_reopen() {
     };
 
     let store = RedbStore::open(&path).unwrap();
-    let recovered = store.recover_delivery().unwrap();
+    let recovered = store.recover_publish_queue().unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0].intent_id, newer_intent);
     assert_eq!(
@@ -810,7 +810,7 @@ fn superseded_receipt_and_pruned_delivery_survive_redb_reopen() {
         ReceiptState::Superseded
     );
     assert!(store
-        .recover_delivery_lanes(older_intent)
+        .recover_publish_queue_lanes(older_intent)
         .unwrap()
         .is_empty());
     assert!(store
@@ -835,7 +835,7 @@ fn a_started_attempt_preserves_the_older_replaceable_obligation() {
             .record_route_revision(older_intent, BTreeSet::from([relay]))
             .unwrap();
         let lane = store
-            .bootstrap_delivery_lanes(older_intent)
+            .bootstrap_publish_queue_lanes(older_intent)
             .unwrap()
             .remove(0);
         let lane = store
@@ -864,7 +864,13 @@ fn a_started_attempt_preserves_the_older_replaceable_obligation() {
             ReceiptState::Signed
         );
         assert_eq!(store.recover_attempts(older_intent).unwrap().len(), 1);
-        assert_eq!(store.recover_delivery_lanes(older_intent).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .recover_publish_queue_lanes(older_intent)
+                .unwrap()
+                .len(),
+            1
+        );
     });
 }
 
@@ -931,7 +937,7 @@ fn recover_attempt_order_is_canonical_and_identical_across_backends() {
                 BTreeSet::from([z_short.clone(), aa_long.clone()]),
             )
             .unwrap();
-        let lanes = store.bootstrap_delivery_lanes(intent_id).unwrap();
+        let lanes = store.bootstrap_publish_queue_lanes(intent_id).unwrap();
         let z_key = lanes
             .iter()
             .find(|lane| lane.key.relay == z_short)
@@ -961,7 +967,7 @@ fn recover_attempt_order_is_canonical_and_identical_across_backends() {
                 &z_key,
                 z_lane.revision,
                 1,
-                DeliveryAttemptOutcome::GaveUp,
+                PublishQueueAttemptOutcome::GaveUp,
                 Timestamp::from(112u64),
             )
             .unwrap();
@@ -1007,9 +1013,9 @@ fn raw_route_revision_key(intent_id: nmp_store::IntentId, ordinal: u64) -> [u8; 
     key
 }
 
-fn raw_delivery_relay_id(path: &Path, relay: &RelayUrl) -> u32 {
+fn raw_publish_queue_relay_id(path: &Path, relay: &RelayUrl) -> u32 {
     const RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
-        TableDefinition::new("delivery_relay_ids_v1");
+        TableDefinition::new("publish_queue_relay_ids");
     let db = Database::open(path).unwrap();
     let read = db.begin_read().unwrap();
     let table = read.open_table(RELAY_IDS).unwrap();
@@ -1056,7 +1062,7 @@ fn route_recovery_refuses_a_forward_relay_without_its_reverse_row() {
     };
 
     const RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
-        TableDefinition::new("delivery_relay_ids_v1");
+        TableDefinition::new("publish_queue_relay_ids");
     let db = Database::open(&path).unwrap();
     let tx = db.begin_write().unwrap();
     {
@@ -1087,9 +1093,9 @@ fn route_recovery_refuses_a_reverse_relay_row_mapped_to_another_surrogate() {
         intent_id
     };
 
-    let second_id = raw_delivery_relay_id(&path, &second).to_be_bytes();
+    let second_id = raw_publish_queue_relay_id(&path, &second).to_be_bytes();
     const RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
-        TableDefinition::new("delivery_relay_ids_v1");
+        TableDefinition::new("publish_queue_relay_ids");
     let db = Database::open(&path).unwrap();
     let tx = db.begin_write().unwrap();
     {
@@ -1139,7 +1145,7 @@ fn route_revision_range_excludes_prefix_intents_but_rejects_target_corruption() 
     };
 
     const ROUTES: TableDefinition<&[u8; 16], &[u8]> =
-        TableDefinition::new("delivery_route_revisions_v1");
+        TableDefinition::new("publish_queue_route_revisions");
     let db = Database::open(&path).unwrap();
     let tx = db.begin_write().unwrap();
     {
@@ -1188,7 +1194,10 @@ fn corrupt_or_unknown_attempt_rows_are_fallible_not_panics() {
         store
             .record_route_revision(intent_id, BTreeSet::from([relay.clone()]))
             .unwrap();
-        let lane = store.bootstrap_delivery_lanes(intent_id).unwrap().remove(0);
+        let lane = store
+            .bootstrap_publish_queue_lanes(intent_id)
+            .unwrap()
+            .remove(0);
         let lane = store
             .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(104))
             .unwrap();
@@ -1203,9 +1212,9 @@ fn corrupt_or_unknown_attempt_rows_are_fallible_not_panics() {
         intent_id
     };
 
-    let relay_id = raw_delivery_relay_id(&path, &relay);
+    let relay_id = raw_publish_queue_relay_id(&path, &relay);
     const ATTEMPTS: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("delivery_attempts_v1");
+        TableDefinition::new("publish_queue_attempts");
     let db = Database::open(&path).unwrap();
     let tx = db.begin_write().unwrap();
     {
@@ -1231,7 +1240,7 @@ fn durable_id_counter_overflow_and_receipt_namespace_boundary_are_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("counter.redb");
         drop(RedbStore::open(&path).unwrap());
-        const META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("delivery_meta_v1");
+        const META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("publish_queue_meta");
         let db = Database::open(&path).unwrap();
         let tx = db.begin_write().unwrap();
         {
@@ -1250,7 +1259,7 @@ fn durable_id_counter_overflow_and_receipt_namespace_boundary_are_errors() {
             .expect_err("counter boundary must reject acceptance atomically");
         assert!(err.to_string().contains(expected), "{err}");
         assert!(store
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
     }
@@ -1262,9 +1271,9 @@ fn durable_id_counter_overflow_and_receipt_namespace_boundary_are_errors() {
 /// trap a naive "seed past max open id" allocator falls into: terminate
 /// EVERY intent via `compensate_write` (the one open-work-row deletion path
 /// this unit actually implements — promotion deliberately does NOT delete
-/// `DELIVERY_INTENTS`, since a promoted-but-undelivered intent is still
+/// `PUBLISH_QUEUE_INTENTS`, since a promoted-but-undelivered intent is still
 /// legitimately open work; full-delivery terminal cleanup is a later
-/// unit's job), restart so `recover_delivery` sees nothing open at all, then
+/// unit's job), restart so `recover_publish_queue` sees nothing open at all, then
 /// accept a fresh intent and assert its id was never used before — because
 /// the store's allocator is a durable counter, not an inference over
 /// "what's currently open".
@@ -1278,7 +1287,7 @@ fn intent_id_never_reused_after_all_intents_terminate_and_restart() {
         let mut store = RedbStore::open(&path).expect("open redb store");
 
         // Both intents terminate via compensation — THIS is the exact
-        // path that deletes their `DELIVERY_INTENTS` open-work row, the
+        // path that deletes their `PUBLISH_QUEUE_INTENTS` open-work row, the
         // reuse hazard the correction closes.
         let (frozen1, _signed1) = compose(&k, Kind::TextNote, "one", 100);
         let outcome1 = do_accept(&mut store, accept(frozen1, k.public_key(), 100));
@@ -1290,11 +1299,11 @@ fn intent_id_never_reused_after_all_intents_terminate_and_restart() {
         let id2 = outcome2.journaled_intent_id().expect("journaled");
         store.compensate_write(id2).expect("compensate persistence");
 
-        // At this exact moment, `recover_delivery` sees NOTHING open — the
+        // At this exact moment, `recover_publish_queue` sees NOTHING open — the
         // scenario a naive "seed past max open id" allocator would read as
         // "no id has ever been used".
         assert!(store
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
 
@@ -1304,7 +1313,7 @@ fn intent_id_never_reused_after_all_intents_terminate_and_restart() {
     // Restart — the open set is (still) empty.
     let mut store = RedbStore::open(&path).expect("reopen redb store");
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .is_empty());
 
@@ -1331,11 +1340,11 @@ fn intent_id_never_reused_after_all_intents_terminate_and_restart() {
 /// correction: once receipts are durably RETAINED across restart, a
 /// caller-side receipt-id counter that resets on restart has the exact
 /// same collision hazard `IntentId` had — `receipt_id` is therefore
-/// ALSO store-allocated from `DELIVERY_META`'s durable high-water mark,
+/// ALSO store-allocated from `PUBLISH_QUEUE_META`'s durable high-water mark,
 /// bumped in the same `accept_write`/`accept_ephemeral` transaction,
 /// never inferred from "what's currently open" or "what's currently
-/// retained"). Unlike an intent's `DELIVERY_INTENTS` row, a receipt's
-/// `DELIVERY_RECEIPTS` row is NEVER deleted by this unit — so this test
+/// retained"). Unlike an intent's `PUBLISH_QUEUE_INTENTS` row, a receipt's
+/// `PUBLISH_QUEUE_RECEIPTS` row is NEVER deleted by this unit — so this test
 /// terminates every intent (closing its open-work row) while leaving the
 /// receipts themselves retained, then restarts and asserts the next
 /// receipt id was never used before, even against the surviving retained
@@ -1376,7 +1385,7 @@ fn receipt_id_never_reused_after_terminal_and_restart() {
         // remain durably RETAINED — the exact surviving-retained-set trap
         // a naive allocator could otherwise be seeded from.
         assert!(store
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
         assert!(store.reattach_receipt(receipt1).unwrap().is_some());
@@ -1389,7 +1398,7 @@ fn receipt_id_never_reused_after_terminal_and_restart() {
     // Restart — the retained receipts still answer, the open set is empty.
     let mut store = RedbStore::open(&path).expect("reopen redb store");
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .is_empty());
     assert!(store.reattach_receipt(receipt1).unwrap().is_some());
@@ -1416,16 +1425,16 @@ fn receipt_id_never_reused_after_terminal_and_restart() {
 }
 
 /// Architecture-review correction #2 falsifier: a receipt must stay
-/// reattachable via `reattach_receipt` after its intent's `DELIVERY_INTENTS`
+/// reattachable via `reattach_receipt` after its intent's `PUBLISH_QUEUE_INTENTS`
 /// open-work row is gone — the case this unit can actually produce that
 /// for is `compensate_write` (promotion deliberately does NOT delete the
 /// open-work row; a promoted-but-undelivered intent legitimately stays in
-/// `recover_delivery` until a later unit's full-delivery tracking closes it
+/// `recover_publish_queue` until a later unit's full-delivery tracking closes it
 /// — see the sibling reuse-hazard test's doc). This test proves both
 /// halves: (a) the compensated intent's receipt survives independently of
 /// its now-gone open-work row, in the correct terminal `Compensated`
 /// state; (b) a still-open (signed-but-undelivered) intent's receipt is
-/// ALSO independently reattachable — the `DELIVERY_RECEIPTS` mechanism is
+/// ALSO independently reattachable — the `PUBLISH_QUEUE_RECEIPTS` mechanism is
 /// general, not conditional on the open-work row being gone.
 #[test]
 fn terminal_receipt_still_reattachable_after_recover() {
@@ -1468,7 +1477,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
     // intent's open-work row legitimately still exists (out of this
     // unit's scope to close) — both receipts must reattach regardless.
     let store = RedbStore::open(&path).expect("reopen redb store");
-    let recovered = store.recover_delivery().expect("recover delivery");
+    let recovered = store.recover_publish_queue().expect("recover delivery");
     assert!(
         !recovered.iter().any(|r| r.intent_id == intent_comp),
         "the compensated intent must not appear in open-work recovery"
@@ -1519,7 +1528,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
 /// issue #3): `Ephemeral` must NOT mean "no receipt / no restart
 /// reattachment" — a durable OR explicitly non-durable write is still
 /// observed through a reattachable receipt. `accept_ephemeral` persists a
-/// receipt-ONLY record (`intent_id: None` — no `DELIVERY_INTENTS`/journal row
+/// receipt-ONLY record (`intent_id: None` — no `PUBLISH_QUEUE_INTENTS`/journal row
 /// backs it, and `accept_ephemeral` never touches `EVENTS` at all, so
 /// there is no query-visible pending row either). After a reopen with no
 /// further transition ever recorded, the receipt must report the
@@ -1546,10 +1555,10 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
             .query(&Filter::new().id(frozen_id))
             .unwrap()
             .is_empty());
-        // No open-work/journal row: `recover_delivery` (DELIVERY_INTENTS-only)
+        // No open-work/journal row: `recover_publish_queue` (PUBLISH_QUEUE_INTENTS-only)
         // sees nothing.
         assert!(store
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
 
@@ -1575,7 +1584,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
         .unwrap()
         .is_empty());
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .is_empty());
 
@@ -1600,7 +1609,10 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
         .accept_ephemeral(frozen2_id, k.public_key())
         .expect("accept_ephemeral persistence");
     assert!(mem.query(&Filter::new().id(frozen2_id)).unwrap().is_empty());
-    assert!(mem.recover_delivery().expect("recover delivery").is_empty());
+    assert!(mem
+        .recover_publish_queue()
+        .expect("recover delivery")
+        .is_empty());
     let mem_receipt = mem
         .reattach_receipt(receipt2_id)
         .expect("receipt lookup must be readable")
@@ -1614,7 +1626,7 @@ fn ephemeral_persists_receipt_only_no_journal_no_pending_row_and_reattaches_afte
 /// which a `Duplicate` (the row belongs to a DIFFERENT provenance) or
 /// `Stale` (no row was ever stored) intent never has. Both must still be
 /// promotable/compensable via their own `IntentId`, keyed off the intent's
-/// own `DELIVERY_INTENTS.frozen_json`, not off `EVENTS`.
+/// own `PUBLISH_QUEUE_INTENTS.frozen_json`, not off `EVENTS`.
 #[test]
 fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
     for_each_backend(|store| {
@@ -1684,7 +1696,7 @@ fn attempted_predecessor_survives_supersession_and_newer_cancellation() {
     let frozen_a_id = frozen_a.id;
     let outcome_a = do_accept(&mut store, accept(frozen_a, k.public_key(), 100));
     let intent_a = outcome_a.journaled_intent_id().expect("journaled");
-    start_delivery_attempt(
+    start_publish_queue_attempt(
         &mut store,
         intent_a,
         signed_a.clone(),
@@ -3234,7 +3246,7 @@ fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
         .query(&Filter::new().id(target_promote_id))
         .unwrap()
         .is_empty());
-    let recovered = store.recover_delivery().expect("recover delivery");
+    let recovered = store.recover_publish_queue().expect("recover delivery");
     assert!(recovered.iter().any(|row| row.intent_id == intent_cancel));
     assert!(recovered.iter().any(|row| row.intent_id == intent_promote));
 
@@ -3366,14 +3378,14 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
 /// Persistence-shape falsifier for issue #61's canonical-owner rule. A
 /// provisional deletion makes the target query-invisible but leaves its
 /// one full row in `events`; no copy is moved into the only other table
-/// that owns full event rows (`delivery_displaced`). Cancelling then exposes
+/// that owns full event rows (`publish_queue_displaced`). Cancelling then exposes
 /// that same one row again.
 #[test]
 fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
-    const EVENTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v6");
-    const EVENT_IDS_TABLE: TableDefinition<&[u8; 32], u64> = TableDefinition::new("event_ids_v6");
+    const EVENTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("events");
+    const EVENT_IDS_TABLE: TableDefinition<&[u8; 32], u64> = TableDefinition::new("event_ids");
     const DISPLACED_TABLE: TableDefinition<&[u8; 8], &[u8]> =
-        TableDefinition::new("delivery_displaced_v1");
+        TableDefinition::new("publish_queue_displaced");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.redb");
@@ -3628,7 +3640,7 @@ fn duplicate_ownership_survives_restart() {
     assert!(local.owners.contains(&intent_b));
     assert!(!local.owners.contains(&intent_a));
 
-    let recovered = store.recover_delivery().expect("recover delivery");
+    let recovered = store.recover_publish_queue().expect("recover delivery");
     assert!(recovered.iter().any(|r| r.intent_id == intent_b));
     assert!(
         !recovered.iter().any(|r| r.intent_id == intent_a),
@@ -3833,7 +3845,7 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
 }
 
 /// Issue #2 P0 correction (codex-nova ruling): `accept_write`'s duplicate
-/// detection must ALSO search the `DELIVERY_DISPLACED` stash, not only the
+/// detection must ALSO search the `PUBLISH_QUEUE_DISPLACED` stash, not only the
 /// live `EVENTS` row — a duplicate accepted while its canonical
 /// predecessor is currently sitting displaced (superseded by a later
 /// local edit, not yet restored) must join that stash entry's owner set
@@ -3849,7 +3861,7 @@ fn duplicate_accepted_while_attempted_predecessor_is_stashed_joins_owner_set() {
         let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
         let intent_a = outcome_a.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
-        start_delivery_attempt(
+        start_publish_queue_attempt(
             store,
             intent_a,
             signed_a,
@@ -3927,7 +3939,7 @@ fn duplicate_accepted_while_stashed_survives_restart() {
         let mut store = RedbStore::open(&path).expect("open redb store");
         let outcome_a = do_accept(&mut store, accept(frozen_a.clone(), k.public_key(), 100));
         let intent_a = outcome_a.journaled_intent_id().expect("journaled");
-        start_delivery_attempt(
+        start_publish_queue_attempt(
             &mut store,
             intent_a,
             signed_a,
@@ -3948,7 +3960,7 @@ fn duplicate_accepted_while_stashed_survives_restart() {
     };
 
     let mut store = RedbStore::open(&path).expect("reopen redb store");
-    let recovered = store.recover_delivery().expect("recover delivery");
+    let recovered = store.recover_publish_queue().expect("recover delivery");
     assert!(recovered.iter().any(|r| r.intent_id == intent_a));
     assert!(recovered.iter().any(|r| r.intent_id == intent_c));
     assert!(recovered.iter().any(|r| r.intent_id == intent_d));
@@ -4000,7 +4012,7 @@ fn reinsert_stashed_collision_with_relay_signed_row_adopts_and_fans_out() {
         let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
         let intent_a = outcome_a.journaled_intent_id().expect("journaled");
         assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
-        start_delivery_attempt(
+        start_publish_queue_attempt(
             store,
             intent_a,
             signed_a.clone(),
@@ -4017,8 +4029,8 @@ fn reinsert_stashed_collision_with_relay_signed_row_adopts_and_fans_out() {
         assert!(matches!(outcome_b, AcceptOutcome::Superseded { .. }));
 
         // Remove B through the ORDINARY store door -- NOT compensate_write
-        // -- freeing the address slot while B's own DELIVERY_INTENTS/
-        // DELIVERY_DISPLACED entries (still holding A) are left untouched.
+        // -- freeing the address slot while B's own PUBLISH_QUEUE_INTENTS/
+        // PUBLISH_QUEUE_DISPLACED entries (still holding A) are left untouched.
         let removed_b = store.remove(frozen_b_id, RetractReason::Rejected).unwrap();
         assert!(removed_b.is_some(), "B must have been live to remove");
         assert!(store
@@ -4249,7 +4261,7 @@ fn supersession_only_retires_unattempted_duplicate_coowners() {
         let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
         let intent_a = outcome_a.journaled_intent_id().expect("journaled");
         let receipt_a = outcome_a.journaled_receipt_id().expect("journaled");
-        start_delivery_attempt(
+        start_publish_queue_attempt(
             store,
             intent_a,
             signed_a.clone(),
@@ -4370,7 +4382,7 @@ fn explicit_cancellation_is_a_distinct_durable_receipt_fact_on_both_backends() {
 }
 
 #[test]
-fn explicit_ephemeral_cancellation_is_retained_without_a_delivery_intent() {
+fn explicit_ephemeral_cancellation_is_retained_without_a_publish_queue_intent() {
     for_each_backend(|store| {
         let k = keys();
         let (frozen, _) = compose(&k, Kind::TextNote, "cancel ephemeral", 101);
@@ -4409,7 +4421,7 @@ fn redb_reopen_replays_cancelled_without_recovering_open_work() {
 
     let store = RedbStore::open(&path).unwrap();
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .is_empty());
     assert_eq!(

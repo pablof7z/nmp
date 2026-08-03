@@ -11,7 +11,7 @@
 //! be used as a memory bound. If a consumer falls behind the finite queue, the
 //! channel keeps its already-buffered prefix, rejects further sends, then
 //! surfaces [`FifoNextError::Lagged`] after that prefix drains. Receipt callers
-//! can reattach to the durable-delivery Redb source of truth; no fact is silently
+//! can reattach to the publish-queue Redb source of truth; no fact is silently
 //! presented as delivered and no paused app can grow this queue without bound.
 //!
 //! Delivery works both ways over the same queue, mirroring the latest mailbox:

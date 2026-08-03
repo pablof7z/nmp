@@ -5,12 +5,12 @@ slug: relay-worker-demand
 status: built
 date: 2026-07-28
 audience: llms
-scope: durable delivery lane projection into relay-worker ownership
+scope: publish queue lane projection into relay-worker ownership
 investigated_revision: 057f59ef9f3a5cbc1a3ce4e3c88d189d55b28244
 runtime_evidence_revision: 9a8ad1fd1a2999b067c19d842467a76a257f7f25
 implementation_pr: https://github.com/pablof7z/nmp/pull/988
 owns:
-  - how durable delivery lanes determine which relay sessions the write plane must keep alive
+  - how publish queue lanes determine which relay sessions the write plane must keep alive
   - why the investigated implementation repeatedly read and decoded every lane
   - the rebuildable in-memory projection that removes those reads
   - the projection's ordering, restart, and degraded-state requirements
@@ -18,7 +18,7 @@ related:
   - docs/design-record.md
   - docs/bug-class-ledger.md
   - docs/known-gaps.md
-  - docs/internals/writes/durable-delivery.md
+  - docs/internals/writes/publish-queue.md
 issues:
   - https://github.com/pablof7z/nmp/issues/1027
   - https://github.com/pablof7z/nmp/issues/985
@@ -60,8 +60,8 @@ At `investigated_revision`, the precise answer was:
   evidence that canonical events are stored as JSON.
 
 Current schema version 12 replaces that physical shape with the explicit
-binary `delivery_*_v1` namespace documented in
-[`durable-delivery.md`](durable-delivery.md). The reducer-owned projection
+binary `publish_queue_*` namespace documented in
+[`publish-queue.md`](publish-queue.md). The reducer-owned projection
 remains the architectural fix for repeated dispatch reads; binary makes
 recovery and any remaining scan cheaper, but does not make a scan unnecessary.
 
@@ -85,7 +85,7 @@ do not.
 The relevant ownership split is:
 
 ```text
-durable delivery tables
+publish queue tables
   authority for intent, lane, attempt, and receipt state
           |
           | bootstrap/recovery and committed transition results
@@ -115,7 +115,7 @@ At `investigated_revision`, `write_relay_workers`:
 2. walks every `PendingWrite`;
 3. includes the pending write's already-known pending, unstarted, and
    route-blocked relays;
-4. calls `EventStore::recover_delivery_lanes(intent_id)` for every pending intent;
+4. calls `EventStore::recover_publish_queue_lanes(intent_id)` for every pending intent;
 5. range-scans the durable lane table, JSON-decodes every returned lane, and
    parses its relay URL;
 6. retains the relay session for every nonterminal lane.
@@ -126,7 +126,7 @@ for the requirements. An unchanged reducer can therefore perform the same
 store reads, B-tree comparisons, JSON decoding, and URL parsing many times.
 
 This was not recovery in the operational sense even though the store method is
-named `recover_delivery_lanes`. Recovery data was being used as a recurring
+named `recover_publish_queue_lanes`. Recovery data was being used as a recurring
 query interface.
 
 ### What is binary and what is JSON
@@ -142,7 +142,7 @@ TableDefinition<&str, &str>
 ```
 
 The key contained the intent identifier and relay URL. The value was a
-JSON-encoded lane. `recover_delivery_lanes` performed a key-range scan, decoded
+JSON-encoded lane. `recover_publish_queue_lanes` performed a key-range scan, decoded
 every matching value with `serde_json`, reconstructed relay URLs, and sorted
 the result. Current code uses `intent:u64-be | relay_id:u32-be` and an explicit
 versioned binary value.
@@ -176,7 +176,7 @@ A profiler report supplied from a running Mosaico daemon pinned to NMP revision
 
 During that sample, the NMP engine thread was on CPU for the full window.
 Inclusive samples attributed about 68% of that thread to
-`recover_delivery_lanes`, about 61% to `required_relay_workers`, about 31% to
+`recover_publish_queue_lanes`, about 61% to `required_relay_workers`, about 31% to
 redb range-iterator construction, and about 17% to lane JSON decoding. String
 key comparison and UTF-8 validation were also visible.
 
@@ -210,7 +210,7 @@ Each `PendingWrite` now owns a `LaneWorkerProjection` with three sets:
 
 The reducer populates the projection from the lanes returned by startup
 recovery and bootstrap. Every successful durable lane mutation then feeds its
-returned post-commit `DeliveryLane` through one projection update path:
+returned post-commit `PublishQueueLane` through one projection update path:
 
 ```text
 committed lane state is nonterminal -> insert relay
@@ -235,7 +235,7 @@ The store API already returned post-commit lane state from bootstrap and lane
 transitions, but many former call sites discarded those returned values.
 `core/lane_projection.rs` now owns wrappers for bootstrap and every lane-writing
 store door. Each wrapper commits first and applies the returned
-`DeliveryLane` before returning to ordinary reducer flow.
+`PublishQueueLane` before returning to ordinary reducer flow.
 
 A recursive source-census falsifier scans every production module under
 `core/` and fails if any module outside `lane_projection.rs` invokes a raw
@@ -331,7 +331,7 @@ runtime retains its existing workers.
 Conservative retention is only safe if it is temporary. The first #985
 implementation had no exit:
 [#1000](https://github.com/pablof7z/nmp/issues/1000) found that `uncertain` is
-cleared solely by a committed `DeliveryLane` for that exact relay, while an
+cleared solely by a committed `PublishQueueLane` for that exact relay, while an
 intent whose bootstrap failed owns no lane rows at all — so `schedule_ready`,
 the deadline sweep and the wake index all find nothing for it and no committed
 lane fact can ever arrive. Its relay workers stayed pinned and its receipt
@@ -345,7 +345,7 @@ A failed bootstrap therefore records a **retryable gap** for that intent
 - arms a deadline through the existing `next_deadline`/`Tick` machinery, with
   the same capped exponential backoff shape as the lane retry schedule, so
   nothing new scans and steady state pays one empty-map probe;
-- is closed by exactly one event — a committed `bootstrap_delivery_lanes`, whose
+- is closed by exactly one event — a committed `bootstrap_publish_queue_lanes`, whose
   exact rebuild supersedes every conservative guess it stood in for — or by
   the pending write leaving `pending`.
 
@@ -540,9 +540,9 @@ removed and re-profiled.
   - redb lane table representation
 - `crates/nmp-store/src/redb_store/delivery.rs`
   - binary lane/deadline mutation helpers
-- `crates/nmp-store/src/redb_store/delivery_codec.rs`
+- `crates/nmp-store/src/redb_store/publish_queue_codec.rs`
   - explicit versioned values, bounds, and fixed-width key constructors
-- `crates/nmp-store/src/redb_store/delivery_ops.rs`
+- `crates/nmp-store/src/redb_store/publish_queue_ops.rs`
   - lane range scans, transition commits, and terminal closure
 - `crates/nmp-store/src/redb_store/canonical.rs`
   - binary canonical-event insertion

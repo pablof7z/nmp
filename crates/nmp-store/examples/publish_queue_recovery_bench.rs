@@ -5,8 +5,8 @@
 //! scheduler policy. Typical use:
 //!
 //! ```text
-//! delivery_recovery_bench populate store.redb 1000 4
-//! delivery_recovery_bench recover store.redb 1000 4
+//! publish_queue_recovery_bench populate store.redb 1000 4
+//! publish_queue_recovery_bench recover store.redb 1000 4
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -18,8 +18,8 @@ use std::time::Instant;
 
 use nmp_grammar::CorrelationToken;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, DeliveryAttemptHandoff, DeliveryPostHandoffState, EventStore,
-    HandoffEvidence, IntentSigState, RedbStore, WriteDurability,
+    sentinel_signature, AcceptWrite, EventStore, HandoffEvidence, IntentSigState,
+    PublishQueueAttemptHandoff, PublishQueuePostHandoffState, RedbStore, WriteDurability,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use serde::Serialize;
@@ -120,7 +120,7 @@ fn fixed_keys() -> Keys {
 fn signed_event(keys: &Keys, intent: usize) -> Event {
     EventBuilder::new(
         Kind::TextNote,
-        format!("durable-delivery-representation-benchmark-{intent:08}"),
+        format!("publish-queue-representation-benchmark-{intent:08}"),
     )
     .custom_created_at(Timestamp::from(1_000_000 + intent as u64))
     .sign_with_keys(keys)
@@ -144,7 +144,7 @@ fn relay(index: usize) -> RelayUrl {
 }
 
 fn semantic_snapshot(store: &RedbStore) -> (usize, usize, String) {
-    let intents = store.recover_delivery().expect("recover delivery");
+    let intents = store.recover_publish_queue().expect("recover delivery");
     let mut normalized = String::new();
     let mut lanes = 0usize;
     for intent in &intents {
@@ -229,7 +229,7 @@ fn semantic_snapshot(store: &RedbStore) -> (usize, usize, String) {
             .unwrap();
         }
         for lane in store
-            .recover_delivery_lanes(intent.intent_id)
+            .recover_publish_queue_lanes(intent.intent_id)
             .expect("delivery lanes")
         {
             lanes += 1;
@@ -242,7 +242,7 @@ fn semantic_snapshot(store: &RedbStore) -> (usize, usize, String) {
         }
     }
     for deadline in store
-        .due_delivery_deadlines(Timestamp::from(u64::MAX), 1_024)
+        .due_publish_queue_deadlines(Timestamp::from(u64::MAX), 1_024)
         .expect("delivery deadlines")
     {
         writeln!(
@@ -295,7 +295,7 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
             .record_route_revision(intent_id, (0..relays_per_intent).map(relay).collect())
             .expect("record benchmark route");
         let seeded = store
-            .bootstrap_delivery_lanes(intent_id)
+            .bootstrap_publish_queue_lanes(intent_id)
             .expect("bootstrap benchmark lanes");
         for lane in seeded {
             let eligible = store
@@ -318,13 +318,13 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
                     &lane.key,
                     in_flight.revision,
                     attempt.ordinal,
-                    DeliveryAttemptHandoff {
+                    PublishQueueAttemptHandoff {
                         at: Timestamp::from(3_200_000 + intent_index as u64),
                         result: HandoffEvidence::Ambiguous,
                     },
-                    DeliveryPostHandoffState::Transient {
+                    PublishQueuePostHandoffState::Transient {
                         eligible_at: Timestamp::from(4_000_000 + intent_index as u64),
-                        cause: nmp_store::DeliveryTransientCause::ConnectionLost,
+                        cause: nmp_store::PublishQueueTransientCause::ConnectionLost,
                         raw_reason: Some("fixed representative transient".into()),
                     },
                 )
@@ -340,7 +340,7 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
     drop(reopened);
     let (database_logical_bytes, database_allocated_bytes) = database_bytes(path);
     BenchResult {
-        schema: "nmp-durable-delivery-representation-v1",
+        schema: "nmp-publish-queue-representation-v1",
         phase: "populate",
         intents,
         relays_per_intent,
@@ -367,7 +367,7 @@ fn recover(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResult
     assert_eq!(lanes, intents.saturating_mul(relays_per_intent));
     let (database_logical_bytes, database_allocated_bytes) = database_bytes(path);
     BenchResult {
-        schema: "nmp-durable-delivery-representation-v1",
+        schema: "nmp-publish-queue-representation-v1",
         phase: "recover",
         intents,
         relays_per_intent,

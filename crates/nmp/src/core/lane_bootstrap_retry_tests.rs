@@ -1,8 +1,8 @@
 //! Falsifiers for the way OUT of conservative lane retention (#1000).
 //!
-//! #988 made a failed `bootstrap_delivery_lanes` retain every route candidate
+//! #988 made a failed `bootstrap_publish_queue_lanes` retain every route candidate
 //! as `uncertain`, which is right, and then gave that retention no exit:
-//! `uncertain` is cleared only by a committed `DeliveryLane` for that exact
+//! `uncertain` is cleared only by a committed `PublishQueueLane` for that exact
 //! relay, and an intent whose bootstrap failed owns no lane rows for any
 //! other path to commit. These tests pin both halves — retention while the
 //! projection is genuinely unknown, AND release once the store answers.
@@ -117,10 +117,10 @@ fn durable_worker_oracle<S: EventStore>(core: &EngineCore<S>) -> BTreeSet<RelayS
             expected.extend(
                 core.resolver
                     .store()
-                    .recover_delivery_lanes(intent_id)
+                    .recover_publish_queue_lanes(intent_id)
                     .expect("oracle lane recovery")
                     .into_iter()
-                    .filter(|lane| !matches!(lane.state, DeliveryLaneState::Terminal { .. }))
+                    .filter(|lane| !matches!(lane.state, PublishQueueLaneState::Terminal { .. }))
                     .map(|lane| RelaySessionKey::new(lane.key.relay, access)),
             );
         }
@@ -278,10 +278,10 @@ fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
     assert_eq!(
         core.resolver
             .store()
-            .recover_delivery_lanes(intent)
+            .recover_publish_queue_lanes(intent)
             .unwrap()[0]
             .state,
-        DeliveryLaneState::WaitingAuth
+        PublishQueueLaneState::WaitingAuth
     );
 }
 

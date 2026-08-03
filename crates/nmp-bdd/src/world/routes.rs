@@ -27,7 +27,7 @@ use nostr::Timestamp;
 use nmp_router::RelayUrl;
 
 use nmp::mechanism::core::{DiagnosticsSnapshot, StalledWriteStage};
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::WriteStatus;
 
 use super::budgets::EVENTUALLY;
 use super::NmpWorld;

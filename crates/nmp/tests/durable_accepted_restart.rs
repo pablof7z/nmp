@@ -8,15 +8,15 @@ use nmp::mechanism::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::WriteStatus;
 use nmp_grammar::{
     AccessContext, Durability, EventBuilder as NmpEventBuilder, Identity, RelaySessionKey,
     WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, DeliveryAttemptOutcome, DeliveryTerminalOutcome, EventStore,
-    IntentSigState, RedbStore, SigState, WriteDurability,
+    sentinel_signature, AcceptWrite, EventStore, IntentSigState, PublishQueueAttemptOutcome,
+    PublishQueueTerminalOutcome, RedbStore, SigState, WriteDurability,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{
@@ -24,7 +24,7 @@ use nostr::{
 };
 use redb::{Database, ReadableTable, TableDefinition};
 
-fn corrupt_first_delivery_row<const N: usize>(
+fn corrupt_first_publish_queue_row<const N: usize>(
     path: &std::path::Path,
     table_name: &'static str,
     prefix: &[u8],
@@ -42,7 +42,7 @@ fn corrupt_first_delivery_row<const N: usize>(
                 (*key.value(), value.value().to_vec())
             })
             .find(|(key, _)| key.as_slice().starts_with(prefix))
-            .expect("matching durable-delivery row");
+            .expect("matching publish-queue row");
         assert!(value.len() >= 5, "versioned delivery envelope");
         value[4] = 200;
         table.insert(&key, value.as_slice()).unwrap();
@@ -50,7 +50,7 @@ fn corrupt_first_delivery_row<const N: usize>(
     tx.commit().unwrap();
 }
 
-fn insert_corrupt_delivery_row<const N: usize>(
+fn insert_corrupt_publish_queue_row<const N: usize>(
     path: &std::path::Path,
     table_name: &'static str,
     key: &[u8; N],
@@ -318,22 +318,22 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             .map(|attempt| (attempt.ordinal, &attempt.outcome))
             .collect::<Vec<_>>(),
         vec![
-            (1, &DeliveryAttemptOutcome::Started),
-            (2, &DeliveryAttemptOutcome::Acked)
+            (1, &PublishQueueAttemptOutcome::Started),
+            (2, &PublishQueueAttemptOutcome::Acked)
         ],
         "restart preserves the interrupted ordinal and ACKs a new retry ordinal"
     );
     let original_lane = store
-        .recover_delivery_lanes(intent)
+        .recover_publish_queue_lanes(intent)
         .unwrap()
         .into_iter()
         .find(|lane| lane.key.relay == relay)
         .unwrap();
     assert_eq!(
         original_lane.state,
-        nmp_store::DeliveryLaneState::Terminal {
+        nmp_store::PublishQueueLaneState::Terminal {
             ordinal: 2,
-            outcome: DeliveryTerminalOutcome::Acked,
+            outcome: PublishQueueTerminalOutcome::Acked,
         }
     );
 }
@@ -393,7 +393,10 @@ fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
     let store = RedbStore::open(&path).unwrap();
     let attempts = store.recover_attempts(intent_id).unwrap();
     assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].outcome, DeliveryAttemptOutcome::OutcomeUnknown);
+    assert_eq!(
+        attempts[0].outcome,
+        PublishQueueAttemptOutcome::OutcomeUnknown
+    );
 }
 
 #[test]
@@ -785,7 +788,7 @@ fn assert_persisted_routing_fails_closed_without_dropping(
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
@@ -884,7 +887,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     let (cancelled, cancellation) = core.cancel_write(receipt);
     assert_eq!(
         cancelled,
-        Ok(nmp::mechanism::delivery::CancelWriteOutcome::Cancelled)
+        Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert!(cancellation.iter().any(
         |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::Cancelled) if *id == receipt)
@@ -900,7 +903,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .is_empty());
     let mut reopened =
@@ -941,7 +944,7 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
 
     let store = RedbStore::open(&path).unwrap();
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .is_empty());
     let mut reopened =
@@ -954,7 +957,7 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
     let (refused, effects) = reopened.cancel_write(receipt);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::delivery::CancelWriteError::AlreadySigned {
+        Err(nmp::mechanism::publish_queue::CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         }) if receipt_id == receipt && event_id == event.id
@@ -1007,7 +1010,11 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             receipt_id,
         )
     };
-    corrupt_first_delivery_row::<20>(&path, "delivery_attempts_v1", &intent_id.0.to_be_bytes());
+    corrupt_first_publish_queue_row::<20>(
+        &path,
+        "publish_queue_attempts",
+        &intent_id.0.to_be_bytes(),
+    );
 
     let store = RedbStore::open(&path).unwrap();
     let mut core =
@@ -1019,7 +1026,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
@@ -1091,7 +1098,11 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         (intent_id, receipt_id)
     };
 
-    corrupt_first_delivery_row::<8>(&path, "delivery_receipts_v1", &receipt_id.0.to_be_bytes());
+    corrupt_first_publish_queue_row::<8>(
+        &path,
+        "publish_queue_receipts",
+        &receipt_id.0.to_be_bytes(),
+    );
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, 10);
@@ -1103,10 +1114,10 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     let (refused, effects) = core.cancel_write(receipt_id);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::delivery::CancelWriteError::PersistenceFailed {
+        Err(nmp::mechanism::publish_queue::CancelWriteError::PersistenceFailed {
             receipt_id: failed_id,
             reason,
-        }) if failed_id == receipt_id && reason.contains("decode durable delivery receipt")
+        }) if failed_id == receipt_id && reason.contains("decode publish queue receipt")
     ));
     assert!(
         effects.is_empty(),
@@ -1116,7 +1127,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     let recovered = store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .into_iter()
         .find(|intent| intent.intent_id == intent_id)
@@ -1225,7 +1236,12 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     let mut route_key = [0_u8; 16];
     route_key[..8].copy_from_slice(&intent_id.0.to_be_bytes());
     route_key[8..].copy_from_slice(&1u64.to_be_bytes());
-    insert_corrupt_delivery_row::<16>(&path, "delivery_route_revisions_v1", &route_key, b"NMDV");
+    insert_corrupt_publish_queue_row::<16>(
+        &path,
+        "publish_queue_route_revisions",
+        &route_key,
+        b"NMDV",
+    );
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, 10);
@@ -1236,7 +1252,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
@@ -1245,7 +1261,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
 /// #790 boot falsifier: an unreadable durable journal degrades explicitly
 /// instead of panicking the host or silently booting as "nothing open".
 ///
-/// Before #790 `recover_delivery` returned a bare `Vec` and `.expect()`ed the
+/// Before #790 `recover_publish_queue` returned a bare `Vec` and `.expect()`ed the
 /// row decode, so this exact file aborted the process inside
 /// `recover_on_boot` — the one moment an embedding app is least able to
 /// survive it. The contract now: exactly one #122 degradation effect, and
@@ -1288,11 +1304,11 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
 
     // Corrupt the one journal row through a raw handle; no store door can
     // write these bytes, which is exactly why this class needs a falsifier.
-    corrupt_first_delivery_row::<8>(&path, "delivery_intents_v1", &[]);
+    corrupt_first_publish_queue_row::<8>(&path, "publish_queue_intents", &[]);
 
     let store = RedbStore::open(&path).unwrap();
     assert!(
-        store.recover_delivery().is_err(),
+        store.recover_publish_queue().is_err(),
         "an undecodable journal row is an error, never an empty recovery"
     );
     let mut core = EngineCore::new_with_fixture_routing_facts(
@@ -1315,7 +1331,7 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
         "boot degrades exactly once: {effects:?}"
     );
     assert!(
-        degradations[0].contains("decode durable delivery intent"),
+        degradations[0].contains("decode publish queue intent"),
         "the degradation names the unreadable row: {}",
         degradations[0]
     );

@@ -11,7 +11,7 @@ use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nostr::{Event, JsonUtil, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
-const EVENTS_V6: TableDefinition<u64, &[u8]> = TableDefinition::new("events_v6");
+const EVENTS_V6: TableDefinition<u64, &[u8]> = TableDefinition::new("events");
 const CODEC_ROWS: TableDefinition<u64, &[u8]> = TableDefinition::new("codec_rows");
 
 fn encode_v3_event(event: &Event) -> Vec<u8> {

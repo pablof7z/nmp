@@ -1010,7 +1010,7 @@ impl Drop for NmpDiagnosticsStream {
 /// exposes the stable store-issued receipt id via [`Self::id`] and delivers
 /// ordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite
 /// FIFO that reports typed lag. Receipt facts are durable: the persisted
-/// durable-delivery Redb store is the source of truth, so a dropped or lagged stream can
+/// publish-queue Redb store is the source of truth, so a dropped or lagged stream can
 /// be reattached and traverse retained facts through finite pages.
 #[derive(uniffi::Object)]
 pub struct NmpReceiptStream {
@@ -2285,13 +2285,13 @@ mod tests {
 
         // Overwrite the receipt's own durable row with undecodable bytes.
         const RECEIPTS: redb::TableDefinition<&[u8; 8], &[u8]> =
-            redb::TableDefinition::new("delivery_receipts_v1");
+            redb::TableDefinition::new("publish_queue_receipts");
         let db = redb::Database::open(&path).expect("redb: reopen for corruption");
         let tx = db.begin_write().expect("redb: begin_write");
         {
             let mut table = tx
                 .open_table(RECEIPTS)
-                .expect("redb: open delivery_receipts_v1");
+                .expect("redb: open publish_queue_receipts_v1");
             let key = receipt_id.to_be_bytes();
             let mut value = table
                 .get(&key)

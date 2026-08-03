@@ -24,7 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{ObservationFact, RelayAdmissionPolicy, RowDelta};
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::WriteStatus;
 use nmp::mechanism::runtime::{
     EngineThread, FifoReceiver, FifoTryRecvError, ReceiptReattachment, RowsReceiver,
 };

@@ -152,7 +152,7 @@ fn apply_updates<S: nmp_store::EventStore>(
 mod tests {
     use super::*;
     use crate::core::{ReceiptId, Row};
-    use crate::delivery::WriteStatus;
+    use crate::publish_queue::WriteStatus;
     use nmp_grammar::{
         AccessContext, Durability, Identity, RelaySessionKey, WriteIntent, WritePayload,
         WriteRouting,

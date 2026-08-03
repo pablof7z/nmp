@@ -18,7 +18,7 @@ use nostr::{Event, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use super::ingest::insert_with_tables;
-use super::ingest_txn::{GovernedDeliveryMap, GovernedIngestTxn, GovernedStringMap};
+use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap, GovernedStringMap};
 use super::query::{
     author_cardinality_key, by_author_key, by_kind_key, created_at_key, global_cardinality_key,
     kind_cardinality_key, tag_cardinality_key, tag_index_key,
@@ -79,12 +79,12 @@ struct FjallKeyspaces {
     by_kind: SingleWriterTxKeyspace,
     by_tag: SingleWriterTxKeyspace,
     cardinality: SingleWriterTxKeyspace,
-    delivery_intents: SingleWriterTxKeyspace,
-    delivery_receipts: SingleWriterTxKeyspace,
-    delivery_displaced: SingleWriterTxKeyspace,
-    delivery_kind5_claims: SingleWriterTxKeyspace,
-    delivery_suppress_by_id: SingleWriterTxKeyspace,
-    delivery_suppress_by_addr: SingleWriterTxKeyspace,
+    publish_queue_intents: SingleWriterTxKeyspace,
+    publish_queue_receipts: SingleWriterTxKeyspace,
+    publish_queue_displaced: SingleWriterTxKeyspace,
+    publish_queue_kind5_claims: SingleWriterTxKeyspace,
+    publish_queue_suppress_by_id: SingleWriterTxKeyspace,
+    publish_queue_suppress_by_addr: SingleWriterTxKeyspace,
 }
 
 impl FjallKeyspaces {
@@ -110,12 +110,12 @@ impl FjallKeyspaces {
             by_kind: open("governed_by_kind")?,
             by_tag: open("governed_by_tag")?,
             cardinality: open("governed_cardinality")?,
-            delivery_intents: open("governed_delivery_intents")?,
-            delivery_receipts: open("governed_delivery_receipts")?,
-            delivery_displaced: open("governed_delivery_displaced")?,
-            delivery_kind5_claims: open("governed_delivery_kind5_claims")?,
-            delivery_suppress_by_id: open("governed_delivery_suppress_by_id")?,
-            delivery_suppress_by_addr: open("governed_delivery_suppress_by_addr")?,
+            publish_queue_intents: open("governed_publish_queue_intents")?,
+            publish_queue_receipts: open("governed_publish_queue_receipts")?,
+            publish_queue_displaced: open("governed_publish_queue_displaced")?,
+            publish_queue_kind5_claims: open("governed_publish_queue_kind5_claims")?,
+            publish_queue_suppress_by_id: open("governed_publish_queue_suppress_by_id")?,
+            publish_queue_suppress_by_addr: open("governed_publish_queue_suppress_by_addr")?,
         })
     }
 
@@ -126,13 +126,13 @@ impl FjallKeyspaces {
         }
     }
 
-    fn delivery_map(&self, map: GovernedDeliveryMap) -> &SingleWriterTxKeyspace {
+    fn publish_queue_map(&self, map: GovernedPublishQueueMap) -> &SingleWriterTxKeyspace {
         match map {
-            GovernedDeliveryMap::Intents => &self.delivery_intents,
-            GovernedDeliveryMap::Receipts => &self.delivery_receipts,
-            GovernedDeliveryMap::Kind5Claims => &self.delivery_kind5_claims,
-            GovernedDeliveryMap::SuppressById => &self.delivery_suppress_by_id,
-            GovernedDeliveryMap::SuppressByAddr => &self.delivery_suppress_by_addr,
+            GovernedPublishQueueMap::Intents => &self.publish_queue_intents,
+            GovernedPublishQueueMap::Receipts => &self.publish_queue_receipts,
+            GovernedPublishQueueMap::Kind5Claims => &self.publish_queue_kind5_claims,
+            GovernedPublishQueueMap::SuppressById => &self.publish_queue_suppress_by_id,
+            GovernedPublishQueueMap::SuppressByAddr => &self.publish_queue_suppress_by_addr,
         }
     }
 }
@@ -473,33 +473,33 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
         Ok(())
     }
 
-    fn delivery_get(
+    fn publish_queue_get(
         &self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, PersistenceError> {
         Ok(self
-            .get(self.keyspaces.delivery_map(map), key)?
+            .get(self.keyspaces.publish_queue_map(map), key)?
             .map(|value| value.to_vec()))
     }
 
-    fn delivery_put(
+    fn publish_queue_put(
         &mut self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
         value: &[u8],
     ) -> Result<(), PersistenceError> {
         self.transaction
-            .insert(self.keyspaces.delivery_map(map), key, value);
+            .insert(self.keyspaces.publish_queue_map(map), key, value);
         Ok(())
     }
 
-    fn delivery_remove(
+    fn publish_queue_remove(
         &mut self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, PersistenceError> {
-        let keyspace = self.keyspaces.delivery_map(map);
+        let keyspace = self.keyspaces.publish_queue_map(map);
         let previous = self.get(keyspace, key)?.map(|value| value.to_vec());
         self.transaction.remove(keyspace, key);
         Ok(previous)
@@ -507,10 +507,10 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
 
     fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError> {
         let previous = self
-            .get(&self.keyspaces.delivery_displaced, key)?
+            .get(&self.keyspaces.publish_queue_displaced, key)?
             .map(|value| value.to_vec());
         self.transaction
-            .remove(&self.keyspaces.delivery_displaced, key);
+            .remove(&self.keyspaces.publish_queue_displaced, key);
         Ok(previous)
     }
 }

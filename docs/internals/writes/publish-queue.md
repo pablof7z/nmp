@@ -1,14 +1,14 @@
 ---
-title: Durable delivery storage
+title: Publish queue storage
 category: writes
-slug: durable-delivery
+slug: publish-queue
 status: built
 date: 2026-07-30
 audience: llms
 scope: binary persistence for accepted write obligations and per-relay delivery
 owns:
   - execution-side delivery vocabulary
-  - the delivery_*_v1 key and value model
+  - the publish_queue_* key and value model
   - schema and codec version refusal
   - relay-surrogate allocation and recovery
   - crash and performance qualification for the representation cut
@@ -24,17 +24,17 @@ issues:
   - https://github.com/pablof7z/nmp/issues/1134
 ---
 
-# Durable delivery storage
+# Publish queue storage
 
 NMP uses two different concepts that used to share the word “outbox”:
 
 - **outbox routing** selects relays, including NIP-65 author write relays;
-- **durable delivery** executes an accepted write against the selected relays.
+- **publish queue** executes an accepted write against the selected relays.
 
 The routing term remains correct. The execution module, store doors, types,
 diagnostics, fixtures, and current documentation use `delivery`: for example
-`DeliveryLane`, `DeliveryAttempt`, `DeliveryDeadline`, `DeliveryReceipt`, and
-`recover_delivery`. There is no compatibility alias for the retired
+`PublishQueueLane`, `PublishQueueAttempt`, `PublishQueueDeadline`, `PublishQueueReceipt`, and
+`recover_publish_queue`. There is no compatibility alias for the retired
 execution-side spelling.
 
 The authority for this cut is the repository owner’s wording:
@@ -45,9 +45,9 @@ The authority for this cut is the repository owner’s wording:
 
 ## Fresh-store cut
 
-The whole Redb schema epoch is version 12. Durable delivery has a second,
-explicit codec marker with version 1 in `delivery_meta_v1`. A new database
-creates only `delivery_*_v1` execution tables. It never opens, drains,
+The whole Redb schema epoch is version 12. Publish queue has a second,
+explicit codec marker with version 1 in `publish_queue_meta_v1`. A new database
+creates only `publish_queue_*` execution tables. It never opens, drains,
 transforms, dual-writes, or deletes a legacy execution table.
 
 A nonempty pre-cut database therefore reaches the existing typed
@@ -79,14 +79,14 @@ Every ordering-sensitive key is fixed width and big-endian:
 
 The namespace consists of:
 
-`delivery_intents_v1`, `delivery_displaced_v1`,
-`delivery_receipts_v1`, `delivery_correlations_v1`,
-`delivery_route_revisions_v1`, `delivery_lanes_v1`,
-`delivery_attempts_v1`, `delivery_attempt_details_v1`,
-`delivery_deadlines_v1`, `delivery_deadlines_by_intent_v1`,
-`delivery_relays_v1`, `delivery_relay_ids_v1`,
-`delivery_kind5_claims_v1`, `delivery_suppress_by_id_v1`,
-`delivery_suppress_by_addr_v1`, and `delivery_meta_v1`.
+`publish_queue_intents_v1`, `publish_queue_displaced_v1`,
+`publish_queue_receipts_v1`, `publish_queue_correlations_v1`,
+`publish_queue_route_revisions_v1`, `publish_queue_lanes_v1`,
+`publish_queue_attempts_v1`, `publish_queue_attempt_details_v1`,
+`publish_queue_deadlines_v1`, `publish_queue_deadlines_by_intent_v1`,
+`publish_queue_relays_v1`, `publish_queue_relay_ids_v1`,
+`publish_queue_kind5_claims_v1`, `publish_queue_suppress_by_id_v1`,
+`publish_queue_suppress_by_addr_v1`, and `publish_queue_meta_v1`.
 
 Values use an explicit eight-byte envelope: four ASCII magic bytes, one codec
 version byte, and three zero reserved bytes. Integers are big-endian; variants
@@ -171,7 +171,7 @@ No `route_complete` field or table exists.
 
 ## Isolated performance evidence
 
-`crates/nmp-store/examples/delivery_recovery_bench.rs` runs population and
+`crates/nmp-store/examples/publish_queue_recovery_bench.rs` runs population and
 recovery in separate release processes with a counting allocator and Linux
 process-I/O accounting. The comparison used exact base
 `625e976d670fe035efa57e42debb332943902c98` and the candidate implementation.
@@ -210,7 +210,7 @@ fixture and source can prove:
   and suppression metadata;
 - its `&str` keys make Redb validate UTF-8 during key handling, and relay URLs
   are reconstructed from repeated JSON values;
-- active `delivery.rs`, `delivery_ops.rs`, and `delivery_codec.rs` have zero
+- active `delivery.rs`, `publish_queue_ops.rs`, and `publish_queue_codec.rs` have zero
   `serde_json` use; their ordered keys are fixed byte arrays;
 - the candidate parses four relay dictionary values once per fresh recovery
   process and caches those four canonical identities while recovering 1,000

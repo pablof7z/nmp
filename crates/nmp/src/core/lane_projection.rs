@@ -14,7 +14,7 @@ impl<S: EventStore> EngineCore<S> {
     /// exact rebuild rather than an incremental merge. Keeping the reverse
     /// wake index in the same door prevents its membership from drifting from
     /// the per-intent projection.
-    fn replace_lane_projection(&mut self, id: ReceiptId, lanes: &[DeliveryLane]) {
+    fn replace_lane_projection(&mut self, id: ReceiptId, lanes: &[PublishQueueLane]) {
         if !self.pending.contains_key(&id) {
             self.lane_projection_unprovable = true;
             return;
@@ -46,7 +46,7 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// Apply one successful store mutation's exact post-state.
-    fn apply_committed_lane(&mut self, lane: &DeliveryLane) {
+    fn apply_committed_lane(&mut self, lane: &PublishQueueLane) {
         let Some(id) = self.intent_receipts.get(&lane.key.intent_id).copied() else {
             self.lane_projection_unprovable = true;
             return;
@@ -69,7 +69,7 @@ impl<S: EventStore> EngineCore<S> {
     /// This deliberately produces a superset. A false-positive worker can be
     /// retired after explicit recovery; a false-negative can strand a durable
     /// obligation forever.
-    fn mark_lane_projection_uncertain(&mut self, key: &DeliveryLaneKey) {
+    fn mark_lane_projection_uncertain(&mut self, key: &PublishQueueLaneKey) {
         let Some(id) = self.intent_receipts.get(&key.intent_id).copied() else {
             self.lane_projection_unprovable = true;
             return;
@@ -89,9 +89,9 @@ impl<S: EventStore> EngineCore<S> {
 
     fn commit_lane_transition<T>(
         &mut self,
-        key: &DeliveryLaneKey,
-        operation: impl FnOnce(&mut S) -> Result<(T, DeliveryLane), PersistenceError>,
-    ) -> Result<(T, DeliveryLane), PersistenceError> {
+        key: &PublishQueueLaneKey,
+        operation: impl FnOnce(&mut S) -> Result<(T, PublishQueueLane), PersistenceError>,
+    ) -> Result<(T, PublishQueueLane), PersistenceError> {
         let result = operation(self.resolver.store_mut());
         match result {
             Ok((value, lane)) => {
@@ -118,11 +118,11 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         intent_id: IntentId,
         candidate_relays: Option<&BTreeSet<RelayUrl>>,
-    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
         let result = self
             .resolver
             .store_mut()
-            .bootstrap_delivery_lanes(intent_id);
+            .bootstrap_publish_queue_lanes(intent_id);
         match result {
             Ok(lanes) => {
                 if let Some(id) = self.intent_receipts.get(&intent_id).copied() {
@@ -144,7 +144,7 @@ impl<S: EventStore> EngineCore<S> {
                 // absent, so every route candidate remains conservatively
                 // owned until a retry commits.
                 for relay in candidate_relays.into_iter().flatten() {
-                    self.mark_lane_projection_uncertain(&DeliveryLaneKey {
+                    self.mark_lane_projection_uncertain(&PublishQueueLaneKey {
                         intent_id,
                         relay: relay.clone(),
                     });
@@ -196,10 +196,10 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn commit_lane_waiting(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         revision: u64,
         auth: bool,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         self.commit_lane_transition(key, |store| {
             store
                 .set_lane_waiting(key, revision, auth)
@@ -210,10 +210,10 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn commit_lane_eligible(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         revision: u64,
         since: Timestamp,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         self.commit_lane_transition(key, |store| {
             store
                 .set_lane_eligible(key, revision, since)
@@ -225,13 +225,13 @@ impl<S: EventStore> EngineCore<S> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_lane_transient(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         revision: u64,
         ordinal: u64,
         eligible_at: Timestamp,
-        cause: DeliveryTransientCause,
+        cause: PublishQueueTransientCause,
         raw_reason: Option<String>,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         self.commit_lane_transition(key, |store| {
             store
                 .set_lane_transient(key, revision, ordinal, eligible_at, cause, raw_reason)
@@ -243,14 +243,14 @@ impl<S: EventStore> EngineCore<S> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_lane_suspension(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         revision: u64,
         ordinal: u64,
         at: Timestamp,
-        cause: DeliveryTransientCause,
+        cause: PublishQueueTransientCause,
         raw_reason: Option<String>,
         auth: bool,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         self.commit_lane_transition(key, |store| {
             store
                 .suspend_lane_attempt(key, revision, ordinal, at, cause, raw_reason, auth)
@@ -261,11 +261,11 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn commit_lane_attempt_start(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         revision: u64,
         event: SignedEvent,
         started_at: Timestamp,
-    ) -> Result<(nmp_store::DeliveryAttempt, DeliveryLane), PersistenceError> {
+    ) -> Result<(nmp_store::PublishQueueAttempt, PublishQueueLane), PersistenceError> {
         self.commit_lane_transition(key, |store| {
             store.start_lane_attempt(key, revision, event, started_at)
         })
@@ -273,12 +273,12 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn commit_lane_handoff(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         revision: u64,
         ordinal: u64,
-        detail: DeliveryAttemptHandoff,
-        next: DeliveryPostHandoffState,
-    ) -> Result<DeliveryLane, PersistenceError> {
+        detail: PublishQueueAttemptHandoff,
+        next: PublishQueuePostHandoffState,
+    ) -> Result<PublishQueueLane, PersistenceError> {
         self.commit_lane_transition(key, |store| {
             store
                 .record_lane_handoff(key, revision, ordinal, detail, next)
@@ -289,12 +289,12 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn commit_lane_attempt_finish(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         revision: u64,
         ordinal: u64,
-        outcome: DeliveryAttemptOutcome,
+        outcome: PublishQueueAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         self.commit_lane_transition(key, |store| {
             store
                 .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
@@ -305,10 +305,10 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn commit_lane_auth_denied(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         revision: u64,
         denial: StoredAuthDenial,
-    ) -> Result<DeliveryLane, PersistenceError> {
+    ) -> Result<PublishQueueLane, PersistenceError> {
         self.commit_lane_transition(key, |store| {
             store
                 .deny_lane_auth(key, revision, denial)
@@ -321,7 +321,7 @@ impl<S: EventStore> EngineCore<S> {
     ///
     /// A revision mints no lane by itself today: its paired
     /// [`Self::bootstrap_projected_lanes`] is what returns the committed
-    /// `DeliveryLane` set, so this applies no projection delta and the
+    /// `PublishQueueLane` set, so this applies no projection delta and the
     /// caller's own route-blocked bookkeeping already retains worker demand
     /// when the append fails.
     ///
@@ -335,7 +335,7 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<nmp_store::DeliveryRouteRevision, PersistenceError> {
+    ) -> Result<nmp_store::PublishQueueRouteRevision, PersistenceError> {
         self.resolver
             .store_mut()
             .record_route_revision(intent_id, relays)
@@ -444,10 +444,12 @@ mod tests {
                 expected.extend(
                     core.resolver
                         .store()
-                        .recover_delivery_lanes(intent_id)
+                        .recover_publish_queue_lanes(intent_id)
                         .expect("oracle lane recovery")
                         .into_iter()
-                        .filter(|lane| !matches!(lane.state, DeliveryLaneState::Terminal { .. }))
+                        .filter(|lane| {
+                            !matches!(lane.state, PublishQueueLaneState::Terminal { .. })
+                        })
                         .map(|lane| RelaySessionKey::new(lane.key.relay, access)),
                 );
             }
@@ -464,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_matches_durable_state_after_every_normal_delivery_transition() {
+    fn projection_matches_durable_state_after_every_normal_publish_queue_transition() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-lifecycle.example.com").unwrap();
         let session =
@@ -570,12 +572,12 @@ mod tests {
         let relay = RelayUrl::parse("wss://projection-unknown.example.com").unwrap();
         let mut core = EngineCore::new(MemoryStore::new(), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 30);
-        let key = DeliveryLaneKey {
+        let key = PublishQueueLaneKey {
             intent_id: core.pending[&receipt].intent_id.unwrap(),
             relay: relay.clone(),
         };
 
-        let result: Result<((), DeliveryLane), PersistenceError> =
+        let result: Result<((), PublishQueueLane), PersistenceError> =
             core.commit_lane_transition(&key, |_store| {
                 Err(PersistenceError::new(
                     PersistenceFault::Io,
@@ -603,13 +605,13 @@ mod tests {
         let relay = RelayUrl::parse("wss://projection-absent.example.com").unwrap();
         let mut core = EngineCore::new(MemoryStore::new(), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 31);
-        let key = DeliveryLaneKey {
+        let key = PublishQueueLaneKey {
             intent_id: core.pending[&receipt].intent_id.unwrap(),
             relay,
         };
         let before = core.pending[&receipt].lane_projection.clone();
 
-        let result: Result<((), DeliveryLane), PersistenceError> =
+        let result: Result<((), PublishQueueLane), PersistenceError> =
             core.commit_lane_transition(&key, |_store| {
                 Err(PersistenceError::invariant(
                     "injected known-absent transition",
@@ -694,17 +696,17 @@ mod tests {
     /// sequencing comment warns about.
     ///
     /// 1. **Nothing is missing from the enumeration.** Every `EventStore`
-    ///    door that takes `&mut self` and deals in `DeliveryLane` is a
+    ///    door that takes `&mut self` and deals in `PublishQueueLane` is a
     ///    lane-mutation constructor, scraped straight out of `nmp-store`'s
     ///    own trait; adding one there without giving it a `commit_*` door in
     ///    this module fails here. Two further constructors never mention
-    ///    `DeliveryLane` in their signature and are therefore named
+    ///    `PublishQueueLane` in their signature and are therefore named
     ///    explicitly: `close_terminal_intent`, which removes an intent's open
     ///    work wholesale, and `record_route_revision`.
     ///
     ///    `record_route_revision` is the one the second #985 design comment
     ///    singles out. Today a revision mints no lane by itself -- its paired
-    ///    `bootstrap_delivery_lanes` does -- so an enumeration written against
+    ///    `bootstrap_publish_queue_lanes` does -- so an enumeration written against
     ///    today's call sites would look complete and go silently incomplete
     ///    the moment #975 lands, because `Auto` re-executes its strategy at
     ///    EVERY send opportunity and appends a revision whenever resolution
@@ -725,7 +727,7 @@ mod tests {
     #[test]
     fn every_lane_mutation_constructor_goes_through_the_projection_door() {
         /// Lane-minting/removing doors whose signature does not mention
-        /// `DeliveryLane`, so the scrape below cannot find them.
+        /// `PublishQueueLane`, so the scrape below cannot find them.
         const NAMED_EXPLICITLY: &[&str] = &["record_route_revision", "close_terminal_intent"];
 
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -736,7 +738,7 @@ mod tests {
         for chunk in store_source.split("\n    fn ").skip(1) {
             let name = chunk.split('(').next().unwrap_or_default();
             let signature = chunk.split('{').next().unwrap_or_default();
-            if signature.contains("&mut self") && signature.contains("DeliveryLane") {
+            if signature.contains("&mut self") && signature.contains("PublishQueueLane") {
                 doors.push(name.to_string());
             }
         }
@@ -764,7 +766,7 @@ mod tests {
                 projection.contains(&format!(".{door}(")),
                 "`EventStore::{door}` mutates lane state but core/lane_projection.rs \
                  has no `commit_*` door for it -- every engine lane mutation must be \
-                 funnelled so its committed `DeliveryLane` updates the projection"
+                 funnelled so its committed `PublishQueueLane` updates the projection"
             );
         }
 
@@ -807,7 +809,7 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "every engine lane mutation must go through the reducer-owned door in \
-             core/lane_projection.rs, so the committed `DeliveryLane` can update the \
+             core/lane_projection.rs, so the committed `PublishQueueLane` can update the \
              worker projection. Bypasses found: {offenders:#?}"
         );
     }
@@ -827,9 +829,9 @@ mod tests {
     /// number, neither of which belongs in the ordinary suite.
     ///
     /// Lane-read counts are not instrumented here: the before body performs
-    /// exactly one `recover_delivery_lanes` per pending intent per pass by
+    /// exactly one `recover_publish_queue_lanes` per pending intent per pass by
     /// construction, and the after body's zero is pinned by
-    /// `unchanged_worker_demand_reads_zero_delivery_lanes` in
+    /// `unchanged_worker_demand_reads_zero_publish_queue_lanes` in
     /// `tests/core_headless`.
     ///
     /// This is NOT the Mosaico-shaped end-to-end profile #985 also asks for;
@@ -881,7 +883,7 @@ mod tests {
         println!(
             "measure_worker_demand_cost intents={INTENTS} x {RELAYS_PER_INTENT} relays, \
              {PASSES} worker-demand passes (RedbStore)\n  \
-             BEFORE (per-intent recover_delivery_lanes): {before:?}, \
+             BEFORE (per-intent recover_publish_queue_lanes): {before:?}, \
              {} lane reads\n  AFTER  (reducer projection): {after:?}, 0 lane reads\n  \
              speedup: {:.1}x",
             INTENTS * PASSES,

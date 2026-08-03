@@ -1,7 +1,7 @@
 //! #680 / #46 — receipt facts are durable and reattachable across a detach that
 //! happens BEFORE the write reaches its retained terminal/steady state
 //! (falsifier item 5). The live async receipt stream is not the source of
-//! truth: the persisted durable-delivery store is. Detaching a consumer loses no
+//! truth: the persisted publish-queue store is. Detaching a consumer loses no
 //! fact — a fresh reattached stream traverses the durable history, including
 //! facts that accrued AFTER the original consumer was dropped.
 //!
@@ -21,9 +21,9 @@ use nmp_ffi::types::{
     FfiWriteRouting, FfiWriteStatus,
 };
 use nmp_store::{
-    AcceptWrite, DeliveryAttemptHandoff, DeliveryAttemptOutcome, DeliveryLaneKey,
-    DeliveryPostHandoffState, DeliveryTransientCause, EventStore, HandoffEvidence, IntentSigState,
-    WriteDurability,
+    AcceptWrite, EventStore, HandoffEvidence, IntentSigState, PublishQueueAttemptHandoff,
+    PublishQueueAttemptOutcome, PublishQueueLaneKey, PublishQueuePostHandoffState,
+    PublishQueueTransientCause, WriteDurability,
 };
 
 async fn next_status(stream: &Arc<NmpReceiptStream>) -> Option<FfiWriteStatus> {
@@ -155,10 +155,10 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
             .record_route_revision(intent_id, [relay.clone()].into_iter().collect())
             .expect("persist route");
         let mut lane = store
-            .bootstrap_delivery_lanes(intent_id)
+            .bootstrap_publish_queue_lanes(intent_id)
             .expect("bootstrap lane")
             .remove(0);
-        let key = DeliveryLaneKey {
+        let key = PublishQueueLaneKey {
             intent_id,
             relay: relay.clone(),
         };
@@ -183,13 +183,13 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
                         &key,
                         started.revision,
                         ordinal,
-                        DeliveryAttemptHandoff {
+                        PublishQueueAttemptHandoff {
                             at: nostr::Timestamp::from(base + 1),
                             result: HandoffEvidence::Written,
                         },
-                        DeliveryPostHandoffState::Transient {
+                        PublishQueuePostHandoffState::Transient {
                             eligible_at: nostr::Timestamp::from(base + 2),
-                            cause: DeliveryTransientCause::RelayRateLimited,
+                            cause: PublishQueueTransientCause::RelayRateLimited,
                             raw_reason: Some("ffi bounded-page proof".into()),
                         },
                     )
@@ -203,11 +203,11 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
                         &key,
                         started.revision,
                         ordinal,
-                        DeliveryAttemptHandoff {
+                        PublishQueueAttemptHandoff {
                             at: nostr::Timestamp::from(base + 1),
                             result: HandoffEvidence::Written,
                         },
-                        DeliveryPostHandoffState::AwaitingAck {
+                        PublishQueuePostHandoffState::AwaitingAck {
                             deadline: nostr::Timestamp::from(base + 2),
                         },
                     )
@@ -217,7 +217,7 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
                         &key,
                         awaiting_ack.revision,
                         ordinal,
-                        DeliveryAttemptOutcome::GaveUp,
+                        PublishQueueAttemptOutcome::GaveUp,
                         nostr::Timestamp::from(base + 2),
                     )
                     .expect("finish final attempt");

@@ -142,10 +142,10 @@ pub enum AuthDiagnosticsPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StalledWriteStage {
     /// No destination could be computed. The write is parked in
-    /// [`crate::delivery::WriteStatus::AwaitingRoute`].
+    /// [`crate::publish_queue::WriteStatus::AwaitingRoute`].
     Unroutable,
     /// No signer answers for the author this obligation was FROZEN to — the
-    /// [`crate::delivery::WriteStatus::AwaitingCapability`] park. Never the
+    /// [`crate::publish_queue::WriteStatus::AwaitingCapability`] park. Never the
     /// mutable active account.
     Unsignable,
     /// Destinations exist and none of them is working: every relay this

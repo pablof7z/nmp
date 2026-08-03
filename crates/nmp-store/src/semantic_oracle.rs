@@ -17,11 +17,11 @@ use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Ti
 use serde_json::{json, Value};
 
 use crate::{
-    coverage_key, sentinel_signature, AcceptOutcome, AcceptWrite, CoverageInterval,
-    DeliveryAttemptHandoff, DeliveryAttemptOutcome, DeliveryLaneKey, DeliveryPostHandoffState,
-    DeliveryTransientCause, EventStore, GcRetentionSet, HandoffEvidence, InsertOutcome, IntentId,
-    IntentSigState, MemoryStore, RedbStore, RefuseReason, RelayObserved, StoredEvent,
-    WriteDurability,
+    coverage_key, sentinel_signature, AcceptOutcome, AcceptWrite, CoverageInterval, EventStore,
+    GcRetentionSet, HandoffEvidence, InsertOutcome, IntentId, IntentSigState, MemoryStore,
+    PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueLaneKey,
+    PublishQueuePostHandoffState, PublishQueueTransientCause, RedbStore, RefuseReason,
+    RelayObserved, StoredEvent, WriteDurability,
 };
 
 const ALICE_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -388,7 +388,7 @@ fn normalized_state(
                 "routes": format!("{:?}", store.recover_route_revisions(*intent_id).expect("routes")),
                 "attempts": format!("{:?}", store.recover_attempts(*intent_id).expect("attempts")),
                 "details": format!("{:?}", store.recover_attempt_details(*intent_id).expect("attempt details")),
-                "lanes": format!("{:?}", store.recover_delivery_lanes(*intent_id).expect("lanes")),
+                "lanes": format!("{:?}", store.recover_publish_queue_lanes(*intent_id).expect("lanes")),
             })
         })
         .collect::<Vec<_>>();
@@ -417,7 +417,7 @@ fn normalized_state(
         "receipts": receipts,
         "correlations": correlations,
         "delivery": delivery,
-        "deadlines": format!("{:?}", store.due_delivery_deadlines(Timestamp::from(u64::MAX), 1_000).expect("deadlines")),
+        "deadlines": format!("{:?}", store.due_publish_queue_deadlines(Timestamp::from(u64::MAX), 1_000).expect("deadlines")),
         "next_expiration": store.next_expiration().map(|value| value.as_secs()),
     });
     serde_json::to_string(&state).expect("serialize normalized oracle state")
@@ -425,8 +425,8 @@ fn normalized_state(
 
 fn normalized_recovery_state(store: &dyn EventStore, context: &OracleContext) -> String {
     let intents = store
-        .recover_delivery()
-        .expect("crash-oracle recover_delivery")
+        .recover_publish_queue()
+        .expect("crash-oracle recover_publish_queue")
         .into_iter()
         .map(|intent| {
             json!({
@@ -486,8 +486,8 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
             .expect("crash-oracle ordered query"),
     );
     let intents = store
-        .recover_delivery()
-        .expect("crash-oracle recover_delivery")
+        .recover_publish_queue()
+        .expect("crash-oracle recover_publish_queue")
         .into_iter()
         .map(|intent| {
             json!({
@@ -500,7 +500,7 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
                 "routes": format!("{:?}", store.recover_route_revisions(intent.intent_id).expect("crash-oracle routes")),
                 "attempts": format!("{:?}", store.recover_attempts(intent.intent_id).expect("crash-oracle attempts")),
                 "details": format!("{:?}", store.recover_attempt_details(intent.intent_id).expect("crash-oracle details")),
-                "lanes": format!("{:?}", store.recover_delivery_lanes(intent.intent_id).expect("crash-oracle lanes")),
+                "lanes": format!("{:?}", store.recover_publish_queue_lanes(intent.intent_id).expect("crash-oracle lanes")),
             })
         })
         .collect::<Vec<_>>();
@@ -508,7 +508,7 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
         "events": rows,
         "ordered": ordered,
         "open_intents": intents,
-        "deadlines": format!("{:?}", store.due_delivery_deadlines(Timestamp::from(u64::MAX), 1_024).expect("crash-oracle deadlines")),
+        "deadlines": format!("{:?}", store.due_publish_queue_deadlines(Timestamp::from(u64::MAX), 1_024).expect("crash-oracle deadlines")),
         "next_expiration": store.next_expiration().map(|value| value.as_secs()),
     }))
     .expect("serialize crash-oracle state");
@@ -993,7 +993,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         .unwrap();
     harness
         .store()
-        .bootstrap_delivery_lanes(edge_intent)
+        .bootstrap_publish_queue_lanes(edge_intent)
         .unwrap();
     record(
         &mut harness,
@@ -1004,8 +1004,11 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &primary,
     );
 
-    let edge_lanes = harness.store().recover_delivery_lanes(edge_intent).unwrap();
-    let unknown_key = DeliveryLaneKey {
+    let edge_lanes = harness
+        .store()
+        .recover_publish_queue_lanes(edge_intent)
+        .unwrap();
+    let unknown_key = PublishQueueLaneKey {
         intent_id: edge_intent,
         relay: unknown_relay,
     };
@@ -1032,12 +1035,12 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &unknown_key,
             unknown_lane.revision,
             unknown_attempt.ordinal,
-            DeliveryAttemptHandoff {
+            PublishQueueAttemptHandoff {
                 at: Timestamp::from(293),
                 result: HandoffEvidence::Ambiguous,
             },
-            DeliveryPostHandoffState::Terminal {
-                outcome: DeliveryAttemptOutcome::OutcomeUnknown,
+            PublishQueuePostHandoffState::Terminal {
+                outcome: PublishQueueAttemptOutcome::OutcomeUnknown,
                 finished_at: Timestamp::from(293),
             },
         )
@@ -1051,7 +1054,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &primary,
     );
 
-    let gave_up_key = DeliveryLaneKey {
+    let gave_up_key = PublishQueueLaneKey {
         intent_id: edge_intent,
         relay: gave_up_relay,
     };
@@ -1078,7 +1081,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &gave_up_key,
             gave_up_lane.revision,
             gave_up_attempt.ordinal,
-            DeliveryAttemptOutcome::GaveUp,
+            PublishQueueAttemptOutcome::GaveUp,
             Timestamp::from(296),
         )
         .unwrap();
@@ -1091,7 +1094,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &primary,
     );
 
-    let interrupted_key = DeliveryLaneKey {
+    let interrupted_key = PublishQueueLaneKey {
         intent_id: edge_intent,
         relay: interrupted_relay,
     };
@@ -1123,7 +1126,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             interrupted_lane.revision,
             interrupted_attempt.ordinal,
             Timestamp::from(299),
-            DeliveryTransientCause::Interrupted,
+            PublishQueueTransientCause::Interrupted,
             Some("oracle process interruption".into()),
             false,
         )
@@ -1159,7 +1162,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &interrupted_key,
             rejection_lane.revision,
             rejection_attempt.ordinal,
-            DeliveryAttemptOutcome::Rejected("oracle relay rejected".into()),
+            PublishQueueAttemptOutcome::Rejected("oracle relay rejected".into()),
             Timestamp::from(302),
         )
         .unwrap();
@@ -1195,7 +1198,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     );
     harness
         .store()
-        .bootstrap_delivery_lanes(publish_intent)
+        .bootstrap_publish_queue_lanes(publish_intent)
         .unwrap();
     record(
         &mut harness,
@@ -1206,7 +1209,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &primary,
     );
 
-    let lane_key = DeliveryLaneKey {
+    let lane_key = PublishQueueLaneKey {
         intent_id: publish_intent,
         relay: publish,
     };
@@ -1245,13 +1248,13 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &lane_key,
             lane.revision,
             attempt.ordinal,
-            DeliveryAttemptHandoff {
+            PublishQueueAttemptHandoff {
                 at: Timestamp::from(242),
                 result: HandoffEvidence::Ambiguous,
             },
-            DeliveryPostHandoffState::Transient {
+            PublishQueuePostHandoffState::Transient {
                 eligible_at: Timestamp::from(250),
-                cause: DeliveryTransientCause::ConnectionLost,
+                cause: PublishQueueTransientCause::ConnectionLost,
                 raw_reason: Some("oracle retry".into()),
             },
         )
@@ -1267,7 +1270,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
 
     let retry_lane = harness
         .store()
-        .recover_delivery_lanes(publish_intent)
+        .recover_publish_queue_lanes(publish_intent)
         .unwrap()
         .remove(0);
     let retry_lane = harness
@@ -1300,11 +1303,11 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &lane_key,
             retry_lane.revision,
             retry.ordinal,
-            DeliveryAttemptHandoff {
+            PublishQueueAttemptHandoff {
                 at: Timestamp::from(252),
                 result: HandoffEvidence::Written,
             },
-            DeliveryPostHandoffState::AwaitingAck {
+            PublishQueuePostHandoffState::AwaitingAck {
                 deadline: Timestamp::from(260),
             },
         )
@@ -1324,7 +1327,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
             &lane_key,
             awaiting_ack.revision,
             retry.ordinal,
-            DeliveryAttemptOutcome::Acked,
+            PublishQueueAttemptOutcome::Acked,
             Timestamp::from(253),
         )
         .unwrap();

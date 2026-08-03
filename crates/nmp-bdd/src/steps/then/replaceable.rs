@@ -114,7 +114,7 @@ async fn nothing_journaled_and_no_id(w: &mut NmpWorld) {
     assert!(
         !statuses
             .iter()
-            .any(|s| matches!(s, nmp::mechanism::delivery::WriteStatus::Accepted)),
+            .any(|s| matches!(s, nmp::mechanism::publish_queue::WriteStatus::Accepted)),
         "the precondition is checked BEFORE an intent or receipt id is allocated; saw \
          {statuses:?}"
     );

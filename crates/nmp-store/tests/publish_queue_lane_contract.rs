@@ -1,14 +1,15 @@
-//! Durable-delivery lane substrate contract (issue #94).
+//! Publish-queue lane substrate contract (issue #94).
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AuthDenial, AuthDenialSource,
-    CloseIntentOutcome, DeliveryAttemptHandoff, DeliveryAttemptOutcome, DeliveryDeadline,
-    DeliveryDeadlineKind, DeliveryInFlightPhase, DeliveryLane, DeliveryLaneKey, DeliveryLaneState,
-    DeliveryPostHandoffState, DeliveryTerminalOutcome, DeliveryTransientCause, EventStore,
-    HandoffEvidence, IntentId, IntentSigState, MemoryStore, RedbStore, WriteDurability,
+    CloseIntentOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState, MemoryStore,
+    PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
+    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
+    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
+    PublishQueueTransientCause, RedbStore, WriteDurability,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -50,7 +51,7 @@ fn seed(
     content: &str,
     created_at: u64,
     relay: RelayUrl,
-) -> (IntentId, u64, Event, DeliveryLaneKey, DeliveryLane) {
+) -> (IntentId, u64, Event, PublishQueueLaneKey, PublishQueueLane) {
     let keys = Keys::generate();
     let (signed, frozen) = signed_and_frozen(&keys, content, created_at);
     let accepted = store
@@ -68,13 +69,13 @@ fn seed(
     store
         .record_route_revision(intent_id, BTreeSet::from([relay.clone()]))
         .unwrap();
-    let lanes = store.bootstrap_delivery_lanes(intent_id).unwrap();
+    let lanes = store.bootstrap_publish_queue_lanes(intent_id).unwrap();
     assert_eq!(lanes.len(), 1);
     let lane = lanes[0].clone();
     assert_eq!(lane.revision, 1);
     assert_eq!(lane.last_ordinal, 0);
-    assert_eq!(lane.state, DeliveryLaneState::WaitingConnection);
-    let key = DeliveryLaneKey { intent_id, relay };
+    assert_eq!(lane.state, PublishQueueLaneState::WaitingConnection);
+    let key = PublishQueueLaneKey { intent_id, relay };
     assert_eq!(lane.key, key);
     (intent_id, receipt_id, signed, key, lane)
 }
@@ -96,7 +97,7 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
 
         // Bootstrap is deterministic and idempotent.
         assert_eq!(
-            store.bootstrap_delivery_lanes(intent).unwrap(),
+            store.bootstrap_publish_queue_lanes(intent).unwrap(),
             vec![seeded]
         );
 
@@ -106,7 +107,7 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
         assert_eq!(eligible.revision, 2);
         assert_eq!(
             eligible.state,
-            DeliveryLaneState::Eligible {
+            PublishQueueLaneState::Eligible {
                 since: Timestamp::from(101)
             }
         );
@@ -120,13 +121,13 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
             .start_lane_attempt(&key, 2, signed.clone(), Timestamp::from(102))
             .unwrap();
         assert_eq!(first.ordinal, 1);
-        assert_eq!(first.outcome, DeliveryAttemptOutcome::Started);
+        assert_eq!(first.outcome, PublishQueueAttemptOutcome::Started);
         assert_eq!(awaiting_handoff.revision, 3);
         assert_eq!(
             awaiting_handoff.state,
-            DeliveryLaneState::InFlight {
+            PublishQueueLaneState::InFlight {
                 ordinal: 1,
-                phase: DeliveryInFlightPhase::AwaitingHandoff,
+                phase: PublishQueueInFlightPhase::AwaitingHandoff,
             }
         );
         let details = store.recover_attempt_details(intent).unwrap();
@@ -139,12 +140,12 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
                 &key,
                 3,
                 1,
-                DeliveryAttemptHandoff {
+                PublishQueueAttemptHandoff {
                     at: Timestamp::from(102),
                     result: HandoffEvidence::NotHandedOff,
                 },
-                DeliveryPostHandoffState::Terminal {
-                    outcome: DeliveryAttemptOutcome::Started,
+                PublishQueuePostHandoffState::Terminal {
+                    outcome: PublishQueueAttemptOutcome::Started,
                     finished_at: Timestamp::from(102),
                 },
             )
@@ -154,7 +155,10 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
             None,
             "an invalid handoff transition must leave no detail mutation"
         );
-        assert_eq!(store.recover_delivery_lanes(intent).unwrap()[0].revision, 3);
+        assert_eq!(
+            store.recover_publish_queue_lanes(intent).unwrap()[0].revision,
+            3
+        );
 
         let ack_deadline = Timestamp::from(120);
         let awaiting_ack = store
@@ -162,19 +166,19 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
                 &key,
                 3,
                 1,
-                DeliveryAttemptHandoff {
+                PublishQueueAttemptHandoff {
                     at: Timestamp::from(103),
                     result: HandoffEvidence::Written,
                 },
-                DeliveryPostHandoffState::AwaitingAck {
+                PublishQueuePostHandoffState::AwaitingAck {
                     deadline: ack_deadline,
                 },
             )
             .unwrap();
         assert_eq!(awaiting_ack.revision, 4);
         assert_eq!(
-            store.due_delivery_deadlines(ack_deadline, 10).unwrap()[0].kind,
-            DeliveryDeadlineKind::AckTimeout
+            store.due_publish_queue_deadlines(ack_deadline, 10).unwrap()[0].kind,
+            PublishQueueDeadlineKind::AckTimeout
         );
 
         let retry_at = Timestamp::from(130);
@@ -184,24 +188,24 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
                 4,
                 1,
                 retry_at,
-                DeliveryTransientCause::AckTimeout,
+                PublishQueueTransientCause::AckTimeout,
                 Some("ack deadline elapsed".into()),
             )
             .unwrap();
         assert_eq!(transient.revision, 5);
         assert!(store
-            .due_delivery_deadlines(ack_deadline, 10)
+            .due_publish_queue_deadlines(ack_deadline, 10)
             .unwrap()
             .is_empty());
-        let retry_due = store.due_delivery_deadlines(retry_at, 10).unwrap();
+        let retry_due = store.due_publish_queue_deadlines(retry_at, 10).unwrap();
         assert_eq!(retry_due.len(), 1);
-        assert_eq!(retry_due[0].kind, DeliveryDeadlineKind::RetryEligible);
+        assert_eq!(retry_due[0].kind, PublishQueueDeadlineKind::RetryEligible);
         assert_eq!(retry_due[0].lane_revision, 5);
 
         let eligible = store.set_lane_eligible(&key, 5, retry_at).unwrap();
         assert_eq!(eligible.revision, 6);
         assert!(store
-            .due_delivery_deadlines(retry_at, 10)
+            .due_publish_queue_deadlines(retry_at, 10)
             .unwrap()
             .is_empty());
 
@@ -210,7 +214,7 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
             .unwrap();
         assert_eq!(second.ordinal, 2);
         assert_eq!(
-            store.recover_delivery_lanes(intent).unwrap()[0].last_ordinal,
+            store.recover_publish_queue_lanes(intent).unwrap()[0].last_ordinal,
             2
         );
         assert_eq!(
@@ -222,12 +226,12 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
                 &key,
                 7,
                 2,
-                DeliveryAttemptHandoff {
+                PublishQueueAttemptHandoff {
                     at: Timestamp::from(132),
                     result: HandoffEvidence::Written,
                 },
-                DeliveryPostHandoffState::Terminal {
-                    outcome: DeliveryAttemptOutcome::Acked,
+                PublishQueuePostHandoffState::Terminal {
+                    outcome: PublishQueueAttemptOutcome::Acked,
                     finished_at: Timestamp::from(133),
                 },
             )
@@ -235,9 +239,9 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
         assert_eq!(terminal.revision, 8);
         assert_eq!(
             terminal.state,
-            DeliveryLaneState::Terminal {
+            PublishQueueLaneState::Terminal {
                 ordinal: 2,
-                outcome: DeliveryTerminalOutcome::Acked
+                outcome: PublishQueueTerminalOutcome::Acked
             }
         );
         let details = store.recover_attempt_details(intent).unwrap();
@@ -246,7 +250,7 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
             details[0].handoff.as_ref().unwrap().result,
             HandoffEvidence::Written
         );
-        assert_eq!(details[1].terminal, Some(DeliveryAttemptOutcome::Acked));
+        assert_eq!(details[1].terminal, Some(PublishQueueAttemptOutcome::Acked));
 
         assert_eq!(
             store.close_terminal_intent(intent).unwrap(),
@@ -258,7 +262,7 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
         );
         assert!(store.reattach_receipt(receipt).unwrap().is_some());
         assert_eq!(
-            store.recover_delivery_lanes(intent).unwrap(),
+            store.recover_publish_queue_lanes(intent).unwrap(),
             vec![terminal]
         );
         assert_eq!(store.recover_attempts(intent).unwrap().len(), 2);
@@ -284,22 +288,22 @@ fn suspended_attempt_is_atomic_deadline_free_and_resumes_with_the_next_ordinal()
                 3,
                 1,
                 Timestamp::from(153),
-                DeliveryTransientCause::AuthRequired,
+                PublishQueueTransientCause::AuthRequired,
                 Some("auth-required: authenticate".into()),
                 true,
             )
             .unwrap();
         assert_eq!(waiting.revision, 4);
-        assert_eq!(waiting.state, DeliveryLaneState::WaitingAuth);
-        assert_eq!(store.next_delivery_deadline().unwrap(), None);
+        assert_eq!(waiting.state, PublishQueueLaneState::WaitingAuth);
+        assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
         assert!(store
-            .due_delivery_deadlines(Timestamp::from(u64::MAX), 10)
+            .due_publish_queue_deadlines(Timestamp::from(u64::MAX), 10)
             .unwrap()
             .is_empty());
         let details = store.recover_attempt_details(intent).unwrap();
         let transient = details[0].transient.as_ref().unwrap();
         assert_eq!(transient.eligible_at, Timestamp::from(153));
-        assert_eq!(transient.cause, DeliveryTransientCause::AuthRequired);
+        assert_eq!(transient.cause, PublishQueueTransientCause::AuthRequired);
         assert_eq!(
             transient.raw_reason.as_deref(),
             Some("auth-required: authenticate")
@@ -333,13 +337,13 @@ fn auth_denial_is_a_durable_terminal_lane_fact_and_revision_precedes_idempotence
         assert_eq!(terminal.last_ordinal, 0);
         assert_eq!(
             terminal.state,
-            DeliveryLaneState::Terminal {
+            PublishQueueLaneState::Terminal {
                 ordinal: 0,
-                outcome: DeliveryTerminalOutcome::AuthDenied(denial.clone()),
+                outcome: PublishQueueTerminalOutcome::AuthDenied(denial.clone()),
             }
         );
         assert_eq!(
-            store.recover_delivery_lanes(intent).unwrap(),
+            store.recover_publish_queue_lanes(intent).unwrap(),
             vec![terminal.clone()]
         );
         assert!(store.recover_attempts(intent).unwrap().is_empty());
@@ -371,7 +375,7 @@ fn due_deadlines_are_ordered_bounded_and_close_rejects_nonterminal_lanes() {
             .journaled_intent_id()
             .unwrap();
         assert!(store
-            .bootstrap_delivery_lanes(empty_intent)
+            .bootstrap_publish_queue_lanes(empty_intent)
             .unwrap()
             .is_empty());
         assert!(store.close_terminal_intent(empty_intent).is_err());
@@ -387,7 +391,7 @@ fn due_deadlines_are_ordered_bounded_and_close_rejects_nonterminal_lanes() {
                     1,
                     0,
                     Timestamp::from(deadline),
-                    DeliveryTransientCause::ConnectionLost,
+                    PublishQueueTransientCause::ConnectionLost,
                     None,
                 )
                 .unwrap();
@@ -396,11 +400,11 @@ fn due_deadlines_are_ordered_bounded_and_close_rejects_nonterminal_lanes() {
         }
 
         assert_eq!(
-            store.next_delivery_deadline().unwrap(),
+            store.next_publish_queue_deadline().unwrap(),
             Some(Timestamp::from(10))
         );
         let due = store
-            .due_delivery_deadlines(Timestamp::from(30), 2)
+            .due_publish_queue_deadlines(Timestamp::from(30), 2)
             .unwrap();
         assert_eq!(due.len(), 2);
         assert_eq!(
@@ -409,10 +413,10 @@ fn due_deadlines_are_ordered_bounded_and_close_rejects_nonterminal_lanes() {
         );
         assert_eq!(
             due.iter().map(|row| row.kind).collect::<Vec<_>>(),
-            vec![DeliveryDeadlineKind::RetryEligible; 2]
+            vec![PublishQueueDeadlineKind::RetryEligible; 2]
         );
         assert!(store
-            .due_delivery_deadlines(Timestamp::from(30), 0)
+            .due_publish_queue_deadlines(Timestamp::from(30), 0)
             .unwrap()
             .is_empty());
     });
@@ -431,13 +435,13 @@ fn deadline_scale_read_returns_only_the_ordered_limit() {
                 lane.revision,
                 0,
                 Timestamp::from(10_000 + index),
-                DeliveryTransientCause::ConnectionLost,
+                PublishQueueTransientCause::ConnectionLost,
                 None,
             )
             .unwrap();
     }
     let due = store
-        .due_delivery_deadlines(Timestamp::from(20_000), 7)
+        .due_publish_queue_deadlines(Timestamp::from(20_000), 7)
         .unwrap();
     assert_eq!(due.len(), 7);
     assert_eq!(
@@ -445,7 +449,7 @@ fn deadline_scale_read_returns_only_the_ordered_limit() {
         (10_000..10_007).collect::<Vec<_>>()
     );
     assert!(store
-        .due_delivery_deadlines(Timestamp::from(20_000), 1_025)
+        .due_publish_queue_deadlines(Timestamp::from(20_000), 1_025)
         .unwrap_err()
         .to_string()
         .contains("limit"));
@@ -468,21 +472,21 @@ fn equal_time_equal_intent_deadlines_use_canonical_relay_order_on_both_backends(
             RelayUrl::parse("wss://a.example/path").unwrap(),
         ]);
         store.record_route_revision(intent, relays.clone()).unwrap();
-        for lane in store.bootstrap_delivery_lanes(intent).unwrap() {
+        for lane in store.bootstrap_publish_queue_lanes(intent).unwrap() {
             store
                 .set_lane_transient(
                     &lane.key,
                     lane.revision,
                     0,
                     Timestamp::from(700),
-                    DeliveryTransientCause::ConnectionLost,
+                    PublishQueueTransientCause::ConnectionLost,
                     None,
                 )
                 .unwrap();
         }
         assert_eq!(
             store
-                .due_delivery_deadlines(Timestamp::from(700), 10)
+                .due_publish_queue_deadlines(Timestamp::from(700), 10)
                 .unwrap()
                 .into_iter()
                 .map(|deadline| deadline.key.relay)
@@ -517,7 +521,7 @@ fn relay_identity_uses_canonical_url_but_preserves_meaningful_path_slashes() {
         ]);
         assert_eq!(relays.len(), 3);
         store.record_route_revision(intent, relays.clone()).unwrap();
-        let lanes = store.bootstrap_delivery_lanes(intent).unwrap();
+        let lanes = store.bootstrap_publish_queue_lanes(intent).unwrap();
         assert_eq!(lanes.len(), 3);
         let root = lanes
             .iter()
@@ -525,25 +529,25 @@ fn relay_identity_uses_canonical_url_but_preserves_meaningful_path_slashes() {
             .unwrap();
         store
             .set_lane_transient(
-                &DeliveryLaneKey {
+                &PublishQueueLaneKey {
                     intent_id: intent,
                     relay: root_slash,
                 },
                 root.revision,
                 0,
                 Timestamp::from(711),
-                DeliveryTransientCause::ConnectionLost,
+                PublishQueueTransientCause::ConnectionLost,
                 None,
             )
             .unwrap();
-        assert_eq!(store.recover_delivery_lanes(intent).unwrap().len(), 3);
+        assert_eq!(store.recover_publish_queue_lanes(intent).unwrap().len(), 3);
         assert!(store
-            .recover_delivery_lanes(intent)
+            .recover_publish_queue_lanes(intent)
             .unwrap()
             .iter()
             .any(|lane| lane.key.relay == path_plain));
         assert!(store
-            .recover_delivery_lanes(intent)
+            .recover_publish_queue_lanes(intent)
             .unwrap()
             .iter()
             .any(|lane| lane.key.relay == path_slash));
@@ -569,7 +573,7 @@ fn bootstrap_cannot_hide_two_contradictory_live_ordinals() {
     duplicate_attempt(&path, intent, &relay, 1, 2, true);
     let mut store = reopen(&path);
     assert!(store
-        .bootstrap_delivery_lanes(intent)
+        .bootstrap_publish_queue_lanes(intent)
         .unwrap_err()
         .to_string()
         .contains("contradictory live"));
@@ -581,7 +585,7 @@ fn reopen(path: &Path) -> RedbStore {
 
 fn raw_relay_id(path: &Path, relay: &RelayUrl) -> u32 {
     const RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
-        TableDefinition::new("delivery_relay_ids_v1");
+        TableDefinition::new("publish_queue_relay_ids");
     let db = Database::open(path).unwrap();
     let read = db.begin_read().unwrap();
     let table = read.open_table(RELAY_IDS).unwrap();
@@ -617,9 +621,9 @@ fn duplicate_attempt(
     with_detail: bool,
 ) {
     const ATTEMPTS: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("delivery_attempts_v1");
+        TableDefinition::new("publish_queue_attempts");
     const DETAILS: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("delivery_attempt_details_v1");
+        TableDefinition::new("publish_queue_attempt_details");
     let relay_id = raw_relay_id(path, relay);
     let source = raw_attempt_key(intent, relay_id, source_ordinal);
     let target = raw_attempt_key(intent, relay_id, target_ordinal);
@@ -670,7 +674,7 @@ fn corrupt_fixed_row_version<const N: usize>(
 }
 
 fn copy_lane_value(path: &Path, source: &[u8; 12], target: &[u8; 12]) {
-    const LANES: TableDefinition<&[u8; 12], &[u8]> = TableDefinition::new("delivery_lanes_v1");
+    const LANES: TableDefinition<&[u8; 12], &[u8]> = TableDefinition::new("publish_queue_lanes");
     let db = Database::open(path).unwrap();
     let write = db.begin_write().unwrap();
     {
@@ -687,7 +691,7 @@ fn copy_lane_value(path: &Path, source: &[u8; 12], target: &[u8; 12]) {
 }
 
 fn write_lane_value(path: &Path, key: &[u8; 12], encoded: &[u8]) {
-    const LANES: TableDefinition<&[u8; 12], &[u8]> = TableDefinition::new("delivery_lanes_v1");
+    const LANES: TableDefinition<&[u8; 12], &[u8]> = TableDefinition::new("publish_queue_lanes");
     let db = Database::open(path).unwrap();
     let write = db.begin_write().unwrap();
     {
@@ -725,7 +729,7 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
             store
                 .record_route_revision(intent, BTreeSet::from([relay.clone(), donor.clone()]))
                 .unwrap();
-            let lanes = store.bootstrap_delivery_lanes(intent).unwrap();
+            let lanes = store.bootstrap_publish_queue_lanes(intent).unwrap();
             let donor_lane = lanes
                 .iter()
                 .find(|lane| lane.key.relay == donor)
@@ -748,7 +752,7 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
                         &key,
                         target_lane.revision,
                         1,
-                        DeliveryAttemptOutcome::Acked,
+                        PublishQueueAttemptOutcome::Acked,
                         Timestamp::from(277),
                     )
                     .unwrap();
@@ -769,7 +773,7 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
                         &donor_lane.key,
                         donor_lane.revision,
                         1,
-                        DeliveryAttemptOutcome::Acked,
+                        PublishQueueAttemptOutcome::Acked,
                         Timestamp::from(277),
                     )
                     .unwrap();
@@ -789,7 +793,7 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
         }
         let mut store = reopen(&path);
         let error = store
-            .bootstrap_delivery_lanes(intent)
+            .bootstrap_publish_queue_lanes(intent)
             .unwrap_err()
             .to_string();
         assert!(
@@ -799,11 +803,11 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
     }
 }
 
-fn insert_stale_deadline(path: &Path, deadline: &DeliveryDeadline) {
+fn insert_stale_deadline(path: &Path, deadline: &PublishQueueDeadline) {
     const ORDERED: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("delivery_deadlines_v1");
+        TableDefinition::new("publish_queue_deadlines");
     const BY_INTENT: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("delivery_deadlines_by_intent_v1");
+        TableDefinition::new("publish_queue_deadlines_by_intent");
     let relay_id = raw_relay_id(path, &deadline.key.relay);
     let ordered_key = raw_deadline_key(deadline.at, deadline.key.intent_id, relay_id, false);
     let by_intent_key = raw_deadline_key(deadline.at, deadline.key.intent_id, relay_id, true);
@@ -834,21 +838,21 @@ fn raw_deadline_key(at: Timestamp, intent: IntentId, relay_id: u32, by_intent: b
     key
 }
 
-fn raw_deadline_value(deadline: &DeliveryDeadline) -> Vec<u8> {
+fn raw_deadline_value(deadline: &PublishQueueDeadline) -> Vec<u8> {
     let mut encoded = b"NMDD\x01\0\0\0".to_vec();
     encoded.extend_from_slice(&deadline.lane_revision.to_be_bytes());
     encoded.push(match deadline.kind {
-        DeliveryDeadlineKind::RetryEligible => 0,
-        DeliveryDeadlineKind::AckTimeout => 1,
+        PublishQueueDeadlineKind::RetryEligible => 0,
+        PublishQueueDeadlineKind::AckTimeout => 1,
     });
     encoded
 }
 
-fn insert_one_sided_deadline(path: &Path, deadline: &DeliveryDeadline, primary: bool) {
+fn insert_one_sided_deadline(path: &Path, deadline: &PublishQueueDeadline, primary: bool) {
     const ORDERED: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("delivery_deadlines_v1");
+        TableDefinition::new("publish_queue_deadlines");
     const BY_INTENT: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("delivery_deadlines_by_intent_v1");
+        TableDefinition::new("publish_queue_deadlines_by_intent");
     let relay_id = raw_relay_id(path, &deadline.key.relay);
     let key = raw_deadline_key(deadline.at, deadline.key.intent_id, relay_id, !primary);
     let encoded = raw_deadline_value(deadline);
@@ -895,12 +899,12 @@ fn one_sided_deadline_index_corruption_fails_closed_before_close() {
                     &key,
                     lane.revision,
                     1,
-                    DeliveryAttemptHandoff {
+                    PublishQueueAttemptHandoff {
                         at: Timestamp::from(278),
                         result: HandoffEvidence::Written,
                     },
-                    DeliveryPostHandoffState::Terminal {
-                        outcome: DeliveryAttemptOutcome::Acked,
+                    PublishQueuePostHandoffState::Terminal {
+                        outcome: PublishQueueAttemptOutcome::Acked,
                         finished_at: Timestamp::from(279),
                     },
                 )
@@ -909,22 +913,22 @@ fn one_sided_deadline_index_corruption_fails_closed_before_close() {
         };
         insert_one_sided_deadline(
             &path,
-            &DeliveryDeadline {
+            &PublishQueueDeadline {
                 at: Timestamp::from(999),
                 key,
                 lane_revision: 4,
-                kind: DeliveryDeadlineKind::AckTimeout,
+                kind: PublishQueueDeadlineKind::AckTimeout,
             },
             primary,
         );
         let mut store = reopen(&path);
         assert!(store
-            .due_delivery_deadlines(Timestamp::from(999), 1)
+            .due_publish_queue_deadlines(Timestamp::from(999), 1)
             .unwrap_err()
             .to_string()
             .contains("cardinalities"));
         assert!(store
-            .next_delivery_deadline()
+            .next_publish_queue_deadline()
             .unwrap_err()
             .to_string()
             .contains("cardinalities"));
@@ -934,7 +938,7 @@ fn one_sided_deadline_index_corruption_fails_closed_before_close() {
             .to_string()
             .contains("cardinalities"));
         assert!(store
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .iter()
             .any(|open| open.intent_id == intent));
@@ -961,11 +965,11 @@ fn lane_detail_and_deadline_corruption_fail_closed() {
                     &key,
                     lane.revision,
                     1,
-                    DeliveryAttemptHandoff {
+                    PublishQueueAttemptHandoff {
                         at: Timestamp::from(273),
                         result: HandoffEvidence::Written,
                     },
-                    DeliveryPostHandoffState::AwaitingAck {
+                    PublishQueuePostHandoffState::AwaitingAck {
                         deadline: Timestamp::from(300),
                     },
                 )
@@ -980,15 +984,15 @@ fn lane_detail_and_deadline_corruption_fail_closed() {
             "lane" => {
                 corrupt_fixed_row_version(
                     &path,
-                    TableDefinition::new("delivery_lanes_v1"),
+                    TableDefinition::new("publish_queue_lanes"),
                     &lane_storage_key,
                 );
-                assert!(reopen(&path).recover_delivery_lanes(intent).is_err());
+                assert!(reopen(&path).recover_publish_queue_lanes(intent).is_err());
             }
             "detail" => {
                 corrupt_fixed_row_version(
                     &path,
-                    TableDefinition::new("delivery_attempt_details_v1"),
+                    TableDefinition::new("publish_queue_attempt_details"),
                     &attempt_storage_key,
                 );
                 assert!(reopen(&path).recover_attempt_details(intent).is_err());
@@ -996,11 +1000,11 @@ fn lane_detail_and_deadline_corruption_fail_closed() {
             "deadline" => {
                 corrupt_fixed_row_version(
                     &path,
-                    TableDefinition::new("delivery_deadlines_v1"),
+                    TableDefinition::new("publish_queue_deadlines"),
                     &deadline_storage_key,
                 );
                 assert!(reopen(&path)
-                    .due_delivery_deadlines(Timestamp::from(300), 1)
+                    .due_publish_queue_deadlines(Timestamp::from(300), 1)
                     .is_err());
             }
             _ => unreachable!(),
@@ -1033,7 +1037,7 @@ fn detail_less_attempt_row_is_refused_rather_than_adopted() {
     let write = db.begin_write().unwrap();
     {
         let mut details: redb::Table<'_, &[u8; 20], &[u8]> = write
-            .open_table(TableDefinition::new("delivery_attempt_details_v1"))
+            .open_table(TableDefinition::new("publish_queue_attempt_details"))
             .unwrap();
         details
             .remove(&raw_attempt_key(intent, relay_id, 1))
@@ -1044,11 +1048,11 @@ fn detail_less_attempt_row_is_refused_rather_than_adopted() {
 
     let mut store = reopen(&path);
     assert!(store
-        .bootstrap_delivery_lanes(intent)
+        .bootstrap_publish_queue_lanes(intent)
         .unwrap_err()
         .to_string()
         .contains("missing its detail row"));
-    assert_eq!(store.recover_delivery_lanes(intent).unwrap().len(), 1);
+    assert_eq!(store.recover_publish_queue_lanes(intent).unwrap().len(), 1);
 }
 
 /// The mirror refusal: attempt history that exists without the lane row the
@@ -1074,7 +1078,7 @@ fn attempt_history_without_its_lane_is_refused_rather_than_reconstructed() {
     let write = db.begin_write().unwrap();
     {
         let mut lanes: redb::Table<'_, &[u8; 12], &[u8]> = write
-            .open_table(TableDefinition::new("delivery_lanes_v1"))
+            .open_table(TableDefinition::new("publish_queue_lanes"))
             .unwrap();
         lanes.remove(&raw_lane_key(intent, relay_id)).unwrap();
     }
@@ -1083,11 +1087,14 @@ fn attempt_history_without_its_lane_is_refused_rather_than_reconstructed() {
 
     let mut store = reopen(&path);
     assert!(store
-        .bootstrap_delivery_lanes(intent)
+        .bootstrap_publish_queue_lanes(intent)
         .unwrap_err()
         .to_string()
         .contains("without its lane row"));
-    assert!(store.recover_delivery_lanes(intent).unwrap().is_empty());
+    assert!(store
+        .recover_publish_queue_lanes(intent)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1103,7 +1110,10 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
     };
     {
         let mut store = reopen(&path);
-        assert_eq!(store.recover_delivery_lanes(intent).unwrap()[0].revision, 1);
+        assert_eq!(
+            store.recover_publish_queue_lanes(intent).unwrap()[0].revision,
+            1
+        );
         store
             .set_lane_eligible(&key, 1, Timestamp::from(301))
             .unwrap();
@@ -1123,11 +1133,11 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
                 &key,
                 3,
                 1,
-                DeliveryAttemptHandoff {
+                PublishQueueAttemptHandoff {
                     at: Timestamp::from(303),
                     result: HandoffEvidence::Ambiguous,
                 },
-                DeliveryPostHandoffState::AwaitingAck {
+                PublishQueuePostHandoffState::AwaitingAck {
                     deadline: Timestamp::from(310),
                 },
             )
@@ -1136,11 +1146,11 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
     {
         let mut store = reopen(&path);
         let due = store
-            .due_delivery_deadlines(Timestamp::from(310), 1)
+            .due_publish_queue_deadlines(Timestamp::from(310), 1)
             .unwrap();
         assert_eq!(
             (due[0].kind, due[0].lane_revision),
-            (DeliveryDeadlineKind::AckTimeout, 4)
+            (PublishQueueDeadlineKind::AckTimeout, 4)
         );
         store
             .set_lane_transient(
@@ -1148,7 +1158,7 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
                 4,
                 1,
                 Timestamp::from(311),
-                DeliveryTransientCause::AckTimeout,
+                PublishQueueTransientCause::AckTimeout,
                 None,
             )
             .unwrap();
@@ -1157,10 +1167,10 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
         let mut store = reopen(&path);
         assert_eq!(
             store
-                .due_delivery_deadlines(Timestamp::from(311), 1)
+                .due_publish_queue_deadlines(Timestamp::from(311), 1)
                 .unwrap()[0]
                 .kind,
-            DeliveryDeadlineKind::RetryEligible
+            PublishQueueDeadlineKind::RetryEligible
         );
         store
             .set_lane_eligible(&key, 5, Timestamp::from(311))
@@ -1176,12 +1186,12 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
                 &key,
                 7,
                 2,
-                DeliveryAttemptHandoff {
+                PublishQueueAttemptHandoff {
                     at: Timestamp::from(313),
                     result: HandoffEvidence::Written,
                 },
-                DeliveryPostHandoffState::Terminal {
-                    outcome: DeliveryAttemptOutcome::OutcomeUnknown,
+                PublishQueuePostHandoffState::Terminal {
+                    outcome: PublishQueueAttemptOutcome::OutcomeUnknown,
                     finished_at: Timestamp::from(314),
                 },
             )
@@ -1189,17 +1199,17 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
     }
     insert_stale_deadline(
         &path,
-        &DeliveryDeadline {
+        &PublishQueueDeadline {
             at: Timestamp::from(999),
             key: key.clone(),
             lane_revision: 7,
-            kind: DeliveryDeadlineKind::AckTimeout,
+            kind: PublishQueueDeadlineKind::AckTimeout,
         },
     );
     {
         let mut store = reopen(&path);
         assert!(store
-            .next_delivery_deadline()
+            .next_publish_queue_deadline()
             .unwrap_err()
             .to_string()
             .contains("deadline and lane disagree"));
@@ -1207,27 +1217,28 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
             store.close_terminal_intent(intent).unwrap(),
             CloseIntentOutcome::Closed
         );
-        assert_eq!(store.next_delivery_deadline().unwrap(), None);
+        assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
     }
     {
         let store = reopen(&path);
         assert!(!store
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .iter()
             .any(|row| row.intent_id == intent));
-        assert_eq!(store.recover_delivery_lanes(intent).unwrap().len(), 1);
+        assert_eq!(store.recover_publish_queue_lanes(intent).unwrap().len(), 1);
         assert_eq!(store.recover_attempts(intent).unwrap().len(), 2);
         assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 2);
         assert!(store.reattach_receipt(receipt).unwrap().is_some());
-        assert_eq!(store.next_delivery_deadline().unwrap(), None);
+        assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
     }
     // Attempt base rows remain immutable Started facts; terminal state
     // overlays from the required detail row.
     let relay_id = raw_relay_id(&path, &key.relay);
     let db = Database::open(&path).unwrap();
     let read = db.begin_read().unwrap();
-    let attempts: TableDefinition<&[u8; 20], &[u8]> = TableDefinition::new("delivery_attempts_v1");
+    let attempts: TableDefinition<&[u8; 20], &[u8]> =
+        TableDefinition::new("publish_queue_attempts");
     let table = read.open_table(attempts).unwrap();
     let raw_key = raw_attempt_key(intent, relay_id, 2);
     let raw = table.get(&raw_key).unwrap().unwrap();

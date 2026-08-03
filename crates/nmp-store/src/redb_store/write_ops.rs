@@ -2,17 +2,6 @@ use super::canonical::{
     encode_stored_event_record, record_to_stored_event, stored_event_to_record,
 };
 use super::commit::commit_prepared;
-use super::delivery::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decrement_pending_ephemeral_in_txn,
-    is_suppressed_in_txn, remove_addr_claimant_in_txn, remove_claimant_in_txn,
-    update_delivery_receipt, DeliveryIntentRecord, DeliveryReceiptRecord, SuppressClaimRecord,
-};
-use super::delivery_codec::{
-    attempt_range, codec_error, deadline_intent_range, deadline_key, decode_claims,
-    decode_deadline, decode_displaced, decode_intent, decode_receipt, encode_claims,
-    encode_displaced, encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
-    parse_deadline_by_intent_key, parse_lane_key, receipt_key, route_revision_range,
-};
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
@@ -20,11 +9,23 @@ use super::mutation::{
     process_kind5_deletions_provisional_in_txn, reinsert_stashed_in_txn, remove_row_in_txn,
     tombstone_refuses,
 };
+use super::publish_queue::{
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, decrement_pending_ephemeral_in_txn,
+    is_suppressed_in_txn, remove_addr_claimant_in_txn, remove_claimant_in_txn,
+    update_publish_queue_receipt, PublishQueueIntentRecord, PublishQueueReceiptRecord,
+    SuppressClaimRecord,
+};
+use super::publish_queue_codec::{
+    attempt_range, codec_error, deadline_intent_range, deadline_key, decode_claims,
+    decode_deadline, decode_displaced, decode_intent, decode_receipt, encode_claims,
+    encode_displaced, encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
+    parse_deadline_by_intent_key, parse_lane_key, receipt_key, route_revision_range,
+};
 use super::query::expiration_key;
 use super::schema::{
-    persist_err, EventKey, DELIVERY_ATTEMPTS, DELIVERY_ATTEMPT_DETAILS, DELIVERY_CORRELATIONS,
-    DELIVERY_DEADLINES, DELIVERY_DEADLINES_BY_INTENT, DELIVERY_LANES, DELIVERY_META,
-    DELIVERY_RECEIPTS, DELIVERY_ROUTE_REVISIONS,
+    persist_err, EventKey, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
+    PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
+    PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -46,20 +47,22 @@ fn retire_superseded_owners_in_txn(
     mut replaced: StoredEvent,
 ) -> Result<(Option<StoredEvent>, Vec<RetiredIntent>), PersistenceError> {
     let attempts = write_txn
-        .open_table(DELIVERY_ATTEMPTS)
+        .open_table(PUBLISH_QUEUE_ATTEMPTS)
         .map_err(persist_err)?;
     let attempt_details = write_txn
-        .open_table(DELIVERY_ATTEMPT_DETAILS)
+        .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
         .map_err(persist_err)?;
-    let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+    let mut lanes = write_txn
+        .open_table(PUBLISH_QUEUE_LANES)
+        .map_err(persist_err)?;
     let mut route_revisions = write_txn
-        .open_table(DELIVERY_ROUTE_REVISIONS)
+        .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
         .map_err(persist_err)?;
     let mut deadlines = write_txn
-        .open_table(DELIVERY_DEADLINES)
+        .open_table(PUBLISH_QUEUE_DEADLINES)
         .map_err(persist_err)?;
     let mut deadlines_by_intent = write_txn
-        .open_table(DELIVERY_DEADLINES_BY_INTENT)
+        .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
         .map_err(persist_err)?;
 
     let owners = replaced
@@ -72,7 +75,7 @@ fn retire_superseded_owners_in_txn(
     for owner in owners {
         let key = intent_key(owner);
         let Some(intent_bytes) = ingest
-            .delivery_intents
+            .publish_queue_intents
             .get(&key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
@@ -109,7 +112,7 @@ fn retire_superseded_owners_in_txn(
             let (lane_key, lane_bytes) = row.map_err(persist_err)?;
             let (key_intent, _) =
                 parse_lane_key(lane_key.value()).map_err(|error| codec_error("lane key", error))?;
-            let (_, last_ordinal, _) = super::delivery_codec::decode_lane(lane_bytes.value())
+            let (_, last_ordinal, _) = super::publish_queue_codec::decode_lane(lane_bytes.value())
                 .map_err(|error| codec_error("lane", error))?;
             if key_intent != owner {
                 return Err(PersistenceError::invariant(
@@ -131,7 +134,7 @@ fn retire_superseded_owners_in_txn(
         }
         let key = intent_key(*owner);
         let displaced_bytes = ingest
-            .delivery_displaced
+            .publish_queue_displaced
             .remove(&key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec());
@@ -140,7 +143,10 @@ fn retire_superseded_owners_in_txn(
                 decode_displaced(&bytes).map_err(|error| codec_error("displaced event", error))?,
             );
         }
-        ingest.delivery_intents.remove(&key).map_err(persist_err)?;
+        ingest
+            .publish_queue_intents
+            .remove(&key)
+            .map_err(persist_err)?;
         for lane_key in lane_keys {
             lanes.remove(lane_key).map_err(persist_err)?;
         }
@@ -182,8 +188,8 @@ fn retire_superseded_owners_in_txn(
                 .remove(&by_intent_key)
                 .map_err(persist_err)?;
         }
-        update_delivery_receipt(
-            &mut ingest.delivery_receipts,
+        update_publish_queue_receipt(
+            &mut ingest.publish_queue_receipts,
             *receipt_id,
             ReceiptState::Superseded,
         )?;
@@ -242,9 +248,11 @@ pub(super) fn accept_write(
 
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, write_txn| {
-        let mut delivery_meta = write_txn.open_table(DELIVERY_META).map_err(persist_err)?;
-        let mut delivery_correlations = write_txn
-            .open_table(DELIVERY_CORRELATIONS)
+        let mut publish_queue_meta = write_txn
+            .open_table(PUBLISH_QUEUE_META)
+            .map_err(persist_err)?;
+        let mut publish_queue_correlations = write_txn
+            .open_table(PUBLISH_QUEUE_CORRELATIONS)
             .map_err(persist_err)?;
 
         if let Some(expected) = replaceable_base {
@@ -297,7 +305,7 @@ pub(super) fn accept_write(
         let is_deletion = frozen.kind == Kind::EventDeletion;
 
         // Dedup detection: checked against BOTH the live `EVENTS` row
-        // AND every OTHER intent's `DELIVERY_DISPLACED` stash (issue #2
+        // AND every OTHER intent's `PUBLISH_QUEUE_DISPLACED` stash (issue #2
         // P0 correction, codex-nova ruling) — a duplicate accepted
         // while its canonical predecessor is currently sitting
         // displaced (superseded by a later local edit, not yet
@@ -313,7 +321,7 @@ pub(super) fn accept_write(
         let dup_loc = if let Some((event_key, stored)) = existing {
             Some(DupLoc::Live(event_key, Box::new(stored)))
         } else {
-            find_any_displaced_key_by_event_id_in_txn(&ingest.delivery_displaced, frozen.id)?
+            find_any_displaced_key_by_event_id_in_txn(&ingest.publish_queue_displaced, frozen.id)?
                 .map(DupLoc::Stash)
         };
 
@@ -325,14 +333,14 @@ pub(super) fn accept_write(
         let (result, displaced): (AcceptOutcome, Option<StoredEvent>) = if let Some(dup_loc) =
             dup_loc
         {
-            let intent_id = alloc_intent_id_in_txn(&mut delivery_meta)?;
-            let receipt_id = alloc_receipt_id_in_txn(&mut delivery_meta)?;
+            let intent_id = alloc_intent_id_in_txn(&mut publish_queue_meta)?;
+            let receipt_id = alloc_receipt_id_in_txn(&mut publish_queue_meta)?;
             let mut existing_record = match &dup_loc {
                 DupLoc::Live(_event_key, stored) => stored_event_to_record(stored),
                 DupLoc::Stash(key) => stored_event_to_record(
                     &decode_displaced(
                         ingest
-                            .delivery_displaced
+                            .publish_queue_displaced
                             .get(key)
                             .map_err(persist_err)?
                             .expect("just found this key")
@@ -388,7 +396,7 @@ pub(super) fn accept_write(
                 DupLoc::Stash(key) => {
                     let encoded = encode_stored_event_record(&existing_record);
                     ingest
-                        .delivery_displaced
+                        .publish_queue_displaced
                         .insert(key, encoded.as_slice())
                         .map_err(persist_err)?;
                 }
@@ -408,7 +416,7 @@ pub(super) fn accept_write(
                 let encoded_claims =
                     encode_claims(&claims).map_err(|error| codec_error("claims", error))?;
                 ingest
-                    .delivery_kind5_claims
+                    .publish_queue_kind5_claims
                     .insert(&intent_key(intent_id), encoded_claims.as_slice())
                     .map_err(persist_err)?;
             }
@@ -441,8 +449,8 @@ pub(super) fn accept_write(
         } else if tombstone_refuses(ingest, &frozen)? {
             (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
         } else {
-            let intent_id = alloc_intent_id_in_txn(&mut delivery_meta)?;
-            let receipt_id = alloc_receipt_id_in_txn(&mut delivery_meta)?;
+            let intent_id = alloc_intent_id_in_txn(&mut publish_queue_meta)?;
+            let receipt_id = alloc_receipt_id_in_txn(&mut publish_queue_meta)?;
             let local = LocalOrigin {
                 owners: BTreeSet::from([intent_id]),
                 sig_state: SigState::Pending,
@@ -490,7 +498,7 @@ pub(super) fn accept_write(
                         let encoded_claims =
                             encode_claims(&claims).map_err(|error| codec_error("claims", error))?;
                         ingest
-                            .delivery_kind5_claims
+                            .publish_queue_kind5_claims
                             .insert(&intent_key(intent_id), encoded_claims.as_slice())
                             .map_err(persist_err)?;
                         (
@@ -611,13 +619,13 @@ pub(super) fn accept_write(
         // receipt record commit in this SAME transaction as the
         // event-table mutation (and the `IntentId`/receipt-id
         // allocation) above — a crash here leaves either nothing or a
-        // fully `recover_delivery`-able `Accepted`. R3: `Refused` is the
+        // fully `recover_publish_queue`-able `Accepted`. R3: `Refused` is the
         // one outcome that journals nothing at all.
         if let (Some(intent_id), Some(receipt_id)) =
             (result.journaled_intent_id(), result.journaled_receipt_id())
         {
             let key = intent_key(intent_id);
-            let intent_record = DeliveryIntentRecord {
+            let intent_record = PublishQueueIntentRecord {
                 receipt_id,
                 frozen: frozen.clone(),
                 expected_pubkey,
@@ -630,7 +638,7 @@ pub(super) fn accept_write(
             let encoded_intent =
                 encode_intent(&intent_record).map_err(|error| codec_error("intent", error))?;
             ingest
-                .delivery_intents
+                .publish_queue_intents
                 .insert(&key, encoded_intent.as_slice())
                 .map_err(persist_err)?;
 
@@ -638,17 +646,17 @@ pub(super) fn accept_write(
                 let encoded_displaced = encode_displaced(displaced)
                     .map_err(|error| codec_error("displaced event", error))?;
                 ingest
-                    .delivery_displaced
+                    .publish_queue_displaced
                     .insert(&key, encoded_displaced.as_slice())
                     .map_err(persist_err)?;
             }
 
             // Architecture review correction: the RETAINED receipt
-            // record, independent of `DELIVERY_INTENTS`'s open-work row.
+            // record, independent of `PUBLISH_QUEUE_INTENTS`'s open-work row.
             // `receipt_state` is `Accepted` except for the `Duplicate`-
             // of-an-already-signed-row case above, which overrides it
             // to `Signed` (codex-nova ruling).
-            let receipt_record = DeliveryReceiptRecord {
+            let receipt_record = PublishQueueReceiptRecord {
                 intent_id: Some(intent_id),
                 frozen_id: frozen.id,
                 expected_pubkey,
@@ -656,7 +664,7 @@ pub(super) fn accept_write(
             };
             let encoded_receipt = encode_receipt(&receipt_record);
             ingest
-                .delivery_receipts
+                .publish_queue_receipts
                 .insert(&receipt_key(receipt_id), encoded_receipt.as_slice())
                 .map_err(persist_err)?;
 
@@ -668,7 +676,7 @@ pub(super) fn accept_write(
             // documented as their contract violation, not a case this
             // store detects or refuses.
             if let Some(token) = &correlation {
-                delivery_correlations
+                publish_queue_correlations
                     .insert(token.as_ref().as_bytes(), &receipt_key(receipt_id))
                     .map_err(persist_err)?;
             }
@@ -699,7 +707,7 @@ pub(super) fn promote_signed(
     let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
         let intent_bytes = ingest
-            .delivery_intents
+            .publish_queue_intents
             .get(&key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec());
@@ -756,12 +764,12 @@ pub(super) fn promote_signed(
                         .and_then(|(_key, r)| r.local.as_ref())
                         .is_some_and(|l| l.sig_state == SigState::Signed)
                 } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
-                    &ingest.delivery_displaced,
+                    &ingest.publish_queue_displaced,
                     frozen_id,
                     intent_id,
                 )? {
                     let other_bytes = ingest
-                        .delivery_displaced
+                        .publish_queue_displaced
                         .get(&other_key)
                         .map_err(persist_err)?
                         .expect("just found this key")
@@ -817,7 +825,7 @@ pub(super) fn promote_signed(
                         owners,
                     )
                 } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
-                    &ingest.delivery_displaced,
+                    &ingest.publish_queue_displaced,
                     frozen_id,
                     intent_id,
                 )? {
@@ -830,7 +838,7 @@ pub(super) fn promote_signed(
                     // copy of an intent that actually did sign. Same
                     // `already_signed` skip as the live case above.
                     let other_bytes = ingest
-                        .delivery_displaced
+                        .publish_queue_displaced
                         .get(&other_key)
                         .map_err(persist_err)?
                         .expect("just found this key")
@@ -847,7 +855,7 @@ pub(super) fn promote_signed(
                         }
                         let encoded_other = encode_stored_event_record(&other_record);
                         ingest
-                            .delivery_displaced
+                            .publish_queue_displaced
                             .insert(&other_key, encoded_other.as_slice())
                             .map_err(persist_err)?;
                     }
@@ -935,7 +943,7 @@ pub(super) fn compensate_write_with_state(
     let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
         let intent_bytes = ingest
-            .delivery_intents
+            .publish_queue_intents
             .get(&key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec());
@@ -989,7 +997,7 @@ pub(super) fn compensate_write_with_state(
                             ingest.canonical.replace_local(*event_key, record.local)?;
                         }
                     } else if let Some(other_key) = find_displaced_key_by_event_id_in_txn(
-                        &ingest.delivery_displaced,
+                        &ingest.publish_queue_displaced,
                         frozen_id,
                         intent_id,
                     )? {
@@ -1003,7 +1011,7 @@ pub(super) fn compensate_write_with_state(
                         // sitting in the SAME stash slot must survive
                         // this intent's cancellation too.
                         let other_bytes = ingest
-                            .delivery_displaced
+                            .publish_queue_displaced
                             .get(&other_key)
                             .map_err(persist_err)?
                             .expect("just found this key")
@@ -1025,20 +1033,23 @@ pub(super) fn compensate_write_with_state(
                             && other_record.provenance.is_empty();
                         if should_drop {
                             ingest
-                                .delivery_displaced
+                                .publish_queue_displaced
                                 .remove(&other_key)
                                 .map_err(persist_err)?;
                         } else {
                             other_record.local = Some(local);
                             let encoded_other = encode_stored_event_record(&other_record);
                             ingest
-                                .delivery_displaced
+                                .publish_queue_displaced
                                 .insert(&other_key, encoded_other.as_slice())
                                 .map_err(persist_err)?;
                         }
                     }
 
-                    ingest.delivery_intents.remove(&key).map_err(persist_err)?;
+                    ingest
+                        .publish_queue_intents
+                        .remove(&key)
+                        .map_err(persist_err)?;
                     // THIS intent's OWN displaced predecessor (if any)
                     // is restored through the same one door regardless
                     // of whether its row was live or already gone for
@@ -1047,7 +1058,7 @@ pub(super) fn compensate_write_with_state(
                     // tombstone check makes this safe even if the
                     // predecessor was itself since deleted or expired.
                     let displaced_bytes = ingest
-                        .delivery_displaced
+                        .publish_queue_displaced
                         .remove(&key)
                         .map_err(persist_err)?
                         .map(|guard| guard.value().to_vec());
@@ -1079,7 +1090,7 @@ pub(super) fn compensate_write_with_state(
                     // author holds), is correctly excluded.
                     let mut revealed = Vec::new();
                     let claims_bytes = ingest
-                        .delivery_kind5_claims
+                        .publish_queue_kind5_claims
                         .remove(&key)
                         .map_err(persist_err)?
                         .map(|guard| guard.value().to_vec());
@@ -1128,8 +1139,8 @@ pub(super) fn compensate_write_with_state(
                             let visible = match ingest.canonical.load_by_id(id)? {
                                 None => false,
                                 Some((_key, se)) => !is_suppressed_in_txn(
-                                    &ingest.delivery_suppress_by_id,
-                                    &ingest.delivery_suppress_by_addr,
+                                    &ingest.publish_queue_suppress_by_id,
+                                    &ingest.publish_queue_suppress_by_addr,
                                     &se.event,
                                 )?,
                             };
@@ -1143,14 +1154,14 @@ pub(super) fn compensate_write_with_state(
                                     claiming_author,
                                 } => {
                                     remove_claimant_in_txn(
-                                        &mut ingest.delivery_suppress_by_id,
+                                        &mut ingest.publish_queue_suppress_by_id,
                                         &id_claim_key(&target, &claiming_author),
                                         intent_id,
                                     )?;
                                 }
                                 SuppressClaimRecord::Addr { key: addr_key, .. } => {
                                     remove_addr_claimant_in_txn(
-                                        &mut ingest.delivery_suppress_by_addr,
+                                        &mut ingest.publish_queue_suppress_by_addr,
                                         &addr_key,
                                         intent_id,
                                     )?;
@@ -1164,8 +1175,8 @@ pub(super) fn compensate_write_with_state(
                             }
                             if let Some((_key, se)) = ingest.canonical.load_by_id(&id)? {
                                 if !is_suppressed_in_txn(
-                                    &ingest.delivery_suppress_by_id,
-                                    &ingest.delivery_suppress_by_addr,
+                                    &ingest.publish_queue_suppress_by_id,
+                                    &ingest.publish_queue_suppress_by_addr,
                                     &se.event,
                                 )? {
                                     revealed.push(se);
@@ -1174,8 +1185,8 @@ pub(super) fn compensate_write_with_state(
                         }
                     }
 
-                    update_delivery_receipt(
-                        &mut ingest.delivery_receipts,
+                    update_publish_queue_receipt(
+                        &mut ingest.publish_queue_receipts,
                         intent_record.receipt_id,
                         terminal_state,
                     )?;
@@ -1198,7 +1209,7 @@ pub(super) fn cancel_ephemeral_receipt(
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let outcome = {
         let mut receipts = write_txn
-            .open_table(DELIVERY_RECEIPTS)
+            .open_table(PUBLISH_QUEUE_RECEIPTS)
             .map_err(persist_err)?;
         let key = receipt_key(receipt_id);
         let existing = receipts.get(&key).map_err(persist_err)?;
@@ -1217,7 +1228,9 @@ pub(super) fn cancel_ephemeral_receipt(
                     receipts
                         .insert(&key, encoded.as_slice())
                         .map_err(persist_err)?;
-                    let mut meta = write_txn.open_table(DELIVERY_META).map_err(persist_err)?;
+                    let mut meta = write_txn
+                        .open_table(PUBLISH_QUEUE_META)
+                        .map_err(persist_err)?;
                     decrement_pending_ephemeral_in_txn(&mut meta)?;
                     crate::CancelEphemeralOutcome::Cancelled
                 }
@@ -1243,7 +1256,7 @@ pub(super) fn mark_ephemeral_signed(
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let changed = {
         let mut receipts = write_txn
-            .open_table(DELIVERY_RECEIPTS)
+            .open_table(PUBLISH_QUEUE_RECEIPTS)
             .map_err(persist_err)?;
         let key = receipt_key(receipt_id);
         let existing = receipts.get(&key).map_err(persist_err)?;
@@ -1260,7 +1273,9 @@ pub(super) fn mark_ephemeral_signed(
             receipts
                 .insert(&key, encoded.as_slice())
                 .map_err(persist_err)?;
-            let mut meta = write_txn.open_table(DELIVERY_META).map_err(persist_err)?;
+            let mut meta = write_txn
+                .open_table(PUBLISH_QUEUE_META)
+                .map_err(persist_err)?;
             decrement_pending_ephemeral_in_txn(&mut meta)?;
             true
         }

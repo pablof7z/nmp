@@ -26,7 +26,7 @@ use crate::runtime::FifoReceiver;
 use std::sync::Mutex;
 
 use crate::core::ReceiptId;
-use crate::delivery::WriteStatus;
+use crate::publish_queue::WriteStatus;
 use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
@@ -105,38 +105,40 @@ pub enum CancelWriteError {
 }
 
 fn cancel_write_outcome_from_engine(
-    outcome: crate::delivery::CancelWriteOutcome,
+    outcome: crate::publish_queue::CancelWriteOutcome,
 ) -> CancelWriteOutcome {
     match outcome {
-        crate::delivery::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
+        crate::publish_queue::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
     }
 }
 
-fn cancel_write_error_from_engine(error: crate::delivery::CancelWriteError) -> CancelWriteError {
+fn cancel_write_error_from_engine(
+    error: crate::publish_queue::CancelWriteError,
+) -> CancelWriteError {
     match error {
-        crate::delivery::CancelWriteError::UnknownReceipt { receipt_id } => {
+        crate::publish_queue::CancelWriteError::UnknownReceipt { receipt_id } => {
             CancelWriteError::UnknownReceipt { receipt_id }
         }
-        crate::delivery::CancelWriteError::AlreadySigned {
+        crate::publish_queue::CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         } => CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         },
-        crate::delivery::CancelWriteError::AlreadyCompensated { receipt_id } => {
+        crate::publish_queue::CancelWriteError::AlreadyCompensated { receipt_id } => {
             CancelWriteError::AlreadyCompensated { receipt_id }
         }
-        crate::delivery::CancelWriteError::AlreadySuperseded { receipt_id } => {
+        crate::publish_queue::CancelWriteError::AlreadySuperseded { receipt_id } => {
             CancelWriteError::AlreadySuperseded { receipt_id }
         }
-        crate::delivery::CancelWriteError::AlreadyAbandoned { receipt_id } => {
+        crate::publish_queue::CancelWriteError::AlreadyAbandoned { receipt_id } => {
             CancelWriteError::AlreadyAbandoned { receipt_id }
         }
-        crate::delivery::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
+        crate::publish_queue::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
             CancelWriteError::PersistenceFailed { receipt_id, reason }
         }
-        crate::delivery::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
+        crate::publish_queue::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
     }
 }
 
@@ -1522,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_event_returns_exact_verified_event_without_store_or_delivery_residue() {
+    fn sign_event_returns_exact_verified_event_without_store_or_publish_queue_residue() {
         use nmp_store::EventStore;
 
         let fixture = tempfile::tempdir().expect("temporary directory");
@@ -1573,7 +1575,7 @@ mod tests {
         );
         assert!(
             store
-                .recover_delivery()
+                .recover_publish_queue()
                 .expect("recover delivery")
                 .is_empty(),
             "sign-only must not create an intent, receipt, or delivery lane"

@@ -99,7 +99,7 @@ mod receipt_allocator_tests {
         assert!(core
             .resolver
             .store()
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
     }
@@ -136,7 +136,7 @@ mod receipt_allocator_tests {
         assert!(core
             .resolver
             .store()
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
     }

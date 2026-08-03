@@ -1,4 +1,4 @@
-//! The durable-delivery write-intent/receipt plane. HARVEST
+//! The publish-queue write-intent/receipt plane. HARVEST
 //! target: `crates/nmp-core/src/publish/engine/{types,mod}.rs`,
 //! `kernel/publish_engine_terminals.rs` in the old repo — the per-relay
 //! terminal model (`TerminalOutcome`, accepted/failed split) and the
@@ -156,7 +156,7 @@ pub enum WriteStatus {
         detail: Option<String>,
     },
     /// Transport accepted a write for this persisted attempt but could not
-    /// prove that it flushed. This is never a `Sent` fact. Durable delivery
+    /// prove that it flushed. This is never a `Sent` fact. Publish queue
     /// waits for ACK/timeout; AtMostOnce additionally becomes
     /// [`Self::OutcomeUnknown`].
     HandoffAmbiguous {
@@ -176,7 +176,7 @@ pub enum WriteStatus {
     Rejected(RelayUrl, String),
     GaveUp(RelayUrl),
     /// The relay remains an owned, nonterminal delivery lane, but the
-    /// durable `DeliveryAttemptOutcome::Started` fact could not be committed. No
+    /// durable `PublishQueueAttemptOutcome::Started` fact could not be committed. No
     /// wire EVENT was emitted. Recovery rediscovers the exact URL from its
     /// committed route revision; the engine's single lane scheduler owns when
     /// an in-process retry occurs.

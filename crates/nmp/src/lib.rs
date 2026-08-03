@@ -89,7 +89,6 @@ mod subscription;
 // `nmp_engine::core::…`. Making them `pub` (even `#[doc(hidden)]`) would
 // instead dump the whole mechanism into `docs/surface/nmp-facade.txt`.
 mod core;
-mod delivery;
 #[cfg(feature = "bench-instrumentation")]
 mod ingest_attribution;
 /// Test-only durable-store double. It lives outside `core` on purpose: it is
@@ -97,6 +96,7 @@ mod ingest_attribution;
 #[cfg(test)]
 mod lane_fault_store;
 mod negentropy;
+mod publish_queue;
 mod relay_information_service;
 mod runtime;
 
@@ -129,8 +129,8 @@ pub mod mechanism {
     pub mod negentropy {
         pub use crate::negentropy::*;
     }
-    pub mod delivery {
-        pub use crate::delivery::*;
+    pub mod publish_queue {
+        pub use crate::publish_queue::*;
     }
     pub mod relay_information_service {
         pub use crate::relay_information_service::*;
@@ -247,7 +247,7 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // relay: [user input]" and a crate routing to a group host say the same
 // thing the same way.
 pub use crate::core::ReceiptId;
-pub use crate::delivery::{AuthDenialSource, RetryCause, WriteStatus};
+pub use crate::publish_queue::{AuthDenialSource, RetryCause, WriteStatus};
 pub use crate::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
     SignerRegistration,

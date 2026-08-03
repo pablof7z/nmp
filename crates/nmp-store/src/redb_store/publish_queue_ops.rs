@@ -1,9 +1,9 @@
 use super::commit::commit_prepared;
-use super::delivery::{
+use super::publish_queue::{
     alloc_counter_in_txn, alloc_receipt_id_in_txn, increment_pending_ephemeral_in_txn,
-    lane_deadline, replace_lane_in_txn, DeliveryReceiptRecord,
+    lane_deadline, replace_lane_in_txn, PublishQueueReceiptRecord,
 };
-use super::delivery_codec::{
+use super::publish_queue_codec::{
     attempt_key, attempt_range, canonical_route_ids, codec_error, deadline_by_intent_key,
     deadline_due_range, deadline_intent_range, deadline_key, decode_attempt,
     decode_attempt_details, decode_deadline, decode_displaced, decode_intent, decode_lane,
@@ -11,13 +11,13 @@ use super::delivery_codec::{
     encode_lane, encode_receipt, encode_relay, encode_route, intent_key, lane_key, lane_range,
     parse_attempt_key, parse_deadline_by_intent_key, parse_deadline_key, parse_intent_key,
     parse_lane_key, parse_route_revision_key, receipt_key, relay_key, route_revision_key,
-    route_revision_range, DeliveryRelayId, NEXT_RELAY_ID_KEY,
+    route_revision_range, PublishQueueRelayId, NEXT_RELAY_ID_KEY,
 };
 use super::schema::{
-    persist_err, DELIVERY_ATTEMPTS, DELIVERY_ATTEMPT_DETAILS, DELIVERY_CORRELATIONS,
-    DELIVERY_DEADLINES, DELIVERY_DEADLINES_BY_INTENT, DELIVERY_DISPLACED, DELIVERY_INTENTS,
-    DELIVERY_LANES, DELIVERY_META, DELIVERY_RECEIPTS, DELIVERY_RELAYS, DELIVERY_RELAY_IDS,
-    DELIVERY_ROUTE_REVISIONS,
+    persist_err, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS, PUBLISH_QUEUE_CORRELATIONS,
+    PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_DISPLACED,
+    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS,
+    PUBLISH_QUEUE_RELAYS, PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -25,11 +25,12 @@ use super::store::RedbStore;
 #[cfg(test)]
 use super::Ordering;
 use super::{
-    AuthDenial, BTreeMap, BTreeSet, CloseIntentOutcome, DeliveryAttempt, DeliveryAttemptDetails,
-    DeliveryAttemptHandoff, DeliveryAttemptOutcome, DeliveryAttemptTransient, DeliveryDeadline,
-    DeliveryInFlightPhase, DeliveryIntent, DeliveryLane, DeliveryLaneKey, DeliveryLaneState,
-    DeliveryPostHandoffState, DeliveryReceipt, DeliveryRouteRevision, DeliveryTerminalOutcome,
-    DeliveryTransientCause, Event, EventId, IntentId, IntentSigState, PersistenceError, PublicKey,
+    AuthDenial, BTreeMap, BTreeSet, CloseIntentOutcome, Event, EventId, IntentId, IntentSigState,
+    PersistenceError, PublicKey, PublishQueueAttempt, PublishQueueAttemptDetails,
+    PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueAttemptTransient,
+    PublishQueueDeadline, PublishQueueInFlightPhase, PublishQueueIntent, PublishQueueLane,
+    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
+    PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RelayUrl, Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
@@ -43,29 +44,33 @@ use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 /// be decoded is still an obligation this store accepted, and quietly
 /// dropping it would let the engine rebuild a `pending` set that is missing
 /// real durable work.
-pub(super) fn recover_delivery(store: &RedbStore) -> Result<Vec<DeliveryIntent>, PersistenceError> {
+pub(super) fn recover_publish_queue(
+    store: &RedbStore,
+) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let delivery_intents = read_txn.open_table(DELIVERY_INTENTS).map_err(persist_err)?;
-    let delivery_displaced = read_txn
-        .open_table(DELIVERY_DISPLACED)
+    let publish_queue_intents = read_txn
+        .open_table(PUBLISH_QUEUE_INTENTS)
+        .map_err(persist_err)?;
+    let publish_queue_displaced = read_txn
+        .open_table(PUBLISH_QUEUE_DISPLACED)
         .map_err(persist_err)?;
 
     let mut out = Vec::new();
-    for entry in delivery_intents.iter().map_err(persist_err)? {
+    for entry in publish_queue_intents.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
         let intent_id =
             parse_intent_key(key.value()).map_err(|error| codec_error("intent key", error))?;
         let record = decode_intent(value.value())
             .map_err(|error| codec_error(&format!("intent {}", intent_id.0), error))?;
 
-        let displaced = delivery_displaced
+        let displaced = publish_queue_displaced
             .get(key.value())
             .map_err(persist_err)?
             .map(|guard| decode_displaced(guard.value()))
             .transpose()
             .map_err(|error| codec_error("displaced event", error))?;
 
-        out.push(DeliveryIntent {
+        out.push(PublishQueueIntent {
             intent_id,
             receipt_id: record.receipt_id,
             frozen: record.frozen,
@@ -84,16 +89,16 @@ pub(super) fn recover_delivery(store: &RedbStore) -> Result<Vec<DeliveryIntent>,
 pub(super) fn reattach_receipt(
     store: &RedbStore,
     receipt_id: u64,
-) -> Result<Option<DeliveryReceipt>, PersistenceError> {
+) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
     // NOT a Q4 "always empty" door: retention (not crash-survival) is
-    // the contract — `DELIVERY_RECEIPTS` rows are never deleted by this
+    // the contract — `PUBLISH_QUEUE_RECEIPTS` rows are never deleted by this
     // unit, so this is an ordinary durable read.
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let delivery_receipts = read_txn
-        .open_table(DELIVERY_RECEIPTS)
+    let publish_queue_receipts = read_txn
+        .open_table(PUBLISH_QUEUE_RECEIPTS)
         .map_err(persist_err)?;
     let key = receipt_key(receipt_id);
-    let Some(encoded) = delivery_receipts
+    let Some(encoded) = publish_queue_receipts
         .get(&key)
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
@@ -102,7 +107,7 @@ pub(super) fn reattach_receipt(
     };
     let record =
         decode_receipt(&encoded).map_err(|error| codec_error("retained receipt", error))?;
-    Ok(Some(DeliveryReceipt {
+    Ok(Some(PublishQueueReceipt {
         receipt_id,
         intent_id: record.intent_id,
         frozen_id: record.frozen_id,
@@ -122,7 +127,7 @@ pub(super) fn lookup_correlation(
     // transaction, a read transaction never creates tables). That is
     // exactly "no token has ever been journaled here", not a
     // persistence failure.
-    let table = match read_txn.open_table(DELIVERY_CORRELATIONS) {
+    let table = match read_txn.open_table(PUBLISH_QUEUE_CORRELATIONS) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
         Err(err) => return Err(persist_err(err)),
@@ -138,18 +143,18 @@ pub(super) fn lookup_correlation(
 }
 
 fn intern_relay_in_txn(
-    delivery_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
-    delivery_relays: &mut redb::Table<'_, &'static [u8; 4], &'static [u8]>,
-    delivery_relay_ids: &mut redb::Table<'_, &'static [u8], &'static [u8; 4]>,
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    publish_queue_relays: &mut redb::Table<'_, &'static [u8; 4], &'static [u8]>,
+    publish_queue_relay_ids: &mut redb::Table<'_, &'static [u8], &'static [u8; 4]>,
     relay: &RelayUrl,
-) -> Result<DeliveryRelayId, PersistenceError> {
-    if let Some(encoded) = delivery_relay_ids
+) -> Result<PublishQueueRelayId, PersistenceError> {
+    if let Some(encoded) = publish_queue_relay_ids
         .get(relay.as_str().as_bytes())
         .map_err(persist_err)?
     {
         let id = u32::from_be_bytes(*encoded.value());
         let key = relay_key(id);
-        let forward = delivery_relays
+        let forward = publish_queue_relays
             .get(&key)
             .map_err(persist_err)?
             .ok_or_else(|| {
@@ -165,15 +170,15 @@ fn intern_relay_in_txn(
         return Ok(id);
     }
 
-    let raw = alloc_counter_in_txn(delivery_meta, NEXT_RELAY_ID_KEY)?;
-    let id = DeliveryRelayId::try_from(raw)
+    let raw = alloc_counter_in_txn(publish_queue_meta, NEXT_RELAY_ID_KEY)?;
+    let id = PublishQueueRelayId::try_from(raw)
         .map_err(|_| PersistenceError::invariant("delivery relay id namespace exhausted"))?;
     let key = relay_key(id);
     let encoded = encode_relay(relay).map_err(|error| codec_error("relay", error))?;
-    delivery_relays
+    publish_queue_relays
         .insert(&key, encoded.as_slice())
         .map_err(persist_err)?;
-    delivery_relay_ids
+    publish_queue_relay_ids
         .insert(relay.as_str().as_bytes(), &key)
         .map_err(persist_err)?;
     Ok(id)
@@ -183,11 +188,11 @@ pub(super) fn record_route_revision(
     store: &mut RedbStore,
     intent_id: IntentId,
     relays: BTreeSet<RelayUrl>,
-) -> Result<DeliveryRouteRevision, PersistenceError> {
+) -> Result<PublishQueueRouteRevision, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let revision = {
         let intents = write_txn
-            .open_table(DELIVERY_INTENTS)
+            .open_table(PUBLISH_QUEUE_INTENTS)
             .map_err(persist_err)?;
         let intent_key_value = intent_key(intent_id);
         if intents
@@ -200,7 +205,7 @@ pub(super) fn record_route_revision(
             ));
         }
         let mut revisions = write_txn
-            .open_table(DELIVERY_ROUTE_REVISIONS)
+            .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
             .map_err(persist_err)?;
         let (lower, upper) = route_revision_range(intent_id);
         let mut last = 0;
@@ -226,17 +231,21 @@ pub(super) fn record_route_revision(
         let ordinal = last
             .checked_add(1)
             .ok_or_else(|| PersistenceError::invariant("route revision ordinal exhausted"))?;
-        let mut delivery_meta = write_txn.open_table(DELIVERY_META).map_err(persist_err)?;
-        let mut delivery_relays = write_txn.open_table(DELIVERY_RELAYS).map_err(persist_err)?;
-        let mut delivery_relay_ids = write_txn
-            .open_table(DELIVERY_RELAY_IDS)
+        let mut publish_queue_meta = write_txn
+            .open_table(PUBLISH_QUEUE_META)
+            .map_err(persist_err)?;
+        let mut publish_queue_relays = write_txn
+            .open_table(PUBLISH_QUEUE_RELAYS)
+            .map_err(persist_err)?;
+        let mut publish_queue_relay_ids = write_txn
+            .open_table(PUBLISH_QUEUE_RELAY_IDS)
             .map_err(persist_err)?;
         let mut interned = Vec::with_capacity(relays.len());
         for relay in &relays {
             let id = intern_relay_in_txn(
-                &mut delivery_meta,
-                &mut delivery_relays,
-                &mut delivery_relay_ids,
+                &mut publish_queue_meta,
+                &mut publish_queue_relays,
+                &mut publish_queue_relay_ids,
                 relay,
             )?;
             interned.push((id, relay.clone()));
@@ -246,7 +255,7 @@ pub(super) fn record_route_revision(
         revisions
             .insert(&route_revision_key(intent_id, ordinal), encoded.as_slice())
             .map_err(persist_err)?;
-        DeliveryRouteRevision {
+        PublishQueueRouteRevision {
             version: 1,
             intent_id,
             ordinal,
@@ -261,10 +270,10 @@ pub(super) fn record_route_revision(
 pub(super) fn recover_route_revisions(
     store: &RedbStore,
     intent_id: IntentId,
-) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
+) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
     let read_txn = store.db.begin_read().map_err(persist_err)?;
     let revisions = read_txn
-        .open_table(DELIVERY_ROUTE_REVISIONS)
+        .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
         .map_err(persist_err)?;
     let (lower, upper) = route_revision_range(intent_id);
     let mut recovered = Vec::new();
@@ -288,9 +297,9 @@ pub(super) fn recover_route_revisions(
             decode_route(value.value()).map_err(|error| codec_error("route revision", error))?;
         let mut relays = BTreeSet::new();
         for id in ids {
-            relays.insert(store.delivery_relay(id)?);
+            relays.insert(store.publish_queue_relay(id)?);
         }
-        recovered.push(DeliveryRouteRevision {
+        recovered.push(PublishQueueRouteRevision {
             version: 1,
             intent_id,
             ordinal,
@@ -304,13 +313,13 @@ pub(super) fn recover_route_revisions(
 pub(super) fn recover_attempts(
     store: &RedbStore,
     intent_id: IntentId,
-) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
+) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
     let read_txn = store.db.begin_read().map_err(persist_err)?;
     let attempts = read_txn
-        .open_table(DELIVERY_ATTEMPTS)
+        .open_table(PUBLISH_QUEUE_ATTEMPTS)
         .map_err(persist_err)?;
     let details = read_txn
-        .open_table(DELIVERY_ATTEMPT_DETAILS)
+        .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
         .map_err(persist_err)?;
     let (lower, upper) = attempt_range(intent_id);
     let mut recovered = Vec::new();
@@ -328,7 +337,7 @@ pub(super) fn recover_attempts(
                 "delivery attempt range escaped intent prefix",
             ));
         }
-        let relay = store.delivery_relay(relay_id)?;
+        let relay = store.publish_queue_relay(relay_id)?;
         let (event, mut outcome) =
             decode_attempt(value.value()).map_err(|error| codec_error("attempt", error))?;
         if let Some(detail) = details.get(key.value()).map_err(persist_err)? {
@@ -338,7 +347,7 @@ pub(super) fn recover_attempts(
                 outcome = terminal;
             }
         }
-        recovered.push(DeliveryAttempt {
+        recovered.push(PublishQueueAttempt {
             version: 1,
             intent_id,
             relay,
@@ -358,14 +367,14 @@ pub(super) fn recover_attempts(
     Ok(recovered)
 }
 
-pub(super) fn bootstrap_delivery_lanes(
+pub(super) fn bootstrap_publish_queue_lanes(
     store: &mut RedbStore,
     intent_id: IntentId,
-) -> Result<Vec<DeliveryLane>, PersistenceError> {
+) -> Result<Vec<PublishQueueLane>, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let prepared = {
         let intents = write_txn
-            .open_table(DELIVERY_INTENTS)
+            .open_table(PUBLISH_QUEUE_INTENTS)
             .map_err(persist_err)?;
         if intents
             .get(&intent_key(intent_id))
@@ -377,14 +386,16 @@ pub(super) fn bootstrap_delivery_lanes(
             ));
         }
         let route_revisions = write_txn
-            .open_table(DELIVERY_ROUTE_REVISIONS)
+            .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
             .map_err(persist_err)?;
         let attempts_table = write_txn
-            .open_table(DELIVERY_ATTEMPTS)
+            .open_table(PUBLISH_QUEUE_ATTEMPTS)
             .map_err(persist_err)?;
-        let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+        let mut lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
+            .map_err(persist_err)?;
         let details = write_txn
-            .open_table(DELIVERY_ATTEMPT_DETAILS)
+            .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
         let (attempt_lower, attempt_upper) = attempt_range(intent_id);
         let mut details_by_key = BTreeMap::new();
@@ -400,12 +411,12 @@ pub(super) fn bootstrap_delivery_lanes(
                     "attempt detail range escaped intent prefix",
                 ));
             }
-            let relay = store.delivery_relay(relay_id)?;
+            let relay = store.publish_queue_relay(relay_id)?;
             let detail = decode_attempt_details(value.value(), intent_id, relay, ordinal)
                 .map_err(|error| codec_error("attempt details", error))?;
             details_by_key.insert((relay_id, ordinal), detail);
         }
-        let mut attempts: Vec<(DeliveryRelayId, DeliveryAttempt)> = Vec::new();
+        let mut attempts: Vec<(PublishQueueRelayId, PublishQueueAttempt)> = Vec::new();
         for row in attempts_table
             .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
             .map_err(persist_err)?
@@ -420,7 +431,7 @@ pub(super) fn bootstrap_delivery_lanes(
                     "attempt range escaped intent prefix",
                 ));
             }
-            let relay = store.delivery_relay(relay_id)?;
+            let relay = store.publish_queue_relay(relay_id)?;
             let (event, mut outcome) =
                 decode_attempt(value.value()).map_err(|error| codec_error("attempt", error))?;
             if let Some(terminal) = details_by_key
@@ -431,7 +442,7 @@ pub(super) fn bootstrap_delivery_lanes(
             }
             attempts.push((
                 relay_id,
-                DeliveryAttempt {
+                PublishQueueAttempt {
                     version: 1,
                     intent_id,
                     relay,
@@ -499,8 +510,8 @@ pub(super) fn bootstrap_delivery_lanes(
             ));
         }
         for relay_id in &relay_ids {
-            let relay = store.delivery_relay(*relay_id)?;
-            let key = DeliveryLaneKey { intent_id, relay };
+            let relay = store.publish_queue_relay(*relay_id)?;
+            let key = PublishQueueLaneKey { intent_id, relay };
             let storage_key = lane_key(intent_id, *relay_id);
             let lane_attempts: Vec<_> = attempts
                 .iter()
@@ -532,7 +543,7 @@ pub(super) fn bootstrap_delivery_lanes(
             if let Some(existing) = lanes.get(&storage_key).map_err(persist_err)? {
                 let (revision, last_ordinal, state) =
                     decode_lane(existing.value()).map_err(|error| codec_error("lane", error))?;
-                let lane = DeliveryLane {
+                let lane = PublishQueueLane {
                     version: 1,
                     key: key.clone(),
                     revision,
@@ -546,11 +557,11 @@ pub(super) fn bootstrap_delivery_lanes(
                     ));
                 }
                 match lane_attempts.last() {
-                    Some(attempt) if attempt.outcome != DeliveryAttemptOutcome::Started => {
+                    Some(attempt) if attempt.outcome != PublishQueueAttemptOutcome::Started => {
                         if lane.state
-                            != (DeliveryLaneState::Terminal {
+                            != (PublishQueueLaneState::Terminal {
                                 ordinal: attempt.ordinal,
-                                outcome: DeliveryTerminalOutcome::from_attempt(
+                                outcome: PublishQueueTerminalOutcome::from_attempt(
                                     attempt.outcome.clone(),
                                 )?,
                             })
@@ -562,12 +573,12 @@ pub(super) fn bootstrap_delivery_lanes(
                     }
                     _ if matches!(
                         lane.state,
-                        DeliveryLaneState::Terminal {
-                            outcome: DeliveryTerminalOutcome::AuthDenied(_),
+                        PublishQueueLaneState::Terminal {
+                            outcome: PublishQueueTerminalOutcome::AuthDenied(_),
                             ..
                         }
                     ) => {}
-                    _ if matches!(lane.state, DeliveryLaneState::Terminal { .. }) => {
+                    _ if matches!(lane.state, PublishQueueLaneState::Terminal { .. }) => {
                         return Err(PersistenceError::invariant(
                             "terminal lane lacks matching terminal attempt",
                         ));
@@ -584,12 +595,12 @@ pub(super) fn bootstrap_delivery_lanes(
                     "attempt history exists without its lane row",
                 ));
             }
-            let lane = DeliveryLane {
+            let lane = PublishQueueLane {
                 version: 1,
                 key,
                 revision: 1,
                 last_ordinal: 0,
-                state: DeliveryLaneState::WaitingConnection,
+                state: PublishQueueLaneState::WaitingConnection,
             };
             let encoded = encode_lane(lane.revision, lane.last_ordinal, &lane.state)
                 .map_err(|error| codec_error("lane", error))?;
@@ -622,12 +633,12 @@ pub(super) fn bootstrap_delivery_lanes(
                     "lane relay is absent from every route revision",
                 ));
             }
-            let relay = store.delivery_relay(relay_id)?;
+            let relay = store.publish_queue_relay(relay_id)?;
             let (revision, last_ordinal, state) =
                 decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
-            recovered.push(DeliveryLane {
+            recovered.push(PublishQueueLane {
                 version: 1,
-                key: DeliveryLaneKey { intent_id, relay },
+                key: PublishQueueLaneKey { intent_id, relay },
                 revision,
                 last_ordinal,
                 state,
@@ -641,12 +652,14 @@ pub(super) fn bootstrap_delivery_lanes(
     commit_prepared(write_txn, prepared)
 }
 
-pub(super) fn recover_delivery_lanes(
+pub(super) fn recover_publish_queue_lanes(
     store: &RedbStore,
     intent_id: IntentId,
-) -> Result<Vec<DeliveryLane>, PersistenceError> {
+) -> Result<Vec<PublishQueueLane>, PersistenceError> {
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let lanes = read_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+    let lanes = read_txn
+        .open_table(PUBLISH_QUEUE_LANES)
+        .map_err(persist_err)?;
     let (lower, upper) = lane_range(intent_id);
     let mut recovered = Vec::new();
     for row in lanes
@@ -663,11 +676,11 @@ pub(super) fn recover_delivery_lanes(
         }
         let (revision, last_ordinal, state) =
             decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
-        recovered.push(DeliveryLane {
+        recovered.push(PublishQueueLane {
             version: 1,
-            key: DeliveryLaneKey {
+            key: PublishQueueLaneKey {
                 intent_id,
-                relay: store.delivery_relay(relay_id)?,
+                relay: store.publish_queue_relay(relay_id)?,
             },
             revision,
             last_ordinal,
@@ -678,11 +691,11 @@ pub(super) fn recover_delivery_lanes(
     Ok(recovered)
 }
 
-pub(super) fn due_delivery_deadlines(
+pub(super) fn due_publish_queue_deadlines(
     store: &RedbStore,
     now: Timestamp,
     limit: usize,
-) -> Result<Vec<DeliveryDeadline>, PersistenceError> {
+) -> Result<Vec<PublishQueueDeadline>, PersistenceError> {
     if limit > 1_024 {
         return Err(PersistenceError::invariant(
             "deadline read limit exceeds 1024",
@@ -690,17 +703,19 @@ pub(super) fn due_delivery_deadlines(
     }
     let read_txn = store.db.begin_read().map_err(persist_err)?;
     let deadlines = read_txn
-        .open_table(DELIVERY_DEADLINES)
+        .open_table(PUBLISH_QUEUE_DEADLINES)
         .map_err(persist_err)?;
     let deadlines_by_intent = read_txn
-        .open_table(DELIVERY_DEADLINES_BY_INTENT)
+        .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
         .map_err(persist_err)?;
     if deadlines.len().map_err(persist_err)? != deadlines_by_intent.len().map_err(persist_err)? {
         return Err(PersistenceError::invariant(
             "deadline index cardinalities disagree",
         ));
     }
-    let lanes = read_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+    let lanes = read_txn
+        .open_table(PUBLISH_QUEUE_LANES)
+        .map_err(persist_err)?;
     let (lower, upper) = deadline_due_range(now);
     let mut recovered = Vec::new();
     for row in deadlines
@@ -734,10 +749,10 @@ pub(super) fn due_delivery_deadlines(
             .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
         let (revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
-        let relay = store.delivery_relay(relay_id)?;
-        let lane = DeliveryLane {
+        let relay = store.publish_queue_relay(relay_id)?;
+        let lane = PublishQueueLane {
             version: 1,
-            key: DeliveryLaneKey {
+            key: PublishQueueLaneKey {
                 intent_id,
                 relay: relay.clone(),
             },
@@ -745,9 +760,9 @@ pub(super) fn due_delivery_deadlines(
             last_ordinal,
             state,
         };
-        let deadline = DeliveryDeadline {
+        let deadline = PublishQueueDeadline {
             at,
-            key: DeliveryLaneKey { intent_id, relay },
+            key: PublishQueueLaneKey { intent_id, relay },
             lane_revision,
             kind,
         };
@@ -759,22 +774,24 @@ pub(super) fn due_delivery_deadlines(
     Ok(recovered)
 }
 
-pub(super) fn next_delivery_deadline(
+pub(super) fn next_publish_queue_deadline(
     store: &RedbStore,
 ) -> Result<Option<Timestamp>, PersistenceError> {
     let read_txn = store.db.begin_read().map_err(persist_err)?;
     let deadlines = read_txn
-        .open_table(DELIVERY_DEADLINES)
+        .open_table(PUBLISH_QUEUE_DEADLINES)
         .map_err(persist_err)?;
     let deadlines_by_intent = read_txn
-        .open_table(DELIVERY_DEADLINES_BY_INTENT)
+        .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
         .map_err(persist_err)?;
     if deadlines.len().map_err(persist_err)? != deadlines_by_intent.len().map_err(persist_err)? {
         return Err(PersistenceError::invariant(
             "deadline index cardinalities disagree",
         ));
     }
-    let lanes = read_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+    let lanes = read_txn
+        .open_table(PUBLISH_QUEUE_LANES)
+        .map_err(persist_err)?;
     let mut rows = deadlines.iter().map_err(persist_err)?;
     let Some(row) = rows.next() else {
         return Ok(None);
@@ -803,10 +820,10 @@ pub(super) fn next_delivery_deadline(
         .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
     let (revision, last_ordinal, state) =
         decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
-    let relay = store.delivery_relay(relay_id)?;
-    let lane = DeliveryLane {
+    let relay = store.publish_queue_relay(relay_id)?;
+    let lane = PublishQueueLane {
         version: 1,
-        key: DeliveryLaneKey {
+        key: PublishQueueLaneKey {
             intent_id,
             relay: relay.clone(),
         },
@@ -814,9 +831,9 @@ pub(super) fn next_delivery_deadline(
         last_ordinal,
         state,
     };
-    let deadline = DeliveryDeadline {
+    let deadline = PublishQueueDeadline {
         at,
-        key: DeliveryLaneKey { intent_id, relay },
+        key: PublishQueueLaneKey { intent_id, relay },
         lane_revision,
         kind,
     };
@@ -828,43 +845,43 @@ pub(super) fn next_delivery_deadline(
 
 pub(super) fn set_lane_waiting(
     store: &mut RedbStore,
-    key: &DeliveryLaneKey,
+    key: &PublishQueueLaneKey,
     expected_revision: u64,
     auth: bool,
-) -> Result<DeliveryLane, PersistenceError> {
+) -> Result<PublishQueueLane, PersistenceError> {
     store.persist_lane_state(
         key,
         expected_revision,
         if auth {
-            DeliveryLaneState::WaitingAuth
+            PublishQueueLaneState::WaitingAuth
         } else {
-            DeliveryLaneState::WaitingConnection
+            PublishQueueLaneState::WaitingConnection
         },
     )
 }
 
 pub(super) fn set_lane_eligible(
     store: &mut RedbStore,
-    key: &DeliveryLaneKey,
+    key: &PublishQueueLaneKey,
     expected_revision: u64,
     since: Timestamp,
-) -> Result<DeliveryLane, PersistenceError> {
+) -> Result<PublishQueueLane, PersistenceError> {
     store.persist_lane_state(
         key,
         expected_revision,
-        DeliveryLaneState::Eligible { since },
+        PublishQueueLaneState::Eligible { since },
     )
 }
 
 pub(super) fn set_lane_transient(
     store: &mut RedbStore,
-    key: &DeliveryLaneKey,
+    key: &PublishQueueLaneKey,
     expected_revision: u64,
     ordinal: u64,
     eligible_at: Timestamp,
-    cause: DeliveryTransientCause,
+    cause: PublishQueueTransientCause,
     raw_reason: Option<String>,
-) -> Result<DeliveryLane, PersistenceError> {
+) -> Result<PublishQueueLane, PersistenceError> {
     if raw_reason
         .as_ref()
         .is_some_and(|reason| reason.len() > 4_096)
@@ -873,18 +890,20 @@ pub(super) fn set_lane_transient(
             "transient raw reason exceeds 4096 bytes",
         ));
     }
-    let relay_id = store.delivery_relay_id(&key.relay)?;
+    let relay_id = store.publish_queue_relay_id(&key.relay)?;
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let lane = {
-        let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+        let mut lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
+            .map_err(persist_err)?;
         let mut deadlines = write_txn
-            .open_table(DELIVERY_DEADLINES)
+            .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
         let mut deadlines_by_intent = write_txn
-            .open_table(DELIVERY_DEADLINES_BY_INTENT)
+            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
             .map_err(persist_err)?;
         let mut details = write_txn
-            .open_table(DELIVERY_ATTEMPT_DETAILS)
+            .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
         let storage_key = lane_key(key.intent_id, relay_id);
         let encoded = lanes
@@ -907,7 +926,7 @@ pub(super) fn set_lane_transient(
             let mut detail =
                 decode_attempt_details(&detail_encoded, key.intent_id, key.relay.clone(), ordinal)
                     .map_err(|error| codec_error("attempt details", error))?;
-            detail.transient = Some(DeliveryAttemptTransient {
+            detail.transient = Some(PublishQueueAttemptTransient {
                 eligible_at,
                 cause,
                 raw_reason: raw_reason.clone(),
@@ -925,7 +944,7 @@ pub(super) fn set_lane_transient(
             key,
             relay_id,
             expected_revision,
-            DeliveryLaneState::Transient {
+            PublishQueueLaneState::Transient {
                 ordinal,
                 eligible_at,
                 cause,
@@ -941,14 +960,14 @@ pub(super) fn set_lane_transient(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn suspend_lane_attempt(
     store: &mut RedbStore,
-    key: &DeliveryLaneKey,
+    key: &PublishQueueLaneKey,
     expected_revision: u64,
     ordinal: u64,
     at: Timestamp,
-    cause: DeliveryTransientCause,
+    cause: PublishQueueTransientCause,
     raw_reason: Option<String>,
     auth: bool,
-) -> Result<DeliveryLane, PersistenceError> {
+) -> Result<PublishQueueLane, PersistenceError> {
     if raw_reason
         .as_ref()
         .is_some_and(|reason| reason.len() > 4_096)
@@ -957,18 +976,20 @@ pub(super) fn suspend_lane_attempt(
             "transient raw reason exceeds 4096 bytes",
         ));
     }
-    let relay_id = store.delivery_relay_id(&key.relay)?;
+    let relay_id = store.publish_queue_relay_id(&key.relay)?;
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let lane = {
-        let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+        let mut lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
+            .map_err(persist_err)?;
         let mut deadlines = write_txn
-            .open_table(DELIVERY_DEADLINES)
+            .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
         let mut deadlines_by_intent = write_txn
-            .open_table(DELIVERY_DEADLINES_BY_INTENT)
+            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
             .map_err(persist_err)?;
         let mut details = write_txn
-            .open_table(DELIVERY_ATTEMPT_DETAILS)
+            .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
         let storage_key = lane_key(key.intent_id, relay_id);
         let encoded = lanes
@@ -990,7 +1011,7 @@ pub(super) fn suspend_lane_attempt(
         let mut detail =
             decode_attempt_details(&detail_encoded, key.intent_id, key.relay.clone(), ordinal)
                 .map_err(|error| codec_error("attempt details", error))?;
-        detail.transient = Some(DeliveryAttemptTransient {
+        detail.transient = Some(PublishQueueAttemptTransient {
             eligible_at: at,
             cause,
             raw_reason,
@@ -1008,9 +1029,9 @@ pub(super) fn suspend_lane_attempt(
             relay_id,
             expected_revision,
             if auth {
-                DeliveryLaneState::WaitingAuth
+                PublishQueueLaneState::WaitingAuth
             } else {
-                DeliveryLaneState::WaitingConnection
+                PublishQueueLaneState::WaitingConnection
             },
         )?
     };
@@ -1021,14 +1042,16 @@ pub(super) fn suspend_lane_attempt(
 
 pub(super) fn start_lane_attempt(
     store: &mut RedbStore,
-    key: &DeliveryLaneKey,
+    key: &PublishQueueLaneKey,
     expected_revision: u64,
     event: Event,
     started_at: Timestamp,
-) -> Result<(DeliveryAttempt, DeliveryLane), PersistenceError> {
+) -> Result<(PublishQueueAttempt, PublishQueueLane), PersistenceError> {
     let intent = {
         let read_txn = store.db.begin_read().map_err(persist_err)?;
-        let intents = read_txn.open_table(DELIVERY_INTENTS).map_err(persist_err)?;
+        let intents = read_txn
+            .open_table(PUBLISH_QUEUE_INTENTS)
+            .map_err(persist_err)?;
         let storage_key = intent_key(key.intent_id);
         let encoded = intents
             .get(&storage_key)
@@ -1045,21 +1068,23 @@ pub(super) fn start_lane_attempt(
     event
         .verify()
         .map_err(|e| PersistenceError::invariant(format!("attempt event is invalid: {e}")))?;
-    let relay_id = store.delivery_relay_id(&key.relay)?;
+    let relay_id = store.publish_queue_relay_id(&key.relay)?;
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let (attempt, lane) = {
         let mut attempts = write_txn
-            .open_table(DELIVERY_ATTEMPTS)
+            .open_table(PUBLISH_QUEUE_ATTEMPTS)
             .map_err(persist_err)?;
         let mut details = write_txn
-            .open_table(DELIVERY_ATTEMPT_DETAILS)
+            .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
-        let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+        let mut lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
+            .map_err(persist_err)?;
         let mut deadlines = write_txn
-            .open_table(DELIVERY_DEADLINES)
+            .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
         let mut deadlines_by_intent = write_txn
-            .open_table(DELIVERY_DEADLINES_BY_INTENT)
+            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
             .map_err(persist_err)?;
         let storage_key = lane_key(key.intent_id, relay_id);
         let lane_encoded = lanes
@@ -1069,7 +1094,8 @@ pub(super) fn start_lane_attempt(
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         let (revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
-        if revision != expected_revision || !matches!(state, DeliveryLaneState::Eligible { .. }) {
+        if revision != expected_revision || !matches!(state, PublishQueueLaneState::Eligible { .. })
+        {
             return Err(PersistenceError::invariant(
                 "lane is not expected eligible cursor",
             ));
@@ -1077,13 +1103,13 @@ pub(super) fn start_lane_attempt(
         let ordinal = last_ordinal
             .checked_add(1)
             .ok_or_else(|| PersistenceError::invariant("attempt ordinal exhausted"))?;
-        let attempt = DeliveryAttempt {
+        let attempt = PublishQueueAttempt {
             version: 1,
             intent_id: key.intent_id,
             relay: key.relay.clone(),
             ordinal,
             event,
-            outcome: DeliveryAttemptOutcome::Started,
+            outcome: PublishQueueAttemptOutcome::Started,
         };
         let attempt_key_value = attempt_key(key.intent_id, relay_id, ordinal);
         let attempt_encoded = encode_attempt(&attempt.event, &attempt.outcome)
@@ -1091,7 +1117,7 @@ pub(super) fn start_lane_attempt(
         attempts
             .insert(&attempt_key_value, attempt_encoded.as_slice())
             .map_err(persist_err)?;
-        let detail = DeliveryAttemptDetails {
+        let detail = PublishQueueAttemptDetails {
             version: 1,
             intent_id: key.intent_id,
             relay: key.relay.clone(),
@@ -1114,9 +1140,9 @@ pub(super) fn start_lane_attempt(
             key,
             relay_id,
             expected_revision,
-            DeliveryLaneState::InFlight {
+            PublishQueueLaneState::InFlight {
                 ordinal,
-                phase: DeliveryInFlightPhase::AwaitingHandoff,
+                phase: PublishQueueInFlightPhase::AwaitingHandoff,
             },
         )?;
         (attempt, advanced)
@@ -1128,15 +1154,15 @@ pub(super) fn start_lane_attempt(
 
 pub(super) fn record_lane_handoff(
     store: &mut RedbStore,
-    key: &DeliveryLaneKey,
+    key: &PublishQueueLaneKey,
     expected_revision: u64,
     ordinal: u64,
-    detail: DeliveryAttemptHandoff,
-    next: DeliveryPostHandoffState,
-) -> Result<DeliveryLane, PersistenceError> {
+    detail: PublishQueueAttemptHandoff,
+    next: PublishQueuePostHandoffState,
+) -> Result<PublishQueueLane, PersistenceError> {
     if matches!(
         &next,
-        DeliveryPostHandoffState::Transient {
+        PublishQueuePostHandoffState::Transient {
             raw_reason: Some(reason),
             ..
         } if reason.len() > 4_096
@@ -1145,18 +1171,20 @@ pub(super) fn record_lane_handoff(
             "transient raw reason exceeds 4096 bytes",
         ));
     }
-    let relay_id = store.delivery_relay_id(&key.relay)?;
+    let relay_id = store.publish_queue_relay_id(&key.relay)?;
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let lane = {
         let mut details = write_txn
-            .open_table(DELIVERY_ATTEMPT_DETAILS)
+            .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
-        let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+        let mut lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
+            .map_err(persist_err)?;
         let mut deadlines = write_txn
-            .open_table(DELIVERY_DEADLINES)
+            .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
         let mut deadlines_by_intent = write_txn
-            .open_table(DELIVERY_DEADLINES_BY_INTENT)
+            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
             .map_err(persist_err)?;
         let lane_storage_key = lane_key(key.intent_id, relay_id);
         let lane_encoded = lanes
@@ -1171,9 +1199,9 @@ pub(super) fn record_lane_handoff(
         }
         if !matches!(
             current_state,
-            DeliveryLaneState::InFlight {
+            PublishQueueLaneState::InFlight {
                 ordinal: current,
-                phase: DeliveryInFlightPhase::AwaitingHandoff,
+                phase: PublishQueueInFlightPhase::AwaitingHandoff,
             } if current == ordinal
         ) {
             return Err(PersistenceError::invariant("lane is not awaiting handoff"));
@@ -1195,35 +1223,41 @@ pub(super) fn record_lane_handoff(
             recovered_detail.handoff = Some(detail);
         }
         let state = match next {
-            DeliveryPostHandoffState::WaitingConnection => DeliveryLaneState::WaitingConnection,
-            DeliveryPostHandoffState::WaitingAuth => DeliveryLaneState::WaitingAuth,
-            DeliveryPostHandoffState::Eligible { since } => DeliveryLaneState::Eligible { since },
-            DeliveryPostHandoffState::AwaitingAck { deadline } => DeliveryLaneState::InFlight {
-                ordinal,
-                phase: DeliveryInFlightPhase::AwaitingAck { deadline },
-            },
-            DeliveryPostHandoffState::Transient {
+            PublishQueuePostHandoffState::WaitingConnection => {
+                PublishQueueLaneState::WaitingConnection
+            }
+            PublishQueuePostHandoffState::WaitingAuth => PublishQueueLaneState::WaitingAuth,
+            PublishQueuePostHandoffState::Eligible { since } => {
+                PublishQueueLaneState::Eligible { since }
+            }
+            PublishQueuePostHandoffState::AwaitingAck { deadline } => {
+                PublishQueueLaneState::InFlight {
+                    ordinal,
+                    phase: PublishQueueInFlightPhase::AwaitingAck { deadline },
+                }
+            }
+            PublishQueuePostHandoffState::Transient {
                 eligible_at,
                 cause,
                 raw_reason,
-            } => DeliveryLaneState::Transient {
+            } => PublishQueueLaneState::Transient {
                 ordinal,
                 eligible_at,
                 cause,
                 raw_reason,
             },
-            DeliveryPostHandoffState::Terminal {
+            PublishQueuePostHandoffState::Terminal {
                 outcome,
                 finished_at,
             } => {
-                if outcome == DeliveryAttemptOutcome::Started {
+                if outcome == PublishQueueAttemptOutcome::Started {
                     return Err(PersistenceError::invariant("Started is not terminal"));
                 }
                 recovered_detail.finished_at = Some(finished_at);
                 recovered_detail.terminal = Some(outcome.clone());
-                DeliveryLaneState::Terminal {
+                PublishQueueLaneState::Terminal {
                     ordinal,
-                    outcome: DeliveryTerminalOutcome::from_attempt(outcome)?,
+                    outcome: PublishQueueTerminalOutcome::from_attempt(outcome)?,
                 }
             }
         };
@@ -1253,28 +1287,30 @@ pub(super) fn record_lane_handoff(
 
 pub(super) fn finish_lane_attempt(
     store: &mut RedbStore,
-    key: &DeliveryLaneKey,
+    key: &PublishQueueLaneKey,
     expected_revision: u64,
     ordinal: u64,
-    outcome: DeliveryAttemptOutcome,
+    outcome: PublishQueueAttemptOutcome,
     finished_at: Timestamp,
-) -> Result<DeliveryLane, PersistenceError> {
-    if outcome == DeliveryAttemptOutcome::Started {
+) -> Result<PublishQueueLane, PersistenceError> {
+    if outcome == PublishQueueAttemptOutcome::Started {
         return Err(PersistenceError::invariant("Started is not terminal"));
     }
-    let lane_outcome = DeliveryTerminalOutcome::from_attempt(outcome.clone())?;
-    let relay_id = store.delivery_relay_id(&key.relay)?;
+    let lane_outcome = PublishQueueTerminalOutcome::from_attempt(outcome.clone())?;
+    let relay_id = store.publish_queue_relay_id(&key.relay)?;
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let lane = {
         let mut details = write_txn
-            .open_table(DELIVERY_ATTEMPT_DETAILS)
+            .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
-        let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+        let mut lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
+            .map_err(persist_err)?;
         let mut deadlines = write_txn
-            .open_table(DELIVERY_DEADLINES)
+            .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
         let mut deadlines_by_intent = write_txn
-            .open_table(DELIVERY_DEADLINES_BY_INTENT)
+            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
             .map_err(persist_err)?;
         let storage_key = lane_key(key.intent_id, relay_id);
         let lane_encoded = lanes
@@ -1284,7 +1320,7 @@ pub(super) fn finish_lane_attempt(
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         let (revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
-        let current = DeliveryLane {
+        let current = PublishQueueLane {
             version: 1,
             key: key.clone(),
             revision,
@@ -1308,7 +1344,7 @@ pub(super) fn finish_lane_attempt(
                 && detail.finished_at == Some(finished_at)
                 && matches!(
                     current.state,
-                    DeliveryLaneState::Terminal {
+                    PublishQueueLaneState::Terminal {
                         ordinal: current_ordinal,
                         outcome: ref current_outcome,
                     } if current_ordinal == ordinal && current_outcome == &lane_outcome
@@ -1335,7 +1371,7 @@ pub(super) fn finish_lane_attempt(
                 key,
                 relay_id,
                 expected_revision,
-                DeliveryLaneState::Terminal {
+                PublishQueueLaneState::Terminal {
                     ordinal,
                     outcome: lane_outcome,
                 },
@@ -1349,24 +1385,26 @@ pub(super) fn finish_lane_attempt(
 
 pub(super) fn deny_lane_auth(
     store: &mut RedbStore,
-    key: &DeliveryLaneKey,
+    key: &PublishQueueLaneKey,
     expected_revision: u64,
     denial: AuthDenial,
-) -> Result<DeliveryLane, PersistenceError> {
+) -> Result<PublishQueueLane, PersistenceError> {
     if denial.reason.len() > 4_096 {
         return Err(PersistenceError::invariant(
             "authentication denial reason exceeds 4096 bytes",
         ));
     }
-    let relay_id = store.delivery_relay_id(&key.relay)?;
+    let relay_id = store.publish_queue_relay_id(&key.relay)?;
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let lane = {
-        let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+        let mut lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
+            .map_err(persist_err)?;
         let mut deadlines = write_txn
-            .open_table(DELIVERY_DEADLINES)
+            .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
         let mut deadlines_by_intent = write_txn
-            .open_table(DELIVERY_DEADLINES_BY_INTENT)
+            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
             .map_err(persist_err)?;
         let storage_key = lane_key(key.intent_id, relay_id);
         let lane_encoded = lanes
@@ -1376,7 +1414,7 @@ pub(super) fn deny_lane_auth(
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
         let (revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
-        let current = DeliveryLane {
+        let current = PublishQueueLane {
             version: 1,
             key: key.clone(),
             revision,
@@ -1390,14 +1428,14 @@ pub(super) fn deny_lane_auth(
         }
         if matches!(
             current.state,
-            DeliveryLaneState::Terminal {
-                outcome: DeliveryTerminalOutcome::AuthDenied(ref existing),
+            PublishQueueLaneState::Terminal {
+                outcome: PublishQueueTerminalOutcome::AuthDenied(ref existing),
                 ..
             } if existing == &denial
         ) {
             current
         } else {
-            if !matches!(current.state, DeliveryLaneState::WaitingAuth) {
+            if !matches!(current.state, PublishQueueLaneState::WaitingAuth) {
                 return Err(PersistenceError::invariant(
                     "lane is not waiting for authentication",
                 ));
@@ -1409,9 +1447,9 @@ pub(super) fn deny_lane_auth(
                 key,
                 relay_id,
                 expected_revision,
-                DeliveryLaneState::Terminal {
+                PublishQueueLaneState::Terminal {
                     ordinal: current.last_ordinal,
-                    outcome: DeliveryTerminalOutcome::AuthDenied(denial),
+                    outcome: PublishQueueTerminalOutcome::AuthDenied(denial),
                 },
             )?
         }
@@ -1424,10 +1462,10 @@ pub(super) fn deny_lane_auth(
 pub(super) fn recover_attempt_details(
     store: &RedbStore,
     intent_id: IntentId,
-) -> Result<Vec<DeliveryAttemptDetails>, PersistenceError> {
+) -> Result<Vec<PublishQueueAttemptDetails>, PersistenceError> {
     let read_txn = store.db.begin_read().map_err(persist_err)?;
     let details = read_txn
-        .open_table(DELIVERY_ATTEMPT_DETAILS)
+        .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
         .map_err(persist_err)?;
     let (lower, upper) = attempt_range(intent_id);
     let mut recovered = Vec::new();
@@ -1447,7 +1485,7 @@ pub(super) fn recover_attempt_details(
             decode_attempt_details(
                 value.value(),
                 intent_id,
-                store.delivery_relay(relay_id)?,
+                store.publish_queue_relay(relay_id)?,
                 ordinal,
             )
             .map_err(|error| codec_error("attempt details", error))?,
@@ -1464,7 +1502,7 @@ pub(super) fn close_terminal_intent(
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let result = {
         let mut intents = write_txn
-            .open_table(DELIVERY_INTENTS)
+            .open_table(PUBLISH_QUEUE_INTENTS)
             .map_err(persist_err)?;
         let intent_key_value = intent_key(intent_id);
         if intents
@@ -1474,7 +1512,9 @@ pub(super) fn close_terminal_intent(
         {
             CloseIntentOutcome::AlreadyClosed
         } else {
-            let lanes_table = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+            let lanes_table = write_txn
+                .open_table(PUBLISH_QUEUE_LANES)
+                .map_err(persist_err)?;
             let (lane_lower, lane_upper) = lane_range(intent_id);
             let mut lanes_snapshot = Vec::new();
             for row in lanes_table
@@ -1496,17 +1536,17 @@ pub(super) fn close_terminal_intent(
             if lanes_snapshot.is_empty()
                 || lanes_snapshot
                     .iter()
-                    .any(|state| !matches!(state, DeliveryLaneState::Terminal { .. }))
+                    .any(|state| !matches!(state, PublishQueueLaneState::Terminal { .. }))
             {
                 return Err(PersistenceError::invariant(
                     "intent lanes are not non-empty and terminal",
                 ));
             }
             let mut deadlines = write_txn
-                .open_table(DELIVERY_DEADLINES)
+                .open_table(PUBLISH_QUEUE_DEADLINES)
                 .map_err(persist_err)?;
             let mut deadlines_by_intent = write_txn
-                .open_table(DELIVERY_DEADLINES_BY_INTENT)
+                .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
                 .map_err(persist_err)?;
             if deadlines.len().map_err(persist_err)?
                 != deadlines_by_intent.len().map_err(persist_err)?
@@ -1567,17 +1607,19 @@ pub(super) fn accept_ephemeral(
     frozen_id: EventId,
     expected_pubkey: PublicKey,
 ) -> Result<u64, PersistenceError> {
-    // Receipt-ONLY: touches `DELIVERY_RECEIPTS` (+ `DELIVERY_META` for the
-    // id allocation) alone — no `EVENTS` row, no `DELIVERY_INTENTS` row,
+    // Receipt-ONLY: touches `PUBLISH_QUEUE_RECEIPTS` (+ `PUBLISH_QUEUE_META` for the
+    // id allocation) alone — no `EVENTS` row, no `PUBLISH_QUEUE_INTENTS` row,
     // `intent_id: None` (nothing backs it).
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let receipt_id = {
-        let mut delivery_meta = write_txn.open_table(DELIVERY_META).map_err(persist_err)?;
-        let mut delivery_receipts = write_txn
-            .open_table(DELIVERY_RECEIPTS)
+        let mut publish_queue_meta = write_txn
+            .open_table(PUBLISH_QUEUE_META)
             .map_err(persist_err)?;
-        let receipt_id = alloc_receipt_id_in_txn(&mut delivery_meta)?;
-        let record = DeliveryReceiptRecord {
+        let mut publish_queue_receipts = write_txn
+            .open_table(PUBLISH_QUEUE_RECEIPTS)
+            .map_err(persist_err)?;
+        let receipt_id = alloc_receipt_id_in_txn(&mut publish_queue_meta)?;
+        let record = PublishQueueReceiptRecord {
             intent_id: None,
             frozen_id,
             expected_pubkey,
@@ -1585,10 +1627,10 @@ pub(super) fn accept_ephemeral(
         };
         let encoded = encode_receipt(&record);
         let receipt_key_value = receipt_key(receipt_id);
-        delivery_receipts
+        publish_queue_receipts
             .insert(&receipt_key_value, encoded.as_slice())
             .map_err(persist_err)?;
-        increment_pending_ephemeral_in_txn(&mut delivery_meta)?;
+        increment_pending_ephemeral_in_txn(&mut publish_queue_meta)?;
         receipt_id
     };
     commit_prepared(write_txn, receipt_id)

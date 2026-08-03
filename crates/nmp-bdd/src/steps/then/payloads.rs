@@ -19,7 +19,7 @@
 
 use cucumber::then;
 
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::WriteStatus;
 use nostr::JsonUtil;
 
 use crate::world::{format_stated_time, NmpWorld};

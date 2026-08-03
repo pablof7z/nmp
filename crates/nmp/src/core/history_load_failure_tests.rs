@@ -5,9 +5,10 @@ use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
-    CoverageInterval, CoverageKey, DeliveryAttempt, DeliveryIntent, DeliveryReceipt,
-    DeliveryRouteRevision, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
-    MemoryStore, PersistenceError, PromoteOutcome, RelayObserved, RetractReason, StoredEvent,
+    CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet,
+    InsertOutcome, MemoryStore, PersistenceError, PromoteOutcome, PublishQueueAttempt,
+    PublishQueueIntent, PublishQueueReceipt, PublishQueueRouteRevision, RelayObserved,
+    RetractReason, StoredEvent,
 };
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
 
@@ -218,14 +219,14 @@ impl EventStore for FailingReadStore {
         self.inner.compensate_write(intent_id)
     }
 
-    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
-        self.inner.recover_delivery()
+    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
+        self.inner.recover_publish_queue()
     }
 
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
+    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
 
@@ -237,21 +238,21 @@ impl EventStore for FailingReadStore {
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<DeliveryRouteRevision, PersistenceError> {
+    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
         self.inner.record_route_revision(intent_id, relays)
     }
 
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
 
     fn recover_attempts(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
 

@@ -76,7 +76,7 @@ set grows.
 What this buys, for free, from structures that already exist:
 
 - **Re-spawn suppression** (§6): the lane key is `(intent_id, relay)`
-  (`DeliveryLaneKey`, `crates/nmp-store/src/lib.rs:1106-1109`). Re-executing a
+  (`PublishQueueLaneKey`, `crates/nmp-store/src/lib.rs:1106-1109`). Re-executing a
   resolver that reports an already-known relay collides with the existing lane
   and creates nothing. An acked lane is terminal and untouched.
 - **One receipt per intent, always** (§6): child intents would each mint a
@@ -93,7 +93,7 @@ rather than an architecture.
 
 **The append-only per-intent route log.**
 `record_route_revision`/`recover_route_revisions`
-(`crates/nmp-store/src/redb_store/delivery_ops.rs:141,211`) maintain an
+(`crates/nmp-store/src/redb_store/publish_queue_ops.rs:141,211`) maintain an
 append-only, ordinal-numbered log of resolved relay sets per intent.
 `record_route_revision` refuses to write for an intent that is not open, scans
 the intent's existing revisions to compute `last_ordinal + 1`, and commits the
@@ -105,7 +105,7 @@ committed, is history.
 against the directory at that moment
 (`crates/nmp/src/core/write.rs:2223-2247`), emits
 `WriteStatus::Routed(relays)` (`:2247`), records the revision (`:2296`), and
-bootstraps lanes from it (`bootstrap_delivery_lanes`, `:2308`). Note what order
+bootstraps lanes from it (`bootstrap_publish_queue_lanes`, `:2308`). Note what order
 that implies: the revision commit is the durable fact, and lanes are derived
 from it — exactly the discipline the rewriter generalizes.
 

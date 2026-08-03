@@ -153,7 +153,7 @@ async fn refused_for_having_no_identity(w: &mut NmpWorld) {
     let named_the_reason = w
         .identity_receipt_statuses(None)
         .iter()
-        .any(|s| matches!(s, nmp::mechanism::delivery::WriteStatus::Failed(r) if r.contains("active account")));
+        .any(|s| matches!(s, nmp::mechanism::publish_queue::WriteStatus::Failed(r) if r.contains("active account")));
     assert!(
         named_the_reason,
         "the refusal must say WHICH instruction could not resolve; saw {:?}",
