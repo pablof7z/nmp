@@ -28,6 +28,9 @@ use redb::ReadableDatabase;
 use tempfile::TempDir;
 
 use super::postings::Family;
+use super::postings_store::{
+    catalog_column_bounds, catalog_key, CATALOG_BY_MIN, CATALOG_DICTIONARY, CATALOG_RUN_META,
+};
 use super::*;
 use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, IntentSigState, PersistenceFault};
 
@@ -711,11 +714,15 @@ fn packed_run_ids(fixture: &Fixture) -> Vec<u64> {
     let db = fixture.raw();
     let read_txn = db.begin_read().expect("raw begin_read");
     let open = read_txn
-        .open_table(POSTINGS_RUN_META)
-        .expect("raw open run meta");
-    open.iter()
-        .expect("raw iter")
-        .map(|entry| entry.expect("raw entry").0.value())
+        .open_table(POSTINGS_CATALOG)
+        .expect("raw open run catalog");
+    let (lower, upper) = catalog_column_bounds(CATALOG_RUN_META);
+    open.range(lower.as_slice()..=upper.as_slice())
+        .expect("raw range")
+        .map(|entry| {
+            let key = entry.expect("raw entry").0.value().to_vec();
+            u64::from_be_bytes(key[1..].try_into().expect("run id is eight bytes"))
+        })
         .collect()
 }
 
@@ -753,9 +760,9 @@ fn read_packed_bytes(fixture: &Fixture, run_id: u64, dictionary: bool) -> Vec<u8
     let read_txn = db.begin_read().expect("raw begin_read");
     if dictionary {
         let open = read_txn
-            .open_table(POSTINGS_DICTIONARIES)
-            .expect("raw open dictionaries");
-        open.get(run_id)
+            .open_table(POSTINGS_CATALOG)
+            .expect("raw open run catalog");
+        open.get(catalog_key(CATALOG_DICTIONARY, run_id).as_slice())
             .expect("raw get")
             .expect("run has a dictionary")
             .value()
@@ -778,9 +785,10 @@ fn write_packed_bytes(fixture: &Fixture, run_id: u64, dictionary: bool, bytes: &
     {
         if dictionary {
             let mut open = write_txn
-                .open_table(POSTINGS_DICTIONARIES)
-                .expect("raw open dictionaries");
-            open.insert(run_id, bytes).expect("raw insert");
+                .open_table(POSTINGS_CATALOG)
+                .expect("raw open run catalog");
+            open.insert(catalog_key(CATALOG_DICTIONARY, run_id).as_slice(), bytes)
+                .expect("raw insert");
         } else {
             let mut open = write_txn
                 .open_table(POSTINGS_SEGMENTS)
@@ -883,15 +891,16 @@ fn packed_scan_reports_a_disagreeing_run_range_index() {
         let write_txn = db.begin_write().expect("raw begin_write");
         {
             let mut open = write_txn
-                .open_table(POSTINGS_RUN_BY_MIN)
-                .expect("raw open run by min");
-            let existing: Vec<u64> = open
-                .iter()
-                .expect("raw iter")
-                .map(|entry| entry.expect("raw entry").0.value())
+                .open_table(POSTINGS_CATALOG)
+                .expect("raw open run catalog");
+            let (lower, upper) = catalog_column_bounds(CATALOG_BY_MIN);
+            let existing: Vec<Vec<u8>> = open
+                .range(lower.as_slice()..=upper.as_slice())
+                .expect("raw range")
+                .map(|entry| entry.expect("raw entry").0.value().to_vec())
                 .collect();
-            for min_event_key in existing {
-                open.insert(min_event_key, run_id + 9_999)
+            for key in existing {
+                open.insert(key.as_slice(), (run_id + 9_999).to_be_bytes().as_slice())
                     .expect("raw insert");
             }
         }

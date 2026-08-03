@@ -10,9 +10,8 @@ use super::publish_queue_codec::{
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
     decode_relay_row, persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, COVERAGE,
-    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX, POSTINGS_DEAD_KEYS,
-    POSTINGS_DICTIONARIES, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
-    POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
+    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX, POSTINGS_CATALOG,
+    POSTINGS_READY, POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
     PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS,
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
@@ -513,10 +512,7 @@ impl RedbStore {
                 write_txn.open_table(TOMBSTONES)?;
                 write_txn.open_table(EXPIRATION_INDEX)?;
                 write_txn.open_table(POSTINGS_SEGMENTS)?;
-                write_txn.open_table(POSTINGS_DICTIONARIES)?;
-                write_txn.open_table(POSTINGS_RUN_META)?;
-                write_txn.open_table(POSTINGS_RUN_BY_MIN)?;
-                write_txn.open_table(POSTINGS_DEAD_KEYS)?;
+                write_txn.open_table(POSTINGS_CATALOG)?;
                 write_txn.open_table(PUBLISH_QUEUE_INTENTS)?;
                 write_txn.open_table(PUBLISH_QUEUE_DISPLACED)?;
                 write_txn.open_table(PUBLISH_QUEUE_ATTEMPTS)?;

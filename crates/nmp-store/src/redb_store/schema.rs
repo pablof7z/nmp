@@ -243,14 +243,28 @@ pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new
 /// current query-authoritative representation.
 pub(super) const POSTINGS_SEGMENTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("postings_segments");
-pub(super) const POSTINGS_DICTIONARIES: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("postings_dictionaries");
-pub(super) const POSTINGS_RUN_META: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("postings_run_meta");
-pub(super) const POSTINGS_RUN_BY_MIN: TableDefinition<u64, u64> =
-    TableDefinition::new("postings_run_by_min");
-pub(super) const POSTINGS_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("postings_dead_keys");
+/// The packed-run catalog: everything that describes a run without being the
+/// run's bulk segment bytes.
+///
+/// Key: `[col:u8 | ...]`, where `col` selects one of four columns of the same
+/// catalog — run metadata, run dictionary, the min-event-key range index, and
+/// the per-run death blocks. Each was its own tree; none of them was a
+/// distinct key space (#1248). redb sorts by raw key bytes, so a
+/// discriminant-first key keeps every column contiguous and prefix-scannable
+/// exactly as its own tree was, and the heavy dictionary bytes never share a
+/// page with the metadata rows the catalog scan reads.
+///
+/// The one access pattern that needs care is the range index's predecessor
+/// search: it must be LOWER-bounded at its own column
+/// (`[BY_MIN | 0] ..= [BY_MIN | k]`), or `next_back()` on an unbounded range
+/// would walk off the front of the column into the dictionary column.
+///
+/// The death blocks stay: segments are immutable, deletion removes only the
+/// canonical rows, and the query projector hard-errors when a posting
+/// resolves to a missing event — so the merged death set is what keeps
+/// deleted events out of query merges. Only their tree is gone.
+pub(super) const POSTINGS_CATALOG: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("postings_catalog");
 /// Sampled live-row counts per ordered-index prefix. Keys are namespaced
 /// binary prefixes (global, author, kind, or tag/value); values count sampled
 /// physical rows in that bucket.
