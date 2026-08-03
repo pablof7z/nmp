@@ -489,18 +489,53 @@ write_seed_summary() {
     jq -n \
         --slurpfile relay_a "$run_dir/seed/relay-a.jsonl" \
         --slurpfile relay_b "$run_dir/seed/relay-b.jsonl" \
-        '($relay_a | map(select(.kind == 9).id)) as $a9
+        'def in_group($id): any(.tags[]; .[0] == "h" and .[1] == $id);
+        ($relay_a | map(select(.kind == 9).id)) as $a9
         | ($relay_b | map(select(.kind == 9).id)) as $b9
         | ($relay_a | map(select(.kind == 30023).id)) as $a30023
         | ($relay_b | map(select(.kind == 30023).id)) as $b30023
+        | ($relay_a | map(select(.kind == 9 and in_group("bitcoin")).id)) as $a9bitcoin
+        | ($relay_b | map(select(.kind == 9 and in_group("bitcoin")).id)) as $b9bitcoin
         | {
           relay_a: ($relay_a | group_by(.kind) | map({kind: .[0].kind, count: length})),
           relay_b: ($relay_b | group_by(.kind) | map({kind: .[0].kind, count: length})),
           shared_event_ids: {
             kind_9: [$a9[] | select(. as $id | $b9 | index($id))],
             kind_30023: [$a30023[] | select(. as $id | $b30023 | index($id))]
+          },
+          group_bitcoin_kind_9: {
+            relay_a: ($a9bitcoin | length),
+            relay_b: ($b9bitcoin | length),
+            distinct: (($a9bitcoin + $b9bitcoin) | unique | length)
           }
         }' > "$run_dir/seed/summary.json"
+    verify_seed_summary "$run_dir"
+}
+
+# The summary above is a READBACK: it is built from what each relay actually
+# serves, not from what the seeding client believed it published. That is the
+# only sound place to check the fixture, because a relay can answer a publish
+# with `OK: false` without `nak` failing, so a silent mis-seed would otherwise
+# reach the consumer intact. It would then surface as the consumer's own
+# assertion failing -- one source instead of two, or fewer than 27 distinct
+# rows -- and be read as an NMP defect. Every number asserted here is a number
+# a consumer asserts too, so a fixture that did not seed what it claims fails
+# as a fixture.
+verify_seed_summary() {
+    local summary="$1/seed/summary.json"
+    require_seed_count "$summary" '.shared_event_ids.kind_9 | length' 1 \
+        'kind 9 events present at both relays'
+    require_seed_count "$summary" '.shared_event_ids.kind_30023 | length' 1 \
+        'kind 30023 events present at both relays'
+    require_seed_count "$summary" '.group_bitcoin_kind_9.distinct' 27 \
+        'distinct kind 9 events in group bitcoin'
+}
+
+require_seed_count() {
+    local summary=$1 query=$2 expected=$3 label=$4 actual
+    actual=$(jq "$query" "$summary")
+    [[ "$actual" == "$expected" ]] \
+        || die "seed readback shows $actual $label, expected $expected"
 }
 
 capture_container_logs() {
