@@ -297,6 +297,24 @@ mod tests {
         );
     }
 
+    /// The ceiling bounds the branches an observation actually opens, so it is
+    /// counted AFTER duplicates collapse. Counting the caller's input list
+    /// instead would refuse a legal declaration: composing two overlapping
+    /// queries repeats their shared branches in the input while the canonical
+    /// set stays inside the ceiling.
+    #[test]
+    fn the_branch_ceiling_counts_the_canonical_set_not_the_input_list() {
+        let mut inputs = (0..LiveQuery::MAX_BRANCHES)
+            .map(|index| LiveQuery::single(demand(index as u16)))
+            .collect::<Vec<_>>();
+        inputs.push(LiveQuery::single(demand(0)));
+        assert_eq!(inputs.len(), LiveQuery::MAX_BRANCHES + 1);
+
+        let query = LiveQuery::union(inputs, None)
+            .expect("a repeated branch is not an extra branch against the ceiling");
+        assert_eq!(query.branches().len(), LiveQuery::MAX_BRANCHES);
+    }
+
     #[test]
     fn the_aggregate_bound_participates_in_value_identity() {
         let branch = LiveQuery::single(demand(1));
