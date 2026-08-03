@@ -1,6 +1,6 @@
 use super::schema::{
     persist_err, EventKey, RelayKey, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
-    EVENT_STORE_META, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
+    NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_REFS, STORE_META,
 };
 use super::{
     binary_event, BTreeMap, Event, EventId, HashMap, LocalOrigin, PersistenceError, Provenance,
@@ -104,12 +104,14 @@ pub(super) struct CanonicalWriteTables<'txn> {
     pub(super) events: redb::Table<'txn, EventKey, &'static [u8]>,
     pub(super) event_ids: redb::Table<'txn, &'static [u8; 32], EventKey>,
     pub(super) local: redb::Table<'txn, EventKey, &'static [u8]>,
-    pub(super) store_meta: redb::Table<'txn, &'static str, EventKey>,
+    /// The one durable-scalar tree. Both surrogate allocators live here, so
+    /// one handle serves both — redb permits a table to be open once per
+    /// write transaction.
+    pub(super) store_meta: redb::Table<'txn, &'static str, u64>,
     pub(super) observations: redb::Table<'txn, &'static [u8; 12], u64>,
     pub(super) relays: redb::Table<'txn, RelayKey, &'static str>,
     pub(super) relay_keys: redb::Table<'txn, &'static str, RelayKey>,
     pub(super) relay_refs: redb::Table<'txn, RelayKey, u64>,
-    pub(super) relay_meta: redb::Table<'txn, &'static str, RelayKey>,
     /// Surrogate allocators are loaded once per write transaction and only
     /// flushed if consumed. A large ingest batch therefore writes each hot
     /// metadata row once, in the same atomic commit as its events/indexes.
@@ -124,19 +126,20 @@ pub(super) struct CanonicalWriteTables<'txn> {
 
 impl<'txn> CanonicalWriteTables<'txn> {
     pub(super) fn open(write_txn: &'txn redb::WriteTransaction) -> Result<Self, PersistenceError> {
-        let store_meta = write_txn
-            .open_table(EVENT_STORE_META)
-            .map_err(persist_err)?;
+        let store_meta = write_txn.open_table(STORE_META).map_err(persist_err)?;
         let next_event_key = store_meta
             .get(NEXT_EVENT_KEY)
             .map_err(persist_err)?
             .map(|guard| guard.value())
             .unwrap_or(1);
-        let relay_meta = write_txn.open_table(RELAY_META).map_err(persist_err)?;
-        let next_relay_key = relay_meta
+        let next_relay_key = store_meta
             .get(NEXT_RELAY_KEY)
             .map_err(persist_err)?
-            .map(|guard| guard.value())
+            .map(|guard| RelayKey::try_from(guard.value()))
+            .transpose()
+            .map_err(|_| {
+                PersistenceError::invariant("relay surrogate allocator overflows u32".to_owned())
+            })?
             .unwrap_or(1);
         Ok(Self {
             events: write_txn.open_table(EVENTS).map_err(persist_err)?,
@@ -149,7 +152,6 @@ impl<'txn> CanonicalWriteTables<'txn> {
             relays: write_txn.open_table(RELAYS).map_err(persist_err)?,
             relay_keys: write_txn.open_table(RELAY_KEYS).map_err(persist_err)?,
             relay_refs: write_txn.open_table(RELAY_REFS).map_err(persist_err)?,
-            relay_meta,
             next_event_key,
             next_relay_key,
             event_allocator_dirty: false,
@@ -343,8 +345,8 @@ impl<'txn> CanonicalWriteTables<'txn> {
             self.event_allocator_dirty = false;
         }
         if self.relay_allocator_dirty {
-            self.relay_meta
-                .insert(NEXT_RELAY_KEY, self.next_relay_key)
+            self.store_meta
+                .insert(NEXT_RELAY_KEY, u64::from(self.next_relay_key))
                 .map_err(persist_err)?;
             self.relay_allocator_dirty = false;
         }

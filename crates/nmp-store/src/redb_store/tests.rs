@@ -29,8 +29,8 @@ fn durable_facts(path: &std::path::Path) -> BTreeMap<String, u64> {
             .expect("count fixture rows");
         facts.insert(name, len);
     }
-    if let Ok(schema_meta) = read_txn.open_table(SCHEMA_META) {
-        if let Some(version) = schema_meta.get(SCHEMA_VERSION_KEY).expect("read marker") {
+    if let Ok(store_meta) = read_txn.open_table(STORE_META) {
+        if let Some(version) = store_meta.get(SCHEMA_VERSION_KEY).expect("read marker") {
             facts.insert("::schema-marker".to_owned(), version.value());
         }
     }
@@ -66,8 +66,8 @@ fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_publish_qu
     let db = Database::create(&path).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
-        schema_meta
+        let mut store_meta = write_txn.open_table(STORE_META).unwrap();
+        store_meta
             .insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION + 1)
             .unwrap();
     }
@@ -184,8 +184,8 @@ fn superseded_schema_markers_refuse_at_open_without_mutating_durable_facts() {
         let db = Database::create(&path).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
-            let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
-            schema_meta.insert(SCHEMA_VERSION_KEY, superseded).unwrap();
+            let mut store_meta = write_txn.open_table(STORE_META).unwrap();
+            store_meta.insert(SCHEMA_VERSION_KEY, superseded).unwrap();
         }
         write_txn.commit().unwrap();
         drop(db);
@@ -264,13 +264,9 @@ fn healthy_current_schema_reopen_starts_no_application_write_transaction() {
         "a healthy schema-marker reopen must remain read-only"
     );
     let read_txn = reopened.db.begin_read().unwrap();
-    let schema_meta = read_txn.open_table(SCHEMA_META).unwrap();
+    let store_meta = read_txn.open_table(STORE_META).unwrap();
     assert_eq!(
-        schema_meta
-            .get(SCHEMA_VERSION_KEY)
-            .unwrap()
-            .unwrap()
-            .value(),
+        store_meta.get(SCHEMA_VERSION_KEY).unwrap().unwrap().value(),
         SCHEMA_VERSION
     );
 }
@@ -323,7 +319,7 @@ fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
             assert_eq!(canonical.allocate_relay_key().unwrap(), expected);
         }
         assert!(canonical.store_meta.get(NEXT_EVENT_KEY).unwrap().is_none());
-        assert!(canonical.relay_meta.get(NEXT_RELAY_KEY).unwrap().is_none());
+        assert!(canonical.store_meta.get(NEXT_RELAY_KEY).unwrap().is_none());
 
         canonical.flush_pending().unwrap();
         assert_eq!(
@@ -337,7 +333,7 @@ fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
         );
         assert_eq!(
             canonical
-                .relay_meta
+                .store_meta
                 .get(NEXT_RELAY_KEY)
                 .unwrap()
                 .unwrap()
@@ -890,7 +886,7 @@ fn canonical_relay_aliases_fold_to_latest_timestamp_on_read_and_mutation() {
             .value();
         let alias_key = canonical_key + 1;
         let mut relay_refs = write_txn.open_table(RELAY_REFS).unwrap();
-        let mut relay_meta = write_txn.open_table(RELAY_META).unwrap();
+        let mut store_meta = write_txn.open_table(STORE_META).unwrap();
         let mut observations = write_txn.open_table(EVENT_OBSERVATIONS).unwrap();
 
         relays.insert(alias_key, STORED_ALIAS).unwrap();
@@ -899,7 +895,9 @@ fn canonical_relay_aliases_fold_to_latest_timestamp_on_read_and_mutation() {
         observations
             .insert(&observation_key(event_key, alias_key), 20)
             .unwrap();
-        relay_meta.insert(NEXT_RELAY_KEY, alias_key + 1).unwrap();
+        store_meta
+            .insert(NEXT_RELAY_KEY, u64::from(alias_key + 1))
+            .unwrap();
     }
     write_txn.commit().unwrap();
     drop(db);
@@ -1878,10 +1876,7 @@ fn plan_choice_cannot_change_query_results() {
 
     let candidates = candidate_ordered_plans(&filter);
     assert_eq!(
-        candidates
-            .iter()
-            .map(|plan| plan.index)
-            .collect::<Vec<_>>(),
+        candidates.iter().map(|plan| plan.index).collect::<Vec<_>>(),
         vec![
             OrderedIndex::Tag(h),
             OrderedIndex::Tag(p),
@@ -1899,7 +1894,12 @@ fn plan_choice_cannot_change_query_results() {
             .into_iter()
             .map(|row| row.event.id)
             .collect();
-        assert_eq!(complete.len(), 5, "{:?} changed the complete result", plan.index);
+        assert_eq!(
+            complete.len(),
+            5,
+            "{:?} changed the complete result",
+            plan.index
+        );
         let bounded: Vec<_> = store
             .query_ordered(&read_txn, plan, &filter, None, Some(3), None)
             .unwrap()

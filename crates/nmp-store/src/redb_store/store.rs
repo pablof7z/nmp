@@ -10,15 +10,15 @@ use super::publish_queue_codec::{
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
     persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, COVERAGE,
-    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META, EXPIRATION_INDEX,
-    POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN,
-    POSTINGS_RUN_META, POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
+    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX, POSTINGS_DEAD_KEYS,
+    POSTINGS_DICTIONARIES, POSTINGS_READY, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META,
+    POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
     PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS,
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
     PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS_BY_ADDR,
-    PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
-    SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
+    PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
+    SCHEMA_VERSION, SCHEMA_VERSION_KEY, STORE_META, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -455,7 +455,7 @@ impl RedbStore {
             let mut has_schema_marker = false;
             for table in read_txn.list_tables()? {
                 table_count += 1;
-                has_schema_marker |= table.name() == SCHEMA_META.name();
+                has_schema_marker |= table.name() == STORE_META.name();
             }
             (table_count, has_schema_marker)
         };
@@ -464,8 +464,8 @@ impl RedbStore {
         if has_schema_marker {
             {
                 let read_txn = db.begin_read()?;
-                let schema_meta = read_txn.open_table(SCHEMA_META)?;
-                let version = schema_meta
+                let store_meta = read_txn.open_table(STORE_META)?;
+                let version = store_meta
                     .get(SCHEMA_VERSION_KEY)?
                     .map(|guard| guard.value());
                 // Exactly one accepted epoch. Anything else — older, newer, or
@@ -505,12 +505,10 @@ impl RedbStore {
                 write_txn.open_table(EVENTS)?;
                 write_txn.open_table(EVENT_IDS)?;
                 write_txn.open_table(EVENT_LOCAL)?;
-                write_txn.open_table(EVENT_STORE_META)?;
                 write_txn.open_table(EVENT_OBSERVATIONS)?;
                 write_txn.open_table(RELAYS)?;
                 write_txn.open_table(RELAY_KEYS)?;
                 write_txn.open_table(RELAY_REFS)?;
-                write_txn.open_table(RELAY_META)?;
                 write_txn.open_table(ADDR_INDEX)?;
                 write_txn.open_table(COVERAGE)?;
                 write_txn.open_table(TOMBSTONES)?;
@@ -521,8 +519,6 @@ impl RedbStore {
                 write_txn.open_table(POSTINGS_RUN_META)?;
                 write_txn.open_table(POSTINGS_RUN_BY_MIN)?;
                 write_txn.open_table(POSTINGS_DEAD_KEYS)?;
-                let mut postings_meta = write_txn.open_table(POSTINGS_META)?;
-                postings_meta.insert(POSTINGS_READY, 1)?;
                 write_txn.open_table(PUBLISH_QUEUE_INTENTS)?;
                 write_txn.open_table(PUBLISH_QUEUE_DISPLACED)?;
                 write_txn.open_table(PUBLISH_QUEUE_ATTEMPTS)?;
@@ -543,8 +539,9 @@ impl RedbStore {
                 write_txn.open_table(PUBLISH_QUEUE_CORRELATIONS)?;
                 write_txn.open_table(PUBLISH_QUEUE_RELAYS)?;
                 write_txn.open_table(PUBLISH_QUEUE_RELAY_IDS)?;
-                let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
-                schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
+                let mut store_meta = write_txn.open_table(STORE_META)?;
+                store_meta.insert(POSTINGS_READY, 1)?;
+                store_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
             }
             write_txn.commit()?;
             _open_write_transactions += 1;

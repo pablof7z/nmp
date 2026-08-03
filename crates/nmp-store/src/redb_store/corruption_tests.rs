@@ -858,7 +858,7 @@ fn set_next_run_id(fixture: &Fixture, value: Option<u64>) {
     let write_txn = db.begin_write().expect("raw begin_write");
     {
         let mut open = write_txn
-            .open_table(POSTINGS_META)
+            .open_table(STORE_META)
             .expect("raw open postings meta");
         match value {
             Some(value) => {

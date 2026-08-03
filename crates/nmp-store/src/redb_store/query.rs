@@ -4,19 +4,19 @@ use super::canonical::{observation_event_key, observation_relay_key};
 use super::schema::EventKey;
 #[cfg(test)]
 use super::schema::{
-    RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META,
-    EXPIRATION_INDEX, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
+    RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EXPIRATION_INDEX,
+    NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_REFS, STORE_META,
 };
+#[cfg(any(test, feature = "bench-instrumentation"))]
+use super::BTreeSet;
+#[cfg(feature = "bench-instrumentation")]
+use super::Event;
 #[cfg(test)]
 use super::{address_key_for, binary_event, Database, RelayUrl};
 use super::{
     decode_hex_32, Deserialize, EventId, Filter, IndexedMatch, Kind, PublicKey, Serialize,
     SingleLetterTag, Timestamp,
 };
-#[cfg(feature = "bench-instrumentation")]
-use super::Event;
-#[cfg(any(test, feature = "bench-instrumentation"))]
-use super::BTreeSet;
 #[cfg(test)]
 use super::{BTreeMap, StoredEventView};
 #[cfg(test)]
@@ -192,7 +192,7 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         .open_table(EVENT_LOCAL)
         .expect("audit event local metadata");
     let store_meta = read_txn
-        .open_table(EVENT_STORE_META)
+        .open_table(STORE_META)
         .expect("audit event store meta");
     let observations = read_txn
         .open_table(EVENT_OBSERVATIONS)
@@ -200,7 +200,6 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
     let relays = read_txn.open_table(RELAYS).expect("audit relays");
     let relay_keys = read_txn.open_table(RELAY_KEYS).expect("audit relay keys");
     let relay_refs = read_txn.open_table(RELAY_REFS).expect("audit relay refs");
-    let relay_meta = read_txn.open_table(RELAY_META).expect("audit relay meta");
 
     let mut canonical = BTreeMap::new();
     for entry in events.iter().expect("iterate audit events") {
@@ -309,12 +308,15 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         );
     }
     if let Some(max_key) = expected_relay_refs.keys().next_back() {
-        let next = relay_meta
+        let next = store_meta
             .get(NEXT_RELAY_KEY)
             .expect("audit next relay key")
             .expect("nonempty relay dictionary has next key")
             .value();
-        assert!(next > *max_key, "relay allocator must not reuse keys");
+        assert!(
+            next > u64::from(*max_key),
+            "relay allocator must not reuse keys"
+        );
     }
 
     let mut expected_address = BTreeSet::new();

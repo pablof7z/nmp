@@ -112,20 +112,32 @@ pub(super) const EVENT_IDS: TableDefinition<&[u8; 32], EventKey> =
     TableDefinition::new("event_ids");
 pub(super) const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> =
     TableDefinition::new("event_local");
-pub(super) const EVENT_STORE_META: TableDefinition<&str, EventKey> =
-    TableDefinition::new("event_store_meta");
-pub(super) const NEXT_EVENT_KEY: &str = "next_event_key";
 pub(super) const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays");
 pub(super) const RELAY_KEYS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_keys");
 pub(super) const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs");
-pub(super) const RELAY_META: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_meta");
-pub(super) const NEXT_RELAY_KEY: &str = "next_relay_key";
 /// Fixed-width key: `event_key:u64-be | relay_key:u32-be`; value is the
 /// greatest observation timestamp in seconds.
 pub(super) const EVENT_OBSERVATIONS: TableDefinition<&[u8; 12], u64> =
     TableDefinition::new("event_observations");
-pub(super) const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta");
-pub(super) const SCHEMA_VERSION_KEY: &str = "version";
+/// Every durable scalar the store keeps, under one namespaced key space.
+///
+/// These are single rows read and written by point `get`/`insert` under a
+/// constant key — surrogate high-water marks, the packed-run allocator, the
+/// packed readiness flag, and the schema marker. None of them is ever
+/// iterated or ranged, so none earns a tree of its own: they were six
+/// separate trees holding seven rows between them (#1248).
+///
+/// [`SCHEMA_VERSION_KEY`] is the epoch probe's target and is written in the
+/// same transaction as everything else the fresh-store path creates. The
+/// probe looks for this TABLE by name and then for that KEY inside it, so a
+/// store from any other epoch — which has no table by this name — is refused
+/// as `UnsupportedSchema` before a byte is read or written.
+pub(super) const STORE_META: TableDefinition<&str, u64> = TableDefinition::new("store_meta");
+pub(super) const SCHEMA_VERSION_KEY: &str = "schema_version";
+pub(super) const NEXT_EVENT_KEY: &str = "next_event_key";
+pub(super) const NEXT_RELAY_KEY: &str = "next_relay_key";
+pub(super) const POSTINGS_NEXT_RUN_ID: &str = "postings_next_run_id";
+pub(super) const POSTINGS_READY: &str = "postings_query_ready";
 /// The ONE exact current schema epoch (#867). NMP carries no persistent-schema
 /// compatibility obligation in this architecture cut: there is no pre-current
 /// decoder, no migration, no adoption, and no destructive reset door. A
@@ -222,9 +234,6 @@ pub(super) const POSTINGS_RUN_BY_MIN: TableDefinition<u64, u64> =
     TableDefinition::new("postings_run_by_min");
 pub(super) const POSTINGS_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("postings_dead_keys");
-pub(super) const POSTINGS_META: TableDefinition<&str, u64> = TableDefinition::new("postings_meta");
-pub(super) const POSTINGS_NEXT_RUN_ID: &str = "next_run_id";
-pub(super) const POSTINGS_READY: &str = "query_ready";
 /// Sampled live-row counts per ordered-index prefix. Keys are namespaced
 /// binary prefixes (global, author, kind, or tag/value); values count sampled
 /// physical rows in that bucket.

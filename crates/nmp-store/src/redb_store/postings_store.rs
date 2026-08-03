@@ -21,8 +21,8 @@ use super::query::tag_index_prefix;
 #[cfg(test)]
 use super::schema::POSTINGS_READY;
 use super::schema::{
-    persist_err, EventKey, POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META,
-    POSTINGS_NEXT_RUN_ID, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META, POSTINGS_SEGMENTS,
+    persist_err, EventKey, POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_NEXT_RUN_ID,
+    POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META, POSTINGS_SEGMENTS, STORE_META,
 };
 use super::{Event, EventCursor, EventId, PersistenceError};
 
@@ -60,7 +60,7 @@ pub(super) fn assert_packed_integrity(
         .open_table(POSTINGS_RUN_BY_MIN)
         .expect("audit packed run ranges");
     let meta = read_txn
-        .open_table(POSTINGS_META)
+        .open_table(STORE_META)
         .expect("audit packed metadata");
     assert_eq!(
         meta.get(POSTINGS_READY)
@@ -534,7 +534,7 @@ fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, Persistenc
         }
         catalog.iter().map(|meta| meta.run_id).max()
     };
-    let mut meta = write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
+    let mut meta = write_txn.open_table(STORE_META).map_err(persist_err)?;
     let stored = meta
         .get(POSTINGS_NEXT_RUN_ID)
         .map_err(persist_err)?
