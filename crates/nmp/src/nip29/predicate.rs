@@ -27,6 +27,8 @@
 //! kind:9000/9001 sequence is a different problem, deliberately not smuggled
 //! in here.
 
+use std::collections::BTreeSet;
+
 use nmp_grammar::{Binding, SetAlgebra, SetOp};
 use nostr::RelayUrl;
 
@@ -45,6 +47,22 @@ pub enum GroupPredicate {
     /// Groups whose observed kind:39001 admin-list evidence names these
     /// subjects.
     AdminListIncludes(Binding),
+    /// Exactly these group ids, whatever any list says about them.
+    ///
+    /// The one leaf that is not evidence-derived: an app that already knows
+    /// which rooms it is showing -- from a kind:10009 entry the user saved,
+    /// from a link they opened -- is not asking a relational question and
+    /// must not have to phrase one. Without it the only way to watch a known
+    /// set of groups was to pick a subject who happens to be listed in all of
+    /// them, which is neither always true nor what the app meant.
+    ///
+    /// Honest limit: this lowers to a `#d` set on the wire, and a relay
+    /// filter carrying very many values may be refused or silently truncated
+    /// by that relay. Watching very many groups at once needs sharding across
+    /// several observations; NMP does not hide that by chunking behind the
+    /// app's back, because a silently-sharded observation would report
+    /// availability for a plan the app never declared.
+    AnyOf(BTreeSet<String>),
     /// Set algebra over child predicates, folded left to right.
     Combined {
         /// The algebra to fold with.
@@ -73,6 +91,16 @@ pub fn member_list_includes(subjects: Binding) -> GroupPredicate {
 #[must_use]
 pub fn admin_list_includes(subjects: Binding) -> GroupPredicate {
     GroupPredicate::AdminListIncludes(subjects)
+}
+
+/// Exactly these group ids.
+///
+/// Composes with the evidence-scoped leaves like any other predicate, which
+/// is the ordinary shape of a real app's watch list: "the groups that list me
+/// as a member, plus the handful I pinned".
+#[must_use]
+pub fn any_of(ids: impl IntoIterator<Item = impl Into<String>>) -> GroupPredicate {
+    GroupPredicate::AnyOf(ids.into_iter().map(Into::into).collect())
 }
 
 impl GroupPredicate {
@@ -111,6 +139,9 @@ impl GroupPredicate {
             Self::AdminListIncludes(subjects) => {
                 nmp_nip29::admin_list_includes_at(host, subjects.clone())
             }
+            // A literal set has no authority to pin: it names values, it
+            // resolves nothing, and there is no inner demand to scope.
+            Self::AnyOf(ids) => Binding::Literal(ids.clone()),
             Self::Combined { op, operands } => Binding::SetOp(Box::new(SetOp {
                 op: *op,
                 operands: operands.iter().map(|each| each.lower_at(host)).collect(),
@@ -248,6 +279,46 @@ mod tests {
         assert_ne!(at_one, at_two);
         assert_eq!(derived(&at_one).inner.source, pinned(host(1)));
         assert_eq!(derived(&at_two).inner.source, pinned(host(2)));
+    }
+
+    /// A known-id watch needs no relational question and no subject: the ids
+    /// lower to the literal `#d` set the wire already takes.
+    #[test]
+    fn a_literal_id_set_lowers_to_the_d_values_themselves() {
+        let lowered = any_of(["photographers", "darkroom"]).lower_at(&host(1));
+        assert_eq!(
+            lowered,
+            Binding::Literal(BTreeSet::from([
+                "darkroom".to_string(),
+                "photographers".to_string()
+            ]))
+        );
+        assert_eq!(
+            lowered,
+            any_of(["photographers", "darkroom"]).lower_at(&host(2)),
+            "a literal names values and resolves nothing, so it is the same at every host"
+        );
+    }
+
+    /// The shape a real watch list has: reactive membership evidence UNION a
+    /// handful of pinned ids, in one predicate, lowered once per host.
+    #[test]
+    fn pinned_ids_compose_with_evidence_in_one_predicate() {
+        let lowered = member_list_includes(me())
+            .union([any_of(["photographers"])])
+            .lower_at(&host(1));
+        match lowered {
+            Binding::SetOp(set) => {
+                assert_eq!(set.op, SetAlgebra::Union);
+                assert_eq!(set.operands.len(), 2);
+                assert_eq!(derived(&set.operands[0]).inner.source, pinned(host(1)));
+                assert_eq!(
+                    set.operands[1],
+                    Binding::Literal(BTreeSet::from(["photographers".to_string()]))
+                );
+            }
+            other => panic!("expected SetOp, got {other:?}"),
+        }
     }
 
     #[test]

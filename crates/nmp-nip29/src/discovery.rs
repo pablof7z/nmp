@@ -62,32 +62,9 @@ pub const GROUP_ADMINS_KIND: u16 = 39001;
 pub const GROUP_MEMBERS_KIND: u16 = 39002;
 
 /// The tag NIP-29's relay-signed group records key themselves by.
-const JOIN_KEY_TAG: char = 'd';
+pub(crate) const JOIN_KEY_TAG: char = 'd';
 /// The tag a member/admin list names its subjects with.
 const SUBJECT_TAG: char = 'p';
-
-/// One host's complete branch of a group listing: the three relay-signed
-/// group kinds at `host`, keyed by whatever `predicate` resolves `d` to.
-///
-/// The predicate is embedded VERBATIM. If the caller built it with
-/// [`member_list_includes_at`] it is already pinned to `host`; if the caller
-/// built it themselves it keeps its own authority, because rewriting it would
-/// be exactly the silent repin `nmp_grammar::Derived` forbids.
-#[must_use]
-pub fn groups_where_at(host: &RelayUrl, predicate: Binding) -> Demand {
-    pinned_public_at(
-        host,
-        Filter {
-            kinds: Some(BTreeSet::from([
-                GROUP_METADATA_KIND,
-                GROUP_ADMINS_KIND,
-                GROUP_MEMBERS_KIND,
-            ])),
-            tags: BTreeMap::from([(join_key(), predicate)]),
-            ..Filter::default()
-        },
-    )
-}
 
 /// Groups whose kind:39002 member-list evidence AT `host` names `subjects`.
 ///
@@ -175,11 +152,11 @@ pub(crate) fn pinned_public_at(host: &RelayUrl, selection: Filter) -> Demand {
     demand
 }
 
-fn join_key() -> IndexedTagName {
+pub(crate) fn join_key() -> IndexedTagName {
     IndexedTagName::new(JOIN_KEY_TAG).expect("'d' is a single ASCII letter")
 }
 
-fn subject() -> IndexedTagName {
+pub(crate) fn subject() -> IndexedTagName {
     IndexedTagName::new(SUBJECT_TAG).expect("'p' is a single ASCII letter")
 }
 
@@ -204,9 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_branch_selects_exactly_the_three_nip29_group_kinds() {
-        let demand = groups_where_at(
+    fn a_listing_branch_selects_exactly_the_records_the_app_asked_for() {
+        let demand = crate::records::group_records_at(
             &host(1),
+            &BTreeSet::from([
+                crate::records::GroupRecord::Metadata,
+                crate::records::GroupRecord::Admins,
+                crate::records::GroupRecord::Members,
+            ]),
             Binding::Literal(BTreeSet::from(["x".to_string()])),
         );
         assert_eq!(
@@ -265,8 +247,9 @@ mod tests {
     /// relays.
     #[test]
     fn every_nip29_owned_level_scopes_both_the_wire_and_the_cache_to_the_exact_host() {
-        let demand = groups_where_at(
+        let demand = crate::records::group_records_at(
             &host(3),
+            &BTreeSet::from([crate::records::GroupRecord::Members]),
             member_list_includes_at(&host(3), Binding::Reactive(IdentityField::ActivePubkey)),
         );
         assert_eq!(demand.source, pinned([host(3)]));

@@ -19,6 +19,15 @@ Feature: A group publishes every kind identically
   # nmp:evidence=rust:nmp-nip29::a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections
   # nmp:evidence=script:repository::scripts/check-nip29-kind-blindness.sh
   # nmp:falsifier=making contextualize or group_demand_at inspect, filter, or special-case any one kind in the table (9021 NIP-29's own, 7/30315 other NIPs', 44815/20/1 unrecognised) makes contextualize_takes_the_identical_path_for_every_kind_familiar_or_not or a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections see a wrong tag set, a refusal, or a kind-dependent result for that one row while the others stay unaffected; adding any `Kind`/`.kind` reference to context.rs to implement such a branch independently makes check-nip29-kind-blindness.sh fail closed
+  #
+  # #1245 added the one selection the read door does refuse: NIP-29's three
+  # relay-signed records, which do not carry an h row at all and so cannot
+  # match an h-scoped request. That is a refusal about which row identifies
+  # the event, not a catalogue of what may live in a group -- and it is
+  # governed on its own terms in
+  # features/groups/roster-records-are-not-group-content.feature, whose
+  # GROUPS-RECORDSNOTCONTENT-004 asserts that everything genuinely in a group
+  # still reads through the door untouched.
   @nip29
   Scenario Outline: A chat message, a reaction and a custom kind take one path
     When I publish an event of kind <kind> with content "<content>" through the group

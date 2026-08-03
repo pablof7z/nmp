@@ -132,6 +132,17 @@ about current code:
   What remains incomplete is `previous`: NMP cannot mint it until a
   host-scoped, group-scoped, author-aware live-window capability can do so
   without caller tuples, truncation, or transplantation.
+- **Watching very many NIP-29 groups at once needs sharding the app does
+  itself (#1233).** The group-records observation opens one branch per HOST,
+  never per group, so a hundred groups on two relays is two branches and
+  `LiveQuery::MAX_BRANCHES` is a ceiling on hosts. What a large watch list
+  actually strains is the `#d` value set inside one relay filter, which a relay
+  may refuse or silently truncate — NIP-01 sets no bound and relays differ. NMP
+  does not chunk behind the app's back: a silently-sharded observation would
+  report availability for a plan the app never declared. An app watching more
+  groups than its relays will carry in one filter must split them across
+  several observations itself, and NMP offers no guidance on where that
+  threshold is because the answer is per-relay and undiscoverable.
 - **~~Selector-projected values lost their only routable lane~~ CLOSED
   (#11).** `Tag(e/a/p)` now retains a valid tag relay hint or falls back to
   the source row's observed-relay provenance; `AddressCoord` retains source

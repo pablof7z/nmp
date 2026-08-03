@@ -33,18 +33,27 @@ Feature: Reading a group goes through the one read door
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-002
   # nmp:status=built
   # nmp:evidence=script:repository::scripts/check-nip29-read-door.sh
-  # nmp:falsifier=adding an observe/subscribe/stream method to a group or relay-scope type on any of the four surfaces this script scans (the two Rust crates, the Rust FFI, Swift, or Kotlin) makes check-nip29-read-door.sh fail with "a second read door for groups appeared"
+  # nmp:falsifier=Give a group or relay-scope value a read lifecycle of its own on any of the five surfaces this script scans -- open a socket, hold a relay pool, add a reconnect or retry loop beside the projection, or stop routing the records observation through the engine's own subscription -- and check-nip29-read-door.sh fails with "a group value grew a read lifecycle of its own" or "no longer opens the engine's own subscription". #1233 narrowed this from banning the WORD observe: that banned the group-records projection along with the defect, and the defect it is aimed at is a parallel lifecycle onto the same mechanism, not a typed reader over it.
   @nip29
-  Scenario: There is no second way to observe a group
+  Scenario: A group owns no way of its own to reach a relay
     When I inspect the group's read surface
-    Then the group exposes no observe operation of its own
-    And the group exposes no stream, channel or callback of its own
-    And every group read in the surface passes through the same observe call
+    Then the group opens no connection of its own
+    And the group holds no retry or reconnection policy of its own
+    And the one live projection it offers is driven by the same engine subscription every other read uses
+    And withdrawing that projection withdraws exactly the demand the engine opened for it
 
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-003
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip29::a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections
   # nmp:falsifier=having group_demand_at substitute, filter, or reject any kind set instead of copying the caller's kinds through unread makes a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections see a kind set other than the app's own for at least one of the six cases in its table
+  #
+  # kind 39002 was a row in this table until #1245. It should never have been:
+  # a kind:39002 event does not carry an h row at all, so that row was asserting
+  # that a request no event could match was built faithfully. The three
+  # relay-signed records now have their own door and their own refusal
+  # (features/groups/roster-records-are-not-group-content.feature); kind 9022,
+  # which NIP-29 defines and which genuinely does live in a group, takes its
+  # place in the table.
   @nip29
   Scenario Outline: The app chooses the kinds; the group imposes no catalogue
     Given a filter selecting <kinds>
@@ -60,20 +69,20 @@ Feature: Reading a group goes through the one read door
       | kinds 9 and 9000     |
       | kind 30315           |
       | kind 7               |
-      | kind 39002           |
+      | kind 9022            |
       | kind 31337           |
 
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-004
   # nmp:status=built
   # nmp:evidence=rust:nmp::one_group_value_mints_several_independent_simultaneous_observations
-  # nmp:falsifier=capping Group to one live observation, or making a second/third/fourth .read()+.observe() call on the same group value fail or silently replace an earlier one, makes one_group_value_mints_several_independent_simultaneous_observations see fewer than four simultaneously open subscriptions
+  # nmp:falsifier=capping Group to one live observation, or making a second/third/fourth read or records observation on the same group value fail or silently replace an earlier one, makes one_group_value_mints_several_independent_simultaneous_observations see fewer than four simultaneously open subscriptions
   @nip29
   Scenario: One group serving four simultaneous queries is the normal case
     Given a chat filter selecting kinds 9 and 9000 and 9001
     And an activity filter selecting kind 30315
     And a reactions filter selecting kind 7
-    And a membership filter selecting kinds 39002 and 39001
-    When I observe live queries built from the group's demand for all four filters
+    And a watch on the group's admin and member records
+    When I open all four at once from the same group value
     Then four independent subscriptions exist at once
     And each request is pinned to "wss://relay.groups.example"
     And each request is scoped to h "photographers"

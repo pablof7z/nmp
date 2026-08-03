@@ -6,10 +6,15 @@
 //!
 //! - [`contextualize`] / [`validate_context`] -- the `h` row an event carries,
 //!   appended to an unsigned draft or validated on an already-signed event.
-//! - [`group_demand_at`] -- one host's complete read branch for one group.
+//! - [`group_demand_at`] -- one host's complete read branch for one group's
+//!   CONTENT. It refuses the three relay-signed records, which are `d`-keyed
+//!   and unreachable through the `h` axis (#1245).
 //! - [`member_list_includes_at`] / [`admin_list_includes_at`] /
-//!   [`groups_where_at`] -- one host's complete discovery branch, built from
+//!   [`group_records_at`] -- one host's complete discovery branch, built from
 //!   the relationships between kinds 39000/39001/39002 and the `d` join key.
+//! - [`group_metadata_at`] / [`listed_record_at`] -- what one of those
+//!   relay-signed records SAYS, read once here rather than four times in two
+//!   applications (#1233).
 //! - the kinds NIP-29 itself defines (#989, 9000-9022: [`join_request`],
 //!   [`leave_request`], [`add_user`], [`remove_user`], [`edit_metadata`],
 //!   [`delete_event`], [`create_group`], [`delete_group`], [`create_invite`]).
@@ -53,13 +58,18 @@
 mod context;
 mod discovery;
 mod operations;
+mod records;
 
 pub use context::{contextualize, group_demand_at, validate_context, GroupContextError};
 pub use discovery::{
-    admin_list_includes_at, groups_where_at, member_list_includes_at, GROUP_ADMINS_KIND,
-    GROUP_MEMBERS_KIND, GROUP_METADATA_KIND,
+    admin_list_includes_at, member_list_includes_at, GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND,
+    GROUP_METADATA_KIND,
 };
 pub use operations::{
     add_user, create_group, create_invite, delete_event, delete_group, edit_metadata, join_request,
     leave_request, remove_user,
+};
+pub use records::{
+    group_metadata_at, group_records_at, join_key_of, listed_record_at, GroupMetadata, GroupRecord,
+    ListedRecord, ListedSubject,
 };

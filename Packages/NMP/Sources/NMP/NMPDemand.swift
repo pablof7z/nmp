@@ -243,7 +243,7 @@ extension NMPLiveQuery {
     }
 
     /// Lift a live query Rust already built (`union`'s own result, and every
-    /// protocol-composed read such as `NMPNIP29.groupsWhere`). It is canonical
+    /// protocol-composed read such as `NMPGroup.read`). It is canonical
     /// by construction there, so this never re-canonicalizes -- and being
     /// non-public, it is not a door an app can forge a noncanonical value
     /// through.

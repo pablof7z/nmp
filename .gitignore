@@ -62,3 +62,4 @@ xcuserdata/
 /Packages/NMPKotlin/build/
 /Packages/NMPKotlin/.gradle/
 tmp
+/tools/nip29-consumer-swift/.build

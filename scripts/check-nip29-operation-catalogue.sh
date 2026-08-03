@@ -25,7 +25,7 @@
 # `publish`/`publishSigned`/`read` -- so "no write or read operation accepts
 # a per-call relay, route, or raw context tag" is proven for EVERY way an
 # app can reach a group write or read, not only the nine named operations.
-# `on`/`group`/`groupsWhere` stay excluded, as before: naming hosts once at
+# `on`/`group`/`observeRecords` stay excluded, as before: naming hosts once at
 # scope construction is the one legal exception this claim is not about.
 #
 # #1074 evidence for PROTOCOL-NIP29OPERATIONS-012/013
@@ -161,7 +161,7 @@ done
 # named operations. `on` is deliberately excluded: it is the one legal place
 # an app names hosts, ONCE, at scope construction (#1033); this claim is
 # that a group WRITE or READ never takes one again, not that host
-# construction is illegal. `group`/`groupsWhere` are likewise excluded: a
+# construction is illegal. `group`/`observe` are likewise excluded: a
 # group id (a `String`) and a `GroupPredicate` value are not a relay, route,
 # or raw context tag.
 RUST_INFRA_OPS=(publish publish_signed read)
@@ -177,14 +177,18 @@ for op in "${CAMEL_INFRA_OPS[@]}"; do
 done
 
 # (013): those nine names are the WHOLE named-operation catalogue -- no
-# surface may declare a tenth. `read`/`validateContext`(`_context`)/
-# `publish`/`publishSigned`/`on`/`group`/`groupsWhere`/predicate composition
+# surface may declare a tenth. The group's live records projection
+# (`observe`/`observeRecords`) is excluded for the same reason `read` is: it
+# is the group's READ door, kind-blind over the three records NIP-29 defines
+# to describe a group, and not one of the nine things NIP-29 lets you DO.
+# `read`/`validateContext`(`_context`)/
+# `publish`/`publishSigned`/`on`/`group`/predicate composition
 # are infrastructure, not NIP-29-owned operations, and `publish`/
 # `publishSigned` are deliberately kind-BLIND (the escape hatch this
 # scenario says an app wanting a chat or reaction composer must use
 # instead) -- excluded here for that reason, not by oversight.
-RUST_EXCLUDED="new|read|read_branches|validate_context|publish|publish_signed|intent|through_the_one_door"
-CAMEL_EXCLUDED="read|validateContext|publish|publishSigned"
+RUST_EXCLUDED="new|read|read_branches|observe|observe_records|validate_context|publish|publish_signed|intent|through_the_one_door"
+CAMEL_EXCLUDED="read|observeRecords|validateContext|publish|publishSigned"
 
 check_exact_catalogue() {
   local file=$1 keyword=$2 start_regex=$3 excluded=$4

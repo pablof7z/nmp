@@ -54,6 +54,10 @@ pub use nmp::nip29::GROUP_ADMINS_KIND
 pub use nmp::nip29::GROUP_MEMBERS_KIND
 pub use nmp::nip29::GROUP_METADATA_KIND
 pub use nmp::nip29::GroupContextError
+pub use nmp::nip29::GroupMetadata
+pub use nmp::nip29::GroupRecord
+pub use nmp::nip29::ListedRecord
+pub use nmp::nip29::ListedSubject
 pub use nmp::nip29::add_user
 pub use nmp::nip29::create_group
 pub use nmp::nip29::create_invite
@@ -63,8 +67,60 @@ pub use nmp::nip29::edit_metadata
 pub use nmp::nip29::join_request
 pub use nmp::nip29::leave_request
 pub use nmp::nip29::remove_user
+pub enum nmp::nip29::GroupAvailability
+pub nmp::nip29::GroupAvailability::Acquiring
+pub nmp::nip29::GroupAvailability::CachedOnly
+pub nmp::nip29::GroupAvailability::Ready
+pub nmp::nip29::GroupAvailability::SourceUnavailable
+impl core::clone::Clone for nmp::nip29::GroupAvailability
+pub fn nmp::nip29::GroupAvailability::clone(&self) -> nmp::nip29::GroupAvailability
+impl core::cmp::Eq for nmp::nip29::GroupAvailability
+impl core::cmp::Ord for nmp::nip29::GroupAvailability
+pub fn nmp::nip29::GroupAvailability::cmp(&self, &nmp::nip29::GroupAvailability) -> core::cmp::Ordering
+impl core::cmp::PartialEq for nmp::nip29::GroupAvailability
+pub fn nmp::nip29::GroupAvailability::eq(&self, &nmp::nip29::GroupAvailability) -> bool
+impl core::cmp::PartialOrd for nmp::nip29::GroupAvailability
+pub fn nmp::nip29::GroupAvailability::partial_cmp(&self, &nmp::nip29::GroupAvailability) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for nmp::nip29::GroupAvailability
+pub fn nmp::nip29::GroupAvailability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::nip29::GroupAvailability
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupAvailability
+impl core::marker::Freeze for nmp::nip29::GroupAvailability
+impl core::marker::Send for nmp::nip29::GroupAvailability
+impl core::marker::Sync for nmp::nip29::GroupAvailability
+impl core::marker::Unpin for nmp::nip29::GroupAvailability
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupAvailability
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupAvailability
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupAvailability
+pub enum nmp::nip29::GroupObserveError
+pub nmp::nip29::GroupObserveError::Declaration(nmp::nip29::GroupReadError)
+pub nmp::nip29::GroupObserveError::Engine(nmp::EngineError)
+pub nmp::nip29::GroupObserveError::NoRecordSelected
+impl core::clone::Clone for nmp::nip29::GroupObserveError
+pub fn nmp::nip29::GroupObserveError::clone(&self) -> nmp::nip29::GroupObserveError
+impl core::cmp::Eq for nmp::nip29::GroupObserveError
+impl core::cmp::PartialEq for nmp::nip29::GroupObserveError
+pub fn nmp::nip29::GroupObserveError::eq(&self, &nmp::nip29::GroupObserveError) -> bool
+impl core::convert::From<nmp::EngineError> for nmp::nip29::GroupObserveError
+pub fn nmp::nip29::GroupObserveError::from(nmp::EngineError) -> Self
+impl core::convert::From<nmp::nip29::GroupReadError> for nmp::nip29::GroupObserveError
+pub fn nmp::nip29::GroupObserveError::from(nmp::nip29::GroupReadError) -> Self
+impl core::error::Error for nmp::nip29::GroupObserveError
+impl core::fmt::Debug for nmp::nip29::GroupObserveError
+pub fn nmp::nip29::GroupObserveError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::nip29::GroupObserveError
+pub fn nmp::nip29::GroupObserveError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupObserveError
+impl core::marker::Freeze for nmp::nip29::GroupObserveError
+impl core::marker::Send for nmp::nip29::GroupObserveError
+impl core::marker::Sync for nmp::nip29::GroupObserveError
+impl core::marker::Unpin for nmp::nip29::GroupObserveError
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupObserveError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupObserveError
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupObserveError
 pub enum nmp::nip29::GroupPredicate
 pub nmp::nip29::GroupPredicate::AdminListIncludes(nmp_grammar::binding::Binding)
+pub nmp::nip29::GroupPredicate::AnyOf(alloc::collections::btree::set::BTreeSet<alloc::string::String>)
 pub nmp::nip29::GroupPredicate::Combined
 pub nmp::nip29::GroupPredicate::Combined::op: nmp_grammar::binding::SetAlgebra
 pub nmp::nip29::GroupPredicate::Combined::operands: alloc::vec::Vec<nmp::nip29::GroupPredicate>
@@ -121,6 +177,8 @@ pub fn nmp::nip29::GroupReadError::clone(&self) -> nmp::nip29::GroupReadError
 impl core::cmp::Eq for nmp::nip29::GroupReadError
 impl core::cmp::PartialEq for nmp::nip29::GroupReadError
 pub fn nmp::nip29::GroupReadError::eq(&self, &nmp::nip29::GroupReadError) -> bool
+impl core::convert::From<nmp::nip29::GroupReadError> for nmp::nip29::GroupObserveError
+pub fn nmp::nip29::GroupObserveError::from(nmp::nip29::GroupReadError) -> Self
 impl core::convert::From<nmp_grammar::live_query::LiveQueryError> for nmp::nip29::GroupReadError
 pub fn nmp::nip29::GroupReadError::from(nmp_grammar::live_query::LiveQueryError) -> Self
 impl core::convert::From<nmp_nip29::context::GroupContextError> for nmp::nip29::GroupReadError
@@ -138,6 +196,28 @@ impl core::marker::Unpin for nmp::nip29::GroupReadError
 impl core::marker::UnsafeUnpin for nmp::nip29::GroupReadError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupReadError
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupReadError
+pub enum nmp::nip29::GroupWaitError
+pub nmp::nip29::GroupWaitError::Concurrent
+pub nmp::nip29::GroupWaitError::TimedOut
+impl core::clone::Clone for nmp::nip29::GroupWaitError
+pub fn nmp::nip29::GroupWaitError::clone(&self) -> nmp::nip29::GroupWaitError
+impl core::cmp::Eq for nmp::nip29::GroupWaitError
+impl core::cmp::PartialEq for nmp::nip29::GroupWaitError
+pub fn nmp::nip29::GroupWaitError::eq(&self, &nmp::nip29::GroupWaitError) -> bool
+impl core::error::Error for nmp::nip29::GroupWaitError
+impl core::fmt::Debug for nmp::nip29::GroupWaitError
+pub fn nmp::nip29::GroupWaitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::nip29::GroupWaitError
+pub fn nmp::nip29::GroupWaitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::nip29::GroupWaitError
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupWaitError
+impl core::marker::Freeze for nmp::nip29::GroupWaitError
+impl core::marker::Send for nmp::nip29::GroupWaitError
+impl core::marker::Sync for nmp::nip29::GroupWaitError
+impl core::marker::Unpin for nmp::nip29::GroupWaitError
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupWaitError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupWaitError
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupWaitError
 pub enum nmp::nip29::RelayScopeError
 pub nmp::nip29::RelayScopeError::EmptyRelaySet
 impl core::clone::Clone for nmp::nip29::RelayScopeError
@@ -168,6 +248,7 @@ pub fn nmp::nip29::Group::delete_group(&self, &nmp::Engine, nostr::key::public_k
 pub fn nmp::nip29::Group::edit_metadata(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::join_request(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::leave_request(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::observe(&self, &nmp::Engine, impl core::iter::traits::collect::IntoIterator<Item = nmp_nip29::records::GroupRecord>) -> core::result::Result<nmp::nip29::GroupObservation, nmp::nip29::GroupObserveError>
 pub fn nmp::nip29::Group::publish(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::publish_signed(&self, &nmp::Engine, nostr::event::Event) -> core::result::Result<nmp::nip29::GroupReceipts, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::read(&self, nmp_grammar::binding::Filter) -> core::result::Result<nmp_grammar::live_query::LiveQuery, nmp::nip29::GroupReadError>
@@ -188,10 +269,74 @@ impl core::marker::Unpin for nmp::nip29::Group
 impl core::marker::UnsafeUnpin for nmp::nip29::Group
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::Group
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::Group
+pub struct nmp::nip29::GroupObservation
+impl nmp::nip29::GroupObservation
+pub fn nmp::nip29::GroupObservation::cancel(&self)
+pub fn nmp::nip29::GroupObservation::cancel_handle(&self) -> nmp::ObservationCancel
+pub fn nmp::nip29::GroupObservation::latest(&self) -> alloc::vec::Vec<nmp::nip29::GroupSnapshot>
+pub async fn nmp::nip29::GroupObservation::next(&self) -> core::result::Result<core::option::Option<alloc::vec::Vec<nmp::nip29::GroupSnapshot>>, nmp::runtime::diagnostics_channel::ConcurrentNext>
+pub async fn nmp::nip29::GroupObservation::next_within(&self, core::time::Duration) -> core::result::Result<core::option::Option<alloc::vec::Vec<nmp::nip29::GroupSnapshot>>, nmp::nip29::GroupWaitError>
+impl core::fmt::Debug for nmp::nip29::GroupObservation
+pub fn nmp::nip29::GroupObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::drop::Drop for nmp::nip29::GroupObservation
+pub fn nmp::nip29::GroupObservation::drop(&mut self)
+impl !core::marker::Freeze for nmp::nip29::GroupObservation
+impl core::marker::Send for nmp::nip29::GroupObservation
+impl core::marker::Sync for nmp::nip29::GroupObservation
+impl core::marker::Unpin for nmp::nip29::GroupObservation
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupObservation
+impl !core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupObservation
+impl !core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupObservation
+pub struct nmp::nip29::GroupSnapshot
+pub nmp::nip29::GroupSnapshot::admins: alloc::vec::Vec<nmp_nip29::records::ListedSubject>
+pub nmp::nip29::GroupSnapshot::availability: nmp::nip29::GroupAvailability
+pub nmp::nip29::GroupSnapshot::disagreements: alloc::collections::btree::set::BTreeSet<nmp_nip29::records::GroupRecord>
+pub nmp::nip29::GroupSnapshot::id: alloc::string::String
+pub nmp::nip29::GroupSnapshot::members: alloc::vec::Vec<nmp_nip29::records::ListedSubject>
+pub nmp::nip29::GroupSnapshot::metadata: core::option::Option<nmp_nip29::records::GroupMetadata>
+pub nmp::nip29::GroupSnapshot::per_host: alloc::collections::btree::map::BTreeMap<nostr::types::url::RelayUrl, nmp::nip29::HostRecords>
+impl nmp::nip29::GroupSnapshot
+pub fn nmp::nip29::GroupSnapshot::at(&self, &nostr::types::url::RelayUrl) -> core::option::Option<&nmp::nip29::HostRecords>
+pub fn nmp::nip29::GroupSnapshot::differs(&self, nmp_nip29::records::GroupRecord) -> bool
+impl core::clone::Clone for nmp::nip29::GroupSnapshot
+pub fn nmp::nip29::GroupSnapshot::clone(&self) -> nmp::nip29::GroupSnapshot
+impl core::cmp::Eq for nmp::nip29::GroupSnapshot
+impl core::cmp::PartialEq for nmp::nip29::GroupSnapshot
+pub fn nmp::nip29::GroupSnapshot::eq(&self, &nmp::nip29::GroupSnapshot) -> bool
+impl core::fmt::Debug for nmp::nip29::GroupSnapshot
+pub fn nmp::nip29::GroupSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupSnapshot
+impl core::marker::Freeze for nmp::nip29::GroupSnapshot
+impl core::marker::Send for nmp::nip29::GroupSnapshot
+impl core::marker::Sync for nmp::nip29::GroupSnapshot
+impl core::marker::Unpin for nmp::nip29::GroupSnapshot
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupSnapshot
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupSnapshot
+pub struct nmp::nip29::HostRecords
+pub nmp::nip29::HostRecords::admins: core::option::Option<nmp_nip29::records::ListedRecord>
+pub nmp::nip29::HostRecords::availability: nmp::nip29::GroupAvailability
+pub nmp::nip29::HostRecords::members: core::option::Option<nmp_nip29::records::ListedRecord>
+pub nmp::nip29::HostRecords::metadata: core::option::Option<nmp_nip29::records::GroupMetadata>
+impl core::clone::Clone for nmp::nip29::HostRecords
+pub fn nmp::nip29::HostRecords::clone(&self) -> nmp::nip29::HostRecords
+impl core::cmp::Eq for nmp::nip29::HostRecords
+impl core::cmp::PartialEq for nmp::nip29::HostRecords
+pub fn nmp::nip29::HostRecords::eq(&self, &nmp::nip29::HostRecords) -> bool
+impl core::fmt::Debug for nmp::nip29::HostRecords
+pub fn nmp::nip29::HostRecords::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::HostRecords
+impl core::marker::Freeze for nmp::nip29::HostRecords
+impl core::marker::Send for nmp::nip29::HostRecords
+impl core::marker::Sync for nmp::nip29::HostRecords
+impl core::marker::Unpin for nmp::nip29::HostRecords
+impl core::marker::UnsafeUnpin for nmp::nip29::HostRecords
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::HostRecords
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::HostRecords
 pub struct nmp::nip29::RelayScope
 impl nmp::nip29::RelayScope
 pub fn nmp::nip29::RelayScope::group(&self, impl core::convert::Into<alloc::string::String>) -> nmp::nip29::Group
-pub fn nmp::nip29::RelayScope::groups_where(&self, &nmp::nip29::GroupPredicate) -> core::result::Result<nmp_grammar::live_query::LiveQuery, nmp::nip29::GroupReadError>
+pub fn nmp::nip29::RelayScope::observe(&self, &nmp::Engine, nmp::nip29::GroupPredicate, impl core::iter::traits::collect::IntoIterator<Item = nmp_nip29::records::GroupRecord>) -> core::result::Result<nmp::nip29::GroupObservation, nmp::nip29::GroupObserveError>
 impl core::clone::Clone for nmp::nip29::RelayScope
 pub fn nmp::nip29::RelayScope::clone(&self) -> nmp::nip29::RelayScope
 impl core::cmp::Eq for nmp::nip29::RelayScope
@@ -208,6 +353,8 @@ impl core::marker::UnsafeUnpin for nmp::nip29::RelayScope
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::RelayScope
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::RelayScope
 pub fn nmp::nip29::admin_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupPredicate
+pub fn nmp::nip29::any_of(impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> nmp::nip29::GroupPredicate
+pub fn nmp::nip29::group(impl core::iter::traits::collect::IntoIterator<Item = nostr::types::url::RelayUrl>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<nmp::nip29::Group, nmp::nip29::RelayScopeError>
 pub fn nmp::nip29::member_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupPredicate
 pub fn nmp::nip29::on(impl core::iter::traits::collect::IntoIterator<Item = nostr::types::url::RelayUrl>) -> core::result::Result<nmp::nip29::RelayScope, nmp::nip29::RelayScopeError>
 pub type nmp::nip29::GroupReceipts = nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteStatus>
@@ -415,6 +562,8 @@ pub fn nmp::EngineError::clone(&self) -> nmp::EngineError
 impl core::cmp::Eq for nmp::EngineError
 impl core::cmp::PartialEq for nmp::EngineError
 pub fn nmp::EngineError::eq(&self, &nmp::EngineError) -> bool
+impl core::convert::From<nmp::EngineError> for nmp::nip29::GroupObserveError
+pub fn nmp::nip29::GroupObserveError::from(nmp::EngineError) -> Self
 impl core::convert::From<nmp::EngineError> for nmp::nip29::GroupPublishError
 pub fn nmp::nip29::GroupPublishError::from(nmp::EngineError) -> Self
 impl core::error::Error for nmp::EngineError

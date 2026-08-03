@@ -90,12 +90,14 @@ Feature: A group can live on more than one relay at once
   # nmp:id=GROUPS-DISCOVERY-002
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_multi_host_listing_is_one_live_query_with_one_branch_per_host
-  # nmp:falsifier=Fold a multi-host discovery listing's branches into fewer live queries than hosts, or drop a host's branch on refusal; either would silently under-resolve which groups the app is shown as belonging to.
+  # nmp:evidence=rust:nmp::only_the_selected_records_reach_the_wire
+  # nmp:falsifier=Fold a multi-host discovery listing's branches into fewer live queries than hosts, or drop a host's branch on refusal; either would silently under-resolve which groups the app is shown as belonging to. Separately, hardcoding all three relay-signed records instead of asking for the ones the app named makes only_the_selected_records_reach_the_wire see a relay asked for two member and admin lists a directory screen never renders -- a real per-relay cost with no reader.
   @nip29
   Scenario: A multi-host discovery listing is also one live query, one branch per host
     Given a group-discovery predicate asking which groups name a subject as a member
     When the app asks the scope for groups matching that predicate, over a two-host scope
     Then the result is one ordinary live query with exactly one branch per host
+    And each relay is asked only for the records the app actually named
 
   # nmp:id=GROUPS-DISCOVERY-003
   # nmp:status=built

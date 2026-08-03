@@ -5,7 +5,7 @@ use super::*;
 // Headless, zero-socket falsifiers for the read half of #1123
 // (`features/groups/reads-through-the-one-door.feature`). Every `Demand`
 // here is minted by the SAME pure `nmp_nip29::group_demand_at`/
-// `groups_where_at` constructors the `nmp::nip29` facade calls -- nothing
+// `group_records_at` constructors the `nmp::nip29` facade calls -- nothing
 // here is a parallel or simplified re-implementation of the door.
 //
 // Provenance in this engine is not something a test has to dig for: which

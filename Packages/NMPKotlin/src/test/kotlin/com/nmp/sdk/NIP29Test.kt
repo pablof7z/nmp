@@ -68,19 +68,16 @@ class NIP29Test {
     }
 
     /** The composable predicate door: union/intersect/minus fold through
-     * the grammar's own set algebra, and a multi-host listing still yields
-     * one branch per host. */
+     * the grammar's own set algebra, including the literal-id leaf. */
     @Test
-    fun groupsWhereComposesPredicatesOverEveryHost() {
-        val scope = NMPRelayScope.on(listOf(host(1), host(2)))
+    fun predicatesComposeIncludingTheLiteralIdLeaf() {
         val member =
             NMPGroupPredicate.memberListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
         val admin =
             NMPGroupPredicate.adminListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
-        val predicate = member.union(listOf(admin))
-
-        val query = scope.groupsWhere(predicate)
-        assertEquals(2, query.branches.size)
+        member.union(listOf(admin, NMPGroupPredicate.anyOf(listOf("photographers"))))
+        member.intersect(listOf(admin))
+        member.minus(listOf(admin))
     }
 
     /** A non-hex literal subject is a typed invalid-public-key refusal --

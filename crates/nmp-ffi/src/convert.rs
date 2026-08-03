@@ -301,6 +301,19 @@ pub enum FfiError {
     GroupContextAmbiguous {
         expected: String,
     },
+    /// #1245 (`nmp::nip29::GroupContextError::RecordsAreNotContextScoped`
+    /// mirror). A selection handed to `FfiGroup::read` named one of NIP-29's
+    /// own relay-signed group records (39000/39001/39002). Those key
+    /// themselves by `d`, never by `h`, so the read would match nothing
+    /// forever and an app could not tell that apart from a group with no
+    /// roster. Read them through `FfiGroup::observe_records` instead.
+    GroupRecordsNotContextScoped {
+        kinds: Vec<u16>,
+    },
+    /// #1233 (`nmp::nip29::GroupObserveError::NoRecordSelected` mirror). A
+    /// records observation named none of the three records, which would
+    /// deliver a permanently empty snapshot.
+    GroupNoRecordSelected,
 }
 
 impl From<nmp::nip29::RelayScopeError> for FfiError {
@@ -332,6 +345,23 @@ impl From<nmp::nip29::GroupContextError> for FfiError {
             nmp::nip29::GroupContextError::AmbiguousContext { expected } => {
                 Self::GroupContextAmbiguous { expected }
             }
+            nmp::nip29::GroupContextError::RecordsAreNotContextScoped { kinds } => {
+                Self::GroupRecordsNotContextScoped {
+                    kinds: kinds.into_iter().collect(),
+                }
+            }
+        }
+    }
+}
+
+/// Same re-dispatch discipline as `GroupReadError`: the only variant that is
+/// this door's OWN is the empty record selection.
+impl From<nmp::nip29::GroupObserveError> for FfiError {
+    fn from(err: nmp::nip29::GroupObserveError) -> Self {
+        match err {
+            nmp::nip29::GroupObserveError::NoRecordSelected => Self::GroupNoRecordSelected,
+            nmp::nip29::GroupObserveError::Declaration(error) => Self::from(error),
+            nmp::nip29::GroupObserveError::Engine(error) => Self::from(error),
         }
     }
 }
@@ -597,6 +627,16 @@ impl std::fmt::Display for FfiError {
             Self::GroupContextAmbiguous { expected } => write!(
                 f,
                 "pre-signed event carries more than one 'h' row (expected {expected:?})"
+            ),
+            Self::GroupRecordsNotContextScoped { kinds } => write!(
+                f,
+                "kinds {kinds:?} are NIP-29's own relay-signed group records: they key \
+                 themselves by 'd', never by 'h', so no such event could ever match a \
+                 group-content read -- read them through the group's records door"
+            ),
+            Self::GroupNoRecordSelected => f.write_str(
+                "a group-records observation must select at least one of the three relay-signed \
+                 records",
             ),
         }
     }

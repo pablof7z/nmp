@@ -319,7 +319,7 @@ description; §§1–10 are the decision/implementation record that led here.
 let relays = nip29::on([relay_a, relay_b])?;              // RelayScopeError::EmptyRelaySet if empty
 let group  = relays.group("photographers");                // same hosts, one group id
 
-engine.observe(relays.groups_where(&mine)?, None)?;         // discovery: which groups
+relays.observe(&engine, mine, [Metadata, Admins, Members])?; // who is in which group
 engine.observe(group.read(chat_filter)?, None)?;             // this group's content
 group.publish(&engine, author, EventBuilder::new(Kind::from(9)).content("hi"))?;
 ```
@@ -383,17 +383,25 @@ state the underlying kinds cannot establish.
   `publication_never_synthesizes_previous`).
 - `crates/nmp-nip29/src/discovery.rs` — `GROUP_METADATA_KIND` /
   `GROUP_ADMINS_KIND` / `GROUP_MEMBERS_KIND` (39000/39001/39002),
-  `groups_where_at`, `member_list_includes_at`, `admin_list_includes_at`: one
-  host's complete discovery branch, every NIP-29-owned nesting level pinned to
-  that host. `pinned_public_at` is the one choke point every NIP-29 demand
+  `member_list_includes_at`, `admin_list_includes_at`: one host's complete
+  discovery branch, every NIP-29-owned nesting level pinned to that host. `pinned_public_at` is the one choke point every NIP-29 demand
   passes through for BOTH axes: `SourceAuthority::Pinned` (which relay is
   asked) and `CacheMode::Strict` (which cached rows may answer) — closing the
   cross-host cache leak a merely-pinned-but-`Agnostic` demand would otherwise
   have (`0ec66f8d`).
+- `crates/nmp-nip29/src/records.rs` (#1233) — what those three records SAY:
+  `GroupRecord`, `GroupMetadata`, `ListedRecord`, `ListedSubject`,
+  `group_metadata_at`, `listed_record_at`, `join_key_of`, and
+  `group_records_at(host, records, predicate)` — one host's branch for the
+  records the app actually named. The per-event projection lives here, beside
+  the schema it parses, because a crate that owns a schema and does not own
+  the only correct way to read it produces divergent hand-rolled parsers, which
+  is exactly what #1233 measured.
 - `crates/nmp-nip29/src/operations.rs` — the typed 9000–9022 composers,
   unchanged in shape by this issue.
 - `crates/nmp/src/nip29/mod.rs` — `nip29::on`, `RelayScope`,
-  `RelayScope::group`, `RelayScope::groups_where`, and the falsifier that
+  `RelayScope::group`, `RelayScope::observe`, the `nip29::group(hosts, id)`
+  sugar, and the falsifier that
   exists to prove per-host stamping survives nesting,
   `scope_stamps_exact_hosts_on_every_nested_nip29_demand`. `nmp::nip29` is a
   real module here (`crates/nmp/src/lib.rs:160`), not a re-export of
