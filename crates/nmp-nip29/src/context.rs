@@ -21,6 +21,8 @@ use std::collections::BTreeSet;
 use nmp_grammar::{Binding, Demand, EventBuilder, Filter, IndexedTagName};
 use nostr::{Event, RelayUrl, Tag};
 
+use crate::discovery::JOIN_KEY_TAG;
+
 /// The row NIP-29 owns: which group an event belongs to.
 const CONTEXT_TAG: char = 'h';
 /// Reserved, never emitted, never accepted from a caller. `previous` remains
@@ -45,6 +47,23 @@ pub enum GroupContextError {
     CallerSuppliedContextConstraint,
     /// An unsigned draft arrived already carrying a `previous` row.
     CallerSuppliedTimeline,
+    /// A group-content read selection named one of NIP-29's own relay-signed
+    /// group records (39000/39001/39002).
+    ///
+    /// Those records key themselves by `d`, never by `h`, so constraining
+    /// them by this group's `h` row builds a filter no such event can match:
+    /// the read would return nothing, forever, and an app could not tell that
+    /// apart from a group whose relay published no roster (#1245). A door
+    /// that returns nothing forever is worse than one that says no, so this
+    /// says no -- the same ownership refusal
+    /// [`Self::CallerSuppliedContextConstraint`] already makes, on the other
+    /// axis.
+    ///
+    /// It is not a kind catalogue and it privileges no kind: which kinds live
+    /// IN a group stays entirely the app's to choose. These three are not in
+    /// the group, they are ABOUT it, and they are read through the group's
+    /// own records door instead.
+    RecordsAreNotContextScoped { kinds: BTreeSet<u16> },
     /// A pre-signed event carries no `h` at all. Appending one would change
     /// the bytes and therefore the `EventId`, so this is a refusal rather
     /// than a repair.
@@ -73,6 +92,16 @@ impl std::fmt::Display for GroupContextError {
                 "the '{RESERVED_TIMELINE_TAG}' tag belongs to the group, not to the caller, \
                  and the group never mints one"
             ),
+            Self::RecordsAreNotContextScoped { kinds } => {
+                let kinds: Vec<String> = kinds.iter().map(u16::to_string).collect();
+                write!(
+                    f,
+                    "kinds {} are NIP-29's own relay-signed group records: they key themselves \
+                     by '{JOIN_KEY_TAG}', never by '{CONTEXT_TAG}', so no such event could ever \
+                     match a group-content read -- read them through the group's records door",
+                    kinds.join(", ")
+                )
+            }
             Self::MissingContext { expected } => write!(
                 f,
                 "a signed event carries no '{CONTEXT_TAG}' tag, so it is not in group \
@@ -100,6 +129,13 @@ impl std::error::Error for GroupContextError {}
 /// Which kinds live in a group is the app's to say; a fixed catalogue here is
 /// precisely what #838 removed. An app selection that already constrains `#h`
 /// is REFUSED rather than overwritten.
+///
+/// The one selection this door refuses on its content is NIP-29's own
+/// relay-signed records (39000/39001/39002), because they are `d`-keyed and
+/// an `h`-scoped filter over them matches nothing at all (#1245). That is a
+/// refusal about which AXIS keys the event, not a catalogue of the group's
+/// kinds: every other kind, defined by NIP-29, by another NIP, or by nothing,
+/// passes through unread.
 pub fn group_demand_at(
     host: &RelayUrl,
     group_id: &str,
@@ -108,6 +144,16 @@ pub fn group_demand_at(
     let mut selection = selection;
     if selection.tags.contains_key(&context_tag()) {
         return Err(GroupContextError::CallerSuppliedContextConstraint);
+    }
+    let records: BTreeSet<u16> = selection
+        .kinds
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|selected| crate::records::GroupRecord::of_kind(*selected).is_some())
+        .collect();
+    if !records.is_empty() {
+        return Err(GroupContextError::RecordsAreNotContextScoped { kinds: records });
     }
     selection.tags.insert(
         context_tag(),
@@ -506,6 +552,59 @@ mod tests {
         );
     }
 
+    /// #1245: the three relay-signed group records key themselves by `d`, so
+    /// an `h`-scoped read of them can only ever match nothing. Each is
+    /// refused, individually and together, and the refusal NAMES the kinds so
+    /// a caller can see which part of its selection was the problem.
+    ///
+    /// Before this, `Group::read(kinds:[39001,39002])` returned an
+    /// `Ok(LiveQuery)` that opened a subscription and then stayed empty
+    /// forever, indistinguishable from a group whose relay published no
+    /// roster.
+    #[test]
+    fn a_read_selection_naming_the_relay_signed_records_is_refused_not_answered() {
+        for (kinds, expected) in [
+            (BTreeSet::from([39000u16]), BTreeSet::from([39000u16])),
+            (BTreeSet::from([39001u16]), BTreeSet::from([39001u16])),
+            (BTreeSet::from([39002u16]), BTreeSet::from([39002u16])),
+            (
+                BTreeSet::from([39001u16, 39002u16]),
+                BTreeSet::from([39001u16, 39002u16]),
+            ),
+            // Mixed with ordinary group content: the presence of readable
+            // content does not license silently dropping the unmatchable part.
+            (
+                BTreeSet::from([9u16, 39002u16]),
+                BTreeSet::from([39002u16]),
+            ),
+        ] {
+            let selection = Filter {
+                kinds: Some(kinds.clone()),
+                ..Filter::default()
+            };
+            assert_eq!(
+                group_demand_at(&host(), GROUP, selection).err(),
+                Some(GroupContextError::RecordsAreNotContextScoped { kinds: expected }),
+                "selection {kinds:?} must be refused, not answered with a permanent silence"
+            );
+        }
+    }
+
+    /// The refusal says which axis the records are keyed by, so a caller
+    /// reading the message learns where to go instead.
+    #[test]
+    fn the_records_refusal_names_both_tag_axes() {
+        let selection = Filter {
+            kinds: Some(BTreeSet::from([39002u16])),
+            ..Filter::default()
+        };
+        let said = group_demand_at(&host(), GROUP, selection)
+            .expect_err("a d-keyed record is unreachable through the h door")
+            .to_string();
+        assert!(said.contains("'d'") && said.contains("'h'"), "{said}");
+        assert!(said.contains("39002"), "{said}");
+    }
+
     /// The retained group id is the SOLE semantic source of `h`, so a
     /// selection that already constrains it is refused, never overwritten.
     #[test]
@@ -527,10 +626,11 @@ mod tests {
     /// (31337) and ones that belong to other NIPs entirely (7, 30315) -- so
     /// passing is never explainable by "it happens to be a kind the group
     /// recognizes". Every case must come back with EXACTLY the app's own
-    /// kind set, still pinned to `host` and still scoped to `GROUP`, and
-    /// `group_demand_at` must never consult, filter, or reject on `kinds` at
-    /// all: the function signature takes a `Filter` and copies it through
-    /// unread except for the one row it owns (`#h`).
+    /// kind set, still pinned to `host` and still scoped to `GROUP`.
+    ///
+    /// The one thing this door does read the selection for is the `d`-keyed
+    /// records refusal below, which is about which tag axis keys the event
+    /// and not about which kinds may live in a group.
     #[test]
     fn a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections() {
         let cases: Vec<BTreeSet<u16>> = vec![
@@ -538,7 +638,7 @@ mod tests {
             BTreeSet::from([9u16, 9000u16]),
             BTreeSet::from([30315u16]),
             BTreeSet::from([7u16]),
-            BTreeSet::from([39002u16]),
+            BTreeSet::from([9022u16]),
             BTreeSet::from([31337u16]),
         ];
         for kinds in cases {
