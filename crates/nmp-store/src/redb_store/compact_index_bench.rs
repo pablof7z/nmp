@@ -13,8 +13,7 @@ use std::time::Instant;
 use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
 use super::schema::{
-    EventKey, EVENTS, EVENT_IDS, EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS,
-    RELAY_IDS,
+    EventKey, EVENTS, EVENT_IDS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_IDS,
 };
 use super::store_bench::{
     duration_ns, nearest_rank, prepared_array, StoreBenchPreparedCorpus, StoreBenchPreparedMetrics,
@@ -64,8 +63,6 @@ fn init_database(path: &Path) -> Result<Database, String> {
     txn.open_table(EVENTS).map_err(|error| error.to_string())?;
     txn.open_table(EVENT_IDS)
         .map_err(|error| error.to_string())?;
-    txn.open_table(EVENT_OBSERVATIONS)
-        .map_err(|error| error.to_string())?;
     txn.open_table(RELAYS).map_err(|error| error.to_string())?;
     txn.open_table(RELAY_IDS)
         .map_err(|error| error.to_string())?;
@@ -109,9 +106,6 @@ pub fn run_prepared_redb_compact_index_bench(
         let mut event_ids = txn
             .open_table(EVENT_IDS)
             .map_err(|error| error.to_string())?;
-        let mut observations = txn
-            .open_table(EVENT_OBSERVATIONS)
-            .map_err(|error| error.to_string())?;
         let mut relays = txn.open_table(RELAYS).map_err(|error| error.to_string())?;
         let mut relay_ids = txn
             .open_table(RELAY_IDS)
@@ -137,10 +131,9 @@ pub fn run_prepared_redb_compact_index_bench(
 
         for record in &batch.records {
             match record.table {
-                StoreBenchPreparedTable::Events => {
-                    let key = u64::from_be_bytes(prepared_array(&record.key, "event key")?);
+                StoreBenchPreparedTable::Events | StoreBenchPreparedTable::EventObservations => {
                     events
-                        .insert(key, record.value.as_slice())
+                        .insert(record.key.as_slice(), record.value.as_slice())
                         .map_err(|error| error.to_string())?;
                 }
                 StoreBenchPreparedTable::EventIds => {
@@ -148,14 +141,6 @@ pub fn run_prepared_redb_compact_index_bench(
                     let value =
                         u64::from_be_bytes(prepared_array(&record.value, "event id value")?);
                     event_ids
-                        .insert(&key, value)
-                        .map_err(|error| error.to_string())?;
-                }
-                StoreBenchPreparedTable::EventObservations => {
-                    let key = prepared_array::<12>(&record.key, "observation key")?;
-                    let value =
-                        u64::from_be_bytes(prepared_array(&record.value, "observation value")?);
-                    observations
                         .insert(&key, value)
                         .map_err(|error| error.to_string())?;
                 }
@@ -252,7 +237,6 @@ pub fn run_prepared_redb_compact_index_bench(
         drop(by_created_at);
         drop(relay_ids);
         drop(relays);
-        drop(observations);
         drop(event_ids);
         drop(events);
         let commit_started = Instant::now();
@@ -278,9 +262,6 @@ pub fn run_prepared_redb_compact_index_bench(
     let reopened_table_rows = vec![
         read.open_table(EVENTS).map_err(|e| e.to_string())?.len(),
         read.open_table(EVENT_IDS).map_err(|e| e.to_string())?.len(),
-        read.open_table(EVENT_OBSERVATIONS)
-            .map_err(|e| e.to_string())?
-            .len(),
         read.open_table(RELAYS).map_err(|e| e.to_string())?.len(),
         read.open_table(RELAY_IDS).map_err(|e| e.to_string())?.len(),
         read.open_table(COMPACT_BY_CREATED_AT)

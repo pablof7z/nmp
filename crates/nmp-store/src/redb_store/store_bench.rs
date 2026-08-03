@@ -14,15 +14,15 @@ use nostr::{Event, Filter, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use super::canonical::observation_key;
 use super::query::{
     author_cardinality_key, by_author_key, by_author_kind_key, by_kind_key, created_at_key,
     event_is_cardinality_sample, global_cardinality_key, insert_tag_index_rows,
     kind_cardinality_key, tag_cardinality_key, tag_index_key,
 };
 use super::schema::{
-    encode_relay_row, BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG, COMPARISON_BY_AUTHOR_KIND, EVENTS,
-    EVENT_IDS, EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_IDS,
+    encode_relay_row, event_row_key, observation_key, BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG,
+    COMPARISON_BY_AUTHOR_KIND, EVENTS, EVENT_IDS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS,
+    RELAY_IDS,
 };
 use super::*;
 
@@ -300,7 +300,7 @@ pub fn prepare_equivalent_store_corpus(
             encoded_event_bytes = encoded_event_bytes.saturating_add(encoded.len() as u64);
             records.push(prepared_record(
                 StoreBenchPreparedTable::Events,
-                event_key_bytes,
+                event_row_key(event_key),
                 encoded,
             ));
             records.push(prepared_record(
@@ -439,9 +439,6 @@ fn init_reduced_database(path: &Path, variant: StoreBenchVariant) -> Result<Data
         .map_err(|error| error.to_string())?;
     if variant.has_provenance() {
         write_txn
-            .open_table(EVENT_OBSERVATIONS)
-            .map_err(|error| error.to_string())?;
-        write_txn
             .open_table(RELAYS)
             .map_err(|error| error.to_string())?;
         write_txn
@@ -519,11 +516,6 @@ fn run_reduced(
         let mut event_ids = write_txn
             .open_table(EVENT_IDS)
             .map_err(|error| error.to_string())?;
-        let mut observations = variant
-            .has_provenance()
-            .then(|| write_txn.open_table(EVENT_OBSERVATIONS))
-            .transpose()
-            .map_err(|error| error.to_string())?;
         let mut relays = variant
             .has_provenance()
             .then(|| write_txn.open_table(RELAYS))
@@ -584,15 +576,17 @@ fn run_reduced(
                 .map_err(|error| format!("encode event: {error}"))?;
             encoded_event_bytes = encoded_event_bytes.saturating_add(encoded.len() as u64);
             event_rows
-                .insert(event_key, encoded.as_slice())
+                .insert(event_row_key(event_key).as_slice(), encoded.as_slice())
                 .map_err(|error| error.to_string())?;
             event_ids
                 .insert(event.id.as_bytes(), event_key)
                 .map_err(|error| error.to_string())?;
-            if let Some(observations) = observations.as_mut() {
-                let key = observation_key(event_key, 1);
-                observations
-                    .insert(&key, observed_at)
+            if variant.has_provenance() {
+                event_rows
+                    .insert(
+                        observation_key(event_key, 1).as_slice(),
+                        observed_at.to_be_bytes().as_slice(),
+                    )
                     .map_err(|error| error.to_string())?;
             }
             if let Some(index) = by_created_at.as_mut() {
@@ -669,7 +663,6 @@ fn run_reduced(
         drop(by_created_at);
         drop(relay_ids);
         drop(relays);
-        drop(observations);
         drop(event_ids);
         drop(event_rows);
         let commit_started = Instant::now();
@@ -855,9 +848,6 @@ fn init_prepared_unified_database(path: &Path) -> Result<Database, String> {
         .open_table(EVENT_IDS)
         .map_err(|error| error.to_string())?;
     write_txn
-        .open_table(EVENT_OBSERVATIONS)
-        .map_err(|error| error.to_string())?;
-    write_txn
         .open_table(RELAYS)
         .map_err(|error| error.to_string())?;
     write_txn
@@ -898,9 +888,6 @@ pub fn run_prepared_redb_unified_index_bench(
         let mut event_ids = write_txn
             .open_table(EVENT_IDS)
             .map_err(|error| error.to_string())?;
-        let mut observations = write_txn
-            .open_table(EVENT_OBSERVATIONS)
-            .map_err(|error| error.to_string())?;
         let mut relays = write_txn
             .open_table(RELAYS)
             .map_err(|error| error.to_string())?;
@@ -916,10 +903,9 @@ pub fn run_prepared_redb_unified_index_bench(
 
         for record in &batch.records {
             match record.table {
-                StoreBenchPreparedTable::Events => {
-                    let key = u64::from_be_bytes(prepared_array(&record.key, "event key")?);
+                StoreBenchPreparedTable::Events | StoreBenchPreparedTable::EventObservations => {
                     events
-                        .insert(key, record.value.as_slice())
+                        .insert(record.key.as_slice(), record.value.as_slice())
                         .map_err(|error| error.to_string())?;
                 }
                 StoreBenchPreparedTable::EventIds => {
@@ -927,14 +913,6 @@ pub fn run_prepared_redb_unified_index_bench(
                     let value =
                         u64::from_be_bytes(prepared_array(&record.value, "event id value")?);
                     event_ids
-                        .insert(&key, value)
-                        .map_err(|error| error.to_string())?;
-                }
-                StoreBenchPreparedTable::EventObservations => {
-                    let key = prepared_array::<12>(&record.key, "observation key")?;
-                    let value =
-                        u64::from_be_bytes(prepared_array(&record.value, "observation value")?);
-                    observations
                         .insert(&key, value)
                         .map_err(|error| error.to_string())?;
                 }
@@ -970,7 +948,6 @@ pub fn run_prepared_redb_unified_index_bench(
         drop(indexes);
         drop(relay_ids);
         drop(relays);
-        drop(observations);
         drop(event_ids);
         drop(events);
         let commit_started = Instant::now();
@@ -1000,11 +977,6 @@ pub fn run_prepared_redb_unified_index_bench(
         .map_err(|e| e.to_string())?;
     reopened_table_rows[StoreBenchPreparedTable::EventIds as usize] = read_txn
         .open_table(EVENT_IDS)
-        .map_err(|e| e.to_string())?
-        .len()
-        .map_err(|e| e.to_string())?;
-    reopened_table_rows[StoreBenchPreparedTable::EventObservations as usize] = read_txn
-        .open_table(EVENT_OBSERVATIONS)
         .map_err(|e| e.to_string())?
         .len()
         .map_err(|e| e.to_string())?;
@@ -1104,9 +1076,6 @@ pub fn run_prepared_redb_store_bench(
         let mut event_ids = write_txn
             .open_table(EVENT_IDS)
             .map_err(|error| error.to_string())?;
-        let mut observations = write_txn
-            .open_table(EVENT_OBSERVATIONS)
-            .map_err(|error| error.to_string())?;
         let mut relays = write_txn
             .open_table(RELAYS)
             .map_err(|error| error.to_string())?;
@@ -1134,10 +1103,9 @@ pub fn run_prepared_redb_store_bench(
 
         for record in &batch.records {
             match record.table {
-                StoreBenchPreparedTable::Events => {
-                    let key = u64::from_be_bytes(prepared_array(&record.key, "event key")?);
+                StoreBenchPreparedTable::Events | StoreBenchPreparedTable::EventObservations => {
                     events
-                        .insert(key, record.value.as_slice())
+                        .insert(record.key.as_slice(), record.value.as_slice())
                         .map_err(|error| error.to_string())?;
                 }
                 StoreBenchPreparedTable::EventIds => {
@@ -1145,14 +1113,6 @@ pub fn run_prepared_redb_store_bench(
                     let value =
                         u64::from_be_bytes(prepared_array(&record.value, "event id value")?);
                     event_ids
-                        .insert(&key, value)
-                        .map_err(|error| error.to_string())?;
-                }
-                StoreBenchPreparedTable::EventObservations => {
-                    let key = prepared_array::<12>(&record.key, "observation key")?;
-                    let value =
-                        u64::from_be_bytes(prepared_array(&record.value, "observation value")?);
-                    observations
                         .insert(&key, value)
                         .map_err(|error| error.to_string())?;
                 }
@@ -1227,7 +1187,6 @@ pub fn run_prepared_redb_store_bench(
         drop(by_created_at);
         drop(relay_ids);
         drop(relays);
-        drop(observations);
         drop(event_ids);
         drop(events);
         let commit_started = Instant::now();
@@ -1256,10 +1215,6 @@ pub fn run_prepared_redb_store_bench(
             .len(),
         read_txn
             .open_table(EVENT_IDS)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(EVENT_OBSERVATIONS)
             .map_err(|e| e.to_string())?
             .len(),
         read_txn

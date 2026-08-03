@@ -3,7 +3,7 @@
 //! Two claims live here, and both are falsifiable by a one-line edit to
 //! `schema.rs`:
 //!
-//! 1. A fresh store creates EXACTLY the 29 production tables, named exactly
+//! 1. A fresh store creates EXACTLY the 27 production tables, named exactly
 //!    as listed below. The old spelling of the publish queue (`outbox_*`,
 //!    then `delivery_*`) is gone, not aliased, and so is every tree #1248
 //!    folded into a neighbour's key space.
@@ -36,12 +36,10 @@ const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
 /// What is left is: does this need a DIFFERENT LEADING SORT DIMENSION than its
 /// neighbour, or is it a GENUINELY DISTINCT KEY SPACE? If neither, it is a
 /// column, and it belongs in its neighbour's key space.
-const PRODUCTION_TABLES: [&str; 29] = [
+const PRODUCTION_TABLES: [&str; 27] = [
     "addr_index",
     "coverage",
     "event_ids",
-    "event_local",
-    "event_observations",
     "events",
     "expiration_index",
     "postings_catalog",
@@ -72,8 +70,10 @@ const PRODUCTION_TABLES: [&str; 29] = [
 /// again: each was a column of a key space a neighbour already owned, or a
 /// scalar row that never needed a tree, and re-creating one under the same
 /// epoch would resurrect a layout nothing reads.
-const FOLDED_AWAY_TABLES: [&str; 14] = [
+const FOLDED_AWAY_TABLES: [&str; 16] = [
     "addr_tombstones",
+    "event_local",
+    "event_observations",
     "event_store_meta",
     "index_cardinality",
     "index_cardinality_meta",

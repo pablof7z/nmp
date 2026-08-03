@@ -1,11 +1,12 @@
 #[cfg(test)]
-use super::canonical::{observation_event_key, observation_relay_key};
-#[cfg(feature = "bench-instrumentation")]
+use super::canonical::observation_event_key;
+#[cfg(any(test, feature = "bench-instrumentation"))]
 use super::schema::EventKey;
 #[cfg(test)]
 use super::schema::{
-    decode_relay_row, RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
-    EXPIRATION_INDEX, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_IDS, STORE_META,
+    decode_relay_row, observation_relay_key, RelayKey, ADDR_INDEX, EVENTS, EVENT_COL_LOCAL,
+    EVENT_COL_OBSERVATION, EVENT_COL_ROW, EVENT_IDS, EXPIRATION_INDEX, NEXT_EVENT_KEY,
+    NEXT_RELAY_KEY, RELAYS, RELAY_IDS, STORE_META,
 };
 #[cfg(test)]
 use super::BTreeSet;
@@ -188,33 +189,50 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
     let read_txn = db.begin_read().expect("begin canonical integrity audit");
     let events = read_txn.open_table(EVENTS).expect("audit events");
     let event_ids = read_txn.open_table(EVENT_IDS).expect("audit event ids");
-    let local = read_txn
-        .open_table(EVENT_LOCAL)
-        .expect("audit event local metadata");
     let store_meta = read_txn
         .open_table(STORE_META)
         .expect("audit event store meta");
-    let observations = read_txn
-        .open_table(EVENT_OBSERVATIONS)
-        .expect("audit event observations");
     let relays = read_txn.open_table(RELAYS).expect("audit relays");
     let relay_ids = read_txn.open_table(RELAY_IDS).expect("audit relay ids");
 
+    // One pass over the folded event key space, split back into its three
+    // columns. Nothing else may live in this tree: an unknown column byte is
+    // a durable row the schema does not define.
     let mut canonical = BTreeMap::new();
+    let mut local_rows = BTreeMap::new();
+    let mut observation_rows = Vec::new();
     for entry in events.iter().expect("iterate audit events") {
         let (key, bytes) = entry.expect("read audit event");
         let key = key.value();
-        let view = StoredEventView::parse(bytes.value()).expect("audit event binary value");
-        let event = view.materialize_event().expect("audit materialized event");
-        assert_eq!(
-            event_ids
-                .get(event.id.as_bytes())
-                .expect("audit id lookup")
-                .expect("every event has a raw-id mapping")
-                .value(),
-            key
-        );
-        assert!(canonical.insert(key, event).is_none());
+        let event_key =
+            EventKey::from_be_bytes(key[..8].try_into().expect("canonical key leads with a key"));
+        match key[8] {
+            EVENT_COL_ROW => {
+                assert_eq!(key.len(), 9, "an event row key carries no suffix");
+                let view = StoredEventView::parse(bytes.value()).expect("audit event binary value");
+                let event = view.materialize_event().expect("audit materialized event");
+                assert_eq!(
+                    event_ids
+                        .get(event.id.as_bytes())
+                        .expect("audit id lookup")
+                        .expect("every event has a raw-id mapping")
+                        .value(),
+                    event_key
+                );
+                assert!(canonical.insert(event_key, event).is_none());
+            }
+            EVENT_COL_LOCAL => {
+                assert_eq!(key.len(), 9, "a local sidecar key carries no suffix");
+                assert!(local_rows
+                    .insert(event_key, bytes.value().to_vec())
+                    .is_none());
+            }
+            EVENT_COL_OBSERVATION => {
+                assert_eq!(key.len(), 13, "an observation key names one relay");
+                observation_rows.push(key.to_vec());
+            }
+            other => panic!("unknown canonical event column {other}"),
+        }
     }
 
     assert_eq!(
@@ -230,10 +248,9 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         assert_eq!(raw_id.value(), event.id.as_bytes());
     }
 
-    for entry in local.iter().expect("iterate audit local metadata") {
-        let (event_key, value) = entry.expect("read audit local metadata");
-        assert!(canonical.contains_key(&event_key.value()));
-        binary_event::decode_local(value.value()).expect("audit local metadata sidecar");
+    for (event_key, value) in &local_rows {
+        assert!(canonical.contains_key(event_key));
+        binary_event::decode_local(value).expect("audit local metadata sidecar");
     }
 
     if let Some(max_key) = canonical.keys().next_back() {
@@ -246,10 +263,7 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
     }
 
     let mut expected_relay_refs = BTreeMap::<RelayKey, u64>::new();
-    for entry in observations.iter().expect("iterate audit observations") {
-        let (encoded_key, _at) = entry.expect("read audit observation");
-        let encoded_key = encoded_key.value();
-        assert_eq!(encoded_key.len(), 12);
+    for encoded_key in &observation_rows {
         let event_key = observation_event_key(encoded_key);
         let relay_key = observation_relay_key(encoded_key);
         assert!(

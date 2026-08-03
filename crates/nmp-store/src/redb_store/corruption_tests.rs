@@ -687,7 +687,10 @@ fn query_reports_a_corrupt_canonical_event() {
         {
             let mut events = write_txn.open_table(EVENTS).expect("raw open events");
             events
-                .insert(event_key, b"NMPE-truncated".as_slice())
+                .insert(
+                    event_row_key(event_key).as_slice(),
+                    b"NMPE-truncated".as_slice(),
+                )
                 .expect("raw insert");
         }
         write_txn.commit().expect("raw commit");

@@ -616,20 +616,19 @@ fn raw_canonical_row(store: &RedbStore, id: EventId) -> (EventKey, Vec<u8>, Opti
     let read_txn = store.db.begin_read().unwrap();
     let event_ids = read_txn.open_table(EVENT_IDS).unwrap();
     let events = read_txn.open_table(EVENTS).unwrap();
-    let local = read_txn.open_table(EVENT_LOCAL).unwrap();
     let event_key = event_ids
         .get(id.as_bytes())
         .unwrap()
         .expect("raw id mapping")
         .value();
     let event_bytes = events
-        .get(event_key)
+        .get(event_row_key(event_key).as_slice())
         .unwrap()
         .expect("raw event row")
         .value()
         .to_vec();
-    let local_bytes = local
-        .get(event_key)
+    let local_bytes = events
+        .get(event_local_key(event_key).as_slice())
         .unwrap()
         .map(|value| value.value().to_vec());
     (event_key, event_bytes, local_bytes)
@@ -637,14 +636,19 @@ fn raw_canonical_row(store: &RedbStore, id: EventId) -> (EventKey, Vec<u8>, Opti
 
 fn raw_observation_rows(store: &RedbStore, event_key: EventKey) -> Vec<(Vec<u8>, u64)> {
     let read_txn = store.db.begin_read().unwrap();
-    let observations = read_txn.open_table(EVENT_OBSERVATIONS).unwrap();
-    let (lower, upper) = observation_range(event_key);
-    observations
-        .range::<&[u8; 12]>(&lower..=&upper)
+    let events = read_txn.open_table(EVENTS).unwrap();
+    let (lower, upper) = observation_bounds(event_key);
+    events
+        .range(lower.as_slice()..=upper.as_slice())
         .unwrap()
         .map(|entry| {
             let (key, at) = entry.unwrap();
-            (key.value().to_vec(), at.value())
+            let key = key.value().to_vec();
+            let relay_key = observation_relay_key(&key);
+            (
+                key,
+                decode_observed_at(event_key, relay_key, at.value()).unwrap(),
+            )
         })
         .collect()
 }
@@ -811,14 +815,14 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
             .unwrap()
             .is_none());
         assert_eq!(read_txn.open_table(RELAYS).unwrap().len().unwrap(), 0);
-        assert_eq!(
-            read_txn
-                .open_table(EVENT_OBSERVATIONS)
-                .unwrap()
-                .len()
-                .unwrap(),
-            0
-        );
+        // Every remaining canonical key is a note row or a local sidecar:
+        // the observation column is empty.
+        assert!(read_txn
+            .open_table(EVENTS)
+            .unwrap()
+            .iter()
+            .unwrap()
+            .all(|entry| entry.unwrap().0.value()[8] != EVENT_COL_OBSERVATION));
     }
     assert_canonical_integrity(&store.db);
 
@@ -893,14 +897,17 @@ fn canonical_relay_aliases_fold_to_latest_timestamp_on_read_and_mutation() {
             .value();
         let alias_key = canonical_key + 1;
         let mut store_meta = write_txn.open_table(STORE_META).unwrap();
-        let mut observations = write_txn.open_table(EVENT_OBSERVATIONS).unwrap();
+        let mut events = write_txn.open_table(EVENTS).unwrap();
 
         relays
             .insert(alias_key, encode_relay_row(1, STORED_ALIAS).as_slice())
             .unwrap();
         relay_ids.insert(STORED_ALIAS, alias_key).unwrap();
-        observations
-            .insert(&observation_key(event_key, alias_key), 20)
+        events
+            .insert(
+                observation_key(event_key, alias_key).as_slice(),
+                20u64.to_be_bytes().as_slice(),
+            )
             .unwrap();
         store_meta
             .insert(NEXT_RELAY_KEY, u64::from(alias_key + 1))

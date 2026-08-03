@@ -20,16 +20,14 @@ use nostr::{Event, RelayUrl};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use super::canonical::observation_key;
 use super::postings::{
     self, merge_dead_blocks, merge_posting_cursors, shard_for, validate_run_metas, DeadKeys,
     DictionaryView, EncodedRun, Family, Membership, MergeSource, Prefix, RunEvent, RunMeta,
     SegmentView,
 };
 use super::query::tag_index_prefix;
-use super::schema::{
-    encode_relay_row, EVENTS, EVENT_IDS, EVENT_OBSERVATIONS, REDB_CACHE_BYTES, RELAYS, RELAY_IDS,
-};
+use super::schema::{encode_relay_row, EVENTS, EVENT_IDS, REDB_CACHE_BYTES, RELAYS, RELAY_IDS};
+use super::schema::{event_row_key, observation_key};
 use super::store_bench::{duration_ns, nearest_rank};
 use super::{binary_event, StoreBenchProcessCounters};
 
@@ -156,8 +154,6 @@ fn run_redb(
     init.open_table(EVENTS).map_err(|error| error.to_string())?;
     init.open_table(EVENT_IDS)
         .map_err(|error| error.to_string())?;
-    init.open_table(EVENT_OBSERVATIONS)
-        .map_err(|error| error.to_string())?;
     init.open_table(RELAYS).map_err(|error| error.to_string())?;
     init.open_table(RELAY_IDS)
         .map_err(|error| error.to_string())?;
@@ -187,9 +183,6 @@ fn run_redb(
             .map_err(|error| error.to_string())?;
         let mut event_ids = write
             .open_table(EVENT_IDS)
-            .map_err(|error| error.to_string())?;
-        let mut observations = write
-            .open_table(EVENT_OBSERVATIONS)
             .map_err(|error| error.to_string())?;
         let mut relays = write
             .open_table(RELAYS)
@@ -224,13 +217,16 @@ fn run_redb(
                 .encoded_event_bytes
                 .saturating_add(encoded.len() as u64);
             event_rows
-                .insert(event_key, encoded.as_slice())
+                .insert(event_row_key(event_key).as_slice(), encoded.as_slice())
                 .map_err(|error| error.to_string())?;
             event_ids
                 .insert(event.id.as_bytes(), event_key)
                 .map_err(|error| error.to_string())?;
-            observations
-                .insert(&observation_key(event_key, 1), observed_at)
+            event_rows
+                .insert(
+                    observation_key(event_key, 1).as_slice(),
+                    observed_at.to_be_bytes().as_slice(),
+                )
                 .map_err(|error| error.to_string())?;
             add_event_memberships(&mut grouped, &mut totals.memberships, event, event_key);
         }
@@ -298,7 +294,6 @@ fn run_redb(
         drop(segments);
         drop(relay_ids);
         drop(relays);
-        drop(observations);
         drop(event_ids);
         drop(event_rows);
         let commit_started = Instant::now();
@@ -791,22 +786,19 @@ fn apply_redb_deletion_overlay(
     let mut event_ids = write
         .open_table(EVENT_IDS)
         .map_err(|error| error.to_string())?;
-    let mut observations = write
-        .open_table(EVENT_OBSERVATIONS)
-        .map_err(|error| error.to_string())?;
     let mut dead_key_table = write
         .open_table(PACKED_DEAD_KEYS)
         .map_err(|error| error.to_string())?;
     for &event_key in &event_keys {
         let event = &events[event_key as usize - 1];
         event_rows
-            .remove(event_key)
+            .remove(event_row_key(event_key).as_slice())
             .map_err(|error| error.to_string())?;
         event_ids
             .remove(event.id.as_bytes())
             .map_err(|error| error.to_string())?;
-        observations
-            .remove(&observation_key(event_key, 1))
+        event_rows
+            .remove(observation_key(event_key, 1).as_slice())
             .map_err(|error| error.to_string())?;
     }
     for (generation, sequence, value) in blocks {
@@ -816,7 +808,6 @@ fn apply_redb_deletion_overlay(
             .map_err(|error| error.to_string())?;
     }
     drop(dead_key_table);
-    drop(observations);
     drop(event_ids);
     drop(event_rows);
     write.commit().map_err(|error| error.to_string())?;
@@ -2027,7 +2018,7 @@ mod tests {
         committed
             .open_table(EVENTS)
             .unwrap()
-            .insert(1, &[1][..])
+            .insert(event_row_key(1).as_slice(), &[1][..])
             .unwrap();
         committed
             .open_table(PACKED_SEGMENTS)
@@ -2040,7 +2031,7 @@ mod tests {
         staged
             .open_table(EVENTS)
             .unwrap()
-            .insert(2, &[2][..])
+            .insert(event_row_key(2).as_slice(), &[2][..])
             .unwrap();
         staged
             .open_table(PACKED_SEGMENTS)
@@ -2069,8 +2060,15 @@ mod tests {
         let segments = read.open_table(PACKED_SEGMENTS).unwrap();
         assert_eq!(events.len().unwrap(), 1);
         assert_eq!(segments.len().unwrap(), 1);
-        assert_eq!(events.get(1).unwrap().unwrap().value(), &[1]);
-        assert!(events.get(2).unwrap().is_none());
+        assert_eq!(
+            events
+                .get(event_row_key(1).as_slice())
+                .unwrap()
+                .unwrap()
+                .value(),
+            &[1]
+        );
+        assert!(events.get(event_row_key(2).as_slice()).unwrap().is_none());
         assert!(segments.get(&[0, 0, 0][..]).unwrap().is_some());
         assert!(segments.get(&[0, 0, 1][..]).unwrap().is_none());
     }

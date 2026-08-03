@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::MemoryStore;
 
-use super::canonical::{observation_key, observation_relay_key};
 use super::ingest::insert_with_tables;
 use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap};
 use super::postings::{
@@ -31,6 +30,7 @@ use super::query::{
     author_cardinality_key, event_is_cardinality_sample, global_cardinality_key,
     kind_cardinality_key, tag_cardinality_key, tag_index_prefix,
 };
+use super::schema::{observation_key, observation_relay_key};
 use super::schema::{EventKey, RelayKey};
 use super::{
     binary_event, EventStore, LocalOrigin, PersistenceError, Provenance, RelayObserved,

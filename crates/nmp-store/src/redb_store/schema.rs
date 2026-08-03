@@ -104,14 +104,36 @@ pub(super) fn unsupported_schema(target: &Path, found: Option<u64>) -> RedbStore
 pub(super) type EventKey = u64;
 pub(super) type RelayKey = u32;
 
-/// Breaking v6 event schema. Compatibility is intentionally not carried:
-/// immutable notes, local state, interned relay observations, raw-id lookup,
-/// and compact primary keys are independent tables from the first byte.
-pub(super) const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events");
+/// The canonical event key space: one tree, three columns.
+///
+/// Key: `[event_key:u64-be | col:u8 | rest]`.
+///
+/// - [`EVENT_COL_ROW`] — the immutable portable note bytes. One row per event.
+/// - [`EVENT_COL_LOCAL`] — this node's local origin sidecar, present iff the
+///   row is ours. Zero or one row per event.
+/// - [`EVENT_COL_OBSERVATION`] — `rest` is `relay_key:u32-be`; the value is
+///   the greatest observation timestamp in seconds. Zero or more per event.
+///
+/// The local sidecar and the relay observations were separate trees, but both
+/// were keyed by (or prefixed with) the event key, so neither was a distinct
+/// key space (#1248) — `event_observations` was already a compound key on it.
+/// `MemoryStore` does not split them at all: local origin and relay
+/// observations live inline on `StoredEvent.provenance`.
+///
+/// The event key leads, so every column of ONE event is contiguous and
+/// "forget event K" is a single range delete instead of four coordinated
+/// deletes across three trees — a crash-atomicity simplification, not only a
+/// table saving. The cost is that the canonical-row full scan in `gc` visits
+/// the sidecars too and filters on the column byte, since no column is
+/// contiguous ACROSS events under this ordering. That is the deliberate
+/// trade: `gc` is already a full scan, and `remove_by_key` is on the hot
+/// governed-mutation path.
+pub(super) const EVENTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("events");
+pub(super) const EVENT_COL_ROW: u8 = 0;
+pub(super) const EVENT_COL_LOCAL: u8 = 1;
+pub(super) const EVENT_COL_OBSERVATION: u8 = 2;
 pub(super) const EVENT_IDS: TableDefinition<&[u8; 32], EventKey> =
     TableDefinition::new("event_ids");
-pub(super) const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> =
-    TableDefinition::new("event_local");
 /// The relay dictionary: surrogate -> (observation refcount, canonical URL).
 ///
 /// The refcount was a second tree keyed by the same surrogate — a column, not
@@ -122,23 +144,6 @@ pub(super) const RELAYS: TableDefinition<RelayKey, &[u8]> = TableDefinition::new
 /// The reverse direction, URL -> surrogate. A genuinely distinct key space:
 /// it is ordered and looked up by URL, which [`RELAYS`] cannot answer.
 pub(super) const RELAY_IDS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_ids");
-/// Fixed-width key: `event_key:u64-be | relay_key:u32-be`; value is the
-/// greatest observation timestamp in seconds.
-pub(super) const EVENT_OBSERVATIONS: TableDefinition<&[u8; 12], u64> =
-    TableDefinition::new("event_observations");
-/// Every durable scalar the store keeps, under one namespaced key space.
-///
-/// These are single rows read and written by point `get`/`insert` under a
-/// constant key — surrogate high-water marks, the packed-run allocator, the
-/// packed readiness flag, and the schema marker. None of them is ever
-/// iterated or ranged, so none earns a tree of its own: they were six
-/// separate trees holding seven rows between them (#1248).
-///
-/// [`SCHEMA_VERSION_KEY`] is the epoch probe's target and is written in the
-/// same transaction as everything else the fresh-store path creates. The
-/// probe looks for this TABLE by name and then for that KEY inside it, so a
-/// store from any other epoch — which has no table by this name — is refused
-/// as `UnsupportedSchema` before a byte is read or written.
 pub(super) const STORE_META: TableDefinition<&str, u64> = TableDefinition::new("store_meta");
 pub(super) const SCHEMA_VERSION_KEY: &str = "schema_version";
 pub(super) const NEXT_EVENT_KEY: &str = "next_event_key";
@@ -325,6 +330,67 @@ pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ID: TableDefinition<&[u8; 64], &[u8]>
     TableDefinition::new("publish_queue_suppress_by_id");
 pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ADDR: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("publish_queue_suppress_by_addr");
+
+/// One [`EVENTS`] key: `[event_key:u64-be | col:u8 | rest]`.
+pub(super) fn event_key_bytes(event_key: EventKey, column: u8, rest: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(9 + rest.len());
+    key.extend_from_slice(&event_key.to_be_bytes());
+    key.push(column);
+    key.extend_from_slice(rest);
+    key
+}
+
+/// The [`EVENT_COL_ROW`] key of one event.
+pub(super) fn event_row_key(event_key: EventKey) -> [u8; 9] {
+    let mut key = [0u8; 9];
+    key[..8].copy_from_slice(&event_key.to_be_bytes());
+    key[8] = EVENT_COL_ROW;
+    key
+}
+
+/// The [`EVENT_COL_LOCAL`] key of one event.
+pub(super) fn event_local_key(event_key: EventKey) -> [u8; 9] {
+    let mut key = [0u8; 9];
+    key[..8].copy_from_slice(&event_key.to_be_bytes());
+    key[8] = EVENT_COL_LOCAL;
+    key
+}
+
+/// The inclusive bounds covering EVERY column of one event — what makes
+/// "forget event K" one range delete.
+pub(super) fn event_all_columns_bounds(event_key: EventKey) -> ([u8; 9], [u8; 13]) {
+    let mut lower = [0u8; 9];
+    lower[..8].copy_from_slice(&event_key.to_be_bytes());
+    let mut upper = [u8::MAX; 13];
+    upper[..8].copy_from_slice(&event_key.to_be_bytes());
+    (lower, upper)
+}
+
+/// The [`EVENTS`] key of one relay observation.
+pub(super) fn observation_key(event_key: EventKey, relay_key: RelayKey) -> [u8; 13] {
+    let mut key = [0u8; 13];
+    key[..8].copy_from_slice(&event_key.to_be_bytes());
+    key[8] = EVENT_COL_OBSERVATION;
+    key[9..].copy_from_slice(&relay_key.to_be_bytes());
+    key
+}
+
+/// The inclusive bounds of one event's observation column.
+pub(super) fn observation_bounds(event_key: EventKey) -> ([u8; 13], [u8; 13]) {
+    (
+        observation_key(event_key, RelayKey::MIN),
+        observation_key(event_key, RelayKey::MAX),
+    )
+}
+
+/// The relay surrogate of a validated [`observation_key`].
+pub(super) fn observation_relay_key(key: &[u8]) -> RelayKey {
+    RelayKey::from_be_bytes(
+        key[9..13]
+            .try_into()
+            .expect("validated observation key is thirteen bytes"),
+    )
+}
 
 /// The `tombstones` key for one (target id, claiming author) pair — see
 /// [`TOMBSTONES`]'s doc for why this is composite, not just the id.
