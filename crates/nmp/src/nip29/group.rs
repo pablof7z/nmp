@@ -11,11 +11,15 @@
 //! under one group and route it as though it came from another, because
 //! there is no spelling for saying so.
 //!
-//! Reads mint a [`LiveQuery`] the ordinary observe door takes. There is
-//! deliberately no `Group::observe`: a second read door onto the same
-//! mechanism is exactly the shape #838 deleted on the write side. Writes mint
-//! the ordinary opaque [`WriteIntent`] and hand it to the ONE publish door;
-//! there is no group-shaped receipt and no group-shaped retry.
+//! Reads of a group's CONTENT mint a [`LiveQuery`] the ordinary observe door
+//! takes. [`Group::observe`] reads NIP-29's own relay-signed records, and it
+//! is a projection over that same door -- it opens the engine's own
+//! subscription and folds the deltas an app would otherwise fold by hand,
+//! exactly as `nmp_nip02`'s follow observation does. What stays absent is a
+//! second read LIFECYCLE: no socket, no retry, no group-shaped cancellation,
+//! which is the read-side shape of the thing #838 deleted on the write side.
+//! Writes mint the ordinary opaque [`WriteIntent`] and hand it to the ONE
+//! publish door; there is no group-shaped receipt and no group-shaped retry.
 
 use std::collections::BTreeSet;
 

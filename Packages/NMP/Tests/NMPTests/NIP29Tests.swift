@@ -67,14 +67,15 @@ final class NIP29Tests: XCTestCase {
     /// The composable predicate door: union/intersect/minus fold through
     /// the grammar's own set algebra, and a multi-host listing still yields
     /// one branch per host.
-    func testGroupsWhereComposesPredicatesOverEveryHost() throws {
-        let scope = try NMPRelayScope.on([host(1), host(2)])
+    func testPredicatesComposeIncludingTheLiteralIdLeaf() throws {
         let member = try NMPGroupPredicate.memberListIncludes(.reactive(.activePubkey))
         let admin = try NMPGroupPredicate.adminListIncludes(.reactive(.activePubkey))
-        let predicate = member.union([admin])
-
-        let query = try scope.groupsWhere(predicate)
-        XCTAssertEqual(query.branches.count, 2)
+        // Composition is total: every combinator returns a predicate the
+        // records door takes, including the literal-id leaf an app uses for
+        // rooms it already knows about.
+        _ = member.union([admin, NMPGroupPredicate.anyOf(["photographers"])])
+        _ = member.intersect([admin])
+        _ = member.minus([admin])
     }
 
     /// A non-hex literal subject is a typed invalid-public-key refusal --

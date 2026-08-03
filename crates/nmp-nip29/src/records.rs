@@ -184,7 +184,7 @@ pub fn group_metadata_at(host: &RelayUrl, event: &Event) -> GroupMetadata {
 
 /// Read one kind:39001 or kind:39002 record signed by `host`.
 ///
-/// Kind-blind on purpose: the role position is reported when the relay filled
+/// Blind to which of the two records this is: the role position is reported when the relay filled
 /// it and reported absent when it did not, on whichever of the two records it
 /// appears. A row whose subject does not decode as a public key is DROPPED
 /// rather than guessed at -- NMP has no honest reading of it, and inventing

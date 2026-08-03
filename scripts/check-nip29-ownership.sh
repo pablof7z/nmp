@@ -28,10 +28,12 @@ required=(
   crates/nmp-nip29/src/context.rs
   crates/nmp-nip29/src/discovery.rs
   crates/nmp-nip29/src/operations.rs
+  crates/nmp-nip29/src/records.rs
   crates/nmp/src/nip29/mod.rs
   crates/nmp/src/nip29/group.rs
   crates/nmp/src/nip29/predicate.rs
   crates/nmp/src/nip29/read.rs
+  crates/nmp/src/nip29/records.rs
   crates/nmp-nipc7/src/lib.rs
   crates/nmp-ffi/src/nip29.rs
   Packages/NMP/Sources/NMP/NIP29.swift
@@ -129,8 +131,12 @@ grep -qF 'pub struct RelayScope {' crates/nmp/src/nip29/mod.rs ||
 grep -qF 'pub fn on(hosts: impl IntoIterator<Item = RelayUrl>) -> Result<RelayScope, RelayScopeError>' \
   crates/nmp/src/nip29/mod.rs ||
   fail "the fallible nip29::on(...) constructor is missing"
-grep -qF 'pub fn groups_where(' crates/nmp/src/nip29/mod.rs ||
-  fail "RelayScope::groups_where is missing"
+grep -qF 'pub fn observe(' crates/nmp/src/nip29/mod.rs ||
+  fail "RelayScope::observe (the group-records door) is missing"
+grep -qF 'pub fn group(' crates/nmp/src/nip29/mod.rs ||
+  fail "the nip29::group(hosts, id) sugar is missing"
+grep -qF 'pub fn any_of(' crates/nmp/src/nip29/predicate.rs ||
+  fail "the literal group-id predicate leaf is missing"
 
 # The evidence-scoped discovery predicates -- `member_is`/`admin_is` were
 # retired by the issue's own authoritative correction because 39001/39002 are
@@ -183,7 +189,7 @@ grep -qF 'scope_stamps_exact_hosts_on_every_nested_nip29_demand' \
 # `docs/surface/*` are append-only surface history and are deliberately not
 # scanned: they record withdrawn spellings as facts of the past.)
 tombstones=$(grep -RInE \
-  'contextualize_group_event|GroupPublication|group_discovery_demand|groupDiscoveryDemand|pinned_demand' \
+  'contextualize_group_event|GroupPublication|group_discovery_demand|groupDiscoveryDemand|pinned_demand|groups_where|groupsWhere' \
   crates/ Packages/ skills/ || true)
 if [[ -n $tombstones ]]; then
   printf '%s\n' "$tombstones"
@@ -201,12 +207,36 @@ if [[ -n $overclaiming ]]; then
   fail "an overclaiming exact-membership/admin spelling reappeared; use the evidence-scoped name"
 fi
 
-# `Group` mints a read declaration and nothing else: the one read door is
-# `Engine::observe`, and a group-shaped stream would be the read-side twin of
-# the `publish_composed` second write lifecycle #838 deleted.
-if grep -nE 'fn observe|fn subscribe|fn stream' \
-  crates/nmp-nip29/src/*.rs crates/nmp/src/nip29/*.rs; then
-  fail "a second read door for groups appeared; LiveQuery/Engine::observe is the one"
+# The engine-free crate mints demand/binding VALUES only, so it can hold no
+# observation of any kind -- there is nothing there to open one with.
+if grep -nE 'fn observe|fn subscribe|fn stream' crates/nmp-nip29/src/*.rs; then
+  fail "the engine-free NIP-29 crate grew an observation; it mints values only"
+fi
+
+# The facade's group-records observation (#1233) is a PROJECTION over the one
+# read door, not a second one: `nmp_nip02`'s follow observation has exactly
+# this relationship to the same door. What must stay true is that it opens the
+# engine's own subscription and owns no lifecycle of its own -- no transport,
+# no retry, no second cancellation semantics.
+#
+# This clause used to ban every `fn observe` in the facade outright. That
+# banned the projection along with the defect, and the defect it was aimed at
+# is narrower: a group value that opens something the engine did not.
+grep -qF 'engine.observe_async(query, None)' crates/nmp/src/nip29/records.rs ||
+  fail "the group-records observation no longer opens the engine's own subscription"
+# Prose is stripped first: these files EXPLAIN, in words, that they own no
+# transport or retry, and that explanation must not trip the check.
+lifecycle=$(grep -vhE '^\s*(//|\*)' crates/nmp/src/nip29/*.rs | grep -nE 'Transport|RelayPool|reconnect|\bretry\(|thread::spawn' || true)
+if [[ -n $lifecycle ]]; then
+  printf '%s\n' "$lifecycle"
+  fail "a group value grew a read lifecycle of its own; the engine owns that"
+fi
+# Every group-records observation is minted by exactly one function, which is
+# the only place in the module that touches the engine at all.
+[[ $(grep -cE '^\s*(pub(\([a-z]+\))? )?fn observe' crates/nmp/src/nip29/records.rs) == 1 ]] ||
+  fail "the group-records observation must have exactly one minting function"
+if grep -nE 'fn subscribe|fn stream' crates/nmp/src/nip29/*.rs; then
+  fail "a group-shaped subscribe/stream lifecycle appeared beside the one observe door"
 fi
 
 # One publish door. The group binding composes an intent and hands it over;
