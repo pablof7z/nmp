@@ -32,6 +32,9 @@
 //! - `observe` -- the observation plane: the accumulating channels
 //!   (`FeedState`/`ReceiptState`/`DiagFeed`) and the bounded observers a
 //!   `Then` step reads them through.
+//! - `acquisition` -- what those same frames' per-source evidence LETS a step
+//!   conclude. Apart from `observe` because that owns ACCUMULATION and this
+//!   owns INTERPRETATION: nothing here folds a channel.
 //! - `contacts` -- the OTHER witness: the scripted relay's own log of what
 //!   reached its socket, and what changed since a marked moment. Apart from
 //!   `observe` deliberately -- a "never contacted" claim must not rest solely
@@ -102,6 +105,7 @@
 //! here, so `nmp_bdd::world::*` names exactly what it named before the split
 //! -- a step file never has to know which of them a helper ended up in.
 
+pub(crate) mod acquisition;
 mod actions;
 mod auth;
 mod budgets;
@@ -212,26 +216,6 @@ impl nmp_signer::SigningCapability for CountingSigner {
             ));
         }
         self.inner.sign(unsigned)
-    }
-}
-
-/// One app-owned policy for the active account, with per-relay answers.
-///
-/// The fixture is deliberately installed through the public facade and sees
-/// the real challenge request. It does not inject an answer into the reducer;
-/// the scripted relay must first challenge the exact websocket session.
-struct StagedAuthPolicy {
-    denied: Vec<(nostr::RelayUrl, String)>,
-}
-
-impl nmp::AuthPolicy for StagedAuthPolicy {
-    fn evaluate(&self, request: nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp {
-        self.denied
-            .iter()
-            .find(|(relay, _)| relay == request.relay())
-            .map_or_else(nmp::AuthPolicyOp::allow, |(_, reason)| {
-                nmp::AuthPolicyOp::deny(reason.clone())
-            })
     }
 }
 

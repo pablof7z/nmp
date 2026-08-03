@@ -5,7 +5,7 @@
 //! would subscribe to, so it is also the only one whose failures a product
 //! person could see directly.
 
-use crate::world::observe::{branch_shortfall, branch_sources};
+use crate::world::acquisition::{branch_shortfall, branch_sources};
 use cucumber::then;
 
 use crate::world::NmpWorld;

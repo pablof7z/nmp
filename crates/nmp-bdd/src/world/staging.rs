@@ -481,7 +481,7 @@ impl NmpWorld {
                     .engine
                     .as_ref()
                     .expect("nmp-bdd: engine exists before policy registration")
-                    .add_auth_policy(keys.public_key(), super::StagedAuthPolicy { denied })
+                    .add_auth_policy(keys.public_key(), super::auth::StagedAuthPolicy { denied })
                     .expect("nmp-bdd: staged AUTH policy must register");
                 self.auth_policy_registrations.push(registration);
             }
