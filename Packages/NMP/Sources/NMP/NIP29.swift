@@ -2,10 +2,16 @@
 // once, narrowed to a group when you want a specific one.
 //
 //   let scope = try NMPRelayScope.on(["wss://relay-a.example.com"])
-//   let mine = try NMPGroupPredicate.memberListIncludes(.reactive(.activePubkey))
+//   let mine = try NMPGroupIds.memberListIncludes(.reactive(.activePubkey))
 //   for try await snapshots in try scope.observeRecords(engine: engine,
-//                                                       matching: mine,
+//                                                       matching: .naming(mine),
 //                                                       records: [.metadata]) { ... }
+//
+//   // A directory: every room this relay advertises, 250 per host.
+//   for try await rooms in try scope.observeRecords(engine: engine,
+//                                                   matching: .all,
+//                                                   records: [.metadata],
+//                                                   limit: 250) { ... }
 //
 //   // The room screen, five lines, no predicate and no id lookup:
 //   let group = try NMPRelayScope.on([host]).group(roomID)
@@ -22,8 +28,8 @@
 //   let status = try group.publish(engine: engine, author: pubkeyHex, kind: 9, content: "hi")
 //   for try await frame in status { ... }
 //
-// `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate` wrap the opaque
-// `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate` UniFFI objects exactly like
+// `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` wrap the opaque
+// `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` UniFFI objects exactly like
 // `BlossomAuthorization` wraps `FfiBlossomAuthorization` in Blossom.swift --
 // a proven Rust value carried across the boundary, never a second mirrored
 // copy of NIP-29's own vocabulary. Neither type exposes its retained hosts
@@ -68,16 +74,23 @@ public final class NMPRelayScope: @unchecked Sendable {
     /// One complete branch per host; each delivered element is the complete
     /// set of `NMPGroupSnapshot`s for the groups currently matching. The app
     /// never sees a row delta and never walks a `p` tag.
+    ///
+    /// `limit` is the ordinary NIP-01 filter limit and bounds EACH host's own
+    /// branch, never the merged union: two hosts with `250` may deliver up to
+    /// 500 snapshots, because each was asked for 250 of its own. `nil` asks
+    /// for whatever the relay chooses to answer with.
     public func observeRecords(
         engine: NMPEngine,
         matching predicate: NMPGroupPredicate,
-        records: [NMPGroupRecord]
+        records: [NMPGroupRecord],
+        limit: UInt32? = nil
     ) throws -> NMPGroupRecordsObservation {
         let handle = try nmpRethrowing {
             try ffi.observeRecords(
                 engine: engine.concreteFfiEngine,
                 predicate: predicate.ffi,
-                records: records.map { $0.toFfi() }
+                records: records.map { $0.toFfi() },
+                limit: limit
             )
         }
         return NMPGroupRecordsObservation(handle: handle)
@@ -297,11 +310,16 @@ public final class NMPGroup: @unchecked Sendable {
     }
 }
 
-/// A composable NIP-29 discovery predicate (`nmp::nip29::GroupPredicate`/
-/// `FfiGroupPredicate` mirror). Opaque by design -- built with
-/// `.memberListIncludes`/`.adminListIncludes` and composed with
-/// `union`/`intersect`/`minus`, then handed to
-/// `NMPRelayScope.observeRecords(engine:matching:records:)`.
+/// Which groups an observation covers (`nmp::nip29::GroupPredicate`/
+/// `FfiGroupPredicate` mirror). Opaque by design -- built with `.all` or
+/// `.naming(_:)`, then handed to
+/// `NMPRelayScope.observeRecords(engine:matching:records:limit:)`.
+///
+/// Set algebra lives on `NMPGroupIds` and on nothing else, so
+/// `.all.minus(...)` does not compile. Nostr filters have no negation, so
+/// "everything except X" cannot narrow a wire request; an app that hides
+/// muted rooms drops them from the snapshots it renders, where the cost is
+/// visible.
 public final class NMPGroupPredicate: @unchecked Sendable {
     let ffi: FfiGroupPredicate
 
@@ -309,42 +327,96 @@ public final class NMPGroupPredicate: @unchecked Sendable {
         self.ffi = ffi
     }
 
+    /// Every group the host advertises among the selected records. The
+    /// branch carries NO group-id row: this is the ABSENCE of a constraint,
+    /// which is what makes a directory expressible -- the ids a directory
+    /// wants are the answer, not the input.
+    ///
+    /// Unbounded by nature: bound it with `observeRecords`'s own `limit`.
+    /// Advertisement is not enumeration -- a group the host serves but
+    /// publishes no kind:39000 for is invisible.
+    public static var all: NMPGroupPredicate {
+        NMPGroupPredicate(FfiGroupPredicate.all())
+    }
+
+    /// Only the groups `ids` names.
+    public static func naming(_ ids: NMPGroupIds) -> NMPGroupPredicate {
+        NMPGroupPredicate(FfiGroupPredicate.naming(ids: ids.ffi))
+    }
+}
+
+/// Where a set of NIP-29 group ids comes from (`nmp::nip29::GroupIds`/
+/// `FfiGroupIds` mirror). Opaque by design -- built with
+/// `.memberListIncludes`/`.adminListIncludes`/`.anyOf`/`.whoseRecordMatches`
+/// and composed with `union`/`intersect`/`minus`.
+///
+/// Whatever this resolves to becomes the `#d` value set of one relay filter,
+/// and a filter carrying very many values may be refused or silently
+/// truncated by that relay. Watching very many groups needs sharding across
+/// several observations; NMP does not chunk behind the app's back.
+public final class NMPGroupIds: @unchecked Sendable {
+    let ffi: FfiGroupIds
+
+    private init(_ ffi: FfiGroupIds) {
+        self.ffi = ffi
+    }
+
+    /// Groups whose own relay-signed record matches `selection` at the branch
+    /// host -- THE general spelling, of which every leaf below is a
+    /// shorthand. Throws when `selection` names no kind, or names a kind that
+    /// is not one of NIP-29's three relay-signed group records: this leaf is
+    /// evaluated with NIP-29's own pin, and a group host is authoritative for
+    /// nothing else.
+    public static func whoseRecordMatches(_ selection: NMPFilter) throws -> NMPGroupIds {
+        try NMPGroupIds(
+            nmpRethrowing { try NMPFFI.groupsWhoseRecordMatches(selection: selection.toFfi()) }
+        )
+    }
+
     /// Groups whose observed kind:39002 member-list evidence names
     /// `subjects`. Inclusion is evidence, never exact state -- absence is
     /// not evidence of non-membership.
-    public static func memberListIncludes(_ subjects: NMPBinding) throws -> NMPGroupPredicate {
-        try NMPGroupPredicate(
+    ///
+    /// Shorthand for `.whoseRecordMatches({ kinds:[39002], #p: subjects })`.
+    public static func memberListIncludes(_ subjects: NMPBinding) throws -> NMPGroupIds {
+        try NMPGroupIds(
             nmpRethrowing { try NMPFFI.memberListIncludes(subjects: subjects.toFfi()) }
         )
     }
 
     /// Groups whose observed kind:39001 admin-list evidence names
     /// `subjects`. Evidence-scoped exactly like `memberListIncludes`.
-    public static func adminListIncludes(_ subjects: NMPBinding) throws -> NMPGroupPredicate {
-        try NMPGroupPredicate(
+    public static func adminListIncludes(_ subjects: NMPBinding) throws -> NMPGroupIds {
+        try NMPGroupIds(
             nmpRethrowing { try NMPFFI.adminListIncludes(subjects: subjects.toFfi()) }
         )
     }
 
-    /// Exactly these group ids, whatever any list says about them. The leaf
-    /// for an app that already knows which rooms it is showing.
-    public static func anyOf(_ ids: [String]) -> NMPGroupPredicate {
-        NMPGroupPredicate(NMPFFI.anyOf(ids: ids))
+    /// The groups `ids` names, whatever any list says about them.
+    ///
+    /// `ids` is an ordinary `NMPBinding`: a literal set for rooms the app
+    /// already knows, and a derived binding for rooms it has to look up.
+    /// "Watch the groups named in my own kind:10009 simple-groups list" is
+    /// that derived case, and it stays reactive -- when the list changes, the
+    /// observation follows it. A derived binding keeps its OWN authority and
+    /// is never repinned to the group's hosts.
+    public static func anyOf(_ ids: NMPBinding) throws -> NMPGroupIds {
+        try NMPGroupIds(nmpRethrowing { try NMPFFI.anyOf(ids: ids.toFfi()) })
     }
 
-    /// Groups matching this predicate OR any of `others`.
-    public func union(_ others: [NMPGroupPredicate]) -> NMPGroupPredicate {
-        NMPGroupPredicate(ffi.union(others: others.map { $0.ffi }))
+    /// Groups named by this source OR by any of `others`.
+    public func union(_ others: [NMPGroupIds]) -> NMPGroupIds {
+        NMPGroupIds(ffi.union(others: others.map { $0.ffi }))
     }
 
-    /// Groups matching this predicate AND all of `others`.
-    public func intersect(_ others: [NMPGroupPredicate]) -> NMPGroupPredicate {
-        NMPGroupPredicate(ffi.intersect(others: others.map { $0.ffi }))
+    /// Groups named by this source AND by all of `others`.
+    public func intersect(_ others: [NMPGroupIds]) -> NMPGroupIds {
+        NMPGroupIds(ffi.intersect(others: others.map { $0.ffi }))
     }
 
-    /// Groups matching this predicate and none of `others`.
-    public func minus(_ others: [NMPGroupPredicate]) -> NMPGroupPredicate {
-        NMPGroupPredicate(ffi.minus(others: others.map { $0.ffi }))
+    /// Groups named by this source and by none of `others`.
+    public func minus(_ others: [NMPGroupIds]) -> NMPGroupIds {
+        NMPGroupIds(ffi.minus(others: others.map { $0.ffi }))
     }
 }
 

@@ -138,7 +138,27 @@ enum ReceiptReplayFactKey {
         relay: RelayUrl,
         revision: u64,
     },
-    PersistenceStalled(RelayUrl),
+    /// A persistence stall, keyed by the relay AND which durable fact failed.
+    ///
+    /// Both halves are load-bearing. One relay can stall on BOTH its
+    /// append-only route revision and its attempt log, and those are two
+    /// different facts with two different recovery stories — whether the
+    /// resolved URL survives a crash. Keying on the relay alone silently
+    /// swallows whichever arrives second under paged reattachment, which is
+    /// exactly the class of loss a durable receipt exists to prevent.
+    PersistenceStalled(RelayUrl, PersistenceStallKind),
+}
+
+/// Which durable fact a persistence stall failed to commit. Not public
+/// vocabulary — the app-facing shape stays one `PersistenceStalled { detail }`
+/// per #1237 — purely the replay cursor's dedup discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum PersistenceStallKind {
+    /// The attempt log: recovery still rediscovers this exact relay from its
+    /// committed route revision.
+    Attempt,
+    /// The route revision itself: this exact URL is not claimed to survive.
+    Route,
 }
 
 impl ReceiptReplayCursor {
@@ -159,9 +179,10 @@ impl ReceiptReplayCursor {
                 .lane_revisions
                 .get(relay)
                 .is_some_and(|delivered| delivered >= revision),
-            ReceiptReplayFactKey::PersistenceStalled(relay) => {
-                self.state.persistence_stalled.contains(relay)
-            }
+            ReceiptReplayFactKey::PersistenceStalled(relay, kind) => self
+                .state
+                .persistence_stalled
+                .contains(&(relay.clone(), *kind)),
         }
     }
 
@@ -176,8 +197,8 @@ impl ReceiptReplayCursor {
             ReceiptReplayFactKey::Lane { relay, revision } => {
                 self.state.lane_revisions.insert(relay, revision);
             }
-            ReceiptReplayFactKey::PersistenceStalled(relay) => {
-                self.state.persistence_stalled.insert(relay);
+            ReceiptReplayFactKey::PersistenceStalled(relay, kind) => {
+                self.state.persistence_stalled.insert((relay, kind));
             }
         }
     }
@@ -1761,7 +1782,10 @@ impl<S: EventStore> EngineCore<S> {
         if let Some(pending) = self.pending.get(&id) {
             for relay in &pending.unstarted_relays {
                 replay.push((
-                    ReceiptReplayFactKey::PersistenceStalled(relay.clone()),
+                    ReceiptReplayFactKey::PersistenceStalled(
+                        relay.clone(),
+                        PersistenceStallKind::Attempt,
+                    ),
                     WriteFact::Relay {
                         relay: relay.clone(),
                         state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
@@ -1772,7 +1796,10 @@ impl<S: EventStore> EngineCore<S> {
             }
             for relay in &pending.route_blocked_relays {
                 replay.push((
-                    ReceiptReplayFactKey::PersistenceStalled(relay.clone()),
+                    ReceiptReplayFactKey::PersistenceStalled(
+                        relay.clone(),
+                        PersistenceStallKind::Route,
+                    ),
                     WriteFact::Relay {
                         relay: relay.clone(),
                         state: RelayState::Waiting(RelayWaiting::PersistenceStalled {

@@ -394,3 +394,163 @@ mod receipt_allocator_tests {
         );
     }
 }
+
+/// The receipt-replay cursor must keep the two persistence stalls apart.
+///
+/// One relay can stall on BOTH its append-only route revision and its attempt
+/// log. The app-facing shape is deliberately one `PersistenceStalled { detail }`
+/// (#1237: the difference is a recovery detail, not an app decision), but the
+/// replay cursor still has to dedup them SEPARATELY — keying on the relay
+/// alone silently swallows whichever arrives second, and a durable receipt
+/// that loses a fact under paging is the exact class of loss it exists to
+/// prevent.
+#[cfg(test)]
+mod persistence_stall_replay_tests {
+    use super::*;
+    use nmp_router::FixtureRoutingFacts;
+    use nmp_store::MemoryStore;
+    use nostr::{Keys, RelayUrl};
+
+    #[test]
+    fn one_relay_stalled_on_both_route_and_attempt_replays_both_facts() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://stalled.example").unwrap();
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            MemoryStore::new(),
+            FixtureRoutingFacts::new(),
+            4,
+        );
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: nostr::Kind::TextNote,
+                tags: Vec::new(),
+                content: "stalled on both".to_string(),
+                created_at: Some(Timestamp::from(1_000u64)),
+            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let id = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(id) => Some(*id),
+                _ => None,
+            })
+            .expect("publish takes custody and answers with the receipt id");
+
+        // The same relay failed to commit BOTH durable facts.
+        let pending = core.pending.get_mut(&id).expect("the write is pending");
+        pending.unstarted_relays.insert(relay.clone());
+        pending.route_blocked_relays.insert(relay.clone());
+
+        // Page one fact at a time, which is what makes a collapsed dedup key
+        // observable: the second stall is skipped as "already delivered".
+        let mut cursor = None;
+        let mut stalls = Vec::new();
+        for _ in 0..8 {
+            let page = core.reattach_receipt_page(id, cursor.clone(), 1);
+            if page.facts.is_empty() {
+                break;
+            }
+            for fact in &page.facts {
+                if let WriteFact::Relay {
+                    state: RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }),
+                    ..
+                } = fact
+                {
+                    stalls.push(detail.clone());
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        assert!(
+            stalls.iter().any(|d| d == ATTEMPT_STALL_DETAIL),
+            "the attempt-log stall was lost under paged reattachment: {stalls:?}"
+        );
+        assert!(
+            stalls.iter().any(|d| d == ROUTE_STALL_DETAIL),
+            "the route-revision stall was lost under paged reattachment; keying the replay \
+             cursor on the relay alone swallows whichever stall arrives second: {stalls:?}"
+        );
+    }
+
+    /// The latch mosaico's `persistence_blockage_remains_visible_after_later_ack`
+    /// specifies: a fault observed once stays readable on the entry even after
+    /// a relay succeeds afterwards. An operator must not lose the only signal
+    /// that the local disk is failing because something later went right.
+    #[test]
+    fn a_persistence_fault_survives_a_later_success_on_the_same_write() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://latched.example").unwrap();
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            MemoryStore::new(),
+            FixtureRoutingFacts::new(),
+            4,
+        );
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: nostr::Kind::TextNote,
+                tags: Vec::new(),
+                content: "latched".to_string(),
+                created_at: Some(Timestamp::from(2_000u64)),
+            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let id = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(id) => Some(*id),
+                _ => None,
+            })
+            .expect("publish takes custody and answers with the receipt id");
+
+        let mut effects = Vec::new();
+        core.emit_write_fact(
+            id,
+            WriteFact::Relay {
+                relay: relay.clone(),
+                state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                    detail: ATTEMPT_STALL_DETAIL.to_string(),
+                }),
+            },
+            &mut effects,
+        );
+        assert_eq!(
+            core.pending
+                .get(&id)
+                .and_then(|pending| pending.persistence_fault.clone())
+                .as_deref(),
+            Some(ATTEMPT_STALL_DETAIL),
+            "the fault must be readable on the entry, not only observable in the stream"
+        );
+
+        // A later success at the same relay.
+        core.emit_write_fact(
+            id,
+            WriteFact::Relay {
+                relay,
+                state: RelayState::Published,
+            },
+            &mut effects,
+        );
+        assert_eq!(
+            core.pending
+                .get(&id)
+                .and_then(|pending| pending.persistence_fault.clone())
+                .as_deref(),
+            Some(ATTEMPT_STALL_DETAIL),
+            "a later ack overwrote the persistence fault; an operator loses the only signal \
+             that the local disk is failing"
+        );
+    }
+}

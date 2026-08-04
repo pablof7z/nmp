@@ -434,7 +434,7 @@ struct ReceiptReplayCursorState {
     lane_revisions: BTreeMap<RelayUrl, u64>,
     /// The relays whose persistence stall has been replayed. Latched, never
     /// cleared: a fault a later ack papered over is still the fault.
-    persistence_stalled: BTreeSet<RelayUrl>,
+    persistence_stalled: BTreeSet<(RelayUrl, write::PersistenceStallKind)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -68,21 +68,50 @@ final class NIP29Tests: XCTestCase {
     /// the grammar's own set algebra, and a multi-host listing still yields
     /// one branch per host.
     func testPredicatesComposeIncludingTheLiteralIdLeaf() throws {
-        let member = try NMPGroupPredicate.memberListIncludes(.reactive(.activePubkey))
-        let admin = try NMPGroupPredicate.adminListIncludes(.reactive(.activePubkey))
-        // Composition is total: every combinator returns a predicate the
+        let member = try NMPGroupIds.memberListIncludes(.reactive(.activePubkey))
+        let admin = try NMPGroupIds.adminListIncludes(.reactive(.activePubkey))
+        // Composition is total: every combinator returns an id source the
         // records door takes, including the literal-id leaf an app uses for
         // rooms it already knows about.
-        _ = member.union([admin, NMPGroupPredicate.anyOf(["photographers"])])
+        _ = try member.union([admin, NMPGroupIds.anyOf(.literal(["photographers"]))])
         _ = member.intersect([admin])
         _ = member.minus([admin])
+        _ = NMPGroupPredicate.naming(member)
+    }
+
+    /// The #1252 capability, in the shape 29er's channel sidebar needs it:
+    /// "every room this relay advertises", bounded per host, phrased with no
+    /// id set of the app's own.
+    func testADirectoryNeedsNoIdSetOfItsOwn() throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
+        let scope = try NMPRelayScope.on([host(1), host(2)])
+        let watching = try scope.observeRecords(
+            engine: engine, matching: .all, records: [.metadata], limit: 250
+        )
+        watching.cancel()
+    }
+
+    /// The general spelling is reachable from Swift, and its refusal
+    /// survives the boundary: a group host is authoritative for NIP-29's
+    /// three relay-signed records and nothing else.
+    func testTheGeneralSpellingRefusesAKindTheHostDoesNotOwn() throws {
+        _ = try NMPGroupIds.whoseRecordMatches(NMPFilter(kinds: [39_002]))
+        XCTAssertThrowsError(
+            try NMPGroupIds.whoseRecordMatches(NMPFilter(kinds: [10_009]))
+        ) { error in
+            guard case NMPError.groupIdSelectionNotAGroupRecordKind(let kind) = error else {
+                return XCTFail("expected .groupIdSelectionNotAGroupRecordKind, got \(error)")
+            }
+            XCTAssertEqual(kind, 10_009)
+        }
     }
 
     /// A non-hex literal subject is a typed invalid-public-key refusal --
     /// the same rule `NMPFilter.authors` carries.
     func testANonHexLiteralSubjectIsATypedInvalidPublicKey() {
         XCTAssertThrowsError(
-            try NMPGroupPredicate.memberListIncludes(.literal(["not-a-pubkey"]))
+            try NMPGroupIds.memberListIncludes(.literal(["not-a-pubkey"]))
         ) { error in
             guard case NMPError.invalidPublicKey(let got) = error else {
                 return XCTFail("expected .invalidPublicKey, got \(error)")

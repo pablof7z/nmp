@@ -120,10 +120,14 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   superseded the single-host `Group::new(host, id)` door with no alias). Every
   group write mints the ordinary `WriteIntent` and routes `Explicit` to the
   whole scope; every group read is one ordinary `LiveQuery`
-  (`Single`/`Union` of per-host branches). Discovery is evidence-scoped —
-  `nip29::member_list_includes`/`admin_list_includes` return a composable
-  `GroupPredicate` over observed kind:39002/39001 rows, never claiming exact
-  membership/admin state. The former kind:9 composer/content catalog remains
+  (`Single`/`Union` of per-host branches). Discovery is the ordinary query language —
+  `nip29::groups_whose_record_matches(Filter)` names groups by any live-query
+  filter over a relay-signed record, with
+  `member_list_includes`/`admin_list_includes` as shorthands exactly equal to
+  it and `any_of(Binding)` taking a derived id source, never claiming exact
+  membership/admin state; `nip29::all()` is "every group this relay
+  advertises", expressed as the absence of a `#d` constraint
+  ([#1252](https://github.com/pablof7z/nmp/issues/1252)). The former kind:9 composer/content catalog remains
   removed because C7 owns chat and `q` replies. A direct-Rust and macOS-host
   Swift consumer exercised the public surface against two real local relays in
   the [NIP-29 consumer capstone](docs/reviews/2026-08-02-nip29-consumer-capstone.md);

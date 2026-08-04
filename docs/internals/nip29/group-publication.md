@@ -319,8 +319,9 @@ description; §§1–10 are the decision/implementation record that led here.
 let relays = nip29::on([relay_a, relay_b])?;              // RelayScopeError::EmptyRelaySet if empty
 let group  = relays.group("photographers");                // same hosts, one group id
 
-relays.observe(&engine, mine, [Metadata, Admins, Members])?; // who is in which group
-engine.observe(group.read(chat_filter)?, None)?;             // this group's content
+relays.observe(&engine, mine, [Metadata, Admins, Members], None)?; // who is in which group
+relays.observe(&engine, nip29::all(), [Metadata], Some(250))?;    // what this relay advertises
+engine.observe(group.read(chat_filter)?, None)?;                  // this group's content
 group.publish(&engine, author, EventBuilder::new(Kind::from(9)).content("hi"))?;
 ```
 

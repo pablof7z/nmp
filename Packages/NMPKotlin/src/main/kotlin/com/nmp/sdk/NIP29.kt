@@ -3,8 +3,13 @@
 // NIP29.swift.
 //
 //   val scope = NMPRelayScope.on(listOf("wss://relay-a.example.com"))
-//   val mine = NMPGroupPredicate.memberListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
-//   scope.observeRecords(engine, mine, listOf(NMPGroupRecord.Metadata)).collect { ... }
+//   val mine = NMPGroupIds.memberListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
+//   scope.observeRecords(engine, NMPGroupPredicate.naming(mine), listOf(NMPGroupRecord.Metadata))
+//       .collect { ... }
+//
+//   // A directory: every room this relay advertises, 250 per host.
+//   scope.observeRecords(engine, NMPGroupPredicate.all(), listOf(NMPGroupRecord.Metadata), 250u)
+//       .collect { ... }
 //
 //   // The room screen: no predicate, no collection, no id lookup.
 //   NMPRelayScope.on(listOf(host)).group(roomId)
@@ -16,8 +21,8 @@
 //   val status = group.publish(engine, authorPubkeyHex = pubkeyHex, kind = 9u, content = "hi")
 //   status.collect { ... }
 //
-// `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate` wrap the opaque
-// `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate` UniFFI objects exactly like
+// `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` wrap the opaque
+// `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` UniFFI objects exactly like
 // `BlossomAuthorization` wraps `FfiBlossomAuthorization` in Blossom.kt -- a
 // proven Rust value carried across the boundary, never a second mirrored
 // copy of NIP-29's own vocabulary. Neither type exposes its retained hosts
@@ -40,6 +45,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiGroup
+import uniffi.nmp_ffi.FfiGroupIds
 import uniffi.nmp_ffi.FfiGroupPredicate
 import uniffi.nmp_ffi.FfiRelayScope
 import uniffi.nmp_ffi.FfiSignedEvent
@@ -55,6 +61,7 @@ import uniffi.nmp_ffi.NmpGroupReceiptStream
 import uniffi.nmp_ffi.NmpGroupRecordsStream
 import uniffi.nmp_ffi.adminListIncludes as ffiAdminListIncludes
 import uniffi.nmp_ffi.anyOf as ffiAnyOf
+import uniffi.nmp_ffi.groupsWhoseRecordMatches as ffiGroupsWhoseRecordMatches
 import uniffi.nmp_ffi.memberListIncludes as ffiMemberListIncludes
 
 /** The relays a NIP-29 group lives on -- named once, retained privately, and
@@ -68,6 +75,11 @@ class NMPRelayScope private constructor(internal val ffi: FfiRelayScope) {
      * of [NMPGroupSnapshot]s for the groups currently matching. The app never
      * sees a row delta and never walks a `p` tag.
      *
+     * [limit] is the ordinary NIP-01 filter limit and bounds EACH host's own
+     * branch, never the merged union: two hosts with `250u` may deliver up to
+     * 500 snapshots, because each was asked for 250 of its own. `null` asks
+     * for whatever the relay chooses to answer with.
+     *
      * Each element is the full current state -- latest-wins, never a growing
      * backlog -- so this is a thin pull loop over the Rust-owned handle.
      * Teardown is collection-scope-tied via `handle.cancel()` in a `finally`,
@@ -76,9 +88,12 @@ class NMPRelayScope private constructor(internal val ffi: FfiRelayScope) {
         engine: NMPEngine,
         predicate: NMPGroupPredicate,
         records: List<NMPGroupRecord>,
+        limit: UInt? = null,
     ): Flow<List<NMPGroupSnapshot>> =
         groupRecordsFlow {
-            nmpRethrowing { ffi.observeRecords(engine.ffi, predicate.ffi, records.map { it.toFfi() }) }
+            nmpRethrowing {
+                ffi.observeRecords(engine.ffi, predicate.ffi, records.map { it.toFfi() }, limit)
+            }
         }
 
     companion object {
@@ -231,39 +246,88 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         )
 }
 
-/** A composable NIP-29 discovery predicate (`nmp::nip29::GroupPredicate`/
- * `FfiGroupPredicate` mirror). Opaque by design -- built with
- * [memberListIncludes]/[adminListIncludes] and composed with
- * [union]/[intersect]/[minus], then handed to
- * [NMPRelayScope.observeRecords]. */
+/** Which groups an observation covers (`nmp::nip29::GroupPredicate`/
+ * `FfiGroupPredicate` mirror). Opaque by design -- built with [all] or
+ * [naming], then handed to [NMPRelayScope.observeRecords].
+ *
+ * Set algebra lives on [NMPGroupIds] and on nothing else, so
+ * `all().minus(...)` does not compile. Nostr filters have no negation, so
+ * "everything except X" cannot narrow a wire request; an app that hides
+ * muted rooms drops them from the snapshots it renders, where the cost is
+ * visible. */
 class NMPGroupPredicate private constructor(internal val ffi: FfiGroupPredicate) {
-    /** Groups matching this predicate OR any of [others]. */
-    fun union(others: List<NMPGroupPredicate>): NMPGroupPredicate =
-        NMPGroupPredicate(ffi.union(others.map { it.ffi }))
+    companion object {
+        /** Every group the host advertises among the selected records. The
+         * branch carries NO group-id row: this is the ABSENCE of a
+         * constraint, which is what makes a directory expressible -- the ids
+         * a directory wants are the answer, not the input.
+         *
+         * Unbounded by nature: bound it with [NMPRelayScope.observeRecords]'s
+         * own `limit`. Advertisement is not enumeration -- a group the host
+         * serves but publishes no kind:39000 for is invisible. */
+        fun all(): NMPGroupPredicate = NMPGroupPredicate(FfiGroupPredicate.all())
 
-    /** Groups matching this predicate AND all of [others]. */
-    fun intersect(others: List<NMPGroupPredicate>): NMPGroupPredicate =
-        NMPGroupPredicate(ffi.intersect(others.map { it.ffi }))
+        /** Only the groups [ids] names. */
+        fun naming(ids: NMPGroupIds): NMPGroupPredicate =
+            NMPGroupPredicate(FfiGroupPredicate.naming(ids.ffi))
+    }
+}
 
-    /** Groups matching this predicate and none of [others]. */
-    fun minus(others: List<NMPGroupPredicate>): NMPGroupPredicate =
-        NMPGroupPredicate(ffi.minus(others.map { it.ffi }))
+/** Where a set of NIP-29 group ids comes from (`nmp::nip29::GroupIds`/
+ * `FfiGroupIds` mirror). Opaque by design -- built with
+ * [memberListIncludes]/[adminListIncludes]/[anyOf]/[whoseRecordMatches] and
+ * composed with [union]/[intersect]/[minus].
+ *
+ * Whatever this resolves to becomes the `#d` value set of one relay filter,
+ * and a filter carrying very many values may be refused or silently
+ * truncated by that relay. Watching very many groups needs sharding across
+ * several observations; NMP does not chunk behind the app's back. */
+class NMPGroupIds private constructor(internal val ffi: FfiGroupIds) {
+    /** Groups named by this source OR by any of [others]. */
+    fun union(others: List<NMPGroupIds>): NMPGroupIds =
+        NMPGroupIds(ffi.union(others.map { it.ffi }))
+
+    /** Groups named by this source AND by all of [others]. */
+    fun intersect(others: List<NMPGroupIds>): NMPGroupIds =
+        NMPGroupIds(ffi.intersect(others.map { it.ffi }))
+
+    /** Groups named by this source and by none of [others]. */
+    fun minus(others: List<NMPGroupIds>): NMPGroupIds =
+        NMPGroupIds(ffi.minus(others.map { it.ffi }))
 
     companion object {
+        /** Groups whose own relay-signed record matches [selection] at the
+         * branch host -- THE general spelling, of which every leaf below is a
+         * shorthand. Throws when [selection] names no kind, or names a kind
+         * that is not one of NIP-29's three relay-signed group records: this
+         * leaf is evaluated with NIP-29's own pin, and a group host is
+         * authoritative for nothing else. */
+        fun whoseRecordMatches(selection: NMPFilter): NMPGroupIds =
+            NMPGroupIds(nmpRethrowing { ffiGroupsWhoseRecordMatches(selection.toFfi()) })
+
         /** Groups whose observed kind:39002 member-list evidence names
          * [subjects]. Inclusion is evidence, never exact state -- absence is
-         * not evidence of non-membership. */
-        fun memberListIncludes(subjects: NMPBinding): NMPGroupPredicate =
-            NMPGroupPredicate(nmpRethrowing { ffiMemberListIncludes(subjects.toFfi()) })
+         * not evidence of non-membership.
+         *
+         * Shorthand for `whoseRecordMatches({ kinds:[39002], #p: subjects })`. */
+        fun memberListIncludes(subjects: NMPBinding): NMPGroupIds =
+            NMPGroupIds(nmpRethrowing { ffiMemberListIncludes(subjects.toFfi()) })
 
         /** Groups whose observed kind:39001 admin-list evidence names
          * [subjects]. Evidence-scoped exactly like [memberListIncludes]. */
-        fun adminListIncludes(subjects: NMPBinding): NMPGroupPredicate =
-            NMPGroupPredicate(nmpRethrowing { ffiAdminListIncludes(subjects.toFfi()) })
+        fun adminListIncludes(subjects: NMPBinding): NMPGroupIds =
+            NMPGroupIds(nmpRethrowing { ffiAdminListIncludes(subjects.toFfi()) })
 
-        /** Exactly these group ids, whatever any list says about them. The
-         * leaf for an app that already knows which rooms it is showing. */
-        fun anyOf(ids: List<String>): NMPGroupPredicate = NMPGroupPredicate(ffiAnyOf(ids))
+        /** The groups [ids] names, whatever any list says about them.
+         *
+         * [ids] is an ordinary [NMPBinding]: a literal set for rooms the app
+         * already knows, and a derived binding for rooms it has to look up.
+         * "Watch the groups named in my own kind:10009 simple-groups list" is
+         * that derived case, and it stays reactive -- when the list changes,
+         * the observation follows it. A derived binding keeps its OWN
+         * authority and is never repinned to the group's hosts. */
+        fun anyOf(ids: NMPBinding): NMPGroupIds =
+            NMPGroupIds(nmpRethrowing { ffiAnyOf(ids.toFfi()) })
     }
 }
 

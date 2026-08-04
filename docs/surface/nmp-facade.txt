@@ -118,32 +118,28 @@ impl core::marker::Unpin for nmp::nip29::GroupObserveError
 impl core::marker::UnsafeUnpin for nmp::nip29::GroupObserveError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupObserveError
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupObserveError
-pub enum nmp::nip29::GroupPredicate
-pub nmp::nip29::GroupPredicate::AdminListIncludes(nmp_grammar::binding::Binding)
-pub nmp::nip29::GroupPredicate::AnyOf(alloc::collections::btree::set::BTreeSet<alloc::string::String>)
-pub nmp::nip29::GroupPredicate::Combined
-pub nmp::nip29::GroupPredicate::Combined::op: nmp_grammar::binding::SetAlgebra
-pub nmp::nip29::GroupPredicate::Combined::operands: alloc::vec::Vec<nmp::nip29::GroupPredicate>
-pub nmp::nip29::GroupPredicate::MemberListIncludes(nmp_grammar::binding::Binding)
-impl nmp::nip29::GroupPredicate
-pub fn nmp::nip29::GroupPredicate::intersect(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupPredicate>) -> Self
-pub fn nmp::nip29::GroupPredicate::minus(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupPredicate>) -> Self
-pub fn nmp::nip29::GroupPredicate::union(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupPredicate>) -> Self
-impl core::clone::Clone for nmp::nip29::GroupPredicate
-pub fn nmp::nip29::GroupPredicate::clone(&self) -> nmp::nip29::GroupPredicate
-impl core::cmp::Eq for nmp::nip29::GroupPredicate
-impl core::cmp::PartialEq for nmp::nip29::GroupPredicate
-pub fn nmp::nip29::GroupPredicate::eq(&self, &nmp::nip29::GroupPredicate) -> bool
-impl core::fmt::Debug for nmp::nip29::GroupPredicate
-pub fn nmp::nip29::GroupPredicate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for nmp::nip29::GroupPredicate
-impl core::marker::Freeze for nmp::nip29::GroupPredicate
-impl core::marker::Send for nmp::nip29::GroupPredicate
-impl core::marker::Sync for nmp::nip29::GroupPredicate
-impl core::marker::Unpin for nmp::nip29::GroupPredicate
-impl core::marker::UnsafeUnpin for nmp::nip29::GroupPredicate
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupPredicate
-impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupPredicate
+pub enum nmp::nip29::GroupPredicateError
+pub nmp::nip29::GroupPredicateError::NoKindSelected
+pub nmp::nip29::GroupPredicateError::NotAGroupRecordKind
+pub nmp::nip29::GroupPredicateError::NotAGroupRecordKind::kind: u16
+impl core::clone::Clone for nmp::nip29::GroupPredicateError
+pub fn nmp::nip29::GroupPredicateError::clone(&self) -> nmp::nip29::GroupPredicateError
+impl core::cmp::Eq for nmp::nip29::GroupPredicateError
+impl core::cmp::PartialEq for nmp::nip29::GroupPredicateError
+pub fn nmp::nip29::GroupPredicateError::eq(&self, &nmp::nip29::GroupPredicateError) -> bool
+impl core::error::Error for nmp::nip29::GroupPredicateError
+impl core::fmt::Debug for nmp::nip29::GroupPredicateError
+pub fn nmp::nip29::GroupPredicateError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::nip29::GroupPredicateError
+pub fn nmp::nip29::GroupPredicateError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupPredicateError
+impl core::marker::Freeze for nmp::nip29::GroupPredicateError
+impl core::marker::Send for nmp::nip29::GroupPredicateError
+impl core::marker::Sync for nmp::nip29::GroupPredicateError
+impl core::marker::Unpin for nmp::nip29::GroupPredicateError
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupPredicateError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupPredicateError
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupPredicateError
 pub enum nmp::nip29::GroupPublishError
 pub nmp::nip29::GroupPublishError::Context(nmp_nip29::context::GroupContextError)
 pub nmp::nip29::GroupPublishError::Engine(nmp::EngineError)
@@ -269,6 +265,28 @@ impl core::marker::Unpin for nmp::nip29::Group
 impl core::marker::UnsafeUnpin for nmp::nip29::Group
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::Group
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::Group
+pub struct nmp::nip29::GroupIds
+impl nmp::nip29::GroupIds
+pub fn nmp::nip29::GroupIds::intersect(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupIds>) -> Self
+pub fn nmp::nip29::GroupIds::minus(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupIds>) -> Self
+pub fn nmp::nip29::GroupIds::union(self, impl core::iter::traits::collect::IntoIterator<Item = nmp::nip29::GroupIds>) -> Self
+impl core::clone::Clone for nmp::nip29::GroupIds
+pub fn nmp::nip29::GroupIds::clone(&self) -> nmp::nip29::GroupIds
+impl core::cmp::Eq for nmp::nip29::GroupIds
+impl core::cmp::PartialEq for nmp::nip29::GroupIds
+pub fn nmp::nip29::GroupIds::eq(&self, &nmp::nip29::GroupIds) -> bool
+impl core::convert::From<nmp::nip29::GroupIds> for nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::from(nmp::nip29::GroupIds) -> Self
+impl core::fmt::Debug for nmp::nip29::GroupIds
+pub fn nmp::nip29::GroupIds::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupIds
+impl core::marker::Freeze for nmp::nip29::GroupIds
+impl core::marker::Send for nmp::nip29::GroupIds
+impl core::marker::Sync for nmp::nip29::GroupIds
+impl core::marker::Unpin for nmp::nip29::GroupIds
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupIds
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupIds
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupIds
 pub struct nmp::nip29::GroupObservation
 impl nmp::nip29::GroupObservation
 pub fn nmp::nip29::GroupObservation::cancel(&self)
@@ -287,6 +305,24 @@ impl core::marker::Unpin for nmp::nip29::GroupObservation
 impl core::marker::UnsafeUnpin for nmp::nip29::GroupObservation
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupObservation
 impl !core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupObservation
+pub struct nmp::nip29::GroupPredicate
+impl core::clone::Clone for nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::clone(&self) -> nmp::nip29::GroupPredicate
+impl core::cmp::Eq for nmp::nip29::GroupPredicate
+impl core::cmp::PartialEq for nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::eq(&self, &nmp::nip29::GroupPredicate) -> bool
+impl core::convert::From<nmp::nip29::GroupIds> for nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::from(nmp::nip29::GroupIds) -> Self
+impl core::fmt::Debug for nmp::nip29::GroupPredicate
+pub fn nmp::nip29::GroupPredicate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::GroupPredicate
+impl core::marker::Freeze for nmp::nip29::GroupPredicate
+impl core::marker::Send for nmp::nip29::GroupPredicate
+impl core::marker::Sync for nmp::nip29::GroupPredicate
+impl core::marker::Unpin for nmp::nip29::GroupPredicate
+impl core::marker::UnsafeUnpin for nmp::nip29::GroupPredicate
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupPredicate
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupPredicate
 pub struct nmp::nip29::GroupSnapshot
 pub nmp::nip29::GroupSnapshot::admins: alloc::vec::Vec<nmp_nip29::records::ListedSubject>
 pub nmp::nip29::GroupSnapshot::availability: nmp::nip29::GroupAvailability
@@ -336,7 +372,7 @@ impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::HostRecords
 pub struct nmp::nip29::RelayScope
 impl nmp::nip29::RelayScope
 pub fn nmp::nip29::RelayScope::group(&self, impl core::convert::Into<alloc::string::String>) -> nmp::nip29::Group
-pub fn nmp::nip29::RelayScope::observe(&self, &nmp::Engine, nmp::nip29::GroupPredicate, impl core::iter::traits::collect::IntoIterator<Item = nmp_nip29::records::GroupRecord>) -> core::result::Result<nmp::nip29::GroupObservation, nmp::nip29::GroupObserveError>
+pub fn nmp::nip29::RelayScope::observe(&self, &nmp::Engine, impl core::convert::Into<nmp::nip29::GroupPredicate>, impl core::iter::traits::collect::IntoIterator<Item = nmp_nip29::records::GroupRecord>, core::option::Option<usize>) -> core::result::Result<nmp::nip29::GroupObservation, nmp::nip29::GroupObserveError>
 impl core::clone::Clone for nmp::nip29::RelayScope
 pub fn nmp::nip29::RelayScope::clone(&self) -> nmp::nip29::RelayScope
 impl core::cmp::Eq for nmp::nip29::RelayScope
@@ -352,10 +388,12 @@ impl core::marker::Unpin for nmp::nip29::RelayScope
 impl core::marker::UnsafeUnpin for nmp::nip29::RelayScope
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::RelayScope
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::RelayScope
-pub fn nmp::nip29::admin_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupPredicate
-pub fn nmp::nip29::any_of(impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> nmp::nip29::GroupPredicate
+pub fn nmp::nip29::admin_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupIds
+pub fn nmp::nip29::all() -> nmp::nip29::GroupPredicate
+pub fn nmp::nip29::any_of(nmp_grammar::binding::Binding) -> nmp::nip29::GroupIds
 pub fn nmp::nip29::group(impl core::iter::traits::collect::IntoIterator<Item = nostr::types::url::RelayUrl>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<nmp::nip29::Group, nmp::nip29::RelayScopeError>
-pub fn nmp::nip29::member_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupPredicate
+pub fn nmp::nip29::groups_whose_record_matches(nmp_grammar::binding::Filter) -> core::result::Result<nmp::nip29::GroupIds, nmp::nip29::GroupPredicateError>
+pub fn nmp::nip29::member_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupIds
 pub fn nmp::nip29::on(impl core::iter::traits::collect::IntoIterator<Item = nostr::types::url::RelayUrl>) -> core::result::Result<nmp::nip29::RelayScope, nmp::nip29::RelayScopeError>
 pub type nmp::nip29::GroupReceipts = nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteFact>
 pub enum nmp::AuthDenialSource

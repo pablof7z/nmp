@@ -328,6 +328,21 @@ pub enum FfiError {
     /// records observation named none of the three records, which would
     /// deliver a permanently empty snapshot.
     GroupNoRecordSelected,
+    /// #1252 (`nmp::nip29::GroupPredicateError::NoKindSelected` mirror). A
+    /// selection handed to `groups_whose_record_matches` named no kind. It is
+    /// evaluated with NIP-29's own pin, so it would match every event the
+    /// group's host holds and key the listing on their `d` rows.
+    GroupIdSelectionNamesNoKind,
+    /// #1252 (`nmp::nip29::GroupPredicateError::NotAGroupRecordKind` mirror).
+    /// A selection handed to `groups_whose_record_matches` named a kind that
+    /// is not one of NIP-29's three relay-signed group records. That leaf is
+    /// evaluated AT the group's host, which is not authoritative for anything
+    /// else -- the read would silently under-resolve. Ids that come from the
+    /// app's OWN data go through `any_of` as a derived binding carrying its
+    /// own authority.
+    GroupIdSelectionNotAGroupRecordKind {
+        kind: u16,
+    },
 }
 
 impl From<nmp::nip29::RelayScopeError> for FfiError {
@@ -363,6 +378,17 @@ impl From<nmp::nip29::GroupContextError> for FfiError {
                 Self::GroupRecordsNotContextScoped {
                     kinds: kinds.into_iter().collect(),
                 }
+            }
+        }
+    }
+}
+
+impl From<nmp::nip29::GroupPredicateError> for FfiError {
+    fn from(err: nmp::nip29::GroupPredicateError) -> Self {
+        match err {
+            nmp::nip29::GroupPredicateError::NoKindSelected => Self::GroupIdSelectionNamesNoKind,
+            nmp::nip29::GroupPredicateError::NotAGroupRecordKind { kind } => {
+                Self::GroupIdSelectionNotAGroupRecordKind { kind }
             }
         }
     }
@@ -649,6 +675,15 @@ impl std::fmt::Display for FfiError {
             Self::GroupNoRecordSelected => f.write_str(
                 "a group-records observation must select at least one of the three relay-signed \
                  records",
+            ),
+            Self::GroupIdSelectionNamesNoKind => f.write_str(
+                "a group-record selection must name at least one of NIP-29's three relay-signed \
+                 group record kinds",
+            ),
+            Self::GroupIdSelectionNotAGroupRecordKind { kind } => write!(
+                f,
+                "kind:{kind} is not one of NIP-29's three relay-signed group records; a group \
+                 host is not authoritative for it"
             ),
         }
     }
@@ -1135,6 +1170,15 @@ fn binding_from_ffi(b: FfiBinding, field: LiteralField) -> Result<GBinding, FfiE
 /// never a panic two crates downstream.
 pub(crate) fn subjects_binding_from_ffi(b: FfiBinding) -> Result<GBinding, FfiError> {
     binding_from_ffi(b, LiteralField::Authors)
+}
+
+/// A binding whose literals are NIP-29 group ids -- `d` row VALUES, which
+/// have no hex invariant and are validated exactly as any other tag binding
+/// is. Validating them as pubkeys would reject every real group id
+/// ("photographers" is not 32-byte hex), which is why this is a distinct
+/// entry point rather than a reuse of the subjects one.
+pub(crate) fn group_ids_binding_from_ffi(b: FfiBinding) -> Result<GBinding, FfiError> {
+    binding_from_ffi(b, LiteralField::Tag)
 }
 
 pub fn binding_to_ffi(b: GBinding) -> FfiBinding {

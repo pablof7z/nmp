@@ -992,7 +992,7 @@ async fn a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for
         nip29::on([host_a.url.clone(), host_b.url.clone()]).expect("two hosts form a scope");
     let predicate = member_list_includes(Binding::Literal(BTreeSet::from([member.to_hex()])));
     let watching = scope
-        .observe(&engine, predicate, [GroupRecord::Metadata])
+        .observe(&engine, predicate, [GroupRecord::Metadata], None)
         .expect("a two-host listing declares two branches");
 
     let snapshot =

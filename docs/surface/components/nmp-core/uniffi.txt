@@ -3089,6 +3089,29 @@ enum Enum {
                 "#1233 (`nmp::nip29::GroupObserveError::NoRecordSelected` mirror). A\nrecords observation named none of the three records, which would\ndeliver a permanently empty snapshot.",
             ),
         },
+        Variant {
+            name: "GroupIdSelectionNamesNoKind",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#1252 (`nmp::nip29::GroupPredicateError::NoKindSelected` mirror). A\nselection handed to `groups_whose_record_matches` named no kind. It is\nevaluated with NIP-29's own pin, so it would match every event the\ngroup's host holds and key the listing on their `d` rows.",
+            ),
+        },
+        Variant {
+            name: "GroupIdSelectionNotAGroupRecordKind",
+            discr: None,
+            fields: [
+                Field {
+                    name: "kind",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#1252 (`nmp::nip29::GroupPredicateError::NotAGroupRecordKind` mirror).\nA selection handed to `groups_whose_record_matches` named a kind that\nis not one of NIP-29's three relay-signed group records. That leaf is\nevaluated AT the group's host, which is not authoritative for anything\nelse -- the read would silently under-resolve. Ids that come from the\napp's OWN data go through `any_of` as a derived binding carrying its\nown authority.",
+            ),
+        },
     ],
     shape: Error {
         flat: false,
@@ -7945,7 +7968,7 @@ function Function {
     return_type: Some(
         Object {
             module_path: "nmp_ffi",
-            name: "FfiGroupPredicate",
+            name: "FfiGroupIds",
             imp: Struct,
         },
     ),
@@ -7967,7 +7990,7 @@ function Function {
         ],
         return_type: Some(
             RustArcPtr(
-                "FfiGroupPredicate",
+                "FfiGroupIds",
             ),
         ),
         has_rust_call_status_arg: true,
@@ -7984,7 +8007,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_admin_list_includes",
     checksum: Some(
-        25813,
+        62685,
     ),
 }
 
@@ -7995,8 +8018,9 @@ function Function {
     arguments: [
         Argument {
             name: "ids",
-            type_: Sequence {
-                inner_type: String,
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiBinding",
             },
             by_ref: false,
             optional: false,
@@ -8006,7 +8030,7 @@ function Function {
     return_type: Some(
         Object {
             module_path: "nmp_ffi",
-            name: "FfiGroupPredicate",
+            name: "FfiGroupIds",
             imp: Struct,
         },
     ),
@@ -8017,25 +8041,35 @@ function Function {
             FfiArgument {
                 name: "ids",
                 type_: RustBuffer(
-                    None,
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiBinding",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
                 ),
             },
         ],
         return_type: Some(
             RustArcPtr(
-                "FfiGroupPredicate",
+                "FfiGroupIds",
             ),
         ),
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
     docstring: Some(
-        "Exactly these group ids, whatever any list says about them\n(`nmp::nip29::any_of` mirror). The leaf an app uses when it already knows\nwhich rooms it is showing and is not asking a relational question.",
+        "The groups `ids` names, whatever any list says about them\n(`nmp::nip29::any_of` mirror).\n\n`ids` is an ordinary [`FfiBinding`], which is the point: a literal set for\nrooms an app already knows, and a derived binding for rooms it has to look\nup. \"Watch the groups named in my own kind:10009 simple-groups list\" is\nthat derived case, and it stays reactive -- when the list changes, the\nobservation follows it, with no hand-extraction of ids and no second\nobservation. A derived binding keeps its OWN authority and is never\nrepinned to the group's hosts.",
     ),
-    throws: None,
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_any_of",
     checksum: Some(
-        42417,
+        5099,
     ),
 }
 
@@ -8680,6 +8714,68 @@ function Function {
 }
 
 function Function {
+    name: "groups_whose_record_matches",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "selection",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiFilter",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Object {
+            module_path: "nmp_ffi",
+            name: "FfiGroupIds",
+            imp: Struct,
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_groups_whose_record_matches",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "selection",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiFilter",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiGroupIds",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Groups whose own relay-signed record matches `selection` at the branch\nhost (`nmp::nip29::groups_whose_record_matches` mirror) -- THE general\nspelling, of which every other id source is a shorthand.\n\nRefused when `selection` names no kind, or names a kind that is not one of\nNIP-29's three relay-signed group records: this leaf is evaluated with\nNIP-29's own pin, and a group host is authoritative for nothing else.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_groups_whose_record_matches",
+    checksum: Some(
+        12466,
+    ),
+}
+
+function Function {
     name: "live_query_union",
     module_path: "nmp_ffi",
     is_async: false,
@@ -8804,7 +8900,7 @@ function Function {
     return_type: Some(
         Object {
             module_path: "nmp_ffi",
-            name: "FfiGroupPredicate",
+            name: "FfiGroupIds",
             imp: Struct,
         },
     ),
@@ -8826,14 +8922,14 @@ function Function {
         ],
         return_type: Some(
             RustArcPtr(
-                "FfiGroupPredicate",
+                "FfiGroupIds",
             ),
         ),
         has_rust_call_status_arg: true,
         is_object_free_function: false,
     },
     docstring: Some(
-        "Groups whose observed kind:39002 member-list evidence names `subjects`\n(`nmp::nip29::member_list_includes` mirror). Inclusion is evidence,\nnever exact state -- absence is not evidence of non-membership.",
+        "Groups whose observed kind:39002 member-list evidence names `subjects`\n(`nmp::nip29::member_list_includes` mirror). Inclusion is evidence,\nnever exact state -- absence is not evidence of non-membership.\n\nShorthand for [`groups_whose_record_matches`] over\n`{ kinds:[39002], #p: subjects }`, and exactly equal to it.",
     ),
     throws: Some(
         Enum {
@@ -8843,7 +8939,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_member_list_includes",
     checksum: Some(
-        54766,
+        62262,
     ),
 }
 
@@ -11676,7 +11772,7 @@ object Object {
 }
 
 object Object {
-    name: "FfiGroupPredicate",
+    name: "FfiGroupIds",
     imp: Struct,
     module_path: "nmp_ffi",
     remote: false,
@@ -11684,7 +11780,7 @@ object Object {
     methods: [
         Method {
             name: "intersect",
-            object_name: "FfiGroupPredicate",
+            object_name: "FfiGroupIds",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
@@ -11694,7 +11790,7 @@ object Object {
                     type_: Sequence {
                         inner_type: Object {
                             module_path: "nmp_ffi",
-                            name: "FfiGroupPredicate",
+                            name: "FfiGroupIds",
                             imp: Struct,
                         },
                     },
@@ -11706,18 +11802,18 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "FfiGroupPredicate",
+                    name: "FfiGroupIds",
                     imp: Struct,
                 },
             ),
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffigrouppredicate_intersect",
+                name: "uniffi_nmp_ffi_fn_method_ffigroupids_intersect",
                 is_async: false,
                 arguments: [
                     FfiArgument {
                         name: "ptr",
                         type_: RustArcPtr(
-                            "FfiGroupPredicate",
+                            "FfiGroupIds",
                         ),
                     },
                     FfiArgument {
@@ -11729,25 +11825,25 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "FfiGroupPredicate",
+                        "FfiGroupIds",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Groups matching this predicate AND all of `others`.",
+                "Groups named by this source AND by all of `others`.",
             ),
             throws: None,
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigrouppredicate_intersect",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroupids_intersect",
             checksum: Some(
-                53920,
+                41533,
             ),
         },
         Method {
             name: "minus",
-            object_name: "FfiGroupPredicate",
+            object_name: "FfiGroupIds",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
@@ -11757,7 +11853,7 @@ object Object {
                     type_: Sequence {
                         inner_type: Object {
                             module_path: "nmp_ffi",
-                            name: "FfiGroupPredicate",
+                            name: "FfiGroupIds",
                             imp: Struct,
                         },
                     },
@@ -11769,18 +11865,18 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "FfiGroupPredicate",
+                    name: "FfiGroupIds",
                     imp: Struct,
                 },
             ),
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffigrouppredicate_minus",
+                name: "uniffi_nmp_ffi_fn_method_ffigroupids_minus",
                 is_async: false,
                 arguments: [
                     FfiArgument {
                         name: "ptr",
                         type_: RustArcPtr(
-                            "FfiGroupPredicate",
+                            "FfiGroupIds",
                         ),
                     },
                     FfiArgument {
@@ -11792,25 +11888,25 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "FfiGroupPredicate",
+                        "FfiGroupIds",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Groups matching this predicate and none of `others`.",
+                "Groups named by this source and by none of `others`.",
             ),
             throws: None,
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigrouppredicate_minus",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroupids_minus",
             checksum: Some(
-                33932,
+                18292,
             ),
         },
         Method {
             name: "union",
-            object_name: "FfiGroupPredicate",
+            object_name: "FfiGroupIds",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
@@ -11820,7 +11916,7 @@ object Object {
                     type_: Sequence {
                         inner_type: Object {
                             module_path: "nmp_ffi",
-                            name: "FfiGroupPredicate",
+                            name: "FfiGroupIds",
                             imp: Struct,
                         },
                     },
@@ -11832,24 +11928,152 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "FfiGroupPredicate",
+                    name: "FfiGroupIds",
                     imp: Struct,
                 },
             ),
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffigrouppredicate_union",
+                name: "uniffi_nmp_ffi_fn_method_ffigroupids_union",
                 is_async: false,
                 arguments: [
                     FfiArgument {
                         name: "ptr",
                         type_: RustArcPtr(
-                            "FfiGroupPredicate",
+                            "FfiGroupIds",
                         ),
                     },
                     FfiArgument {
                         name: "others",
                         type_: RustBuffer(
                             None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiGroupIds",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Groups named by this source OR by any of `others`.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroupids_union",
+            checksum: Some(
+                11613,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffigroupids",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiGroupIds",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiGroupIds",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffigroupids",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiGroupIds",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Where a set of NIP-29 group ids comes from (`nmp::nip29::GroupIds`\nmirror). Opaque by design, built with [`member_list_includes`]/\n[`admin_list_includes`]/[`any_of`]/[`groups_whose_record_matches`] and\ncomposed with [`Self::union`]/[`Self::intersect`]/[`Self::minus`].\n\nWhatever this resolves to becomes the `#d` value set of one relay filter,\nand a filter carrying very many values may be refused or silently\ntruncated by that relay. Watching very many groups needs sharding across\nseveral observations; NMP does not chunk behind the app's back, because a\nsilently-sharded observation would report availability for a plan the app\nnever declared.",
+    ),
+}
+
+object Object {
+    name: "FfiGroupPredicate",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [
+        Constructor {
+            name: "all",
+            object_name: "FfiGroupPredicate",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffigrouppredicate_all",
+                is_async: false,
+                arguments: [],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiGroupPredicate",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Every group the host advertises among the selected records\n(`nmp::nip29::all` mirror). The branch carries NO group-id row: this is\nthe ABSENCE of a constraint, which is what makes a directory\nexpressible -- the ids a directory wants are the answer, not the input.\n\nUnbounded by nature: bound it with `observe_records`'s own `limit`.\nAdvertisement is not enumeration -- a group the host serves but\npublishes no kind:39000 for is invisible.",
+            ),
+            throws: None,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffigrouppredicate_all",
+            checksum: Some(
+                30426,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiGroupPredicate",
+                imp: Struct,
+            },
+        },
+        Constructor {
+            name: "naming",
+            object_name: "FfiGroupPredicate",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [
+                Argument {
+                    name: "ids",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiGroupIds",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffigrouppredicate_naming",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ids",
+                        type_: RustArcPtr(
+                            "FfiGroupIds",
                         ),
                     },
                 ],
@@ -11862,16 +12086,21 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Groups matching this predicate OR any of `others`.",
+                "Only the groups `ids` names (`From<GroupIds> for GroupPredicate`\nmirror).",
             ),
             throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigrouppredicate_union",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffigrouppredicate_naming",
             checksum: Some(
-                41822,
+                44409,
             ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiGroupPredicate",
+                imp: Struct,
+            },
         },
     ],
+    methods: [],
     uniffi_traits: [],
     trait_impls: [],
     ffi_func_clone: FfiFunction {
@@ -11910,7 +12139,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "A composable NIP-29 discovery predicate (`nmp::nip29::GroupPredicate`\nmirror). Opaque by design -- see this module's own doc for why -- built\nwith [`member_list_includes`]/[`admin_list_includes`] and composed with\n[`Self::union`]/[`Self::intersect`]/[`Self::minus`], then handed to\n[`FfiRelayScope::observe_records`].",
+        "Which groups an observation covers (`nmp::nip29::GroupPredicate` mirror).\nOpaque by design -- see this module's own doc for why -- built with\n[`Self::all`] or from an [`FfiGroupIds`] with [`Self::naming`], then handed\nto [`FfiRelayScope::observe_records`].",
     ),
 }
 
@@ -12074,6 +12303,15 @@ object Object {
                     optional: false,
                     default: None,
                 },
+                Argument {
+                    name: "limit",
+                    type_: Optional {
+                        inner_type: UInt32,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
             ],
             return_type: Some(
                 Object {
@@ -12110,6 +12348,12 @@ object Object {
                             None,
                         ),
                     },
+                    FfiArgument {
+                        name: "limit",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
                 ],
                 return_type: Some(
                     RustArcPtr(
@@ -12120,7 +12364,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Watch the relay-signed records of every group matching `predicate`\n(`nmp::nip29::RelayScope::observe` mirror). One complete branch per\nhost, folded into ONE ordinary engine subscription; each delivery is\nthe complete set of [`FfiGroupSnapshot`]s for the groups currently\nmatching. The app never sees a row delta and never walks a `p` row.",
+                "Watch the relay-signed records of every group matching `predicate`\n(`nmp::nip29::RelayScope::observe` mirror). One complete branch per\nhost, folded into ONE ordinary engine subscription; each delivery is\nthe complete set of [`FfiGroupSnapshot`]s for the groups currently\nmatching. The app never sees a row delta and never walks a `p` row.\n\n`limit` is the ordinary NIP-01 `Filter::limit` and bounds EACH host's\nown branch, never the merged union: two hosts with `Some(250)` may\ndeliver up to 500 snapshots, because each was asked for 250 of its\nown. `None` asks for whatever the relay chooses to answer with.",
             ),
             throws: Some(
                 Enum {
@@ -12131,7 +12375,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffirelayscope_observe_records",
             checksum: Some(
-                50577,
+                35187,
             ),
         },
     ],
