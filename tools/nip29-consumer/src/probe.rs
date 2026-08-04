@@ -269,6 +269,7 @@ fn metadata_observation(
             &context.engine,
             nip29::member_list_includes(subjects),
             [nip29::GroupRecord::Metadata],
+            None,
         )
         .map_err(display)
 }
@@ -317,6 +318,7 @@ fn follows_discovery_observation(
             &context.engine,
             nip29::member_list_includes(follows),
             [nip29::GroupRecord::Members],
+            None,
         )
         .map_err(display)
 }

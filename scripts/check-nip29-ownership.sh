@@ -4,7 +4,7 @@
 #
 # #1033 retargeted this gate for the RelayScope/Group facade shape: the
 # engine-free crate (`crates/nmp-nip29`) owns per-host vocabulary only --
-# kinds, `groups_where_at`/`member_list_includes_at`/`admin_list_includes_at`,
+# kinds, `records_matching_at`/`member_list_includes_at`/`admin_list_includes_at`,
 # `group_demand_at`, `contextualize`/`validate_context` -- while the app-facing
 # door, the retained relay scope, and the one opaque `WriteIntent` all live in
 # the `nmp` facade (`crates/nmp/src/nip29/{mod,group,predicate,read}.rs`).
@@ -197,6 +197,19 @@ grep -qF 'scope_stamps_exact_hosts_on_every_nested_nip29_demand' \
 tombstones=$(grep -RInE \
   'contextualize_group_event|GroupPublication|group_discovery_demand|groupDiscoveryDemand|pinned_demand|groups_where|groupsWhere' \
   crates/ Packages/ skills/ tools/ || true)
+# #1252 replaced the closed predicate enum with the general query language.
+# The four leaf variants and the predicate-level set algebra are deleted, and
+# their absence is LOAD-BEARING rather than cosmetic: set algebra lives on
+# `GroupIds` alone precisely so `all().minus(...)` is unspellable, and any
+# combinator reappearing on `GroupPredicate` would silently restore the
+# spelling this change proved cannot be honoured on the wire.
+predicate_tombstones=$(grep -RInE \
+  'GroupPredicate::(AnyOf|Combined|MemberListIncludes|AdminListIncludes)|GroupPredicate\.(anyOf|memberListIncludes|adminListIncludes|union|intersect|minus)' \
+  crates/ Packages/ skills/ tools/ || true)
+if [[ -n $predicate_tombstones ]]; then
+  printf '%s\n' "$predicate_tombstones"
+  fail "a deleted NIP-29 predicate leaf or predicate-level combinator reappeared; leaves and set algebra belong to GroupIds"
+fi
 if [[ -n $tombstones ]]; then
   printf '%s\n' "$tombstones"
   fail "a deleted NIP-29 publication/discovery spelling reappeared"

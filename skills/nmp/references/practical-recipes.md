@@ -63,8 +63,11 @@ let scope = nip29::on(hosts)?          // RelayScopeError::EmptyRelaySet if empt
 let group = scope.group(groupId)       // same hosts, narrowed to one group
 
 // Who is in these groups, and what are they called: the relay-signed records.
-let watching = scope.observe(&engine, predicate, [Metadata, Admins, Members])?;
+let watching = scope.observe(&engine, predicate, [Metadata, Admins, Members], None)?;
 while let Some(snapshots) = watching.next().await? { /* GroupSnapshot per group */ }
+
+// A directory: every room this relay advertises, 250 per host.
+let browsing = scope.observe(&engine, nip29::all(), [Metadata], Some(250))?;
 
 // One known room, no predicate and no id lookup:
 let room = nip29::group(hosts, group_id)?.observe(&engine, [Metadata, Members])?;
@@ -101,10 +104,22 @@ Rules:
 - Every discovery/read branch carries pinned read authority to exactly its own
   host, stamped explicitly rather than inherited -- resolving evidence at one
   relay while listing at another would be a confidently wrong answer.
-- Discovery is evidence-scoped: `nip29::member_list_includes`/
-  `admin_list_includes` build a composable `GroupPredicate`
-  (`union`/`intersect`/`minus`) over observed kind:39002/39001 rows. Absence
-  from a list is never proof of non-membership/non-admin.
+- Discovery IS the query language. `nip29::groups_whose_record_matches(Filter)`
+  is the general spelling; `member_list_includes`/`admin_list_includes` are
+  shorthands exactly equal to it, and `any_of(Binding)` takes any binding, so
+  an app's own saved-groups lookup drives the observation reactively instead
+  of being re-derived by hand. All build a `GroupIds`, composable with
+  `union`/`intersect`/`minus`. Absence from a list is never proof of
+  non-membership/non-admin.
+- `nip29::all()` is "every group this host advertises" -- the ABSENCE of a
+  `#d` row, not a `#d` row naming everything. Unbounded by nature; bound it
+  with `observe`'s per-host `limit`. Advertisement is not enumeration.
+  `all().minus(...)` does not typecheck: Nostr filters have no negation, so
+  filter muted rooms out of the snapshots you render.
+- `groups_whose_record_matches` refuses a kind outside 39000/39001/39002: it
+  is evaluated with NIP-29's own pin, and a group host is authoritative for
+  nothing else. Ids from the app's OWN data go through `any_of` as a derived
+  binding carrying its own authority.
 - Content kinds are selected by their real schema owners/app composition;
   NIP-29 has no fixed `[9,30315]` catalog.
 - Sort the accumulated rows in the app. Preserve each row's source proof and the query evidence.

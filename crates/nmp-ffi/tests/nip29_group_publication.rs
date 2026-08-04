@@ -17,7 +17,10 @@ use std::sync::Arc;
 
 use nmp_ffi::convert::FfiError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
-use nmp_ffi::nip29::{admin_list_includes, member_list_includes, FfiGroupRecord, FfiRelayScope};
+use nmp_ffi::nip29::{
+    admin_list_includes, groups_whose_record_matches, member_list_includes, FfiGroupPredicate,
+    FfiGroupRecord, FfiRelayScope,
+};
 use nmp_ffi::types::{
     FfiAccessContext, FfiBinding, FfiEventBuilder, FfiFilter, FfiIdentityField, FfiSourceAuthority,
 };
@@ -72,17 +75,62 @@ fn predicates_compose_through_union_intersect_and_minus() {
     let admin = admin_list_includes(me()).expect("reactive subjects are always valid");
 
     let engine = engine();
-    for predicate in [
+    for ids in [
         member.clone().union(vec![admin.clone()]),
         member.clone().intersect(vec![admin.clone()]),
         member.minus(vec![admin]),
     ] {
         let watching = scope
-            .observe_records(engine.clone(), predicate, vec![FfiGroupRecord::Metadata])
+            .observe_records(
+                engine.clone(),
+                FfiGroupPredicate::naming(ids),
+                vec![FfiGroupRecord::Metadata],
+                None,
+            )
             .expect("a composed predicate still opens over every host");
         watching.cancel();
     }
     engine.shutdown();
+}
+
+/// The #1252 capability at the boundary: "every group this relay hosts" is a
+/// predicate an app can phrase, and it needs no id set of its own. A boundary
+/// that could only phrase a membership question or a known-id list would
+/// leave a directory screen hand-building its own demand and hand-parsing
+/// kind:39000 rows, which is the state #1246 otherwise ended.
+#[test]
+fn an_unconstrained_directory_is_phrasable_at_the_boundary() {
+    let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
+    let engine = engine();
+    let watching = scope
+        .observe_records(
+            engine.clone(),
+            FfiGroupPredicate::all(),
+            vec![FfiGroupRecord::Metadata],
+            Some(250),
+        )
+        .expect("a two-host directory opens");
+    watching.cancel();
+    engine.shutdown();
+}
+
+/// The refusal the general spelling carries survives to the boundary: a
+/// selection naming a kind the group's host is not authoritative for is a
+/// typed error, not a read that silently under-resolves.
+#[test]
+fn a_selection_naming_a_foreign_kind_is_refused_at_the_boundary() {
+    let refusal = groups_whose_record_matches(FfiFilter {
+        kinds: Some(vec![10009]),
+        ..FfiFilter::default()
+    })
+    .expect_err("kind:10009 is not a relay-signed group record");
+    assert_eq!(
+        refusal,
+        FfiError::GroupIdSelectionNotAGroupRecordKind { kind: 10009 }
+    );
+    let refusal = groups_whose_record_matches(FfiFilter::default())
+        .expect_err("a selection naming no kind is refused");
+    assert_eq!(refusal, FfiError::GroupIdSelectionNamesNoKind);
 }
 
 /// A group is an identity, not a subscription: forming a `FfiRelayScope`
