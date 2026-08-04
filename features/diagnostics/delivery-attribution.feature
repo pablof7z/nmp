@@ -166,22 +166,13 @@ Feature: Which destination failed, and why, one destination at a time
   # ---- the boundary between the two failures ----------------------------
 
   @designed @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-020
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
-  # Defect shape this scenario will falsify once its evidence runs (#1253):
-  #   Attribute a delivery failure to a write that has no destination yet;
-  #   "we could not reach relay X" and "we do not know where this goes" are
-  #   different screens and inventing the first from the second sends a user
-  #   to fix a relay that was never involved.
   Scenario: A write that never got a destination has no delivery failure
     # "We were trying to publish to relay X" and "we were trying to route this
     # event" are different sentences and an app shows different screens for
     # them. A write with no destinations yet has nothing to attribute a
     # delivery failure to, and must not invent one.
-    Given nothing is known yet about Bob's DM relay list
+    Given the indexers have settled that Bob has no DM relay list
     When I publish a direct message to Bob
-    Then the receipt reports an open destination set naming no relays
+    Then the receipt reports the write awaiting a route
     And the receipt reports no destination as failed
     And the receipt reports no destination at all
