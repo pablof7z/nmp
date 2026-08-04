@@ -234,9 +234,7 @@ impl RelayScope {
     ) -> Vec<Demand> {
         self.hosts
             .iter()
-            .map(|host| {
-                nmp_nip29::group_records_at(host, records, predicate.lower_at(host), limit)
-            })
+            .map(|host| nmp_nip29::group_records_at(host, records, predicate.lower_at(host), limit))
             .collect()
     }
 

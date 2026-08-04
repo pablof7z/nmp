@@ -544,10 +544,9 @@ async fn a_composed_predicate_delivers_one_snapshot_per_matching_group() {
     let watching = scope
         .observe(
             &engine,
-            member_list_includes(Binding::Literal(BTreeSet::from([me.to_hex()])))
-                .union([nip29::any_of(Binding::Literal(BTreeSet::from([
-                    "darkroom".to_string()
-                ])))]),
+            member_list_includes(Binding::Literal(BTreeSet::from([me.to_hex()]))).union([
+                nip29::any_of(Binding::Literal(BTreeSet::from(["darkroom".to_string()]))),
+            ]),
             [GroupRecord::Metadata],
             None,
         )

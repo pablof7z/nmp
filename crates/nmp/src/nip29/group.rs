@@ -154,16 +154,12 @@ impl Group {
         if records.is_empty() {
             return Err(GroupObserveError::NoRecordSelected);
         }
-        let predicate: super::GroupPredicate = super::any_of(nmp_grammar::Binding::Literal(
-            BTreeSet::from([self.id.clone()]),
-        ))
-        .into();
+        let this_id = nmp_grammar::Binding::Literal(BTreeSet::from([self.id.clone()]));
+        let predicate: super::GroupPredicate = super::any_of(this_id).into();
         let branches = self
             .hosts
             .iter()
-            .map(|host| {
-                nmp_nip29::group_records_at(host, &records, predicate.lower_at(host), None)
-            })
+            .map(|host| nmp_nip29::group_records_at(host, &records, predicate.lower_at(host), None))
             .collect();
         super::records::observe(
             engine,

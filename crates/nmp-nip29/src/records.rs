@@ -319,7 +319,9 @@ mod tests {
         let demand = group_records_at(
             &host(1),
             &BTreeSet::from([GroupRecord::Metadata]),
-            Some(Binding::Literal(BTreeSet::from(["photographers".to_string()]))),
+            Some(Binding::Literal(BTreeSet::from([
+                "photographers".to_string()
+            ]))),
             None,
         );
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([39000u16])));
