@@ -337,7 +337,9 @@ impl GroupIds {
     /// binding inside it survives untouched.
     fn lower_at(&self, host: &RelayUrl) -> Binding {
         match &self.source {
-            IdSource::AtHost(selection) => nmp_nip29::records_matching_at(host, selection.clone()),
+            IdSource::AtHost(selection) => {
+                nmp_nip29::groups_whose_record_matches_at(host, selection.clone())
+            }
             // A caller's binding names values under its own authority: there
             // is nothing here to pin and nothing here NMP may repin.
             IdSource::Given(ids) => ids.clone(),

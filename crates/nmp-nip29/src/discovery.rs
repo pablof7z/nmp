@@ -84,7 +84,7 @@ const SUBJECT_TAG: char = 'p';
 /// Returns an ordinary [`Binding`], so `Binding::SetOp` composes it with any
 /// other binding for free.
 #[must_use]
-pub fn records_matching_at(host: &RelayUrl, selection: Filter) -> Binding {
+pub fn groups_whose_record_matches_at(host: &RelayUrl, selection: Filter) -> Binding {
     Binding::Derived(Box::new(Derived {
         inner: pinned_public_at(host, selection),
         project: Selector::Tag(JOIN_KEY_TAG.to_string()),
@@ -97,8 +97,8 @@ pub fn records_matching_at(host: &RelayUrl, selection: Filter) -> Binding {
 /// subject. A group NOT matching proves nothing -- the list may be absent,
 /// restricted, or partial.
 ///
-/// Shorthand for [`records_matching_at`] over `{ kinds:[39002], #p: subjects }`
-/// and exactly equal to it.
+/// Shorthand for [`groups_whose_record_matches_at`] over
+/// `{ kinds:[39002], #p: subjects }` and exactly equal to it.
 #[must_use]
 pub fn member_list_includes_at(host: &RelayUrl, subjects: Binding) -> Binding {
     list_evidence_at(host, GROUP_MEMBERS_KIND, subjects)
@@ -114,7 +114,7 @@ pub fn admin_list_includes_at(host: &RelayUrl, subjects: Binding) -> Binding {
 }
 
 fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
-    records_matching_at(
+    groups_whose_record_matches_at(
         host,
         Filter {
             kinds: Some(BTreeSet::from([kind])),

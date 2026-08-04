@@ -62,8 +62,8 @@ mod records;
 
 pub use context::{contextualize, group_demand_at, validate_context, GroupContextError};
 pub use discovery::{
-    admin_list_includes_at, member_list_includes_at, records_matching_at, GROUP_ADMINS_KIND,
-    GROUP_MEMBERS_KIND, GROUP_METADATA_KIND,
+    admin_list_includes_at, groups_whose_record_matches_at, member_list_includes_at,
+    GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND, GROUP_METADATA_KIND,
 };
 pub use operations::{
     add_user, create_group, create_invite, delete_event, delete_group, edit_metadata, join_request,
