@@ -17,7 +17,7 @@ Feature: Publishing tells the truth, per relay
   # nmp:status=specified
   # nmp:gap=evidence
   # nmp:issue=#1253
-  @ledger-9 @ledger-15 @wip
+  @ledger-9 @ledger-15
   Scenario: Durable acceptance survives restart through the ordinary store
     Given an unsigned kind 9999 draft matches an open ordinary query
     When the durable write is accepted and the process stops immediately
@@ -29,7 +29,7 @@ Feature: Publishing tells the truth, per relay
   # nmp:status=specified
   # nmp:gap=evidence
   # nmp:issue=#1253
-  @ledger-10 @ledger-19 @wip
+  @ledger-10 @ledger-19
   Scenario: An offline remote signer leaves a durable obligation
     Given a NIP-46 signer is registered for the current pubkey but is offline
     When I publish an unsigned kind 9999 draft
@@ -42,7 +42,7 @@ Feature: Publishing tells the truth, per relay
   # nmp:status=specified
   # nmp:gap=evidence
   # nmp:issue=#1253
-  @ledger-15 @wip
+  @ledger-15
   Scenario: Relay rejection does not retract a signed row
     Given a signed kind 9999 row is visible in a matching query
     When every planned relay rejects its publication

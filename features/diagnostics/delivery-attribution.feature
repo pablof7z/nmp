@@ -67,7 +67,7 @@ Feature: Which destination failed, and why, one destination at a time
     And the reason is the same reason it was denied with
     And no further event attempt is made against "wss://one.example"
 
-  @designed @ledger-9
+  @ledger-9
   # nmp:id=DIAG-ATTRIBUTION-003
   # nmp:status=specified
   # nmp:gap=evidence
@@ -82,7 +82,7 @@ Feature: Which destination failed, and why, one destination at a time
     When authentication succeeds for "wss://one.example"
     Then the same write is delivered -- not a second copy of it
 
-  @designed @ledger-9
+  @ledger-9
   # nmp:id=DIAG-ATTRIBUTION-004
   # nmp:status=specified
   # nmp:gap=evidence
@@ -96,7 +96,7 @@ Feature: Which destination failed, and why, one destination at a time
     When exact-session authentication succeeds for the write
     Then the same write is delivered -- not a second copy of it
 
-  @designed @ledger-9
+  @ledger-9
   # nmp:id=DIAG-ATTRIBUTION-005
   # nmp:status=specified
   # nmp:gap=evidence
@@ -108,7 +108,7 @@ Feature: Which destination failed, and why, one destination at a time
     And Bob's write remains live
     And Bob's write can still be delivered
 
-  @designed @ledger-9
+  @ledger-9
   # nmp:id=DIAG-ATTRIBUTION-006
   # nmp:status=specified
   # nmp:gap=evidence
@@ -125,7 +125,7 @@ Feature: Which destination failed, and why, one destination at a time
       | error       |
       | unavailable |
 
-  @designed @ledger-16
+  @ledger-16
   # nmp:id=DIAG-ATTRIBUTION-007
   # nmp:status=specified
   # nmp:gap=evidence
@@ -139,7 +139,7 @@ Feature: Which destination failed, and why, one destination at a time
     And it reports the persisted non-authentication cause and relay detail
     And "wss://one.example" is not reported as failed
 
-  @designed @ledger-16
+  @ledger-16
   # nmp:id=DIAG-ATTRIBUTION-008
   # nmp:status=specified
   # nmp:gap=evidence
@@ -158,7 +158,7 @@ Feature: Which destination failed, and why, one destination at a time
 
   # ---- four destinations, four answers ----------------------------------
 
-  @designed @ledger-9
+  @ledger-9
   # nmp:id=DIAG-ATTRIBUTION-009
   # nmp:status=specified
   # nmp:gap=evidence
@@ -181,7 +181,7 @@ Feature: Which destination failed, and why, one destination at a time
 
   # ---- sent, partially sent, and the difference -------------------------
 
-  @designed @ledger-9
+  @ledger-9
   # nmp:id=DIAG-ATTRIBUTION-010
   # nmp:status=specified
   # nmp:gap=evidence
@@ -196,7 +196,7 @@ Feature: Which destination failed, and why, one destination at a time
     And the receipt reports that some destinations have not finished
     And the receipt makes no claim that the note is fully sent
 
-  @designed @ledger-9
+  @ledger-9
   # nmp:id=DIAG-ATTRIBUTION-011
   # nmp:status=specified
   # nmp:gap=evidence
@@ -209,7 +209,7 @@ Feature: Which destination failed, and why, one destination at a time
 
   # ---- the boundary between the two failures ----------------------------
 
-  @designed @ledger-9
+  @ledger-9
   # nmp:id=DIAG-ATTRIBUTION-012
   # nmp:status=specified
   # nmp:gap=evidence
