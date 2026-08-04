@@ -66,12 +66,12 @@ func waitForRows(
 }
 
 func waitForStatuses(
-    _ stream: NMPGroupWriteStatus,
+    _ stream: NMPGroupWriteFacts,
     seconds: UInt64,
-    predicate: @escaping @Sendable ([WriteStatus]) -> Bool
-) async throws -> [WriteStatus] {
+    predicate: @escaping @Sendable ([WriteFact]) -> Bool
+) async throws -> [WriteFact] {
     try await withTimeout(seconds: seconds) {
-        var statuses: [WriteStatus] = []
+        var statuses: [WriteFact] = []
         for try await status in stream {
             statuses.append(status)
             if predicate(statuses) { return statuses }
@@ -108,16 +108,21 @@ func hasContent(_ batch: RowBatch, _ content: String, sourceCount: Int) -> Bool 
     batch.rows.contains { $0.content == content && $0.sources.count == sourceCount }
 }
 
-func acked(_ statuses: [WriteStatus], relay: String) -> Bool {
+/// The relay acked this event. Per-relay, not per-write: a four-relay
+/// publish has four independent fates and this asks about exactly one.
+func acked(_ statuses: [WriteFact], relay: String) -> Bool {
     statuses.contains {
-        if case .acked(let candidate) = $0 { return candidate == relay }
+        if case .relay(let candidate, .published) = $0 { return candidate == relay }
         return false
     }
 }
 
-func rejected(_ statuses: [WriteStatus], relay: String) -> Bool {
+/// The relay authenticated the identity and refused THIS EVENT. Deliberately
+/// not satisfied by `.authFailed`, which is a different situation with a
+/// different repair.
+func rejected(_ statuses: [WriteFact], relay: String) -> Bool {
     statuses.contains {
-        if case .rejected(let candidate, _) = $0 { return candidate == relay }
+        if case .relay(let candidate, .rejected) = $0 { return candidate == relay }
         return false
     }
 }
