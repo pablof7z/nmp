@@ -163,7 +163,10 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
     handle

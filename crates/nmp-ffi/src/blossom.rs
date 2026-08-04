@@ -612,8 +612,17 @@ pub struct FfiBlossomClientConfig {
     /// Operator opt-in local-host allowlist, in `nmp-transport`'s
     /// normalized bare-host form (lowercase, no brackets) -- the same
     /// vocabulary the engine's `allowed_local_relay_hosts` uses. Empty
-    /// means NO loopback/private/link-local/onion host may be dialed.
+    /// means NO loopback/private/link-local host may be dialed.
+    ///
+    /// Says nothing about `.onion`, which `tor_reachable` owns (#1251).
     pub allowed_local_hosts: Vec<String>,
+    /// Whether this process can reach a Tor hidden service (#1251). A Blossom
+    /// server URL arrives with no provenance NMP can inspect, so a `.onion`
+    /// server needs this declaration; the local-host allowlist grants it
+    /// nothing. `default = false` keeps the field optional for existing
+    /// callers.
+    #[uniffi(default = false)]
+    pub tor_reachable: bool,
     /// Cap on a single-descriptor response body (upload/mirror).
     pub max_response_bytes: Option<u64>,
     /// Cap on a `GET /list` response body.
@@ -632,6 +641,7 @@ fn client_config_from_ffi(config: FfiBlossomClientConfig) -> BlossomClientConfig
             .allowed_local_hosts
             .into_iter()
             .collect::<BTreeSet<String>>(),
+        tor_reachable: config.tor_reachable,
         max_response_bytes: config
             .max_response_bytes
             .map(byte_bound)
@@ -2167,6 +2177,7 @@ mod tests {
     fn client_config_nones_resolve_to_crate_defaults() {
         let defaults = client_config_from_ffi(FfiBlossomClientConfig {
             allowed_local_hosts: vec![],
+            tor_reachable: false,
             max_response_bytes: None,
             max_list_response_bytes: None,
             request_deadline_secs: None,
@@ -2181,6 +2192,7 @@ mod tests {
 
         let explicit = client_config_from_ffi(FfiBlossomClientConfig {
             allowed_local_hosts: vec!["localhost".to_string(), "localhost".to_string()],
+            tor_reachable: false,
             max_response_bytes: Some(1024),
             max_list_response_bytes: Some(2048),
             request_deadline_secs: Some(5),
@@ -2208,6 +2220,7 @@ mod tests {
         .expect("a valid authorization");
         let client = FfiBlossomClient::new(FfiBlossomClientConfig {
             allowed_local_hosts: vec![],
+            tor_reachable: false,
             max_response_bytes: None,
             max_list_response_bytes: None,
             request_deadline_secs: None,
@@ -2289,6 +2302,7 @@ mod tests {
         .expect("a valid authorization");
         let client = FfiBlossomClient::new(FfiBlossomClientConfig {
             allowed_local_hosts: vec![],
+            tor_reachable: false,
             max_response_bytes: None,
             max_list_response_bytes: None,
             request_deadline_secs: None,
@@ -2413,6 +2427,7 @@ mod tests {
         .expect("a valid upload authorization");
         let client = FfiBlossomClient::new(FfiBlossomClientConfig {
             allowed_local_hosts: vec![],
+            tor_reachable: false,
             max_response_bytes: None,
             max_list_response_bytes: None,
             request_deadline_secs: Some(5),

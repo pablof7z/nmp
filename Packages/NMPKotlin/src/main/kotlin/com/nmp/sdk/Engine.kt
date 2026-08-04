@@ -28,13 +28,26 @@ data class NMPConfig(
      * under the 2-relay-min, suppressed when `appRelays` is non-empty.
      * Default empty. */
     val fallbackRelays: List<String> = emptyList(),
-    /** Local/private relay HOSTS the operator explicitly opts into despite
-     * the SSRF admission policy (issue #121). A network-derived relay on a
-     * loopback / RFC-1918 / link-local / `.onion` host is rejected by
-     * default; listing its host here (e.g. `"127.0.0.1"` or `"localhost"`)
-     * re-admits derived relays on that exact host.
-     * Host-only match (port- and path-insensitive). Default empty. */
+    /** Local/private relay HOSTS to re-admit from OTHER PEOPLE's data. A
+     * loopback / RFC-1918 / link-local relay named by someone else's relay
+     * list or event is refused by default; listing its host here
+     * (`"127.0.0.1"`, `"localhost"`) re-admits that exact host from any
+     * source. Host-only match (port- and path-insensitive).
+     *
+     * NOT how an app reaches its own local relay: relays this app declared
+     * (`appRelays`, `fallbackRelays`, an explicit write route, a pinned read
+     * scope) and relays a signed-in identity declared in its own relay list
+     * are heeded on their provenance alone. Default empty. */
     val allowedLocalRelayHosts: List<String> = emptyList(),
+    /** Whether this process can reach a Tor hidden service.
+     *
+     * `.onion` is a reachability question, not a "my network" address, so
+     * `allowedLocalRelayHosts` grants it nothing. Declaring reachability makes
+     * OTHER people's `.onion` relays usable, not only ones this app or its own
+     * identities declared. NMP installs no Tor transport and never probes for
+     * one: this states that reachability exists, and a hidden service that
+     * turns out unreachable simply fails to connect. Default `false`. */
+    val torReachable: Boolean = false,
     /** The one whole-engine relay ceiling. It bounds the complete compiled
      * demand and simultaneous physical transport workers with the same
      * effective value. Access contexts never share a socket; competing read
@@ -52,6 +65,7 @@ data class NMPConfig(
             appRelays = appRelays,
             fallbackRelays = fallbackRelays,
             allowedLocalRelayHosts = allowedLocalRelayHosts,
+            torReachable = torReachable,
             maxRelays = maxRelays,
             maxAuthCapabilities = maxAuthCapabilities,
         )
