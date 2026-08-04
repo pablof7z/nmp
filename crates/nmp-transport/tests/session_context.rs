@@ -1,6 +1,7 @@
 use std::sync::mpsc;
 
 use nmp_grammar::{AccessContext, RelaySessionKey};
+use nmp_network_policy::Declarer;
 use nmp_transport::{Pool, PoolConfig, RelayOpenError};
 use nostr::{Keys, RelayUrl};
 
@@ -23,12 +24,15 @@ fn physical_session_cap_counts_contexts_not_urls() {
     );
     let b = RelaySessionKey::new(relay, AccessContext::Nip42(Keys::generate().public_key()));
 
-    let public_handle = pool.ensure_session(&public).unwrap();
-    assert_eq!(pool.ensure_session(&public).unwrap(), public_handle);
-    let a_handle = pool.ensure_session(&a).unwrap();
+    let public_handle = pool.ensure_session(&public, Declarer::Ourselves).unwrap();
+    assert_eq!(
+        pool.ensure_session(&public, Declarer::Ourselves).unwrap(),
+        public_handle
+    );
+    let a_handle = pool.ensure_session(&a, Declarer::Ourselves).unwrap();
     assert_ne!(a_handle, public_handle);
     assert_eq!(
-        pool.ensure_session(&b),
+        pool.ensure_session(&b, Declarer::Ourselves),
         Err(RelayOpenError::AtCapacity { max_relays: 2 })
     );
 

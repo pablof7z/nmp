@@ -726,7 +726,10 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             MemoryStore::default(),
             config.relays,
             pool_config,
-            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+            RelayAdmissionPolicy::new(
+                ["127.0.0.1".to_string()],
+                nmp_network_policy::OnionReachability::Unreachable,
+            ),
         )?
     } else {
         let store = if config.redb_nondurable_diagnostic {
@@ -745,7 +748,10 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             store,
             config.relays,
             pool_config,
-            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+            RelayAdmissionPolicy::new(
+                ["127.0.0.1".to_string()],
+                nmp_network_policy::OnionReachability::Unreachable,
+            ),
         )?
     };
     let live_query = LiveQuery::single(demand);

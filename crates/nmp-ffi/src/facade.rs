@@ -79,17 +79,33 @@ pub struct NmpEngineConfig {
     pub app_relays: Vec<String>,
     /// Operator fallback relay set (`Lane::OperatorFallback`). Default empty.
     pub fallback_relays: Vec<String>,
-    /// Local/private relay HOSTS the operator explicitly opts into despite
-    /// the SSRF admission policy (issue #121). A network-derived relay on a
-    /// loopback / RFC-1918 / link-local / `.onion` host is rejected by
-    /// default; listing its host here (e.g. `"127.0.0.1"` or `"localhost"`)
-    /// re-admits derived relays on that exact host.
-    /// Host-only match (port- and path-insensitive). Default empty.
+    /// Local/private relay HOSTS to re-admit from OTHER PEOPLE's data
+    /// (issues #121, #1251). A loopback / RFC-1918 / link-local relay named by
+    /// someone else's relay list or event is rejected by default; listing its
+    /// host here (`"127.0.0.1"`, `"localhost"`) re-admits that exact host from
+    /// any source. Host-only match (port- and path-insensitive).
+    ///
+    /// NOT how an app reaches its own local relay: relays this app declared
+    /// (`app_relays`, `fallback_relays`, an explicit write route, a pinned
+    /// read scope) and relays a signed-in identity declared in its own relay
+    /// list are heeded on their provenance alone. Default empty.
     ///
     /// `default = []` keeps this field OPTIONAL for existing foreign-language
     /// callers — adding it must not break records constructed before #121.
     #[uniffi(default = [])]
     pub allowed_local_relay_hosts: Vec<String>,
+    /// Whether this process can reach a Tor hidden service (#1251).
+    ///
+    /// `.onion` is a reachability question, not a "my network" address, so
+    /// `allowed_local_relay_hosts` grants it nothing. Declaring reachability
+    /// makes OTHER people's `.onion` relays usable, not only ones this app or
+    /// its own identities declared. NMP installs no Tor transport and never
+    /// probes for one: this states that reachability exists, and a hidden
+    /// service that turns out unreachable simply fails to connect.
+    ///
+    /// `default = false` keeps the field optional for existing callers.
+    #[uniffi(default = false)]
+    pub tor_reachable: bool,
     /// The one whole-engine relay ceiling. It bounds the complete compiled
     /// demand and simultaneous physical transport workers with the same
     /// effective value. Access contexts never share a socket; competing read
@@ -127,6 +143,7 @@ impl Default for NmpEngineConfig {
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
             allowed_local_relay_hosts: Vec::new(),
+            tor_reachable: false,
             max_relays: DEFAULT_MAX_RELAYS,
             max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
         }
@@ -171,6 +188,7 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             fallback_relays: config.fallback_relays,
             allowed_local_relay_hosts: config.allowed_local_relay_hosts,
             max_publish_attempts: nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            tor_reachable: config.tor_reachable,
             max_relays: config.max_relays as usize,
             max_auth_capabilities: config.max_auth_capabilities as usize,
         }

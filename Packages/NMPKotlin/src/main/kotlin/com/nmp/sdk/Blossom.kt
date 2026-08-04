@@ -742,9 +742,13 @@ class BlossomAuthorization private constructor(internal val ffi: FfiBlossomAutho
  * `null` means the Rust crate's default. */
 data class BlossomClientConfig(
     /** Operator opt-in local-host allowlist (normalized bare-host form,
-     * lowercase). Empty means NO loopback/private/link-local/onion host
-     * may be dialed. */
+     * lowercase). Empty means NO loopback/private/link-local host may be
+     * dialed. Says nothing about `.onion`, which `torReachable` owns. */
     val allowedLocalHosts: List<String> = emptyList(),
+    /** Whether this process can reach a Tor hidden service. A Blossom server
+     * URL arrives with no provenance NMP can inspect, so a `.onion` server
+     * needs this declaration; the local-host allowlist grants it nothing. */
+    val torReachable: Boolean = false,
     /** Cap on a single-descriptor response body (upload/mirror). */
     val maxResponseBytes: ULong? = null,
     /** Cap on a `GET /list` response body. */
@@ -755,6 +759,7 @@ data class BlossomClientConfig(
     internal fun toFfi(): FfiBlossomClientConfig =
         FfiBlossomClientConfig(
             allowedLocalHosts = allowedLocalHosts,
+            torReachable = torReachable,
             maxResponseBytes = maxResponseBytes,
             maxListResponseBytes = maxListResponseBytes,
             requestDeadlineSecs = requestDeadlineSeconds,

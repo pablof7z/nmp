@@ -1,15 +1,36 @@
 //! Pure network-destination admission.
 //!
-//! This crate owns only three facts:
+//! This crate owns only four facts:
 //!
 //! - canonical bare-host normalization;
 //! - literal host/IP classification;
-//! - whether one complete DNS answer set is admissible under an explicit
-//!   local-host allowlist.
+//! - whether a destination is admissible given WHOSE declaration named it;
+//! - whether one complete DNS answer set is admissible for a host already
+//!   admitted.
 //!
 //! It performs no DNS, socket, HTTP, WebSocket, relay, or protocol work.
 //! Protocol adapters extract their own URL host, resolve or dial using their
 //! own machinery, and may proceed only with the typed values returned here.
+//!
+//! # The two independent questions
+//!
+//! Admission used to be one list of address shapes nobody may dial. It is
+//! really two questions that happen to be asked at the same moment:
+//!
+//! 1. **Whose declaration is this?** ([`Declarer`]) A loopback or RFC-1918
+//!    address is meaningless — and possibly hostile — in somebody else's data,
+//!    and entirely legitimate when this app's operator or an identity it signs
+//!    as named it, because they are describing their own network. Address
+//!    shape decides nothing on its own; provenance does.
+//! 2. **Can this process reach a `.onion` name at all?**
+//!    ([`OnionReachability`]) That is not a "my network" question, so it is not
+//!    on the provenance axis. An app that has arranged Tor reachability says
+//!    so once, and then other people's `.onion` relays become usable — not
+//!    only its own.
+//!
+//! Admitting is permission to try, never a promise the destination works: an
+//! own declaration naming a `.onion` with no Tor available is admitted here
+//! and simply fails to connect.
 
 #![forbid(unsafe_code)]
 
@@ -20,7 +41,49 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostClass {
     Public,
+    /// Loopback, RFC-1918, link-local, unspecified, or broadcast: an address
+    /// that means something only on somebody's own network.
     Local,
+    /// A Tor hidden-service name. Not local, not public, and not resolvable
+    /// without Tor — a reachability question rather than a network-ownership
+    /// one, which is why it is its own class.
+    Onion,
+}
+
+/// Whose declaration named this destination.
+///
+/// This is the whole of the provenance axis. It is deliberately not a
+/// confidence score or a source enumeration: every trusted tier collapses to
+/// the same answer, and a destination named by any trusted tier is admitted
+/// even when an untrusted tier also names it — admission is a union of grants,
+/// never a per-source filter that gets intersected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Declarer {
+    /// This app's operator, or an identity this app can sign as, named this
+    /// destination. They are describing their own network, so every address
+    /// shape they name is heeded.
+    Ourselves,
+    /// Someone else's data named it: another author's list, a relay hint in a
+    /// third party's event, anything unverified. Address shape now decides.
+    SomeoneElse,
+}
+
+/// Whether this process can reach a Tor hidden service.
+///
+/// The app declares it; NMP never probes for it. Declaring reachability does
+/// not install a Tor transport — it states that one exists, and admission
+/// stops standing in the way of `.onion` destinations nobody in this process
+/// declared themselves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OnionReachability {
+    /// No Tor. A `.onion` name someone else declared is refused before any
+    /// socket work; one we declared ourselves is still admitted and simply
+    /// fails to connect.
+    #[default]
+    Unreachable,
+    /// Tor is available to this process, so `.onion` destinations are ordinary
+    /// destinations regardless of who named them.
+    Reachable,
 }
 
 /// One canonical, engine-free destination policy.
@@ -28,9 +91,14 @@ pub enum HostClass {
 /// Allowlist entries are bare host names or IP literals. They are normalized
 /// once at construction, so literal-host and post-DNS checks cannot compare
 /// different spellings.
+///
+/// The allowlist re-admits LOCAL hosts named by someone else. It says nothing
+/// about `.onion`, which [`OnionReachability`] owns, and nothing about hosts we
+/// declared ourselves, which [`Declarer::Ourselves`] already admits.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DestinationPolicy {
     allowed_local_hosts: BTreeSet<String>,
+    onion: OnionReachability,
 }
 
 /// Proof that a literal host passed [`DestinationPolicy::admit_host`].
@@ -41,9 +109,11 @@ pub struct DestinationPolicy {
 /// The witness is the ONLY way into [`DestinationPolicy::admit_resolved`]:
 ///
 /// ```
-/// use nmp_network_policy::DestinationPolicy;
+/// use nmp_network_policy::{Declarer, DestinationPolicy};
 /// let policy = DestinationPolicy::default();
-/// let host = policy.admit_host("relay.example.com").unwrap();
+/// let host = policy
+///     .admit_host("relay.example.com", Declarer::SomeoneElse)
+///     .unwrap();
 /// assert!(policy.admit_resolved(&host, ["8.8.8.8".parse().unwrap()]).is_ok());
 /// ```
 ///
@@ -65,9 +135,11 @@ pub struct DestinationPolicy {
 /// path to the authority discriminant:
 ///
 /// ```compile_fail
-/// use nmp_network_policy::{AdmittedHost, DestinationPolicy};
+/// use nmp_network_policy::{AdmittedHost, Declarer, DestinationPolicy};
 /// let policy = DestinationPolicy::default();
-/// let admitted = policy.admit_host("relay.example.com").unwrap();
+/// let admitted = policy
+///     .admit_host("relay.example.com", Declarer::SomeoneElse)
+///     .unwrap();
 /// let escalated = AdmittedHost {
 ///     key: "127.0.0.1".to_string(),
 ///     ..admitted
@@ -97,11 +169,15 @@ pub struct AdmittedAddresses(Vec<IpAddr>);
 /// Typed reasons a destination cannot be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DestinationRefusal {
-    /// The literal URL host itself is local and was not explicitly allowed.
+    /// Someone else's data named a local literal host, and no operator
+    /// allowlist entry re-admits it.
     LocalHostNotAllowed { host: String },
-    /// At least one resolved address is local and the queried host was not
-    /// explicitly allowed. `public_addresses` is nonempty for a mixed answer;
-    /// that mixed set is refused in full.
+    /// Someone else's data named a Tor hidden service and this process has not
+    /// declared Tor reachable.
+    OnionUnreachable { host: String },
+    /// At least one resolved address is local and the queried host had no
+    /// local-resolution authority. `public_addresses` is nonempty for a mixed
+    /// answer; that mixed set is refused in full.
     ResolvedLocalAddressesNotAllowed {
         host: String,
         local_addresses: Vec<IpAddr>,
@@ -116,7 +192,13 @@ impl std::fmt::Display for DestinationRefusal {
         match self {
             Self::LocalHostNotAllowed { host } => write!(
                 formatter,
-                "destination host {host} is local and not operator allowed"
+                "destination host {host} is local, was declared by someone else, \
+                 and is not operator allowed"
+            ),
+            Self::OnionUnreachable { host } => write!(
+                formatter,
+                "destination host {host} was declared by someone else and this \
+                 process has not declared Tor reachable"
             ),
             Self::ResolvedLocalAddressesNotAllowed {
                 host,
@@ -150,15 +232,20 @@ impl std::fmt::Display for DestinationRefusal {
 impl std::error::Error for DestinationRefusal {}
 
 impl DestinationPolicy {
-    /// Normalize and deduplicate the explicit local-host allowlist.
+    /// Normalize and deduplicate the explicit local-host allowlist, and record
+    /// whether this process can reach a Tor hidden service.
     #[must_use]
-    pub fn new(allowed_local_hosts: impl IntoIterator<Item = String>) -> Self {
+    pub fn new(
+        allowed_local_hosts: impl IntoIterator<Item = String>,
+        onion: OnionReachability,
+    ) -> Self {
         Self {
             allowed_local_hosts: allowed_local_hosts
                 .into_iter()
                 .map(|host| normalize_bare_host(&host))
                 .filter(|host| !host.is_empty())
                 .collect(),
+            onion,
         }
     }
 
@@ -168,32 +255,69 @@ impl DestinationPolicy {
         &self.allowed_local_hosts
     }
 
+    /// Whether this process declared Tor reachable.
+    #[must_use]
+    pub fn onion_reachability(&self) -> OnionReachability {
+        self.onion
+    }
+
     /// Admit one bare host before resolution or socket work begins.
     ///
-    /// Public-looking names are admitted provisionally but still receive only
+    /// A host we declared ourselves is admitted whatever its shape, and
+    /// carries local-resolution authority: describing your own network is
+    /// exactly the case where a name legitimately resolves to an address only
+    /// you can reach.
+    ///
+    /// A host someone else declared is admitted when it is public, when it is
+    /// local and the operator allowlist names it, or when it is `.onion` and
+    /// Tor is declared reachable. Public-looking names still receive only
     /// `PublicOnly` authority: their complete DNS answer must pass
     /// [`Self::admit_resolved`] before dialing.
-    pub fn admit_host(&self, host: &str) -> Result<AdmittedHost, DestinationRefusal> {
+    pub fn admit_host(
+        &self,
+        host: &str,
+        declarer: Declarer,
+    ) -> Result<AdmittedHost, DestinationRefusal> {
         let key = normalize_bare_host(host);
-        let explicitly_allowed = self.allowed_local_hosts.contains(&key);
-        if classify_bare_host(&key) == HostClass::Local && !explicitly_allowed {
-            return Err(DestinationRefusal::LocalHostNotAllowed { host: key });
+        if declarer == Declarer::Ourselves {
+            return Ok(AdmittedHost {
+                key,
+                local_resolution_authority: LocalResolutionAuthority::ExplicitlyAllowed,
+            });
         }
-        Ok(AdmittedHost {
-            key,
-            local_resolution_authority: if explicitly_allowed {
-                LocalResolutionAuthority::ExplicitlyAllowed
-            } else {
-                LocalResolutionAuthority::PublicOnly
-            },
-        })
+        match classify_bare_host(&key) {
+            // `.onion` is off the local-host axis entirely: only declared
+            // reachability answers for it, and the allowlist grants it
+            // nothing. A resolved hidden-service answer is whatever the local
+            // Tor resolver hands back — routinely a loopback or otherwise
+            // private address — so reachability necessarily carries
+            // local-resolution authority.
+            HostClass::Onion if self.onion == OnionReachability::Reachable => Ok(AdmittedHost {
+                key,
+                local_resolution_authority: LocalResolutionAuthority::ExplicitlyAllowed,
+            }),
+            HostClass::Onion => Err(DestinationRefusal::OnionUnreachable { host: key }),
+            // Naming a host in the allowlist IS the operator declaring it, so
+            // it carries local-resolution authority whatever the literal name
+            // looks like: the dev relay that answers `relay.example.com` with
+            // `127.0.0.1` is the case this opt-in exists for.
+            _ if self.allowed_local_hosts.contains(&key) => Ok(AdmittedHost {
+                key,
+                local_resolution_authority: LocalResolutionAuthority::ExplicitlyAllowed,
+            }),
+            HostClass::Public => Ok(AdmittedHost {
+                key,
+                local_resolution_authority: LocalResolutionAuthority::PublicOnly,
+            }),
+            HostClass::Local => Err(DestinationRefusal::LocalHostNotAllowed { host: key }),
+        }
     }
 
     /// Admit one complete DNS answer for an already-admitted literal host.
     ///
-    /// An explicitly allowed host may resolve locally. Every other host is
-    /// refused if even one answer is local; public answers do not launder a
-    /// mixed set.
+    /// A host with local-resolution authority may resolve locally. Every other
+    /// host is refused if even one answer is local; public answers do not
+    /// launder a mixed set.
     pub fn admit_resolved(
         &self,
         host: &AdmittedHost,
@@ -270,12 +394,15 @@ pub fn classify_bare_host(host: &str) -> HostClass {
         Ok(ip) => classify_ip(ip),
         Err(_) if normalized == "localhost" => HostClass::Local,
         Err(_) if normalized.ends_with(".localhost") => HostClass::Local,
-        Err(_) if normalized.ends_with(".onion") => HostClass::Local,
+        Err(_) if normalized == "onion" || normalized.ends_with(".onion") => HostClass::Onion,
         Err(_) => HostClass::Public,
     }
 }
 
 /// Classify one literal or resolved IP address.
+///
+/// An IP is never [`HostClass::Onion`]: a hidden service is a name, and by the
+/// time an address exists Tor has already answered for it.
 #[must_use]
 pub fn classify_ip(ip: IpAddr) -> HostClass {
     match ip {
@@ -345,9 +472,11 @@ mod tests {
             "localhost",
             "LOCALHOST.",
             "foo.localhost",
-            "hiddenservice.onion",
         ] {
             assert_eq!(classify_bare_host(host), HostClass::Local, "{host}");
+        }
+        for host in ["hiddenservice.onion", "HiddenService.Onion."] {
+            assert_eq!(classify_bare_host(host), HostClass::Onion, "{host}");
         }
         for host in [
             "8.8.8.8",
@@ -355,6 +484,7 @@ mod tests {
             "2606:4700:4700::1111",
             "relay.example.com",
             "localhost.example.com",
+            "onion.example.com",
         ] {
             assert_eq!(classify_bare_host(host), HostClass::Public, "{host}");
         }
@@ -389,18 +519,96 @@ mod tests {
 
     #[test]
     fn normalization_and_explicit_allowlist_matching_cannot_drift() {
-        let policy = DestinationPolicy::new([
-            " LOCALHOST. ".to_string(),
-            "[::1]".to_string(),
-            "Blossom.NMP.Test.".to_string(),
-        ]);
-        assert!(policy.admit_host("localhost").is_ok());
-        assert!(policy.admit_host("LOCALHOST.").is_ok());
-        assert!(policy.admit_host("::1").is_ok());
-        assert!(policy.admit_host("[::1]").is_ok());
-        assert!(policy.admit_host("blossom.nmp.test").is_ok());
+        let policy = DestinationPolicy::new(
+            [
+                " LOCALHOST. ".to_string(),
+                "[::1]".to_string(),
+                "Blossom.NMP.Test.".to_string(),
+            ],
+            OnionReachability::Unreachable,
+        );
+        for host in [
+            "localhost",
+            "LOCALHOST.",
+            "::1",
+            "[::1]",
+            "blossom.nmp.test",
+        ] {
+            assert!(
+                policy.admit_host(host, Declarer::SomeoneElse).is_ok(),
+                "{host}"
+            );
+        }
         assert!(matches!(
-            policy.admit_host("foo.localhost"),
+            policy.admit_host("foo.localhost", Declarer::SomeoneElse),
+            Err(DestinationRefusal::LocalHostNotAllowed { .. })
+        ));
+    }
+
+    /// The whole point of the provenance axis: the address decides nothing on
+    /// its own, and the SAME address gets opposite answers depending on whose
+    /// declaration named it.
+    #[test]
+    fn one_address_gets_opposite_answers_from_the_two_declarers() {
+        let policy = DestinationPolicy::default();
+        for host in ["127.0.0.1", "192.168.1.10", "localhost", "fe80::1"] {
+            assert!(
+                policy.admit_host(host, Declarer::Ourselves).is_ok(),
+                "our own declaration describes our own network: {host}"
+            );
+            assert!(
+                policy.admit_host(host, Declarer::SomeoneElse).is_err(),
+                "the same address in someone else's data is refused: {host}"
+            );
+        }
+    }
+
+    /// Heeding is permission to try, not a promise it works: an own `.onion`
+    /// is admitted with no Tor at all, and simply fails later.
+    #[test]
+    fn onion_is_governed_by_reachability_not_by_the_local_allowlist() {
+        let without_tor = DestinationPolicy::default();
+        assert!(without_tor
+            .admit_host("abcdef.onion", Declarer::Ourselves)
+            .is_ok());
+        assert_eq!(
+            without_tor.admit_host("abcdef.onion", Declarer::SomeoneElse),
+            Err(DestinationRefusal::OnionUnreachable {
+                host: "abcdef.onion".to_string()
+            })
+        );
+
+        let with_tor = DestinationPolicy::new([], OnionReachability::Reachable);
+        assert!(
+            with_tor
+                .admit_host("abcdef.onion", Declarer::SomeoneElse)
+                .is_ok(),
+            "a declared Tor capability admits OTHER people's hidden services"
+        );
+
+        // The local-host allowlist is about local hosts. Listing a hidden
+        // service there grants nothing, because `.onion` is not on that axis.
+        let allowlisted =
+            DestinationPolicy::new(["abcdef.onion".to_string()], OnionReachability::Unreachable);
+        assert_eq!(
+            allowlisted.admit_host("abcdef.onion", Declarer::SomeoneElse),
+            Err(DestinationRefusal::OnionUnreachable {
+                host: "abcdef.onion".to_string()
+            })
+        );
+    }
+
+    /// Tor reachability is not a local-host grant: declaring Tor must not
+    /// quietly re-admit loopback or RFC-1918 from someone else's data.
+    #[test]
+    fn tor_reachability_grants_nothing_to_local_addresses() {
+        let policy = DestinationPolicy::new([], OnionReachability::Reachable);
+        assert!(matches!(
+            policy.admit_host("127.0.0.1", Declarer::SomeoneElse),
+            Err(DestinationRefusal::LocalHostNotAllowed { .. })
+        ));
+        assert!(matches!(
+            policy.admit_host("192.168.1.10", Declarer::SomeoneElse),
             Err(DestinationRefusal::LocalHostNotAllowed { .. })
         ));
     }
@@ -408,7 +616,9 @@ mod tests {
     #[test]
     fn complete_resolved_set_is_admitted_or_refused_without_filtering() {
         let policy = DestinationPolicy::default();
-        let host = policy.admit_host("relay.example.com").unwrap();
+        let host = policy
+            .admit_host("relay.example.com", Declarer::SomeoneElse)
+            .unwrap();
         let public: Vec<IpAddr> = ["8.8.8.8", "2606:4700:4700::1111"]
             .into_iter()
             .map(|address| address.parse().unwrap())
@@ -436,8 +646,13 @@ mod tests {
 
     #[test]
     fn explicit_host_authority_admits_local_and_mixed_answers_exactly() {
-        let policy = DestinationPolicy::new(["relay.example.com".to_string()]);
-        let host = policy.admit_host("RELAY.EXAMPLE.COM.").unwrap();
+        let policy = DestinationPolicy::new(
+            ["relay.example.com".to_string()],
+            OnionReachability::Unreachable,
+        );
+        let host = policy
+            .admit_host("RELAY.EXAMPLE.COM.", Declarer::SomeoneElse)
+            .unwrap();
         let addresses: Vec<IpAddr> = ["127.0.0.1", "8.8.8.8"]
             .into_iter()
             .map(|address| address.parse().unwrap())
@@ -451,10 +666,32 @@ mod tests {
         );
     }
 
+    /// A public-looking name we declared ourselves that resolves to our own
+    /// LAN is the ordinary "my relay is at home" shape, not a rebinding
+    /// attack, so the same authority has to survive to the post-DNS check.
+    #[test]
+    fn our_own_public_looking_host_may_resolve_onto_our_own_network() {
+        let policy = DestinationPolicy::default();
+        let ours = policy
+            .admit_host("relay.example.com", Declarer::Ourselves)
+            .unwrap();
+        let theirs = policy
+            .admit_host("relay.example.com", Declarer::SomeoneElse)
+            .unwrap();
+        let answer: IpAddr = "192.168.1.10".parse().unwrap();
+        assert!(policy.admit_resolved(&ours, [answer]).is_ok());
+        assert!(matches!(
+            policy.admit_resolved(&theirs, [answer]),
+            Err(DestinationRefusal::ResolvedLocalAddressesNotAllowed { .. })
+        ));
+    }
+
     #[test]
     fn empty_dns_answer_has_one_typed_refusal() {
         let policy = DestinationPolicy::default();
-        let host = policy.admit_host("relay.example.com").unwrap();
+        let host = policy
+            .admit_host("relay.example.com", Declarer::SomeoneElse)
+            .unwrap();
         assert_eq!(
             policy.admit_resolved(&host, []),
             Err(DestinationRefusal::NoResolvedAddresses {

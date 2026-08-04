@@ -1936,6 +1936,14 @@ impl<S: EventStore> EngineCore<S> {
             return self.refuse_publish(PublishError::EmptyExplicitRoute);
         }
 
+        // An exact route the app named for this write is the app describing
+        // its own network (#1251). Routing already executes it verbatim; the
+        // socket has to agree, or an app that publishes to its own LAN relay
+        // is told the write was routed and then cannot reach it.
+        if let WriteRouting::Explicit(relays) = &routing {
+            self.heed_relays(relays.iter().cloned());
+        }
+
         // #591: a token that already resolves to a previously-accepted
         // receipt REATTACHES that existing obligation -- this call enqueues
         // no second write, and `payload`/`durability`/`routing`/
@@ -2316,6 +2324,9 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
+        // Holding this key's signer is what makes its relay list OUR relay
+        // list (#1251): we could have signed it, active or not.
+        self.attached_signers.insert(pk);
         let mut effects = Vec::new();
         for (id, pending) in &mut self.pending {
             if pending.signing_pubkey == pk
@@ -3224,10 +3235,27 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// One contributing author's clause of [`Self::no_destination_detail`].
+    ///
+    /// "Present but empty" has two completely different meanings, and telling
+    /// a user with a LAN relay that they have no relays is the defect #1251
+    /// exists to close. A list every one of whose relays was refused says so,
+    /// names them, and names the config that would re-admit them; a list that
+    /// really declared nothing keeps the old wording.
     fn exhausted_source(&self, author: &PublicKey, direction: RouteDirection) -> String {
         let state = self.routing_facts.author_routes(author);
         let author = author.to_hex();
         match state {
+            AuthorRouteState::Present(routes) if routes.every_declared_relay_was_refused() => {
+                let refused = routes
+                    .refused()
+                    .iter()
+                    .map(RelayUrl::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "{author} declared relays but every one was refused ({refused});                      they are not this app's own and their hosts are neither in                      allowed_local_relay_hosts nor reachable under the declared                      Tor capability"
+                )
+            }
             AuthorRouteState::Present(_) => match direction {
                 RouteDirection::Outbound => {
                     format!("Present outbound routes for {author} are empty")

@@ -1340,8 +1340,9 @@ mod affected_handle_invalidation_tests {
 
     #[test]
     fn operator_allowlist_admits_projected_local_evidence() {
-        let mut core = EngineCore::new(MemoryStore::new(), 20)
-            .with_relay_admission(RelayAdmissionPolicy::new(["127.0.0.1".to_string()]));
+        let mut core = EngineCore::new(MemoryStore::new(), 20).with_relay_admission(
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()], OnionReachability::Unreachable),
+        );
         let atom = ContextualAtom {
             filter: ConcreteFilter::default(),
             source: SourceAuthority::Public,
@@ -1356,6 +1357,44 @@ mod affected_handle_invalidation_tests {
 
         assert_eq!(admitted.iter().next().unwrap().routing_evidence.len(), 1);
         assert_eq!(core.discovered_private_relays_rejected, 0);
+    }
+
+    /// A relay hint is the cheapest thing in Nostr to forge, and it carries no
+    /// authorship at all: the tag is in someone else's event and says whatever
+    /// they typed. So a hint naming an RFC-1918 address is skipped, and it is
+    /// STILL skipped when it names the exact local relay this app declared and
+    /// dials every day (#1251). Inheriting a grant by naming its destination is
+    /// how a forged hint would obtain admission nobody gave it.
+    #[test]
+    fn a_relay_hint_naming_a_lan_address_is_skipped_even_when_we_use_that_relay() {
+        let lan = RelayUrl::parse("ws://192.168.1.10").unwrap();
+        let facts = crate::core::RoutingFactStore::new([lan.clone()], []);
+        let mut core = EngineCore::new_with_routing_facts(MemoryStore::new(), facts, 20);
+        assert_eq!(
+            core.dial_declarer(&lan),
+            nmp_network_policy::Declarer::Ourselves,
+            "this app really does declare and dial that exact relay"
+        );
+
+        let atom = ContextualAtom {
+            filter: ConcreteFilter {
+                ids: Some(BTreeSet::from(["22".repeat(32)])),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Public,
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::from([RoutingEvidence {
+                relay: lan,
+                origin: nmp_grammar::RoutingEvidenceKind::Hint,
+            }]),
+        };
+
+        let admitted = core.admit_projected_routing_evidence(&BTreeSet::from([atom]));
+        assert!(
+            admitted.iter().next().unwrap().routing_evidence.is_empty(),
+            "the hint gets nothing from a grant it was never part of"
+        );
+        assert_eq!(core.discovered_private_relays_rejected, 1);
     }
 }
 

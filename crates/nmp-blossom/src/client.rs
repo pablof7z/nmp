@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nmp_asset::{Sha256Hash, VerifiedAsset};
-use nmp_network_policy::{DestinationPolicy, DestinationRefusal};
+use nmp_network_policy::{Declarer, DestinationPolicy, DestinationRefusal, OnionReachability};
 
 use crate::auth::{BlossomVerb, SignedAuthorization};
 use crate::descriptor::{BlobDescriptor, DescriptorError};
@@ -182,9 +182,19 @@ pub struct BlossomClientConfig {
     /// Operator opt-in local-host allowlist, in
     /// `nmp_network_policy::normalize_bare_host`'s normalized form -- the
     /// same vocabulary the engine's `RelayAdmissionPolicy` uses (#519, #885).
-    /// Empty (the default) means NO loopback/private/link-local/onion host
-    /// or resolved address may be uploaded to.
+    /// Empty (the default) means NO loopback/private/link-local host or
+    /// resolved address may be uploaded to.
+    ///
+    /// This says nothing about `.onion`, which [`Self::tor_reachable`] owns
+    /// (#1251): the two are different questions, and a list of local hosts was
+    /// never the right place to answer a reachability one.
     pub allowed_local_hosts: BTreeSet<String>,
+    /// Whether this process can reach a Tor hidden service. A Blossom server
+    /// URL arrives from the app with no provenance NMP can inspect -- there is
+    /// no Blossom server-list parser here to tell "my own servers" from "a
+    /// server named in someone else's list" -- so a `.onion` server is treated
+    /// as anyone else's and needs this declaration. Default: no Tor.
+    pub tor_reachable: bool,
     /// Cap on a single-descriptor response body (upload/mirror), enforced
     /// while streaming.
     pub max_response_bytes: usize,
@@ -200,6 +210,7 @@ impl Default for BlossomClientConfig {
     fn default() -> Self {
         Self {
             allowed_local_hosts: BTreeSet::new(),
+            tor_reachable: false,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_list_response_bytes: DEFAULT_MAX_LIST_RESPONSE_BYTES,
             request_deadline: DEFAULT_REQUEST_DEADLINE,
@@ -717,7 +728,14 @@ impl BlossomClient {
         resolver_config: Option<hickory_resolver::config::ResolverConfig>,
         resolver_strategy: hickory_resolver::config::LookupIpStrategy,
     ) -> Result<Self, ClientBuildError> {
-        let destination_policy = Arc::new(DestinationPolicy::new(config.allowed_local_hosts));
+        let destination_policy = Arc::new(DestinationPolicy::new(
+            config.allowed_local_hosts,
+            if config.tor_reachable {
+                OnionReachability::Reachable
+            } else {
+                OnionReachability::Unreachable
+            },
+        ));
         let resolver = AdmittedDnsResolver::new(
             resolver_config,
             resolver_strategy,
@@ -1142,7 +1160,7 @@ impl BlossomClient {
     /// each operation wraps it in its own `LocalHostNotAdmitted` variant.
     fn reject_unadmitted_local_host(&self, host: &str) -> Result<(), String> {
         self.destination_policy
-            .admit_host(host)
+            .admit_host(host, Declarer::SomeoneElse)
             .map(|_| ())
             .map_err(|_| host.to_string())
     }
@@ -1237,7 +1255,7 @@ fn admitted_reqwest_addresses(
     host: &str,
     addresses: impl IntoIterator<Item = IpAddr>,
 ) -> Result<Vec<std::net::SocketAddr>, DestinationRefusal> {
-    let admitted_host = destination_policy.admit_host(host)?;
+    let admitted_host = destination_policy.admit_host(host, Declarer::SomeoneElse)?;
     let admitted = destination_policy.admit_resolved(&admitted_host, addresses)?;
     Ok(admitted
         .into_vec()
