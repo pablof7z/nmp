@@ -163,10 +163,18 @@ Feature: Which destination failed, and why, one destination at a time
     Then the receipt reports 4 of 4 destinations acked
     And the receipt reports that no destination is still outstanding
 
-  @designed @ledger-9
   # ---- the boundary between the two failures ----------------------------
 
   @designed @ledger-9
+  # nmp:id=DIAG-ATTRIBUTION-020
+  # nmp:status=specified
+  # nmp:gap=evidence
+  # nmp:issue=#1253
+  # Defect shape this scenario will falsify once its evidence runs (#1253):
+  #   Attribute a delivery failure to a write that has no destination yet;
+  #   "we could not reach relay X" and "we do not know where this goes" are
+  #   different screens and inventing the first from the second sends a user
+  #   to fix a relay that was never involved.
   Scenario: A write that never got a destination has no delivery failure
     # "We were trying to publish to relay X" and "we were trying to route this
     # event" are different sentences and an app shows different screens for
