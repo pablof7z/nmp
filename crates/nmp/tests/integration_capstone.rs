@@ -1164,8 +1164,8 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
 /// Plan §5 test 11, live tier: publish a `Durable` intent to TWO real
 /// relays, one of which accepts and one of which is configured to reject
 /// every event. Asserts the FULL shape of ledger #9: the first status is
-/// never a terminal (`Accepted` only), both relays are individually `Sent`
-/// to, and the two relays resolve to DIFFERENT terminals (`Acked` vs
+/// never a terminal, both relays are individually `Sent` to, and the two
+/// relays resolve to DIFFERENT per-relay terminals (`Published` vs
 /// `Rejected`) -- there is no way to read "is it sent" except by observing
 /// this per-relay stream.
 #[test]
