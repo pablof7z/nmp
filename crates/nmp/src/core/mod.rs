@@ -1910,9 +1910,14 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// The current neutral author-route fact, including what admission
-    /// refused. The router reads the routable sets; anything that has to
-    /// EXPLAIN an empty route set needs the refusals too.
-    #[allow(dead_code)]
+    /// refused.
+    ///
+    /// Test-only, and deliberately so: production readers of this fact are
+    /// the router (which wants the routable sets) and `exhausted_source`
+    /// (which wants the refusals to explain an empty one), and both already
+    /// hold `routing_facts`. A second public read door with no production
+    /// caller would be a surface nobody needs.
+    #[cfg(test)]
     pub(crate) fn author_routes(&self, author: &PublicKey) -> AuthorRouteState {
         self.routing_facts.author_routes(author)
     }
@@ -1941,7 +1946,6 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Record that a trusted declaration named these relays, so the socket
     /// boundary gives the same provenance answer routing already gave.
-    #[allow(dead_code)]
     pub(crate) fn heed_relays(&mut self, relays: impl IntoIterator<Item = RelayUrl>) {
         self.heeded_relays.extend(relays);
     }
