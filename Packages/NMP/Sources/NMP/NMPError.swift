@@ -152,6 +152,18 @@ public enum NMPError: Error, Sendable, Equatable {
     /// #1233: a records observation named none of the three records, which
     /// would deliver a permanently empty state.
     case groupNoRecordSelected
+    /// #1252: a selection handed to `NMPGroupIds.whoseRecordMatches(_:)`
+    /// named no kind. It is evaluated with NIP-29's own pin, so it would
+    /// match every event the group's host holds.
+    case groupIdSelectionNamesNoKind
+    /// #1252: a selection handed to `NMPGroupIds.whoseRecordMatches(_:)`
+    /// named a kind that is not one of NIP-29's three relay-signed group
+    /// records. That leaf is evaluated at the group's host, which is not
+    /// authoritative for anything else, so the read would silently
+    /// under-resolve. Ids that come from the app's OWN data go through
+    /// `NMPGroupIds.anyOf(_:)` as a derived binding carrying its own
+    /// authority.
+    case groupIdSelectionNotAGroupRecordKind(kind: UInt16)
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -219,6 +231,10 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .groupRecordsNotContextScoped(kinds: kinds)
         case .GroupNoRecordSelected:
             self = .groupNoRecordSelected
+        case .GroupIdSelectionNamesNoKind:
+            self = .groupIdSelectionNamesNoKind
+        case .GroupIdSelectionNotAGroupRecordKind(let kind):
+            self = .groupIdSelectionNotAGroupRecordKind(kind: kind)
         }
     }
 }
@@ -335,6 +351,10 @@ extension NMPError: LocalizedError {
             "Kinds \(kinds) are NIP-29's own relay-signed group records: they key themselves by d, never by h, so no such event could ever match a group content read; observe the group's records instead"
         case .groupNoRecordSelected:
             "A group records observation must name at least one of the three relay-signed records"
+        case .groupIdSelectionNamesNoKind:
+            "A group-record selection must name at least one of NIP-29's three relay-signed group record kinds"
+        case .groupIdSelectionNotAGroupRecordKind(let kind):
+            "Kind \(kind) is not one of NIP-29's three relay-signed group records; a group host is not authoritative for it"
         }
     }
 }

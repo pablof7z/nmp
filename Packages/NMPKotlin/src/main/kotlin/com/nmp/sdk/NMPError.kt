@@ -233,6 +233,27 @@ sealed class NMPError(message: String) : Exception(message) {
             "a group records observation must name at least one of the three relay-signed records",
         )
 
+    /** #1252: a selection handed to `NMPGroupIds.whoseRecordMatches` named no
+     * kind. It is evaluated with NIP-29's own pin, so it would match every
+     * event the group's host holds. */
+    object GroupIdSelectionNamesNoKind :
+        NMPError(
+            "a group-record selection must name at least one of NIP-29's three relay-signed " +
+                "group record kinds",
+        )
+
+    /** #1252: a selection handed to `NMPGroupIds.whoseRecordMatches` named a
+     * kind that is not one of NIP-29's three relay-signed group records. That
+     * leaf is evaluated at the group's host, which is not authoritative for
+     * anything else, so the read would silently under-resolve. Ids that come
+     * from the app's OWN data go through `NMPGroupIds.anyOf` as a derived
+     * binding carrying its own authority. */
+    data class GroupIdSelectionNotAGroupRecordKind(val kind: UShort) :
+        NMPError(
+            "kind $kind is not one of NIP-29's three relay-signed group records; a group host " +
+                "is not authoritative for it",
+        )
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -292,6 +313,9 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.GroupRecordsNotContextScoped ->
                     GroupRecordsNotContextScoped(ffi.kinds)
                 is FfiException.GroupNoRecordSelected -> GroupNoRecordSelected
+                is FfiException.GroupIdSelectionNamesNoKind -> GroupIdSelectionNamesNoKind
+                is FfiException.GroupIdSelectionNotAGroupRecordKind ->
+                    GroupIdSelectionNotAGroupRecordKind(ffi.kind)
             }
     }
 }

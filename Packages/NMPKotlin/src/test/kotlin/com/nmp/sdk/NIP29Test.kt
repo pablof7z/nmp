@@ -93,10 +93,10 @@ class NIP29Test {
      * three relay-signed records and nothing else. */
     @Test
     fun theGeneralSpellingRefusesAKindTheHostDoesNotOwn() {
-        NMPGroupIds.whoseRecordMatches(NMPFilter(kinds = setOf(39_002u)))
+        NMPGroupIds.whoseRecordMatches(NMPFilter(kinds = listOf(39_002u)))
         val error =
             assertThrows(NMPError.GroupIdSelectionNotAGroupRecordKind::class.java) {
-                NMPGroupIds.whoseRecordMatches(NMPFilter(kinds = setOf(10_009u)))
+                NMPGroupIds.whoseRecordMatches(NMPFilter(kinds = listOf(10_009u)))
             }
         assertEquals(10_009, error.kind.toInt())
     }
