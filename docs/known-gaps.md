@@ -177,7 +177,29 @@ about current code:
   report availability for a plan the app never declared. An app watching more
   groups than its relays will carry in one filter must split them across
   several observations itself, and NMP offers no guidance on where that
-  threshold is because the answer is per-relay and undiscoverable.
+  threshold is because the answer is per-relay and undiscoverable. #1252
+  widened this from one leaf to the whole id-source type without widening the
+  hazard: a derived id source (an app's own kind:10009 list, say) resolves to
+  the same `#d` set a literal list would, so it is another spelling of the
+  same wire limit rather than a new one, and the evidence leaves could already
+  resolve to thousands of ids against a relay that lists one subject in very
+  many groups.
+- **"Every group this relay hosts, except these" is not expressible (#1252).**
+  `nip29::all()` is the absence of a `#d` constraint, and set algebra is
+  defined on `GroupIds` alone, so `all().minus(...)` does not typecheck on any
+  of the four surfaces. This is a decision, not an oversight: Nostr filters
+  have no negation, so "everything except X" cannot narrow a wire request, and
+  the only way to honour it would be to ask the relay for everything and drop
+  rows after delivery — the same spelling as every other `minus`, with none of
+  the wire effect. Lowering `all()` to a derived query over kind:39000 so the
+  algebra closes was rejected for a worse reason: `all()` would then always
+  carry a `#d` set of every id the host advertises, which is both unbounded
+  and the exact defect GROUPS-DISCOVERY-007 refuses. An app hiding muted rooms
+  from a directory drops them from the `Vec<GroupSnapshot>` it renders, where
+  the cost is visible. `all()` is also unbounded by nature; the observation's
+  own per-host `limit` is the only bound, and there is no `all`-specific knob
+  because a relay that lists one subject in very many groups makes
+  `member_list_includes` just as large.
 - **~~Selector-projected values lost their only routable lane~~ CLOSED
   (#11).** `Tag(e/a/p)` now retains a valid tag relay hint or falls back to
   the source row's observed-relay provenance; `AddressCoord` retains source

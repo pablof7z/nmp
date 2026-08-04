@@ -36,7 +36,7 @@ through the existing `Engine::publish` lifecycle; every write routes
 `WriteRouting::Explicit` to the whole scope, never one host. Reads mint one
 ordinary `LiveQuery` per group or discovery predicate, never a group-specific
 observe door. `nmp-ffi` projects the full `FfiRelayScope`/`FfiGroup`/
-`FfiGroupPredicate` read-and-write surface. Swift and Kotlin do not yet
+`FfiGroupPredicate`/`FfiGroupIds` read-and-write surface. Swift and Kotlin do not yet
 project it; native apps must not reproduce `h`, host routing, signing, or
 receipt choreography while that projection is absent. This record makes no
 Kotlin or Android Group support claim.
