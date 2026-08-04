@@ -291,12 +291,18 @@ pub struct ParsedAuthorRoutes {
 /// Parse one winner after winner selection and before neutral fact mutation.
 ///
 /// Unmarked rows enter both sets; `read` and `write` markers enter exactly
-/// one. Unknown markers, malformed URLs, and URLs refused by `admits` enter
-/// neither set. Sets deduplicate repeated URLs.
-pub fn parse_relay_list(
-    event: &Event,
-    mut admits: impl FnMut(&RelayUrl) -> bool,
-) -> ParsedAuthorRoutes {
+/// one. Unknown markers and malformed URLs enter neither set. Sets deduplicate
+/// repeated URLs.
+///
+/// Nothing is admitted or refused here, deliberately (#1251). Admission
+/// depends on WHOSE declaration this event is, and a parser holds one event
+/// and no identity: it cannot tell the author's own relay list from a
+/// stranger's, so any filtering it did would have to guess. Every refused row
+/// used to vanish silently at exactly this point, which is how an author whose
+/// list was entirely local became indistinguishable from an author who
+/// declared no relays at all. The caller knows the identity and applies
+/// admission with it.
+pub fn parse_relay_list(event: &Event) -> ParsedAuthorRoutes {
     let mut routes = ParsedAuthorRoutes::default();
     for tag in event.tags.iter() {
         let values = tag.as_slice();
@@ -309,9 +315,6 @@ pub fn parse_relay_list(
         let Ok(relay) = RelayUrl::parse(value) else {
             continue;
         };
-        if !admits(&relay) {
-            continue;
-        }
         match values.get(2).map(String::as_str) {
             None => {
                 routes.outbound.insert(relay.clone());
@@ -396,13 +399,9 @@ impl Nip65Coordinator {
         })
     }
 
-    /// Select canonical replaceable winners before parsing/admission.
-    pub fn observe(
-        &mut self,
-        events: impl IntoIterator<Item = Event>,
-        admits: impl FnMut(&RelayUrl) -> bool,
-    ) -> Vec<CoordinatorUpdate> {
-        self.observe_current_delta([], events, admits)
+    /// Select canonical replaceable winners and parse them.
+    pub fn observe(&mut self, events: impl IntoIterator<Item = Event>) -> Vec<CoordinatorUpdate> {
+        self.observe_current_delta([], events)
     }
 
     /// Apply one atomic delta from the authoritative current-row projection.
@@ -417,7 +416,6 @@ impl Nip65Coordinator {
         &mut self,
         removed: impl IntoIterator<Item = EventId>,
         events: impl IntoIterator<Item = Event>,
-        mut admits: impl FnMut(&RelayUrl) -> bool,
     ) -> Vec<CoordinatorUpdate> {
         let removed: BTreeSet<EventId> = removed.into_iter().collect();
         let mut changed = BTreeSet::new();
@@ -451,7 +449,7 @@ impl Nip65Coordinator {
                     self.absent_emitted.remove(&author);
                     return Some(CoordinatorUpdate::Present {
                         author,
-                        routes: parse_relay_list(event, &mut admits),
+                        routes: parse_relay_list(event),
                     });
                 }
                 (self.settled_sources.len() == self.sources.len()
@@ -637,12 +635,11 @@ mod tests {
     }
 
     #[test]
-    fn parser_preserves_unmarked_read_write_and_refuses_before_output() {
+    fn parser_preserves_unmarked_read_write_and_drops_only_unreadable_rows() {
         let keys = Keys::generate();
         let both = relay("both");
         let read = relay("read");
         let write = relay("write");
-        let refused = relay("refused");
         let event = relay_list_event(
             &keys,
             1,
@@ -650,14 +647,42 @@ mod tests {
                 (both.as_str(), None),
                 (read.as_str(), Some("read")),
                 (write.as_str(), Some("write")),
-                (refused.as_str(), None),
                 ("not a relay", None),
                 ("wss://ignored.example", Some("future-marker")),
             ],
         );
-        let routes = parse_relay_list(&event, |url| url != &refused);
+        let routes = parse_relay_list(&event);
         assert_eq!(routes.outbound, BTreeSet::from([both.clone(), write]));
         assert_eq!(routes.inbound, BTreeSet::from([both, read]));
+    }
+
+    /// The parser holds one event and no identity, so it cannot know whose
+    /// declaration this is. It must therefore report every readable row the
+    /// author declared and refuse nothing — the defect it replaces is a local
+    /// row vanishing here, where the loss is unrecoverable and unattributable
+    /// (#1251).
+    #[test]
+    fn the_parser_reports_local_rows_instead_of_deciding_about_them() {
+        let keys = Keys::generate();
+        let loopback = RelayUrl::parse("ws://127.0.0.1:7777").unwrap();
+        let lan = RelayUrl::parse("ws://192.168.1.10").unwrap();
+        let hidden = RelayUrl::parse("ws://nmprelayxyz.onion").unwrap();
+        let event = relay_list_event(
+            &keys,
+            1,
+            &[
+                (loopback.as_str(), Some("write")),
+                (lan.as_str(), None),
+                (hidden.as_str(), Some("read")),
+            ],
+        );
+        let routes = parse_relay_list(&event);
+        assert_eq!(
+            routes.outbound,
+            BTreeSet::from([loopback, lan.clone()]),
+            "every declared write row survives parsing"
+        );
+        assert_eq!(routes.inbound, BTreeSet::from([lan, hidden]));
     }
 
     #[test]
@@ -677,7 +702,7 @@ mod tests {
 
         let newer = relay_list_event(&keys, 2, &[("wss://new.example", None)]);
         let older = relay_list_event(&keys, 1, &[("wss://old.example", None)]);
-        let updates = coordinator.observe([newer, older], |_| true);
+        let updates = coordinator.observe([newer, older]);
         assert_eq!(updates.len(), 1, "older arrival cannot overwrite winner");
         let CoordinatorUpdate::Present { routes, .. } = &updates[0] else {
             panic!("positive winner")
@@ -727,10 +752,10 @@ mod tests {
         let older = relay_list_event(&keys, 1, &[("wss://old.example", None)]);
         let newer = relay_list_event(&keys, 2, &[("wss://new.example", None)]);
 
-        assert_eq!(coordinator.observe([newer.clone()], |_| true).len(), 1);
+        assert_eq!(coordinator.observe([newer.clone()]).len(), 1);
         assert!(coordinator.settle(query.revision, &source).is_empty());
 
-        let updates = coordinator.observe_current_delta([newer.id], [older.clone()], |_| true);
+        let updates = coordinator.observe_current_delta([newer.id], [older.clone()]);
         assert_eq!(
             updates,
             vec![CoordinatorUpdate::Present {
@@ -752,18 +777,18 @@ mod tests {
         let mut coordinator = Nip65Coordinator::new([source.clone()]);
         let query = coordinator.reroot(BTreeSet::from([author])).expect("query");
         let winner = relay_list_event(&keys, 2, &[("wss://winner.example", None)]);
-        assert_eq!(coordinator.observe([winner.clone()], |_| true).len(), 1);
+        assert_eq!(coordinator.observe([winner.clone()]).len(), 1);
         assert!(coordinator.settle(query.revision, &source).is_empty());
 
         assert_eq!(
-            coordinator.observe_current_delta([winner.id], [], |_| true),
+            coordinator.observe_current_delta([winner.id], []),
             vec![CoordinatorUpdate::Absent { author }]
         );
 
         let later = relay_list_event(&keys, 3, &[("wss://later.example", None)]);
         assert!(
             matches!(
-                coordinator.observe([later], |_| true).as_slice(),
+                coordinator.observe([later]).as_slice(),
                 [CoordinatorUpdate::Present { author: updated, .. }] if updated == &author
             ),
             "a later positive row must overwrite session-derived absence"
@@ -778,17 +803,10 @@ mod tests {
         coordinator.reroot(BTreeSet::from([author])).expect("query");
         let older = relay_list_event(&keys, 1, &[("wss://old.example", None)]);
         let newer = relay_list_event(&keys, 2, &[("wss://new.example", None)]);
-        assert_eq!(
-            coordinator
-                .observe([newer.clone(), older.clone()], |_| true)
-                .len(),
-            1
-        );
+        assert_eq!(coordinator.observe([newer.clone(), older.clone()]).len(), 1);
 
         assert!(
-            coordinator
-                .observe_current_delta([older.id], [], |_| true)
-                .is_empty(),
+            coordinator.observe_current_delta([older.id], []).is_empty(),
             "a removed row that was never the winner cannot affect the fact"
         );
     }

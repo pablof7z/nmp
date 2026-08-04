@@ -185,7 +185,10 @@ fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("spawn runtime");
     let mut demand = Demand::from_filter(selection);
@@ -231,7 +234,10 @@ fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
         store,
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .unwrap();
 
@@ -396,7 +402,10 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
 
@@ -536,7 +545,10 @@ async fn unchanged_same_generation_req_is_suppressed_and_reconnect_replays_once(
             reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("spawn runtime");
 
@@ -715,7 +727,10 @@ fn no_deadlines_blocks_indefinitely() {
         MemoryStore::new(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
 
@@ -956,7 +971,10 @@ fn neg_liveness_deadline_does_not_busy_spin() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
 
@@ -1069,7 +1087,10 @@ async fn expiring_event_retracts_with_no_further_input() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
 
@@ -1137,7 +1158,10 @@ async fn earlier_expiration_from_ingest_rearms() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
 
@@ -1254,7 +1278,10 @@ fn boot_catches_up_past_due_expiry() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
 
@@ -1373,7 +1400,10 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         MemoryStore::new(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
     handle.set_active_account(Some(keys.public_key()));
@@ -1461,7 +1491,10 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
         MemoryStore::new(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
     handle.set_active_account(Some(keys.public_key()));
@@ -1583,7 +1616,10 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         RedbStore::open(&path).unwrap(),
         10,
         PoolConfig::default(),
-        RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
     )
     .expect("test engine thread construction");
     // This is literally the first command sent to the new engine thread.

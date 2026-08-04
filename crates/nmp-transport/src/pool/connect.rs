@@ -20,7 +20,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Once;
 use std::time::Duration;
 
-use nmp_network_policy::{AdmittedHost, DestinationPolicy, DestinationRefusal};
+use nmp_network_policy::{AdmittedHost, Declarer, DestinationPolicy, DestinationRefusal};
 use tungstenite::client::{uri_mode, IntoClientRequest};
 use tungstenite::error::{Error as WsError, UrlError};
 use tungstenite::protocol::WebSocketConfig;
@@ -74,9 +74,18 @@ fn install_rustls_provider() {
 /// [`std::net::SocketAddr`] values it just admitted — never re-resolving —
 /// so there is no window between the check and the connect for a rebind to
 /// exploit.
+///
+/// `declarer` carries the engine's provenance answer for this exact
+/// destination down to the socket (#1251). The pool does not re-derive it and
+/// could not: whose declaration named a relay is knowable only where the
+/// declaration was read. Passing it is what keeps ONE answer to one question —
+/// a routing layer that admits what the dial refuses is two owners of the same
+/// property, and the visible symptom is a relay the app was told it has and
+/// can never reach.
 pub(super) fn open_relay_socket(
     relay_url: &str,
     destination_policy: &DestinationPolicy,
+    declarer: Declarer,
 ) -> Result<RelaySocket, String> {
     install_rustls_provider();
 
@@ -103,7 +112,7 @@ pub(super) fn open_relay_socket(
         Mode::Tls => 443,
     });
 
-    let stream = connect_with_timeout(host, port, CONNECT_TIMEOUT, destination_policy)
+    let stream = connect_with_timeout(host, port, CONNECT_TIMEOUT, destination_policy, declarer)
         .map_err(|error| format!("tcp connect {host}:{port}: {error}"))?;
     stream
         .set_nodelay(true)
@@ -150,9 +159,10 @@ fn connect_with_timeout(
     port: u16,
     timeout: Duration,
     destination_policy: &DestinationPolicy,
+    declarer: Declarer,
 ) -> std::io::Result<TcpStream> {
     let admitted_host = destination_policy
-        .admit_host(host)
+        .admit_host(host, declarer)
         .map_err(destination_refusal)?;
     let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
@@ -202,6 +212,7 @@ fn destination_refusal(refusal: DestinationRefusal) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nmp_network_policy::OnionReachability;
     use std::time::Instant;
 
     /// issue #519 Fix 2 falsifier: the socket config actually applied by
@@ -229,6 +240,7 @@ mod tests {
             9,
             Duration::from_secs(2),
             &DestinationPolicy::default(),
+            Declarer::SomeoneElse,
         );
         let elapsed = started.elapsed();
         assert!(result.is_err());
@@ -263,6 +275,7 @@ mod tests {
                 port,
                 Duration::from_secs(5),
                 &DestinationPolicy::default(),
+                Declarer::SomeoneElse,
             );
             let elapsed = started.elapsed();
             let error = result.expect_err(&format!("{host} must be refused"));
@@ -290,11 +303,59 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let accept_thread = std::thread::spawn(move || listener.accept().unwrap());
 
-        let policy = DestinationPolicy::new(["127.0.0.1".to_string()]);
-        let result = connect_with_timeout("127.0.0.1", port, Duration::from_secs(5), &policy);
+        let policy =
+            DestinationPolicy::new(["127.0.0.1".to_string()], OnionReachability::Unreachable);
+        let result = connect_with_timeout(
+            "127.0.0.1",
+            port,
+            Duration::from_secs(5),
+            &policy,
+            Declarer::SomeoneElse,
+        );
         assert!(
             result.is_ok(),
             "an opted-in local host must still connect: {result:?}"
+        );
+        accept_thread.join().unwrap();
+    }
+
+    /// #1251 falsifier at the DIAL site: the provenance answer the engine
+    /// computed has to survive to the socket. With no allowlist at all, the
+    /// exact loopback address the previous test needed an opt-in for connects
+    /// purely because the engine said this destination was one we declared.
+    /// If the dial re-derived admission from the address alone, this would be
+    /// refused and the relay the app was told it has would be unreachable.
+    #[test]
+    fn our_own_declaration_reaches_a_local_relay_with_no_allowlist() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept_thread = std::thread::spawn(move || listener.accept().unwrap());
+
+        let policy = DestinationPolicy::default();
+        let refused = connect_with_timeout(
+            "127.0.0.1",
+            port,
+            Duration::from_secs(5),
+            &policy,
+            Declarer::SomeoneElse,
+        );
+        assert_eq!(
+            refused
+                .expect_err("a stranger may not name loopback")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        let ours = connect_with_timeout(
+            "127.0.0.1",
+            port,
+            Duration::from_secs(5),
+            &policy,
+            Declarer::Ourselves,
+        );
+        assert!(
+            ours.is_ok(),
+            "our own declaration must reach our own network: {ours:?}"
         );
         accept_thread.join().unwrap();
     }
@@ -307,7 +368,7 @@ mod tests {
     fn mixed_resolved_answer_yields_no_dialable_address() {
         let policy = DestinationPolicy::default();
         let host = policy
-            .admit_host("relay.example.com")
+            .admit_host("relay.example.com", Declarer::SomeoneElse)
             .expect("a public-looking literal host is admitted");
         let mixed: Vec<SocketAddr> = vec![
             "8.8.8.8:443".parse().unwrap(),

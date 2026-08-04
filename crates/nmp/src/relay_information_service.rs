@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use futures_channel::oneshot;
 use nmp_grammar::relay::relay_host_key;
-use nmp_network_policy::{DestinationPolicy, DestinationRefusal};
+use nmp_network_policy::{Declarer, DestinationPolicy, DestinationRefusal};
 use nostr::{types::url::Host, RelayUrl};
 use serde::Deserialize;
 use serde_json::Value;
@@ -590,9 +590,10 @@ impl Fetcher for HttpFetcher {
 }
 
 /// Refuse `relay` outright if its URL names a literal loopback/private/
-/// link-local/unspecified/onion HOST that the operator did not explicitly
-/// opt in (issue #519). Pure and DNS-free — the same destination policy the
-/// discovery-time gate applies, checked again here because
+/// link-local/unspecified HOST that the operator did not explicitly opt in
+/// (issue #519), or a `.onion` name with no declared Tor reachability
+/// (#1251). Pure and DNS-free — the same destination policy the routing gate
+/// applies, checked again here because
 /// `Handle::relay_information` is a public API any caller can invoke for ANY
 /// relay URL, admitted into the routable directory or not.
 fn admit_relay_host(
@@ -602,8 +603,16 @@ fn admit_relay_host(
     let host = relay_host_key(relay).ok_or_else(|| RelayInformationError::Http {
         reason: "refusing NIP-11 fetch: relay URL has no destination host".to_string(),
     })?;
+    // NIP-11 acquisition is deliberately provenance-blind: this HTTP GET is
+    // the classic SSRF target, the service holds no identity, and every
+    // caller reaches the same public door for any relay URL. It therefore
+    // asks the strictest question — is this admissible as anyone else's
+    // claim? — so an operator's own LOCAL relay still needs its host in
+    // `allowed_local_relay_hosts` for its document to be fetched, even though
+    // its websocket now dials on the operator's declaration alone. Recorded
+    // in docs/known-gaps.md rather than quietly widened here.
     destination_policy
-        .admit_host(&host)
+        .admit_host(&host, Declarer::SomeoneElse)
         .map(|_| ())
         .map_err(|refusal| RelayInformationError::Http {
             reason: format!("refusing NIP-11 fetch: {refusal}"),
@@ -777,7 +786,7 @@ fn admitted_reqwest_addresses(
     host: &str,
     addresses: impl IntoIterator<Item = std::net::IpAddr>,
 ) -> Result<Vec<std::net::SocketAddr>, DestinationRefusal> {
-    let admitted_host = destination_policy.admit_host(host)?;
+    let admitted_host = destination_policy.admit_host(host, Declarer::SomeoneElse)?;
     let admitted = destination_policy.admit_resolved(&admitted_host, addresses)?;
     Ok(admitted
         .into_vec()
@@ -1662,11 +1671,14 @@ mod tests {
     /// path" requirement, applied to this crate's own test doubles rather
     /// than a real operator config.
     fn loopback_admission() -> Arc<DestinationPolicy> {
-        Arc::new(DestinationPolicy::new([
-            "127.0.0.1".to_string(),
-            "::1".to_string(),
-            "localhost".to_string(),
-        ]))
+        Arc::new(DestinationPolicy::new(
+            [
+                "127.0.0.1".to_string(),
+                "::1".to_string(),
+                "localhost".to_string(),
+            ],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ))
     }
 
     fn resolver_config_for_dns_server(
@@ -2838,7 +2850,10 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
         let relay = RelayUrl::parse(&format!("ws://relay.nmp.test:{port}")).unwrap();
-        let allowed = Arc::new(DestinationPolicy::new(["relay.nmp.test".to_string()]));
+        let allowed = Arc::new(DestinationPolicy::new(
+            ["relay.nmp.test".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ));
         let value = HttpFetcher::with_resolver_config_and_admission(resolver, allowed)
             .fetch(&relay, None)
             .unwrap();
