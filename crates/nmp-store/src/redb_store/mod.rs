@@ -465,6 +465,13 @@ impl EventStore for RedbStore {
         publish_queue_ops::close_terminal_intent(self, intent_id)
     }
 
+    fn close_unroutable_intent(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CloseIntentOutcome, PersistenceError> {
+        publish_queue_ops::close_unroutable_intent(self, intent_id)
+    }
+
     fn accept_refused(
         &mut self,
         frozen_id: EventId,

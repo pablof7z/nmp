@@ -620,6 +620,7 @@ fn encode_receipt_state(encoder: &mut Encoder, state: ReceiptState) {
         ReceiptState::Compensated => encoder.u8(2),
         ReceiptState::Cancelled => encoder.u8(3),
         ReceiptState::Superseded => encoder.u8(4),
+        ReceiptState::NoDestination => encoder.u8(6),
         ReceiptState::Refused(reason) => {
             encoder.u8(5);
             encode_refuse_reason(encoder, reason);
@@ -634,6 +635,7 @@ fn decode_receipt_state(decoder: &mut Decoder<'_>) -> Result<ReceiptState, Publi
         2 => Ok(ReceiptState::Compensated),
         3 => Ok(ReceiptState::Cancelled),
         4 => Ok(ReceiptState::Superseded),
+        6 => Ok(ReceiptState::NoDestination),
         5 => Ok(ReceiptState::Refused(decode_refuse_reason(decoder)?)),
         other => Err(PublishQueueCodecError::InvalidTag("receipt state", other)),
     }

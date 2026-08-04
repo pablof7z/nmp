@@ -103,18 +103,22 @@ about current code:
   source/reason. Every receipt stream ends with exactly one
   `WriteOutcome`, so an app can always tell a finished write from a dropped
   subscription.
-- **A `NoDestination` write's open-work row is retained and has no
-  reclamation door.** When routing completes and names zero relays the write
-  terminates as `WriteOutcome::NoDestination` and stays enumerable with that
-  reason, which is the honest report — but its `PUBLISH_QUEUE_INTENTS` row is
-  not closed, because `EventStore::close_terminal_intent` requires a NON-EMPTY
-  terminal lane set and this write owns no lanes at all. Consequence, stated
-  rather than hidden: such an entry is refused by
-  `remove_publish_queue_entry` as still-active, and (once signed) by
-  `cancel_write` as already-signed, so it currently has no removal path and is
-  replayed on every boot. Closing it needs a store door that can retire an
-  intent with zero lanes, distinguished from "not resolved yet" by the
-  engine's own `route_complete` — which the store cannot see today.
+- **A settled-empty relay list and an admission-rejected one are the same
+  fact (unresolved, flagged for the owner).** `parse_relay_list`
+  (`crates/nmp-nip65/src/lib.rs:311`) drops any relay the discovered-relay
+  admission policy refuses, and the author still projects as
+  `AuthorRouteState::Present` with the survivors. So a user who published a
+  kind:10002 naming ONLY relays that admission rejects — every loopback /
+  RFC-1918 / `.onion` host, the default local-development shape — is
+  indistinguishable from a user who published a list declaring no write
+  relays. Both are `Present` with an empty outbound set, both are
+  `complete` with zero destinations, and both now terminate as
+  `WriteOutcome::NoDestination`. The second is the owner's ruled case and is
+  correct. The first tells the app "nowhere to publish" when the user DOES
+  have relays and the real repair is `EngineConfig::allowed_local_relay_hosts`
+  — an operator opt-in that exists precisely for this. Nothing here is
+  decided unilaterally: the two readings genuinely diverge, so the ruling
+  needs extending rather than a variant being invented.
 - **The governed sign-only path is built; NMP ships no remote-signer provider and no standard platform vault providers.**
   The protocol-neutral signer contract lives in dependency-free `nmp-signer`,
   and the explicit local-key implementation lives in `nmp-local-signer`. NMP

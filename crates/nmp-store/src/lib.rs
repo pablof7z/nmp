@@ -1182,6 +1182,12 @@ pub enum ReceiptState {
     /// coordinate before this obligation started any wire attempt. Terminal:
     /// the receipt is retained, but the old intent is absent from recovery.
     Superseded,
+    /// Routing finished — knowledge exhausted — and named zero relays, so
+    /// there was nowhere to publish ([`EventStore::close_unroutable_intent`]).
+    /// Terminal, and distinct from [`Self::Refused`]: the instruction was
+    /// fine and the store took it; the WORLD had no destination for it.
+    /// Retained so a reattaching app is told that, rather than told nothing.
+    NoDestination,
     /// The acceptance instruction was answered with a semantic no
     /// ([`EventStore::accept_refused`]): the store was working and said no.
     /// Terminal at birth — there was never an intent, a journal row, a
@@ -2176,6 +2182,31 @@ pub trait EventStore {
         Err(PersistenceError::invariant(
             "delivery attempt details unsupported",
         ))
+    }
+
+    /// Delete an intent's bounded open-work rows when it owns NO lanes at all.
+    ///
+    /// The exact structural complement of [`Self::close_terminal_intent`],
+    /// which requires a NON-EMPTY all-terminal lane set. Zero lanes is a fact
+    /// this crate can check for itself, so neither door asks the store to
+    /// guess at routing policy: the engine calls this one only when its own
+    /// resolution reported knowledge exhausted with zero destinations, and
+    /// the store still refuses if any lane exists.
+    ///
+    /// Without it a write that resolved to nowhere kept its open-work row
+    /// forever — unremovable (the removal door refuses an open intent),
+    /// uncancellable once signed, and replayed on every boot. That is the
+    /// FIRST-RUN path now that a fresh install with no reachable relay list
+    /// terminates as `NoDestination`, so it is a leak on the most common
+    /// path rather than an edge case.
+    ///
+    /// Receipts stay retained and reattachable, exactly as
+    /// [`Self::close_terminal_intent`] leaves them.
+    fn close_unroutable_intent(
+        &mut self,
+        _intent_id: IntentId,
+    ) -> Result<CloseIntentOutcome, PersistenceError> {
+        Err(PersistenceError::invariant("delivery lanes unsupported"))
     }
 
     /// Delete bounded open-work rows only after a non-empty lane set is all

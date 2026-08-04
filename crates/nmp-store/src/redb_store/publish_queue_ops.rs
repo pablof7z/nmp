@@ -1,7 +1,7 @@
 use super::commit::commit_prepared;
 use super::publish_queue::{
     alloc_counter_in_txn, alloc_receipt_id_in_txn, lane_deadline, replace_lane_in_txn,
-    PublishQueueReceiptRecord,
+    update_publish_queue_receipt, PublishQueueReceiptRecord,
 };
 use super::publish_queue_codec::{
     attempt_key, attempt_range, canonical_route_ids, codec_error, deadline_by_intent_key,
@@ -1494,9 +1494,34 @@ pub(super) fn recover_attempt_details(
     Ok(recovered)
 }
 
+pub(super) fn close_unroutable_intent(
+    store: &mut RedbStore,
+    intent_id: IntentId,
+) -> Result<CloseIntentOutcome, PersistenceError> {
+    close_intent(store, intent_id, LaneShape::None)
+}
+
 pub(super) fn close_terminal_intent(
     store: &mut RedbStore,
     intent_id: IntentId,
+) -> Result<CloseIntentOutcome, PersistenceError> {
+    close_intent(store, intent_id, LaneShape::AllTerminal)
+}
+
+/// Which lane shape a close door demands. Both are facts this crate checks
+/// for itself, so no caller can talk the store into deleting open work.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LaneShape {
+    /// No lane exists at all -- the intent resolved to nowhere.
+    None,
+    /// At least one lane exists and every one of them is terminal.
+    AllTerminal,
+}
+
+fn close_intent(
+    store: &mut RedbStore,
+    intent_id: IntentId,
+    shape: LaneShape,
 ) -> Result<CloseIntentOutcome, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
     let result = {
@@ -1504,11 +1529,9 @@ pub(super) fn close_terminal_intent(
             .open_table(PUBLISH_QUEUE_INTENTS)
             .map_err(persist_err)?;
         let intent_key_value = intent_key(intent_id);
-        if intents
-            .get(&intent_key_value)
-            .map_err(persist_err)?
-            .is_none()
-        {
+        let existing = intents.get(&intent_key_value).map_err(persist_err)?;
+        let encoded_intent = existing.map(|guard| guard.value().to_vec());
+        if encoded_intent.is_none() {
             CloseIntentOutcome::AlreadyClosed
         } else {
             let lanes_table = write_txn
@@ -1532,14 +1555,39 @@ pub(super) fn close_terminal_intent(
                     decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
                 lanes_snapshot.push(state);
             }
-            if lanes_snapshot.is_empty()
-                || lanes_snapshot
-                    .iter()
-                    .any(|state| !matches!(state, PublishQueueLaneState::Terminal { .. }))
-            {
-                return Err(PersistenceError::invariant(
-                    "intent lanes are not non-empty and terminal",
-                ));
+            let shape_holds = match shape {
+                LaneShape::None => lanes_snapshot.is_empty(),
+                LaneShape::AllTerminal => {
+                    !lanes_snapshot.is_empty()
+                        && lanes_snapshot
+                            .iter()
+                            .all(|state| matches!(state, PublishQueueLaneState::Terminal { .. }))
+                }
+            };
+            if !shape_holds {
+                return Err(PersistenceError::invariant(match shape {
+                    LaneShape::None => "intent still owns lanes",
+                    LaneShape::AllTerminal => "intent lanes are not non-empty and terminal",
+                }));
+            }
+            if shape == LaneShape::None {
+                // One transaction: the receipt records WHY the write ended,
+                // so a reattaching app is told "nowhere to publish" rather
+                // than merely finding its open work gone.
+                let record = decode_intent(
+                    encoded_intent
+                        .as_deref()
+                        .expect("close path already proved the intent row exists"),
+                )
+                .map_err(|error| codec_error("intent", error))?;
+                let mut receipts = write_txn
+                    .open_table(PUBLISH_QUEUE_RECEIPTS)
+                    .map_err(persist_err)?;
+                update_publish_queue_receipt(
+                    &mut receipts,
+                    record.receipt_id,
+                    ReceiptState::NoDestination,
+                )?;
             }
             let mut deadlines = write_txn
                 .open_table(PUBLISH_QUEUE_DEADLINES)

@@ -1454,6 +1454,7 @@ impl<S: EventStore> EngineCore<S> {
             ReceiptState::Refused(reason) => {
                 Some(WriteFact::Outcome(WriteOutcome::Refused(reason)))
             }
+            ReceiptState::NoDestination => Some(WriteFact::Outcome(WriteOutcome::NoDestination)),
         }
     }
 
@@ -2352,6 +2353,9 @@ impl<S: EventStore> EngineCore<S> {
             }
             ReceiptState::Superseded => Err(CancelWriteError::AlreadySuperseded { receipt_id: id }),
             ReceiptState::Refused(_) => Err(CancelWriteError::AlreadyRefused { receipt_id: id }),
+            // Terminal already: routing finished and named nobody. There is
+            // no obligation left to cancel, only an entry to remove.
+            ReceiptState::NoDestination => Err(CancelWriteError::AlreadyRefused { receipt_id: id }),
             ReceiptState::Accepted => Err(CancelWriteError::PersistenceFailed {
                 receipt_id: id,
                 reason: "accepted receipt has no live cancellation owner".to_string(),
@@ -2395,6 +2399,7 @@ impl<S: EventStore> EngineCore<S> {
                 ReceiptState::Cancelled => Some(WriteOutcome::NotSent(NotSentReason::Cancelled)),
                 ReceiptState::Superseded => Some(WriteOutcome::NotSent(NotSentReason::Superseded)),
                 ReceiptState::Refused(reason) => Some(WriteOutcome::Refused(reason)),
+                ReceiptState::NoDestination => Some(WriteOutcome::NoDestination),
                 ReceiptState::Accepted | ReceiptState::Signed => match pending {
                     // Routing finished and named nobody. Terminal, and the
                     // one terminal that leaves its open-work row behind (see
@@ -3382,24 +3387,37 @@ impl<S: EventStore> EngineCore<S> {
                     effects,
                 );
                 if answer.complete {
-                    // Terminal, and RETAINED rather than dropped. The write
-                    // stays in `pending` so it stays enumerable through the
-                    // queue door with its own reason: an app that is told
-                    // "nowhere to publish" and then cannot find the write
-                    // again has been told about a loss, not a fact.
+                    // Knowledge is exhausted and it named nobody. Terminal.
                     //
-                    // Deliberately NOT closed here: `close_terminal_intent`
-                    // requires a NON-EMPTY terminal lane set, and this write
-                    // owns no lanes at all. Reclaiming its open-work row
-                    // needs a door that does not exist yet, so the row is
-                    // retained and the gap is recorded in `known-gaps.md`
-                    // rather than papered over with a close the store would
-                    // refuse.
+                    // The open-work row goes with it. This write owns no
+                    // lanes at all, which is the exact precondition of
+                    // `close_unroutable_intent` (the structural complement
+                    // of `close_terminal_intent`'s non-empty all-terminal
+                    // set), so the store can check the shape itself rather
+                    // than being told a routing verdict. Leaving the row
+                    // behind would strand the entry: the removal door
+                    // refuses an open intent, cancellation refuses a signed
+                    // one, and boot would replay it forever — on the FIRST
+                    // publish of a fresh install with no reachable relay
+                    // list, which is the commonest path there is.
+                    //
+                    // The RECEIPT is retained and reattachable either way,
+                    // so the app can still read back what happened and why.
+                    let closed = self
+                        .resolver
+                        .store_mut()
+                        .close_unroutable_intent(intent_id)
+                        .is_ok();
                     self.emit_write_fact(
                         id,
                         WriteFact::Outcome(WriteOutcome::NoDestination),
                         effects,
                     );
+                    if closed {
+                        if let Some(pending) = self.pending.remove(&id) {
+                            self.forget_pending_indexes(id, &pending);
+                        }
+                    }
                 }
             }
         } else {

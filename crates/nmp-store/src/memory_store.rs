@@ -472,6 +472,17 @@ impl MemoryStore {
         }
     }
 
+    /// Drop an intent's bounded open-work rows. Shared by both close doors,
+    /// which differ only in the lane shape they demand first.
+    fn forget_open_work(&mut self, intent_id: IntentId) {
+        if let Some(rows) = self.publish_queue_deadlines_by_intent.remove(&intent_id) {
+            for (at, relay) in rows {
+                self.publish_queue_deadlines.remove(&(at, intent_id, relay));
+            }
+        }
+        self.publish_queue_intents.remove(&intent_id);
+    }
+
     /// Write one `PUBLISH_QUEUE_RECEIPTS` row at `Accepted` — `accept_write`'s
     /// receipt-retention half (architecture review correction). Always
     /// paired with `journal_intent` in the same call; never pruned by this
@@ -3190,12 +3201,30 @@ impl EventStore for MemoryStore {
                 "intent lanes are not non-empty and terminal",
             ));
         }
-        if let Some(rows) = self.publish_queue_deadlines_by_intent.remove(&intent_id) {
-            for (at, relay) in rows {
-                self.publish_queue_deadlines.remove(&(at, intent_id, relay));
+        self.forget_open_work(intent_id);
+        Ok(CloseIntentOutcome::Closed)
+    }
+
+    fn close_unroutable_intent(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CloseIntentOutcome, PersistenceError> {
+        if !self.publish_queue_intents.contains_key(&intent_id) {
+            return Ok(CloseIntentOutcome::AlreadyClosed);
+        }
+        if !self.recover_publish_queue_lanes(intent_id)?.is_empty() {
+            return Err(PersistenceError::invariant("intent still owns lanes"));
+        }
+        // Same transaction, conceptually: the receipt records the terminal
+        // so a reattaching app is told WHY the write ended, not merely that
+        // its open work is gone.
+        if let Some(record) = self.publish_queue_intents.get(&intent_id) {
+            let receipt_id = record.receipt_id;
+            if let Some(receipt) = self.publish_queue_receipts.get_mut(&receipt_id) {
+                receipt.state = ReceiptState::NoDestination;
             }
         }
-        self.publish_queue_intents.remove(&intent_id);
+        self.forget_open_work(intent_id);
         Ok(CloseIntentOutcome::Closed)
     }
 
