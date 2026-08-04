@@ -57,7 +57,10 @@ use crate::engine::Engine;
 
 pub use group::{Group, GroupPublishError, GroupReceipts};
 pub use nmp_nip29::GroupContextError;
-pub use predicate::{admin_list_includes, any_of, member_list_includes, GroupPredicate};
+pub use predicate::{
+    admin_list_includes, all, any_of, groups_whose_record_matches, member_list_includes, GroupIds,
+    GroupPredicate, GroupPredicateError,
+};
 pub use read::GroupReadError;
 pub use records::{
     GroupAvailability, GroupObservation, GroupObserveError, GroupSnapshot, GroupWaitError,
@@ -158,8 +161,9 @@ impl RelayScope {
     ///
     /// One complete branch per host: at host `H` the read selects exactly the
     /// kinds `records` names, pinned to `H`, keyed on `d` by the predicate
-    /// lowered AT `H`. Evidence observed at one relay therefore never
-    /// constrains a listing at another.
+    /// lowered AT `H` -- or keyed on nothing at all, when the predicate is
+    /// [`all`]. Evidence observed at one relay therefore never constrains a
+    /// listing at another.
     ///
     /// Each delivery is a complete [`GroupSnapshot`] per matching group --
     /// metadata, admins, members, availability, and the per-host breakdown
@@ -169,29 +173,51 @@ impl RelayScope {
     /// let watching = nip29::on(hosts)?.observe(
     ///     &engine,
     ///     nip29::member_list_includes(Binding::Reactive(IdentityField::ActivePubkey))
-    ///         .union([nip29::any_of(pinned_ids)]),
+    ///         .union([nip29::any_of(Binding::Literal(pinned_ids))]),
     ///     [GroupRecord::Metadata, GroupRecord::Admins, GroupRecord::Members],
+    ///     None,
+    /// )?;
+    ///
+    /// // a directory of everything this relay advertises, 250 rooms per host
+    /// let browsing = nip29::on(hosts)?.observe(
+    ///     &engine, nip29::all(), [GroupRecord::Metadata], Some(250),
     /// )?;
     /// while let Some(snapshots) = watching.next().await? { /* ... */ }
     /// ```
+    ///
+    /// # `limit` bounds each host's own branch
+    ///
+    /// It is the ordinary NIP-01 `Filter::limit`, applied to every branch, and
+    /// it is the ONLY bound this door offers -- there is no `all`-specific
+    /// knob, because unboundedness is not `all`-specific: a relay that lists
+    /// one subject in very many groups makes `member_list_includes` just as
+    /// large. `None` asks for whatever the relay chooses to answer with.
+    ///
+    /// It is deliberately NOT a
+    /// [`LiveQuery`](nmp_grammar::LiveQuery)-level aggregate bound. Two hosts
+    /// with `Some(250)` may deliver up to 500 snapshots, because each host was
+    /// asked for 250 of its OWN; presenting a per-branch bound as a global one
+    /// would be a second owner of row membership.
     ///
     /// Branches scale with HOSTS, not groups: a hundred groups on two relays
     /// is two branches.
     pub fn observe(
         &self,
         engine: &Engine,
-        predicate: GroupPredicate,
+        predicate: impl Into<GroupPredicate>,
         records: impl IntoIterator<Item = GroupRecord>,
+        limit: Option<usize>,
     ) -> Result<GroupObservation, GroupObserveError> {
         let records: BTreeSet<GroupRecord> = records.into_iter().collect();
         if records.is_empty() {
             return Err(GroupObserveError::NoRecordSelected);
         }
+        let predicate = predicate.into();
         records::observe(
             engine,
             self.hosts.clone(),
             BTreeSet::new(),
-            self.records_branches(&predicate, &records),
+            self.records_branches(&predicate, &records, limit),
         )
     }
 
@@ -204,10 +230,13 @@ impl RelayScope {
         &self,
         predicate: &GroupPredicate,
         records: &BTreeSet<GroupRecord>,
+        limit: Option<usize>,
     ) -> Vec<Demand> {
         self.hosts
             .iter()
-            .map(|host| nmp_nip29::group_records_at(host, records, predicate.lower_at(host)))
+            .map(|host| {
+                nmp_nip29::group_records_at(host, records, predicate.lower_at(host), limit)
+            })
             .collect()
     }
 
@@ -278,7 +307,11 @@ mod tests {
     fn scope_stamps_exact_hosts_on_every_nested_nip29_demand() {
         let scope = on([host(1), host(2)]).expect("two hosts");
         let predicate = member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
-        let branches = scope.records_branches(&predicate, &BTreeSet::from([GroupRecord::Members]));
+        let branches = scope.records_branches(
+            &predicate.clone().into(),
+            &BTreeSet::from([GroupRecord::Members]),
+            None,
+        );
         let d = IndexedTagName::new('d').expect("d is a single ASCII letter");
 
         assert_eq!(branches.len(), 2, "one complete branch per host");
@@ -411,11 +444,64 @@ mod tests {
     fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
         let scope = on([host(1), host(2)]).expect("two hosts");
         let query = read::one_live_query(scope.records_branches(
-            &member_list_includes(Binding::Reactive(IdentityField::ActivePubkey)),
+            &member_list_includes(Binding::Reactive(IdentityField::ActivePubkey)).into(),
             &BTreeSet::from([GroupRecord::Metadata]),
+            None,
         ))
         .expect("a two-host listing declares two branches");
         assert_eq!(query.branches().len(), 2);
+    }
+
+    /// THE #1252 falsifier at the door an app actually calls. A directory
+    /// asks every host for the groups it advertises, and every branch carries
+    /// NO group-id row: the ids a directory wants are the ANSWER, so a branch
+    /// that still keyed itself on some id set would show the app only rooms it
+    /// already knew -- indistinguishable, on screen, from a relay hosting
+    /// nothing.
+    #[test]
+    fn an_unconstrained_directory_asks_every_host_with_no_group_id_row() {
+        let scope = on([host(1), host(2)]).expect("two hosts");
+        let branches =
+            scope.records_branches(&all(), &BTreeSet::from([GroupRecord::Metadata]), Some(250));
+        let d = IndexedTagName::new('d').expect("d is a single ASCII letter");
+
+        assert_eq!(branches.len(), 2, "one complete branch per host");
+        for (branch, expected) in branches.iter().zip([host(1), host(2)]) {
+            assert_eq!(branch.source, pinned(expected));
+            assert_eq!(branch.cache, CacheMode::Strict);
+            assert_eq!(branch.selection.kinds, Some(BTreeSet::from([39000u16])));
+            assert_eq!(
+                branch.selection.tags.get(&d),
+                None,
+                "an unconstrained directory must not key itself on any group id"
+            );
+            assert!(branch.selection.tags.is_empty());
+            assert_eq!(
+                branch.selection.limit,
+                Some(250),
+                "the app's own per-host bound is the only thing bounding it"
+            );
+        }
+    }
+
+    /// The bound is the ordinary NIP-01 per-branch `limit`, and it is never
+    /// promoted to a bound on the merged union. Two hosts asked for 250 of
+    /// their OWN groups were asked for 250 each; declaring 250 globally would
+    /// make the live query a second owner of row membership.
+    #[test]
+    fn a_per_host_bound_is_never_reported_as_a_bound_on_the_union() {
+        let scope = on([host(1), host(2)]).expect("two hosts");
+        let query = read::one_live_query(scope.records_branches(
+            &all(),
+            &BTreeSet::from([GroupRecord::Metadata]),
+            Some(250),
+        ))
+        .expect("a two-host directory declares two branches");
+        assert_eq!(query.branches().len(), 2);
+        for branch in query.branches() {
+            assert_eq!(branch.selection.limit, Some(250));
+        }
+        assert_eq!(query.aggregate_result_limit(), None);
     }
 
     /// The record selection is the app's, and only the kinds it named reach
@@ -424,7 +510,8 @@ mod tests {
     #[test]
     fn only_the_selected_records_reach_the_wire() {
         let scope = on([host(1)]).expect("one host");
-        let predicate = member_list_includes(Binding::Reactive(IdentityField::ActivePubkey));
+        let predicate: GroupPredicate =
+            member_list_includes(Binding::Reactive(IdentityField::ActivePubkey)).into();
         for (records, expected) in [
             (BTreeSet::from([GroupRecord::Metadata]), vec![39000u16]),
             (BTreeSet::from([GroupRecord::Admins]), vec![39001u16]),
@@ -434,7 +521,7 @@ mod tests {
                 vec![39000u16, 39002u16],
             ),
         ] {
-            let branches = scope.records_branches(&predicate, &records);
+            let branches = scope.records_branches(&predicate, &records, None);
             assert_eq!(
                 branches[0].selection.kinds,
                 Some(expected.iter().copied().collect::<BTreeSet<u16>>()),
@@ -457,6 +544,7 @@ mod tests {
                     &engine,
                     member_list_includes(Binding::Reactive(IdentityField::ActivePubkey)),
                     [],
+                    None,
                 )
                 .err(),
             Some(GroupObserveError::NoRecordSelected)

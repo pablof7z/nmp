@@ -223,20 +223,33 @@ pub fn listed_record_at(host: &RelayUrl, event: &Event) -> ListedRecord {
 }
 
 /// One host's complete branch for the SELECTED relay-signed group records,
-/// keyed on `d` by whatever `predicate` resolves it to.
+/// keyed on `d` by whatever `group_ids` resolves it to.
 ///
 /// Replaces the fixed all-three-kinds listing: an app that renders a
 /// directory asks for [`GroupRecord::Metadata`] alone and never pays a relay
 /// for two lists it does not read.
 ///
-/// The predicate is embedded VERBATIM, for the same reason the listing door
-/// always has: rewriting it would be the silent repin `nmp_grammar::Derived`
-/// forbids.
+/// `group_ids` of `None` builds a branch with NO `d` row at all -- every
+/// group the host advertises among the selected records. That is the ABSENCE
+/// of a constraint, and it is the only honest lowering of it: a `d` row
+/// naming any specific set would ask the relay about those groups and no
+/// others, which for a directory is indistinguishable from a host with no
+/// groups.
+///
+/// A `Some` binding is embedded VERBATIM, for the same reason the listing
+/// door always has: rewriting it would be the silent repin
+/// `nmp_grammar::Derived` forbids.
+///
+/// `limit` is the ordinary NIP-01 `Filter::limit` and bounds THIS host's
+/// branch alone -- never a global bound over the union, which
+/// `nmp_grammar::LiveQuery` owns separately and which this crate never
+/// invents.
 #[must_use]
 pub fn group_records_at(
     host: &RelayUrl,
     records: &BTreeSet<GroupRecord>,
-    predicate: Binding,
+    group_ids: Option<Binding>,
+    limit: Option<usize>,
 ) -> Demand {
     debug_assert!(
         !records.is_empty(),
@@ -246,7 +259,11 @@ pub fn group_records_at(
         host,
         Filter {
             kinds: Some(records.iter().map(|record| record.record_kind()).collect()),
-            tags: [(join_key(), predicate)].into_iter().collect(),
+            tags: group_ids
+                .into_iter()
+                .map(|binding| (join_key(), binding))
+                .collect(),
+            limit,
             ..Filter::default()
         },
     )
@@ -302,10 +319,41 @@ mod tests {
         let demand = group_records_at(
             &host(1),
             &BTreeSet::from([GroupRecord::Metadata]),
-            Binding::Literal(BTreeSet::from(["photographers".to_string()])),
+            Some(Binding::Literal(BTreeSet::from(["photographers".to_string()]))),
+            None,
         );
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([39000u16])));
         assert!(demand.selection.tags.contains_key(&join_key()));
+        assert_eq!(demand.selection.limit, None);
+    }
+
+    /// "Every group the host advertises" is the ABSENCE of a `d` row, not a
+    /// `d` row that happens to name a lot. Leave any `d` constraint on the
+    /// branch and the relay answers about that id set alone -- for a
+    /// directory, whichever rooms the app already knew, which is
+    /// indistinguishable from a host advertising no groups at all.
+    #[test]
+    fn an_unconstrained_listing_carries_no_join_key_row_at_all() {
+        let demand = group_records_at(
+            &host(1),
+            &BTreeSet::from([GroupRecord::Metadata]),
+            None,
+            Some(250),
+        );
+        assert_eq!(demand.selection.kinds, Some(BTreeSet::from([39000u16])));
+        assert!(
+            !demand.selection.tags.contains_key(&join_key()),
+            "an unconstrained listing must not key itself on any group id"
+        );
+        assert!(
+            demand.selection.tags.is_empty(),
+            "and it must not smuggle the constraint into some other row either"
+        );
+        assert_eq!(
+            demand.selection.limit,
+            Some(250),
+            "the caller's own per-host bound is the only thing bounding it"
+        );
     }
 
     /// The defect this module exists to delete: a role-less admin recorded as

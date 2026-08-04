@@ -66,14 +66,39 @@ pub(crate) const JOIN_KEY_TAG: char = 'd';
 /// The tag a member/admin list names its subjects with.
 const SUBJECT_TAG: char = 'p';
 
+/// The group ids named by the relay-signed records matching `selection` AT
+/// `host` -- the ONE host-evaluated id source, of which every named
+/// constructor is a shorthand.
+///
+/// `selection` is an ordinary [`Filter`], so anything a live query can
+/// express over a relay-signed group record can key a listing. The projection
+/// is always the `d` row: it is the join key NIP-29 defines between the three
+/// records, so projecting through anything else would yield values that are
+/// not group ids. That is a protocol fact and deliberately not a parameter.
+///
+/// Which kinds a `selection` may name is the FACADE's refusal, not this
+/// function's: `nmp::nip29::groups_whose_record_matches` rejects a kind the
+/// group's host is not authoritative for, and every caller here has already
+/// passed it.
+///
+/// Returns an ordinary [`Binding`], so `Binding::SetOp` composes it with any
+/// other binding for free.
+#[must_use]
+pub fn records_matching_at(host: &RelayUrl, selection: Filter) -> Binding {
+    Binding::Derived(Box::new(Derived {
+        inner: pinned_public_at(host, selection),
+        project: Selector::Tag(JOIN_KEY_TAG.to_string()),
+    }))
+}
+
 /// Groups whose kind:39002 member-list evidence AT `host` names `subjects`.
 ///
 /// Evidence-scoped: a group matches when an observed member list includes a
 /// subject. A group NOT matching proves nothing -- the list may be absent,
 /// restricted, or partial.
 ///
-/// Returns an ordinary [`Binding`], so `Binding::SetOp` composes it with any
-/// other binding for free.
+/// Shorthand for [`records_matching_at`] over `{ kinds:[39002], #p: subjects }`
+/// and exactly equal to it.
 #[must_use]
 pub fn member_list_includes_at(host: &RelayUrl, subjects: Binding) -> Binding {
     list_evidence_at(host, GROUP_MEMBERS_KIND, subjects)
@@ -89,17 +114,14 @@ pub fn admin_list_includes_at(host: &RelayUrl, subjects: Binding) -> Binding {
 }
 
 fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
-    Binding::Derived(Box::new(Derived {
-        inner: pinned_public_at(
-            host,
-            Filter {
-                kinds: Some(BTreeSet::from([kind])),
-                tags: BTreeMap::from([(subject(), subjects)]),
-                ..Filter::default()
-            },
-        ),
-        project: Selector::Tag(JOIN_KEY_TAG.to_string()),
-    }))
+    records_matching_at(
+        host,
+        Filter {
+            kinds: Some(BTreeSet::from([kind])),
+            tags: BTreeMap::from([(subject(), subjects)]),
+            ..Filter::default()
+        },
+    )
 }
 
 /// The one place a NIP-29-owned demand acquires its authority: pinned to
@@ -189,7 +211,8 @@ mod tests {
                 crate::records::GroupRecord::Admins,
                 crate::records::GroupRecord::Members,
             ]),
-            Binding::Literal(BTreeSet::from(["x".to_string()])),
+            Some(Binding::Literal(BTreeSet::from(["x".to_string()]))),
+            None,
         );
         assert_eq!(
             demand.selection.kinds,
@@ -250,7 +273,11 @@ mod tests {
         let demand = crate::records::group_records_at(
             &host(3),
             &BTreeSet::from([crate::records::GroupRecord::Members]),
-            member_list_includes_at(&host(3), Binding::Reactive(IdentityField::ActivePubkey)),
+            Some(member_list_includes_at(
+                &host(3),
+                Binding::Reactive(IdentityField::ActivePubkey),
+            )),
+            None,
         );
         assert_eq!(demand.source, pinned([host(3)]));
         assert_eq!(
