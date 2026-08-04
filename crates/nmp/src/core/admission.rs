@@ -95,7 +95,8 @@ impl RelayAdmissionPolicy {
         &self.destination_policy
     }
 
-    /// Whether a relay declared by `source` may be used, and why not if not.
+    /// Whether one relay may be used given whose declaration named it, and why
+    /// not if not.
     pub fn admits(&self, url: &RelayUrl, declarer: Declarer) -> Result<(), RelayRefusal> {
         let Some(host) = relay_host_key(url) else {
             return Err(RelayRefusal::NoHost);
