@@ -4,6 +4,13 @@
 //! before its causal EOSE by accident. Delaying query admission makes that
 //! ordering explicit: the setup must not return until the receipt contains
 //! the settled `Absent` revision that the restart is meant to preserve.
+//!
+//! What survives that boundary changed with the owner's 2026-08-04 ruling.
+//! A settled absence is knowledge EXHAUSTED, so the write terminates as
+//! `NoDestination` rather than parking on a question already answered. The
+//! open-work row is therefore reclaimed and boot re-declares NOTHING for it —
+//! the fact that must survive is the terminal itself, retained on the receipt
+//! and replayed on reattachment.
 
 use std::time::Duration;
 
@@ -54,14 +61,12 @@ async fn past_tense_publish_observes_settled_absence_before_restart() {
     let store = RedbStore::open(path).expect("the stopped process releases its durable store");
     let recovered = store
         .recover_publish_queue()
-        .expect("the accepted write must be recoverable");
-    assert_eq!(recovered.len(), 1);
+        .expect("the publish queue must be readable");
     assert!(
-        store
-            .recover_route_revisions(recovered[0].intent_id)
-            .expect("route revisions must be readable")
-            .is_empty(),
-        "a zero-relay answer owns no durable route revision; boot must re-declare its route need"
+        recovered.is_empty(),
+        "a settled absence is knowledge exhausted, so the write is terminal and owns no open \
+         work; leaving its row behind would replay an answered question on every boot and \
+         strand an entry the removal door refuses: {recovered:?}"
     );
     drop(store);
 
@@ -81,15 +86,15 @@ async fn past_tense_publish_observes_settled_absence_before_restart() {
         queries_before_restart.iter().zip(&queries_after_restart)
     {
         assert_eq!(before_name, after_name);
-        assert!(
-            after > before,
-            "restart did not replay the recovered route need to indexer {after_name}: \
-             before {before}, after {after}"
+        assert_eq!(
+            after, before,
+            "restart re-declared a route need for a write whose routing already finished; \
+             a terminated write must not keep discovery alive on indexer {after_name}"
         );
     }
     assert!(
         settled_after_restart,
-        "the observed settled-absence revision did not survive receipt reattachment; \
+        "the observed settled-absence terminal did not survive receipt reattachment; \
          indexer queries before restart {queries_before_restart:?}, after restart \
          {queries_after_restart:?}; receipt {:?}",
         world.routing_facts_reported()

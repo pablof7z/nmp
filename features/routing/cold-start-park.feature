@@ -45,7 +45,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Terminate a write whose relay-list lookup has not settled; a user who was merely offline on first run loses a message NMP never proved undeliverable.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Terminate a write whose relay-list lookup has not settled; a user who was merely offline on first run loses a message NMP never proved undeliverable.
     Scenario: The very first publish of a fresh install parks and then delivers
       # The headline case. An indexer exists and has not answered yet, so
       # nothing has been learned and the write waits for it.
@@ -62,7 +63,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Let recovery and a fresh publish reach different states from the same unsettled directory; a crash survivor would outlive the exact condition that ends a fresh write.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Let recovery and a fresh publish reach different states from the same unsettled directory; a crash survivor would outlive the exact condition that ends a fresh write.
     Scenario: A young directory treats a fresh write and a recovered one alike
       Given an indexer relay is configured
       And my relay list lookup has not settled
@@ -78,7 +80,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Drop the park across a restart; an app that reattaches to a persisted receipt id is told nothing, which is indistinguishable from data loss.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Drop the park across a restart; an app that reattaches to a persisted receipt id is told nothing, which is indistinguishable from data loss.
     Scenario: The park survives a restart
       Given an indexer relay is configured
       And my relay list lookup has not settled
@@ -92,7 +95,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Expire an unsettled park after any elapsed time; NMP would be deciding a relay list will never arrive, which it cannot prove.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Expire an unsettled park after any elapsed time; NMP would be deciding a relay list will never arrive, which it cannot prove.
     Scenario: Nothing gives up on an unsettled lookup
       Given an indexer relay is configured
       And my relay list lookup has not settled
@@ -109,7 +113,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Park a write whose relay-list lookup finished and found nothing; the user watches a message sit in "sending" forever while the app has everything it needs to tell them they have no relays configured.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Park a write whose relay-list lookup finished and found nothing; the user watches a message sit in "sending" forever while the app has everything it needs to tell them they have no relays configured.
     Scenario: A settled lookup that found no relay list ends the write
       # The scenario this file used to get backwards. The indexer answered.
       # There is no relay list, no app relay and no fallback, so there is
@@ -127,7 +132,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Park a write when nothing can ever resolve it; with no app relay and no indexer there is no source that could change the answer, so waiting is waiting on nobody.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Park a write when nothing can ever resolve it; with no app relay and no indexer there is no source that could change the answer, so waiting is waiting on nobody.
     Scenario: No app relay and no indexer is nowhere to go
       # The owner's own case. Nothing is configured that could ever produce a
       # destination, so the answer is already final at the first attempt.
@@ -141,7 +147,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Leave a no-destination write's open work behind; the entry cannot be removed (removal refuses an open intent), cannot be cancelled once signed, and is replayed on every boot -- a leak on the FIRST publish of a fresh install.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Leave a no-destination write's open work behind; the entry cannot be removed (removal refuses an open intent), cannot be cancelled once signed, and is replayed on every boot -- a leak on the FIRST publish of a fresh install.
     Scenario: A write with nowhere to go is readable in the queue and removable
       # The user-facing point. "Nowhere to publish" is only useful if the app
       # can still find the write and say so, and only honest if the app can
@@ -158,7 +165,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Report the same destination fact before and after the lookup settles; the two states have opposite correct app behaviour and collapsing them is the defect this whole file is about.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Report the same destination fact before and after the lookup settles; the two states have opposite correct app behaviour and collapsing them is the defect this whole file is about.
     Scenario: Settling turns a park into a terminal answer
       Given an indexer relay is configured
       And my relay list lookup has not settled
@@ -174,7 +182,8 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
     # nmp:status=specified
     # nmp:gap=evidence
     # nmp:issue=#1253
-    # nmp:falsifier=Report routing complete while a recipient is still unresolved; a message delivered to two of its five destinations and called sent is a privacy failure, not a delivery one.
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Report routing complete while a recipient is still unresolved; a message delivered to two of its five destinations and called sent is a privacy failure, not a delivery one.
     Scenario: A cold start does not silently under-route
       Given an indexer relay is configured
       And my relay list lookup has not settled
