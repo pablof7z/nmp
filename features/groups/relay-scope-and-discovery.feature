@@ -13,7 +13,7 @@ Feature: A group can live on more than one relay at once
   of done per #979, and these scenarios were never tagged that way -- they are
   born `built`.
 
-  Traces to #1033 and to `crates/nmp/src/nip29/{mod,group,predicate}.rs`.
+  Traces to #1033 and #1252, and to `crates/nmp/src/nip29/{mod,group,predicate}.rs`.
 
   Background:
     Given a NIP-29 relay scope named over more than one relay
@@ -132,12 +132,60 @@ Feature: A group can live on more than one relay at once
 
   # nmp:id=GROUPS-DISCOVERY-006
   # nmp:status=built
-  # nmp:evidence=rust:nmp::set_algebra_composes_predicates_into_ordinary_bindings
+  # nmp:evidence=rust:nmp::set_algebra_composes_id_sources_into_ordinary_bindings
   # nmp:evidence=rust:nmp::union_and_diff_fold_with_the_grammars_own_algebra
-  # nmp:falsifier=Give `GroupPredicate::union`/`intersect`/`minus` a second, NIP-29-specific combinator representation instead of folding into the grammar's own `Binding::SetOp`; a composed predicate would then need its own resolver path instead of reusing the one every other composite query already has.
+  # nmp:falsifier=Give `GroupIds::union`/`intersect`/`minus` a second, NIP-29-specific combinator representation instead of folding into the grammar's own `Binding::SetOp`; a composed predicate would then need its own resolver path instead of reusing the one every other composite query already has.
   @nip29
   Scenario: Discovery predicates compose with the grammar's own set algebra
     Given a "member of this group" predicate and an "admin of this group" predicate
     When the app unions, intersects, or subtracts them
     Then the composed predicate lowers to the grammar's ordinary set-operation binding
     And no second, NIP-29-specific combinator vocabulary is introduced
+
+  # nmp:id=GROUPS-DISCOVERY-007
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::an_unconstrained_directory_asks_every_host_with_no_group_id_row
+  # nmp:evidence=rust:nmp_nip29::an_unconstrained_listing_carries_no_join_key_row_at_all
+  # nmp:evidence=rust:nmp::all_binds_no_group_id_row_whatsoever
+  # nmp:falsifier=Lower `nip29::all()` to a branch that still carries a `d` row -- any `d` row, including one bound to whatever ids the app already had. The relay would then answer about that id set alone, so a directory screen would show only rooms the app already knew, and on screen that is indistinguishable from a relay advertising no groups at all. Equally, let the door treat a predicate that names no constraint as a fall-back to the app's own id list rather than as the absence of a constraint, and the same wrong screen results.
+  @nip29
+  Scenario: A directory asks a relay which groups it advertises, and names no group ids of its own
+    Given an app browsing the rooms a relay advertises rather than watching rooms it already knows
+    When the app observes with the unconstrained predicate over a two-host scope
+    Then each host's branch selects the relay-signed records the app named
+    And no branch carries a group-id row at all
+    And the app's own per-host bound is the only thing bounding the answer
+
+  # nmp:id=GROUPS-DISCOVERY-008
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_named_shorthand_is_exactly_the_general_spelling
+  # nmp:evidence=rust:nmp::the_general_spelling_constrains_a_field_no_shorthand_names
+  # nmp:falsifier=Keep a hardcoded tag inside each predicate leaf -- `#p` for the two list leaves, `#d` for the id leaf -- so the leaf set IS the language rather than a shorthand over it. A question the shorthands do not name, such as "groups whose metadata record carries this topic row", would then be unaskable, and a leaf that quietly grew its own lowering path would no longer compare equal to the general spelling it claims to abbreviate.
+  @nip29
+  Scenario: The named discovery leaves are shorthands over the general query language, not a closed vocabulary
+    Given the general spelling that takes an ordinary live-query filter over a relay-signed group record
+    When the app writes the member-list question out in full instead of using the named leaf
+    Then the two are the same value, not merely equivalent
+    And a question no named leaf spells is expressible through the same door
+
+  # nmp:id=GROUPS-DISCOVERY-009
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_derived_id_source_keeps_its_own_authority_and_stays_reactive
+  # nmp:falsifier=Keep the group-id set literal, as a plain set of strings rather than an ordinary binding. An app watching the groups named in its own saved list must then fetch that list itself, extract the ids by hand, open a second observation, and redo all of it whenever the list changes -- exactly the hand-rolled shape the typed reader exists to end, surviving one layer up.
+  @nip29
+  Scenario: An app watches the groups named in its own saved list, without re-deriving them by hand
+    Given an app whose room list is its own saved-groups event rather than a set of ids typed into the code
+    When the app names that lookup as the source of the group ids
+    Then the observation follows the saved list as it changes, with no second observation
+    And the lookup resolves from the app's own relays, never from the group's hosts
+
+  # nmp:id=GROUPS-DISCOVERY-010
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_kind_the_group_host_is_not_authoritative_for_is_refused
+  # nmp:falsifier=Accept any filter at all in the general spelling. That filter is evaluated with NIP-29's own pin, so a selection naming the app's own saved-groups kind would be asked of the GROUP's relay, which has no reason to hold it: the read would return nothing and the app could not tell that from a relay that genuinely lists no matching group.
+  @nip29
+  Scenario: The general spelling may only name records the group's host is authoritative for
+    Given a filter naming a kind that is not one of NIP-29's three relay-signed group records
+    When the app tries to build a group-id source from it
+    Then the door refuses with a typed error naming the offending kind
+    And no observation is opened that would silently ask the wrong relay

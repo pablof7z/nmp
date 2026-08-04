@@ -72,12 +72,33 @@ class NIP29Test {
     @Test
     fun predicatesComposeIncludingTheLiteralIdLeaf() {
         val member =
-            NMPGroupPredicate.memberListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
+            NMPGroupIds.memberListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
         val admin =
-            NMPGroupPredicate.adminListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
-        member.union(listOf(admin, NMPGroupPredicate.anyOf(listOf("photographers"))))
+            NMPGroupIds.adminListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
+        member.union(listOf(admin, NMPGroupIds.anyOf(NMPBinding.Literal(setOf("photographers")))))
         member.intersect(listOf(admin))
         member.minus(listOf(admin))
+        NMPGroupPredicate.naming(member)
+    }
+
+    /** The #1252 capability: "every room this relay advertises" is a
+     * predicate an app can phrase, with no id set of its own. */
+    @Test
+    fun aDirectoryNeedsNoIdSetOfItsOwn() {
+        NMPGroupPredicate.all()
+    }
+
+    /** The general spelling is reachable from Kotlin, and its refusal
+     * survives the boundary: a group host is authoritative for NIP-29's
+     * three relay-signed records and nothing else. */
+    @Test
+    fun theGeneralSpellingRefusesAKindTheHostDoesNotOwn() {
+        NMPGroupIds.whoseRecordMatches(NMPFilter(kinds = setOf(39_002u)))
+        val error =
+            assertThrows(NMPError.GroupIdSelectionNotAGroupRecordKind::class.java) {
+                NMPGroupIds.whoseRecordMatches(NMPFilter(kinds = setOf(10_009u)))
+            }
+        assertEquals(10_009, error.kind.toInt())
     }
 
     /** A non-hex literal subject is a typed invalid-public-key refusal --
@@ -86,7 +107,7 @@ class NIP29Test {
     fun aNonHexLiteralSubjectIsATypedInvalidPublicKey() {
         val error =
             assertThrows(NMPError.InvalidPublicKey::class.java) {
-                NMPGroupPredicate.memberListIncludes(NMPBinding.Literal(setOf("not-a-pubkey")))
+                NMPGroupIds.memberListIncludes(NMPBinding.Literal(setOf("not-a-pubkey")))
             }
         assertEquals("not-a-pubkey", error.got)
     }

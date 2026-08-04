@@ -121,7 +121,7 @@ enum Probe {
         let subjects = NMPBinding.literal(Set([context.args.followed, context.args.outsider]))
         return try context.scope.observeRecords(
             engine: context.engine,
-            matching: try NMPGroupPredicate.memberListIncludes(subjects),
+            matching: .naming(try NMPGroupIds.memberListIncludes(subjects)),
             records: [.metadata]
         )
     }
@@ -167,7 +167,7 @@ enum Probe {
         )
         return try context.scope.observeRecords(
             engine: context.engine,
-            matching: try NMPGroupPredicate.memberListIncludes(follows),
+            matching: .naming(try NMPGroupIds.memberListIncludes(follows)),
             records: [.members]
         )
     }

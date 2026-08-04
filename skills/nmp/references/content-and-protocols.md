@@ -47,13 +47,26 @@ the one `observe` door. Writes go through the same `Group`:
 `group.publish(&engine, author, builder)` (plus `publish_signed` and the named
 9000-9022 operations) preserves the draft's kind and schema, appends exactly
 one `h` before signing, and routes `Explicit` to every host in the scope, not
-one. Discovery across the scope is evidence-scoped:
-`nip29::member_list_includes`/`admin_list_includes`/`any_of` build a
-composable `GroupPredicate` (`union`/`intersect`/`minus`) over observed
-kind:39002/39001 rows and over ids the app already knows; absence from a list
-is never treated as proof of non-membership/non-admin.
+one. Discovery across the scope is the ordinary query language, not a closed leaf
+set: `nip29::groups_whose_record_matches(Filter)` names the groups whose own
+relay-signed record matches an ordinary live-query filter at the branch host,
+and `member_list_includes`/`admin_list_includes` are shorthands over it that
+are exactly equal to writing it out. `any_of(Binding)` takes any binding, so
+"the groups named in my own kind:10009 list" is a derived source that stays
+reactive. All three build a `GroupIds`, composable with
+`union`/`intersect`/`minus`. Absence from a list is never treated as proof of
+non-membership/non-admin.
 
-Reading those records is `scope.observe(&engine, predicate, records)` and
+`nip29::all()` is the fourth spelling and the only one that is not a
+`GroupIds`: every group the host advertises, expressed as the ABSENCE of a
+`#d` row. It is unbounded by nature -- bound it with `observe`'s own per-host
+`limit` -- and advertisement is not enumeration: a group the host serves but
+publishes no kind:39000 for is invisible. Set algebra is on `GroupIds` alone,
+so `all().minus(...)` does not typecheck: Nostr filters have no negation, and
+"everything except X" cannot narrow a wire request. Filter muted rooms out of
+the `Vec<GroupSnapshot>` you render.
+
+Reading those records is `scope.observe(&engine, predicate, records, limit)` and
 `nip29::group(hosts, id)?.observe(&engine, records)`. Both deliver a complete
 `GroupSnapshot` -- typed metadata plus the record's raw rows, admins and
 members as `ListedSubject`s each carrying the hosts that named them, an
@@ -63,7 +76,7 @@ never defaulted. Across hosts the lists union and the metadata does not: one
 host's whole record wins on `created_at`, never merged field-wise.
 
 Rust, FFI and both native SDKs project the full read-and-write door
-(`FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`NmpGroupRecordsStream`;
+(`FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds`/`NmpGroupRecordsStream`;
 `NMPRelayScope`/`NMPGroup`/`NMPGroupSnapshot` in Swift and Kotlin).
 
 `nmp-nipc7` independently owns pure kind:9 chat and `q` replies. It does not
