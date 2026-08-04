@@ -16,12 +16,22 @@
 //! out: exactly like the Rust door, there is no spelling for composing an
 //! event under one group and routing it as though it came from another.
 //!
-//! [`FfiGroupPredicate`] wraps [`nmp::nip29::GroupPredicate`] the same way.
-//! It stays opaque for the same reason `FfiBinding::Derived`/`FfiBinding::
+//! [`FfiGroupPredicate`] and [`FfiGroupIds`] wrap
+//! [`nmp::nip29::GroupPredicate`] and [`nmp::nip29::GroupIds`] the same way.
+//! They stay opaque for the same reason `FfiBinding::Derived`/`FfiBinding::
 //! SetOp` are UniFFI objects rather than records (see `types.rs`'s own doc):
-//! a caller composes it with [`member_list_includes`]/[`admin_list_includes`]
-//! and [`FfiGroupPredicate::union`]/[`intersect`]/[`minus`], then hands it to
-//! [`FfiRelayScope::observe_records`] -- it is never inspected.
+//! a caller composes them with [`member_list_includes`]/[`admin_list_includes`]/
+//! [`any_of`]/[`groups_whose_record_matches`] and
+//! [`FfiGroupIds::union`]/[`intersect`](FfiGroupIds::intersect)/[`minus`](FfiGroupIds::minus),
+//! then hands the result to [`FfiRelayScope::observe_records`] -- they are
+//! never inspected.
+//!
+//! The two-object split carries the Rust door's refusal ACROSS the boundary
+//! rather than restating it in prose. Set algebra lives on [`FfiGroupIds`]
+//! and on nothing else, so `all().minus(...)` is unspellable in Swift and
+//! Kotlin exactly as it is in Rust: Nostr filters have no negation, and
+//! "everything except X" could only be honoured by asking the relay for
+//! everything and hiding rows after delivery.
 //!
 //! Deliberately absent, same as before #1033: a fixed group-content kind
 //! catalog and a kind:9 composer. NIP-29 owns neither; C7 and client
@@ -34,15 +44,15 @@
 use std::sync::Arc;
 
 use nmp::nip29::{
-    self, Group, GroupAvailability, GroupMetadata, GroupObservation, GroupPredicate, GroupRecord,
-    GroupSnapshot, ListedRecord, ListedSubject, RelayScope,
+    self, Group, GroupAvailability, GroupIds, GroupMetadata, GroupObservation, GroupPredicate,
+    GroupRecord, GroupSnapshot, ListedRecord, ListedSubject, RelayScope,
 };
 use nostr::RelayUrl;
 
 use crate::convert::{
-    event_builder_from_ffi, filter_from_ffi, live_query_to_ffi, parse_event_id, parse_pubkey,
-    signed_event_from_ffi, subjects_binding_from_ffi, write_status_to_ffi, FfiError,
-    WriteStatusRef,
+    event_builder_from_ffi, filter_from_ffi, group_ids_binding_from_ffi, live_query_to_ffi,
+    parse_event_id, parse_pubkey, signed_event_from_ffi, subjects_binding_from_ffi,
+    write_status_to_ffi, FfiError, WriteStatusRef,
 };
 use crate::facade::NmpEngine;
 use crate::types::{
@@ -94,16 +104,23 @@ impl FfiRelayScope {
     /// host, folded into ONE ordinary engine subscription; each delivery is
     /// the complete set of [`FfiGroupSnapshot`]s for the groups currently
     /// matching. The app never sees a row delta and never walks a `p` row.
+    ///
+    /// `limit` is the ordinary NIP-01 `Filter::limit` and bounds EACH host's
+    /// own branch, never the merged union: two hosts with `Some(250)` may
+    /// deliver up to 500 snapshots, because each was asked for 250 of its
+    /// own. `None` asks for whatever the relay chooses to answer with.
     pub fn observe_records(
         &self,
         engine: Arc<NmpEngine>,
         predicate: Arc<FfiGroupPredicate>,
         records: Vec<FfiGroupRecord>,
+        limit: Option<u32>,
     ) -> Result<Arc<NmpGroupRecordsStream>, FfiError> {
         let observation = self.inner.observe(
             &engine.engine,
             predicate.inner.clone(),
             records.into_iter().map(GroupRecord::from),
+            limit.map(|limit| limit as usize),
         )?;
         Ok(NmpGroupRecordsStream::new(observation))
     }
@@ -325,11 +342,10 @@ impl FfiGroup {
     }
 }
 
-/// A composable NIP-29 discovery predicate (`nmp::nip29::GroupPredicate`
-/// mirror). Opaque by design -- see this module's own doc for why -- built
-/// with [`member_list_includes`]/[`admin_list_includes`] and composed with
-/// [`Self::union`]/[`Self::intersect`]/[`Self::minus`], then handed to
-/// [`FfiRelayScope::observe_records`].
+/// Which groups an observation covers (`nmp::nip29::GroupPredicate` mirror).
+/// Opaque by design -- see this module's own doc for why -- built with
+/// [`Self::all`] or from an [`FfiGroupIds`] with [`Self::naming`], then handed
+/// to [`FfiRelayScope::observe_records`].
 #[derive(Debug, uniffi::Object)]
 pub struct FfiGroupPredicate {
     inner: GroupPredicate,
@@ -337,8 +353,51 @@ pub struct FfiGroupPredicate {
 
 #[uniffi::export]
 impl FfiGroupPredicate {
-    /// Groups matching this predicate OR any of `others`.
-    pub fn union(&self, others: Vec<Arc<FfiGroupPredicate>>) -> Arc<Self> {
+    /// Every group the host advertises among the selected records
+    /// (`nmp::nip29::all` mirror). The branch carries NO group-id row: this is
+    /// the ABSENCE of a constraint, which is what makes a directory
+    /// expressible -- the ids a directory wants are the answer, not the input.
+    ///
+    /// Unbounded by nature: bound it with `observe_records`'s own `limit`.
+    /// Advertisement is not enumeration -- a group the host serves but
+    /// publishes no kind:39000 for is invisible.
+    #[uniffi::constructor]
+    pub fn all() -> Arc<Self> {
+        Arc::new(Self {
+            inner: nip29::all(),
+        })
+    }
+
+    /// Only the groups `ids` names (`From<GroupIds> for GroupPredicate`
+    /// mirror).
+    #[uniffi::constructor]
+    pub fn naming(ids: Arc<FfiGroupIds>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: ids.inner.clone().into(),
+        })
+    }
+}
+
+/// Where a set of NIP-29 group ids comes from (`nmp::nip29::GroupIds`
+/// mirror). Opaque by design, built with [`member_list_includes`]/
+/// [`admin_list_includes`]/[`any_of`]/[`groups_whose_record_matches`] and
+/// composed with [`Self::union`]/[`Self::intersect`]/[`Self::minus`].
+///
+/// Whatever this resolves to becomes the `#d` value set of one relay filter,
+/// and a filter carrying very many values may be refused or silently
+/// truncated by that relay. Watching very many groups needs sharding across
+/// several observations; NMP does not chunk behind the app's back, because a
+/// silently-sharded observation would report availability for a plan the app
+/// never declared.
+#[derive(Debug, uniffi::Object)]
+pub struct FfiGroupIds {
+    inner: GroupIds,
+}
+
+#[uniffi::export]
+impl FfiGroupIds {
+    /// Groups named by this source OR by any of `others`.
+    pub fn union(&self, others: Vec<Arc<FfiGroupIds>>) -> Arc<Self> {
         let inner = self
             .inner
             .clone()
@@ -346,8 +405,8 @@ impl FfiGroupPredicate {
         Arc::new(Self { inner })
     }
 
-    /// Groups matching this predicate AND all of `others`.
-    pub fn intersect(&self, others: Vec<Arc<FfiGroupPredicate>>) -> Arc<Self> {
+    /// Groups named by this source AND by all of `others`.
+    pub fn intersect(&self, others: Vec<Arc<FfiGroupIds>>) -> Arc<Self> {
         let inner = self
             .inner
             .clone()
@@ -355,8 +414,8 @@ impl FfiGroupPredicate {
         Arc::new(Self { inner })
     }
 
-    /// Groups matching this predicate and none of `others`.
-    pub fn minus(&self, others: Vec<Arc<FfiGroupPredicate>>) -> Arc<Self> {
+    /// Groups named by this source and by none of `others`.
+    pub fn minus(&self, others: Vec<Arc<FfiGroupIds>>) -> Arc<Self> {
         let inner = self
             .inner
             .clone()
@@ -365,13 +424,31 @@ impl FfiGroupPredicate {
     }
 }
 
+/// Groups whose own relay-signed record matches `selection` at the branch
+/// host (`nmp::nip29::groups_whose_record_matches` mirror) -- THE general
+/// spelling, of which every other id source is a shorthand.
+///
+/// Refused when `selection` names no kind, or names a kind that is not one of
+/// NIP-29's three relay-signed group records: this leaf is evaluated with
+/// NIP-29's own pin, and a group host is authoritative for nothing else.
+#[uniffi::export]
+pub fn groups_whose_record_matches(selection: FfiFilter) -> Result<Arc<FfiGroupIds>, FfiError> {
+    let selection = filter_from_ffi(selection)?;
+    Ok(Arc::new(FfiGroupIds {
+        inner: nip29::groups_whose_record_matches(selection)?,
+    }))
+}
+
 /// Groups whose observed kind:39002 member-list evidence names `subjects`
 /// (`nmp::nip29::member_list_includes` mirror). Inclusion is evidence,
 /// never exact state -- absence is not evidence of non-membership.
+///
+/// Shorthand for [`groups_whose_record_matches`] over
+/// `{ kinds:[39002], #p: subjects }`, and exactly equal to it.
 #[uniffi::export]
-pub fn member_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupPredicate>, FfiError> {
+pub fn member_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupIds>, FfiError> {
     let subjects = subjects_binding_from_ffi(subjects)?;
-    Ok(Arc::new(FfiGroupPredicate {
+    Ok(Arc::new(FfiGroupIds {
         inner: nip29::member_list_includes(subjects),
     }))
 }
@@ -380,9 +457,9 @@ pub fn member_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupPredicat
 /// (`nmp::nip29::admin_list_includes` mirror). Evidence-scoped exactly like
 /// [`member_list_includes`].
 #[uniffi::export]
-pub fn admin_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupPredicate>, FfiError> {
+pub fn admin_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupIds>, FfiError> {
     let subjects = subjects_binding_from_ffi(subjects)?;
-    Ok(Arc::new(FfiGroupPredicate {
+    Ok(Arc::new(FfiGroupIds {
         inner: nip29::admin_list_includes(subjects),
     }))
 }
@@ -602,14 +679,22 @@ pub(crate) fn snapshot_to_ffi(snapshot: &GroupSnapshot) -> FfiGroupSnapshot {
     }
 }
 
-/// Exactly these group ids, whatever any list says about them
-/// (`nmp::nip29::any_of` mirror). The leaf an app uses when it already knows
-/// which rooms it is showing and is not asking a relational question.
+/// The groups `ids` names, whatever any list says about them
+/// (`nmp::nip29::any_of` mirror).
+///
+/// `ids` is an ordinary [`FfiBinding`], which is the point: a literal set for
+/// rooms an app already knows, and a derived binding for rooms it has to look
+/// up. "Watch the groups named in my own kind:10009 simple-groups list" is
+/// that derived case, and it stays reactive -- when the list changes, the
+/// observation follows it, with no hand-extraction of ids and no second
+/// observation. A derived binding keeps its OWN authority and is never
+/// repinned to the group's hosts.
 #[uniffi::export]
-pub fn any_of(ids: Vec<String>) -> Arc<FfiGroupPredicate> {
-    Arc::new(FfiGroupPredicate {
+pub fn any_of(ids: FfiBinding) -> Result<Arc<FfiGroupIds>, FfiError> {
+    let ids = group_ids_binding_from_ffi(ids)?;
+    Ok(Arc::new(FfiGroupIds {
         inner: nip29::any_of(ids),
-    })
+    }))
 }
 
 /// Pull-based receipt stream for a NIP-29 group write (#1033). Unlike
@@ -753,7 +838,11 @@ mod tests {
             field: FfiIdentityField::ActivePubkey,
         })
         .expect("a reactive subjects binding needs no hex validation");
-        let predicate = member.union(vec![admin, any_of(vec!["photographers".to_string()])]);
+        let pinned = any_of(FfiBinding::Literal {
+            values: vec!["photographers".to_string()],
+        })
+        .expect("a literal id set needs no hex validation");
+        let predicate = FfiGroupPredicate::naming(member.union(vec![admin, pinned]));
 
         let watching = scope
             .observe_records(
@@ -764,6 +853,7 @@ mod tests {
                     FfiGroupRecord::Admins,
                     FfiGroupRecord::Members,
                 ],
+                None,
             )
             .expect("a two-host records observation opens");
         watching.cancel();
