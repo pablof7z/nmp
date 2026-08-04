@@ -32,15 +32,16 @@ class CorrelationTest {
                                     content = "first draft",
                                     createdAt = 1_723_456_800uL,
                                 ),
-                            durability = Durability.Durable,
                             routing = WriteRouting.Auto,
                             correlation = token,
                         ),
                     )
-                val firstStatuses = withTimeout(5_000) { first.status.take(2).toList() }
+                // Acceptance is `publish` returning this receipt, not a
+                // stream item; the LIVE stream's first fact is the park.
+                val firstFacts = withTimeout(5_000) { first.status.take(1).toList() }
                 assertEquals(
-                    listOf(WriteStatus.Accepted, WriteStatus.AwaitingCapability(author)),
-                    firstStatuses,
+                    listOf(WriteFact.Signing(SigningState.AwaitingSigner(author))),
+                    firstFacts,
                 )
 
                 // A re-composed draft -- different timestamp/content -- under
@@ -56,16 +57,20 @@ class CorrelationTest {
                                     content = "second, different draft",
                                     createdAt = 1_723_456_801uL,
                                 ),
-                            durability = Durability.Durable,
                             routing = WriteRouting.Auto,
                             correlation = token,
                         ),
                     )
                 assertEquals(first.id, second.id)
-                val secondStatuses = withTimeout(5_000) { second.status.take(2).toList() }
+                // The retry reattaches, so its stream REPLAYS the original
+                // obligation's retained facts -- both parks, signer and route.
+                val secondFacts = withTimeout(5_000) { second.status.take(2).toList() }
                 assertEquals(
-                    listOf(WriteStatus.Accepted, WriteStatus.AwaitingCapability(author)),
-                    secondStatuses,
+                    listOf(
+                        WriteFact.Signing(SigningState.AwaitingSigner(author)),
+                        WriteFact.Destinations(emptyList(), false),
+                    ),
+                    secondFacts,
                     "the retry's stream must replay the ORIGINAL obligation's facts",
                 )
             }
@@ -88,22 +93,24 @@ class CorrelationTest {
                                     content = "reattach by correlation",
                                     createdAt = 1_723_456_900uL,
                                 ),
-                            durability = Durability.Durable,
                             routing = WriteRouting.Auto,
                             correlation = token,
                         ),
                     )
-                withTimeout(5_000) { receipt.status.take(2).toList() }
+                withTimeout(5_000) { receipt.status.take(1).toList() }
 
                 // Simulate the "app forgot the numeric id" scenario: reattach
                 // using only the token it minted itself.
                 val reattachment = engine.reattachReceipt(token)
                 assertTrue(reattachment is ReceiptReattachment.Attached)
                 val replay = (reattachment as ReceiptReattachment.Attached).receipt
-                val replayStatuses = withTimeout(5_000) { replay.status.take(2).toList() }
+                val replayFacts = withTimeout(5_000) { replay.status.take(2).toList() }
                 assertEquals(
-                    listOf(WriteStatus.Accepted, WriteStatus.AwaitingCapability(author)),
-                    replayStatuses,
+                    listOf(
+                        WriteFact.Signing(SigningState.AwaitingSigner(author)),
+                        WriteFact.Destinations(emptyList(), false),
+                    ),
+                    replayFacts,
                 )
 
                 // An unknown token is a distinct, typed absence.
@@ -132,8 +139,7 @@ class CorrelationTest {
                                         content = "malformed correlation token",
                                         createdAt = 1_723_457_000uL,
                                     ),
-                                durability = Durability.Durable,
-                                routing = WriteRouting.Auto,
+                                    routing = WriteRouting.Auto,
                                 correlation = "",
                             ),
                         )

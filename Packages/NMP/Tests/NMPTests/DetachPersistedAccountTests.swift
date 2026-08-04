@@ -186,18 +186,16 @@ final class DetachPersistedAccountTests: XCTestCase {
                     content: "cached before detach",
                     createdAt: 1_723_456_999
                 ),
-                durability: .durable,
                 routing: .auto
             )
         )
-        var sawAccepted = false
-        for try await status in receipt.status {
-            if status == .accepted {
-                sawAccepted = true
-                break
-            }
-        }
-        XCTAssertTrue(sawAccepted, "the write must be durably accepted into the store before detach")
+        // `publish` returning is the acceptance, so the durable evidence to
+        // assert is the queue entry it left behind -- read back through the
+        // ordinary inspection door, not awaited on the stream.
+        XCTAssertTrue(
+            try seed.publishQueue().contains { $0.receiptID == receipt.id },
+            "the write must be durably accepted into the store before detach"
+        )
         seed.shutdown()
 
         let restored = try NMPEngine(config: config, localAccountStore: fixture.store)

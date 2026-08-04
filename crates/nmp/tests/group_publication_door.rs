@@ -58,7 +58,7 @@ use nmp::nip29::{
     GroupRecord, GroupSnapshot,
 };
 use nmp::{
-    Binding, Engine, EngineConfig, EventBuilder, Filter, RelayState, Row, RowDelta, SignerError,
+    Binding, Engine, EngineConfig, EventBuilder, Filter, RelayState, RowDelta, SignerError,
     SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
     SigningState, WriteFact,
 };

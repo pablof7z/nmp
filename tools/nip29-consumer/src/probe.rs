@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use nmp::nip29::GroupAvailability;
 use nmp::{
     nip29, AccessContext, Binding, CacheMode, Demand, Derived, DiagnosticsSnapshot, Engine,
-    EngineConfig, EventBuilder, Filter, IdentityField, Kind, LiveQuery, PublicKey, RelayState,
-    RelayUrl, Selector, SourceAuthority, SourceStatus, Tag, Window, WriteFact,
+    EngineConfig, EventBuilder, Filter, IdentityField, Kind, PublicKey, RelayState, RelayUrl,
+    Selector, SourceAuthority, SourceStatus, Tag, Window, WriteFact,
 };
 
 use crate::args::{Args, Mode};

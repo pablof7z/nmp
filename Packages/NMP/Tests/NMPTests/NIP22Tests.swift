@@ -24,8 +24,8 @@ final class NIP22Tests: XCTestCase {
         }
     }
 
-    private static func collect(_ stream: ReceiptStatus, count: Int) async -> [WriteStatus] {
-        var statuses: [WriteStatus] = []
+    private static func collect(_ stream: ReceiptStatus, count: Int) async -> [WriteFact] {
+        var statuses: [WriteFact] = []
         // #680: a receipt is a throwing `AsyncSequence`; a throw here is
         // terminal teardown, so end collection with what we have.
         do {
@@ -161,11 +161,12 @@ final class NIP22Tests: XCTestCase {
     }
 
     /// #572's offline-signer durable acceptance + restart reattachment
-    /// falsifier: compose a comment intent while the active identity has
-    /// no signer, publish, observe `Accepted` + `AwaitingCapability`
-    /// (the canonical "locally pending" state an app renders without
-    /// interpreting `sources`/the all-zero sig sentinel itself), and prove
-    /// the SAME token reattaches the identical obligation.
+    /// falsifier: compose a comment intent while the active identity has no
+    /// signer, publish -- whose returning receipt IS the durable acceptance --
+    /// observe the parked `SigningState.awaitingSigner` (the canonical
+    /// "locally pending" state an app renders without interpreting
+    /// `sources`/the all-zero sig sentinel itself), and prove the SAME token
+    /// reattaches the identical obligation.
     func testOfflineSignerDurableAcceptanceAndCorrelationReattachment() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
@@ -180,9 +181,9 @@ final class NIP22Tests: XCTestCase {
         )
         let receipt = try await engine.publish(intent)
         let statuses = try await Self.withTimeout {
-            await Self.collect(receipt.status, count: 2)
+            await Self.collect(receipt.status, count: 1)
         }
-        XCTAssertEqual(statuses, [.accepted, .awaitingCapability(pubkey: author)])
+        XCTAssertEqual(statuses, [.signing(.awaitingSigner(pubkey: author))])
 
         // The app never learned the numeric receipt id (it only minted the
         // token) -- reattach using only the token, mirroring a restart.
@@ -190,9 +191,9 @@ final class NIP22Tests: XCTestCase {
             return XCTFail("a token that resolved during publish must remain reattachable")
         }
         let replayStatuses = try await Self.withTimeout {
-            await Self.collect(replay.status, count: 2)
+            await Self.collect(replay.status, count: 1)
         }
-        XCTAssertEqual(replayStatuses, [.accepted, .awaitingCapability(pubkey: author)])
+        XCTAssertEqual(replayStatuses, [.signing(.awaitingSigner(pubkey: author))])
     }
 
     // MARK: - #572 review finding 4: test honesty
@@ -225,7 +226,6 @@ final class NIP22Tests: XCTestCase {
                 ["k", "podcast:item:guid"],
             ]
         )
-        XCTAssertEqual(intent.durability, .durable)
         XCTAssertEqual(intent.routing, .auto)
         XCTAssertEqual(intent.identity, .active)
         XCTAssertNil(intent.correlation)
@@ -247,7 +247,7 @@ final class NIP22Tests: XCTestCase {
         )
         let receipt = try await engine.publish(intent)
         _ = try await Self.withTimeout {
-            await Self.collect(receipt.status, count: 2)
+            await Self.collect(receipt.status, count: 1)
         }
 
         let row = try await Self.withTimeout {

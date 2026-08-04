@@ -1,6 +1,7 @@
 package com.nmp.sdk
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -14,7 +15,12 @@ import uniffi.nmp_ffi.FfiException
 import uniffi.nmp_ffi.FfiShortfallFact
 import uniffi.nmp_ffi.FfiSourceEvidence
 import uniffi.nmp_ffi.FfiSourceStatus
-import uniffi.nmp_ffi.FfiWriteStatus
+import uniffi.nmp_ffi.FfiNotSentReason
+import uniffi.nmp_ffi.FfiRefuseReason
+import uniffi.nmp_ffi.FfiRelayState
+import uniffi.nmp_ffi.FfiRelayWaiting
+import uniffi.nmp_ffi.FfiWriteFact
+import uniffi.nmp_ffi.FfiWriteOutcome
 import uniffi.nmp_ffi.FfiCancelWriteException
 import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiRetryCause
@@ -24,8 +30,18 @@ import uniffi.nmp_ffi.FfiRowDelta
 class EvidenceMappingTest {
     @Test
     fun cancellationFactAndEveryRefusalRemainTyped() {
-        assertEquals(WriteStatus.Cancelled, WriteStatus.from(FfiWriteStatus.Cancelled))
-        assertEquals(WriteStatus.Superseded, WriteStatus.from(FfiWriteStatus.Superseded))
+        assertEquals(
+            WriteFact.Outcome(WriteOutcome.NotSent(NotSentReason.Cancelled)),
+            WriteFact.from(
+                FfiWriteFact.Outcome(FfiWriteOutcome.NotSent(FfiNotSentReason.CANCELLED)),
+            ),
+        )
+        assertEquals(
+            WriteFact.Outcome(WriteOutcome.NotSent(NotSentReason.Superseded)),
+            WriteFact.from(
+                FfiWriteFact.Outcome(FfiWriteOutcome.NotSent(FfiNotSentReason.SUPERSEDED)),
+            ),
+        )
         assertEquals(
             NMPWriteCancellationError.UnknownReceipt(42uL),
             NMPWriteCancellationError.from(FfiCancelWriteException.UnknownReceipt(42uL)),
@@ -43,8 +59,8 @@ class EvidenceMappingTest {
             NMPWriteCancellationError.from(FfiCancelWriteException.AlreadySuperseded(42uL)),
         )
         assertEquals(
-            NMPWriteCancellationError.AlreadyAbandoned(42uL),
-            NMPWriteCancellationError.from(FfiCancelWriteException.AlreadyAbandoned(42uL)),
+            NMPWriteCancellationError.AlreadyRefused(42uL),
+            NMPWriteCancellationError.from(FfiCancelWriteException.AlreadyRefused(42uL)),
         )
         assertEquals(
             NMPWriteCancellationError.PersistenceFailed(42uL, "disk"),
@@ -84,12 +100,6 @@ class EvidenceMappingTest {
 
         assertEquals(1, order.size, "SourcesGrew must never insert a second row for the same id")
         assertEquals(listOf("wss://r0.example", "wss://r1.example"), byId["abc"]?.sources)
-    }
-
-    @Test
-    fun receiptCorrelationExhaustionRemainsTypedAtTheNativeBoundary() {
-        assertTrue(
-        )
     }
 
     @Test
@@ -146,95 +156,125 @@ class EvidenceMappingTest {
     }
 
     @Test
-    fun outcomeUnknownReceiptMappingRemainsDistinctFromGaveUp() {
-        val ambiguous = WriteStatus.from(FfiWriteStatus.OutcomeUnknown("wss://ambiguous.example"))
-        assertEquals(WriteStatus.OutcomeUnknown("wss://ambiguous.example"), ambiguous)
-        assertTrue(ambiguous != WriteStatus.GaveUp("wss://ambiguous.example"))
-    }
-
-    @Test
-    fun everyRetryLaneReceiptStateMapsWithoutLosingAttemptTruth() {
+    fun everyRetryLaneRelayStateMapsWithoutLosingAttemptTruth() {
         assertEquals(
-            WriteStatus.AwaitingRelay("wss://offline.example"),
-            WriteStatus.from(FfiWriteStatus.AwaitingRelay("wss://offline.example")),
-        )
-        assertEquals(
-            WriteStatus.AwaitingAuth("wss://auth.example"),
-            WriteStatus.from(FfiWriteStatus.AwaitingAuth("wss://auth.example")),
-        )
-        assertEquals(
-            WriteStatus.AuthDenied(
-                "wss://auth.example",
-                "a".repeat(64),
-                AuthDenialSource.Policy,
-                "account not permitted",
+            WriteFact.Relay(
+                "wss://offline.example",
+                RelayState.Waiting(RelayWaiting.NotConnected),
             ),
-            WriteStatus.from(
-                FfiWriteStatus.AuthDenied(
+            WriteFact.from(
+                FfiWriteFact.Relay(
+                    "wss://offline.example",
+                    FfiRelayState.Waiting(FfiRelayWaiting.NotConnected),
+                ),
+            ),
+        )
+        assertEquals(
+            WriteFact.Relay("wss://auth.example", RelayState.Waiting(RelayWaiting.NeedsAuth)),
+            WriteFact.from(
+                FfiWriteFact.Relay(
                     "wss://auth.example",
+                    FfiRelayState.Waiting(FfiRelayWaiting.NeedsAuth),
+                ),
+            ),
+        )
+        assertEquals(
+            WriteFact.Relay(
+                "wss://auth.example",
+                RelayState.AuthFailed(
                     "a".repeat(64),
-                    FfiAuthDenialSource.POLICY,
+                    AuthDenialSource.Policy,
                     "account not permitted",
                 ),
             ),
-        )
-        assertEquals(
-            WriteStatus.RetryEligible(
-                "wss://retry.example",
-                2uL,
-                123uL,
-                RetryCause.RelayRateLimited,
-                "rate-limited: slow down",
-            ),
-            WriteStatus.from(
-                FfiWriteStatus.RetryEligible(
-                    "wss://retry.example",
-                    2uL,
-                    123uL,
-                    FfiRetryCause.RELAY_RATE_LIMITED,
-                    "rate-limited: slow down",
+            WriteFact.from(
+                FfiWriteFact.Relay(
+                    "wss://auth.example",
+                    FfiRelayState.AuthFailed(
+                        "a".repeat(64),
+                        FfiAuthDenialSource.POLICY,
+                        "account not permitted",
+                    ),
                 ),
             ),
         )
         assertEquals(
-            WriteStatus.HandoffAmbiguous("wss://ambiguous.example", 3uL, 124uL),
-            WriteStatus.from(
-                FfiWriteStatus.HandoffAmbiguous("wss://ambiguous.example", 3uL, 124uL),
+            WriteFact.Relay(
+                "wss://retry.example",
+                RelayState.Waiting(
+                    RelayWaiting.BackingOff(
+                        2uL,
+                        123uL,
+                        RetryCause.RelayRateLimited,
+                        "rate-limited: slow down",
+                    ),
+                ),
+            ),
+            WriteFact.from(
+                FfiWriteFact.Relay(
+                    "wss://retry.example",
+                    FfiRelayState.Waiting(
+                        FfiRelayWaiting.BackingOff(
+                            2uL,
+                            123uL,
+                            FfiRetryCause.RELAY_RATE_LIMITED,
+                            "rate-limited: slow down",
+                        ),
+                    ),
+                ),
             ),
         )
         assertEquals(
-            WriteStatus.Sent("wss://written.example", 4uL, 125uL),
-            WriteStatus.from(FfiWriteStatus.Sent("wss://written.example", 4uL, 125uL)),
+            WriteFact.Relay("wss://written.example", RelayState.Sent(4uL, 125uL)),
+            WriteFact.from(
+                FfiWriteFact.Relay("wss://written.example", FfiRelayState.Sent(4uL, 125uL)),
+            ),
         )
     }
 
+    /** A stalled local disk owns the lane but has emitted nothing on the
+     * wire: it must never be read as the lane being finished with. */
     @Test
-    fun persistenceBlockedReceiptMappingRemainsNonterminal() {
-        val blocked = WriteStatus.from(FfiWriteStatus.PersistenceBlocked("wss://blocked.example"))
-        assertEquals(WriteStatus.PersistenceBlocked("wss://blocked.example"), blocked)
-        assertTrue(blocked != WriteStatus.GaveUp("wss://blocked.example"))
-        assertTrue(blocked != WriteStatus.Failed("persistence"))
-    }
-
-    @Test
-    fun routePersistenceBlockedDoesNotClaimDurableAttemptOwnership() {
-        val blocked = WriteStatus.from(FfiWriteStatus.RoutePersistenceBlocked("wss://volatile.example"))
-        assertEquals(WriteStatus.RoutePersistenceBlocked("wss://volatile.example"), blocked)
-        assertTrue(blocked != WriteStatus.PersistenceBlocked("wss://volatile.example"))
-    }
-
-    @Test
-    fun replaceableConflictPreservesBothWinnerIds() {
-        val conflict =
-            WriteStatus.from(
-                FfiWriteStatus.ReplaceableConflict(
-                    expected = "expected-event",
-                    actual = "actual-event",
+    fun persistenceStalledRelayStateMappingRemainsNonterminal() {
+        val stalled =
+            WriteFact.from(
+                FfiWriteFact.Relay(
+                    "wss://blocked.example",
+                    FfiRelayState.Waiting(FfiRelayWaiting.PersistenceStalled("disk full")),
                 ),
             )
         assertEquals(
-            WriteStatus.ReplaceableConflict("expected-event", "actual-event"),
-            conflict,
+            WriteFact.Relay(
+                "wss://blocked.example",
+                RelayState.Waiting(RelayWaiting.PersistenceStalled("disk full")),
+            ),
+            stalled,
+        )
+        val state = (stalled as WriteFact.Relay).state
+        assertFalse(state.isTerminal)
+        assertTrue(state != RelayState.GaveUp)
+    }
+
+    @Test
+    fun replaceableBaseChangedPreservesBothWinnerIds() {
+        val refused =
+            WriteFact.from(
+                FfiWriteFact.Outcome(
+                    FfiWriteOutcome.Refused(
+                        FfiRefuseReason.ReplaceableBaseChanged(
+                            expected = "expected-event",
+                            actual = "actual-event",
+                        ),
+                    ),
+                ),
+            )
+        assertEquals(
+            WriteFact.Outcome(
+                WriteOutcome.Refused(
+                    RefuseReason.ReplaceableBaseChanged("expected-event", "actual-event"),
+                ),
+            ),
+            refused,
         )
     }
 

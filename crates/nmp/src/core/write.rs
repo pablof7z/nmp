@@ -3437,7 +3437,7 @@ impl<S: EventStore> EngineCore<S> {
             self.emit_write_fact(
                 id,
                 WriteFact::Relay {
-                    relay: relay,
+                    relay,
                     state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                         detail: ROUTE_STALL_DETAIL.to_string(),
                     }),

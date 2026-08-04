@@ -18,7 +18,7 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
             (.signerUnavailable("sentinel-unavailable"), "Signer unavailable: sentinel-unavailable"),
             (.signerRejected("sentinel-rejection"), "Signer rejected the request: sentinel-rejection"),
             (.invalidSignerOutput("sentinel-output"), "Invalid signer output: sentinel-output"),
-            (.receiptCorrelationIdExhausted, "Receipt correlation ID namespace exhausted"),
+            (.publishRefused("sentinel-refusal"), "sentinel-refusal"),
             (.storeOpenFailed("sentinel-open"), "Could not open store: sentinel-open"),
             (
                 .storeAlreadyOpen("/sentinel/store"),

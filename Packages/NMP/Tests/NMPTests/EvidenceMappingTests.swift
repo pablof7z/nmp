@@ -4,8 +4,14 @@ import NMPFFI
 
 final class EvidenceMappingTests: XCTestCase {
     func testCancellationFactAndEveryRefusalRemainTyped() {
-        XCTAssertEqual(WriteStatus(.cancelled), .cancelled)
-        XCTAssertEqual(WriteStatus(.superseded), .superseded)
+        XCTAssertEqual(
+            WriteFact(.outcome(outcome: .notSent(reason: .cancelled))),
+            .outcome(.notSent(.cancelled))
+        )
+        XCTAssertEqual(
+            WriteFact(.outcome(outcome: .notSent(reason: .superseded))),
+            .outcome(.notSent(.superseded))
+        )
         XCTAssertEqual(
             NMPWriteCancellationError(.UnknownReceipt(receiptId: 42)),
             .unknownReceipt(receiptId: 42)
@@ -23,8 +29,8 @@ final class EvidenceMappingTests: XCTestCase {
             .alreadySuperseded(receiptId: 42)
         )
         XCTAssertEqual(
-            NMPWriteCancellationError(.AlreadyAbandoned(receiptId: 42)),
-            .alreadyAbandoned(receiptId: 42)
+            NMPWriteCancellationError(.AlreadyRefused(receiptId: 42)),
+            .alreadyRefused(receiptId: 42)
         )
         XCTAssertEqual(
             NMPWriteCancellationError(.PersistenceFailed(receiptId: 42, reason: "disk")),
@@ -36,8 +42,31 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
-    func testReceiptCorrelationExhaustionRemainsTypedAtTheNativeBoundary() {
+    /// The queue-entry removal door is the other end of custody: a write that
+    /// nothing is going to move is forgotten HERE, so each of its refusals has
+    /// to survive as its own fact -- "I do not know that receipt" and "that
+    /// receipt still owns open delivery work, cancel it first" are different
+    /// instructions to the app and must never collapse into one.
+    func testEveryQueueEntryRemovalRefusalRemainsTypedAtTheNativeBoundary() {
         XCTAssertEqual(
+            NMPQueueEntryRemovalError(.UnknownReceipt(receiptId: 42)),
+            .unknownReceipt(receiptId: 42)
+        )
+        XCTAssertEqual(
+            NMPQueueEntryRemovalError(.StillActive(receiptId: 42)),
+            .stillActive(receiptId: 42)
+        )
+        XCTAssertNotEqual(
+            NMPQueueEntryRemovalError(.StillActive(receiptId: 42)),
+            .unknownReceipt(receiptId: 42)
+        )
+        XCTAssertEqual(
+            NMPQueueEntryRemovalError(.PersistenceFailed(receiptId: 42, reason: "disk")),
+            .persistenceFailed(receiptId: 42, reason: "disk")
+        )
+        XCTAssertEqual(
+            NMPQueueEntryRemovalError(.EngineClosed),
+            .engineClosed
         )
     }
 
@@ -91,89 +120,104 @@ final class EvidenceMappingTests: XCTestCase {
         }
     }
 
-    func testOutcomeUnknownReceiptMappingRemainsDistinctFromGaveUp() {
-        XCTAssertEqual(
-            WriteStatus(.outcomeUnknown(relay: "wss://ambiguous.example")),
-            .outcomeUnknown(relay: "wss://ambiguous.example")
-        )
-        XCTAssertNotEqual(
-            WriteStatus(.outcomeUnknown(relay: "wss://ambiguous.example")),
-            WriteStatus(.gaveUp(relay: "wss://ambiguous.example"))
-        )
+    /// A socket write that flushed is NOT the relay having taken the event.
+    /// `.sent` is deliberately nonterminal and deliberately not equal to
+    /// `.published`: collapsing them would let an app tell a user their note
+    /// landed on the strength of its own outbound bytes.
+    func testSentIsNeitherTerminalNorEqualToPublished() {
+        let sent = RelayState(.sent(attempt: 4, writtenAt: 125))
+        XCTAssertEqual(sent, .sent(attempt: 4, writtenAt: 125))
+        XCTAssertFalse(sent.isTerminal)
+        XCTAssertNotEqual(sent, .published)
+        XCTAssertTrue(RelayState(.published).isTerminal)
+        XCTAssertTrue(RelayState(.gaveUp).isTerminal)
     }
 
     func testEveryRetryLaneReceiptStateMapsWithoutLosingAttemptTruth() {
         XCTAssertEqual(
-            WriteStatus(.awaitingRelay(relay: "wss://offline.example")),
-            .awaitingRelay(relay: "wss://offline.example")
+            WriteFact(.relay(relay: "wss://offline.example", state: .waiting(waiting: .notConnected))),
+            .relay(relay: "wss://offline.example", state: .waiting(.notConnected))
         )
         XCTAssertEqual(
-            WriteStatus(.awaitingAuth(relay: "wss://auth.example")),
-            .awaitingAuth(relay: "wss://auth.example")
+            WriteFact(.relay(relay: "wss://auth.example", state: .waiting(waiting: .needsAuth))),
+            .relay(relay: "wss://auth.example", state: .waiting(.needsAuth))
         )
         XCTAssertEqual(
-            WriteStatus(
-                .authDenied(
+            WriteFact(
+                .relay(
                     relay: "wss://auth.example",
+                    state: .authFailed(
+                        pubkey: String(repeating: "a", count: 64),
+                        source: .policy,
+                        reason: "account not permitted"
+                    )
+                )
+            ),
+            .relay(
+                relay: "wss://auth.example",
+                state: .authFailed(
                     pubkey: String(repeating: "a", count: 64),
                     source: .policy,
                     reason: "account not permitted"
                 )
-            ),
-            .authDenied(
-                relay: "wss://auth.example",
-                pubkey: String(repeating: "a", count: 64),
-                source: .policy,
-                reason: "account not permitted"
             )
         )
         XCTAssertEqual(
-            WriteStatus(
-                .retryEligible(
+            WriteFact(
+                .relay(
                     relay: "wss://retry.example",
-                    attempt: 2,
-                    eligibleAt: 123,
-                    cause: .relayRateLimited,
-                    detail: "rate-limited: slow down"
+                    state: .waiting(
+                        waiting: .backingOff(
+                            attempt: 2,
+                            eligibleAt: 123,
+                            cause: .relayRateLimited,
+                            detail: "rate-limited: slow down"
+                        )
+                    )
                 )
             ),
-            .retryEligible(
+            .relay(
                 relay: "wss://retry.example",
-                attempt: 2,
-                eligibleAt: 123,
-                cause: .relayRateLimited,
-                detail: "rate-limited: slow down"
-            )
-        )
-        XCTAssertEqual(
-            WriteStatus(
-                .handoffAmbiguous(
-                    relay: "wss://ambiguous.example", attempt: 3, observedAt: 124
+                state: .waiting(
+                    .backingOff(
+                        attempt: 2,
+                        eligibleAt: 123,
+                        cause: .relayRateLimited,
+                        detail: "rate-limited: slow down"
+                    )
                 )
-            ),
-            .handoffAmbiguous(
-                relay: "wss://ambiguous.example", attempt: 3, observedAt: 124
             )
         )
         XCTAssertEqual(
-            WriteStatus(
-                .sent(relay: "wss://written.example", attempt: 4, writtenAt: 125)
+            WriteFact(
+                .relay(relay: "wss://written.example", state: .sent(attempt: 4, writtenAt: 125))
             ),
-            .sent(relay: "wss://written.example", attempt: 4, writtenAt: 125)
+            .relay(relay: "wss://written.example", state: .sent(attempt: 4, writtenAt: 125))
         )
     }
 
-    func testPersistenceBlockedReceiptMappingRemainsNonterminal() {
-        let blocked = WriteStatus(.persistenceBlocked(relay: "wss://blocked.example"))
-        XCTAssertEqual(blocked, .persistenceBlocked(relay: "wss://blocked.example"))
-        XCTAssertNotEqual(blocked, .gaveUp(relay: "wss://blocked.example"))
-        XCTAssertNotEqual(blocked, .failed(reason: "persistence"))
+    /// A lane the local disk stalled is a lane that is still ours: it is
+    /// `.waiting`, so it is nonterminal, and it is not the relay having
+    /// refused us or the attempt ceiling having been reached.
+    func testPersistenceStalledReceiptMappingRemainsNonterminal() {
+        let blocked = RelayState(.waiting(waiting: .persistenceStalled(detail: "disk full")))
+        XCTAssertEqual(blocked, .waiting(.persistenceStalled(detail: "disk full")))
+        XCTAssertFalse(blocked.isTerminal)
+        XCTAssertNotEqual(blocked, .gaveUp)
+        XCTAssertNotEqual(blocked, .rejected(reason: "disk full"))
     }
 
-    func testRoutePersistenceBlockedDoesNotClaimDurableAttemptOwnership() {
-        let blocked = WriteStatus(.routePersistenceBlocked(relay: "wss://volatile.example"))
-        XCTAssertEqual(blocked, .routePersistenceBlocked(relay: "wss://volatile.example"))
-        XCTAssertNotEqual(blocked, .persistenceBlocked(relay: "wss://volatile.example"))
+    /// A stalled durable fact carries the WHY across intact. Two different
+    /// stalls are two different facts -- the detail is the only thing that
+    /// distinguishes them, so it must not be dropped or rolled up -- and
+    /// neither of them claims a wire attempt: no `EVENT` was emitted, so no
+    /// attempt ordinal is spent.
+    func testPersistenceStalledKeepsItsDetailAndClaimsNoAttempt() {
+        let route = RelayState(.waiting(waiting: .persistenceStalled(detail: "route not committed")))
+        let attempt = RelayState(.waiting(waiting: .persistenceStalled(detail: "attempt not committed")))
+        XCTAssertEqual(route, .waiting(.persistenceStalled(detail: "route not committed")))
+        XCTAssertNotEqual(route, attempt)
+        XCTAssertNotEqual(route, .sent(attempt: 1, writtenAt: 0))
     }
 
     func testEveryAcquisitionEvidenceVariantMapsWithoutARollup() {
