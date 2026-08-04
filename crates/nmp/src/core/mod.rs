@@ -365,7 +365,7 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
     }
 }
 
-pub use admission::RelayAdmissionPolicy;
+pub use admission::{RelayAdmissionPolicy, RelayRefusal, RelaySource};
 use attribution::{
     AttributionSendId, AttributionState, CompletedAttribution, CoveragePoison, EventFailureTarget,
 };
@@ -376,6 +376,7 @@ pub use diagnostics::{
 };
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
+pub use nmp_network_policy::OnionReachability;
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
@@ -1668,6 +1669,28 @@ pub struct EngineCore<S: EventStore> {
     /// loopback/onion host); production threads the operator's opt-in local
     /// allowlist via [`Self::with_relay_admission`].
     admission: RelayAdmissionPolicy,
+    /// Every public key this engine can currently act as: the active account
+    /// plus every attached signing capability. This is what "own" means in
+    /// provenance-aware admission (#1251), and it is deliberately a SET rather
+    /// than the single active account, because `Identity::Explicit` publishes
+    /// as a held key without making it active.
+    ///
+    /// The grant it produces is always keyed to the exact author whose list is
+    /// being read, so heeding one held key's own relay list can never widen
+    /// what a write signing as a different key is allowed to reach.
+    attached_signers: BTreeSet<PublicKey>,
+    /// Relays some trusted declaration named, in the exact spelling the
+    /// declaration used. It answers ONE question, at the socket boundary:
+    /// may this dial reach a local address? Routing has already decided that
+    /// nothing untrusted gets here, so this set never widens what is routable
+    /// -- it only stops the dial guard from refusing what routing admitted,
+    /// which would leave two owners disagreeing about one provenance answer.
+    ///
+    /// Grants are added, never removed. A relay dropped from a trusted
+    /// declaration stops being routed to immediately, so a stale grant names a
+    /// destination nothing can reach; revoking it would buy nothing and cost a
+    /// reference count over every declaration site.
+    heeded_relays: BTreeSet<RelayUrl>,
     /// Monotonic count of discovered route rejections by `admission` before
     /// they could become router candidates (issues #121/#11).
     /// Selector-projected facts count once when a rejected
@@ -1765,6 +1788,15 @@ impl<S: EventStore> EngineCore<S> {
         routing_facts: RoutingFactStore,
         cap: usize,
     ) -> Self {
+        // The operator's own lanes are a trusted declaration, so the socket
+        // boundary must not refuse what routing already heeds (#1251). An app
+        // relay list naming `localhost` is the operator describing their own
+        // network, and needs no second opt-in to be dialed.
+        let heeded_relays = routing_facts
+            .operator_app_relays()
+            .into_iter()
+            .chain(routing_facts.operator_fallback_relays())
+            .collect();
         Self {
             resolver: ResolverEngine::new(store),
             router: Router::new(RuleRegistry::default_widen_only()),
@@ -1812,6 +1844,8 @@ impl<S: EventStore> EngineCore<S> {
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
             admission: RelayAdmissionPolicy::default(),
+            attached_signers: BTreeSet::new(),
+            heeded_relays,
             discovered_private_relays_rejected: 0,
             rejected_projected_evidence: BTreeSet::new(),
             store_degraded: None,
@@ -1841,6 +1875,17 @@ impl<S: EventStore> EngineCore<S> {
         effects: &mut Vec<Effect>,
     ) {
         let before = self.routing_facts.author_routes(&author);
+        if self.is_own_identity(&author) {
+            if let AuthorRouteReplacement::Present(routes) = &replacement {
+                let declared = routes
+                    .outbound()
+                    .iter()
+                    .chain(routes.inbound())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.heeded_relays.extend(declared);
+            }
+        }
         self.routing_facts.writer().replace(author, replacement);
         if self.routing_facts.author_routes(&author) != before {
             self.recompile(effects);
@@ -1848,14 +1893,64 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Whether one relay declared by `source` may be used, counting a refusal
+    /// exactly once for diagnostics.
     #[allow(dead_code)]
-    pub(crate) fn admits_discovered_route(&mut self, relay: &RelayUrl) -> bool {
-        let admitted = self.admission.admits_discovered(relay);
-        if !admitted {
+    pub(crate) fn admits_relay(
+        &mut self,
+        relay: &RelayUrl,
+        source: RelaySource,
+    ) -> Result<(), RelayRefusal> {
+        let outcome = self.admission.admits(relay, source);
+        if outcome.is_err() {
             self.discovered_private_relays_rejected =
                 self.discovered_private_relays_rejected.saturating_add(1);
         }
-        admitted
+        outcome
+    }
+
+    /// Whether `author` is an identity this engine can act as, and therefore
+    /// whether a relay list signed by that key is our own declaration.
+    ///
+    /// Authorship, not arrival, is the test: a list that reached us by
+    /// discovery from a stranger's relay is still ours if we hold the key that
+    /// signed it. Signed out with nothing attached, this is false for
+    /// everyone, so only the operator tier grants anything.
+    #[allow(dead_code)]
+    pub(crate) fn is_own_identity(&self, author: &PublicKey) -> bool {
+        self.active_pubkey.as_ref() == Some(author) || self.attached_signers.contains(author)
+    }
+
+    /// Classify one author's relay list by whose declaration it is.
+    #[allow(dead_code)]
+    pub(crate) fn relay_list_source(&self, author: &PublicKey) -> RelaySource {
+        if self.is_own_identity(author) {
+            RelaySource::OwnIdentity
+        } else {
+            RelaySource::SomeoneElse
+        }
+    }
+
+    /// Record that a trusted declaration named these relays, so the socket
+    /// boundary gives the same provenance answer routing already gave.
+    #[allow(dead_code)]
+    pub(crate) fn heed_relays(&mut self, relays: impl IntoIterator<Item = RelayUrl>) {
+        self.heeded_relays.extend(relays);
+    }
+
+    /// The provenance answer for one relay at the moment a socket is opened.
+    ///
+    /// The socket boundary asks the narrower question routing already
+    /// answered — may this dial reach a local address? — so it consults the
+    /// grants trusted declarations left behind rather than re-deriving
+    /// admission from the address, which is how the two layers used to
+    /// disagree about one relay.
+    pub(crate) fn dial_declarer(&self, relay: &RelayUrl) -> nmp_network_policy::Declarer {
+        if self.heeded_relays.contains(relay) {
+            nmp_network_policy::Declarer::Ourselves
+        } else {
+            nmp_network_policy::Declarer::SomeoneElse
+        }
     }
 
     /// Thread the operator's discovered-relay admission policy through

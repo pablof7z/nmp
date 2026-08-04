@@ -20,6 +20,7 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
+use nmp_network_policy::Declarer;
 use nostr::secp256k1::schnorr::Signature;
 #[cfg(test)]
 use nostr::RelayUrl;
@@ -210,7 +211,7 @@ impl PoolInner {
 
     #[cfg(test)]
     pub(super) fn ensure_open(&mut self, url: &RelayUrl) -> RelayHandle {
-        self.try_ensure_session(&RelaySessionKey::public(url.clone()))
+        self.try_ensure_session(&RelaySessionKey::public(url.clone()), Declarer::SomeoneElse)
             .expect("test relay worker spawn/admission must succeed")
     }
 
@@ -219,12 +220,13 @@ impl PoolInner {
         &mut self,
         url: &RelayUrl,
     ) -> Result<RelayHandle, RelayOpenError> {
-        self.try_ensure_session(&RelaySessionKey::public(url.clone()))
+        self.try_ensure_session(&RelaySessionKey::public(url.clone()), Declarer::SomeoneElse)
     }
 
     pub(super) fn try_ensure_session(
         &mut self,
         session: &RelaySessionKey,
+        declarer: Declarer,
     ) -> Result<RelayHandle, RelayOpenError> {
         self.reap_orphaned_workers();
         if self.shutdown {
@@ -252,7 +254,7 @@ impl PoolInner {
                     max_relays: self.config.max_relays,
                 });
             }
-            return self.reopen(slot_id, session.clone());
+            return self.reopen(slot_id, session.clone(), declarer);
         }
         if self.live_worker_count() >= self.config.max_relays
             || self.total_relay_thread_count() >= self.max_relay_threads
@@ -262,7 +264,7 @@ impl PoolInner {
                 max_relays: self.config.max_relays,
             });
         }
-        self.open_new(session.clone())
+        self.open_new(session.clone(), declarer)
     }
 
     pub(super) fn live_session_handle(&self, session: &RelaySessionKey) -> Option<RelayHandle> {
@@ -329,7 +331,11 @@ impl PoolInner {
         self.relays_rejected_over_cap
     }
 
-    fn open_new(&mut self, session: RelaySessionKey) -> Result<RelayHandle, RelayOpenError> {
+    fn open_new(
+        &mut self,
+        session: RelaySessionKey,
+        declarer: Declarer,
+    ) -> Result<RelayHandle, RelayOpenError> {
         let slot_id = u32::try_from(self.slots.len()).map_err(|_| RelayOpenError::Unavailable)?;
         let worker_id = self.next_worker_id;
         self.next_worker_id = self
@@ -337,7 +343,7 @@ impl PoolInner {
             .checked_add(1)
             .ok_or(RelayOpenError::Unavailable)?;
         let generation = pack_generation(worker_id, 0);
-        let worker = self.spawn_worker(slot_id, worker_id, &session)?;
+        let worker = self.spawn_worker(slot_id, worker_id, &session, declarer)?;
         self.slots.push(SlotState {
             session: session.clone(),
             worker: Some(worker),
@@ -358,6 +364,7 @@ impl PoolInner {
         &mut self,
         slot_id: u32,
         session: RelaySessionKey,
+        declarer: Declarer,
     ) -> Result<RelayHandle, RelayOpenError> {
         let worker_id = self.next_worker_id;
         self.next_worker_id = self
@@ -365,7 +372,7 @@ impl PoolInner {
             .checked_add(1)
             .ok_or(RelayOpenError::Unavailable)?;
         let generation = pack_generation(worker_id, 0);
-        let worker = self.spawn_worker(slot_id, worker_id, &session)?;
+        let worker = self.spawn_worker(slot_id, worker_id, &session, declarer)?;
         self.slots[slot_id as usize] = SlotState {
             session,
             worker: Some(worker),
@@ -386,6 +393,7 @@ impl PoolInner {
         slot_id: u32,
         worker_id: u32,
         session: &RelaySessionKey,
+        declarer: Declarer,
     ) -> Result<WorkerHandle, RelayOpenError> {
         let idle = self
             .config
@@ -419,6 +427,7 @@ impl PoolInner {
             reconnect_jitter_max,
             command_queue_capacity,
             Arc::clone(&self.config.destination_policy),
+            declarer,
             Arc::clone(&self.committed_observations),
             self.spawner.as_ref(),
         )
@@ -1846,7 +1855,9 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), tx).expect("test pool construction");
         let url = RelayUrl::parse("wss://relay.example").unwrap();
-        let h1 = pool.ensure_open(&url).expect("relay admitted");
+        let h1 = pool
+            .ensure_open(&url, Declarer::Ourselves)
+            .expect("relay admitted");
         assert!(pool.close(h1).is_some());
 
         let correlation = AttemptCorrelation(42);
@@ -1873,15 +1884,15 @@ mod tests {
         let admitted = RelayUrl::parse("wss://admitted.example").unwrap();
         let refused = RelayUrl::parse("wss://refused.example").unwrap();
 
-        assert!(pool.ensure_open(&admitted).is_ok());
+        assert!(pool.ensure_open(&admitted, Declarer::Ourselves).is_ok());
         assert_eq!(
-            pool.ensure_open(&refused),
+            pool.ensure_open(&refused, Declarer::Ourselves),
             Err(crate::pool::RelayOpenError::AtCapacity { max_relays: 1 })
         );
 
         pool.shutdown();
         assert_eq!(
-            pool.ensure_open(&admitted),
+            pool.ensure_open(&admitted, Declarer::Ourselves),
             Err(crate::pool::RelayOpenError::ShuttingDown)
         );
     }

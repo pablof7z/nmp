@@ -77,7 +77,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel as cb;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
-use nmp_network_policy::DestinationPolicy;
+use nmp_network_policy::{Declarer, DestinationPolicy};
 use nmp_router::{SubId, WireDelta, WireOp, WireReq};
 use nmp_signer::{
     PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
@@ -1886,7 +1886,10 @@ mod receipt_delivery_lifecycle_tests {
             MemoryStore::new(),
             10,
             PoolConfig::default(),
-            RelayAdmissionPolicy::new(["127.0.0.1".to_string()]),
+            RelayAdmissionPolicy::new(
+                ["127.0.0.1".to_string()],
+                nmp_network_policy::OnionReachability::Unreachable,
+            ),
         )
         .expect("test engine thread construction");
         let tracked = parked_write(&handle, &Keys::generate());
@@ -2882,12 +2885,13 @@ mod relay_worker_reconciliation_tests {
         config.max_relays = 1;
         let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let public_handle = pool
-            .ensure_session(&public)
+            .ensure_session(&public, Declarer::Ourselves)
             .expect("Public read owns the cap-sized pool");
         let (self_inbox, inbox_rx) = mpsc::channel();
 
-        let protected_handle = ensure_write_effect_session(&protected, &pool, &self_inbox)
-            .expect("write displaces Public");
+        let protected_handle =
+            ensure_write_effect_session(&protected, Declarer::Ourselves, &pool, &self_inbox)
+                .expect("write displaces Public");
 
         assert_eq!(pool.live_session_handle(&public), None);
         assert_eq!(pool.live_session_handle(&protected), Some(protected_handle));
@@ -2923,10 +2927,10 @@ mod relay_worker_reconciliation_tests {
         config.max_relays = 1;
         let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let public_handle = pool
-            .ensure_session(&public)
+            .ensure_session(&public, Declarer::Ourselves)
             .expect("Public read owns the cap-sized pool");
         assert!(matches!(
-            pool.ensure_session(&protected_read),
+            pool.ensure_session(&protected_read, Declarer::Ourselves),
             Err(nmp_transport::RelayOpenError::AtCapacity { max_relays: 1 })
         ));
         assert_eq!(pool.live_session_handle(&public), Some(public_handle));
@@ -4009,6 +4013,13 @@ fn engine_loop<S>(
     let runtime_handle = &runtime_handle;
     let mut core = EngineCore::new_with_routing_facts(store, routing_facts, cap)
         .with_relay_admission(admission);
+    // The operator's exact NIP-65 discovery sources are a trusted declaration
+    // like every other configured lane (#1251), so an indexer on `localhost`
+    // is dialable on that declaration alone. Done here rather than in
+    // `EngineCore::new_with_routing_facts` because indexer relays are the
+    // optional coordinator's configuration, not a neutral routing fact.
+    #[cfg(feature = "nip65")]
+    core.heed_relays(nip65_sources.iter().cloned());
     let mut row_channels: HashMap<ObservationId, RowsSender> = HashMap::new();
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
@@ -5436,24 +5447,25 @@ fn dispatch_relay_open_failure(
 /// access contexts onto one socket, and never evicts a different relay.
 fn ensure_write_effect_session(
     session: &RelaySessionKey,
+    declarer: Declarer,
     pool: &Pool,
     self_inbox: &Sender<Cmd>,
 ) -> Result<nmp_transport::RelayHandle, nmp_transport::RelayOpenError> {
-    match pool.ensure_session(session) {
+    match pool.ensure_session(session, declarer) {
         Ok(handle) => Ok(handle),
         Err(nmp_transport::RelayOpenError::AtCapacity { .. })
             if session.access != nmp_grammar::AccessContext::Public =>
         {
             let public = RelaySessionKey::public(session.relay.clone());
             let Some(public_handle) = pool.live_session_handle(&public) else {
-                return pool.ensure_session(session);
+                return pool.ensure_session(session, declarer);
             };
             if let Some(event) = pool.close(public_handle) {
                 if let Some(message) = translate_pool_event(event) {
                     let _ = self_inbox.send(Cmd::Engine(message));
                 }
             }
-            pool.ensure_session(session)
+            pool.ensure_session(session, declarer)
         }
         Err(error) => Err(error),
     }
@@ -5484,7 +5496,7 @@ fn retry_required_relay_workers<S: EventStore>(core: &EngineCore<S>, pool: &Pool
         if pool.live_session_handle(&session).is_some() {
             continue;
         }
-        let Ok(handle) = pool.ensure_session(&session) else {
+        let Ok(handle) = pool.ensure_session(&session, core.dial_declarer(&session.relay)) else {
             continue;
         };
         pool.set_reconnect_preamble(handle, Vec::new());
@@ -5563,7 +5575,7 @@ fn dispatch_effect(
             crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
         }
         Effect::Wire(delta) => {
-            let reports = apply_wire_delta(&delta, pool);
+            let reports = apply_wire_delta(core, &delta, pool);
             for report in reports {
                 let evidence = core.on_wire_request_handoff(
                     &report.session,
@@ -5586,7 +5598,7 @@ fn dispatch_effect(
             }
         }
         Effect::Replay(session, reqs) => {
-            let reports = apply_replay(&session, reqs, pool);
+            let reports = apply_replay(core, &session, reqs, pool);
             for report in reports {
                 let evidence = core.on_wire_request_handoff(
                     &report.session,
@@ -5640,7 +5652,8 @@ fn dispatch_effect(
             }
         }
         Effect::PublishEvent(session, event, correlation) => {
-            let Ok(handle) = pool.ensure_session(&session) else {
+            let declarer = core.dial_declarer(&session.relay);
+            let Ok(handle) = pool.ensure_session(&session, declarer) else {
                 let _ = runtime.self_inbox.send(Cmd::Engine(EngineMsg::EventHandoff(
                     correlation,
                     HandoffResult::NotHandedOff,
@@ -5660,7 +5673,7 @@ fn dispatch_effect(
             // Read ownership cannot displace an already-live physical
             // session. A typed cap refusal remains observable in pool
             // diagnostics and is reconciled after a real worker retirement.
-            if let Err(error) = pool.ensure_session(&session) {
+            if let Err(error) = pool.ensure_session(&session, core.dial_declarer(&session.relay)) {
                 dispatch_relay_open_failure(
                     core,
                     session,
@@ -5680,7 +5693,10 @@ fn dispatch_effect(
             // must not be converted back into an invalid handle or a busy
             // retry loop here. A protected write may, however, time-share
             // this relay's already-live Public slot (#598).
-            if let Err(error) = ensure_write_effect_session(&session, pool, runtime.self_inbox) {
+            let declarer = core.dial_declarer(&session.relay);
+            if let Err(error) =
+                ensure_write_effect_session(&session, declarer, pool, runtime.self_inbox)
+            {
                 dispatch_relay_open_failure(
                     core,
                     session,
@@ -5883,7 +5899,7 @@ fn dispatch_effect(
             // its synchronous reply. There is no receipt stream to fan out.
         }
         Effect::StartProbe(url, sub_id, filter, initial_hex) => {
-            let Ok(handle) = pool.ensure_open(&url) else {
+            let Ok(handle) = pool.ensure_open(&url, core.dial_declarer(&url)) else {
                 return;
             };
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
@@ -5891,21 +5907,21 @@ fn dispatch_effect(
         }
         Effect::NegOpen(probed, sub_id, filter, initial_hex) => {
             let relay = probed.url().clone();
-            let Ok(handle) = pool.ensure_open(&relay) else {
+            let Ok(handle) = pool.ensure_open(&relay, core.dial_declarer(&relay)) else {
                 return;
             };
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
         Effect::NegMsg(relay, sub_id, message_hex) => {
-            let Ok(handle) = pool.ensure_open(&relay) else {
+            let Ok(handle) = pool.ensure_open(&relay, core.dial_declarer(&relay)) else {
                 return;
             };
             let text = neg_msg_frame_text(&sub_id, message_hex);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
         Effect::NegClose(relay, sub_id) => {
-            let Ok(handle) = pool.ensure_open(&relay) else {
+            let Ok(handle) = pool.ensure_open(&relay, core.dial_declarer(&relay)) else {
                 return;
             };
             let text = neg_close_frame_text(&sub_id);
@@ -5972,12 +5988,17 @@ struct RequestHandoffReport {
     reason: Option<String>,
 }
 
-fn apply_wire_delta(delta: &WireDelta, pool: &Pool) -> Vec<RequestHandoffReport> {
+fn apply_wire_delta<S: EventStore>(
+    core: &EngineCore<S>,
+    delta: &WireDelta,
+    pool: &Pool,
+) -> Vec<RequestHandoffReport> {
     let mut reports = Vec::new();
     for (session, ops) in &delta.ops {
         let has_req = ops.iter().any(|op| matches!(op, WireOp::Req(..)));
         let handle = if has_req {
-            pool.ensure_session(session).ok()
+            pool.ensure_session(session, core.dial_declarer(&session.relay))
+                .ok()
         } else {
             // A close-only delta must never reopen a worker already released
             // by exact session-demand reconciliation. Socket teardown already
@@ -6021,12 +6042,13 @@ fn apply_wire_delta(delta: &WireDelta, pool: &Pool) -> Vec<RequestHandoffReport>
 /// is the sole replay owner. No transport preamble is installed, so the same
 /// generation cannot receive an automatic copy; protected sessions retain the
 /// same empty-preamble rule (#8).
-fn apply_replay(
+fn apply_replay<S: EventStore>(
+    core: &EngineCore<S>,
     session: &RelaySessionKey,
     reqs: Vec<WireReq>,
     pool: &Pool,
 ) -> Vec<RequestHandoffReport> {
-    let Ok(handle) = pool.ensure_session(session) else {
+    let Ok(handle) = pool.ensure_session(session, core.dial_declarer(&session.relay)) else {
         return reqs
             .into_iter()
             .map(|req| RequestHandoffReport {

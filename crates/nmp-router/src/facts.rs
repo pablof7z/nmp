@@ -40,16 +40,18 @@ impl LanedRelay {
 
 /// One author's complete, authoritative directional routing fact.
 ///
-/// Both sets are replaced together. Empty sets remain positive knowledge and
-/// therefore differ from both [`AuthorRouteState::Unknown`] and
+/// All three sets are replaced together. Empty sets remain positive knowledge
+/// and therefore differ from both [`AuthorRouteState::Unknown`] and
 /// [`AuthorRouteState::Absent`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthorRoutes {
     outbound: BTreeSet<RelayUrl>,
     inbound: BTreeSet<RelayUrl>,
+    refused: BTreeSet<RelayUrl>,
 }
 
 impl AuthorRoutes {
+    /// A fact whose every declared relay was admitted.
     pub fn new(
         outbound: impl IntoIterator<Item = RelayUrl>,
         inbound: impl IntoIterator<Item = RelayUrl>,
@@ -57,7 +59,21 @@ impl AuthorRoutes {
         Self {
             outbound: outbound.into_iter().collect(),
             inbound: inbound.into_iter().collect(),
+            refused: BTreeSet::new(),
         }
+    }
+
+    /// Record the relays this author declared that admission did not admit.
+    ///
+    /// This is what keeps a refused relay distinguishable from an absent one
+    /// (#1251). Without it, an author whose whole list is on their own LAN is
+    /// byte-identical to an author who declared no relays, so the only honest
+    /// thing a reader can say — "they have relays, we would not use them, and
+    /// here is which" — cannot be said at all.
+    #[must_use]
+    pub fn with_refused(mut self, refused: impl IntoIterator<Item = RelayUrl>) -> Self {
+        self.refused = refused.into_iter().collect();
+        self
     }
 
     pub fn outbound(&self) -> &BTreeSet<RelayUrl> {
@@ -66,6 +82,24 @@ impl AuthorRoutes {
 
     pub fn inbound(&self) -> &BTreeSet<RelayUrl> {
         &self.inbound
+    }
+
+    /// The relays this author declared that were not admitted. Routing never
+    /// reads this — a refused relay is exactly as unroutable as one that was
+    /// never declared — but a reader that must explain an empty route set
+    /// cannot do it from the routable sets alone.
+    pub fn refused(&self) -> &BTreeSet<RelayUrl> {
+        &self.refused
+    }
+
+    /// Whether this author declared relays and NONE of them were admitted.
+    ///
+    /// The exact shape an app has to distinguish from "declared nothing":
+    /// both have no destinations, and only one of them means the user should
+    /// be told their own relays were turned away.
+    #[must_use]
+    pub fn every_declared_relay_was_refused(&self) -> bool {
+        !self.refused.is_empty() && self.outbound.is_empty() && self.inbound.is_empty()
     }
 }
 

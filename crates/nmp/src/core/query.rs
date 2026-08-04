@@ -138,6 +138,15 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
+        // A pinned source is the app naming the exact relays this read must
+        // ask -- `RelayScope::on`, a NIP-29 host, an operator indexer query
+        // (#1251). The app named them, so the socket heeds them; nothing here
+        // widens what an unpinned read may reach.
+        for branch in query.branches() {
+            if let nmp_grammar::SourceAuthority::Pinned(relays) = &branch.source {
+                self.heed_relays(relays.iter().cloned());
+            }
+        }
         match self.open_observation(query) {
             ObservationOpen::Opened {
                 id,
@@ -425,8 +434,11 @@ impl<S: EventStore> EngineCore<S> {
         let admitted = demand
             .into_iter()
             .map(|mut atom| {
-                atom.routing_evidence
-                    .retain(|evidence| self.admission.admits_discovered(&evidence.relay));
+                atom.routing_evidence.retain(|evidence| {
+                    self.admission
+                        .admits(&evidence.relay, super::RelaySource::SomeoneElse)
+                        .is_ok()
+                });
                 atom
             })
             .collect();
@@ -559,9 +571,14 @@ impl<S: EventStore> EngineCore<S> {
         })
     }
 
-    /// Gate every network-sourced selector hint/provenance URL before it
-    /// can become a router candidate. Operator-configured lanes remain
-    /// trusted and bypass this path, matching discovered-route admission.
+    /// Gate every network-sourced selector hint/provenance URL before it can
+    /// become a router candidate.
+    ///
+    /// A relay hint in an `e`/`p`/`a` tag is the cheapest thing in Nostr to
+    /// forge, and a row's observed-source provenance is arrival rather than
+    /// authorship, so both are always [`RelaySource::SomeoneElse`] however
+    /// familiar the relay they name looks. Operator-configured lanes never
+    /// travel this path; they are a trusted declaration made elsewhere.
     pub(super) fn admit_projected_routing_evidence(
         &mut self,
         demand: &BTreeSet<ContextualAtom>,
@@ -573,7 +590,10 @@ impl<S: EventStore> EngineCore<S> {
             .map(|mut atom| {
                 let atom_selection = atom.filter.hash();
                 atom.routing_evidence.retain(|evidence| {
-                    let admitted = self.admission.admits_discovered(&evidence.relay);
+                    let admitted = self
+                        .admission
+                        .admits(&evidence.relay, super::RelaySource::SomeoneElse)
+                        .is_ok();
                     if !admitted {
                         rejected_now.insert((atom_selection, evidence.clone()));
                     }

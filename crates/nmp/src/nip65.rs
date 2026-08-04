@@ -98,9 +98,7 @@ impl RuntimeAssembly {
             .filter_map(RowDelta::event)
             .cloned()
             .collect::<Vec<_>>();
-        let updates = self
-            .coordinator
-            .observe_current_delta(removed, events, |relay| core.admits_discovered_route(relay));
+        let updates = self.coordinator.observe_current_delta(removed, events);
         Some(apply_updates(core, updates))
     }
 
@@ -123,6 +121,45 @@ impl RuntimeAssembly {
     }
 }
 
+/// Apply admission to one author's parsed relay list, here, where the
+/// author's identity is known (#1251).
+///
+/// This is the whole point of the move out of `parse_relay_list`. The parser
+/// holds one event; this function holds the engine, so it can ask the only
+/// question that decides the answer — is this key one we can act as? — and it
+/// keeps what it refused instead of dropping it on the floor, so an author
+/// whose entire list was turned away never reads as an author with no relays.
+fn admit_author_routes<S: nmp_store::EventStore>(
+    core: &mut EngineCore<S>,
+    author: PublicKey,
+    routes: ParsedAuthorRoutes,
+) -> nmp_router::AuthorRoutes {
+    let source = core.relay_list_source(&author);
+    let mut outbound = BTreeSet::new();
+    let mut inbound = BTreeSet::new();
+    let mut refused = BTreeSet::new();
+    // One decision per DECLARED relay, not one per direction: an unmarked row
+    // that names both directions is one refusal, counted once.
+    let declared = routes
+        .outbound
+        .union(&routes.inbound)
+        .cloned()
+        .collect::<Vec<_>>();
+    for relay in declared {
+        if core.admits_relay(&relay, source).is_err() {
+            refused.insert(relay);
+            continue;
+        }
+        if routes.outbound.contains(&relay) {
+            outbound.insert(relay.clone());
+        }
+        if routes.inbound.contains(&relay) {
+            inbound.insert(relay);
+        }
+    }
+    nmp_router::AuthorRoutes::new(outbound, inbound).with_refused(refused)
+}
+
 fn apply_updates<S: nmp_store::EventStore>(
     core: &mut EngineCore<S>,
     updates: Vec<CoordinatorUpdate>,
@@ -131,12 +168,10 @@ fn apply_updates<S: nmp_store::EventStore>(
     for update in updates {
         match update {
             CoordinatorUpdate::Present { author, routes } => {
+                let admitted = admit_author_routes(core, author, routes);
                 core.replace_author_routes(
                     author,
-                    AuthorRouteReplacement::Present(nmp_router::AuthorRoutes::new(
-                        routes.outbound,
-                        routes.inbound,
-                    )),
+                    AuthorRouteReplacement::Present(admitted),
                     &mut effects,
                 );
             }

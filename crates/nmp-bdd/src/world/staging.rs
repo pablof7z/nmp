@@ -523,12 +523,15 @@ impl NmpWorld {
             // Static fixture facts do not pass through the network-discovery
             // gate. Opt local hosts in because feature-on NIP-65 scenarios do
             // discover routes from scripted local relay-list events.
-            nmp::mechanism::core::RelayAdmissionPolicy::new([
-                "127.0.0.1".to_string(),
-                "localhost".to_string(),
-                "[::1]".to_string(),
-                "::1".to_string(),
-            ]),
+            nmp::mechanism::core::RelayAdmissionPolicy::new(
+                [
+                    "127.0.0.1".to_string(),
+                    "localhost".to_string(),
+                    "[::1]".to_string(),
+                    "::1".to_string(),
+                ],
+                nmp::mechanism::core::OnionReachability::Unreachable,
+            ),
         )
         .expect("BDD engine construction");
         let handle = engine

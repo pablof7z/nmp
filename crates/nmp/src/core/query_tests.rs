@@ -1345,8 +1345,9 @@ mod affected_handle_invalidation_tests {
 
     #[test]
     fn operator_allowlist_admits_projected_local_evidence() {
-        let mut core = EngineCore::new(MemoryStore::new(), 20)
-            .with_relay_admission(RelayAdmissionPolicy::new(["127.0.0.1".to_string()]));
+        let mut core = EngineCore::new(MemoryStore::new(), 20).with_relay_admission(
+            RelayAdmissionPolicy::new(["127.0.0.1".to_string()], OnionReachability::Unreachable),
+        );
         let atom = ContextualAtom {
             filter: ConcreteFilter::default(),
             source: SourceAuthority::Public,

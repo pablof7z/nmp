@@ -90,6 +90,7 @@ fn main() {
         fallback_relays: Vec::new(),
         // A loopback dev relay must be opted into explicitly.
         allowed_local_relay_hosts: vec!["localhost".into(), "127.0.0.1".into()],
+        tor_reachable: false,
         max_relays: 4,
         max_auth_capabilities: 4,
     })

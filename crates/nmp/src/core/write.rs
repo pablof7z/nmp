@@ -1891,6 +1891,14 @@ impl<S: EventStore> EngineCore<S> {
             return self.fail_unaccepted(EMPTY_EXPLICIT_ROUTE.to_string());
         }
 
+        // An exact route the app named for this write is the app describing
+        // its own network (#1251). Routing already executes it verbatim; the
+        // socket has to agree, or an app that publishes to its own LAN relay
+        // is told the write was routed and then cannot reach it.
+        if let WriteRouting::Explicit(relays) = &routing {
+            self.heed_relays(relays.iter().cloned());
+        }
+
         // #591 review (PR #604 finding 2): `Durability::Ephemeral` has no
         // delivery row for a correlation token to name -- `accept_ephemeral`
         // below never receives `correlation`, so a token on an ephemeral
@@ -2283,6 +2291,9 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
+        // Holding this key's signer is what makes its relay list OUR relay
+        // list (#1251): we could have signed it, active or not.
+        self.attached_signers.insert(pk);
         let mut effects = Vec::new();
         for (id, pending) in &mut self.pending {
             if pending.signing_pubkey == pk
