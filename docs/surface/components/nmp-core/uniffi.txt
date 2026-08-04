@@ -5509,7 +5509,19 @@ record Record {
             },
             default: None,
             docstring: Some(
-                "Operator opt-in local-host allowlist, in `nmp-transport`'s\nnormalized bare-host form (lowercase, no brackets) -- the same\nvocabulary the engine's `allowed_local_relay_hosts` uses. Empty\nmeans NO loopback/private/link-local/onion host may be dialed.",
+                "Operator opt-in local-host allowlist, in `nmp-transport`'s\nnormalized bare-host form (lowercase, no brackets) -- the same\nvocabulary the engine's `allowed_local_relay_hosts` uses. Empty\nmeans NO loopback/private/link-local host may be dialed.\n\nSays nothing about `.onion`, which `tor_reachable` owns (#1251).",
+            ),
+        },
+        Field {
+            name: "tor_reachable",
+            type_: Boolean,
+            default: Some(
+                Boolean(
+                    false,
+                ),
+            ),
+            docstring: Some(
+                "Whether this process can reach a Tor hidden service (#1251). A Blossom\nserver URL arrives with no provenance NMP can inspect, so a `.onion`\nserver needs this declaration; the local-host allowlist grants it\nnothing. `default = false` keeps the field optional for existing\ncallers.",
             ),
         },
         Field {
@@ -7548,7 +7560,19 @@ record Record {
                 EmptySequence,
             ),
             docstring: Some(
-                "Local/private relay HOSTS the operator explicitly opts into despite\nthe SSRF admission policy (issue #121). A network-derived relay on a\nloopback / RFC-1918 / link-local / `.onion` host is rejected by\ndefault; listing its host here (e.g. `\"127.0.0.1\"` or `\"localhost\"`)\nre-admits derived relays on that exact host.\nHost-only match (port- and path-insensitive). Default empty.\n\n`default = []` keeps this field OPTIONAL for existing foreign-language\ncallers — adding it must not break records constructed before #121.",
+                "Local/private relay HOSTS to re-admit from OTHER PEOPLE's data\n(issues #121, #1251). A loopback / RFC-1918 / link-local relay named by\nsomeone else's relay list or event is rejected by default; listing its\nhost here (`\"127.0.0.1\"`, `\"localhost\"`) re-admits that exact host from\nany source. Host-only match (port- and path-insensitive).\n\nNOT how an app reaches its own local relay: relays this app declared\n(`app_relays`, `fallback_relays`, an explicit write route, a pinned\nread scope) and relays a signed-in identity declared in its own relay\nlist are heeded on their provenance alone. Default empty.\n\n`default = []` keeps this field OPTIONAL for existing foreign-language\ncallers — adding it must not break records constructed before #121.",
+            ),
+        },
+        Field {
+            name: "tor_reachable",
+            type_: Boolean,
+            default: Some(
+                Boolean(
+                    false,
+                ),
+            ),
+            docstring: Some(
+                "Whether this process can reach a Tor hidden service (#1251).\n\n`.onion` is a reachability question, not a \"my network\" address, so\n`allowed_local_relay_hosts` grants it nothing. Declaring reachability\nmakes OTHER people's `.onion` relays usable, not only ones this app or\nits own identities declared. NMP installs no Tor transport and never\nprobes for one: this states that reachability exists, and a hidden\nservice that turns out unreachable simply fails to connect.\n\n`default = false` keeps the field optional for existing callers.",
             ),
         },
         Field {

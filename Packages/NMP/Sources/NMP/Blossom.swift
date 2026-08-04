@@ -578,9 +578,13 @@ public final class BlossomAuthorization: @unchecked Sendable {
 /// `nil` means the Rust crate's default.
 public struct BlossomClientConfig: Sendable, Hashable {
     /// Operator opt-in local-host allowlist (normalized bare-host form,
-    /// lowercase). Empty means NO loopback/private/link-local/onion host
-    /// may be dialed.
+    /// lowercase). Empty means NO loopback/private/link-local host may be
+    /// dialed. Says nothing about `.onion`, which `torReachable` owns.
     public var allowedLocalHosts: [String]
+    /// Whether this process can reach a Tor hidden service. A Blossom server
+    /// URL arrives with no provenance NMP can inspect, so a `.onion` server
+    /// needs this declaration; the local-host allowlist grants it nothing.
+    public var torReachable: Bool
     /// Cap on a single-descriptor response body (upload/mirror).
     public var maxResponseBytes: UInt64?
     /// Cap on a `GET /list` response body.
@@ -590,11 +594,13 @@ public struct BlossomClientConfig: Sendable, Hashable {
 
     public init(
         allowedLocalHosts: [String] = [],
+        torReachable: Bool = false,
         maxResponseBytes: UInt64? = nil,
         maxListResponseBytes: UInt64? = nil,
         requestDeadlineSeconds: UInt64? = nil
     ) {
         self.allowedLocalHosts = allowedLocalHosts
+        self.torReachable = torReachable
         self.maxResponseBytes = maxResponseBytes
         self.maxListResponseBytes = maxListResponseBytes
         self.requestDeadlineSeconds = requestDeadlineSeconds
@@ -603,6 +609,7 @@ public struct BlossomClientConfig: Sendable, Hashable {
     func toFfi() -> FfiBlossomClientConfig {
         FfiBlossomClientConfig(
             allowedLocalHosts: allowedLocalHosts,
+            torReachable: torReachable,
             maxResponseBytes: maxResponseBytes,
             maxListResponseBytes: maxListResponseBytes,
             requestDeadlineSecs: requestDeadlineSeconds

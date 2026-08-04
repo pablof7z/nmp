@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use nmp_grammar::RelaySessionKey;
-use nmp_network_policy::DestinationPolicy;
+use nmp_network_policy::{Declarer, DestinationPolicy};
 use nostr::{Event, EventId, JsonUtil, RelayMessage, RelayUrl, SubscriptionId};
 
 use crate::handle::RelayHandle;
@@ -868,8 +868,18 @@ impl Pool {
     /// previously closed via [`Self::close`], the slot reopens with a fresh
     /// generation — the prior handle is now stale. Every refusal is returned
     /// as a typed error; this API never manufactures an invalid handle.
-    pub fn ensure_open(&self, url: &RelayUrl) -> Result<RelayHandle, RelayOpenError> {
-        self.ensure_session(&RelaySessionKey::public(url.clone()))
+    ///
+    /// `declarer` is the caller's provenance answer for this destination
+    /// (#1251). It is a parameter rather than something the pool derives
+    /// because the pool never sees a declaration — only the layer that read
+    /// one can answer, and making every dial site answer is what stops the
+    /// socket boundary from silently disagreeing with routing.
+    pub fn ensure_open(
+        &self,
+        url: &RelayUrl,
+        declarer: Declarer,
+    ) -> Result<RelayHandle, RelayOpenError> {
+        self.ensure_session(&RelaySessionKey::public(url.clone()), declarer)
     }
 
     #[doc(hidden)]
@@ -896,9 +906,13 @@ impl Pool {
     }
 
     /// Ensure the exact physical relay session is dialing/connected.
-    pub fn ensure_session(&self, session: &RelaySessionKey) -> Result<RelayHandle, RelayOpenError> {
+    pub fn ensure_session(
+        &self,
+        session: &RelaySessionKey,
+        declarer: Declarer,
+    ) -> Result<RelayHandle, RelayOpenError> {
         match self.inner.lock() {
-            Ok(mut guard) => guard.try_ensure_session(session),
+            Ok(mut guard) => guard.try_ensure_session(session, declarer),
             Err(_) => Err(RelayOpenError::Unavailable),
         }
     }
@@ -1230,7 +1244,7 @@ mod thread_budget_tests {
         let (spawner, pool, _events) = test_pool(4, 1);
         let pool = pool.expect("fixed engine executors fit the injected budget");
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let error = pool.ensure_open(&relay).unwrap_err();
+        let error = pool.ensure_open(&relay, Declarer::Ourselves).unwrap_err();
         assert!(matches!(
             error,
             RelayOpenError::ThreadUnavailable(ThreadSpawnError {
@@ -1250,9 +1264,9 @@ mod thread_budget_tests {
         let pool = pool.unwrap();
         let first = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let second = RelayUrl::parse("ws://127.0.0.1:10").unwrap();
-        let first_handle = pool.ensure_open(&first).unwrap();
+        let first_handle = pool.ensure_open(&first, Declarer::Ourselves).unwrap();
         pool.close(first_handle).unwrap();
-        let second_handle = pool.ensure_open(&second).unwrap();
+        let second_handle = pool.ensure_open(&second, Declarer::Ourselves).unwrap();
         pool.close(second_handle).unwrap();
 
         // Four fixed engine executors + at most two relay OS threads: one
@@ -1315,7 +1329,7 @@ mod ephemeral_send_tests {
             relay.clone(),
             AccessContext::Nip42(Keys::generate().public_key()),
         );
-        let handle = pool.ensure_session(&session).unwrap();
+        let handle = pool.ensure_session(&session, Declarer::Ourselves).unwrap();
         let wrong_session =
             RelaySessionKey::new(relay, AccessContext::Nip42(Keys::generate().public_key()));
         let stale = RelayHandle {

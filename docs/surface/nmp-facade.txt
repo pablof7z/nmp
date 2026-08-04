@@ -1155,6 +1155,7 @@ pub nmp::EngineConfig::indexer_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::max_auth_capabilities: usize
 pub nmp::EngineConfig::max_relays: usize
 pub nmp::EngineConfig::store_path: core::option::Option<alloc::string::String>
+pub nmp::EngineConfig::tor_reachable: bool
 impl core::clone::Clone for nmp::EngineConfig
 pub fn nmp::EngineConfig::clone(&self) -> nmp::EngineConfig
 impl core::default::Default for nmp::EngineConfig
