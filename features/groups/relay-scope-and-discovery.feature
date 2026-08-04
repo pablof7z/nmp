@@ -145,7 +145,7 @@ Feature: A group can live on more than one relay at once
   # nmp:id=GROUPS-DISCOVERY-007
   # nmp:status=built
   # nmp:evidence=rust:nmp::an_unconstrained_directory_asks_every_host_with_no_group_id_row
-  # nmp:evidence=rust:nmp_nip29::an_unconstrained_listing_carries_no_join_key_row_at_all
+  # nmp:evidence=rust:nmp-nip29::an_unconstrained_listing_carries_no_join_key_row_at_all
   # nmp:evidence=rust:nmp::all_binds_no_group_id_row_whatsoever
   # nmp:falsifier=Lower `nip29::all()` to a branch that still carries a `d` row -- any `d` row, including one bound to whatever ids the app already had. The relay would then answer about that id set alone, so a directory screen would show only rooms the app already knew, and on screen that is indistinguishable from a relay advertising no groups at all. Equally, let the door treat a predicate that names no constraint as a fall-back to the app's own id list rather than as the absence of a constraint, and the same wrong screen results.
   @nip29
