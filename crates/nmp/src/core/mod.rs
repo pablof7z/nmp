@@ -365,7 +365,7 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
     }
 }
 
-pub use admission::{RelayAdmissionPolicy, RelayRefusal, RelaySource};
+pub use admission::{RelayAdmissionPolicy, RelayRefusal};
 use attribution::{
     AttributionSendId, AttributionState, CompletedAttribution, CoveragePoison, EventFailureTarget,
 };
@@ -376,7 +376,7 @@ pub use diagnostics::{
 };
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
-pub use nmp_network_policy::OnionReachability;
+pub use nmp_network_policy::{Declarer, OnionReachability};
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
@@ -1893,15 +1893,15 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    /// Whether one relay declared by `source` may be used, counting a refusal
+    /// Whether one relay may be used given whose declaration named it, counting a refusal
     /// exactly once for diagnostics.
     #[allow(dead_code)]
     pub(crate) fn admits_relay(
         &mut self,
         relay: &RelayUrl,
-        source: RelaySource,
+        declarer: Declarer,
     ) -> Result<(), RelayRefusal> {
-        let outcome = self.admission.admits(relay, source);
+        let outcome = self.admission.admits(relay, declarer);
         if outcome.is_err() {
             self.discovered_private_relays_rejected =
                 self.discovered_private_relays_rejected.saturating_add(1);
@@ -1931,11 +1931,11 @@ impl<S: EventStore> EngineCore<S> {
 
     /// Classify one author's relay list by whose declaration it is.
     #[allow(dead_code)]
-    pub(crate) fn relay_list_source(&self, author: &PublicKey) -> RelaySource {
+    pub(crate) fn relay_list_declarer(&self, author: &PublicKey) -> Declarer {
         if self.is_own_identity(author) {
-            RelaySource::OwnIdentity
+            Declarer::Ourselves
         } else {
-            RelaySource::SomeoneElse
+            Declarer::SomeoneElse
         }
     }
 
@@ -1953,11 +1953,11 @@ impl<S: EventStore> EngineCore<S> {
     /// grants trusted declarations left behind rather than re-deriving
     /// admission from the address, which is how the two layers used to
     /// disagree about one relay.
-    pub(crate) fn dial_declarer(&self, relay: &RelayUrl) -> nmp_network_policy::Declarer {
+    pub(crate) fn dial_declarer(&self, relay: &RelayUrl) -> Declarer {
         if self.heeded_relays.contains(relay) {
-            nmp_network_policy::Declarer::Ourselves
+            Declarer::Ourselves
         } else {
-            nmp_network_policy::Declarer::SomeoneElse
+            Declarer::SomeoneElse
         }
     }
 

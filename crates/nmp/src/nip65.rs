@@ -134,7 +134,7 @@ fn admit_author_routes<S: nmp_store::EventStore>(
     author: PublicKey,
     routes: ParsedAuthorRoutes,
 ) -> nmp_router::AuthorRoutes {
-    let source = core.relay_list_source(&author);
+    let declarer = core.relay_list_declarer(&author);
     let mut outbound = BTreeSet::new();
     let mut inbound = BTreeSet::new();
     let mut refused = BTreeSet::new();
@@ -146,7 +146,7 @@ fn admit_author_routes<S: nmp_store::EventStore>(
         .cloned()
         .collect::<Vec<_>>();
     for relay in declared {
-        if core.admits_relay(&relay, source).is_err() {
+        if core.admits_relay(&relay, declarer).is_err() {
             refused.insert(relay);
             continue;
         }
@@ -514,7 +514,7 @@ mod tests {
 mod provenance {
     use super::*;
     use crate::core::{
-        EngineMsg, OnionReachability, RelayAdmissionPolicy, RelaySource, Row, RowDelta,
+        Declarer, EngineMsg, OnionReachability, RelayAdmissionPolicy, Row, RowDelta,
     };
     use nmp_router::AuthorRouteState;
     use nmp_store::MemoryStore;
@@ -789,8 +789,8 @@ mod provenance {
         let mut core = EngineCore::new(MemoryStore::new(), 8);
         core.handle(EngineMsg::SignerAttached(keys.public_key()));
         assert_eq!(
-            core.relay_list_source(&keys.public_key()),
-            RelaySource::OwnIdentity
+            core.relay_list_declarer(&keys.public_key()),
+            Declarer::Ourselves
         );
         core.handle(EngineMsg::AuthCapabilityInvalidated(
             keys.public_key(),
@@ -798,8 +798,8 @@ mod provenance {
             crate::core::AuthCapabilityInstance(1),
         ));
         assert_eq!(
-            core.relay_list_source(&keys.public_key()),
-            RelaySource::SomeoneElse
+            core.relay_list_declarer(&keys.public_key()),
+            Declarer::SomeoneElse
         );
     }
 }
@@ -810,11 +810,11 @@ mod provenance {
 /// declaration are the same grant, arrived at differently.
 #[cfg(test)]
 mod operator_provenance {
-    use crate::core::{EngineCore, EngineMsg, RelaySource};
+    use crate::core::{Declarer, EngineCore, EngineMsg};
     use nmp_grammar::{
         Durability, Identity, SourceAuthority, WriteIntent, WritePayload, WriteRouting,
     };
-    use nmp_network_policy::Declarer;
+
     use nmp_store::MemoryStore;
     use nostr::{Keys, Kind, RelayUrl};
     use std::collections::BTreeSet;
@@ -896,8 +896,8 @@ mod operator_provenance {
     fn signed_out_leaves_only_the_operator_tier() {
         let core = config_with_app_relay("ws://127.0.0.1:7777");
         assert_eq!(
-            core.relay_list_source(&Keys::generate().public_key()),
-            RelaySource::SomeoneElse
+            core.relay_list_declarer(&Keys::generate().public_key()),
+            Declarer::SomeoneElse
         );
         assert_eq!(
             core.dial_declarer(&RelayUrl::parse("ws://127.0.0.1:7777").unwrap()),

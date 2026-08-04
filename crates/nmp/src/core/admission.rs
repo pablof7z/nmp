@@ -10,9 +10,11 @@
 //! A `127.0.0.1` or `192.168.1.10` relay is meaningless — and possibly
 //! hostile — in a stranger's data, and completely legitimate when this app's
 //! operator or an identity it signs as named it, because they are describing
-//! their own network. So this module owns the mapping from an NMP-internal
-//! declaration site to [`Declarer`], and every relay URL that reaches routing
-//! or a socket passes exactly one of them.
+//! their own network. So this module answers that question with
+//! [`nmp_network_policy::Declarer`] — the SAME two-valued answer the pure
+//! policy takes, deliberately not a second NMP-side enumeration of
+//! declaration sites, because a parallel vocabulary would immediately need a
+//! mapping nobody could keep total.
 //!
 //! Two properties this shape is designed to make unavailable:
 //!
@@ -27,41 +29,10 @@ use nmp_grammar::relay::relay_host_key;
 use nmp_network_policy::{Declarer, DestinationPolicy, DestinationRefusal, OnionReachability};
 use nmp_router::RelayUrl;
 
-/// Where one relay URL came from, in NMP's own vocabulary, and therefore which
-/// [`Declarer`] answers for it.
-///
-/// This enumerates declaration SITES, not trust levels: the whole point is that
-/// each site has exactly one honest answer, decided once, here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelaySource {
-    /// Anything the app handed the engine: `EngineConfig`'s indexer, app and
-    /// fallback relays, `WriteRouting::Explicit`, `RelayScope::on`, a pinned
-    /// read source, a relay the user typed into the app's own UI, and the URL
-    /// passed to a one-shot relay-information request. The app named it for
-    /// this exact piece of work.
-    App,
-    /// A relay list signed by an identity this engine can act as. Authorship,
-    /// not arrival, is the test: a list that reached us by discovery from some
-    /// stranger's relay is still ours if the key that signed it is ours.
-    OwnIdentity,
-    /// Anyone else's data: another author's relay list, a relay hint carried by
-    /// a third party's `e`/`p`/`a` tag, a relay a row happened to arrive on.
-    SomeoneElse,
-}
-
-impl RelaySource {
-    fn declarer(self) -> Declarer {
-        match self {
-            Self::App | Self::OwnIdentity => Declarer::Ourselves,
-            Self::SomeoneElse => Declarer::SomeoneElse,
-        }
-    }
-}
-
 /// The engine's relay admission policy.
 ///
 /// The default is the secure one: no local host re-admitted, Tor not
-/// reachable. Both knobs only ever affect [`RelaySource::SomeoneElse`] —
+/// reachable. Both knobs only ever affect [`Declarer::SomeoneElse`] —
 /// nothing an operator or an own identity declared has ever needed them.
 #[derive(Debug, Clone, Default)]
 pub struct RelayAdmissionPolicy {
@@ -125,12 +96,12 @@ impl RelayAdmissionPolicy {
     }
 
     /// Whether a relay declared by `source` may be used, and why not if not.
-    pub fn admits(&self, url: &RelayUrl, source: RelaySource) -> Result<(), RelayRefusal> {
+    pub fn admits(&self, url: &RelayUrl, declarer: Declarer) -> Result<(), RelayRefusal> {
         let Some(host) = relay_host_key(url) else {
             return Err(RelayRefusal::NoHost);
         };
         self.destination_policy
-            .admit_host(&host, source.declarer())
+            .admit_host(&host, declarer)
             .map(|_| ())
             .map_err(RelayRefusal::Destination)
     }
@@ -170,16 +141,13 @@ mod tests {
         ] {
             let url = relay(url);
             assert!(
-                policy.admits(&url, RelaySource::SomeoneElse).is_err(),
+                policy.admits(&url, Declarer::SomeoneElse).is_err(),
                 "someone else's data may not name {url}"
             );
             assert!(
-                policy.admits(&url, RelaySource::OwnIdentity).is_ok(),
-                "our own signed relay list describes our own network: {url}"
-            );
-            assert!(
-                policy.admits(&url, RelaySource::App).is_ok(),
-                "the app naming it is the operator describing their own network: {url}"
+                policy.admits(&url, Declarer::Ourselves).is_ok(),
+                "our own declaration -- a signed relay list of ours, or a relay this \
+                 app named itself -- describes our own network: {url}"
             );
         }
     }
@@ -188,7 +156,7 @@ mod tests {
     fn public_hosts_need_no_grant_from_anyone() {
         let policy = RelayAdmissionPolicy::default();
         for url in ["wss://relay.damus.io", "wss://nostr.wine/npub1abc"] {
-            assert!(policy.admits(&relay(url), RelaySource::SomeoneElse).is_ok());
+            assert!(policy.admits(&relay(url), Declarer::SomeoneElse).is_ok());
         }
     }
 
@@ -198,17 +166,17 @@ mod tests {
             RelayAdmissionPolicy::new(["127.0.0.1".to_string()], OnionReachability::Unreachable);
         // The opted-in host is admitted at any port / path.
         assert!(policy
-            .admits(&relay("ws://127.0.0.1:7777"), RelaySource::SomeoneElse)
+            .admits(&relay("ws://127.0.0.1:7777"), Declarer::SomeoneElse)
             .is_ok());
         assert!(policy
-            .admits(&relay("ws://127.0.0.1:9999/x"), RelaySource::SomeoneElse)
+            .admits(&relay("ws://127.0.0.1:9999/x"), Declarer::SomeoneElse)
             .is_ok());
         // A DIFFERENT local host is still refused — the opt-in is exact.
         assert!(policy
-            .admits(&relay("ws://10.0.0.1"), RelaySource::SomeoneElse)
+            .admits(&relay("ws://10.0.0.1"), Declarer::SomeoneElse)
             .is_err());
         assert!(policy
-            .admits(&relay("ws://localhost"), RelaySource::SomeoneElse)
+            .admits(&relay("ws://localhost"), Declarer::SomeoneElse)
             .is_err());
     }
 
@@ -219,7 +187,7 @@ mod tests {
             OnionReachability::Unreachable,
         );
         assert!(policy
-            .admits(&relay("ws://localhost:8899"), RelaySource::SomeoneElse)
+            .admits(&relay("ws://localhost:8899"), Declarer::SomeoneElse)
             .is_ok());
     }
 
@@ -231,11 +199,11 @@ mod tests {
 
         let without_tor = RelayAdmissionPolicy::default();
         assert!(without_tor
-            .admits(&stranger_onion, RelaySource::SomeoneElse)
+            .admits(&stranger_onion, Declarer::SomeoneElse)
             .is_err());
         assert!(
             without_tor
-                .admits(&stranger_onion, RelaySource::OwnIdentity)
+                .admits(&stranger_onion, Declarer::Ourselves)
                 .is_ok(),
             "our own list naming a hidden service is heeded even with no Tor; \
              it just fails to connect"
@@ -243,11 +211,11 @@ mod tests {
 
         let with_tor = RelayAdmissionPolicy::new([], OnionReachability::Reachable);
         assert!(with_tor
-            .admits(&stranger_onion, RelaySource::SomeoneElse)
+            .admits(&stranger_onion, Declarer::SomeoneElse)
             .is_ok());
         assert!(
             with_tor
-                .admits(&relay("ws://127.0.0.1:7777"), RelaySource::SomeoneElse)
+                .admits(&relay("ws://127.0.0.1:7777"), Declarer::SomeoneElse)
                 .is_err(),
             "declaring Tor must not quietly re-admit loopback from strangers"
         );
@@ -257,14 +225,14 @@ mod tests {
     fn a_refusal_carries_the_reason_the_app_has_to_show_a_user() {
         let policy = RelayAdmissionPolicy::default();
         let refusal = policy
-            .admits(&relay("ws://192.168.1.5"), RelaySource::SomeoneElse)
+            .admits(&relay("ws://192.168.1.5"), Declarer::SomeoneElse)
             .unwrap_err();
         assert!(
             refusal.to_string().contains("192.168.1.5"),
             "the reason names the exact host: {refusal}"
         );
         let refusal = policy
-            .admits(&relay("ws://nmprelayxyz.onion"), RelaySource::SomeoneElse)
+            .admits(&relay("ws://nmprelayxyz.onion"), Declarer::SomeoneElse)
             .unwrap_err();
         assert!(
             matches!(

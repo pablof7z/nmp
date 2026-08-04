@@ -436,7 +436,7 @@ impl<S: EventStore> EngineCore<S> {
             .map(|mut atom| {
                 atom.routing_evidence.retain(|evidence| {
                     self.admission
-                        .admits(&evidence.relay, super::RelaySource::SomeoneElse)
+                        .admits(&evidence.relay, super::Declarer::SomeoneElse)
                         .is_ok()
                 });
                 atom
@@ -576,7 +576,7 @@ impl<S: EventStore> EngineCore<S> {
     ///
     /// A relay hint in an `e`/`p`/`a` tag is the cheapest thing in Nostr to
     /// forge, and a row's observed-source provenance is arrival rather than
-    /// authorship, so both are always [`RelaySource::SomeoneElse`] however
+    /// authorship, so both are always [`Declarer::SomeoneElse`] however
     /// familiar the relay they name looks. Operator-configured lanes never
     /// travel this path; they are a trusted declaration made elsewhere.
     pub(super) fn admit_projected_routing_evidence(
@@ -592,7 +592,7 @@ impl<S: EventStore> EngineCore<S> {
                 atom.routing_evidence.retain(|evidence| {
                     let admitted = self
                         .admission
-                        .admits(&evidence.relay, super::RelaySource::SomeoneElse)
+                        .admits(&evidence.relay, super::Declarer::SomeoneElse)
                         .is_ok();
                     if !admitted {
                         rejected_now.insert((atom_selection, evidence.clone()));
