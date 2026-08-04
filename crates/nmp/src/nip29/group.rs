@@ -11,11 +11,15 @@
 //! under one group and route it as though it came from another, because
 //! there is no spelling for saying so.
 //!
-//! Reads mint a [`LiveQuery`] the ordinary observe door takes. There is
-//! deliberately no `Group::observe`: a second read door onto the same
-//! mechanism is exactly the shape #838 deleted on the write side. Writes mint
-//! the ordinary opaque [`WriteIntent`] and hand it to the ONE publish door;
-//! there is no group-shaped receipt and no group-shaped retry.
+//! Reads of a group's CONTENT mint a [`LiveQuery`] the ordinary observe door
+//! takes. [`Group::observe`] reads NIP-29's own relay-signed records, and it
+//! is a projection over that same door -- it opens the engine's own
+//! subscription and folds the deltas an app would otherwise fold by hand,
+//! exactly as `nmp_nip02`'s follow observation does. What stays absent is a
+//! second read LIFECYCLE: no socket, no retry, no group-shaped cancellation,
+//! which is the read-side shape of the thing #838 deleted on the write side.
+//! Writes mint the ordinary opaque [`WriteIntent`] and hand it to the ONE
+//! publish door; there is no group-shaped receipt and no group-shaped retry.
 
 use std::collections::BTreeSet;
 
@@ -23,12 +27,14 @@ use nmp_grammar::{EventBuilder, Filter, Identity, WriteIntent, WritePayload, Wri
 use nostr::{Event, EventId, PublicKey, RelayUrl};
 
 use super::read::{self, GroupReadError};
+use super::records::{GroupObservation, GroupObserveError};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::publish_queue::WriteFact;
 use crate::runtime::FifoReceiver;
 use crate::LiveQuery;
 use nmp_nip29::GroupContextError;
+use nmp_nip29::GroupRecord;
 
 /// Why a group publication never reached the publish door, or what the door
 /// said when it did.
@@ -103,7 +109,7 @@ impl Group {
 
     /// One complete read branch per host, in canonical host order. Split out
     /// for the same reason as
-    /// [`RelayScope::listing_branches`](super::RelayScope::listing_branches):
+    /// [`RelayScope::records_branches`](super::RelayScope::records_branches):
     /// the per-branch scoping property must be assertable for a MULTI-host
     /// group independently of how branches are aggregated.
     pub(crate) fn read_branches(
@@ -114,6 +120,50 @@ impl Group {
             .iter()
             .map(|host| nmp_nip29::group_demand_at(host, &self.id, selection.clone()))
             .collect()
+    }
+
+    /// Watch this group's own relay-signed records.
+    ///
+    /// The five-line path: no predicate, no collection, no id lookup. Each
+    /// delivery carries exactly one [`GroupSnapshot`] -- this group's -- from
+    /// the first delivery onward, including before any record has arrived, so
+    /// there is always something to render.
+    ///
+    /// This is not a second read door. It opens the ONE ordinary
+    /// `Engine::observe_async` subscription over the ONE ordinary
+    /// [`LiveQuery`] the group's hosts declare, and folds the deltas the app
+    /// would otherwise fold by hand -- the same relationship
+    /// `nmp_nip02`'s follow observation has to the same door. The group owns
+    /// no socket, no retry and no cancellation semantics of its own.
+    ///
+    /// ```text
+    /// let group = nip29::group([host], room_id)?;
+    /// let watching = group.observe(&engine, [GroupRecord::Metadata, GroupRecord::Members])?;
+    /// while let Some(snapshots) = watching.next().await? {
+    ///     let room = &snapshots[0];
+    /// }
+    /// ```
+    pub fn observe(
+        &self,
+        engine: &Engine,
+        records: impl IntoIterator<Item = GroupRecord>,
+    ) -> Result<GroupObservation, GroupObserveError> {
+        let records: BTreeSet<GroupRecord> = records.into_iter().collect();
+        if records.is_empty() {
+            return Err(GroupObserveError::NoRecordSelected);
+        }
+        let predicate = super::any_of([self.id.clone()]);
+        let branches = self
+            .hosts
+            .iter()
+            .map(|host| nmp_nip29::group_records_at(host, &records, predicate.lower_at(host)))
+            .collect();
+        super::records::observe(
+            engine,
+            self.hosts.clone(),
+            BTreeSet::from([self.id.clone()]),
+            branches,
+        )
     }
 
     /// Ask whether an already-signed event belongs to this group, without
@@ -568,12 +618,6 @@ mod tests {
                 ..Filter::default()
             })
             .expect("a reactions selection scopes");
-        let membership = group
-            .read(Filter {
-                kinds: Some(BTreeSet::from([39001u16, 39002u16])),
-                ..Filter::default()
-            })
-            .expect("a membership selection scopes");
 
         let subscriptions = vec![
             engine
@@ -585,16 +629,68 @@ mod tests {
             engine
                 .observe(reactions, None)
                 .expect("the reactions query opens its own subscription"),
-            engine
-                .observe(membership, None)
-                .expect("the membership query opens its own subscription"),
         ];
+        // The roster is the fourth simultaneous observation, and it is a
+        // records observation rather than a fourth `read`: the relay-signed
+        // records are `d`-keyed and unreachable through the `#h` door (#1245).
+        let roster = group
+            .observe(&engine, [GroupRecord::Admins, GroupRecord::Members])
+            .expect("the roster observation opens its own subscription");
         assert_eq!(
             subscriptions.len(),
-            4,
+            3,
             "all four independent observations must be open at once, from the SAME group value"
         );
         drop(subscriptions);
+        drop(roster);
         engine.shutdown();
+    }
+
+    /// #1245, at the shipped call site that proved it. The variable was
+    /// literally named `membership`, the read returned `Ok`, the subscription
+    /// opened, and no 39001 or 39002 event could ever match the `#h` filter it
+    /// built -- an empty result indistinguishable from a group with no roster
+    /// published.
+    #[test]
+    fn a_roster_read_through_the_content_door_is_refused_not_silently_empty() {
+        let group = group([host(1)]);
+        assert_eq!(
+            group
+                .read(Filter {
+                    kinds: Some(BTreeSet::from([39001u16, 39002u16])),
+                    ..Filter::default()
+                })
+                .err(),
+            Some(GroupReadError::Context(
+                GroupContextError::RecordsAreNotContextScoped {
+                    kinds: BTreeSet::from([39001u16, 39002u16])
+                }
+            )),
+            "the door must say no; a door that returns nothing forever is worse"
+        );
+    }
+
+    /// The refusal is about the `d`/`h` axis, not about kinds: ordinary group
+    /// content -- including the moderation kinds NIP-29 itself defines, which
+    /// DO carry `h` -- still reads through the same door untouched.
+    #[test]
+    fn ordinary_group_content_still_reads_through_the_content_door() {
+        let group = group([host(1)]);
+        for kinds in [
+            BTreeSet::from([9u16]),
+            BTreeSet::from([9000u16, 9001u16]),
+            BTreeSet::from([30315u16]),
+            BTreeSet::from([31337u16]),
+        ] {
+            assert!(
+                group
+                    .read(Filter {
+                        kinds: Some(kinds.clone()),
+                        ..Filter::default()
+                    })
+                    .is_ok(),
+                "{kinds:?} lives IN a group and must still read through the content door"
+            );
+        }
     }
 }

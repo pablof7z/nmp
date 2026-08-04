@@ -48,14 +48,23 @@ the one `observe` door. Writes go through the same `Group`:
 9000-9022 operations) preserves the draft's kind and schema, appends exactly
 one `h` before signing, and routes `Explicit` to every host in the scope, not
 one. Discovery across the scope is evidence-scoped:
-`nip29::member_list_includes`/`admin_list_includes` build a composable
-`GroupPredicate` (`union`/`intersect`/`minus`) over observed kind:39002/39001
-rows, consumed via `scope.groups_where(&predicate)`; absence from a list is
-never treated as proof of non-membership/non-admin.
+`nip29::member_list_includes`/`admin_list_includes`/`any_of` build a
+composable `GroupPredicate` (`union`/`intersect`/`minus`) over observed
+kind:39002/39001 rows and over ids the app already knows; absence from a list
+is never treated as proof of non-membership/non-admin.
 
-Rust and FFI project the full read-and-write door
-(`FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`). Swift/Kotlin projection of
-this surface is not yet built.
+Reading those records is `scope.observe(&engine, predicate, records)` and
+`nip29::group(hosts, id)?.observe(&engine, records)`. Both deliver a complete
+`GroupSnapshot` -- typed metadata plus the record's raw rows, admins and
+members as `ListedSubject`s each carrying the hosts that named them, an
+`availability` min'd over hosts, and the per-host breakdown beside the
+aggregate. Roles come from 39001's third `p` position and are `Option<String>`,
+never defaulted. Across hosts the lists union and the metadata does not: one
+host's whole record wins on `created_at`, never merged field-wise.
+
+Rust, FFI and both native SDKs project the full read-and-write door
+(`FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`NmpGroupRecordsStream`;
+`NMPRelayScope`/`NMPGroup`/`NMPGroupSnapshot` in Swift and Kotlin).
 
 `nmp-nipc7` independently owns pure kind:9 chat and `q` replies. It does not
 materialize mentions, notification `p` rows, NIP-29 `h`, or routing. No

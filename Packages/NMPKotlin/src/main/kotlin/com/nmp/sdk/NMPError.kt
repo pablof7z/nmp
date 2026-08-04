@@ -224,6 +224,24 @@ sealed class NMPError(message: String) : Exception(message) {
     data class GroupContextAmbiguous(val expected: String) :
         NMPError("event carries more than one distinct h tag; expected exactly group $expected")
 
+    /** #1245: a group content read named one of NIP-29's own relay-signed
+     * group records. Those identify themselves a different way, so an
+     * `h`-scoped read of them can only ever match nothing -- read them through
+     * `NMPGroup.observeRecords` instead. */
+    data class GroupRecordsNotContextScoped(val kinds: List<UShort>) :
+        NMPError(
+            "kinds $kinds are NIP-29's own relay-signed group records: they key themselves by " +
+                "d, never by h, so no such event could ever match a group content read; " +
+                "observe the group's records instead",
+        )
+
+    /** #1233: a records observation named none of the three records, which
+     * would deliver a permanently empty state. */
+    object GroupNoRecordSelected :
+        NMPError(
+            "a group records observation must name at least one of the three relay-signed records",
+        )
+
     companion object {
         fun from(ffi: FfiException): NMPError =
             when (ffi) {
@@ -280,6 +298,9 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.GroupContextMismatched ->
                     GroupContextMismatched(ffi.found, ffi.expected)
                 is FfiException.GroupContextAmbiguous -> GroupContextAmbiguous(ffi.expected)
+                is FfiException.GroupRecordsNotContextScoped ->
+                    GroupRecordsNotContextScoped(ffi.kinds)
+                is FfiException.GroupNoRecordSelected -> GroupNoRecordSelected
             }
     }
 }

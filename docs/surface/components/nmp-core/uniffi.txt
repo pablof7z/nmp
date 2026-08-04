@@ -3064,6 +3064,31 @@ enum Enum {
                 "#1033 (`nmp::nip29::GroupContextError::AmbiguousContext` mirror). A\npre-signed event carries more than one `h` row, so which group it\nclaims to be in has no single answer.",
             ),
         },
+        Variant {
+            name: "GroupRecordsNotContextScoped",
+            discr: None,
+            fields: [
+                Field {
+                    name: "kinds",
+                    type_: Sequence {
+                        inner_type: UInt16,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#1245 (`nmp::nip29::GroupContextError::RecordsAreNotContextScoped`\nmirror). A selection handed to `FfiGroup::read` named one of NIP-29's\nown relay-signed group records (39000/39001/39002). Those key\nthemselves by `d`, never by `h`, so the read would match nothing\nforever and an app could not tell that apart from a group with no\nroster. Read them through `FfiGroup::observe_records` instead.",
+            ),
+        },
+        Variant {
+            name: "GroupNoRecordSelected",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#1233 (`nmp::nip29::GroupObserveError::NoRecordSelected` mirror). A\nrecords observation named none of the three records, which would\ndeliver a permanently empty snapshot.",
+            ),
+        },
     ],
     shape: Error {
         flat: false,
@@ -3342,6 +3367,82 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "`nmp_grammar::Freshness` mirror (#565). Whole seconds are the exact\nprecision of Nostr timestamps and persisted coverage watermarks.",
+    ),
+}
+
+enum Enum {
+    name: "FfiGroupAvailability",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "SourceUnavailable",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Acquiring",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "CachedOnly",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Ready",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "How much of what the app asked for has been established\n(`nmp::nip29::GroupAvailability` mirror). Says nothing about whether the\nrecords themselves are complete.",
+    ),
+}
+
+enum Enum {
+    name: "FfiGroupRecord",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Metadata",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "kind:39000 -- the group's own metadata.",
+            ),
+        },
+        Variant {
+            name: "Admins",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "kind:39001 -- the optional, informative admin list.",
+            ),
+        },
+        Variant {
+            name: "Members",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "kind:39002 -- the optional, possibly partial member list.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Which of NIP-29's three relay-signed group records an app is asking for\n(`nmp::nip29::GroupRecord` mirror).",
     ),
 }
 
@@ -6212,6 +6313,219 @@ record Record {
 }
 
 record Record {
+    name: "FfiGroupMetadata",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "name",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "about",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "picture",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "tags",
+            type_: Sequence {
+                inner_type: Sequence {
+                    inner_type: String,
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "as_of",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "event_id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "host",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One relay-signed kind:39000 record (`nmp::nip29::GroupMetadata` mirror).\nThe three rows NIP-29 names are typed; `tags` carries the record's\ncomplete row list verbatim, so a row NIP-29 core does not define (a\n`parent`, say) needs no hand-parser on the native side.",
+    ),
+}
+
+record Record {
+    name: "FfiGroupSnapshot",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "metadata",
+            type_: Optional {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroupMetadata",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "The whole winning host's record -- latest `created_at` wins, never a\nfield-wise merge across hosts.",
+            ),
+        },
+        Field {
+            name: "admins",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiListedSubject",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "The union across hosts, each entry carrying the hosts that named it.",
+            ),
+        },
+        Field {
+            name: "members",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiListedSubject",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "availability",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiGroupAvailability",
+            },
+            default: None,
+            docstring: Some(
+                "The minimum over every host in the scope.",
+            ),
+        },
+        Field {
+            name: "per_host",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiHostRecords",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "Exactly what each host that answered signed, in host order.",
+            ),
+        },
+        Field {
+            name: "disagreements",
+            type_: Sequence {
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroupRecord",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "The records the answering hosts do not agree on.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "One group, as the hosts in the scope currently describe it\n(`nmp::nip29::GroupSnapshot` mirror). A complete self-contained value,\nnever a patch on a previous one.",
+    ),
+}
+
+record Record {
+    name: "FfiHostRecords",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "host",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "metadata",
+            type_: Optional {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroupMetadata",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "admins",
+            type_: Optional {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiListedRecord",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "members",
+            type_: Optional {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiListedRecord",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "availability",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiGroupAvailability",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "Exactly what one host signed, folded with nothing\n(`nmp::nip29::HostRecords` mirror).",
+    ),
+}
+
+record Record {
     name: "FfiKindCount",
     module_path: "nmp_ffi",
     remote: false,
@@ -6254,6 +6568,81 @@ record Record {
     ],
     docstring: Some(
         "One lane's wire-req count within a relay's diagnostics (M5 plan §1.1;\n`nmp::Lane` mirror, rendered as a string -- see\n`convert::lane_to_ffi_string`).",
+    ),
+}
+
+record Record {
+    name: "FfiListedRecord",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "subjects",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiListedSubject",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "as_of",
+            type_: UInt64,
+            default: None,
+            docstring: Some(
+                "The record's own `created_at`. A DISPLAY fact -- never compared\nagainst a local clock to adjudicate anything.",
+            ),
+        },
+        Field {
+            name: "event_id",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "host",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One relay-signed list record (`nmp::nip29::ListedRecord` mirror).",
+    ),
+}
+
+record Record {
+    name: "FfiListedSubject",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "pubkey",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "role",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "hosts",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One subject a relay-signed list names, and the hosts that named it\n(`nmp::nip29::ListedSubject` mirror). `role` is absent when the relay\nwrote none -- never defaulted.",
     ),
 }
 
@@ -7572,6 +7961,57 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_admin_list_includes",
     checksum: Some(
         25813,
+    ),
+}
+
+function Function {
+    name: "any_of",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "ids",
+            type_: Sequence {
+                inner_type: String,
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Object {
+            module_path: "nmp_ffi",
+            name: "FfiGroupPredicate",
+            imp: Struct,
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_any_of",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ids",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiGroupPredicate",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Exactly these group ids, whatever any list says about them\n(`nmp::nip29::any_of` mirror). The leaf an app uses when it already knows\nwhich rooms it is showing and is not asking a relational question.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_any_of",
+    checksum: Some(
+        42417,
     ),
 }
 
@@ -10672,6 +11112,90 @@ object Object {
             ),
         },
         Method {
+            name: "observe_records",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "records",
+                    type_: Sequence {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiGroupRecord",
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpGroupRecordsStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_observe_records",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "records",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpGroupRecordsStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Watch THIS group's own relay-signed records\n(`nmp::nip29::Group::observe` mirror). Each delivery carries exactly\none [`FfiGroupSnapshot`] -- this group's -- from the first delivery\nonward, including before any record has arrived.\n\nThis is not a second read door: it opens the ONE ordinary engine\nsubscription over the ONE ordinary live query the group's hosts\ndeclare, and folds the deltas an app would otherwise fold by hand.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_observe_records",
+            checksum: Some(
+                54252,
+            ),
+        },
+        Method {
             name: "publish",
             object_name: "FfiGroup",
             object_module_path: "nmp_ffi",
@@ -11362,7 +11886,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "A composable NIP-29 discovery predicate (`nmp::nip29::GroupPredicate`\nmirror). Opaque by design -- see this module's own doc for why -- built\nwith [`member_list_includes`]/[`admin_list_includes`] and composed with\n[`Self::union`]/[`Self::intersect`]/[`Self::minus`], then handed to\n[`FfiRelayScope::groups_where`].",
+        "A composable NIP-29 discovery predicate (`nmp::nip29::GroupPredicate`\nmirror). Opaque by design -- see this module's own doc for why -- built\nwith [`member_list_includes`]/[`admin_list_includes`] and composed with\n[`Self::union`]/[`Self::intersect`]/[`Self::minus`], then handed to\n[`FfiRelayScope::observe_records`].",
     ),
 }
 
@@ -11486,12 +12010,23 @@ object Object {
             ),
         },
         Method {
-            name: "groups_where",
+            name: "observe_records",
             object_name: "FfiRelayScope",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
             arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
                 Argument {
                     name: "predicate",
                     type_: Object {
@@ -11503,15 +12038,28 @@ object Object {
                     optional: false,
                     default: None,
                 },
+                Argument {
+                    name: "records",
+                    type_: Sequence {
+                        inner_type: Enum {
+                            module_path: "nmp_ffi",
+                            name: "FfiGroupRecord",
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
             ],
             return_type: Some(
-                Record {
+                Object {
                     module_path: "nmp_ffi",
-                    name: "FfiLiveQuery",
+                    name: "NmpGroupRecordsStream",
+                    imp: Struct,
                 },
             ),
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffirelayscope_groups_where",
+                name: "uniffi_nmp_ffi_fn_method_ffirelayscope_observe_records",
                 is_async: false,
                 arguments: [
                     FfiArgument {
@@ -11521,27 +12069,34 @@ object Object {
                         ),
                     },
                     FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
                         name: "predicate",
                         type_: RustArcPtr(
                             "FfiGroupPredicate",
                         ),
                     },
+                    FfiArgument {
+                        name: "records",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
                 ],
                 return_type: Some(
-                    RustBuffer(
-                        Some(
-                            ExternalFfiMetadata {
-                                name: "FfiLiveQuery",
-                                module_path: "nmp_ffi",
-                            },
-                        ),
+                    RustArcPtr(
+                        "NmpGroupRecordsStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Groups on these relays matching a composable discovery predicate\n(`nmp::nip29::RelayScope::groups_where` mirror). One complete branch\nper host, folded into ONE [`FfiLiveQuery`] the ordinary\n`NmpEngine::observe_query` door takes -- never a per-host demand list\nthe app has to merge itself.",
+                "Watch the relay-signed records of every group matching `predicate`\n(`nmp::nip29::RelayScope::observe` mirror). One complete branch per\nhost, folded into ONE ordinary engine subscription; each delivery is\nthe complete set of [`FfiGroupSnapshot`]s for the groups currently\nmatching. The app never sees a row delta and never walks a `p` row.",
             ),
             throws: Some(
                 Enum {
@@ -11550,9 +12105,9 @@ object Object {
                 },
             ),
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffirelayscope_groups_where",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffirelayscope_observe_records",
             checksum: Some(
-                35980,
+                50577,
             ),
         },
     ],
@@ -13733,6 +14288,138 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "Pull-based receipt stream for a NIP-29 group write (#1033). Unlike\n[`crate::facade::NmpReceiptStream`] this stream carries NO receipt id:\nevery `FfiGroup` write reaches the engine's UNTRACKED `Engine::publish`\ndoor (never `publish_tracked`), because the store-issued receipt-id\nnamespace is a `publish`-door concern the group scope has no reason to\nsurface -- `nmp::nip29::Group::through_the_one_door`'s own doc names the\nsame door. Same ordered `WriteFact` delivery and cancel/Drop discipline\nas every other pull stream in this crate.",
+    ),
+}
+
+object Object {
+    name: "NmpGroupRecordsStream",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "cancel",
+            object_name: "NmpGroupRecordsStream",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpgrouprecordsstream_cancel",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpGroupRecordsStream",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Withdraw the observation now (idempotent; `Drop` does the same).",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpgrouprecordsstream_cancel",
+            checksum: Some(
+                44637,
+            ),
+        },
+        Method {
+            name: "next",
+            object_name: "NmpGroupRecordsStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Sequence {
+                        inner_type: Record {
+                            module_path: "nmp_ffi",
+                            name: "FfiGroupSnapshot",
+                        },
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpgrouprecordsstream_next",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpGroupRecordsStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the next snapshot set, or `None` once the observation is\nwithdrawn. A second concurrent `next()` is [`FfiError::ConcurrentNext`].",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpgrouprecordsstream_next",
+            checksum: Some(
+                18727,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_nmpgrouprecordsstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpGroupRecordsStream",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "NmpGroupRecordsStream",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_nmpgrouprecordsstream",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "NmpGroupRecordsStream",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Pull-based group-records observation handle (`nmp::nip29::GroupObservation`\nmirror). Each `next()` awaits the engine's waker-driven async row mailbox\nand folds a complete self-contained snapshot set inline. `None` is the\nterminal signal (the demand was withdrawn or the engine shut down);\n`Drop`/`cancel` withdraw the observation.",
     ),
 }
 

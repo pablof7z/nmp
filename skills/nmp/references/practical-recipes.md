@@ -62,13 +62,35 @@ and narrows it to a group:
 let scope = nip29::on(hosts)?          // RelayScopeError::EmptyRelaySet if empty
 let group = scope.group(groupId)       // same hosts, narrowed to one group
 
-engine.observe(scope.groups_where(&predicate)?, None)?   // discovery
-engine.observe(group.read(contentFilter)?, None)?         // this group's content
+// Who is in these groups, and what are they called: the relay-signed records.
+let watching = scope.observe(&engine, predicate, [Metadata, Admins, Members])?;
+while let Some(snapshots) = watching.next().await? { /* GroupSnapshot per group */ }
+
+// One known room, no predicate and no id lookup:
+let room = nip29::group(hosts, group_id)?.observe(&engine, [Metadata, Members])?;
+
+// This group's CONTENT stays an ordinary live query through the one door.
+engine.observe(group.read(contentFilter)?, None)?
 ```
 
-Both `observe` calls take one ordinary `LiveQuery` -- `Single` for one host,
-`Union` of complete per-host branches for more -- never a per-host list the
-app merges itself.
+`group.read` takes one ordinary `LiveQuery` -- `Single` for one host, `Union`
+of complete per-host branches for more -- never a per-host list the app merges
+itself. The records observation folds the same per-host branches for you and
+delivers a complete `GroupSnapshot`; you never see a row delta.
+
+`group.read` REFUSES a selection naming 39000/39001/39002: those key on `d`,
+not `h`, so an `h`-scoped filter over them matches nothing forever. Read them
+through the records observation instead.
+
+Across hosts, the lists UNION (every entry carries the hosts that named it)
+and the metadata does NOT -- one host's whole record wins on `created_at`,
+never a field-wise merge. `snapshot.differs(record)` says whether the hosts
+disagree; `snapshot.at(&host)` is exactly what one relay signed.
+
+Branches scale with HOSTS, not groups: a hundred groups on two relays is two
+branches. What a large watch list actually strains is the `#d` value set
+inside one filter, which a relay may refuse or truncate -- shard across
+several observations rather than assuming one will carry them all.
 
 Rules:
 

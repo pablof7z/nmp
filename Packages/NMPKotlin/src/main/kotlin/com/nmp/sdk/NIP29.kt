@@ -4,7 +4,12 @@
 //
 //   val scope = NMPRelayScope.on(listOf("wss://relay-a.example.com"))
 //   val mine = NMPGroupPredicate.memberListIncludes(NMPBinding.Reactive(NMPIdentityField.ActivePubkey))
-//   val query = scope.groupsWhere(mine)                    // one branch per host
+//   scope.observeRecords(engine, mine, listOf(NMPGroupRecord.Metadata)).collect { ... }
+//
+//   // The room screen: no predicate, no collection, no id lookup.
+//   NMPRelayScope.on(listOf(host)).group(roomId)
+//       .observeRecords(engine, listOf(NMPGroupRecord.Metadata, NMPGroupRecord.Members))
+//       .collect { room -> title = room.metadata?.name ?: roomId }
 //
 //   val group = scope.group("photographers")                // narrows, contacts nothing
 //   val query = group.read(NMPFilter(kinds = listOf(9u)))    // #h-scoped, per-host branches
@@ -39,8 +44,17 @@ import uniffi.nmp_ffi.FfiGroupPredicate
 import uniffi.nmp_ffi.FfiRelayScope
 import uniffi.nmp_ffi.FfiSignedEvent
 import uniffi.nmp_ffi.NmpEngine
+import uniffi.nmp_ffi.FfiGroupAvailability
+import uniffi.nmp_ffi.FfiGroupMetadata
+import uniffi.nmp_ffi.FfiGroupRecord
+import uniffi.nmp_ffi.FfiGroupSnapshot
+import uniffi.nmp_ffi.FfiHostRecords
+import uniffi.nmp_ffi.FfiListedRecord
+import uniffi.nmp_ffi.FfiListedSubject
 import uniffi.nmp_ffi.NmpGroupReceiptStream
+import uniffi.nmp_ffi.NmpGroupRecordsStream
 import uniffi.nmp_ffi.adminListIncludes as ffiAdminListIncludes
+import uniffi.nmp_ffi.anyOf as ffiAnyOf
 import uniffi.nmp_ffi.memberListIncludes as ffiMemberListIncludes
 
 /** The relays a NIP-29 group lives on -- named once, retained privately, and
@@ -49,12 +63,23 @@ class NMPRelayScope private constructor(internal val ffi: FfiRelayScope) {
     /** Narrow to one group id, keeping the same hosts. Contacts nothing. */
     fun group(groupId: String): NMPGroup = NMPGroup(ffi.group(groupId))
 
-    /** Groups on these relays matching a composable discovery predicate. One
-     * complete branch per host, folded into ONE [NMPLiveQuery] --
-     * `NMPEngine.observe` takes it directly, never a per-host demand list
-     * the app has to merge itself. */
-    fun groupsWhere(predicate: NMPGroupPredicate): NMPLiveQuery =
-        NMPLiveQuery.from(nmpRethrowing { ffi.groupsWhere(predicate.ffi) })
+    /** Watch the relay-signed records of every group matching [predicate].
+     * One complete branch per host; each emitted element is the complete set
+     * of [NMPGroupSnapshot]s for the groups currently matching. The app never
+     * sees a row delta and never walks a `p` tag.
+     *
+     * Each element is the full current state -- latest-wins, never a growing
+     * backlog -- so this is a thin pull loop over the Rust-owned handle.
+     * Teardown is collection-scope-tied via `handle.cancel()` in a `finally`,
+     * identical reasoning to `Query.kt`'s header. */
+    fun observeRecords(
+        engine: NMPEngine,
+        predicate: NMPGroupPredicate,
+        records: List<NMPGroupRecord>,
+    ): Flow<List<NMPGroupSnapshot>> =
+        groupRecordsFlow {
+            nmpRethrowing { ffi.observeRecords(engine.ffi, predicate.ffi, records.map { it.toFfi() }) }
+        }
 
     companion object {
         /** Name the relays a NIP-29 group lives on. Each host is parsed with
@@ -78,6 +103,34 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
      * `NMPEngine.observe`. */
     fun read(selection: NMPFilter): NMPLiveQuery =
         NMPLiveQuery.from(nmpRethrowing { ffi.read(selection.toFfi()) })
+
+    /** Watch THIS group's own relay-signed records. Every emitted element is
+     * exactly one [NMPGroupSnapshot] -- this group's -- from the first
+     * delivery onward, including before any record has arrived, so there is
+     * always something to render.
+     *
+     * Not a second read door: it drains the Rust-owned handle over the one
+     * engine subscription the group's hosts declare. */
+    fun observeRecords(
+        engine: NMPEngine,
+        records: List<NMPGroupRecord>,
+    ): Flow<NMPGroupSnapshot> =
+        flow {
+            val handle = nmpRethrowing { ffi.observeRecords(engine.ffi, records.map { it.toFfi() }) }
+            try {
+                while (true) {
+                    val delivered = nmpRethrowingAsync { handle.next() } ?: break
+                    // A group-scoped observation delivers exactly one
+                    // snapshot per delivery. A delivery that somehow carried
+                    // none is skipped rather than ending the flow: ending it
+                    // would tear down a live observation over a delivery that
+                    // said nothing.
+                    delivered.firstOrNull()?.let { emit(NMPGroupSnapshot.from(it)) }
+                }
+            } finally {
+                handle.cancel()
+            }
+        }
 
     /** Ask whether an already-signed event belongs to this group, without
      * building a write out of it. */
@@ -181,7 +234,8 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
 /** A composable NIP-29 discovery predicate (`nmp::nip29::GroupPredicate`/
  * `FfiGroupPredicate` mirror). Opaque by design -- built with
  * [memberListIncludes]/[adminListIncludes] and composed with
- * [union]/[intersect]/[minus], then handed to [NMPRelayScope.groupsWhere]. */
+ * [union]/[intersect]/[minus], then handed to
+ * [NMPRelayScope.observeRecords]. */
 class NMPGroupPredicate private constructor(internal val ffi: FfiGroupPredicate) {
     /** Groups matching this predicate OR any of [others]. */
     fun union(others: List<NMPGroupPredicate>): NMPGroupPredicate =
@@ -206,6 +260,10 @@ class NMPGroupPredicate private constructor(internal val ffi: FfiGroupPredicate)
          * [subjects]. Evidence-scoped exactly like [memberListIncludes]. */
         fun adminListIncludes(subjects: NMPBinding): NMPGroupPredicate =
             NMPGroupPredicate(nmpRethrowing { ffiAdminListIncludes(subjects.toFfi()) })
+
+        /** Exactly these group ids, whatever any list says about them. The
+         * leaf for an app that already knows which rooms it is showing. */
+        fun anyOf(ids: List<String>): NMPGroupPredicate = NMPGroupPredicate(ffiAnyOf(ids))
     }
 }
 
@@ -236,5 +294,206 @@ private fun groupWriteStatusFlow(stream: NmpGroupReceiptStream): Flow<WriteFact>
             }
         } finally {
             stream.cancel()
+        }
+    }
+
+// ===========================================================================
+// The relay-signed group records (#1233).
+//
+// Every value below is copied straight out of Rust. No `p`-tag walking, no
+// role defaulting, no cross-host merge policy lives on this side of the FFI
+// boundary -- this file only mirrors Rust-owned state and drains Rust-owned
+// handles, exactly like `Following.kt` does for NIP-02.
+// ===========================================================================
+
+/** Which of NIP-29's three relay-signed group records you are asking for
+ * (`FfiGroupRecord` mirror). */
+enum class NMPGroupRecord {
+    /** kind:39000 -- the group's own metadata. */
+    Metadata,
+
+    /** kind:39001 -- the optional, informative admin list. */
+    Admins,
+
+    /** kind:39002 -- the optional, possibly partial member list. */
+    Members,
+    ;
+
+    internal fun toFfi(): FfiGroupRecord =
+        when (this) {
+            Metadata -> FfiGroupRecord.METADATA
+            Admins -> FfiGroupRecord.ADMINS
+            Members -> FfiGroupRecord.MEMBERS
+        }
+
+    companion object {
+        fun from(ffi: FfiGroupRecord): NMPGroupRecord =
+            when (ffi) {
+                FfiGroupRecord.METADATA -> Metadata
+                FfiGroupRecord.ADMINS -> Admins
+                FfiGroupRecord.MEMBERS -> Members
+            }
+    }
+}
+
+/** How much of what you asked for has been established (`FfiGroupAvailability`
+ * mirror). It says nothing about whether the records are complete: a relay
+ * that is [Ready] and published no member list has published no member list. */
+enum class NMPGroupAvailability {
+    SourceUnavailable,
+    Acquiring,
+    CachedOnly,
+    Ready,
+    ;
+
+    companion object {
+        fun from(ffi: FfiGroupAvailability): NMPGroupAvailability =
+            when (ffi) {
+                FfiGroupAvailability.SOURCE_UNAVAILABLE -> SourceUnavailable
+                FfiGroupAvailability.ACQUIRING -> Acquiring
+                FfiGroupAvailability.CACHED_ONLY -> CachedOnly
+                FfiGroupAvailability.READY -> Ready
+            }
+    }
+}
+
+/** One subject a relay-signed list names, and the hosts that named it
+ * (`FfiListedSubject` mirror). [role] is null when the relay wrote none --
+ * never defaulted to "member". */
+data class NMPListedSubject(
+    val pubkey: String,
+    val role: String?,
+    val hosts: List<String>,
+) {
+    companion object {
+        fun from(ffi: FfiListedSubject): NMPListedSubject =
+            NMPListedSubject(ffi.pubkey, ffi.role, ffi.hosts)
+    }
+}
+
+/** One relay-signed list record (`FfiListedRecord` mirror). */
+data class NMPListedRecord(
+    val subjects: List<NMPListedSubject>,
+    /** The record's own `created_at`. A DISPLAY fact about this relay's
+     * record -- never compared against a local clock to adjudicate anything. */
+    val asOf: ULong,
+    val eventId: String,
+    val host: String,
+) {
+    companion object {
+        fun from(ffi: FfiListedRecord): NMPListedRecord =
+            NMPListedRecord(
+                subjects = ffi.subjects.map { NMPListedSubject.from(it) },
+                asOf = ffi.asOf,
+                eventId = ffi.eventId,
+                host = ffi.host,
+            )
+    }
+}
+
+/** One relay-signed kind:39000 record (`FfiGroupMetadata` mirror). The three
+ * rows NIP-29 names are typed; [tags] carries the record's complete row list
+ * verbatim, so reading a row NIP-29 core does not define (a `parent`, say)
+ * needs no hand-parser here. */
+data class NMPGroupMetadata(
+    val name: String?,
+    val about: String?,
+    val picture: String?,
+    val tags: List<List<String>>,
+    val asOf: ULong,
+    val eventId: String,
+    /** The relay that signed this record. */
+    val host: String,
+) {
+    companion object {
+        fun from(ffi: FfiGroupMetadata): NMPGroupMetadata =
+            NMPGroupMetadata(
+                name = ffi.name,
+                about = ffi.about,
+                picture = ffi.picture,
+                tags = ffi.tags,
+                asOf = ffi.asOf,
+                eventId = ffi.eventId,
+                host = ffi.host,
+            )
+    }
+}
+
+/** Exactly what one host signed, folded with nothing (`FfiHostRecords`
+ * mirror). Each record is nullable because a relay genuinely may publish one,
+ * two, or none of the three -- null means "this host has published none we
+ * have seen", never "there are none". */
+data class NMPHostRecords(
+    val host: String,
+    val metadata: NMPGroupMetadata?,
+    val admins: NMPListedRecord?,
+    val members: NMPListedRecord?,
+    val availability: NMPGroupAvailability,
+) {
+    companion object {
+        fun from(ffi: FfiHostRecords): NMPHostRecords =
+            NMPHostRecords(
+                host = ffi.host,
+                metadata = ffi.metadata?.let { NMPGroupMetadata.from(it) },
+                admins = ffi.admins?.let { NMPListedRecord.from(it) },
+                members = ffi.members?.let { NMPListedRecord.from(it) },
+                availability = NMPGroupAvailability.from(ffi.availability),
+            )
+    }
+}
+
+/** One group, as the hosts currently describe it (`FfiGroupSnapshot` mirror).
+ * A complete self-contained value, never a patch on a previous one. */
+data class NMPGroupSnapshot(
+    /** The `d` value the relay-signed records key themselves by. */
+    val id: String,
+    /** The whole winning host's record -- latest `created_at` wins, never a
+     * field-wise merge. [NMPGroupMetadata.host] says which relay signed it. */
+    val metadata: NMPGroupMetadata?,
+    /** The union across hosts, each entry carrying the hosts that named it. */
+    val admins: List<NMPListedSubject>,
+    val members: List<NMPListedSubject>,
+    /** The minimum over every host in the scope. */
+    val availability: NMPGroupAvailability,
+    /** Exactly what each host that answered signed, in host order. */
+    val perHost: List<NMPHostRecords>,
+    /** The records the answering hosts do not agree on. */
+    val disagreements: Set<NMPGroupRecord>,
+) {
+    /** Exactly what [host] signed, or null if it has published none of the
+     * selected records for this group that we have seen. */
+    fun at(host: String): NMPHostRecords? = perHost.firstOrNull { it.host == host }
+
+    /** Whether the hosts disagree about [record], so a UI can decide whether
+     * a dig-in affordance is worth offering. */
+    fun differs(record: NMPGroupRecord): Boolean = disagreements.contains(record)
+
+    companion object {
+        fun from(ffi: FfiGroupSnapshot): NMPGroupSnapshot =
+            NMPGroupSnapshot(
+                id = ffi.id,
+                metadata = ffi.metadata?.let { NMPGroupMetadata.from(it) },
+                admins = ffi.admins.map { NMPListedSubject.from(it) },
+                members = ffi.members.map { NMPListedSubject.from(it) },
+                availability = NMPGroupAvailability.from(ffi.availability),
+                perHost = ffi.perHost.map { NMPHostRecords.from(it) },
+                disagreements = ffi.disagreements.map { NMPGroupRecord.from(it) }.toSet(),
+            )
+    }
+}
+
+/** Shared pull loop for a scope-wide group-records observation. Each element
+ * is the complete current snapshot set (latest-wins, conflated by the
+ * engine's own mailbox), so this folds nothing of its own. */
+private fun groupRecordsFlow(open: () -> NmpGroupRecordsStream): Flow<List<NMPGroupSnapshot>> =
+    flow {
+        val handle = open()
+        try {
+            while (true) {
+                val delivered = nmpRethrowingAsync { handle.next() } ?: break
+                emit(delivered.map { NMPGroupSnapshot.from(it) })
+            }
+        } finally {
+            handle.cancel()
         }
     }

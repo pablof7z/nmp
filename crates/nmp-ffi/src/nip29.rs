@@ -21,7 +21,7 @@
 //! SetOp` are UniFFI objects rather than records (see `types.rs`'s own doc):
 //! a caller composes it with [`member_list_includes`]/[`admin_list_includes`]
 //! and [`FfiGroupPredicate::union`]/[`intersect`]/[`minus`], then hands it to
-//! [`FfiRelayScope::groups_where`] -- it is never inspected.
+//! [`FfiRelayScope::observe_records`] -- it is never inspected.
 //!
 //! Deliberately absent, same as before #1033: a fixed group-content kind
 //! catalog and a kind:9 composer. NIP-29 owns neither; C7 and client
@@ -33,7 +33,10 @@
 
 use std::sync::Arc;
 
-use nmp::nip29::{self, Group, GroupPredicate, RelayScope};
+use nmp::nip29::{
+    self, Group, GroupAvailability, GroupMetadata, GroupObservation, GroupPredicate, GroupRecord,
+    GroupSnapshot, ListedRecord, ListedSubject, RelayScope,
+};
 use nostr::RelayUrl;
 
 use crate::convert::{
@@ -86,17 +89,23 @@ impl FfiRelayScope {
         })
     }
 
-    /// Groups on these relays matching a composable discovery predicate
-    /// (`nmp::nip29::RelayScope::groups_where` mirror). One complete branch
-    /// per host, folded into ONE [`FfiLiveQuery`] the ordinary
-    /// `NmpEngine::observe_query` door takes -- never a per-host demand list
-    /// the app has to merge itself.
-    pub fn groups_where(
+    /// Watch the relay-signed records of every group matching `predicate`
+    /// (`nmp::nip29::RelayScope::observe` mirror). One complete branch per
+    /// host, folded into ONE ordinary engine subscription; each delivery is
+    /// the complete set of [`FfiGroupSnapshot`]s for the groups currently
+    /// matching. The app never sees a row delta and never walks a `p` row.
+    pub fn observe_records(
         &self,
+        engine: Arc<NmpEngine>,
         predicate: Arc<FfiGroupPredicate>,
-    ) -> Result<FfiLiveQuery, FfiError> {
-        let query = self.inner.groups_where(&predicate.inner)?;
-        Ok(live_query_to_ffi(query))
+        records: Vec<FfiGroupRecord>,
+    ) -> Result<Arc<NmpGroupRecordsStream>, FfiError> {
+        let observation = self.inner.observe(
+            &engine.engine,
+            predicate.inner.clone(),
+            records.into_iter().map(GroupRecord::from),
+        )?;
+        Ok(NmpGroupRecordsStream::new(observation))
     }
 }
 
@@ -121,6 +130,25 @@ impl FfiGroup {
         let selection = filter_from_ffi(selection)?;
         let query = self.inner.read(selection)?;
         Ok(live_query_to_ffi(query))
+    }
+
+    /// Watch THIS group's own relay-signed records
+    /// (`nmp::nip29::Group::observe` mirror). Each delivery carries exactly
+    /// one [`FfiGroupSnapshot`] -- this group's -- from the first delivery
+    /// onward, including before any record has arrived.
+    ///
+    /// This is not a second read door: it opens the ONE ordinary engine
+    /// subscription over the ONE ordinary live query the group's hosts
+    /// declare, and folds the deltas an app would otherwise fold by hand.
+    pub fn observe_records(
+        &self,
+        engine: Arc<NmpEngine>,
+        records: Vec<FfiGroupRecord>,
+    ) -> Result<Arc<NmpGroupRecordsStream>, FfiError> {
+        let observation = self
+            .inner
+            .observe(&engine.engine, records.into_iter().map(GroupRecord::from))?;
+        Ok(NmpGroupRecordsStream::new(observation))
     }
 
     /// Ask whether an already-signed event belongs to this group, without
@@ -301,7 +329,7 @@ impl FfiGroup {
 /// mirror). Opaque by design -- see this module's own doc for why -- built
 /// with [`member_list_includes`]/[`admin_list_includes`] and composed with
 /// [`Self::union`]/[`Self::intersect`]/[`Self::minus`], then handed to
-/// [`FfiRelayScope::groups_where`].
+/// [`FfiRelayScope::observe_records`].
 #[derive(Debug, uniffi::Object)]
 pub struct FfiGroupPredicate {
     inner: GroupPredicate,
@@ -357,6 +385,231 @@ pub fn admin_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupPredicate
     Ok(Arc::new(FfiGroupPredicate {
         inner: nip29::admin_list_includes(subjects),
     }))
+}
+
+/// Which of NIP-29's three relay-signed group records an app is asking for
+/// (`nmp::nip29::GroupRecord` mirror).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGroupRecord {
+    /// kind:39000 -- the group's own metadata.
+    Metadata,
+    /// kind:39001 -- the optional, informative admin list.
+    Admins,
+    /// kind:39002 -- the optional, possibly partial member list.
+    Members,
+}
+
+impl From<FfiGroupRecord> for GroupRecord {
+    fn from(record: FfiGroupRecord) -> Self {
+        match record {
+            FfiGroupRecord::Metadata => Self::Metadata,
+            FfiGroupRecord::Admins => Self::Admins,
+            FfiGroupRecord::Members => Self::Members,
+        }
+    }
+}
+
+impl From<GroupRecord> for FfiGroupRecord {
+    fn from(record: GroupRecord) -> Self {
+        match record {
+            GroupRecord::Metadata => Self::Metadata,
+            GroupRecord::Admins => Self::Admins,
+            GroupRecord::Members => Self::Members,
+        }
+    }
+}
+
+/// How much of what the app asked for has been established
+/// (`nmp::nip29::GroupAvailability` mirror). Says nothing about whether the
+/// records themselves are complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGroupAvailability {
+    SourceUnavailable,
+    Acquiring,
+    CachedOnly,
+    Ready,
+}
+
+/// One subject a relay-signed list names, and the hosts that named it
+/// (`nmp::nip29::ListedSubject` mirror). `role` is absent when the relay
+/// wrote none -- never defaulted.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiListedSubject {
+    pub pubkey: String,
+    pub role: Option<String>,
+    pub hosts: Vec<String>,
+}
+
+/// One relay-signed list record (`nmp::nip29::ListedRecord` mirror).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiListedRecord {
+    pub subjects: Vec<FfiListedSubject>,
+    /// The record's own `created_at`. A DISPLAY fact -- never compared
+    /// against a local clock to adjudicate anything.
+    pub as_of: u64,
+    pub event_id: String,
+    pub host: String,
+}
+
+/// One relay-signed kind:39000 record (`nmp::nip29::GroupMetadata` mirror).
+/// The three rows NIP-29 names are typed; `tags` carries the record's
+/// complete row list verbatim, so a row NIP-29 core does not define (a
+/// `parent`, say) needs no hand-parser on the native side.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGroupMetadata {
+    pub name: Option<String>,
+    pub about: Option<String>,
+    pub picture: Option<String>,
+    pub tags: Vec<Vec<String>>,
+    pub as_of: u64,
+    pub event_id: String,
+    pub host: String,
+}
+
+/// Exactly what one host signed, folded with nothing
+/// (`nmp::nip29::HostRecords` mirror).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiHostRecords {
+    pub host: String,
+    pub metadata: Option<FfiGroupMetadata>,
+    pub admins: Option<FfiListedRecord>,
+    pub members: Option<FfiListedRecord>,
+    pub availability: FfiGroupAvailability,
+}
+
+/// One group, as the hosts in the scope currently describe it
+/// (`nmp::nip29::GroupSnapshot` mirror). A complete self-contained value,
+/// never a patch on a previous one.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGroupSnapshot {
+    pub id: String,
+    /// The whole winning host's record -- latest `created_at` wins, never a
+    /// field-wise merge across hosts.
+    pub metadata: Option<FfiGroupMetadata>,
+    /// The union across hosts, each entry carrying the hosts that named it.
+    pub admins: Vec<FfiListedSubject>,
+    pub members: Vec<FfiListedSubject>,
+    /// The minimum over every host in the scope.
+    pub availability: FfiGroupAvailability,
+    /// Exactly what each host that answered signed, in host order.
+    pub per_host: Vec<FfiHostRecords>,
+    /// The records the answering hosts do not agree on.
+    pub disagreements: Vec<FfiGroupRecord>,
+}
+
+/// Pull-based group-records observation handle (`nmp::nip29::GroupObservation`
+/// mirror). Each `next()` awaits the engine's waker-driven async row mailbox
+/// and folds a complete self-contained snapshot set inline. `None` is the
+/// terminal signal (the demand was withdrawn or the engine shut down);
+/// `Drop`/`cancel` withdraw the observation.
+#[derive(uniffi::Object)]
+pub struct NmpGroupRecordsStream {
+    inner: GroupObservation,
+}
+
+impl NmpGroupRecordsStream {
+    fn new(inner: GroupObservation) -> Arc<Self> {
+        Arc::new(Self { inner })
+    }
+}
+
+#[uniffi::export]
+impl NmpGroupRecordsStream {
+    /// Await the next snapshot set, or `None` once the observation is
+    /// withdrawn. A second concurrent `next()` is [`FfiError::ConcurrentNext`].
+    pub async fn next(&self) -> Result<Option<Vec<FfiGroupSnapshot>>, FfiError> {
+        match self.inner.next().await {
+            Ok(Some(snapshots)) => Ok(Some(snapshots.iter().map(snapshot_to_ffi).collect())),
+            Ok(None) => Ok(None),
+            Err(_) => Err(FfiError::ConcurrentNext),
+        }
+    }
+
+    /// Withdraw the observation now (idempotent; `Drop` does the same).
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+}
+
+impl Drop for NmpGroupRecordsStream {
+    fn drop(&mut self) {
+        self.inner.cancel();
+    }
+}
+
+fn availability_to_ffi(availability: GroupAvailability) -> FfiGroupAvailability {
+    match availability {
+        GroupAvailability::SourceUnavailable => FfiGroupAvailability::SourceUnavailable,
+        GroupAvailability::Acquiring => FfiGroupAvailability::Acquiring,
+        GroupAvailability::CachedOnly => FfiGroupAvailability::CachedOnly,
+        GroupAvailability::Ready => FfiGroupAvailability::Ready,
+    }
+}
+
+fn subject_to_ffi(subject: &ListedSubject) -> FfiListedSubject {
+    FfiListedSubject {
+        pubkey: subject.pubkey.to_hex(),
+        role: subject.role.clone(),
+        hosts: subject.hosts.iter().map(RelayUrl::to_string).collect(),
+    }
+}
+
+fn listed_record_to_ffi(record: &ListedRecord) -> FfiListedRecord {
+    FfiListedRecord {
+        subjects: record.subjects.iter().map(subject_to_ffi).collect(),
+        as_of: record.as_of.as_secs(),
+        event_id: record.event_id.to_hex(),
+        host: record.host.to_string(),
+    }
+}
+
+fn metadata_to_ffi(metadata: &GroupMetadata) -> FfiGroupMetadata {
+    FfiGroupMetadata {
+        name: metadata.name.clone(),
+        about: metadata.about.clone(),
+        picture: metadata.picture.clone(),
+        tags: metadata.tags.clone(),
+        as_of: metadata.as_of.as_secs(),
+        event_id: metadata.event_id.to_hex(),
+        host: metadata.host.to_string(),
+    }
+}
+
+pub(crate) fn snapshot_to_ffi(snapshot: &GroupSnapshot) -> FfiGroupSnapshot {
+    FfiGroupSnapshot {
+        id: snapshot.id.clone(),
+        metadata: snapshot.metadata.as_ref().map(metadata_to_ffi),
+        admins: snapshot.admins.iter().map(subject_to_ffi).collect(),
+        members: snapshot.members.iter().map(subject_to_ffi).collect(),
+        availability: availability_to_ffi(snapshot.availability),
+        per_host: snapshot
+            .per_host
+            .iter()
+            .map(|(host, records)| FfiHostRecords {
+                host: host.to_string(),
+                metadata: records.metadata.as_ref().map(metadata_to_ffi),
+                admins: records.admins.as_ref().map(listed_record_to_ffi),
+                members: records.members.as_ref().map(listed_record_to_ffi),
+                availability: availability_to_ffi(records.availability),
+            })
+            .collect(),
+        disagreements: snapshot
+            .disagreements
+            .iter()
+            .copied()
+            .map(FfiGroupRecord::from)
+            .collect(),
+    }
+}
+
+/// Exactly these group ids, whatever any list says about them
+/// (`nmp::nip29::any_of` mirror). The leaf an app uses when it already knows
+/// which rooms it is showing and is not asking a relational question.
+#[uniffi::export]
+pub fn any_of(ids: Vec<String>) -> Arc<FfiGroupPredicate> {
+    Arc::new(FfiGroupPredicate {
+        inner: nip29::any_of(ids),
+    })
 }
 
 /// Pull-based receipt stream for a NIP-29 group write (#1033). Unlike
@@ -485,10 +738,12 @@ mod tests {
     }
 
     /// The composable predicate door: union/intersect/minus fold through
-    /// the grammar's own set algebra, and a multi-host listing still yields
-    /// one branch per host.
+    /// the grammar's own set algebra, including the literal-id leaf, and a
+    /// multi-host observation opens over every host.
     #[test]
-    fn groups_where_composes_predicates_over_every_host() {
+    fn a_composed_predicate_observes_the_records_over_every_host() {
+        let engine =
+            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
         let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
         let member = member_list_includes(FfiBinding::Reactive {
             field: FfiIdentityField::ActivePubkey,
@@ -498,12 +753,132 @@ mod tests {
             field: FfiIdentityField::ActivePubkey,
         })
         .expect("a reactive subjects binding needs no hex validation");
-        let predicate = member.union(vec![admin]);
+        let predicate = member.union(vec![admin, any_of(vec!["photographers".to_string()])]);
 
-        let query = scope
-            .groups_where(predicate)
-            .expect("a two-host listing declares two branches");
-        assert_eq!(query.branches.len(), 2);
+        let watching = scope
+            .observe_records(
+                engine.clone(),
+                predicate,
+                vec![
+                    FfiGroupRecord::Metadata,
+                    FfiGroupRecord::Admins,
+                    FfiGroupRecord::Members,
+                ],
+            )
+            .expect("a two-host records observation opens");
+        watching.cancel();
+        engine.shutdown();
+    }
+
+    /// The empty record selection is refused at the boundary, not opened
+    /// empty -- the same rule the direct-Rust door carries.
+    #[test]
+    fn an_empty_record_selection_is_a_typed_refusal_at_the_boundary() {
+        let engine =
+            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
+        let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
+        match scope
+            .group("photographers".to_string())
+            .observe_records(engine.clone(), Vec::new())
+        {
+            Err(FfiError::GroupNoRecordSelected) => {}
+            Err(other) => panic!("expected GroupNoRecordSelected, got {other:?}"),
+            Ok(_) => panic!("an empty record selection must be refused, not opened"),
+        }
+        engine.shutdown();
+    }
+
+    /// #1245 at the boundary: a `read` selection naming the relay-signed
+    /// records is refused with the kinds named, never answered with a
+    /// permanently empty query.
+    #[test]
+    fn a_roster_read_through_the_content_door_is_refused_at_the_boundary() {
+        let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
+        let group = scope.group("photographers".to_string());
+        match group.read(FfiFilter {
+            kinds: Some(vec![39001, 39002]),
+            ..FfiFilter::default()
+        }) {
+            Err(FfiError::GroupRecordsNotContextScoped { kinds }) => {
+                assert_eq!(kinds, vec![39001, 39002]);
+            }
+            other => panic!("expected GroupRecordsNotContextScoped, got {other:?}"),
+        }
+    }
+
+    /// The snapshot projection is lossless for everything an app renders --
+    /// including the role a relay wrote, the absence of one it did not, and
+    /// the hosts each entry is attributed to.
+    #[test]
+    fn snapshot_projection_is_lossless_for_what_an_app_renders() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let with_role = nostr::Keys::generate().public_key();
+        let without_role = nostr::Keys::generate().public_key();
+        let relay = RelayUrl::parse(&host(1)).expect("a well-formed host");
+        let metadata = GroupMetadata {
+            name: Some("Photographers".to_string()),
+            about: None,
+            picture: None,
+            tags: vec![vec!["parent".to_string(), "darkroom".to_string()]],
+            as_of: nostr::Timestamp::from(1_700_000_000u64),
+            event_id: nostr::EventId::all_zeros(),
+            host: relay.clone(),
+        };
+        let snapshot = GroupSnapshot {
+            id: "photographers".to_string(),
+            metadata: Some(metadata.clone()),
+            admins: vec![
+                ListedSubject {
+                    pubkey: with_role,
+                    role: Some("moderator".to_string()),
+                    hosts: BTreeSet::from([relay.clone()]),
+                },
+                ListedSubject {
+                    pubkey: without_role,
+                    role: None,
+                    hosts: BTreeSet::from([relay.clone()]),
+                },
+            ],
+            members: Vec::new(),
+            availability: GroupAvailability::Ready,
+            per_host: BTreeMap::from([(
+                relay.clone(),
+                nmp::nip29::HostRecords {
+                    metadata: Some(metadata),
+                    admins: None,
+                    members: None,
+                    availability: GroupAvailability::Ready,
+                },
+            )]),
+            disagreements: BTreeSet::from([GroupRecord::Metadata]),
+        };
+
+        let projected = snapshot_to_ffi(&snapshot);
+        assert_eq!(projected.id, "photographers");
+        assert_eq!(
+            projected.metadata.as_ref().and_then(|m| m.name.as_deref()),
+            Some("Photographers")
+        );
+        assert_eq!(
+            projected.metadata.as_ref().and_then(|m| m.about.clone()),
+            None
+        );
+        assert_eq!(
+            projected.metadata.as_ref().map(|m| m.tags.clone()),
+            Some(vec![vec!["parent".to_string(), "darkroom".to_string()]]),
+            "the raw rows cross the boundary so a native app needs no hand-parser"
+        );
+        assert_eq!(projected.admins[0].role.as_deref(), Some("moderator"));
+        assert_eq!(
+            projected.admins[1].role, None,
+            "an absent role must cross the boundary as absent, never as a default"
+        );
+        assert_eq!(projected.admins[0].hosts, vec![host(1)]);
+        assert_eq!(projected.availability, FfiGroupAvailability::Ready);
+        assert_eq!(projected.per_host.len(), 1);
+        assert_eq!(projected.per_host[0].host, host(1));
+        assert_eq!(projected.disagreements, vec![FfiGroupRecord::Metadata]);
     }
 
     /// A literal `subjects` binding is validated as a pubkey, the same rule

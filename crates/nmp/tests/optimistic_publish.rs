@@ -22,7 +22,7 @@
 //!
 //! #1182 f3 (the cross-host leak PR #1173 fixed stays fixed) is
 //! `group_publication_door.rs`'s
-//! `a_groups_where_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group`,
+//! `a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group`,
 //! plus `nip29_owns_no_publication_visibility_rule.rs` for f5. Nothing here
 //! weakens it: a row ANOTHER host served is still never projected under a pin
 //! that host is not in. This file is about a row NO host has served yet, which

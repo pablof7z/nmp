@@ -17,20 +17,17 @@ private actor LiveAdversarialState {
         if failure == nil { failure = "\(stream) stream ended unexpectedly" }
     }
 
-    func ingestMetadata(_ batch: RowBatch) {
+    func ingestMetadata(_ snapshots: [NMPGroupSnapshot]) {
         var next: [String: String] = [:]
-        for row in rows(batch, kind: 39000) {
-            if let source = row.sources.first, let name = tagValue(row, "name") {
-                next[source] = name
-            }
+        for records in snapshots.first(where: { $0.id == Probe.groupID })?.perHost ?? [] {
+            if let name = records.metadata?.name { next[records.host] = name }
         }
         metadataNames = next
     }
 
-    func ingestDiscovery(_ batch: RowBatch, followed: String) {
-        discoveryPresent = rows(batch, kind: 39002).contains { row in
-            tagValue(row, "d") == Probe.groupID
-                && row.tags.contains(["p", followed])
+    func ingestDiscovery(_ snapshots: [NMPGroupSnapshot], followed: String) {
+        discoveryPresent = snapshots.contains { snapshot in
+            snapshot.id == Probe.groupID && Probe.listsFollowed(snapshot, followed)
         }
     }
 
@@ -87,14 +84,8 @@ extension Probe {
         let group = context.scope.group(groupID)
         let state = LiveAdversarialState()
 
-        let subjects = NMPBinding.literal(Set([args.followed, args.outsider]))
-        let metadataPredicate = try NMPGroupPredicate.memberListIncludes(subjects)
-        let metadataQuery = try context.engine.observe(
-            context.scope.groupsWhere(metadataPredicate)
-        )
-        let discoveryQuery = try context.engine.observe(
-            context.scope.groupsWhere(try followsPredicate(context))
-        )
+        let metadataQuery = try Probe.metadataObservation(context)
+        let discoveryQuery = try Probe.followsDiscoveryObservation(context)
         let chatDemand = try group.read(NMPFilter(kinds: [9]))
         let cancelledQuery = try context.engine.observe(chatDemand)
         let survivingQuery = try context.engine.observe(chatDemand)
@@ -152,27 +143,30 @@ extension Probe {
     static func restartConflict(_ args: Args) async throws {
         let context = try await Context.open(args)
         defer { context.close() }
-        let subjects = NMPBinding.literal(Set([args.followed, args.outsider]))
-        let predicate = try NMPGroupPredicate.memberListIncludes(subjects)
-        let query = try context.engine.observe(context.scope.groupsWhere(predicate))
+        let query = try Probe.metadataObservation(context)
         defer { query.cancel() }
 
+        // Relay B is offline, and its own record survived the restart in the
+        // local store. The app must still SEE what relay B signed -- absence of
+        // a link is not absence of a record -- while being told, per host, that
+        // relay B is not currently proven.
         try await withTimeout(seconds: args.settleSeconds) {
             var offlineProved = false
-            for try await batch in query {
-                let names = metadataNames(batch)
-                let statuses = sourceStatuses(batch)
+            for try await snapshots in query {
+                guard let snapshot = snapshots.first(where: { $0.id == groupID }) else { continue }
+                let names = (try? Probe.metadataNames(snapshot)) ?? [:]
+                let statuses = hostAvailabilities(snapshot)
                 if !offlineProved,
                    names[args.relayA] == "Bitcoin Cash live",
                    names[args.relayB] == "Bitcoin (real) live",
-                   statuses[args.relayA] == .requesting,
+                   statuses[args.relayA] == .ready,
                    statuses[args.relayB] != nil,
-                   statuses[args.relayB] != .requesting {
+                   statuses[args.relayB] != .ready {
                     offlineProved = true
                     try signalReady(args.readyFile)
-                    print("PROOF swift_restart_conflict_offline metadata=\(names) cached_sources=2 statuses=\(statuses)")
+                    print("PROOF swift_restart_conflict_offline metadata=\(names) cached_sources=2 hoisted=\(snapshot.availability) per_host=\(statuses)")
                 }
-                if offlineProved, statuses[args.relayB] == .requesting {
+                if offlineProved, statuses[args.relayB] == .ready {
                     print("PROOF swift_restart_conflict_reconnected metadata=\(names) statuses=\(statuses)")
                     return ()
                 }
@@ -182,39 +176,29 @@ extension Probe {
         print("PASS swift_restart_conflict")
     }
 
-    private static func followsPredicate(_ context: Context) throws -> NMPGroupPredicate {
-        let follows = NMPBinding.derived(
-            inner: NMPDemand(
-                selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-                source: .pinned(Set([context.args.relayA, context.args.relayB])),
-                cache: .strict
-            ),
-            project: .tag("p")
-        )
-        return try NMPGroupPredicate.memberListIncludes(follows)
-    }
-
     private static func metadataPump(
-        _ query: NMPQuery,
+        _ observation: NMPGroupRecordsObservation,
         state: LiveAdversarialState
     ) -> Task<Void, Never> {
         Task {
             do {
-                for try await batch in query { await state.ingestMetadata(batch) }
+                for try await snapshots in observation {
+                    await state.ingestMetadata(snapshots)
+                }
                 await state.ended("metadata")
             } catch { await state.fail("metadata stream failed: \(error)") }
         }
     }
 
     private static func discoveryPump(
-        _ query: NMPQuery,
+        _ observation: NMPGroupRecordsObservation,
         state: LiveAdversarialState,
         followed: String
     ) -> Task<Void, Never> {
         Task {
             do {
-                for try await batch in query {
-                    await state.ingestDiscovery(batch, followed: followed)
+                for try await snapshots in observation {
+                    await state.ingestDiscovery(snapshots, followed: followed)
                 }
                 await state.ended("discovery")
             } catch { await state.fail("discovery stream failed: \(error)") }
@@ -281,19 +265,12 @@ extension Probe {
         })
     }
 
-    private static func metadataNames(_ batch: RowBatch) -> [String: String] {
-        var names: [String: String] = [:]
-        for row in rows(batch, kind: 39000) {
-            if let source = row.sources.first, let name = tagValue(row, "name") {
-                names[source] = name
-            }
-        }
-        return names
-    }
-
-    private static func sourceStatuses(_ batch: RowBatch) -> [String: SourceStatus] {
-        var statuses: [String: SourceStatus] = [:]
-        for source in sourceEvidence(batch) { statuses[source.relay] = source.status }
-        return statuses
+    /// Per-host acquisition state, read off the snapshot's own breakdown --
+    /// a stronger statement than the raw source status it replaced, because
+    /// it sits beside exactly what that relay signed.
+    private static func hostAvailabilities(
+        _ snapshot: NMPGroupSnapshot
+    ) -> [String: NMPGroupAvailability] {
+        Dictionary(uniqueKeysWithValues: snapshot.perHost.map { ($0.host, $0.availability) })
     }
 }
