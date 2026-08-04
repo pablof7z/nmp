@@ -1909,6 +1909,14 @@ impl<S: EventStore> EngineCore<S> {
         outcome
     }
 
+    /// The current neutral author-route fact, including what admission
+    /// refused. The router reads the routable sets; anything that has to
+    /// EXPLAIN an empty route set needs the refusals too.
+    #[allow(dead_code)]
+    pub(crate) fn author_routes(&self, author: &PublicKey) -> AuthorRouteState {
+        self.routing_facts.author_routes(author)
+    }
+
     /// Whether `author` is an identity this engine can act as, and therefore
     /// whether a relay list signed by that key is our own declaration.
     ///

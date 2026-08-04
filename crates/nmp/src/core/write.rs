@@ -3156,10 +3156,27 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// One contributing author's clause of [`Self::no_destination_detail`].
+    ///
+    /// "Present but empty" has two completely different meanings, and telling
+    /// a user with a LAN relay that they have no relays is the defect #1251
+    /// exists to close. A list every one of whose relays was refused says so,
+    /// names them, and names the config that would re-admit them; a list that
+    /// really declared nothing keeps the old wording.
     fn exhausted_source(&self, author: &PublicKey, direction: RouteDirection) -> String {
         let state = self.routing_facts.author_routes(author);
         let author = author.to_hex();
         match state {
+            AuthorRouteState::Present(routes) if routes.every_declared_relay_was_refused() => {
+                let refused = routes
+                    .refused()
+                    .iter()
+                    .map(RelayUrl::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "{author} declared relays but every one was refused ({refused});                      they are not this app's own and their hosts are neither in                      allowed_local_relay_hosts nor reachable under the declared                      Tor capability"
+                )
+            }
             AuthorRouteState::Present(_) => match direction {
                 RouteDirection::Outbound => {
                     format!("Present outbound routes for {author} are empty")
