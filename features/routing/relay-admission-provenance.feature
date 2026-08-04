@@ -59,6 +59,7 @@ Feature: A relay is admitted for whose declaration it is, not what it says
   # nmp:status=built
   # nmp:evidence=rust:nmp::an_app_relay_on_localhost_is_heeded_by_the_socket_with_no_allowlist
   # nmp:evidence=rust:nmp-transport::our_own_declaration_reaches_a_local_relay_with_no_allowlist
+  # nmp:evidence=rust:nmp::an_app_declared_loopback_relay_is_reached_with_an_empty_allowlist
   # nmp:falsifier=Let the socket re-derive admission from the address instead of carrying the provenance answer routing already gave; the app relay the user was told they have is refused at the dial and can never be reached.
   Scenario: The app's own relay list naming localhost is heeded
     # An operator running a dev relay on their own machine declared it by
