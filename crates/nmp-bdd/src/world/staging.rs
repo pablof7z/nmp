@@ -524,12 +524,7 @@ impl NmpWorld {
             // gate. Opt local hosts in because feature-on NIP-65 scenarios do
             // discover routes from scripted local relay-list events.
             nmp::mechanism::core::RelayAdmissionPolicy::new(
-                [
-                    "127.0.0.1".to_string(),
-                    "localhost".to_string(),
-                    "[::1]".to_string(),
-                    "::1".to_string(),
-                ],
+                ["127.0.0.1", "localhost", "[::1]", "::1"].map(str::to_string),
                 nmp::mechanism::core::OnionReachability::Unreachable,
             ),
         )
