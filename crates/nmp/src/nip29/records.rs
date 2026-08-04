@@ -56,7 +56,11 @@
 //! is therefore a ceiling on HOSTS and never on groups. The pressure a large
 //! watch list actually creates is on the `#d` value set inside one filter,
 //! which a relay may refuse or silently truncate; see
-//! [`GroupPredicate::AnyOf`](super::GroupPredicate::AnyOf).
+//! [`GroupIds`](super::GroupIds), which owns that caveat for every id source
+//! rather than for one leaf.
+//!
+//! [`all`](super::all) has no `#d` set at all, so nothing bounds it from
+//! inside the filter. Its bound is the observation's own per-host `limit`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
