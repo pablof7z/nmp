@@ -219,7 +219,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 "group at all",
         )
 
-    /** #1033/#1281: `NMPGroup.validateContext`/`publishSigned` was given an
+    /** #1033/#1281: `NMPGroup.validateContext` was given an
      * event carrying no `h` tag naming any group at all. `expected` is the
      * whole set the door was asked for -- one id for an [NMPGroup], several
      * for an [NMPGroups]. */

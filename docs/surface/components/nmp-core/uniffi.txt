@@ -3081,7 +3081,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "#1033/#1281 (`nmp::nip29::GroupContextError::MissingContext` mirror).\nA pre-signed event handed to `FfiGroup::publish_signed`/\n`FfiGroup::validate_context` carries no `h` row at all. `expected` is\nthe whole set the door was asked for, in canonical order -- one id\nfor an `FfiGroup`, several for an `FfiGroups`.",
+                "#1033/#1281 (`nmp::nip29::GroupContextError::MissingContext` mirror).\nA signed event handed to `FfiGroup::validate_context` carries no `h`\nrow at all. `expected` is\nthe whole set the door was asked for, in canonical order -- one id\nfor an `FfiGroup`, several for an `FfiGroups`.",
             ),
         },
         Variant {
@@ -3106,7 +3106,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "#1033/#1281 (`nmp::nip29::GroupContextError::MismatchedContext`\nmirror). A pre-signed event names a different SET of groups than the\none publishing or validating it -- too few, too many, or the wrong\nones. An event carrying a second `h` row beside the right one reports\nboth in `found`.",
+                "#1033/#1281 (`nmp::nip29::GroupContextError::MismatchedContext`\nmirror). A signed event names a different SET of groups than the\none validating it -- too few, too many, or the wrong\nones. An event carrying a second `h` row beside the right one reports\nboth in `found`.",
             ),
         },
         Variant {
