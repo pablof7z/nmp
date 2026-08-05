@@ -1274,7 +1274,6 @@ fn ingest_attribution_json() -> serde_json::Value {
             "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
             "encode_event_ns": store.encode_event_ns,
             "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
-            "index_insert_ns": store.index_insert_ns,
             "memory_insert_ns": store.memory_insert_ns,
             "memory_event_build_ns": store.memory_event_build_ns,
             "memory_expiration_index_ns": store.memory_expiration_index_ns,

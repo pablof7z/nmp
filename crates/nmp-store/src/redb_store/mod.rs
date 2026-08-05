@@ -116,8 +116,6 @@ mod canonical;
 use canonical::*;
 mod commit;
 mod query;
-#[cfg(feature = "bench-instrumentation")]
-pub use query::set_bench_exact_cardinality;
 #[cfg(test)]
 use query::*;
 mod ingest_txn;

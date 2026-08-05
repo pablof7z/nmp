@@ -5,8 +5,8 @@ use super::mutation::remove_row_in_txn;
 use super::publish_queue::is_suppressed_in_txn;
 use super::query::{expiration_key_upper_bound, plan_ordered_query};
 use super::schema::{
-    persist_err, EventKey, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
-    EXPIRATION_INDEX, RELAYS,
+    event_local_key, event_row_key, persist_err, EventKey, COVERAGE, EVENTS, EVENT_COL_LOCAL,
+    EVENT_COL_ROW, EVENT_IDS, EXPIRATION_INDEX, RELAYS,
 };
 use super::schema::{PUBLISH_QUEUE_SUPPRESS_BY_ADDR, PUBLISH_QUEUE_SUPPRESS_BY_ID};
 #[cfg(test)]
@@ -123,10 +123,6 @@ pub(super) fn query(
     if let Some(ids) = filter.ids.as_ref().filter(|ids| !ids.is_empty()) {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
-        let local = read_txn.open_table(EVENT_LOCAL).map_err(persist_err)?;
-        let observations = read_txn
-            .open_table(EVENT_OBSERVATIONS)
-            .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let mut relay_cache = HashMap::new();
         let publish_queue_suppress_by_id = read_txn
@@ -148,11 +144,14 @@ pub(super) fn query(
             // An id map naming a canonical row that is gone is corruption,
             // not a miss: answering `continue` here would report the event
             // as absent from a store that still claims to hold it.
-            let value = events.get(event_key).map_err(persist_err)?.ok_or_else(|| {
-                PersistenceError::invariant(format!(
-                    "raw id map points at missing canonical event {event_key}"
-                ))
-            })?;
+            let value = events
+                .get(event_row_key(event_key).as_slice())
+                .map_err(persist_err)?
+                .ok_or_else(|| {
+                    PersistenceError::invariant(format!(
+                        "raw id map points at missing canonical event {event_key}"
+                    ))
+                })?;
             let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
                 PersistenceError::invariant(format!(
                     "decode canonical event view {event_key}: {error:?}"
@@ -161,12 +160,14 @@ pub(super) fn query(
             if !view.matches_prepared_filter_after_index(&prepared_filter, IndexedMatch::None) {
                 continue;
             }
-            let local_value = local.get(event_key).map_err(persist_err)?;
+            let local_value = events
+                .get(event_local_key(event_key).as_slice())
+                .map_err(persist_err)?;
             let se = store.decode_row(
                 event_key,
                 view,
                 local_value.as_ref().map(|value| value.value()),
-                &observations,
+                &events,
                 &relays,
                 &mut relay_cache,
             )?;
@@ -181,7 +182,7 @@ pub(super) fn query(
         return Ok(out);
     }
 
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, None, None, None)
 }
 
@@ -216,7 +217,7 @@ pub(super) fn query_newest(
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
 
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, None, Some(limit), None)
 }
 
@@ -243,7 +244,7 @@ pub(super) fn query_newest_ids(
     }
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered_ids(&read_txn, &plan, filter, limit)
 }
 
@@ -276,7 +277,7 @@ pub(super) fn query_newest_under_pin(
     }
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, None, Some(limit), Some(pinned))
 }
 
@@ -315,7 +316,7 @@ pub(super) fn query_newest_before(
     }
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, Some(before), Some(limit), None)
 }
 
@@ -353,7 +354,7 @@ pub(super) fn query_newest_before_under_pin(
     }
 
     let read_txn = store.db.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(&read_txn, filter)?;
+    let plan = plan_ordered_query(filter);
     store.query_ordered(
         &read_txn,
         &plan,
@@ -563,51 +564,94 @@ pub(super) fn gc(
         // Collected up front into owned values so the removal pass
         // below never holds a borrow across a mutation.
         let mut victims: Vec<Event> = Vec::new();
+        // The canonical note rows are one column of the event key space, and
+        // the event key LEADS the key, so no column is contiguous across
+        // events: this scan visits the local and observation sidecars too.
+        // What it exploits instead is that every column of ONE event is
+        // adjacent and ordered `row, local, observations…`, so a note row and
+        // its own local sidecar arrive back to back. One row of lookahead is
+        // therefore enough — no map keyed by event, no second pass, no
+        // per-event point lookup. `gc` was already a full scan; the single
+        // range delete `remove_by_key` gained is the other half of this trade
+        // (#1248).
+        let mut pending: Option<(EventKey, Event)> = None;
+        let mut consider =
+            |event: Event, local: Option<LocalOrigin>| -> Result<(), PersistenceError> {
+                if address_key_for(&event).is_none()
+                    && !matches!(
+                        local,
+                        Some(LocalOrigin {
+                            sig_state: SigState::Pending,
+                            ..
+                        })
+                    )
+                    && !is_suppressed_in_txn(
+                        &txn.publish_queue_suppress_by_id,
+                        &txn.publish_queue_suppress_by_addr,
+                        &event,
+                    )?
+                    && !claims.is_claimed(&event)
+                {
+                    victims.push(event);
+                }
+                Ok(())
+            };
         for entry in txn.canonical.events.iter().map_err(persist_err)? {
             let (key, value) = entry.map_err(persist_err)?;
-            let event_key = key.value();
-            let event = StoredEventView::from_trusted(value.value())
-                .map_err(|error| {
-                    PersistenceError::invariant(format!(
-                        "decode canonical event view {event_key}: {error:?}"
-                    ))
-                })?
-                .materialize_event()
-                .map_err(|error| {
-                    PersistenceError::invariant(format!(
-                        "materialize canonical event {event_key}: {error:?}"
-                    ))
-                })?;
-            let local = txn
-                .canonical
-                .local
-                .get(event_key)
-                .map_err(persist_err)?
-                .map(|value| {
-                    binary_event::decode_local(value.value()).map_err(|error| {
+            let key = key.value();
+            let event_key = EventKey::from_be_bytes(
+                key[..8]
+                    .try_into()
+                    .expect("every canonical key leads with an event key"),
+            );
+            match key[8] {
+                EVENT_COL_ROW => {
+                    if let Some((_, event)) = pending.take() {
+                        consider(event, None)?;
+                    }
+                    let event = StoredEventView::from_trusted(value.value())
+                        .map_err(|error| {
+                            PersistenceError::invariant(format!(
+                                "decode canonical event view {event_key}: {error:?}"
+                            ))
+                        })?
+                        .materialize_event()
+                        .map_err(|error| {
+                            PersistenceError::invariant(format!(
+                                "materialize canonical event {event_key}: {error:?}"
+                            ))
+                        })?;
+                    pending = Some((event_key, event));
+                }
+                EVENT_COL_LOCAL => {
+                    // A local sidecar with no note row before it is a broken
+                    // relational invariant, not an event without local state.
+                    let Some((pending_key, event)) = pending.take() else {
+                        return Err(PersistenceError::invariant(format!(
+                            "canonical local state {event_key} has no event row"
+                        )));
+                    };
+                    if pending_key != event_key {
+                        return Err(PersistenceError::invariant(format!(
+                            "canonical local state {event_key} follows event {pending_key}"
+                        )));
+                    }
+                    let local = binary_event::decode_local(value.value()).map_err(|error| {
                         PersistenceError::invariant(format!(
                             "decode canonical local state {event_key}: {error:?}"
                         ))
-                    })
-                })
-                .transpose()?;
-            if address_key_for(&event).is_none()
-                && !matches!(
-                    local,
-                    Some(LocalOrigin {
-                        sig_state: SigState::Pending,
-                        ..
-                    })
-                )
-                && !is_suppressed_in_txn(
-                    &txn.publish_queue_suppress_by_id,
-                    &txn.publish_queue_suppress_by_addr,
-                    &event,
-                )?
-                && !claims.is_claimed(&event)
-            {
-                victims.push(event);
+                    })?;
+                    consider(event, Some(local))?;
+                }
+                _ => {
+                    if let Some((_, event)) = pending.take() {
+                        consider(event, None)?;
+                    }
+                }
             }
+        }
+        if let Some((_, event)) = pending.take() {
+            consider(event, None)?;
         }
 
         for event in &victims {

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::schema::{
     BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG, COMPARISON_BY_AUTHOR_KIND, EVENTS, EVENT_IDS,
-    EVENT_OBSERVATIONS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_REFS,
+    INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_IDS,
 };
 use super::store_bench::{
     StoreBenchPreparedCorpus, StoreBenchPreparedMetrics, StoreBenchPreparedRecord,
@@ -166,12 +166,8 @@ fn init_database(path: &Path) -> Result<Database, String> {
     txn.open_table(EVENTS).map_err(|error| error.to_string())?;
     txn.open_table(EVENT_IDS)
         .map_err(|error| error.to_string())?;
-    txn.open_table(EVENT_OBSERVATIONS)
-        .map_err(|error| error.to_string())?;
     txn.open_table(RELAYS).map_err(|error| error.to_string())?;
-    txn.open_table(RELAY_KEYS)
-        .map_err(|error| error.to_string())?;
-    txn.open_table(RELAY_REFS)
+    txn.open_table(RELAY_IDS)
         .map_err(|error| error.to_string())?;
     txn.open_table(BY_CREATED_AT)
         .map_err(|error| error.to_string())?;
@@ -194,59 +190,32 @@ fn apply_facts(txn: &WriteTransaction, records: &[StoreBenchPreparedRecord]) -> 
     let mut event_ids = txn
         .open_table(EVENT_IDS)
         .map_err(|error| error.to_string())?;
-    let mut observations = txn
-        .open_table(EVENT_OBSERVATIONS)
-        .map_err(|error| error.to_string())?;
     let mut relays = txn.open_table(RELAYS).map_err(|error| error.to_string())?;
-    let mut relay_keys = txn
-        .open_table(RELAY_KEYS)
-        .map_err(|error| error.to_string())?;
-    let mut relay_refs = txn
-        .open_table(RELAY_REFS)
+    let mut relay_ids = txn
+        .open_table(RELAY_IDS)
         .map_err(|error| error.to_string())?;
     for record in records
         .iter()
         .filter(|record| !is_index_table(record.table))
     {
         match record.table {
-            StoreBenchPreparedTable::Events => {
-                let key = u64::from_be_bytes(prepared_array(&record.key, "event key")?);
-                events
-                    .insert(key, record.value.as_slice())
-                    .map_err(|error| error.to_string())?;
-            }
-            StoreBenchPreparedTable::EventIds => {
+            StoreBenchPreparedTable::Events | StoreBenchPreparedTable::EventIds => {
                 let key = prepared_array::<32>(&record.key, "event id")?;
                 let value = u64::from_be_bytes(prepared_array(&record.value, "event id value")?);
                 event_ids
                     .insert(&key, value)
                     .map_err(|error| error.to_string())?;
             }
-            StoreBenchPreparedTable::EventObservations => {
-                let key = prepared_array::<12>(&record.key, "observation key")?;
-                let value = u64::from_be_bytes(prepared_array(&record.value, "observation value")?);
-                observations
-                    .insert(&key, value)
-                    .map_err(|error| error.to_string())?;
-            }
             StoreBenchPreparedTable::Relays => {
                 let key = u32::from_be_bytes(prepared_array(&record.key, "relay key")?);
-                let value = std::str::from_utf8(&record.value).map_err(|e| e.to_string())?;
                 relays
-                    .insert(key, value)
+                    .insert(key, record.value.as_slice())
                     .map_err(|error| error.to_string())?;
             }
-            StoreBenchPreparedTable::RelayKeys => {
+            StoreBenchPreparedTable::RelayIds => {
                 let key = std::str::from_utf8(&record.key).map_err(|e| e.to_string())?;
                 let value = u32::from_be_bytes(prepared_array(&record.value, "relay id")?);
-                relay_keys
-                    .insert(key, value)
-                    .map_err(|error| error.to_string())?;
-            }
-            StoreBenchPreparedTable::RelayRefs => {
-                let key = u32::from_be_bytes(prepared_array(&record.key, "relay ref key")?);
-                let value = u64::from_be_bytes(prepared_array(&record.value, "relay ref value")?);
-                relay_refs
+                relay_ids
                     .insert(key, value)
                     .map_err(|error| error.to_string())?;
             }
@@ -359,12 +328,8 @@ fn logical_row_counts(db: &Database) -> Result<(Vec<u64>, u64), String> {
     let rows = vec![
         txn.open_table(EVENTS).map_err(|e| e.to_string())?.len(),
         txn.open_table(EVENT_IDS).map_err(|e| e.to_string())?.len(),
-        txn.open_table(EVENT_OBSERVATIONS)
-            .map_err(|e| e.to_string())?
-            .len(),
         txn.open_table(RELAYS).map_err(|e| e.to_string())?.len(),
-        txn.open_table(RELAY_KEYS).map_err(|e| e.to_string())?.len(),
-        txn.open_table(RELAY_REFS).map_err(|e| e.to_string())?.len(),
+        txn.open_table(RELAY_IDS).map_err(|e| e.to_string())?.len(),
         txn.open_table(BY_CREATED_AT)
             .map_err(|e| e.to_string())?
             .len(),
