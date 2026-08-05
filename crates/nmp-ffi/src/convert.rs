@@ -298,14 +298,13 @@ pub enum FfiError {
     /// the group never mints and never accepts from a caller.
     GroupCallerSuppliedTimeline,
     /// #1033 (`nmp::nip29::GroupContextError::MissingContext` mirror). A
-    /// pre-signed event handed to `FfiGroup::publish_signed`/
-    /// `FfiGroup::validate_context` carries no `h` row at all.
+    /// signed event handed to `FfiGroup::validate_context` carries no `h` row
+    /// at all.
     GroupContextMissing {
         expected: String,
     },
     /// #1033 (`nmp::nip29::GroupContextError::MismatchedContext` mirror). A
-    /// pre-signed event names a different group than the one publishing or
-    /// validating it.
+    /// signed event names a different group than the one validating it.
     GroupContextMismatched {
         found: String,
         expected: String,
