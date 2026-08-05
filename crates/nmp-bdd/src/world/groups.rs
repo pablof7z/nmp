@@ -15,6 +15,9 @@
 //!   author, ..)` -- an INHERENT method on `nip29::Group`, not a hand-built
 //!   `WriteIntent`. That is the whole point of the feature under test, so the
 //!   harness must not reimplement it.
+//!   The mint half (#1242) has no harness of its own here: governed scenarios
+//!   never reach this runner, and its proof lives with the narrowest contract
+//!   owner -- `nip29::group`'s own tests, and their FFI/Swift/Kotlin mirrors.
 //! - **Reads go through the same subscription call every other read in this
 //!   suite uses** (`Handle::subscribe`, which `Engine::observe` is a thin
 //!   wrapper over), fed by `group.read(filter)` -- one ordinary `LiveQuery`
@@ -34,8 +37,9 @@ use std::time::{Duration, Instant};
 
 use nostr::{Event, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
-use nmp::nip29::{self, Group, GroupContextError, GroupPublishError, GroupReceipts};
+use nmp::nip29::{self, Group, GroupContextError, GroupPublishError};
 use nmp::Engine;
+use nmp::ReceiptStream;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 
@@ -327,7 +331,7 @@ impl NmpWorld {
     /// refusal that never reached the door.
     pub async fn group_operation<F>(&mut self, group_id: Option<&str>, call: GroupCall, op: F)
     where
-        F: FnOnce(&Group, &Engine) -> Result<GroupReceipts, GroupPublishError>,
+        F: FnOnce(&Group, &Engine) -> Result<ReceiptStream, GroupPublishError>,
     {
         self.ensure_started().await;
         self.wire_settled().await;
@@ -345,7 +349,10 @@ impl NmpWorld {
             op(&group, engine)
         };
         match outcome {
-            Ok(receipts) => self.receipts.push(ReceiptState::new(receipts)),
+            Ok(receipts) => {
+                self.last_receipt_id = Some(receipts.id);
+                self.receipts.push(ReceiptState::new(receipts.statuses));
+            }
             Err(GroupPublishError::Context(error)) => {
                 // A refusal at the door minted no obligation, so it adds
                 // nothing to the world's list of publishes -- which is what

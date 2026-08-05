@@ -165,18 +165,16 @@ async fn no_observe_of_its_own(w: &mut NmpWorld) {
 #[then(regex = r#"^the group exposes no stream, channel or callback of its own$"#)]
 async fn no_stream_of_its_own(w: &mut NmpWorld) {
     let surface = w.group_surface();
-    // #1033 merged the pure door and its engine binding into one file, so
-    // `door` now also imports and aliases `FifoReceiver` -- the SAME ordinary
-    // publish stream every other write already returns (the door's own doc
-    // comment: "the SAME stream every other publish returns, drained the
-    // same way"). That is reuse, not a group-shaped stream of its own, so
-    // both the import and the `pub type GroupReceipts = FifoReceiver<..>`
-    // alias are excused from the scan below; everything else must still name
-    // none of these.
+    // #1033 merged the pure door and its engine binding into one file, and
+    // #1242 replaced the door's own receipt alias with `ReceiptStream`
+    // itself -- the SAME value `Engine::publish_tracked` returns for every
+    // other write, receipt id included. Naming it is reuse, not a
+    // group-shaped stream of its own, so lines mentioning it are excused
+    // from the scan below; everything else must still name none of these.
     let lines: Vec<&str> = surface
         .door
         .lines()
-        .filter(|line| !line.contains("FifoReceiver"))
+        .filter(|line| !line.contains("ReceiptStream"))
         .collect();
     for forbidden in ["Receiver", "Sender", "Subscription", "Fn(", "callback"] {
         let offending: Vec<&str> = lines
