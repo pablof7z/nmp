@@ -129,6 +129,29 @@ Feature: NIP-29's own operations draft their exact kind and tag schema
     Then the draft carries a name tag with value "Workspace"
     And the draft carries no marker tag at all
 
+  # nmp:id=NIP29OPERATIONS-015
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip29::create_group_under_a_parent_carries_the_parent_row_on_the_create
+  # nmp:evidence=rust:nmp-nip29::create_group_at_the_root_is_kind_9007_with_no_tag_at_all
+  # nmp:evidence=rust:nmp-nip29::the_parent_row_carries_the_group_id_verbatim
+  # nmp:evidence=rust:nmp-ffi::the_create_door_composes_the_parent_row_and_omits_it_for_a_root
+  # nmp:falsifier=Dropping the parent argument from create_group -- the shape kind:9007 had before #1301 -- makes create_group_under_a_parent_carries_the_parent_row_on_the_create observe a draft with no rows at all, which is the state that forced a real consumer to append ["parent", id] to NMP's own builder by hand. Emitting the row unconditionally instead makes create_group_at_the_root_is_kind_9007_with_no_tag_at_all observe a root group declaring an empty parent, which the relay refuses outright.
+  @nip29
+  Scenario: Creating a subgroup drafts NIP-29's parent row on the create itself
+    When I compose creating a group under parent "darkroom"
+    Then the draft is kind 9007
+    And the draft carries a parent tag with value "darkroom"
+
+  # nmp:id=NIP29OPERATIONS-016
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip29::a_metadata_edit_never_composes_a_parent_row
+  # nmp:falsifier=Adding a parent field to GroupMetadataEdit makes a_metadata_edit_never_composes_a_parent_row observe a parent row on a kind:9002 -- a row the only relay implementing subgroups reads on neither path, so the app would be told it had moved a group under a new parent when the relay had left it exactly where it was.
+  @nip29
+  Scenario: A metadata edit states no parent, because no relay honours one there
+    When I compose editing the group metadata to a public closed workspace named "Workspace" pictured at "https://cdn.example/w.png"
+    Then the draft is kind 9002
+    And the draft carries no parent tag
+
   # nmp:id=NIP29OPERATIONS-011
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip29::join_request_with_code_carries_kind_h_free_code_tag
@@ -137,7 +160,7 @@ Feature: NIP-29's own operations draft their exact kind and tag schema
   # nmp:evidence=rust:nmp-nip29::remove_user_carries_kind_9001_and_a_p_tag
   # nmp:evidence=rust:nmp-nip29::edit_metadata_carries_both_fields_when_both_are_supplied
   # nmp:evidence=rust:nmp-nip29::delete_event_carries_kind_9005_and_an_e_tag
-  # nmp:evidence=rust:nmp-nip29::create_group_is_kind_9007_with_no_tags
+  # nmp:evidence=rust:nmp-nip29::create_group_at_the_root_is_kind_9007_with_no_tag_at_all
   # nmp:evidence=rust:nmp-nip29::delete_group_is_kind_9008_with_no_tags
   # nmp:evidence=rust:nmp-nip29::create_invite_carries_kind_9009_and_the_code_tag
   # nmp:falsifier=Changing any one of the nine operation kind constants makes its exact owner proof fail; the performed mutation moved create-invite's 9009 to 9010.

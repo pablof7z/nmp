@@ -244,7 +244,7 @@ async fn every_group_operation_reaches_the_one_publish_door() {
         ),
         (
             "create_group",
-            group.create_group(engine.clone(), author.clone()),
+            group.create_group(engine.clone(), author.clone(), None),
         ),
         (
             "delete_group",

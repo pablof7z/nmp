@@ -278,9 +278,19 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
             nmpRethrowing { ffi.deleteEvent(engine.ffi, authorPubkeyHex, eventId) },
         )
 
-    /** kind:9007 -- create the group at its hosts. */
-    fun createGroup(engine: NMPEngine, authorPubkeyHex: String): Receipt =
-        receiptFrom(nmpRethrowing { ffi.createGroup(engine.ffi, authorPubkeyHex) })
+    /**
+     * kind:9007 -- create the group at its hosts, optionally as a SUBGROUP of
+     * one that already exists there (#1301).
+     *
+     * [parent] is the parent's group id -- the same relay-scoped string
+     * `NMPRelayScope.group` takes, never an `naddr`. `null` creates a root
+     * group and composes no row at all. The relationship rides on the create
+     * and not on an edit: NIP-29's `Subgroups` section puts parenting on
+     * kind:9002, and the only relay that implements subgroups reads `parent`
+     * on the kind:9007 create and ignores it on a kind:9002.
+     */
+    fun createGroup(engine: NMPEngine, authorPubkeyHex: String, parent: String? = null): Receipt =
+        receiptFrom(nmpRethrowing { ffi.createGroup(engine.ffi, authorPubkeyHex, parent) })
 
     /** kind:9008 -- delete the group from its hosts. */
     fun deleteGroup(engine: NMPEngine, authorPubkeyHex: String): Receipt =
