@@ -2495,6 +2495,76 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiContentPart",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Text",
+            discr: None,
+            fields: [
+                Field {
+                    name: "text",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Literal text, rendered verbatim and emitting no rows. A `nostr:` URI\ntyped into this arm is just characters: it emits nothing, because\nnothing here parses it. Name the person or the event instead.",
+            ),
+        },
+        Variant {
+            name: "Person",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "relay",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Somebody named inline. Renders `nostr:npub1…` and emits their `p` row.\n\n`relay` is where a reader should look for them, WHEN THE APP KNOWS --\na person's relay is an outbox fact (NIP-65) no schema crate can reach,\nso this slot is left honestly empty rather than guessed. Stating one\nreaches both halves: the rendering becomes `nostr:nprofile1…` carrying\nthat relay and the `p` row's hint cell carries the same value.",
+            ),
+        },
+        Variant {
+            name: "Quote",
+            discr: None,
+            fields: [
+                Field {
+                    name: "target",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiRow",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "An event named inline. Renders `nostr:nevent1…` and emits its NIP-18\n`q` row, hinted from the row's own verified sources.\n\nIt is a QUOTE and never a thread reply: NIP-18's `q` exists precisely\nso *\"quote reposts are not pulled and included as replies in threads\"*.\nReplying is `chat_reply`/`reply_to`, which point with `e`.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "One piece of a message body (`nmp_grammar::text!`'s arguments, as a native\ncaller states them). [`crate::tagging::with_content`] renders the pieces\ninto one string AND emits the rows that make each inline reference\nresolvable, so the two cannot be written apart.\n\nRust spells this as a variadic macro over a format string, which no FFI\nboundary has. A list of parts is the projection, and it is strictly\nstronger: a `{}` placeholder can outnumber its arguments and a token here\ncannot, because the part IS the argument.\n\n**Bech32 appears in the rendered content and nowhere else** -- that is the\nuser boundary (`docs/internals/conventions/bech32-boundary.md`). Every\ninput here is the decoded form: [`Person::pubkey`](Self::Person) is 64-char\nhex like every other key at this boundary, and [`Quote`](Self::Quote) names\nthe row the app is already holding. The `nostr:npub1…` / `nostr:nevent1…`\na reader sees is produced from those, which is exactly the pairing this\ntype exists to keep honest.",
+    ),
+}
+
+enum Enum {
     name: "FfiContentSyntax",
     module_path: "nmp_ffi",
     remote: false,
@@ -8614,6 +8684,44 @@ function Function {
 }
 
 function Function {
+    name: "chat",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiEventBuilder",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_chat",
+        is_async: false,
+        arguments: [],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiEventBuilder",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose a top-level NIP-C7 kind:9 chat.\n\nThe other half of what #1243 opened and #964 named: `chat_reply` closed\nthe reply case, so an app that replies no longer states a kind -- but an\napp sending an ordinary message still stated `kind: 9` itself, because the\ncomposer for THAT never crossed this boundary.\n\nIt composes SCHEMA ONLY, exactly as `chat_reply` does: no `h` row, no\nnotification policy, no routing, and no content. What the message says\ncomes from [`with_content`], which is also what emits the rows an inline\nmention or quote needs.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_chat",
+    checksum: Some(
+        55681,
+    ),
+}
+
+function Function {
     name: "chat_reply",
     module_path: "nmp_ffi",
     is_async: false,
@@ -9529,6 +9637,90 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reset_persistent_store",
     checksum: Some(
         52986,
+    ),
+}
+
+function Function {
+    name: "with_content",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "draft",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiEventBuilder",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "content",
+            type_: Sequence {
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiContentPart",
+                },
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiEventBuilder",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_with_content",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "draft",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiEventBuilder",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+            FfiArgument {
+                name: "content",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiEventBuilder",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "State what a composed draft SAYS, and emit the rows its inline references\nneed, from one call.\n\nThis is the second thing #964 named still living in Swift. An app that\nlets somebody @-mention a person wrote `[\"p\", hex]` by hand and hoped it\nmatched the `nostr:npub…` token it had separately put in the content;\nnothing could catch a disagreement, because from the app's side nothing is\nmissing. Here the token and the row come out of the same\n[`FfiContentPart`], so they cannot be written apart.\n\nThe rows are APPENDED after whatever the composer already stated for its\nown reasons, never reordered and never deduplicated against them -- a\nchat reply's `e` and `p` rows survive intact and the mention rows follow.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_with_content",
+    checksum: Some(
+        1307,
     ),
 }
 
