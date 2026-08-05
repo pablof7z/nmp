@@ -432,7 +432,19 @@ public enum WriteFact: Sendable, Hashable {
     /// `complete == false` with an empty set is a write still learning where
     /// it goes; it parks indefinitely and NOTHING expires it. `complete ==
     /// true` with an empty set is `.outcome(.noDestination)`.
-    case destinations(relays: [String], complete: Bool)
+    ///
+    /// `awaitingAuthorRoutes` is WHY resolution is still open, as 64-char hex
+    /// public keys rather than as a sentence: every author whose routes this
+    /// write is still waiting on, in sorted key order. A later positive route
+    /// fact for any one of them is the only thing that can move the picture,
+    /// so the set is both the reason to show and the list of repairs.
+    /// Non-empty implies `complete == false`; a settled resolution names
+    /// nobody. The converse does NOT hold: an open picture naming nobody is a
+    /// write whose routing has not run at all because it is not signed yet,
+    /// and `.signing` is the fact that says what it IS held on. Never a
+    /// rendered message -- a park you can only print is a park you cannot act
+    /// on.
+    case destinations(relays: [String], complete: Bool, awaitingAuthorRoutes: [String])
     case outcome(WriteOutcome)
 
     init(_ ffi: FfiWriteFact) {
@@ -440,8 +452,12 @@ public enum WriteFact: Sendable, Hashable {
         case .signing(let state): self = .signing(SigningState(state))
         case .relay(let relay, let state):
             self = .relay(relay: relay, state: RelayState(state))
-        case .destinations(let relays, let complete):
-            self = .destinations(relays: relays, complete: complete)
+        case .destinations(let relays, let complete, let awaitingAuthorRoutes):
+            self = .destinations(
+                relays: relays,
+                complete: complete,
+                awaitingAuthorRoutes: awaitingAuthorRoutes
+            )
         case .outcome(let outcome): self = .outcome(WriteOutcome(outcome))
         }
     }
