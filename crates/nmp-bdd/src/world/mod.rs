@@ -532,15 +532,15 @@ impl NmpWorld {
             .expect("nmp-bdd: the engine must be started (ensure_started) before use")
     }
 
-    /// The active account's pubkey in the hex spelling a park's reason uses.
-    /// Internal identity is `PublicKey`/hex everywhere; bech32 is outward
-    /// decoration only and never appears here.
-    pub fn my_pubkey_hex(&mut self) -> String {
+    /// The active account's public key, decoded — the exact type a park's
+    /// reason names it with. Bech32 is outward decoration and never appears
+    /// here (`docs/internals/conventions/bech32-boundary.md`).
+    pub fn my_pubkey(&mut self) -> nostr::PublicKey {
         let me = self
             .active_person
             .clone()
             .expect("nmp-bdd: 'me' needs a logged-in account");
-        self.person(&me).public_key().to_hex()
+        self.person(&me).public_key()
     }
 
     /// Every relay named as `person`'s INBOX -- what an outbox fan-out would

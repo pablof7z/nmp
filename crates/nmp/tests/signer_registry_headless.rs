@@ -407,12 +407,13 @@ fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
                 status,
                 WriteFact::Destinations {
                     relays,
-                    complete: false
-                } if relays.is_empty()
+                    complete: false,
+                    awaiting_author_routes,
+                } if relays.is_empty() && !awaiting_author_routes.is_empty()
             )
         }),
         "an Auto write with no relay list known yet parks on an empty, still-open \
-         destination set"
+         destination set that names whose relay list it is waiting for"
     );
     assert!(
         !wait_for_status(&receipt, Duration::from_millis(500), |status| {

@@ -40,6 +40,7 @@ use nmp_nip02::{
     observe_following, set_following, FollowAction, FollowActionStatus, FollowAvailability,
     FollowChange, FollowObservation, FollowRelationship, FollowSnapshot,
 };
+use nostr::PublicKey;
 use nostr::{JsonUtil, Keys, Kind};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -180,6 +181,7 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
 fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
     let relay = nostr::RelayUrl::parse("wss://receipt-parity.example").unwrap();
     let pubkey = nostr::Keys::generate().public_key();
+    let awaited = nostr::Keys::generate().public_key();
     let expected_id = nostr::EventId::from_slice(&[0x5a; 32]).unwrap();
     let actual_id = nostr::EventId::from_slice(&[0x6b; 32]).unwrap();
     let cases = [
@@ -321,10 +323,28 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
             WriteFact::Destinations {
                 relays: [relay.clone()].into_iter().collect(),
                 complete: true,
+                awaiting_author_routes: BTreeSet::new(),
             },
             FfiWriteFact::Destinations {
                 relays: vec![relay.to_string()],
                 complete: true,
+                awaiting_author_routes: Vec::new(),
+            },
+        ),
+        (
+            // The park, which is the whole reason the field exists: an open
+            // picture that NAMES who it waits on. A boundary that shipped
+            // the emptiness and dropped the names would look identical to a
+            // settled write from the tag alone.
+            WriteFact::Destinations {
+                relays: BTreeSet::new(),
+                complete: false,
+                awaiting_author_routes: [awaited].into_iter().collect(),
+            },
+            FfiWriteFact::Destinations {
+                relays: Vec::new(),
+                complete: false,
+                awaiting_author_routes: vec![awaited.to_hex()],
             },
         ),
         (
@@ -430,10 +450,13 @@ enum NormStatus {
     SigningInFlight(String),
     Signed(String),
     SigningRefused(String),
-    /// Both routing axes: the relays named so far AND whether resolution can
-    /// still grow. `complete` is payload, not a tag, so a boundary that
-    /// dropped it would pass a tag-only oracle.
-    Destinations(Vec<String>, bool),
+    /// Both routing axes plus the reason the open one is open: the relays
+    /// named so far, whether resolution can still grow, and the hex authors
+    /// whose routes it is still waiting on. All three are payload, not tags,
+    /// so a boundary that dropped any of them would pass a tag-only oracle —
+    /// and the third is the one #1236 added, so it is carried here rather
+    /// than normalized away.
+    Destinations(Vec<String>, bool, Vec<String>),
     WaitingNotConnected(String),
     WaitingNeedsAuth(String),
     BackingOff(String, u64, u64, String, Option<String>),
@@ -873,12 +896,20 @@ fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
             NormStatus::Signed(event_id.to_hex())
         }
         WriteFact::Signing(SigningState::Refused { reason }) => NormStatus::SigningRefused(reason),
-        WriteFact::Destinations { relays, complete } => NormStatus::Destinations(
+        WriteFact::Destinations {
+            relays,
+            complete,
+            awaiting_author_routes,
+        } => NormStatus::Destinations(
             relays
                 .iter()
                 .map(|url| normalize_url(url.as_str(), relay))
                 .collect(),
             complete,
+            awaiting_author_routes
+                .iter()
+                .map(PublicKey::to_hex)
+                .collect(),
         ),
         WriteFact::Relay { relay: url, state } => {
             let url = normalize_url(url.as_str(), relay);
@@ -946,12 +977,14 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
         FfiWriteFact::Destinations {
             mut relays,
             complete,
+            mut awaiting_author_routes,
         } => {
             for url in &mut relays {
                 *url = normalize_url(url, relay);
             }
             relays.sort();
-            NormStatus::Destinations(relays, complete)
+            awaiting_author_routes.sort();
+            NormStatus::Destinations(relays, complete, awaiting_author_routes)
         }
         FfiWriteFact::Relay { relay: url, state } => {
             let url = normalize_url(&url, relay);
@@ -1586,7 +1619,18 @@ fn expected_send_preamble(keys: &Keys, route_complete: bool) -> Vec<NormStatus> 
         // from operator app policy while the author's neutral route fact
         // remains Unknown. Delivery may finish; routing truthfully stays
         // open because no optional provider is assembled in this crate.
-        NormStatus::Destinations(vec![relay.clone()], route_complete),
+        // An open picture here is open for exactly one reason -- the
+        // author's own neutral route fact is Unknown -- so the park names
+        // that one key and a closed picture names nobody.
+        NormStatus::Destinations(
+            vec![relay.clone()],
+            route_complete,
+            if route_complete {
+                Vec::new()
+            } else {
+                vec![keys.public_key().to_hex()]
+            },
+        ),
         NormStatus::WaitingNotConnected(relay.clone()),
         NormStatus::WaitingNeedsAuth(relay.clone()),
         NormStatus::Sent(relay),

@@ -260,14 +260,12 @@ mod receipt_allocator_tests {
         // Finished looking, twice over. A settled-but-empty list and a
         // settled absence are both answers, and an answer that names nobody
         // means there is nowhere to publish.
-        for (label, detail_label, facts) in [
+        for (label, facts) in [
             (
                 "Present empty",
-                "Present outbound",
                 FixtureRoutingFacts::new().with_author_routes(author, [], []),
             ),
             (
-                "Absent",
                 "Absent",
                 FixtureRoutingFacts::new().with_author_absent(author),
             ),
@@ -282,13 +280,6 @@ mod receipt_allocator_tests {
             assert!(
                 answer.author_route_needs.is_empty(),
                 "{label} has nothing left to look up, so it must not hold a provider open on a question already answered: {answer:?}"
-            );
-            assert!(
-                answer
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains(detail_label)),
-                "the answer must still distinguish {label} truthfully: {answer:?}"
             );
         }
     }

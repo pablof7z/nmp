@@ -25,6 +25,7 @@ Feature: "We don't know where this goes" is not "we know, and it hasn't gone yet
     Then the receipt reports it is still determining destinations
     And the receipt reports no destinations yet
     And the receipt says why it is still determining destinations
+    And the receipt says it has no relay list for me yet
 
   @designed
   Scenario: Determining destinations, with some already known
