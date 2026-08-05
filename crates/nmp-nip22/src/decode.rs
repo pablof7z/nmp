@@ -663,7 +663,7 @@ pub fn decode_comment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::{compose_comment_reply, compose_top_level_comment};
+    use crate::intent::compose_comment;
     use nostr::{Keys, Timestamp};
 
     fn keys() -> Keys {
@@ -699,7 +699,7 @@ mod tests {
     fn valid_top_level_podcast_comment_decodes() {
         let root = CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap());
         let author = keys().public_key();
-        let composed = compose_top_level_comment(&root, "hi".to_string());
+        let composed = compose_comment(&root, "hi".to_string());
         let decoded =
             decode_composed(&composed, author).expect("valid top-level comment must decode");
         assert_eq!(decoded.root, root);
@@ -713,24 +713,25 @@ mod tests {
     #[test]
     fn valid_reply_retains_podcast_root_and_exposes_comment_parent() {
         let root = CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap());
-        let parent_author = keys().public_key();
-        let parent_id = EventId::from_slice(&[1; 32]).unwrap();
         let author = keys().public_key();
-        let composed = compose_comment_reply(
-            &root,
-            CommentParent::Comment {
-                event_id: parent_id,
-                author: Some(parent_author),
-            },
-            "reply".to_string(),
-        );
+        // The parent is a real comment event, so its root scope is read off
+        // its own rows rather than restated by the caller -- which is the
+        // whole point of the fold.
+        let parent_keys = keys();
+        let parent = nostr::EventBuilder::new(nostr::Kind::from(COMMENT_KIND), "parent")
+            .tags(compose_comment(&root, "parent".to_string()).tags)
+            .custom_created_at(Timestamp::from(1000u64))
+            .sign_with_keys(&parent_keys)
+            .expect("test event signs");
+
+        let composed = compose_comment(&parent, "reply".to_string());
         let decoded = decode_composed(&composed, author).expect("valid reply must decode");
         assert_eq!(decoded.root, root);
         assert_eq!(
             decoded.parent,
             CommentParent::Comment {
-                event_id: parent_id,
-                author: Some(parent_author)
+                event_id: parent.id,
+                author: Some(parent_keys.public_key())
             }
         );
     }

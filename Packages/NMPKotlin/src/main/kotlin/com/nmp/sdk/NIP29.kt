@@ -174,6 +174,33 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
             },
         )
 
+    /** Publish a draft composed by the tagging door (#1243) into the group.
+     *
+     * The `h` row and the group's relay set stay this door's, exactly as for
+     * the field-by-field overload above: a composer owns the SCHEMA and the
+     * group owns the CONTEXT, and neither reaches into the other. What this
+     * adds is that a [chatReply] no longer has to be taken apart into
+     * kind/tags/content just to be published where it belongs. A pre-signed
+     * payload carries its own `h` already and is validated rather than
+     * contextualized -- that is [publishSigned]. */
+    fun publish(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        payload: WritePayload,
+    ): NMPGroupWriteFacts =
+        when (payload) {
+            is WritePayload.Event ->
+                publish(
+                    engine,
+                    authorPubkeyHex,
+                    payload.kind,
+                    payload.tags,
+                    payload.content,
+                    payload.createdAt,
+                )
+            is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
+        }
+
     /** Publish an ALREADY-SIGNED event into the group. The `h` it already
      * carries is validated, never appended or repaired -- see
      * [validateContext]'s doc for the exact refusals. */

@@ -294,3 +294,84 @@ mod tests {
         }
     }
 }
+
+/// An external content id is not a Nostr event, so it has no tags, no author
+/// and no thread of its own: **it is always the root scope**. The four-case
+/// thread-position reading applies to the event case and is untouched here.
+///
+/// This impl is the whole reason the ids left `nmp-nip22`: `nmp-grammar` is
+/// `generic-value` and may not reach a protocol crate, so grammar defines
+/// [`nmp_grammar::RootScope`] naming no NIP and the protocol crate implements
+/// it downward. `EventBuilder::reply_to(&Nip73::url("https://google.com")?)`
+/// is what that buys.
+impl nmp_grammar::RootScope for Nip73 {
+    fn root_rows(&self, _options: &nmp_grammar::TagOptions) -> Vec<nostr::Tag> {
+        vec![
+            nostr::Tag::parse(["I", &self.i_value()]).expect("non-empty I row"),
+            nostr::Tag::parse(["K", self.k_value()]).expect("non-empty K row"),
+        ]
+    }
+
+    fn parent_rows(&self, _options: &nmp_grammar::TagOptions) -> Vec<nostr::Tag> {
+        vec![
+            nostr::Tag::parse(["i", &self.i_value()]).expect("non-empty i row"),
+            nostr::Tag::parse(["k", self.k_value()]).expect("non-empty k row"),
+        ]
+    }
+
+    /// `None`: this is not a Nostr event and has no kind. A reply to it is a
+    /// NIP-22 comment, which is what [`nmp_grammar::RootScope::reply_kind`]'s
+    /// default already says.
+    fn entity_kind(&self) -> Option<nostr::Kind> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod root_scope_tests {
+    use super::*;
+    use nmp_grammar::{reply_to, RootScope, TagOptions};
+
+    fn rows(builder: &nmp_grammar::EventBuilder) -> Vec<Vec<String>> {
+        builder
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect()
+    }
+
+    /// The maintainer's own example. An external content id is a legal reply
+    /// target, it produces a NIP-22 comment (it has no kind, so it is never a
+    /// text note), and the root scope is uppercase with no marker anywhere.
+    #[test]
+    fn an_external_content_id_is_a_reply_target_and_is_always_the_root() {
+        let page = Nip73::url("https://google.com").unwrap();
+        let comment = reply_to(&page);
+        assert_eq!(comment.kind, nostr::Kind::from(1111u16));
+        assert_eq!(
+            rows(&comment),
+            vec![
+                vec!["I".to_string(), "https://google.com/".to_string()],
+                vec!["K".to_string(), "web".to_string()],
+                vec!["i".to_string(), "https://google.com/".to_string()],
+                vec!["k".to_string(), "web".to_string()],
+            ]
+        );
+    }
+
+    /// It has no author and no thread, so no modifier can change what it
+    /// emits -- there is nothing for `without_author`, `without_self` or a
+    /// relay hint to act on.
+    #[test]
+    fn an_external_content_id_has_nothing_for_a_modifier_to_change() {
+        let episode = Nip73::podcast_episode("guid-1").unwrap();
+        let plain = episode.parent_rows(&TagOptions::default());
+        let modified = episode.parent_rows(
+            &TagOptions::default()
+                .without_author()
+                .without_carried_mentions(),
+        );
+        assert_eq!(plain, modified);
+        assert_eq!(episode.entity_kind(), None);
+    }
+}

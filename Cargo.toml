@@ -55,6 +55,9 @@ members = [
     # that is not a Nostr event. Several NIPs consume them (NIP-22 comment
     # roots, NIP-25 kind:17 external reactions) and none of them owns them.
     "crates/nmp-nip73",
+    # NIP-18 reposts (#1243). NIP-18 owns BOTH kinds (6 and 16), so its
+    # two-way split is internal and needs no cross-crate dispatch.
+    "crates/nmp-nip18",
     # #818 Fjall journal-write-error falsifier. ONLY the harness is a member,
     # so `cargo test --workspace` runs the regression instead of letting it rot
     # behind a bespoke lane. It depends on no Fjall crate: the three pinned
@@ -107,6 +110,7 @@ nmp-content = { path = "crates/nmp-content" }
 nmp-test-support = { path = "crates/nmp-test-support" }
 nmp-nip22 = { path = "crates/nmp-nip22" }
 nmp-nip73 = { path = "crates/nmp-nip73" }
+nmp-nip18 = { path = "crates/nmp-nip18" }
 proptest = "1"
 uniffi = "0.29"
 serde = { version = "1", features = ["derive"] }

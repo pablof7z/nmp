@@ -51,7 +51,28 @@ pub enum FfiCommentRoot {
     },
 }
 
+/// What a comment is being written on.
+///
+/// The two shapes are the two things an app actually holds. `Root` describes
+/// an entity by its parts -- what an app has for an external content id, or
+/// after decoding a comment. `Row` is an event NMP observed, and its own
+/// thread position is read off its own rows, so replying to a deep comment
+/// and commenting on a root are the same call: the root cannot be restated
+/// wrongly by a caller who thought it knew, which is the correction
+/// amethyst#629 needed.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
+pub enum FfiCommentTarget {
+    Root { root: FfiCommentRoot },
+    Row { row: FfiRow },
+}
+
 /// A comment's direct parent (`nmp::nip22::CommentParent` mirror).
+///
+/// DECODE-ONLY since #1243. It used to be half of a composition input, and
+/// that was the defect: a caller who states the parent separately from the
+/// root can state a pair that never existed together on the wire. Composing
+/// now names ONE target ([`FfiCommentTarget`]) and reads the parent from it,
+/// so there is no from-FFI direction left to write.
 #[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
 pub enum FfiCommentParent {
     Root,
@@ -239,20 +260,6 @@ fn root_to_ffi(root: &nmp::nip22::CommentRoot) -> FfiCommentRoot {
     }
 }
 
-fn parent_from_ffi(parent: FfiCommentParent) -> Result<nmp::nip22::CommentParent, FfiError> {
-    Ok(match parent {
-        FfiCommentParent::Root => nmp::nip22::CommentParent::Root,
-        FfiCommentParent::Comment {
-            event_id,
-            author_pubkey,
-        } => nmp::nip22::CommentParent::Comment {
-            event_id: EventId::from_hex(&event_id)
-                .map_err(|_| FfiError::InvalidEventId { got: event_id })?,
-            author: author_pubkey.as_deref().map(parse_pubkey).transpose()?,
-        },
-    })
-}
-
 fn parent_to_ffi(parent: &nmp::nip22::CommentParent) -> FfiCommentParent {
     match parent {
         nmp::nip22::CommentParent::Root => FfiCommentParent::Root,
@@ -316,18 +323,22 @@ pub fn decode_comment(row: FfiRow) -> Result<FfiDecodedComment, FfiCommentDecode
 /// take-once, signing, routing, receipt, or retry machinery.
 #[uniffi::export]
 pub fn comment_intent(
-    root: FfiCommentRoot,
-    parent: FfiCommentParent,
+    target: FfiCommentTarget,
     content: String,
     correlation: Option<String>,
 ) -> Result<FfiWriteIntent, FfiError> {
-    let root = root_from_ffi(root)?;
-    let parent = parent_from_ffi(parent)?;
     let correlation = correlation
         .as_deref()
         .map(parse_correlation_token)
         .transpose()?;
-    let intent = nmp::nip22::comment_intent(&root, parent, content, correlation);
+    let intent = match target {
+        FfiCommentTarget::Root { root } => {
+            nmp::nip22::comment_intent(&root_from_ffi(root)?, content, correlation)
+        }
+        FfiCommentTarget::Row { row } => {
+            nmp::nip22::comment_intent(&crate::tagging::row_from_ffi(row)?, content, correlation)
+        }
+    };
 
     // NIP-22 owns this complete shape, and the FFI layer projects the
     // returned ordinary intent rather than independently re-stating its
@@ -378,10 +389,8 @@ mod tests {
     #[test]
     fn decode_comment_round_trips_a_valid_top_level_comment() {
         let author = nostr::Keys::generate().public_key();
-        let composed = nmp::nip22::compose_top_level_comment(
-            &root_from_ffi(podcast_root()).unwrap(),
-            "hi".to_string(),
-        );
+        let composed =
+            nmp::nip22::compose_comment(&root_from_ffi(podcast_root()).unwrap(), "hi".to_string());
         // The id, author and timestamp the engine would have supplied at
         // acceptance, stated here so a row can exist to decode.
         let created_at = nostr::Timestamp::from(1000u64);
@@ -431,8 +440,9 @@ mod tests {
     #[test]
     fn comment_intent_composes_the_ordinary_exact_write_intent() {
         let intent = comment_intent(
-            podcast_root(),
-            FfiCommentParent::Root,
+            FfiCommentTarget::Root {
+                root: podcast_root(),
+            },
             "hi".to_string(),
             Some("comment-correlation".to_string()),
         )
@@ -463,8 +473,9 @@ mod tests {
     fn composed_comment_uses_the_generic_publish_door() {
         let correlation = "comment-generic-publish".to_string();
         let intent = comment_intent(
-            podcast_root(),
-            FfiCommentParent::Root,
+            FfiCommentTarget::Root {
+                root: podcast_root(),
+            },
             "hi".to_string(),
             Some(correlation.clone()),
         )

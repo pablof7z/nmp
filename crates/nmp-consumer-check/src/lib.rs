@@ -184,12 +184,7 @@ pub fn build_comment_intent(
     content: &str,
 ) -> Result<WriteIntent, nmp::nip22::Nip73Error> {
     let root = nmp::nip22::CommentRoot::External(nmp::nip22::Nip73::podcast_episode(guid)?);
-    Ok(nmp::nip22::comment_intent(
-        &root,
-        nmp::nip22::CommentParent::Root,
-        content.to_string(),
-        None,
-    ))
+    Ok(nmp::nip22::comment_intent(&root, content.to_string(), None))
 }
 
 /// Names and reads the observation-scoped execution envelope from an
