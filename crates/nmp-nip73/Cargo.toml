@@ -1,0 +1,12 @@
+[package]
+name = "nmp-nip73"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# NIP-73 canonicalisation is URL normalisation for the `web` namespace: the
+# `Url` variant's constructor MUST drop the fragment and normalise the
+# scheme/host/default port, which is parsing, not string surgery.
+url = "2"

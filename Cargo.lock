@@ -2198,6 +2198,7 @@ name = "nmp-nip22"
 version = "0.1.0"
 dependencies = [
  "nmp-grammar",
+ "nmp-nip73",
  "nostr 0.44.4",
 ]
 
@@ -2240,6 +2241,13 @@ dependencies = [
  "nmp-asset",
  "nmp-blossom",
  "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip73"
+version = "0.1.0"
+dependencies = [
+ "url",
 ]
 
 [[package]]

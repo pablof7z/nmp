@@ -71,7 +71,7 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
                 .invalidCorrelationToken(got: "sentinel-token", reason: "sentinel-correlation"),
                 #"Invalid correlation token "sentinel-token": sentinel-correlation"#
             ),
-            (.invalidNip73Target(reason: "sentinel-target"), "Invalid NIP-73 target: sentinel-target"),
+            (.invalidNip73(reason: "sentinel-id"), "Invalid NIP-73 external content id: sentinel-id"),
         ]
 
         for (error, expected) in cases {

@@ -19,7 +19,7 @@ class NIP22Test {
      * never a parent-only lowercase `#i` shortcut. */
     @Test
     fun commentThreadDemandScopesKind1111ByUppercaseITag() {
-        val root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-1"))
+        val root = CommentRoot.External(Nip73.PodcastEpisode("guid-1"))
         val demand = commentThreadDemand(root)
         assertEquals(listOf(1111u.toUShort()), demand.selection.kinds)
     }
@@ -47,7 +47,7 @@ class NIP22Test {
                 sources = emptyList(),
             )
         val decoded = decodeComment(row)
-        assertEquals(CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-1")), decoded.root)
+        assertEquals(CommentRoot.External(Nip73.PodcastEpisode("guid-1")), decoded.root)
         assertEquals(CommentParent.Root, decoded.parent)
         assertEquals("nice episode", decoded.content)
     }
@@ -181,7 +181,7 @@ class NIP22Test {
                 val token = "kotlin-nip22-offline-signer-token"
                 val intent =
                     commentIntent(
-                        root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-offline")),
+                        root = CommentRoot.External(Nip73.PodcastEpisode("guid-offline")),
                         parent = CommentParent.Root,
                         content = "great show",
                         correlation = token,
@@ -225,7 +225,7 @@ class NIP22Test {
     fun composedCommentPinsTheExactTagRows() {
         val intent =
             commentIntent(
-                root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("golden-guid-572")),
+                root = CommentRoot.External(Nip73.PodcastEpisode("golden-guid-572")),
                 parent = CommentParent.Root,
                 content = "golden fixture content",
             )
@@ -261,7 +261,7 @@ class NIP22Test {
             NMPEngine(NMPConfig()).use { engine ->
                 engine.setActiveAccount(author)
 
-                val root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-query-path"))
+                val root = CommentRoot.External(Nip73.PodcastEpisode("guid-query-path"))
                 val demand = commentThreadDemand(root)
                 val rowFlow = engine.observe(demand)
 
