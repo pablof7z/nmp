@@ -32,7 +32,6 @@ use crate::runtime::{
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
     SignEventOperation, SignerRegistration,
 };
-use crate::signer_mailbox::SignerMailbox;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::WriteIntent;
 use nmp_store::{MemoryStore, RedbStore, RedbStoreOpenError, RedbStoreResetError};
@@ -809,44 +808,6 @@ impl Engine {
                 .add_signer(signer)
                 .map_err(EngineError::from_add_signer_error)
         })?
-    }
-
-    /// Register a signing capability the APP implements, reached through an
-    /// engine-owned pull mailbox instead of by NMP calling into app code
-    /// (#1238, in #783's inverted shape).
-    ///
-    /// [`Self::add_signer`] is the door for a capability written in Rust. It
-    /// cannot serve one written in Swift or Kotlin: it is generic over a trait
-    /// whose `sign` returns a poll-thunk, and neither generics nor thunks
-    /// cross UniFFI. This door takes no capability object at all. The caller
-    /// declares which key it can sign for, and receives the [`SignerMailbox`]
-    /// of [`SignatureRequest`]s to drain on its own executor, settling each
-    /// exactly once.
-    ///
-    /// Registration is otherwise identical to every other signer: same one
-    /// registry, same replace-by-key semantics, same exact-instance
-    /// [`SignerRegistration`] proof for [`Self::remove_signer`], and the same
-    /// promotion boundary verifying whatever comes back against the frozen
-    /// accepted event. Nothing downstream knows the capability is an app's.
-    ///
-    /// A mailbox nobody drains is not a hang. Its bound is fixed and private;
-    /// requests past it are refused as [`SignerError`](crate::SignerError)
-    /// `::Unavailable`, which parks the write for a later attempt exactly as
-    /// an unattached signer does. NMP spawns no thread for this signer and
-    /// runs none of the app's code.
-    pub fn add_signer_mailbox(
-        &self,
-        public_key: nostr::PublicKey,
-    ) -> Result<(SignerRegistration, SignerMailbox), EngineError> {
-        let (signer, mailbox) = crate::signer_mailbox::mailbox_signer(crate::SignerPublicKey::new(
-            public_key.to_bytes(),
-        ));
-        let registration = self.with_handle(|handle| {
-            handle
-                .add_signer(signer)
-                .map_err(EngineError::from_add_signer_error)
-        })??;
-        Ok((registration, mailbox))
     }
 
     /// Detach one exact signer installation without changing active identity
