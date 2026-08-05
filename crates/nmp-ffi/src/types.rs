@@ -987,9 +987,22 @@ pub enum FfiWriteFact {
     /// `complete: false` with an empty set is a write still learning where it
     /// goes; it parks indefinitely and NOTHING expires it. `complete: true`
     /// with an empty set is [`FfiWriteOutcome::NoDestination`].
+    ///
+    /// `awaiting_author_routes` is WHY resolution is still open, as 64-char
+    /// hex public keys rather than as a sentence: every author whose routes
+    /// this write is still waiting on, in sorted key order. A later positive
+    /// route fact for any one of them is the only thing that can move the
+    /// picture, so the set is both the reason and the list of repairs.
+    /// Non-empty implies `complete: false`; a settled resolution has nothing
+    /// left to wait on and always names nobody. The converse does NOT hold:
+    /// an open picture naming nobody is a write whose routing has not run at
+    /// all because it is not signed yet, and `Signing` is the fact that says
+    /// what it IS held on. Never a rendered message — a park an app can only
+    /// print is a park it cannot act on (#1236).
     Destinations {
         relays: Vec<String>,
         complete: bool,
+        awaiting_author_routes: Vec<String>,
     },
     Outcome {
         outcome: FfiWriteOutcome,

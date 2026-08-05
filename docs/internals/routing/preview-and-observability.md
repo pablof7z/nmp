@@ -7,7 +7,7 @@ date: 2026-07-29
 owns:
   - Engine::preview_route and why it structurally cannot drift from real routing
   - preview's deliberate side effect on the discovery set
-  - AwaitingRoute and the stalled_writes diagnostics section
+  - the routing park, its reason, and the stalled_writes diagnostics section
   - why NOTHING auto-abandons — visibility replaces a give-up policy
 related:
   - docs/internals/routing/auto-and-explicit.md
@@ -148,19 +148,34 @@ the routing stage — which is §4.
 
 ## 4. Observability for what never got that far — DESIGNED
 
-### 4.1 `AwaitingRoute { detail }`
+### 4.1 The routing park and its reason — BUILT
 
-A new retained, replayed `WriteStatus`: the intent is accepted (and possibly
-signed) but resolution has not produced a single relay. `detail` carries the
-resolver's stated reason ("no DM relay list known for npub…", "author relay
-list never fetched"). Like `AwaitingCapability { pubkey }` — the shipped
-precedent for a durable park that names what it waits for
-(`crates/nmp/src/delivery/mod.rs:72`) — it is retained, not terminal, and
-**re-emitted verbatim on receipt reattachment**, so a route parked for a
-month is still visible with its reason a month later, across restarts. A park
-nobody can see is indistinguishable from data loss; the detail string is the
-difference between "stuck" and "stuck because X", and X is what the app can
-act on.
+`WriteFact::Destinations { relays, complete, awaiting_author_routes }`: the
+intent is accepted (and possibly signed) and resolution has not closed. It is
+retained, not terminal, and **replayed on receipt reattachment**, so a route
+parked for a month is still visible a month later, across restarts. A park
+nobody can see is indistinguishable from data loss.
+
+The reason is a SET OF KEYS, not a sentence, and that is the load-bearing
+part. `awaiting_author_routes` names every author whose routes the write is
+still waiting on; a later positive route fact for any one of them is the only
+thing that can move the picture, so the same value is both the reason and the
+list of repairs.
+
+This section previously specified `AwaitingRoute { detail: String }`, which
+shipped, and the string was the defect. "Still determining destinations" and
+"nowhere to send this" arrived as one rendered English sentence that no
+program could branch on — an app that wanted to tell them apart had to
+prefix-match prose (#1236). The two halves are now separate typed facts:
+`complete` is the branch (knowledge exhausted or not, never delivery), and
+`awaiting_author_routes` is the detail behind the open side of it. Anything
+rendered belongs above this layer, in the app, which is where the language
+and the audience are known.
+
+The precedent still holds and is now literal rather than analogical:
+`SigningState::AwaitingSigner { pubkey }` is the same shape — a durable park
+that names the key it waits for, in the decoded type
+(`docs/internals/conventions/bech32-boundary.md`).
 
 This also fixes a verified defect: today a routing error at `on_signed`
 terminally `Failed`s and drops the intent
@@ -181,7 +196,8 @@ pub stalled_writes: Vec<StalledWrite>
 // { receipt/intent identity, stage, detail, age }
 ```
 
-covering all three stall classes: **unroutable** (`AwaitingRoute`),
+covering all three stall classes: **unroutable** (an open, empty
+destination picture),
 **unsignable** (`AwaitingCapability`), and **undeliverable** (lanes parked or
 exhausted with nothing progressing). `age` is what makes it a diagnostic: a
 DM parked for 40 seconds is discovery in flight; parked for 40 days it is the
