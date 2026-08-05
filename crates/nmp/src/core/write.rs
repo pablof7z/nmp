@@ -39,17 +39,6 @@ fn unsigned_from_frozen(frozen: &SignedEvent) -> UnsignedEvent {
     }
 }
 
-/// The one refusal reason for an explicit route naming no relays.
-///
-/// Emptiness is a property of the REQUEST, knowable at the door, so it is
-/// refused there — before an intent id, a receipt id, or a journal row
-/// exists. (Reachability is a property of the world and is not knowable at
-/// the door: a write aimed at a relay that does not exist is accepted,
-/// routed, and fails visibly per relay instead.)
-pub(super) const EMPTY_EXPLICIT_ROUTE: &str =
-    "explicit routing names no relays: a route with nothing in it is refused at the door, never \
-     widened to the author's write relays";
-
 /// The read path's 2-relay minimum, reused verbatim on the write side so
 /// `fallback_relays`' trigger means the same thing on both
 /// (`docs/internals/routing/outbox.md` §6.2).
@@ -86,10 +75,15 @@ pub(super) struct RouteAnswer {
     pub(super) author_route_needs: BTreeSet<PublicKey>,
     /// True iff nothing is left to learn, so re-executing is pointless and
     /// the `Auto` retires.
+    ///
+    /// Always the complement of `author_route_needs` being empty: an answer
+    /// with nothing left to wait on is settled, and an answer that is not
+    /// settled names exactly who it is waiting for. That equivalence is what
+    /// lets [`WriteFact::Destinations`] carry the reason a park exists as
+    /// keys rather than as a rendered sentence (#1236) — the sentence this
+    /// struct used to carry was unbranchable by construction, so it is gone
+    /// rather than reworded.
     pub(super) complete: bool,
-    /// Why this resolution is not complete, in the words the receipt park
-    /// carries. A park nobody can read is indistinguishable from data loss.
-    pub(super) detail: Option<String>,
 }
 
 /// Every pubkey this signed event `p`-tags, in tag order, deduplicated.
@@ -112,23 +106,15 @@ fn p_tagged_authors(event: &SignedEvent) -> BTreeSet<PublicKey> {
         .collect()
 }
 
-/// The park reason for a resolution still holding unknowns. Names WHO is
-/// missing, because "stuck because X" is the only thing an app or a person
-/// can act on, and a bare "stuck" is barely better than losing the write.
-fn unresolved_detail(unknown: &BTreeSet<PublicKey>) -> String {
-    let mut names = unknown.iter().map(PublicKey::to_hex).collect::<Vec<_>>();
-    names.sort();
-    format!("author routes are Unknown for {}", names.join(", "))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReceiptReplayFactKey {
     ReceiptStatus,
     AwaitingCapability,
-    /// The routing park, keyed by its own reason: a park whose detail
-    /// CHANGES (a second unknown settled, one recipient still missing) is a
-    /// new fact worth re-emitting, while the same reason repeated on every
-    /// tick is not.
+    /// The routing park. One key for the whole picture: a reattach replays
+    /// the park once, carrying whatever it is currently waiting on. Movement
+    /// WITHIN the park — a second unknown settling while one recipient is
+    /// still missing — is news on the live stream, not on a replay, and
+    /// `picture_changed` is what decides it there.
     Destinations,
     Attempt {
         relay: RelayUrl,
@@ -1587,17 +1573,21 @@ impl<S: EventStore> EngineCore<S> {
         // The routing park is retained and replayed the same way the signer
         // park is. An app that restarts, reattaches to an id it persisted,
         // and is told nothing has learned nothing -- a park nobody can see
-        // again is indistinguishable from data loss.
-        if self
+        // again is indistinguishable from data loss. The REASON replays with
+        // it, off the same reducer memory a live resolution writes, so a
+        // reattached park says who it is waiting for rather than only that it
+        // is waiting.
+        if let Some(pending) = self
             .pending
             .get(&id)
-            .is_some_and(|pending| pending.durable_routes.is_empty() && !pending.route_complete)
+            .filter(|pending| pending.durable_routes.is_empty() && !pending.route_complete)
         {
             replay.push((
                 ReceiptReplayFactKey::Destinations,
                 WriteFact::Destinations {
                     relays: BTreeSet::new(),
                     complete: false,
+                    awaiting_author_routes: pending.route_needs.clone(),
                 },
             ));
         }
@@ -3145,7 +3135,6 @@ impl<S: EventStore> EngineCore<S> {
                 // it resolves, before any relay is contacted.
                 author_route_needs: BTreeSet::new(),
                 complete: !relays.is_empty(),
-                detail: relays.is_empty().then(|| EMPTY_EXPLICIT_ROUTE.to_string()),
             },
         }
     }
@@ -3216,7 +3205,6 @@ impl<S: EventStore> EngineCore<S> {
             // (Owner ruling on #1237/#1031; this reverses the older doctrine
             // that a zero-destination answer could never retire.)
             let still_learning = !answer.author_route_needs.is_empty();
-            answer.detail = Some(self.no_destination_detail(&author, &recipients));
             answer.complete = !still_learning;
             if still_learning {
                 answer.author_route_needs.insert(author);
@@ -3226,9 +3214,6 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         answer.complete = answer.author_route_needs.is_empty();
-        if !answer.complete {
-            answer.detail = Some(unresolved_detail(&answer.author_route_needs));
-        }
         answer
     }
 
@@ -3264,72 +3249,6 @@ impl<S: EventStore> EngineCore<S> {
                 answer.author_route_needs.insert(*author);
                 None
             }
-        }
-    }
-
-    /// Why a resolution named no destination at all, in the terms that make it
-    /// actionable: every exhausted source, and the operator sets that were
-    /// empty.
-    ///
-    /// "Stuck" and "stuck because X" are different messages and only the
-    /// second one can be acted on — and here every clause doubles as a way to
-    /// fix it, because configuring any single one of them would have produced
-    /// a route. It also keeps the two shapes of nothing apart: an author fact
-    /// that a protocol coordinator settled as ABSENT is a final answer,
-    /// while one nobody has finished looking up is merely young, and an operator reading
-    /// "absent" knows waiting will not help.
-    fn no_destination_detail(
-        &self,
-        author: &PublicKey,
-        recipients: &BTreeSet<PublicKey>,
-    ) -> String {
-        let mut parts = vec![self.exhausted_source(author, RouteDirection::Outbound)];
-        parts.extend(
-            recipients
-                .iter()
-                .map(|recipient| self.exhausted_source(recipient, RouteDirection::Inbound)),
-        );
-        if self.routing_facts.operator_app_relays().is_empty() {
-            parts.push("no app relays are configured".to_string());
-        }
-        if self.routing_facts.operator_fallback_relays().is_empty() {
-            parts.push("no fallback relays are configured".to_string());
-        }
-        format!("no destination could be determined: {}", parts.join("; "))
-    }
-
-    /// One contributing author's clause of [`Self::no_destination_detail`].
-    ///
-    /// "Present but empty" has two completely different meanings, and telling
-    /// a user with a LAN relay that they have no relays is the defect #1251
-    /// exists to close. A list every one of whose relays was refused says so,
-    /// names them, and names the config that would re-admit them; a list that
-    /// really declared nothing keeps the old wording.
-    fn exhausted_source(&self, author: &PublicKey, direction: RouteDirection) -> String {
-        let state = self.routing_facts.author_routes(author);
-        let author = author.to_hex();
-        match state {
-            AuthorRouteState::Present(routes) if routes.every_declared_relay_was_refused() => {
-                let refused = routes
-                    .refused()
-                    .iter()
-                    .map(RelayUrl::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "{author} declared relays but every one was refused ({refused});                      they are not this app's own and their hosts are neither in                      allowed_local_relay_hosts nor reachable under the declared                      Tor capability"
-                )
-            }
-            AuthorRouteState::Present(_) => match direction {
-                RouteDirection::Outbound => {
-                    format!("Present outbound routes for {author} are empty")
-                }
-                RouteDirection::Inbound => {
-                    format!("Present inbound routes for {author} are empty")
-                }
-            },
-            AuthorRouteState::Absent => format!("author routes are Absent for {author}"),
-            AuthorRouteState::Unknown => format!("author routes are Unknown for {author}"),
         }
     }
 
@@ -3434,9 +3353,16 @@ impl<S: EventStore> EngineCore<S> {
             let Some(pending) = self.pending.get_mut(&id) else {
                 return;
             };
+            // The waiting set is part of the picture, not decoration on it:
+            // a park that stops waiting on Dave and starts waiting only on
+            // Erin has told the app something new even though the relay set
+            // is still empty and the resolution is still open. Leaving it out
+            // of this comparison would emit the FIRST reason and then go
+            // silent while the reason changed underneath the app.
             let changed = !pending.destinations_reported
                 || pending.durable_routes != union
-                || pending.route_complete != answer.complete;
+                || pending.route_complete != answer.complete
+                || pending.route_needs != answer.author_route_needs;
             pending.destinations_reported = true;
             pending.durable_routes = union.clone();
             pending.route_complete = answer.complete;
@@ -3475,6 +3401,7 @@ impl<S: EventStore> EngineCore<S> {
                     WriteFact::Destinations {
                         relays: BTreeSet::new(),
                         complete: answer.complete,
+                        awaiting_author_routes: answer.author_route_needs.clone(),
                     },
                     effects,
                 );
@@ -3519,6 +3446,7 @@ impl<S: EventStore> EngineCore<S> {
                     WriteFact::Destinations {
                         relays: union.clone(),
                         complete: answer.complete,
+                        awaiting_author_routes: answer.author_route_needs.clone(),
                     },
                     effects,
                 );
