@@ -455,10 +455,6 @@ pub struct NmpWorld {
     /// The unsigned draft a scenario staged, kept verbatim so a `Then` can
     /// compare the delivered event against what was actually supplied.
     staged_draft: Option<nmp_grammar::EventBuilder>,
-    /// The already-signed event a scenario staged, and the parts it is built
-    /// from while the scenario is still adding tags to it.
-    staged_signed_parts: Option<group_fixtures::PendingSignedEvent>,
-    staged_signed_event: Option<nostr::Event>,
     /// Scenario-visible id LABELS bound to the real ids they stand for. A
     /// `.feature` cannot spell a real event id -- one is only known after
     /// signing -- so `has id "9f2c..."` BINDS that word to the id the event

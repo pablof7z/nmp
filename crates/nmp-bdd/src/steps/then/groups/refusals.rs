@@ -6,19 +6,14 @@ use super::*;
 
 // ---- refusals ------------------------------------------------------------
 
-#[then(regex = r#"^the publication is refused with a typed missing-group-context error$"#)]
-async fn refused_missing_context(w: &mut NmpWorld) {
-    assert_refusal(w, "MissingContext");
-}
-
-#[then(regex = r#"^the publication is refused with a typed mismatched-group-context error$"#)]
-async fn refused_mismatched_context(w: &mut NmpWorld) {
-    assert_refusal(w, "MismatchedContext");
-}
-
-#[then(regex = r#"^the publication is refused with a typed ambiguous-group-context error$"#)]
-async fn refused_ambiguous_context(w: &mut NmpWorld) {
-    assert_refusal(w, "AmbiguousContext");
+#[then(regex = r#"^the signer was never asked to sign$"#)]
+async fn signer_never_asked(w: &mut NmpWorld) {
+    settled(w).await;
+    assert_eq!(
+        w.signer_ask_count(),
+        0,
+        "a draft the door refused never reaches a signer"
+    );
 }
 
 #[then(regex = r#"^the publication is refused with a typed caller-supplied-h error$"#)]
@@ -86,18 +81,6 @@ async fn error_names_the_previous_tag(w: &mut NmpWorld) {
     );
 }
 
-#[then(regex = r#"^the error names both "([^"]+)" and "([^"]+)"$"#)]
-async fn error_names_both(w: &mut NmpWorld, found: String, expected: String) {
-    let said = w
-        .group_refusal()
-        .expect("expected a typed refusal")
-        .to_string();
-    assert!(
-        said.contains(&found) && said.contains(&expected),
-        "the refusal must name the group it found AND the one it was published through: {said}"
-    );
-}
-
 #[then(regex = r#"^the refusal is the same error as for a matching h$"#)]
 async fn same_refusal_as_matching_h(w: &mut NmpWorld) {
     assert_refusal(w, "CallerSuppliedContext");
@@ -122,28 +105,6 @@ async fn refusal_is_a_caller_error(w: &mut NmpWorld) {
         w.receipt_count(),
         0,
         "a caller error has no receipt to carry a relay's rejection"
-    );
-}
-
-#[then(regex = r#"^no h tag was appended to it$"#)]
-async fn no_h_was_appended(w: &mut NmpWorld) {
-    let supplied = w.signed_event();
-    assert!(
-        !supplied
-            .tags
-            .iter()
-            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("h")),
-        "the refused event must be exactly as it arrived"
-    );
-}
-
-#[then(regex = r#"^its id was never recomputed$"#)]
-async fn id_never_recomputed(w: &mut NmpWorld) {
-    let event = w.signed_event();
-    assert_eq!(
-        event_id_over(&event, event.tags.iter().cloned().collect()),
-        event.id,
-        "the refused event still hashes to the id its author signed"
     );
 }
 
@@ -180,9 +141,8 @@ async fn delivered_carries_no_previous(w: &mut NmpWorld) {
 /// sibling scenario "An event carrying a previous tag is refused"). This
 /// step no longer claims "no surface anywhere" can mint one -- #1034
 /// deliberately preserves one global ordered Exact escape, and a
-/// caller-SIGNED event may already carry a tag shaped like `previous` that
-/// the pre-signed door's `validate_context` preserves verbatim rather than
-/// interpreting.
+/// caller-SIGNED event may already carry a tag shaped like `previous`, which
+/// `Group::validate_context` reports on verbatim rather than interpreting.
 #[then(
     regex = r#"^the unsigned group-publication door never invents or accepts a caller-supplied previous tag$"#
 )]
