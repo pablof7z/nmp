@@ -43,15 +43,11 @@ pub struct Snapshot {
     pub history_projection_apply_ns: u64,
     pub history_projection_delta_ns: u64,
     pub history_projection_batch_ns: u64,
-    pub history_sink_delivery_ns: u64,
     pub history_channel_send_ns: u64,
     pub history_receiver_reconcile_ns: u64,
     pub history_batches: u64,
     pub history_deltas: u64,
     pub history_rows: u64,
-    pub row_sink_delivery_ns: u64,
-    pub row_sink_batches: u64,
-    pub row_sink_deltas: u64,
     pub row_channel_send_ns: u64,
     pub row_channel_batches: u64,
     pub row_channel_deltas: u64,
@@ -98,15 +94,11 @@ counters!(
     HISTORY_PROJECTION_APPLY_NS,
     HISTORY_PROJECTION_DELTA_NS,
     HISTORY_PROJECTION_BATCH_NS,
-    HISTORY_SINK_DELIVERY_NS,
     HISTORY_CHANNEL_SEND_NS,
     HISTORY_RECEIVER_RECONCILE_NS,
     HISTORY_BATCHES,
     HISTORY_DELTAS,
     HISTORY_ROWS,
-    ROW_SINK_DELIVERY_NS,
-    ROW_SINK_BATCHES,
-    ROW_SINK_DELTAS,
     ROW_CHANNEL_SEND_NS,
     ROW_CHANNEL_BATCHES,
     ROW_CHANNEL_DELTAS,
@@ -158,15 +150,11 @@ pub fn reset() {
         &HISTORY_PROJECTION_APPLY_NS,
         &HISTORY_PROJECTION_DELTA_NS,
         &HISTORY_PROJECTION_BATCH_NS,
-        &HISTORY_SINK_DELIVERY_NS,
         &HISTORY_CHANNEL_SEND_NS,
         &HISTORY_RECEIVER_RECONCILE_NS,
         &HISTORY_BATCHES,
         &HISTORY_DELTAS,
         &HISTORY_ROWS,
-        &ROW_SINK_DELIVERY_NS,
-        &ROW_SINK_BATCHES,
-        &ROW_SINK_DELTAS,
         &ROW_CHANNEL_SEND_NS,
         &ROW_CHANNEL_BATCHES,
         &ROW_CHANNEL_DELTAS,
@@ -219,15 +207,11 @@ pub fn snapshot() -> Snapshot {
         history_projection_apply_ns: load(&HISTORY_PROJECTION_APPLY_NS),
         history_projection_delta_ns: load(&HISTORY_PROJECTION_DELTA_NS),
         history_projection_batch_ns: load(&HISTORY_PROJECTION_BATCH_NS),
-        history_sink_delivery_ns: load(&HISTORY_SINK_DELIVERY_NS),
         history_channel_send_ns: load(&HISTORY_CHANNEL_SEND_NS),
         history_receiver_reconcile_ns: load(&HISTORY_RECEIVER_RECONCILE_NS),
         history_batches: load(&HISTORY_BATCHES),
         history_deltas: load(&HISTORY_DELTAS),
         history_rows: load(&HISTORY_ROWS),
-        row_sink_delivery_ns: load(&ROW_SINK_DELIVERY_NS),
-        row_sink_batches: load(&ROW_SINK_BATCHES),
-        row_sink_deltas: load(&ROW_SINK_DELTAS),
         row_channel_send_ns: load(&ROW_CHANNEL_SEND_NS),
         row_channel_batches: load(&ROW_CHANNEL_BATCHES),
         row_channel_deltas: load(&ROW_CHANNEL_DELTAS),
@@ -390,22 +374,12 @@ pub(crate) fn history_projection_batch(duration: Duration, deltas: usize, rows: 
     HISTORY_ROWS.fetch_add(rows as u64, Ordering::Relaxed);
 }
 
-pub(crate) fn history_sink_delivery(duration: Duration) {
-    add(&HISTORY_SINK_DELIVERY_NS, duration);
-}
-
 pub(crate) fn history_channel_send(duration: Duration) {
     add(&HISTORY_CHANNEL_SEND_NS, duration);
 }
 
 pub(crate) fn history_receiver_reconcile(duration: Duration) {
     add(&HISTORY_RECEIVER_RECONCILE_NS, duration);
-}
-
-pub(crate) fn row_sink_delivery(duration: Duration, deltas: usize) {
-    add(&ROW_SINK_DELIVERY_NS, duration);
-    ROW_SINK_BATCHES.fetch_add(1, Ordering::Relaxed);
-    ROW_SINK_DELTAS.fetch_add(deltas as u64, Ordering::Relaxed);
 }
 
 pub(crate) fn row_channel_send(duration: Duration, deltas: usize) {
