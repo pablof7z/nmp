@@ -97,6 +97,38 @@ Feature: NIP-29's own operations draft their exact kind and tag schema
     And the draft carries no about tag
     And the draft carries no empty tag
 
+  # nmp:id=NIP29OPERATIONS-012
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip29::edit_metadata_composes_the_picture_row_and_both_marker_rows
+  # nmp:evidence=rust:nmp-ffi::the_metadata_edit_door_composes_the_picture_and_marker_rows
+  # nmp:falsifier=Composing only name and about -- the shape kind:9002 had before #1282 -- makes edit_metadata_composes_the_picture_row_and_both_marker_rows observe a two-row draft instead of the four-row one, which is the state that forced a real consumer to hand-write ["closed"] and therefore to hand-assemble a whole 9002.
+  @nip29
+  Scenario: Editing metadata drafts NIP-29's picture row and its marker rows
+    When I compose editing the group metadata to a public closed workspace named "Workspace" pictured at "https://cdn.example/w.png"
+    Then the draft is kind 9002
+    And the draft carries a name tag with value "Workspace"
+    And the draft carries a picture tag with value "https://cdn.example/w.png"
+    And the draft carries a bare public tag
+    And the draft carries a bare closed tag
+
+  # nmp:id=NIP29OPERATIONS-013
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip29::each_marker_axis_composes_the_exact_tag_nip29_spells_for_that_state
+  # nmp:falsifier=Collapsing the two independent axes onto one setting, or spelling either axis with a single boolean whose false case emits nothing, makes each_marker_axis_composes_the_exact_tag_nip29_spells_for_that_state observe a missing or wrong marker for at least one of the four combinations -- and a public-but-closed group, which is what a published workspace is, would stop being expressible.
+  @nip29
+  Scenario: Who may read and whether joins are honoured are independent two-valued choices
+    Then each of NIP-29's four read/join combinations composes exactly its own two marker tags
+
+  # nmp:id=NIP29OPERATIONS-014
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip29::an_unstated_marker_emits_no_row_and_therefore_clears_nothing
+  # nmp:falsifier=Spelling either marker as a plain boolean that always emits a row makes an_unstated_marker_emits_no_row_and_therefore_clears_nothing observe an edit that renames a group also restating -- and therefore silently resetting -- who may read it and whether it accepts joins.
+  @nip29
+  Scenario: An unstated marker emits no row, so an edit never clears what it did not mention
+    When I compose editing the group metadata with name "Workspace" and nothing else
+    Then the draft carries a name tag with value "Workspace"
+    And the draft carries no marker tag at all
+
   # nmp:id=NIP29OPERATIONS-011
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip29::join_request_with_code_carries_kind_h_free_code_tag
