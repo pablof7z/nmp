@@ -16,3 +16,7 @@ default = []
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
+# #1258: NIP-22 is a CONSUMER of NIP-73 external content ids, not their
+# owner. `pure-protocol` may reach `pure-protocol`
+# (`scripts/dependency-direction-policy.json`).
+nmp-nip73.workspace = true

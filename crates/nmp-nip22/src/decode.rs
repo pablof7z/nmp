@@ -9,7 +9,7 @@
 use nostr::{EventId, PublicKey};
 
 use crate::root::{CommentParent, CommentRoot, COMMENT_KIND};
-use crate::target::Nip73Target;
+use nmp_nip73::Nip73;
 
 /// A successfully decoded, typed NIP-22 comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,28 +459,34 @@ fn root_to_typed(raw: RawRoot) -> Result<CommentRoot, CommentDecodeError> {
     }
 }
 
-/// Construct the typed [`Nip73Target`] a decoded `I`/`i` + `K`/`k` cell
+/// Construct the typed [`Nip73`] a decoded `I`/`i` + `K`/`k` cell
 /// pair names, mapping the target crate's construction error onto the
 /// right [`CommentDecodeError`]: a missing podcast-guid prefix is a
 /// [`CommentDecodeError::MalformedExternalValue`] (the cell's FORMAT is
 /// wrong for what `K`/`k` declares), while an empty cell remains
 /// [`CommentDecodeError::EmptyExternalValue`].
-fn external_target_from_i_k(
-    i_value: &str,
-    k_value: &str,
-) -> Result<Nip73Target, CommentDecodeError> {
-    if k_value == Nip73Target::PODCAST_EPISODE_GUID_KIND {
-        return Nip73Target::parse_podcast_episode_guid_i_value(i_value).map_err(|err| match err {
-            crate::target::Nip73TargetError::MissingPodcastGuidPrefix => {
+fn external_target_from_i_k(i_value: &str, k_value: &str) -> Result<Nip73, CommentDecodeError> {
+    if k_value == Nip73::PODCAST_EPISODE_GUID_KIND {
+        return Nip73::parse_podcast_episode_guid_i_value(i_value).map_err(|err| match err {
+            nmp_nip73::Nip73Error::MissingPodcastGuidPrefix => {
                 CommentDecodeError::MalformedExternalValue {
                     got: i_value.to_string(),
                 }
             }
-            crate::target::Nip73TargetError::EmptyValue
-            | crate::target::Nip73TargetError::EmptyKind => CommentDecodeError::EmptyExternalValue,
+            nmp_nip73::Nip73Error::EmptyValue
+            | nmp_nip73::Nip73Error::EmptyKind
+            | nmp_nip73::Nip73Error::MalformedUrl => CommentDecodeError::EmptyExternalValue,
         });
     }
-    Nip73Target::general(i_value, k_value).map_err(|_| CommentDecodeError::EmptyExternalValue)
+    // Every other namespace -- INCLUDING `web` -- decodes as
+    // [`Nip73::General`], deliberately. Reading is not composing: a `web`
+    // row another client wrote IS the thread's identity whether or not it
+    // is canonical, so re-running [`Nip73::url`] on read would either
+    // rewrite that identity (splitting NMP off from every other reader) or
+    // refuse a valid event NMP has no business refusing. Canonicalisation
+    // belongs to the composing side, where the value is still NMP's to
+    // choose. This is the production consumer `General` exists for.
+    Nip73::general(i_value, k_value).map_err(|_| CommentDecodeError::EmptyExternalValue)
 }
 
 /// Cross-validate the decoded parent against the decoded root, producing
@@ -691,7 +697,7 @@ mod tests {
     /// A valid top-level podcast comment decodes.
     #[test]
     fn valid_top_level_podcast_comment_decodes() {
-        let root = CommentRoot::External(Nip73Target::podcast_episode_guid("guid-1").unwrap());
+        let root = CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap());
         let author = keys().public_key();
         let composed = compose_top_level_comment(&root, "hi".to_string());
         let decoded =
@@ -706,7 +712,7 @@ mod tests {
     /// parent.
     #[test]
     fn valid_reply_retains_podcast_root_and_exposes_comment_parent() {
-        let root = CommentRoot::External(Nip73Target::podcast_episode_guid("guid-1").unwrap());
+        let root = CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap());
         let parent_author = keys().public_key();
         let parent_id = EventId::from_slice(&[1; 32]).unwrap();
         let author = keys().public_key();

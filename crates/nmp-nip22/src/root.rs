@@ -4,11 +4,11 @@
 //! | Address | External` mirrors NIP-22's own uppercase `E`/`A`/`I` root
 //! vocabulary exactly, one variant per root shape the spec defines --
 //! never one variant per NIP-73 *namespace* (that restraint lives in
-//! [`crate::Nip73Target`] instead).
+//! [`Nip73`] instead).
 
 use nostr::{EventId, PublicKey};
 
-use crate::target::Nip73Target;
+use nmp_nip73::Nip73;
 
 /// The root of a NIP-22 comment thread -- what every reply in the thread,
 /// regardless of depth, keeps naming via the uppercase `E`/`A`/`K`/`P`/`I`
@@ -40,7 +40,7 @@ pub enum CommentRoot {
         event_id: Option<EventId>,
     },
     /// A root outside Nostr entirely -- `I`/`K` (NIP-73).
-    External(Nip73Target),
+    External(Nip73),
 }
 
 impl CommentRoot {
