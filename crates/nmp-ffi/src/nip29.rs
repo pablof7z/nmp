@@ -411,9 +411,10 @@ impl FfiGroup {
 /// moderation action names one group. A write is the one thing that is
 /// genuinely plural.
 ///
-/// Two methods, both UNSIGNED: NMP appends the `h` rows and NMP signs. There
-/// is deliberately no pre-signed spelling and no way to obtain a draft to
-/// sign yourself.
+/// ONE method. NMP appends the `h` rows, NMP signs, NMP publishes. There is
+/// deliberately no pre-signed spelling, no way to obtain a draft to sign
+/// yourself, and no mint-without-publish door -- an app that wants NMP to
+/// sign without publishing uses `NmpEngine::sign_event`.
 ///
 /// Opaque for the same reason [`FfiGroup`] is: it yields back neither its
 /// hosts nor its ids, so no layer handed one can reconstruct the authority
@@ -425,23 +426,13 @@ pub struct FfiGroups {
 
 #[uniffi::export]
 impl FfiGroups {
-    /// Mint the contextualized write intent for an unsigned draft and publish
-    /// NOTHING (`nmp::nip29::Groups::intent` mirror). Same appended-before-
-    /// signing rows, same explicit route over the scope's whole host set,
-    /// same frozen exact author, same `correlation: None` for the caller to
-    /// stamp -- [`FfiGroup::intent`] at a larger arity, not a second door.
-    pub fn intent(
-        &self,
-        author: String,
-        builder: FfiEventBuilder,
-    ) -> Result<FfiWriteIntent, FfiError> {
-        let author = parse_pubkey(&author)?;
-        let builder = event_builder_from_ffi(builder)?;
-        Ok(write_intent_to_ffi(self.inner.intent(author, builder)?))
-    }
-
-    /// [`Self::intent`] handed straight to the one publish door
-    /// (`nmp::nip29::Groups::publish` mirror).
+    /// Publish one event into every retained group, through the ONE publish
+    /// door (`nmp::nip29::Groups::publish` mirror).
+    ///
+    /// The whole door: one `h` row per retained id appended before signing,
+    /// the route minted from the scope's own hosts, an exact frozen author.
+    /// The app names neither a relay nor an `h` row and never holds a write
+    /// intent -- NMP contextualizes, signs and publishes.
     pub fn publish(
         &self,
         engine: Arc<NmpEngine>,
@@ -452,6 +443,9 @@ impl FfiGroups {
         let builder = event_builder_from_ffi(builder)?;
         let receipts = self.inner.publish(&engine.engine, author, builder)?;
         Ok(NmpReceiptStream::new(receipts))
+    }
+}
+
 /// Who may READ a group's messages (`nmp::nip29::ReadAccess` mirror, #1282).
 ///
 /// NIP-29 spells the restricted state `["private"]` on kind:39000 and
@@ -994,9 +988,7 @@ pub fn any_of(ids: FfiBinding) -> Result<Arc<FfiGroupIds>, FfiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        FfiAccessContext, FfiIdentityField, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting,
-    };
+    use crate::types::{FfiAccessContext, FfiIdentityField, FfiSourceAuthority};
 
     fn host(n: u16) -> String {
         format!("wss://host-{n}.example.com")
@@ -1543,18 +1535,21 @@ mod tests {
         }
     }
 
-    /// #1281 across the boundary: one intent, one `h` row per named room,
-    /// minted by the door with the caller naming neither a relay nor an `h`.
+    /// #1281 across the boundary: a several-group write reaches the one
+    /// publish door with the app naming neither a relay nor an `h` row, and
+    /// comes back with the ordinary receipt stream.
     #[test]
-    fn a_several_group_write_crosses_the_boundary_as_one_intent_with_every_h_row() {
+    fn a_several_group_write_crosses_the_boundary_and_reaches_the_one_publish_door() {
+        let engine =
+            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
         let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
         let rooms = scope
             .groups(vec!["darkroom".to_string(), "photographers".to_string()])
             .expect("a nonempty group set");
-        let author = nostr::Keys::generate().public_key().to_hex();
-        let intent = rooms
-            .intent(
-                author,
+        let receipts = rooms
+            .publish(
+                engine,
+                nostr::Keys::generate().public_key().to_hex(),
                 FfiEventBuilder {
                     kind: 30315,
                     tags: vec![vec!["d".to_string(), "status".to_string()]],
@@ -1562,23 +1557,8 @@ mod tests {
                     created_at: None,
                 },
             )
-            .expect("a plain draft contextualizes for several groups");
-        match intent.payload {
-            FfiWritePayload::Event { builder } => assert_eq!(
-                builder
-                    .tags
-                    .iter()
-                    .filter(|row| row.first().map(String::as_str) == Some("h"))
-                    .map(|row| row[1].clone())
-                    .collect::<Vec<String>>(),
-                vec!["darkroom".to_string(), "photographers".to_string()]
-            ),
-            other => panic!("an unsigned draft must mint an Event payload, got {other:?}"),
-        }
-        match intent.routing {
-            FfiWriteRouting::Explicit { relays } => assert_eq!(relays, vec![host(1), host(2)]),
-            other => panic!("a group write is never Auto, got {other:?}"),
-        }
+            .expect("the publish door accepts a several-group write");
+        assert!(receipts.id() > 0, "a group write is a tracked write");
     }
 
     /// #1281's refusal at the boundary: naming no group forms no write

@@ -74,10 +74,9 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{EventBuilder, Filter, Identity, WriteIntent, WritePayload};
+use nmp_grammar::{EventBuilder, Filter, Identity, WriteIntent, WritePayload, WriteRouting};
 use nostr::{Event, EventId, PublicKey, RelayUrl};
 
-use super::groups::Groups;
 use super::read::{self, GroupReadError};
 use super::records::{GroupObservation, GroupObserveError};
 use crate::engine::Engine;
@@ -219,22 +218,7 @@ impl Group {
     /// Ask whether an already-signed event belongs to this group, without
     /// building a write out of it.
     pub fn validate_context(&self, event: &Event) -> Result<(), GroupContextError> {
-        nmp_nip29::validate_context(&self.ids(), event)
-    }
-
-    /// This group as the one-element write context it is.
-    ///
-    /// Not an accessor: [`Groups`] retains its hosts and ids as privately as
-    /// `Group` does and yields neither back. Every intent a `Group` mints is
-    /// assembled by `Groups::mint`, so "one group is the one-element case" is
-    /// a fact about the code rather than a claim in a doc comment.
-    fn write_context(&self) -> Groups {
-        Groups::new(self.hosts.clone(), self.ids()).expect("a one-element group set is nonempty")
-    }
-
-    /// This group's id as the one-element set the context vocabulary takes.
-    fn ids(&self) -> BTreeSet<String> {
-        BTreeSet::from([self.id.clone()])
+        nmp_nip29::validate_context(&BTreeSet::from([self.id.clone()]), event)
     }
 
     /// Mint the group-contextualized [`WriteIntent`] for an unsigned draft,
@@ -271,7 +255,11 @@ impl Group {
         author: PublicKey,
         builder: EventBuilder,
     ) -> Result<WriteIntent, GroupPublishError> {
-        self.write_context().intent(author, builder)
+        let contextualized = nmp_nip29::contextualize(&BTreeSet::from([self.id.clone()]), builder)?;
+        Ok(self.mint(
+            WritePayload::Event(contextualized),
+            Identity::Explicit(author),
+        ))
     }
 
     /// Mint the group-contextualized [`WriteIntent`] for an ALREADY-SIGNED
@@ -285,11 +273,9 @@ impl Group {
     /// There is no author argument. A signed event already fixed its author;
     /// accepting a second selector would let the two disagree.
     pub fn signed_intent(&self, event: Event) -> Result<WriteIntent, GroupPublishError> {
-        self.validate_context(&event)?;
+        nmp_nip29::validate_context(&BTreeSet::from([self.id.clone()]), &event)?;
         let author = event.pubkey;
-        Ok(self
-            .write_context()
-            .mint(WritePayload::Signed(event), Identity::Explicit(author)))
+        Ok(self.mint(WritePayload::Signed(event), Identity::Explicit(author)))
     }
 
     /// [`Self::intent`] handed straight to the one publish door -- the
@@ -415,6 +401,26 @@ impl Group {
         self.publish(engine, author, nmp_nip29::create_invite(code))
     }
 
+    /// The one shape a group write has. `Explicit(every host)` is minted
+    /// HERE, from the scope the app named once: no caller supplies it and no
+    /// engine derives it. The `h` tag carries the GROUP ID, never a relay, so
+    /// the hosts are not derivable from the event and no resolver could ever
+    /// compute them.
+    ///
+    /// `correlation: None` is not a decision this door is entitled to make
+    /// differently. A correlation token is minted and persisted by the app
+    /// BEFORE it writes -- that is the entire point of it (#591) -- so the
+    /// only honest value here is the absence, and [`Self::intent`]'s caller
+    /// is the one that can fill it in.
+    fn mint(&self, payload: WritePayload, identity: Identity) -> WriteIntent {
+        WriteIntent {
+            payload,
+            routing: WriteRouting::Explicit(self.hosts.iter().cloned().collect()),
+            identity,
+            correlation: None,
+        }
+    }
+
     /// The whole engine-facing body of this type: hand a group-minted intent
     /// to the one publish door. Named so a reader can see there is exactly
     /// one, and so a second write lifecycle could not be added without
@@ -439,7 +445,6 @@ impl Group {
 mod tests {
     use super::*;
     use crate::nip29;
-    use nmp_grammar::{Identity, WritePayload, WriteRouting};
     use nostr::{Keys, Kind, Tag, Timestamp, UnsignedEvent};
 
     const GROUP: &str = "photographers";
@@ -734,8 +739,8 @@ mod tests {
                     expected: BTreeSet::from([GROUP.to_string()])
                 }
             )),
-            "a group this door was not asked for must never mint an intent, and the \
-             refusal must name the whole set that leaked in"
+            "a group this door was not asked for must never mint an intent, and the refusal \
+             must name the whole set that leaked in"
         );
         assert_eq!(
             group
@@ -852,36 +857,6 @@ mod tests {
             );
         }
         engine.shutdown();
-    }
-
-    /// One group is the ONE-ELEMENT case in code, not merely in prose: the
-    /// intent a `Group` mints is byte-identical to the one a one-element
-    /// `Groups` mints from the same scope, payload, route and identity.
-    #[test]
-    fn a_group_write_is_the_one_element_case_of_a_several_group_write() {
-        let me = author();
-        let scope = nip29::on([host(1), host(2)]).expect("a nonempty scope");
-        let draft = || EventBuilder::new(Kind::from(9u16)).content("first light");
-        let single = scope
-            .group(GROUP)
-            .intent(me, draft())
-            .expect("a plain draft contextualizes");
-        let plural = scope
-            .groups([GROUP])
-            .expect("a one-element group set is nonempty")
-            .intent(me, draft())
-            .expect("a plain draft contextualizes");
-        assert_eq!(routed(&single), routed(&plural));
-        assert_eq!(single.identity, plural.identity);
-        assert_eq!(single.correlation, plural.correlation);
-        match (single.payload, plural.payload) {
-            (WritePayload::Event(one), WritePayload::Event(many)) => {
-                assert_eq!(one.kind, many.kind);
-                assert_eq!(one.content, many.content);
-                assert_eq!(one.tags, many.tags);
-            }
-            _ => panic!("both doors must mint an Event payload"),
-        }
     }
 
     /// The read half has no verb of its own: the group mints a live query and

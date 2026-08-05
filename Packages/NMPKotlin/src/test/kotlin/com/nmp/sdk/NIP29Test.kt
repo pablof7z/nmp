@@ -171,22 +171,23 @@ class NIP29Test {
         }
     }
 
-    /** #1281: one intent, one `h` row per named room, minted by the door
-     * with the app naming neither a relay nor an `h`. */
+    /** #1281: a several-group write reaches the one publish door and comes
+     * back with the ordinary store-issued receipt id. */
     @Test
-    fun aSeveralGroupWriteMintsOneIntentCarryingEveryHRow() {
-        val scope = NMPRelayScope.on(listOf(host(1), host(2)))
-        val rooms = scope.groups(listOf("darkroom", "photographers"))
-        val authorHex = randomPubkeyHex()
-
-        val intent = rooms.intent(authorHex, kind = 30315u, tags = listOf(listOf("d", "status")))
-        assertEquals(WriteRouting.Explicit(listOf(host(1), host(2))), intent.routing)
-        val payload = intent.payload
-        check(payload is WritePayload.Event) { "an unsigned draft mints an Event payload" }
-        assertEquals(
-            listOf(listOf("h", "darkroom"), listOf("h", "photographers")),
-            payload.tags.filter { it.firstOrNull() == "h" },
-        )
+    fun aSeveralGroupWriteReachesTheOnePublishDoor() {
+        NMPEngine(NMPConfig()).use { engine ->
+            val rooms =
+                NMPRelayScope.on(listOf(host(1), host(2)))
+                    .groups(listOf("darkroom", "photographers"))
+            val receipt =
+                rooms.publish(
+                    engine,
+                    randomPubkeyHex(),
+                    kind = 30315u,
+                    tags = listOf(listOf("d", "status")),
+                )
+            assert(receipt.id > 0uL) { "a group write is a tracked write" }
+        }
     }
 
     /** #1281: naming no group at all forms no write context. */

@@ -203,23 +203,15 @@ final class NIP29Tests: XCTestCase {
         XCTAssertGreaterThan(receipt.id, 0)
     }
 
-    /// #1281: one intent, one `h` row per named room, minted by the door
-    /// with the app naming neither a relay nor an `h`.
-    func testASeveralGroupWriteMintsOneIntentCarryingEveryHRow() throws {
-        let scope = try NMPRelayScope.on([host(1), host(2)])
-        let rooms = try scope.groups(["darkroom", "photographers"])
-        let intent = try rooms.intent(
-            authorPubkeyHex: randomPubkeyHex(), kind: 30315, tags: [["d", "status"]]
-        )
-        XCTAssertEqual(intent.routing, .explicit(relays: [host(1), host(2)]))
-        guard case let .event(_, tags, _, _) = intent.payload else {
-            return XCTFail("an unsigned draft must mint an .event payload, got \(intent.payload)")
-        }
-        XCTAssertEqual(
-            tags.filter { $0.first == "h" },
-            [["h", "darkroom"], ["h", "photographers"]],
-            "one h row per room, so the one replaceable event renders in both"
-        )
+    /// #1281: a several-group write reaches the one publish door and comes
+    /// back with the ordinary store-issued receipt id.
+    func testASeveralGroupWriteReachesTheOnePublishDoor() throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        let rooms = try NMPRelayScope.on([host(1), host(2)]).groups(["darkroom", "photographers"])
+        let receipt = try rooms.publish(
+            engine: engine, authorPubkeyHex: randomPubkeyHex(), kind: 30315,
+            tags: [["d", "status"]])
+        XCTAssertGreaterThan(receipt.id, 0)
     }
 
     /// #1281: naming no group at all forms no write context.

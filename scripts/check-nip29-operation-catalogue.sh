@@ -179,11 +179,11 @@ done
 
 # #1281: `Groups` is the SEVERAL-group write context. It offers no named
 # operation at all -- every 9000-9022 action names one group by definition --
-# so (013) has nothing to enumerate on it. It offers exactly two doors, both
-# UNSIGNED, and (012)'s routing rule must hold for both: naming hosts once at
-# scope construction stays the one legal exception, and `groups(ids)` is a
-# narrowing exactly as `group(id)` is, not a per-call route.
-RUST_GROUPS_INFRA_OPS=(intent publish)
+# so (013) has nothing to enumerate on it. It offers exactly ONE door, and
+# (012)'s routing rule must hold for it: naming hosts once at scope
+# construction stays the one legal exception, and `groups(ids)` is a narrowing
+# exactly as `group(id)` is, not a per-call route.
+RUST_GROUPS_INFRA_OPS=(publish)
 
 for op in "${RUST_GROUPS_INFRA_OPS[@]}"; do
   check_no_routing_parameter "$RUST_GROUPS" "pub fn" "$op"

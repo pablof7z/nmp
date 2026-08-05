@@ -420,9 +420,10 @@ public final class NMPGroup: @unchecked Sendable {
 /// moderation action names one group. A write is the one thing that is
 /// genuinely plural.
 ///
-/// Two methods, both UNSIGNED: NMP appends the `h` rows and NMP signs. There
-/// is deliberately no pre-signed spelling and no way to obtain a draft to
-/// sign yourself.
+/// ONE method. NMP appends the `h` rows, NMP signs, NMP publishes. There is
+/// deliberately no pre-signed spelling, no way to obtain a draft to sign
+/// yourself, and no mint-without-publish door -- an app that wants NMP to
+/// sign without publishing uses `NMPEngine.signEvent(...)`.
 public final class NMPGroups: @unchecked Sendable {
     let ffi: FfiGroups
 
@@ -430,28 +431,10 @@ public final class NMPGroups: @unchecked Sendable {
         self.ffi = ffi
     }
 
-    /// Mint the contextualized `WriteIntent` for an unsigned draft and
-    /// publish NOTHING. `NMPGroup.intent(...)` at a larger arity, not a
-    /// second door: same appended-before-signing rows, same explicit route
-    /// over the scope's whole host set, same frozen exact author, same `nil`
-    /// correlation for the caller to stamp.
-    public func intent(
-        authorPubkeyHex: String,
-        kind: UInt16,
-        tags: [[String]] = [],
-        content: String = "",
-        createdAt: UInt64? = nil
-    ) throws -> WriteIntent {
-        let ffiIntent = try nmpRethrowing {
-            try ffi.intent(
-                author: authorPubkeyHex,
-                builder: FfiEventBuilder(kind: kind, tags: tags, content: content, createdAt: createdAt)
-            )
-        }
-        return WriteIntent(ffiIntent)
-    }
-
-    /// `intent(...)` handed straight to the one publish door.
+    /// Publish one event into every retained group, through the ONE publish
+    /// door. One `h` row per retained id is appended before signing, the
+    /// route is the scope's own hosts, and the app names neither a relay nor
+    /// an `h` row.
     public func publish(
         engine: NMPEngine,
         authorPubkeyHex: String,

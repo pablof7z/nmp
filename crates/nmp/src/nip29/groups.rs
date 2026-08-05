@@ -6,10 +6,11 @@
 //! event claims -- and it exists because a legitimate NIP-29 write had no
 //! door at all.
 //!
-//! It has exactly two methods and both are the UNSIGNED door: NMP appends the
-//! `h` rows, NMP signs, and the app reads its own write back through the
+//! It has exactly ONE method, [`Groups::publish`]. NMP appends the `h` rows,
+//! NMP signs, NMP publishes, and the app reads its own write back through the
 //! subscription it already holds. There is deliberately no pre-signed
-//! spelling here and no way to obtain a draft to sign yourself.
+//! spelling, no way to obtain a draft to sign yourself, and no
+//! mint-without-publish door -- see "One door, not three" below.
 //!
 //! # The write that had no door
 //!
@@ -45,6 +46,23 @@
 //!
 //! So the several-group case needs the unsigned door and only the unsigned
 //! door.
+//!
+//! # One door, not three
+//!
+//! An earlier shape of this type also handed back a [`WriteIntent`] for an
+//! app to submit later. That door is absent, and the reasons are checkable
+//! rather than stylistic: a `WriteIntent` derives NOTHING -- no `Clone`, no
+//! `Debug`, no `Serialize` -- so it cannot be persisted across a restart,
+//! cloned for batching, or inspected, and holding one buys an app nothing.
+//! Its one honest use is stamping [`WriteIntent::correlation`], and the
+//! consumer that asked for the door stamps `None` on every intent it builds.
+//! The separate submit stage that motivated it had already been deleted when
+//! that consumer adopted NMP's own publish queue.
+//!
+//! An app that wants NMP to SIGN without publishing already has a door:
+//! [`Engine::sign_event`](crate::Engine::sign_event) returns the signed
+//! event. That is a different question from routing, and it is answered
+//! elsewhere rather than duplicated here.
 //!
 //! # It is the same door, at a larger arity
 //!
@@ -107,51 +125,51 @@ impl Groups {
         Ok(Self { hosts, ids })
     }
 
-    /// Mint the contextualized [`WriteIntent`] for an unsigned draft, as
-    /// `author`, and publish NOTHING.
+    /// Publish one event into every retained group, through the ONE publish
+    /// door.
     ///
-    /// [`Group::intent`](super::Group::intent) with a larger set, and the
-    /// same door: one `h` row per retained id appended BEFORE the stamp/sign
-    /// step so every row is inside the bytes that get signed,
-    /// [`WriteRouting::Explicit`] over the scope's whole host set, an exact
-    /// frozen author (#878), and `correlation: None` for the caller to stamp
-    /// (#1244).
+    /// The whole door. One `h` row per retained id is appended BEFORE the
+    /// stamp/sign step so every row is inside the bytes that get signed, the
+    /// route is [`WriteRouting::Explicit`] over the scope's whole host set,
+    /// and the author is an exact frozen [`PublicKey`] rather than a reactive
+    /// selector (#878). The app names neither a relay nor an `h` row, and
+    /// never holds the intent: NMP contextualizes, NMP signs, NMP publishes,
+    /// and the app reads its own write back through the subscription it
+    /// already holds.
     ///
-    /// The app names neither a relay nor an `h` row. A draft that already
-    /// carries an `h` is refused whichever value it holds, because the row
-    /// belongs to the retained scope and not to the caller.
-    pub fn intent(
-        &self,
-        author: PublicKey,
-        builder: EventBuilder,
-    ) -> Result<WriteIntent, GroupPublishError> {
-        let contextualized = nmp_nip29::contextualize(&self.ids, builder)?;
-        Ok(self.mint(
-            WritePayload::Event(contextualized),
-            Identity::Explicit(author),
-        ))
-    }
-
-    /// [`Self::intent`] handed straight to the one publish door.
+    /// A draft that already carries an `h` row is refused whichever value it
+    /// holds, because that row belongs to the retained scope and not to the
+    /// caller.
+    ///
+    /// Returns the ordinary [`ReceiptStream`] every other write returns,
+    /// store-issued [`ReceiptId`](crate::ReceiptId) included.
     pub fn publish(
         &self,
         engine: &Engine,
         author: PublicKey,
         builder: EventBuilder,
     ) -> Result<ReceiptStream, GroupPublishError> {
+        let contextualized = nmp_nip29::contextualize(&self.ids, builder)?;
+        let intent = self.mint(
+            WritePayload::Event(contextualized),
+            Identity::Explicit(author),
+        );
         engine
-            .publish_tracked(self.intent(author, builder)?)
+            .publish_tracked(intent)
             .map_err(GroupPublishError::Engine)
     }
 
-    /// The one shape a group write has, and the ONLY place a group
-    /// [`WriteIntent`] is assembled -- [`Group`](super::Group)'s doors mint
-    /// through this one too, which is what makes "one group is the
-    /// one-element case" a property of the code. `Explicit(every host)` comes
-    /// from the scope the app named once; the `h` rows carry GROUP IDS, never
-    /// relays, so the hosts are not derivable from the event and no resolver
-    /// could compute them.
-    pub(super) fn mint(&self, payload: WritePayload, identity: Identity) -> WriteIntent {
+    /// The one shape a group write has. `Explicit(every host)` comes from the
+    /// scope the app named once: no caller supplies it and no engine derives
+    /// it. The `h` rows carry GROUP IDS, never relays, so the hosts are not
+    /// derivable from the event and no resolver could ever compute them.
+    ///
+    /// Private, and the intent never leaves this function: a
+    /// [`WriteIntent`] carries no derives at all -- not `Clone`, not `Debug`,
+    /// not `Serialize` -- so an app holding one could not persist it across a
+    /// restart, batch it, or inspect it. Handing one out would buy nothing
+    /// and would be a second write lifecycle to keep honest.
+    fn mint(&self, payload: WritePayload, identity: Identity) -> WriteIntent {
         WriteIntent {
             payload,
             routing: WriteRouting::Explicit(self.hosts.iter().cloned().collect()),
@@ -186,106 +204,10 @@ mod tests {
             .expect("a nonempty group set")
     }
 
-    fn routed(intent: &WriteIntent) -> Vec<RelayUrl> {
-        match &intent.routing {
-            WriteRouting::Explicit(relays) => relays.clone(),
-            WriteRouting::Auto => panic!("a group write is never Auto"),
-        }
-    }
-
-    fn context_rows(intent: &WriteIntent) -> Vec<String> {
-        match &intent.payload {
-            WritePayload::Event(builder) => builder
-                .tags
-                .iter()
-                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
-                .map(|tag| tag.as_slice()[1].clone())
-                .collect(),
-            _ => panic!("an unsigned draft must mint an Event payload"),
-        }
-    }
-
-    /// THE #1281 falsifier: one minted intent, one addressable coordinate,
-    /// and one `h` row per room -- from a door, with the app naming neither
-    /// a relay nor an `h` row. Before this the app hand-built the
-    /// `WriteIntent` because no door would mint it.
-    #[test]
-    fn one_intent_carries_every_group_and_the_apps_own_coordinate() {
-        let intent = rooms()
-            .intent(
-                author(),
-                nmp_grammar::EventBuilder::new(Kind::from(30315u16))
-                    .tag(Tag::parse(["d", "status"]).unwrap()),
-            )
-            .expect("a plain draft contextualizes for several groups");
-        assert_eq!(
-            context_rows(&intent),
-            vec!["darkroom".to_string(), "photographers".to_string()],
-            "one h row per room, so the one replaceable event renders in both"
-        );
-        assert_eq!(
-            routed(&intent),
-            vec![host(1), host(2)],
-            "the route is the scope's whole host set, chosen by the door"
-        );
-        assert_eq!(intent.correlation, None);
-    }
-
-    /// The whole reason a multi-`h` write is the only correct shape: two
-    /// separate one-room writes share `(author, d)` and so replace each
-    /// other. Proven by construction -- the two single-room intents carry
-    /// the IDENTICAL addressable coordinate, so a relay applying NIP-01
-    /// replacement keeps one of them.
-    #[test]
-    fn publishing_once_per_room_would_share_one_replaceable_coordinate() {
-        let scope = nip29::on([host(1)]).expect("a nonempty scope");
-        let me = author();
-        let draft = || {
-            nmp_grammar::EventBuilder::new(Kind::from(30315u16))
-                .tag(Tag::parse(["d", "status"]).unwrap())
-        };
-        let first = scope
-            .group("darkroom")
-            .intent(me, draft())
-            .expect("a plain draft contextualizes");
-        let second = scope
-            .group("photographers")
-            .intent(me, draft())
-            .expect("a plain draft contextualizes");
-        let coordinate = |intent: &WriteIntent| match (&intent.payload, &intent.identity) {
-            (WritePayload::Event(builder), Identity::Explicit(author)) => (
-                builder.kind,
-                *author,
-                builder
-                    .tags
-                    .iter()
-                    .find(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
-                    .map(|tag| tag.as_slice()[1].clone()),
-            ),
-            _ => panic!("an unsigned draft must mint an Event payload"),
-        };
-        assert_eq!(
-            coordinate(&first),
-            coordinate(&second),
-            "NOTHING TO OBSERVE unless the two per-room copies really do collide"
-        );
-
-        let together = scope
-            .groups(["darkroom", "photographers"])
-            .expect("a nonempty group set")
-            .intent(me, draft())
-            .expect("a plain draft contextualizes");
-        assert_eq!(
-            context_rows(&together),
-            vec!["darkroom".to_string(), "photographers".to_string()],
-            "the multi-h write is the only spelling that survives the collision"
-        );
-    }
-
-    /// A write into no group is refused where the value is FORMED, so no
-    /// `Groups` exists on that path at all -- the invalid state is
-    /// unconstructible rather than validated later, exactly as an empty
-    /// relay set is.
+    /// A write context over no group is refused where the value is FORMED, so
+    /// no `Groups` exists on that path at all -- the invalid state is
+    /// unconstructible rather than validated later, exactly as an empty relay
+    /// set is.
     #[test]
     fn a_write_context_over_no_group_is_never_formed() {
         let empty: [&str; 0] = [];
@@ -299,8 +221,7 @@ mod tests {
     }
 
     /// Duplicates collapse and order is the id order, so two apps naming the
-    /// same rooms differently hold the SAME value and compose the same
-    /// bytes.
+    /// same rooms differently hold the SAME value and compose the same bytes.
     #[test]
     fn duplicate_and_unsorted_ids_canonicalize_to_one_set() {
         let scope = nip29::on([host(1)]).expect("a nonempty scope");
@@ -310,15 +231,17 @@ mod tests {
         );
     }
 
-    /// A caller-supplied `h` is refused at this arity too, and it is refused
-    /// BEFORE any intent exists -- where a caller error belongs. Named
-    /// distinctly from `Group`'s own one-group proof so a governed
-    /// `nmp:evidence` locator resolves to exactly one executable test.
+    /// The `h` row belongs to the retained scope at this arity too, and the
+    /// refusal happens BEFORE anything is signed, routed or accepted -- no
+    /// receipt stream is returned at all, which is what "the write never
+    /// reached the door" means.
     #[test]
-    fn a_caller_supplied_context_is_refused_before_any_several_group_intent_exists() {
+    fn a_caller_supplied_context_is_refused_before_any_several_group_write_is_accepted() {
+        let engine = engine();
         assert_eq!(
             rooms()
-                .intent(
+                .publish(
+                    &engine,
                     author(),
                     nmp_grammar::EventBuilder::new(Kind::from(30315u16))
                         .tag(Tag::parse(["h", "darkroom"]).unwrap()),
@@ -328,49 +251,116 @@ mod tests {
                 GroupContextError::CallerSuppliedContext
             ))
         );
-    }
-
-    /// A multi-group write is an ordinary tracked write through the ONE
-    /// publish door -- no second lifecycle, and reattachable by the app's own
-    /// correlation token like every other.
-    #[test]
-    fn a_multi_group_write_is_an_ordinary_tracked_write() {
-        let engine = engine();
-        let token = "multi-group-write-0001";
-        let mut intent = rooms()
-            .intent(
-                author(),
-                nmp_grammar::EventBuilder::new(Kind::from(30315u16)),
-            )
-            .expect("a plain draft contextualizes");
-        intent.correlation = Some(
-            nmp_grammar::CorrelationToken::try_from(token).expect("a short token is well-formed"),
-        );
-        let receipt = engine
-            .publish_tracked(intent)
-            .expect("the one publish door accepts a multi-group intent");
-        match engine
-            .reattach_by_correlation(token.to_string())
-            .expect("the token lookup door answers")
-        {
-            crate::ReceiptReattachment::Attached { id, .. } => assert_eq!(id, receipt.id),
-            _ => panic!("a correlated multi-group write must be reattachable by its own token"),
-        }
         engine.shutdown();
     }
 
-    /// The inline spelling reaches the same one publish door.
+    /// A several-group write is an ORDINARY tracked write: it reaches the one
+    /// publish door and comes back with the store-issued receipt id every
+    /// other write returns. There is no group-shaped receipt and no second
+    /// write lifecycle.
     #[test]
-    fn the_inline_door_reaches_the_one_publish_door() {
+    fn a_several_group_write_is_an_ordinary_tracked_write() {
         let engine = engine();
-        let receipts = rooms()
+        let receipt = rooms()
             .publish(
                 &engine,
                 author(),
-                nmp_grammar::EventBuilder::new(Kind::from(30315u16)),
+                nmp_grammar::EventBuilder::new(Kind::from(30315u16))
+                    .tag(Tag::parse(["d", "status"]).unwrap()),
             )
-            .expect("the publish door accepts a multi-group write");
-        drop(receipts);
+            .expect("the publish door accepts a several-group write");
+        let queued = engine.publish_queue().expect("the queue reads back");
+        assert!(
+            queued.iter().any(|entry| entry.receipt_id == receipt.id),
+            "the id a several-group publication returns must name a real queue entry"
+        );
         engine.shutdown();
+    }
+
+    /// The app never holds a `WriteIntent`, so the door's own composition is
+    /// proved where it is decided: the contextualizer this door calls, over
+    /// the exact retained set, is what puts one `h` row per room inside the
+    /// signed bytes. `nmp-nip29`'s
+    /// `a_draft_for_several_groups_carries_one_h_row_per_group` pins the row
+    /// list; this pins that THIS door composes with the whole retained set
+    /// and not a subset of it.
+    #[test]
+    fn the_door_contextualizes_with_the_whole_retained_set() {
+        let rooms = rooms();
+        let composed = nmp_nip29::contextualize(
+            &rooms.ids,
+            nmp_grammar::EventBuilder::new(Kind::from(30315u16))
+                .tag(Tag::parse(["d", "status"]).unwrap()),
+        )
+        .expect("a plain draft contextualizes for several groups");
+        assert_eq!(
+            composed
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+                .map(|tag| tag.as_slice()[1].clone())
+                .collect::<Vec<String>>(),
+            vec!["darkroom".to_string(), "photographers".to_string()],
+            "one h row per room, so the one replaceable event renders in both"
+        );
+        assert_eq!(
+            composed.tags[0].as_slice(),
+            &["d".to_string(), "status".to_string()],
+            "the app's own addressable coordinate survives ahead of the appended rows"
+        );
+    }
+
+    /// THE reason a multi-`h` write is the only correct shape, proved by
+    /// construction rather than asserted: two per-room copies of the same
+    /// status share one addressable coordinate `(kind, author, d)`, so a
+    /// relay applying NIP-01 replacement keeps exactly one of them. If this
+    /// ever observes two DIFFERENT coordinates there was nothing to fix.
+    #[test]
+    fn publishing_once_per_room_would_share_one_replaceable_coordinate() {
+        let me = author();
+        let draft = || {
+            nmp_grammar::EventBuilder::new(Kind::from(30315u16))
+                .tag(Tag::parse(["d", "status"]).unwrap())
+        };
+        let coordinate = |group_id: &str| {
+            let composed =
+                nmp_nip29::contextualize(&BTreeSet::from([group_id.to_string()]), draft())
+                    .expect("a plain draft contextualizes");
+            (
+                composed.kind,
+                me,
+                composed
+                    .tags
+                    .iter()
+                    .find(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+                    .map(|tag| tag.as_slice()[1].clone()),
+            )
+        };
+        assert_eq!(
+            coordinate("darkroom"),
+            coordinate("photographers"),
+            "NOTHING TO OBSERVE unless the two per-room copies really do collide"
+        );
+    }
+
+    /// The route is the scope's whole host set, minted by the door: the write
+    /// reaches every host the app named once and no other.
+    #[test]
+    fn a_several_group_write_routes_to_every_host_in_the_scope() {
+        let hosts = BTreeSet::from([host(1), host(2)]);
+        let rooms = Groups::new(hosts.clone(), BTreeSet::from(["darkroom".to_string()]))
+            .expect("a nonempty group set");
+        match rooms
+            .mint(
+                WritePayload::Event(nmp_grammar::EventBuilder::new(Kind::from(9u16))),
+                Identity::Explicit(author()),
+            )
+            .routing
+        {
+            WriteRouting::Explicit(relays) => {
+                assert_eq!(relays, vec![host(1), host(2)]);
+            }
+            WriteRouting::Auto => panic!("a group write is never Auto"),
+        }
     }
 }
