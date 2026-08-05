@@ -454,7 +454,7 @@ fn verify_publications(context: &Context, scope: &nip29::RelayScope) -> Result<(
             EventBuilder::new(Kind::from(9u16)).content("NMP consumer published chat"),
         )
         .map_err(display)?;
-    let chat_statuses = wait_for_write(&chat, context.settle, |statuses| {
+    let chat_statuses = wait_for_write(&chat.statuses, context.settle, |statuses| {
         acked(statuses, &context.relay_a) && acked(statuses, &context.relay_b)
     })?;
     println!("PROOF publish kind=9 outcomes={chat_statuses:?}");
@@ -468,7 +468,7 @@ fn verify_publications(context: &Context, scope: &nip29::RelayScope) -> Result<(
                 .content("NMP consumer published long-form event"),
         )
         .map_err(display)?;
-    let article_statuses = wait_for_write(&article, context.settle, |statuses| {
+    let article_statuses = wait_for_write(&article.statuses, context.settle, |statuses| {
         acked(statuses, &context.relay_a) && acked(statuses, &context.relay_b)
     })?;
     println!("PROOF publish kind=30023 outcomes={article_statuses:?}");
@@ -481,7 +481,7 @@ fn verify_publications(context: &Context, scope: &nip29::RelayScope) -> Result<(
             EventBuilder::new(Kind::from(9u16)).content("NMP mixed-outcome publication"),
         )
         .map_err(display)?;
-    let mixed_statuses = wait_for_write(&mixed, context.settle, |statuses| {
+    let mixed_statuses = wait_for_write(&mixed.statuses, context.settle, |statuses| {
         acked(statuses, &context.relay_a)
             && statuses.iter().any(
                 |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if relay == &context.relay_b),

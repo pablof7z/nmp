@@ -66,7 +66,7 @@ func waitForRows(
 }
 
 func waitForStatuses(
-    _ stream: NMPGroupWriteFacts,
+    _ stream: ReceiptStatus,
     seconds: UInt64,
     predicate: @escaping @Sendable ([WriteFact]) -> Bool
 ) async throws -> [WriteFact] {

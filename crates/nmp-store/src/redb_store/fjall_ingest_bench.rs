@@ -686,6 +686,7 @@ mod tests {
 
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
+    use super::super::schema::id_tombstone_key;
     use super::*;
 
     fn event(keys: &Keys, created_at: u64, kind: u16, tags: Vec<Tag>) -> Event {
@@ -778,10 +779,14 @@ mod tests {
 
         let read = database.read_tx();
         assert_eq!(read.len(&keyspaces.events).unwrap(), 1);
+        // Ask `schema` for the key rather than respelling it here: this
+        // assertion spent #1250 looking for the pre-fold `"{id}:{author}"` hex
+        // string, which no longer exists, and reported a missing tombstone the
+        // governed policy had in fact written.
         assert!(read
             .contains_key(
                 &keyspaces.tombstones,
-                format!("{}:{}", newer.id, newer.pubkey)
+                id_tombstone_key(&newer.id, &newer.pubkey)
             )
             .unwrap());
     }
