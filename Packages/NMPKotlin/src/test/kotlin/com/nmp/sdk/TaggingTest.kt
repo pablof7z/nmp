@@ -4,6 +4,7 @@ package com.nmp.sdk
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -83,9 +84,81 @@ class TaggingTest {
     fun withContentFillsADraftWithoutDisturbingItsRows() {
         val draft = chatReply(row(9u))
         val bare = event(draft)
-        val filled = event(draft.withContent("hello"))
+        val filled = event(draft.withContent(listOf(ContentPart.Text("hello"))))
         assertEquals("", bare.content)
         assertEquals("hello", filled.content)
         assertEquals(bare.tags, filled.tags)
+    }
+
+    /** #964's remaining half: a message that is NOT a reply. Until this door
+     * crossed the boundary an app stated `kind: 9` itself for every ordinary
+     * message it sent. */
+    @Test
+    fun chatIsKindNineAndCarriesNoRows() {
+        val composed = event(chat())
+        assertEquals(9u.toUShort(), composed.kind)
+        assertTrue(composed.tags.isEmpty(), "a chat states no policy rows")
+        assertEquals("", composed.content)
+        assertEquals(null, composed.createdAt, "a schema-only composer invents no timestamp")
+    }
+
+    /** The whole point of the door: the `nostr:npub...` a reader sees and the
+     * `p` row that notifies the person come out of ONE statement, so an app can
+     * no longer append `["p", hex]` by hand and hope it matches the token it
+     * separately put in the content. */
+    @Test
+    fun namingAPersonWritesTheTokenAndThePRowTogether() {
+        val alice = "b".repeat(64)
+        val composed = event(
+            chat().withContent(
+                listOf(
+                    ContentPart.Text("hey "),
+                    ContentPart.Person(alice, null),
+                    ContentPart.Text(", look"),
+                ),
+            ),
+        )
+        assertTrue(
+            composed.content.startsWith("hey nostr:npub1"),
+            "bech32 is rendered at the user boundary: ${composed.content}",
+        )
+        assertTrue(composed.content.endsWith(", look"))
+        assertEquals(listOf(listOf("p", alice)), composed.tags)
+    }
+
+    /** A stated relay reaches BOTH halves, because both come from the same
+     * part: the rendered pointer becomes an `nprofile` carrying the relay and
+     * the `p` row's hint cell carries the same value. */
+    @Test
+    fun aStatedRelayReachesTheTokenAndTheRowTogether() {
+        val alice = "b".repeat(64)
+        val composed = event(
+            chat().withContent(listOf(ContentPart.Person(alice, "wss://relay.example"))),
+        )
+        assertTrue(composed.content.startsWith("nostr:nprofile1"), composed.content)
+        assertEquals(listOf(listOf("p", alice, "wss://relay.example")), composed.tags)
+    }
+
+    /** An event named inline is a QUOTE, never a thread reply, and its hint
+     * comes from where NMP actually saw it -- the row's own verified sources. */
+    @Test
+    fun quotingAnEventRendersItAndEmitsItsQRow() {
+        val quoted = row(9u, sources = listOf("wss://chat.example.com"))
+        val composed = event(
+            chat().withContent(listOf(ContentPart.Text("look: "), ContentPart.Quote(quoted))),
+        )
+        assertTrue(composed.content.startsWith("look: nostr:nevent1"), composed.content)
+        assertEquals(
+            listOf(listOf("q", quoted.id, "wss://chat.example.com", quoted.pubkey)),
+            composed.tags,
+        )
+    }
+
+    /** A malformed key is a typed refusal; nothing partial escapes. */
+    @Test
+    fun aMalformedNamedKeyRefuses() {
+        assertFailsWith<NMPError.InvalidPublicKey> {
+            chat().withContent(listOf(ContentPart.Person("not-a-key", null)))
+        }
     }
 }

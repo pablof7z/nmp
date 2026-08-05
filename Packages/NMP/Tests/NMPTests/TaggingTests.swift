@@ -82,12 +82,85 @@ final class TaggingTests: XCTestCase {
     func testWithContentFillsADraftWithoutDisturbingItsRows() throws {
         let draft = try chatReply(to: row(kind: 9))
         guard case .event(_, let tags, let empty, _) = draft,
-            case .event(_, let sameTags, let content, _) = draft.withContent("hello")
+            case .event(_, let sameTags, let content, _) = try draft.withContent([.text("hello")])
         else {
             return XCTFail("a chat reply composes an ordinary builder payload")
         }
         XCTAssertEqual(empty, "")
         XCTAssertEqual(content, "hello")
         XCTAssertEqual(tags, sameTags)
+    }
+
+    /// #964's remaining half: a message that is NOT a reply. Until this door
+    /// crossed the boundary an app stated `kind: 9` itself for every ordinary
+    /// message it sent.
+    func testChatIsKindNineAndCarriesNoRows() throws {
+        guard case .event(let kind, let tags, let content, let createdAt) = chat() else {
+            return XCTFail("a chat composes an ordinary builder payload")
+        }
+        XCTAssertEqual(kind, 9)
+        XCTAssertTrue(tags.isEmpty, "a chat states no policy rows")
+        XCTAssertEqual(content, "")
+        XCTAssertNil(createdAt, "a schema-only composer invents no timestamp")
+    }
+
+    /// The whole point of the door: the `nostr:npub…` a reader sees and the
+    /// `p` row that notifies the person come out of ONE statement, so an app
+    /// can no longer append `["p", hex]` by hand and hope it matches the token
+    /// it separately put in the content.
+    func testNamingAPersonWritesTheTokenAndThePRowTogether() throws {
+        let alice = String(repeating: "b", count: 64)
+        guard
+            case .event(_, let tags, let content, _) = try chat().withContent([
+                .text("hey "), .person(pubkey: alice, relay: nil), .text(", look"),
+            ])
+        else {
+            return XCTFail("a named person composes an ordinary builder payload")
+        }
+        XCTAssertTrue(
+            content.hasPrefix("hey nostr:npub1"),
+            "bech32 is rendered at the user boundary: \(content)")
+        XCTAssertTrue(content.hasSuffix(", look"))
+        XCTAssertEqual(tags, [["p", alice]])
+    }
+
+    /// A stated relay reaches BOTH halves, because both come from the same
+    /// part: the rendered pointer becomes an `nprofile` carrying the relay and
+    /// the `p` row's hint cell carries the same value.
+    func testAStatedRelayReachesTheTokenAndTheRowTogether() throws {
+        let alice = String(repeating: "b", count: 64)
+        guard
+            case .event(_, let tags, let content, _) = try chat().withContent([
+                .person(pubkey: alice, relay: "wss://relay.example")
+            ])
+        else {
+            return XCTFail("a named person composes an ordinary builder payload")
+        }
+        XCTAssertTrue(content.hasPrefix("nostr:nprofile1"), content)
+        XCTAssertEqual(tags, [["p", alice, "wss://relay.example"]])
+    }
+
+    /// An event named inline is a QUOTE, never a thread reply, and its hint
+    /// comes from where NMP actually saw it -- the row's own verified sources.
+    func testQuotingAnEventRendersItAndEmitsItsQRow() throws {
+        let quoted = row(kind: 9, sources: ["wss://chat.example.com"])
+        guard
+            case .event(_, let tags, let content, _) = try chat().withContent([
+                .text("look: "), .quote(quoted),
+            ])
+        else {
+            return XCTFail("a quote composes an ordinary builder payload")
+        }
+        XCTAssertTrue(content.hasPrefix("look: nostr:nevent1"), content)
+        XCTAssertEqual(tags, [["q", quoted.id, "wss://chat.example.com", quoted.pubkey]])
+    }
+
+    /// A malformed key is a typed refusal; nothing partial escapes.
+    func testAMalformedNamedKeyRefuses() throws {
+        XCTAssertThrowsError(try chat().withContent([.person(pubkey: "not-a-key", relay: nil)])) {
+            guard case NMPError.invalidPublicKey = $0 else {
+                return XCTFail("expected a typed key refusal, got \($0)")
+            }
+        }
     }
 }

@@ -25,9 +25,16 @@ use nostr::Kind;
 
 pub const CHAT_KIND: u16 = 9;
 
-/// Compose a kind:9 chat with no policy-added tags.
-pub fn compose_chat(content: String) -> EventBuilder {
-    EventBuilder::new(Kind::from(CHAT_KIND)).content(content)
+/// Compose a top-level kind:9 chat with no policy-added tags.
+///
+/// It states no content, exactly as [`chat_reply`] states none. What a
+/// message SAYS belongs to `EventBuilder::content`, which is also where the
+/// rows an inline mention or quote needs come from; taking a `String` here
+/// meant a caller with either in the body passed an empty one and then
+/// restated the content anyway, which is what the composer's own quote test
+/// was doing (#964).
+pub fn chat() -> EventBuilder {
+    EventBuilder::new(Kind::from(CHAT_KIND))
 }
 
 /// Compose a kind:9 reply to `target`.
@@ -49,13 +56,9 @@ pub fn chat_reply(target: &impl RootScope) -> EventBuilder {
 mod tests {
     use super::*;
     use nmp_grammar::{text, Modifiers};
-    use nostr::{EventBuilder as NostrBuilder, Keys, PublicKey, RelayUrl, Tag, Timestamp};
+    use nostr::{EventBuilder as NostrBuilder, Keys, RelayUrl, Tag, Timestamp};
 
-    fn author() -> PublicKey {
-        Keys::generate().public_key()
-    }
-
-    fn chat(tags: Vec<Tag>) -> nostr::Event {
+    fn observed(tags: Vec<Tag>) -> nostr::Event {
         NostrBuilder::new(Kind::from(CHAT_KIND), "parent")
             .tags(tags)
             .custom_created_at(Timestamp::from(1_700_000_000))
@@ -73,7 +76,7 @@ mod tests {
 
     #[test]
     fn chat_is_kind_9_without_group_or_notification_policy() {
-        let event = compose_chat("hello".to_string());
+        let event = chat().content("hello");
         assert_eq!(event.kind, Kind::from(CHAT_KIND));
         assert_eq!(event.content, "hello");
         assert!(event.tags.is_empty());
@@ -90,7 +93,7 @@ mod tests {
     /// group context (`h`) and of `previous`, which are not C7's to add.
     #[test]
     fn chat_reply_points_with_e_and_never_q_or_h_or_previous_rows() {
-        let parent = chat(vec![]);
+        let parent = observed(vec![]);
         let event = chat_reply(&parent);
 
         assert_eq!(event.kind, Kind::from(CHAT_KIND));
@@ -117,7 +120,7 @@ mod tests {
     #[test]
     fn a_chat_reply_carries_the_hint_the_author_slot_and_the_p_row() {
         let relay = RelayUrl::parse("wss://chat.example.com").unwrap();
-        let parent = chat(vec![]);
+        let parent = observed(vec![]);
         let event = chat_reply(&parent.from_relay(relay.clone()));
 
         let emitted = rows(&event);
@@ -139,9 +142,8 @@ mod tests {
     /// composer got wrong.
     #[test]
     fn a_quote_and_its_row_still_come_from_one_statement() {
-        let quoted = chat(vec![]);
-        let _ = author();
-        let event = compose_chat(String::new()).content(text!("look: {}", &quoted));
+        let quoted = observed(vec![]);
+        let event = chat().content(text!("look: {}", &quoted));
         assert!(event.content.contains("nostr:nevent1"));
         let emitted = rows(&event);
         assert_eq!(emitted[0][0], "q");
