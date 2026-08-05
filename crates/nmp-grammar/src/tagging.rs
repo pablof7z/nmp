@@ -266,13 +266,15 @@ impl ThreadPosition {
                 .and_then(|row| cell(row, 1))
                 .map(String::from),
             author: find(&rows, "P").and_then(|row| pubkey_at(row, 1)),
-            kind: find(&rows, "K").and_then(|row| cell(row, 1)).map(String::from),
+            kind: find(&rows, "K")
+                .and_then(|row| cell(row, 1))
+                .map(String::from),
             relay: find(&rows, "E")
                 .or_else(|| find(&rows, "A"))
                 .and_then(|row| relay_at(row, 2)),
         };
         let parent = find(&rows, "e")
-            .and_then(|row| pointer_from_e_row(row))
+            .and_then(pointer_from_e_row)
             .filter(|parent| parent.event_id != root.event_id);
         Some(Self {
             root: Some(root),
@@ -419,6 +421,12 @@ pub trait Modifiers: RootScope + Sized {
         }
     }
     /// See [`TagOptions::from_relay`].
+    ///
+    /// `from_relay` names where the HINT comes from, not a conversion of a
+    /// relay into something else, so clippy's `from_*`-is-a-constructor
+    /// convention does not apply and the ruled modifier vocabulary keeps its
+    /// spelling.
+    #[allow(clippy::wrong_self_convention)]
     fn from_relay(&self, relay: RelayUrl) -> Tagged<'_, Self> {
         Tagged {
             target: self,
@@ -539,7 +547,7 @@ fn rows_of(event: &Event) -> Vec<&[String]> {
     event.tags.iter().map(|tag| tag.as_slice()).collect()
 }
 
-fn cell<'a>(row: &'a [String], index: usize) -> Option<&'a str> {
+fn cell(row: &[String], index: usize) -> Option<&str> {
     row.get(index).map(String::as_str).filter(|s| !s.is_empty())
 }
 
@@ -586,7 +594,7 @@ fn carried_pubkeys(event: &Event, options: &TagOptions) -> Vec<PublicKey> {
     let mut seen = BTreeSet::new();
     let mut carried = Vec::new();
     for row in rows_of(event) {
-        if cell(&row, 0) != Some("p") {
+        if cell(row, 0) != Some("p") {
             continue;
         }
         // A NIP-29 roster row (`["p", <hex>, <role>]`) puts a ROLE where a
@@ -801,10 +809,7 @@ fn marked_e_row(pointer: &Pointer, marker: &str) -> Tag {
         .author
         .map(|author| author.to_hex())
         .unwrap_or_default();
-    let id = pointer
-        .event_id
-        .map(|id| id.to_hex())
-        .unwrap_or_default();
+    let id = pointer.event_id.map(|id| id.to_hex()).unwrap_or_default();
     row(["e", &id, &relay, marker, &author])
 }
 
@@ -999,7 +1004,11 @@ mod tests {
     #[test]
     fn every_pointer_emits_its_author_row_unless_declined() {
         let article = signed(30023, vec![Tag::parse(["d", "my-article"]).unwrap()]);
-        let with_author = rows(&crate::EventBuilder::new(Kind::from(1111)).tag(&article).tags);
+        let with_author = rows(
+            &crate::EventBuilder::new(Kind::from(1111))
+                .tag(&article)
+                .tags,
+        );
         assert!(
             with_author
                 .iter()

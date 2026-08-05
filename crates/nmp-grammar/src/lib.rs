@@ -41,8 +41,8 @@ pub use live_query::{LiveQuery, LiveQueryError};
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};
 pub use selector::{IdentityField, Selector};
 pub use tagging::{
-    entity_rows, event_parent_rows, event_root_rows, reply_to, Modifiers, Pointer, RootScope, TagOptions,
-    TagRows, Tagged, ThreadPosition, COMMENT_KIND, TEXT_NOTE_KIND,
+    entity_rows, event_parent_rows, event_root_rows, reply_to, Modifiers, Pointer, RootScope,
+    TagOptions, TagRows, Tagged, ThreadPosition, COMMENT_KIND, TEXT_NOTE_KIND,
 };
 pub use text::{At, InterpolatedContent, Mention};
 pub use write::{

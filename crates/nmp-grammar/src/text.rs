@@ -98,9 +98,7 @@ impl Mention for &nostr::PublicKey {
 /// threads"*. Naming one in content therefore never threads it.
 impl Mention for Event {
     fn render(&self) -> String {
-        let pointer = Nip19Event::new(self.id)
-            .author(self.pubkey)
-            .kind(self.kind);
+        let pointer = Nip19Event::new(self.id).author(self.pubkey).kind(self.kind);
         format!(
             "nostr:{}",
             pointer
@@ -110,8 +108,10 @@ impl Mention for Event {
     }
 
     fn rows(&self) -> Vec<Tag> {
-        vec![Tag::parse(["q", &self.id.to_hex(), "", &self.pubkey.to_hex()])
-            .expect("non-empty q row")]
+        vec![
+            Tag::parse(["q", &self.id.to_hex(), "", &self.pubkey.to_hex()])
+                .expect("non-empty q row"),
+        ]
     }
 }
 
@@ -141,9 +141,7 @@ impl Mention for At<nostr::PublicKey> {
     }
 
     fn rows(&self) -> Vec<Tag> {
-        vec![
-            Tag::parse(["p", &self.0.to_hex(), &self.1.to_string()]).expect("non-empty p row"),
-        ]
+        vec![Tag::parse(["p", &self.0.to_hex(), &self.1.to_string()]).expect("non-empty p row")]
     }
 }
 
@@ -231,8 +229,11 @@ mod tests {
     fn an_inline_reference_and_its_row_come_from_one_statement() {
         let alice = Keys::generate().public_key();
         let quoted = note();
-        let built = EventBuilder::new(Kind::from(1u16))
-            .content(text!("hey {}, check this out: {}", alice, &quoted));
+        let built = EventBuilder::new(Kind::from(1u16)).content(text!(
+            "hey {}, check this out: {}",
+            alice,
+            &quoted
+        ));
 
         assert!(
             built.content.contains("nostr:npub1"),

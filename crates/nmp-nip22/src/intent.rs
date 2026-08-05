@@ -162,7 +162,9 @@ mod tests {
             author: None,
         };
         let built = compose_comment(&root, "hi".to_string());
-        assert!(!rows(&built).iter().any(|row| row[0] == "p" || row[0] == "P"));
+        assert!(!rows(&built)
+            .iter()
+            .any(|row| row[0] == "p" || row[0] == "P"));
     }
 
     /// The schema is a pure function of its inputs. Note what is NOT

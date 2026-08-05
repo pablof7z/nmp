@@ -96,7 +96,9 @@ mod tests {
         assert_eq!(event.kind, Kind::from(CHAT_KIND));
         let emitted = rows(&event);
         assert!(
-            emitted.iter().any(|row| row[0] == "e" && row[1] == parent.id.to_hex()),
+            emitted
+                .iter()
+                .any(|row| row[0] == "e" && row[1] == parent.id.to_hex()),
             "a reply points with e: {emitted:?}"
         );
         for row in &emitted {

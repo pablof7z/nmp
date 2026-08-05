@@ -67,6 +67,12 @@ pub enum FfiCommentTarget {
 }
 
 /// A comment's direct parent (`nmp::nip22::CommentParent` mirror).
+///
+/// DECODE-ONLY since #1243. It used to be half of a composition input, and
+/// that was the defect: a caller who states the parent separately from the
+/// root can state a pair that never existed together on the wire. Composing
+/// now names ONE target ([`FfiCommentTarget`]) and reads the parent from it,
+/// so there is no from-FFI direction left to write.
 #[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
 pub enum FfiCommentParent {
     Root,
@@ -254,20 +260,6 @@ fn root_to_ffi(root: &nmp::nip22::CommentRoot) -> FfiCommentRoot {
     }
 }
 
-fn parent_from_ffi(parent: FfiCommentParent) -> Result<nmp::nip22::CommentParent, FfiError> {
-    Ok(match parent {
-        FfiCommentParent::Root => nmp::nip22::CommentParent::Root,
-        FfiCommentParent::Comment {
-            event_id,
-            author_pubkey,
-        } => nmp::nip22::CommentParent::Comment {
-            event_id: EventId::from_hex(&event_id)
-                .map_err(|_| FfiError::InvalidEventId { got: event_id })?,
-            author: author_pubkey.as_deref().map(parse_pubkey).transpose()?,
-        },
-    })
-}
-
 fn parent_to_ffi(parent: &nmp::nip22::CommentParent) -> FfiCommentParent {
     match parent {
         nmp::nip22::CommentParent::Root => FfiCommentParent::Root,
@@ -343,11 +335,9 @@ pub fn comment_intent(
         FfiCommentTarget::Root { root } => {
             nmp::nip22::comment_intent(&root_from_ffi(root)?, content, correlation)
         }
-        FfiCommentTarget::Row { row } => nmp::nip22::comment_intent(
-            &crate::tagging::row_from_ffi(row)?,
-            content,
-            correlation,
-        ),
+        FfiCommentTarget::Row { row } => {
+            nmp::nip22::comment_intent(&crate::tagging::row_from_ffi(row)?, content, correlation)
+        }
     };
 
     // NIP-22 owns this complete shape, and the FFI layer projects the

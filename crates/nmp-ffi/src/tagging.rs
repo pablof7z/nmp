@@ -139,7 +139,10 @@ mod tests {
         assert_eq!(e_row[3], parent_author, "the author slot is filled");
         assert!(built.tags.iter().all(|row| row[0] != "q"));
         assert!(
-            built.tags.iter().any(|row| row[0] == "p" && row[1] == parent_author),
+            built
+                .tags
+                .iter()
+                .any(|row| row[0] == "p" && row[1] == parent_author),
             "the companion p row crosses too"
         );
     }
@@ -152,7 +155,12 @@ mod tests {
         let root_id = nostr::EventId::from_slice(&[4; 32]).unwrap().to_hex();
         let target = row(
             1,
-            vec![vec!["e".into(), root_id.clone(), String::new(), "root".into()]],
+            vec![vec![
+                "e".into(),
+                root_id.clone(),
+                String::new(),
+                "root".into(),
+            ]],
             &["wss://relay.example"],
         );
         let target_id = target.id.clone();
@@ -173,7 +181,12 @@ mod tests {
         let root_id = nostr::EventId::from_slice(&[5; 32]).unwrap().to_hex();
         let reply = row(
             1,
-            vec![vec!["e".into(), root_id.clone(), String::new(), "root".into()]],
+            vec![vec![
+                "e".into(),
+                root_id.clone(),
+                String::new(),
+                "root".into(),
+            ]],
             &["wss://relay.example"],
         );
         let reply_id = reply.id.clone();
