@@ -18,7 +18,7 @@ use nostr::{Event, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use super::ingest::insert_with_tables;
-use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap, GovernedStringMap};
+use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap};
 use super::query::{
     author_cardinality_key, by_author_key, by_kind_key, created_at_key, global_cardinality_key,
     kind_cardinality_key, tag_cardinality_key, tag_index_key,
@@ -72,7 +72,6 @@ struct FjallKeyspaces {
     meta: SingleWriterTxKeyspace,
     addr_index: SingleWriterTxKeyspace,
     tombstones: SingleWriterTxKeyspace,
-    addr_tombstones: SingleWriterTxKeyspace,
     expiration: SingleWriterTxKeyspace,
     by_created_at: SingleWriterTxKeyspace,
     by_author: SingleWriterTxKeyspace,
@@ -103,7 +102,6 @@ impl FjallKeyspaces {
             meta: open("governed_meta")?,
             addr_index: open("governed_addr_index")?,
             tombstones: open("governed_tombstones")?,
-            addr_tombstones: open("governed_addr_tombstones")?,
             expiration: open("governed_expiration")?,
             by_created_at: open("governed_by_created_at")?,
             by_author: open("governed_by_author")?,
@@ -117,13 +115,6 @@ impl FjallKeyspaces {
             publish_queue_suppress_by_id: open("governed_publish_queue_suppress_by_id")?,
             publish_queue_suppress_by_addr: open("governed_publish_queue_suppress_by_addr")?,
         })
-    }
-
-    fn string_map(&self, map: GovernedStringMap) -> &SingleWriterTxKeyspace {
-        match map {
-            GovernedStringMap::Tombstones => &self.tombstones,
-            GovernedStringMap::AddrTombstones => &self.addr_tombstones,
-        }
     }
 
     fn publish_queue_map(&self, map: GovernedPublishQueueMap) -> &SingleWriterTxKeyspace {
@@ -448,28 +439,15 @@ impl GovernedIngestTxn for FjallIngestTxn<'_, '_> {
         Ok(())
     }
 
-    fn string_get(
-        &self,
-        map: GovernedStringMap,
-        key: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        self.get(self.keyspaces.string_map(map), key)?
-            .map(|value| {
-                String::from_utf8(value.to_vec()).map_err(|error| {
-                    PersistenceError::invariant(format!("decode Fjall string: {error}"))
-                })
-            })
-            .transpose()
+    fn tombstone_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PersistenceError> {
+        Ok(self
+            .get(&self.keyspaces.tombstones, key)?
+            .map(|value| value.to_vec()))
     }
 
-    fn string_put(
-        &mut self,
-        map: GovernedStringMap,
-        key: &str,
-        value: &str,
-    ) -> Result<(), PersistenceError> {
+    fn tombstone_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), PersistenceError> {
         self.transaction
-            .insert(self.keyspaces.string_map(map), key, value);
+            .insert(&self.keyspaces.tombstones, key, value);
         Ok(())
     }
 

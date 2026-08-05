@@ -19,7 +19,6 @@ pub struct Snapshot {
     pub encode_event_ns: u64,
     pub encoded_event_bytes: u64,
     pub canonical_insert_ns: u64,
-    pub index_insert_ns: u64,
     pub memory_insert_ns: u64,
     pub memory_event_build_ns: u64,
     pub memory_expiration_index_ns: u64,
@@ -47,7 +46,6 @@ counters!(
     ENCODE_EVENT_NS,
     ENCODED_EVENT_BYTES,
     CANONICAL_INSERT_NS,
-    INDEX_INSERT_NS,
     MEMORY_INSERT_NS,
     MEMORY_EVENT_BUILD_NS,
     MEMORY_EXPIRATION_INDEX_NS,
@@ -80,7 +78,6 @@ pub fn reset() {
         &ENCODE_EVENT_NS,
         &ENCODED_EVENT_BYTES,
         &CANONICAL_INSERT_NS,
-        &INDEX_INSERT_NS,
         &MEMORY_INSERT_NS,
         &MEMORY_EVENT_BUILD_NS,
         &MEMORY_EXPIRATION_INDEX_NS,
@@ -109,7 +106,6 @@ pub fn snapshot() -> Snapshot {
         encode_event_ns: load(&ENCODE_EVENT_NS),
         encoded_event_bytes: load(&ENCODED_EVENT_BYTES),
         canonical_insert_ns: load(&CANONICAL_INSERT_NS),
-        index_insert_ns: load(&INDEX_INSERT_NS),
         memory_insert_ns: load(&MEMORY_INSERT_NS),
         memory_event_build_ns: load(&MEMORY_EVENT_BUILD_NS),
         memory_expiration_index_ns: load(&MEMORY_EXPIRATION_INDEX_NS),
@@ -155,9 +151,6 @@ pub(crate) fn encode_event(duration: Duration, bytes: usize) {
 }
 pub(crate) fn canonical_insert(duration: Duration) {
     add(&CANONICAL_INSERT_NS, duration);
-}
-pub(crate) fn index_insert(duration: Duration) {
-    add(&INDEX_INSERT_NS, duration);
 }
 
 pub(crate) fn memory_insert(duration: Duration) {

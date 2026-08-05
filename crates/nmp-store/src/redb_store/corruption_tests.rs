@@ -28,6 +28,9 @@ use redb::ReadableDatabase;
 use tempfile::TempDir;
 
 use super::postings::Family;
+use super::postings_store::{
+    catalog_column_bounds, catalog_key, CATALOG_BY_MIN, CATALOG_DICTIONARY, CATALOG_RUN_META,
+};
 use super::*;
 use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, IntentSigState, PersistenceFault};
 
@@ -133,6 +136,57 @@ fn str_table_digest(
     fixture: &Fixture,
     table: TableDefinition<&str, &str>,
 ) -> Vec<(String, String)> {
+    let db = fixture.raw();
+    let read_txn = db.begin_read().expect("raw begin_read");
+    let open = read_txn.open_table(table).expect("raw open_table");
+    open.iter()
+        .expect("raw iter")
+        .map(|entry| {
+            let (key, value) = entry.expect("raw entry");
+            (key.value().to_owned(), value.value().to_owned())
+        })
+        .collect()
+}
+
+fn rewrite_bytes_row(
+    fixture: &Fixture,
+    table: TableDefinition<&[u8], &[u8]>,
+    key: &[u8],
+    value: &[u8],
+) {
+    let db = fixture.raw();
+    let write_txn = db.begin_write().expect("raw begin_write");
+    {
+        let mut open = write_txn.open_table(table).expect("raw open_table");
+        open.insert(key, value).expect("raw insert");
+    }
+    write_txn.commit().expect("raw commit");
+}
+
+/// The first key of a `&[u8]`-keyed table under `prefix`. `tombstones` is one
+/// key space with a leading discriminant, so a corruption falsifier names the
+/// column it damages rather than "whatever sorts first".
+fn first_bytes_key(
+    fixture: &Fixture,
+    table: TableDefinition<&[u8], &[u8]>,
+    prefix: &[u8],
+) -> Vec<u8> {
+    let db = fixture.raw();
+    let read_txn = db.begin_read().expect("raw begin_read");
+    let open = read_txn.open_table(table).expect("raw open_table");
+    open.iter()
+        .expect("raw iter")
+        .map(|entry| entry.expect("raw entry").0.value().to_owned())
+        .find(|key| key.starts_with(prefix))
+        .expect("table has at least one row under the prefix")
+}
+
+/// A stable digest of one `&[u8]`-keyed table, used to prove a refused
+/// mutation left the durable bytes untouched.
+fn bytes_table_digest(
+    fixture: &Fixture,
+    table: TableDefinition<&[u8], &[u8]>,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
     let db = fixture.raw();
     let read_txn = db.begin_read().expect("raw begin_read");
     let open = read_txn.open_table(table).expect("raw open_table");
@@ -541,9 +595,9 @@ fn insert_reports_a_corrupt_address_tombstone() {
             .expect("insert addressable");
         store.insert(deletion, observed()).expect("insert deletion");
     }
-    let key = first_str_key(&fixture, ADDR_TOMBSTONES);
-    rewrite_str_row(&fixture, ADDR_TOMBSTONES, &key, "{ not a tombstone");
-    let before = str_table_digest(&fixture, ADDR_TOMBSTONES);
+    let key = first_bytes_key(&fixture, TOMBSTONES, &[TOMBSTONE_ADDR]);
+    rewrite_bytes_row(&fixture, TOMBSTONES, &key, b"{ not a tombstone");
+    let before = bytes_table_digest(&fixture, TOMBSTONES);
 
     let later = EventBuilder::new(Kind::Metadata, "later")
         .custom_created_at(Timestamp::from(3_000))
@@ -554,7 +608,7 @@ fn insert_reports_a_corrupt_address_tombstone() {
         assert_typed_refusal("insert", || store.insert(later, observed()));
     }
     assert_eq!(
-        str_table_digest(&fixture, ADDR_TOMBSTONES),
+        bytes_table_digest(&fixture, TOMBSTONES),
         before,
         "a refused ingest commits nothing"
     );
@@ -633,7 +687,10 @@ fn query_reports_a_corrupt_canonical_event() {
         {
             let mut events = write_txn.open_table(EVENTS).expect("raw open events");
             events
-                .insert(event_key, b"NMPE-truncated".as_slice())
+                .insert(
+                    event_row_key(event_key).as_slice(),
+                    b"NMPE-truncated".as_slice(),
+                )
                 .expect("raw insert");
         }
         write_txn.commit().expect("raw commit");
@@ -660,11 +717,15 @@ fn packed_run_ids(fixture: &Fixture) -> Vec<u64> {
     let db = fixture.raw();
     let read_txn = db.begin_read().expect("raw begin_read");
     let open = read_txn
-        .open_table(POSTINGS_RUN_META)
-        .expect("raw open run meta");
-    open.iter()
-        .expect("raw iter")
-        .map(|entry| entry.expect("raw entry").0.value())
+        .open_table(POSTINGS_CATALOG)
+        .expect("raw open run catalog");
+    let (lower, upper) = catalog_column_bounds(CATALOG_RUN_META);
+    open.range(lower.as_slice()..=upper.as_slice())
+        .expect("raw range")
+        .map(|entry| {
+            let key = entry.expect("raw entry").0.value().to_vec();
+            u64::from_be_bytes(key[1..].try_into().expect("run id is eight bytes"))
+        })
         .collect()
 }
 
@@ -702,9 +763,9 @@ fn read_packed_bytes(fixture: &Fixture, run_id: u64, dictionary: bool) -> Vec<u8
     let read_txn = db.begin_read().expect("raw begin_read");
     if dictionary {
         let open = read_txn
-            .open_table(POSTINGS_DICTIONARIES)
-            .expect("raw open dictionaries");
-        open.get(run_id)
+            .open_table(POSTINGS_CATALOG)
+            .expect("raw open run catalog");
+        open.get(catalog_key(CATALOG_DICTIONARY, run_id).as_slice())
             .expect("raw get")
             .expect("run has a dictionary")
             .value()
@@ -727,9 +788,10 @@ fn write_packed_bytes(fixture: &Fixture, run_id: u64, dictionary: bool, bytes: &
     {
         if dictionary {
             let mut open = write_txn
-                .open_table(POSTINGS_DICTIONARIES)
-                .expect("raw open dictionaries");
-            open.insert(run_id, bytes).expect("raw insert");
+                .open_table(POSTINGS_CATALOG)
+                .expect("raw open run catalog");
+            open.insert(catalog_key(CATALOG_DICTIONARY, run_id).as_slice(), bytes)
+                .expect("raw insert");
         } else {
             let mut open = write_txn
                 .open_table(POSTINGS_SEGMENTS)
@@ -832,15 +894,16 @@ fn packed_scan_reports_a_disagreeing_run_range_index() {
         let write_txn = db.begin_write().expect("raw begin_write");
         {
             let mut open = write_txn
-                .open_table(POSTINGS_RUN_BY_MIN)
-                .expect("raw open run by min");
-            let existing: Vec<u64> = open
-                .iter()
-                .expect("raw iter")
-                .map(|entry| entry.expect("raw entry").0.value())
+                .open_table(POSTINGS_CATALOG)
+                .expect("raw open run catalog");
+            let (lower, upper) = catalog_column_bounds(CATALOG_BY_MIN);
+            let existing: Vec<Vec<u8>> = open
+                .range(lower.as_slice()..=upper.as_slice())
+                .expect("raw range")
+                .map(|entry| entry.expect("raw entry").0.value().to_vec())
                 .collect();
-            for min_event_key in existing {
-                open.insert(min_event_key, run_id + 9_999)
+            for key in existing {
+                open.insert(key.as_slice(), (run_id + 9_999).to_be_bytes().as_slice())
                     .expect("raw insert");
             }
         }
@@ -858,7 +921,7 @@ fn set_next_run_id(fixture: &Fixture, value: Option<u64>) {
     let write_txn = db.begin_write().expect("raw begin_write");
     {
         let mut open = write_txn
-            .open_table(POSTINGS_META)
+            .open_table(STORE_META)
             .expect("raw open postings meta");
         match value {
             Some(value) => {

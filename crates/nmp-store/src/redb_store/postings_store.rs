@@ -9,7 +9,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::sync::Arc;
 
-use redb::{ReadableTable, ReadableTableMetadata};
+use redb::ReadableTable;
+#[cfg(test)]
+use redb::ReadableTableMetadata;
 
 use super::postings::validate_run_metas;
 use super::postings::{
@@ -21,8 +23,7 @@ use super::query::tag_index_prefix;
 #[cfg(test)]
 use super::schema::POSTINGS_READY;
 use super::schema::{
-    persist_err, EventKey, POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META,
-    POSTINGS_NEXT_RUN_ID, POSTINGS_RUN_BY_MIN, POSTINGS_RUN_META, POSTINGS_SEGMENTS,
+    persist_err, EventKey, POSTINGS_CATALOG, POSTINGS_NEXT_RUN_ID, POSTINGS_SEGMENTS, STORE_META,
 };
 use super::{Event, EventCursor, EventId, PersistenceError};
 
@@ -44,23 +45,14 @@ pub(super) fn assert_packed_integrity(
     read_txn: &redb::ReadTransaction,
     canonical: &BTreeMap<EventKey, Event>,
 ) {
-    let run_meta = read_txn
-        .open_table(POSTINGS_RUN_META)
-        .expect("audit packed run metadata");
-    let dictionaries = read_txn
-        .open_table(POSTINGS_DICTIONARIES)
-        .expect("audit packed dictionaries");
+    let catalog = read_txn
+        .open_table(POSTINGS_CATALOG)
+        .expect("audit packed run catalog");
     let segments = read_txn
         .open_table(POSTINGS_SEGMENTS)
         .expect("audit packed segments");
-    let deaths = read_txn
-        .open_table(POSTINGS_DEAD_KEYS)
-        .expect("audit packed deaths");
-    let by_min = read_txn
-        .open_table(POSTINGS_RUN_BY_MIN)
-        .expect("audit packed run ranges");
     let meta = read_txn
-        .open_table(POSTINGS_META)
+        .open_table(STORE_META)
         .expect("audit packed metadata");
     assert_eq!(
         meta.get(POSTINGS_READY)
@@ -70,39 +62,30 @@ pub(super) fn assert_packed_integrity(
         1
     );
 
-    let metas: Vec<_> = run_meta
-        .iter()
-        .expect("iterate packed runs")
-        .map(|row| {
-            let (run_id, value) = row.expect("read packed run");
-            let decoded = RunMeta::decode(value.value()).expect("decode packed run metadata");
-            assert_eq!(run_id.value(), decoded.run_id);
-            decoded
-        })
-        .collect();
+    let metas = catalog_run_metas(&catalog).expect("read packed run catalog");
     validate_run_metas(&metas).expect("packed run ranges are valid");
     assert_eq!(
-        by_min.len().expect("count packed run ranges"),
+        catalog_column_len(&catalog, CATALOG_BY_MIN).expect("count packed run ranges"),
         metas.len() as u64
     );
     assert_eq!(
-        dictionaries.len().expect("count packed dictionaries"),
+        catalog_column_len(&catalog, CATALOG_DICTIONARY).expect("count packed dictionaries"),
         metas.len() as u64
     );
 
     let mut actual = Vec::new();
     let mut seen_segments = 0u64;
     for run in &metas {
+        let range_entry = catalog
+            .get(catalog_key(CATALOG_BY_MIN, run.min_event_key).as_slice())
+            .expect("audit packed run range")
+            .expect("packed run range exists");
         assert_eq!(
-            by_min
-                .get(run.min_event_key)
-                .expect("audit packed run range")
-                .expect("packed run range exists")
-                .value(),
+            decode_run_id(range_entry.value()).expect("decode packed run range"),
             run.run_id
         );
-        let dictionary_bytes = dictionaries
-            .get(run.run_id)
+        let dictionary_bytes = catalog
+            .get(catalog_key(CATALOG_DICTIONARY, run.run_id).as_slice())
             .expect("audit packed dictionary")
             .expect("packed dictionary exists");
         let dictionary = DictionaryView::parse(dictionary_bytes.value())
@@ -111,7 +94,7 @@ pub(super) fn assert_packed_integrity(
         let mut blocks = Vec::new();
         for level in 0..MAX_DEATH_BLOCKS {
             let key = death_key(run.run_id, level);
-            if let Some(value) = deaths.get(key.as_slice()).expect("audit death block") {
+            if let Some(value) = catalog.get(key.as_slice()).expect("audit death block") {
                 blocks.push(DeadKeys::decode(value.value()).expect("decode death block"));
             }
         }
@@ -305,33 +288,22 @@ pub(super) fn scan_packed<T>(
     if scan.limit == Some(0) {
         return Ok(Vec::new());
     }
-    let run_meta = read_txn
-        .open_table(POSTINGS_RUN_META)
-        .map_err(persist_err)?;
-    let by_min = read_txn
-        .open_table(POSTINGS_RUN_BY_MIN)
-        .map_err(persist_err)?;
-    let dictionaries = read_txn
-        .open_table(POSTINGS_DICTIONARIES)
-        .map_err(persist_err)?;
+    let catalog = read_txn.open_table(POSTINGS_CATALOG).map_err(persist_err)?;
     let segments = read_txn
         .open_table(POSTINGS_SEGMENTS)
-        .map_err(persist_err)?;
-    let deaths = read_txn
-        .open_table(POSTINGS_DEAD_KEYS)
         .map_err(persist_err)?;
     let shards: BTreeSet<_> = scan
         .prefixes
         .iter()
         .map(|prefix| shard_for(scan.family, prefix))
         .collect();
-    // #790: the bounded run catalog and its `POSTINGS_RUN_BY_MIN` mirror are
-    // validated as one relationship before a single prefix directory is
-    // consulted. A wrong-id, duplicate-range, or orphan catalog entry is not
-    // a run this scan may quietly skip.
-    let catalog = load_run_catalog(&run_meta, &by_min)?;
+    // #790: the bounded run catalog and its range-index column are validated
+    // as one relationship before a single prefix directory is consulted. A
+    // wrong-id, duplicate-range, or orphan catalog entry is not a run this
+    // scan may quietly skip.
+    let runs = load_run_catalog(&catalog)?;
     let mut loaded = Vec::new();
-    for meta in &catalog {
+    for meta in &runs {
         let mut candidates = Vec::new();
         for &shard in &shards {
             let key = segment_key(scan.family, shard, meta.run_id);
@@ -342,8 +314,8 @@ pub(super) fn scan_packed<T>(
         if candidates.is_empty() {
             continue;
         }
-        let dictionary = dictionaries
-            .get(meta.run_id)
+        let dictionary = catalog
+            .get(catalog_key(CATALOG_DICTIONARY, meta.run_id).as_slice())
             .map_err(persist_err)?
             .ok_or_else(|| packed_err(format!("run {} has no dictionary", meta.run_id)))?;
         // Validate the dictionary once and every candidate segment against
@@ -374,7 +346,7 @@ pub(super) fn scan_packed<T>(
         let mut blocks = Vec::new();
         for level in 0..MAX_DEATH_BLOCKS {
             let key = death_key(meta.run_id, level);
-            if let Some(value) = deaths.get(key.as_slice()).map_err(persist_err)? {
+            if let Some(value) = catalog.get(key.as_slice()).map_err(persist_err)? {
                 blocks.push(DeadKeys::decode(value.value()).map_err(packed_err)?);
             }
         }
@@ -447,35 +419,27 @@ fn packed_err(error: impl std::fmt::Display) -> PersistenceError {
 /// before anything acts on it (#790).
 ///
 /// Three separate facts, none of which any individual row can carry: each
-/// `POSTINGS_RUN_META` value decodes and agrees with its own key; the runs
-/// have unique ids and non-overlapping event-key ranges
-/// ([`validate_run_metas`]); and `POSTINGS_RUN_BY_MIN` is an exact bijection
-/// with them — no missing entry, no duplicate range, no wrong id, no orphan.
-/// Bounded by the live run count, which levelled compaction keeps small.
+/// run-metadata value decodes and agrees with its own key; the runs have
+/// unique ids and non-overlapping event-key ranges ([`validate_run_metas`]);
+/// and the range-index column is an exact bijection with them — no missing
+/// entry, no duplicate range, no wrong id, no orphan. Bounded by the live run
+/// count, which levelled compaction keeps small.
 fn load_run_catalog(
-    run_meta: &impl ReadableTable<u64, &'static [u8]>,
-    by_min: &impl ReadableTable<u64, u64>,
+    catalog: &impl ReadableTable<&'static [u8], &'static [u8]>,
 ) -> Result<Vec<RunMeta>, PersistenceError> {
-    let mut metas = Vec::new();
-    for row in run_meta.iter().map_err(persist_err)? {
-        let (run_id, value) = row.map_err(persist_err)?;
-        let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
-        if meta.run_id != run_id.value() {
-            return Err(packed_err("run metadata key disagrees with its value"));
-        }
-        metas.push(meta);
-    }
+    let metas = catalog_run_metas(catalog)?;
     validate_run_metas(&metas).map_err(packed_err)?;
-    if by_min.len().map_err(persist_err)? != metas.len() as u64 {
+    if catalog_column_len(catalog, CATALOG_BY_MIN)? != metas.len() as u64 {
         return Err(packed_err(
             "packed run-range index does not match the run catalog",
         ));
     }
     for meta in &metas {
-        let mapped = by_min
-            .get(meta.min_event_key)
+        let mapped = catalog
+            .get(catalog_key(CATALOG_BY_MIN, meta.min_event_key).as_slice())
             .map_err(persist_err)?
-            .map(|guard| guard.value())
+            .map(|guard| decode_run_id(guard.value()))
+            .transpose()?
             .ok_or_else(|| packed_err(format!("run {} has no run-range entry", meta.run_id)))?;
         if mapped != meta.run_id {
             return Err(packed_err(format!(
@@ -505,36 +469,30 @@ fn load_run_catalog(
 /// - `u64::MAX` stays typed exhaustion — never wrap, never reuse.
 fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, PersistenceError> {
     let highest_live = {
-        let run_meta = write_txn
-            .open_table(POSTINGS_RUN_META)
+        let catalog = write_txn
+            .open_table(POSTINGS_CATALOG)
             .map_err(persist_err)?;
-        let by_min = write_txn
-            .open_table(POSTINGS_RUN_BY_MIN)
-            .map_err(persist_err)?;
-        let catalog = load_run_catalog(&run_meta, &by_min)?;
-        let dictionaries = write_txn
-            .open_table(POSTINGS_DICTIONARIES)
-            .map_err(persist_err)?;
+        let runs = load_run_catalog(&catalog)?;
         // One dictionary per live run, and no dictionary that outlives its
         // run: an orphan here is a run id the allocator could hand out again
         // while its bytes are still on disk.
-        if dictionaries.len().map_err(persist_err)? != catalog.len() as u64 {
+        if catalog_column_len(&catalog, CATALOG_DICTIONARY)? != runs.len() as u64 {
             return Err(packed_err(
                 "packed dictionaries do not match the run catalog",
             ));
         }
-        for meta in &catalog {
-            if dictionaries
-                .get(meta.run_id)
+        for meta in &runs {
+            if catalog
+                .get(catalog_key(CATALOG_DICTIONARY, meta.run_id).as_slice())
                 .map_err(persist_err)?
                 .is_none()
             {
                 return Err(packed_err(format!("run {} has no dictionary", meta.run_id)));
             }
         }
-        catalog.iter().map(|meta| meta.run_id).max()
+        runs.iter().map(|meta| meta.run_id).max()
     };
-    let mut meta = write_txn.open_table(POSTINGS_META).map_err(persist_err)?;
+    let mut meta = write_txn.open_table(STORE_META).map_err(persist_err)?;
     let stored = meta
         .get(POSTINGS_NEXT_RUN_ID)
         .map_err(persist_err)?
@@ -661,11 +619,80 @@ fn segment_key(family: Family, shard: u8, run_id: u64) -> [u8; 10] {
     key
 }
 
-fn death_key(run_id: u64, level: usize) -> [u8; 9] {
+/// Columns of [`POSTINGS_CATALOG`]. The discriminant leads the key, so each
+/// column is contiguous and prefix-scannable exactly as its own tree was.
+pub(super) const CATALOG_RUN_META: u8 = 0;
+pub(super) const CATALOG_DICTIONARY: u8 = 1;
+pub(super) const CATALOG_BY_MIN: u8 = 2;
+pub(super) const CATALOG_DEATHS: u8 = 3;
+
+pub(super) fn catalog_key(column: u8, id: u64) -> [u8; 9] {
     let mut key = [0u8; 9];
-    key[..8].copy_from_slice(&run_id.to_be_bytes());
-    key[8] = level as u8;
+    key[0] = column;
+    key[1..].copy_from_slice(&id.to_be_bytes());
     key
+}
+
+/// The inclusive bounds of one whole `u64`-keyed catalog column.
+pub(super) fn catalog_column_bounds(column: u8) -> ([u8; 9], [u8; 9]) {
+    (catalog_key(column, 0), catalog_key(column, u64::MAX))
+}
+
+fn death_key(run_id: u64, level: usize) -> [u8; 10] {
+    let mut key = [0u8; 10];
+    key[..9].copy_from_slice(&catalog_key(CATALOG_DEATHS, run_id));
+    key[9] = level as u8;
+    key
+}
+
+/// Read one catalog column's `u64` payload — the range index's only value
+/// shape.
+fn decode_run_id(value: &[u8]) -> Result<u64, PersistenceError> {
+    let bytes: [u8; 8] = value
+        .try_into()
+        .map_err(|_| packed_err("packed run-range entry is not eight bytes"))?;
+    Ok(u64::from_be_bytes(bytes))
+}
+
+/// Every live [`RunMeta`], in run-id order, without the relational checks
+/// [`load_run_catalog`] adds.
+fn catalog_run_metas(
+    catalog: &impl ReadableTable<&'static [u8], &'static [u8]>,
+) -> Result<Vec<RunMeta>, PersistenceError> {
+    let (lower, upper) = catalog_column_bounds(CATALOG_RUN_META);
+    let mut metas = Vec::new();
+    for row in catalog
+        .range(lower.as_slice()..=upper.as_slice())
+        .map_err(persist_err)?
+    {
+        let (key, value) = row.map_err(persist_err)?;
+        let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
+        let run_id = decode_run_id(&key.value()[1..])?;
+        if meta.run_id != run_id {
+            return Err(packed_err("run metadata key disagrees with its value"));
+        }
+        metas.push(meta);
+    }
+    Ok(metas)
+}
+
+/// The number of rows in one `u64`-keyed catalog column. Replaces the O(1)
+/// `len()` the separate trees offered; the catalog is bounded by the live run
+/// count, which levelled compaction keeps small.
+fn catalog_column_len(
+    catalog: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    column: u8,
+) -> Result<u64, PersistenceError> {
+    let (lower, upper) = catalog_column_bounds(column);
+    let mut count = 0u64;
+    for row in catalog
+        .range(lower.as_slice()..=upper.as_slice())
+        .map_err(persist_err)?
+    {
+        row.map_err(persist_err)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn insert_run(
@@ -675,12 +702,17 @@ fn insert_run(
 ) -> Result<(), PersistenceError> {
     #[cfg(test)]
     crash_if_postings("postings-before-segments");
-    let mut dictionaries = write_txn
-        .open_table(POSTINGS_DICTIONARIES)
-        .map_err(persist_err)?;
-    dictionaries
-        .insert(meta.run_id, encoded.dictionary.as_slice())
-        .map_err(persist_err)?;
+    {
+        let mut catalog = write_txn
+            .open_table(POSTINGS_CATALOG)
+            .map_err(persist_err)?;
+        catalog
+            .insert(
+                catalog_key(CATALOG_DICTIONARY, meta.run_id).as_slice(),
+                encoded.dictionary.as_slice(),
+            )
+            .map_err(persist_err)?;
+    }
     let mut segments = write_txn
         .open_table(POSTINGS_SEGMENTS)
         .map_err(persist_err)?;
@@ -690,6 +722,7 @@ fn insert_run(
             .insert(key.as_slice(), value.as_slice())
             .map_err(persist_err)?;
     }
+    drop(segments);
     #[cfg(test)]
     crash_if_postings("postings-after-segments");
     insert_run_catalog(write_txn, meta)
@@ -702,18 +735,22 @@ fn insert_run_catalog(
     #[cfg(test)]
     crash_if_postings("postings-before-catalog");
     let encoded_meta = meta.encode().map_err(packed_err)?;
-    let mut run_meta = write_txn
-        .open_table(POSTINGS_RUN_META)
+    let mut catalog = write_txn
+        .open_table(POSTINGS_CATALOG)
         .map_err(persist_err)?;
-    run_meta
-        .insert(meta.run_id, encoded_meta.as_slice())
+    catalog
+        .insert(
+            catalog_key(CATALOG_RUN_META, meta.run_id).as_slice(),
+            encoded_meta.as_slice(),
+        )
         .map_err(persist_err)?;
-    let mut by_min = write_txn
-        .open_table(POSTINGS_RUN_BY_MIN)
+    catalog
+        .insert(
+            catalog_key(CATALOG_BY_MIN, meta.min_event_key).as_slice(),
+            meta.run_id.to_be_bytes().as_slice(),
+        )
         .map_err(persist_err)?;
-    by_min
-        .insert(meta.min_event_key, meta.run_id)
-        .map_err(persist_err)?;
+    drop(catalog);
     #[cfg(test)]
     crash_if_postings("postings-after-catalog");
     Ok(())
@@ -725,15 +762,17 @@ fn apply_deaths(
 ) -> Result<(), PersistenceError> {
     let mut by_run: BTreeMap<u64, Vec<EventKey>> = BTreeMap::new();
     {
-        let by_min = write_txn
-            .open_table(POSTINGS_RUN_BY_MIN)
+        let catalog = write_txn
+            .open_table(POSTINGS_CATALOG)
             .map_err(persist_err)?;
-        let run_meta = write_txn
-            .open_table(POSTINGS_RUN_META)
-            .map_err(persist_err)?;
+        // Lower-bounded at the range-index column's own start: an unbounded
+        // `..=k` would let `next_back()` walk off the front of this column
+        // and answer with a dictionary row.
+        let column_start = catalog_key(CATALOG_BY_MIN, 0);
         for &event_key in deaths {
-            let Some(candidate) = by_min
-                .range(..=event_key)
+            let upper = catalog_key(CATALOG_BY_MIN, event_key);
+            let Some(candidate) = catalog
+                .range(column_start.as_slice()..=upper.as_slice())
                 .map_err(persist_err)?
                 .next_back()
                 .transpose()
@@ -743,8 +782,11 @@ fn apply_deaths(
                 // artifacts are not query-authoritative before that flip.
                 continue;
             };
-            let run_id = candidate.1.value();
-            let Some(value) = run_meta.get(run_id).map_err(persist_err)? else {
+            let run_id = decode_run_id(candidate.1.value())?;
+            let Some(value) = catalog
+                .get(catalog_key(CATALOG_RUN_META, run_id).as_slice())
+                .map_err(persist_err)?
+            else {
                 return Err(packed_err(format!(
                     "run-range entry names run {run_id}, which has no metadata"
                 )));
@@ -766,23 +808,20 @@ fn apply_run_deaths(
     run_id: u64,
     keys: Vec<EventKey>,
 ) -> Result<(), PersistenceError> {
-    let mut run_meta = write_txn
-        .open_table(POSTINGS_RUN_META)
+    let mut catalog = write_txn
+        .open_table(POSTINGS_CATALOG)
         .map_err(persist_err)?;
-    let value = run_meta
-        .get(run_id)
+    let value = catalog
+        .get(catalog_key(CATALOG_RUN_META, run_id).as_slice())
         .map_err(persist_err)?
         .ok_or_else(|| packed_err("death target has no run metadata"))?;
     let mut meta = RunMeta::decode(value.value()).map_err(packed_err)?;
     drop(value);
 
-    let mut death_table = write_txn
-        .open_table(POSTINGS_DEAD_KEYS)
-        .map_err(persist_err)?;
     let mut existing = Vec::new();
     for level in 0..MAX_DEATH_BLOCKS {
         let key = death_key(run_id, level);
-        if let Some(value) = death_table.get(key.as_slice()).map_err(persist_err)? {
+        if let Some(value) = catalog.get(key.as_slice()).map_err(persist_err)? {
             existing.push(DeadKeys::decode(value.value()).map_err(packed_err)?);
         }
     }
@@ -806,21 +845,20 @@ fn apply_run_deaths(
     }
     meta.live_events -= fresh_count;
     if meta.live_events == 0 {
-        drop(death_table);
-        drop(run_meta);
+        drop(catalog);
         return delete_run(write_txn, meta);
     }
 
     let mut carry = DeadKeys::new(fresh).map_err(packed_err)?;
     for level in 0..MAX_DEATH_BLOCKS {
         let key = death_key(run_id, level);
-        let prior = death_table
+        let prior = catalog
             .get(key.as_slice())
             .map_err(persist_err)?
             .map(|value| DeadKeys::decode(value.value()).map_err(packed_err))
             .transpose()?;
         if let Some(prior) = prior {
-            death_table.remove(key.as_slice()).map_err(persist_err)?;
+            catalog.remove(key.as_slice()).map_err(persist_err)?;
             carry = merge_dead_blocks(&[prior, carry])
                 .map_err(packed_err)?
                 .expect("two nonempty death blocks");
@@ -828,12 +866,15 @@ fn apply_run_deaths(
             #[cfg(test)]
             crash_if_postings("postings-before-death");
             let encoded = carry.encode().map_err(packed_err)?;
-            death_table
+            catalog
                 .insert(key.as_slice(), encoded.as_slice())
                 .map_err(persist_err)?;
             let encoded_meta = meta.encode().map_err(packed_err)?;
-            run_meta
-                .insert(run_id, encoded_meta.as_slice())
+            catalog
+                .insert(
+                    catalog_key(CATALOG_RUN_META, run_id).as_slice(),
+                    encoded_meta.as_slice(),
+                )
                 .map_err(persist_err)?;
             #[cfg(test)]
             crash_if_postings("postings-after-death");
@@ -845,8 +886,7 @@ fn apply_run_deaths(
     let all_dead = merge_dead_blocks(&existing)
         .map_err(packed_err)?
         .expect("fresh deaths are nonempty");
-    drop(death_table);
-    drop(run_meta);
+    drop(catalog);
     rewrite_run_without_dead(write_txn, meta, &all_dead)
 }
 
@@ -858,14 +898,14 @@ fn stream_compaction_cohort(
     if cohort.len() != dead.len() {
         return Err(packed_err("compaction death-map count mismatch"));
     }
-    let dictionaries = write_txn
-        .open_table(POSTINGS_DICTIONARIES)
+    let catalog = write_txn
+        .open_table(POSTINGS_CATALOG)
         .map_err(persist_err)?;
     let mut dictionary_entries = Vec::new();
     let mut ordinal_maps = Vec::with_capacity(cohort.len());
     for (source, meta) in cohort.iter().enumerate() {
-        let dictionary_bytes = dictionaries
-            .get(meta.run_id)
+        let dictionary_bytes = catalog
+            .get(catalog_key(CATALOG_DICTIONARY, meta.run_id).as_slice())
             .map_err(persist_err)?
             .ok_or_else(|| packed_err("run has no dictionary"))?;
         let dictionary = DictionaryView::parse(dictionary_bytes.value())
@@ -910,19 +950,20 @@ fn stream_compaction_cohort(
     let live_events = dictionary_entries.len() as u64;
     let dictionary = encode_dictionary(&dictionary_entries).map_err(packed_err)?;
     drop(dictionary_entries);
-    drop(dictionaries);
+    drop(catalog);
     let run_id = allocate_run_id(write_txn)?;
     #[cfg(test)]
     crash_if_postings("postings-before-compaction-output");
-    let mut dictionaries = write_txn
-        .open_table(POSTINGS_DICTIONARIES)
+    let mut catalog = write_txn
+        .open_table(POSTINGS_CATALOG)
         .map_err(persist_err)?;
-    dictionaries
-        .insert(run_id, dictionary.as_slice())
+    let dictionary_key = catalog_key(CATALOG_DICTIONARY, run_id);
+    catalog
+        .insert(dictionary_key.as_slice(), dictionary.as_slice())
         .map_err(persist_err)?;
     drop(dictionary);
-    let output_dictionary_guard = dictionaries
-        .get(run_id)
+    let output_dictionary_guard = catalog
+        .get(dictionary_key.as_slice())
         .map_err(persist_err)?
         .ok_or_else(|| packed_err("new compacted run has no dictionary"))?;
     // Every source dictionary was validated above, source event-key ranges are
@@ -975,7 +1016,7 @@ fn stream_compaction_cohort(
     }
     drop(segments);
     drop(output_dictionary_guard);
-    drop(dictionaries);
+    drop(catalog);
     if postings == 0 {
         return Err(packed_err(
             "nonempty compaction dictionary produced no live segments",
@@ -990,13 +1031,13 @@ fn load_run_deaths(
     write_txn: &redb::WriteTransaction,
     run_id: u64,
 ) -> Result<Option<DeadKeys>, PersistenceError> {
-    let deaths = write_txn
-        .open_table(POSTINGS_DEAD_KEYS)
+    let catalog = write_txn
+        .open_table(POSTINGS_CATALOG)
         .map_err(persist_err)?;
     let mut blocks = Vec::new();
     for level in 0..MAX_DEATH_BLOCKS {
         let key = death_key(run_id, level);
-        if let Some(value) = deaths.get(key.as_slice()).map_err(persist_err)? {
+        if let Some(value) = catalog.get(key.as_slice()).map_err(persist_err)? {
             blocks.push(DeadKeys::decode(value.value()).map_err(packed_err)?);
         }
     }
@@ -1012,21 +1053,19 @@ fn compact_overfull_levels(write_txn: &redb::WriteTransaction) -> Result<(), Per
             } else {
                 LARGE_RUN_FAN_IN
             };
-            let run_meta = write_txn
-                .open_table(POSTINGS_RUN_META)
+            let catalog = write_txn
+                .open_table(POSTINGS_CATALOG)
                 .map_err(persist_err)?;
             let mut cohort = Vec::new();
             let mut has_higher_level = false;
-            for row in run_meta.iter().map_err(persist_err)? {
-                let (_run_id, value) = row.map_err(persist_err)?;
-                let meta = RunMeta::decode(value.value()).map_err(packed_err)?;
+            for meta in catalog_run_metas(&catalog)? {
                 if meta.level == level {
                     cohort.push(meta);
                 } else if meta.level > level {
                     has_higher_level = true;
                 }
             }
-            drop(run_meta);
+            drop(catalog);
             if cohort.len() < fan_in {
                 if has_higher_level {
                     level = level
@@ -1107,24 +1146,24 @@ fn delete_run(write_txn: &redb::WriteTransaction, meta: RunMeta) -> Result<(), P
             segments.remove(key.as_slice()).map_err(persist_err)?;
         }
     }
-    let mut dictionaries = write_txn
-        .open_table(POSTINGS_DICTIONARIES)
+    drop(segments);
+    // One range delete's worth of rows, all under the same catalog tree:
+    // dictionary, metadata, range-index entry and every death block.
+    let mut catalog = write_txn
+        .open_table(POSTINGS_CATALOG)
         .map_err(persist_err)?;
-    dictionaries.remove(meta.run_id).map_err(persist_err)?;
-    let mut run_meta = write_txn
-        .open_table(POSTINGS_RUN_META)
+    catalog
+        .remove(catalog_key(CATALOG_DICTIONARY, meta.run_id).as_slice())
         .map_err(persist_err)?;
-    run_meta.remove(meta.run_id).map_err(persist_err)?;
-    let mut by_min = write_txn
-        .open_table(POSTINGS_RUN_BY_MIN)
+    catalog
+        .remove(catalog_key(CATALOG_RUN_META, meta.run_id).as_slice())
         .map_err(persist_err)?;
-    by_min.remove(meta.min_event_key).map_err(persist_err)?;
-    let mut deaths = write_txn
-        .open_table(POSTINGS_DEAD_KEYS)
+    catalog
+        .remove(catalog_key(CATALOG_BY_MIN, meta.min_event_key).as_slice())
         .map_err(persist_err)?;
     for level in 0..MAX_DEATH_BLOCKS {
         let key = death_key(meta.run_id, level);
-        deaths.remove(key.as_slice()).map_err(persist_err)?;
+        catalog.remove(key.as_slice()).map_err(persist_err)?;
     }
     Ok(())
 }
