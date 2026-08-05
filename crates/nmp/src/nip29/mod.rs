@@ -66,7 +66,7 @@ pub use predicate::{
 pub use read::GroupReadError;
 pub use records::{
     GroupAvailability, GroupObservation, GroupObserveError, GroupSnapshot, GroupWaitError,
-    HostRecords, Listing,
+    HostRecords,
 };
 
 // What one relay-signed record SAYS is `nmp-nip29`'s, beside the schema it
@@ -246,13 +246,11 @@ impl RelayScope {
             return Err(GroupObserveError::NoRecordSelected);
         }
         let predicate = predicate.into();
-        let branches = self.records_branches(&predicate, &records, limit);
         records::observe(
             engine,
             self.hosts.clone(),
             BTreeSet::new(),
-            records,
-            branches,
+            self.records_branches(&predicate, &records, limit),
         )
     }
 
