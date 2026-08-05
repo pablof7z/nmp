@@ -29,7 +29,6 @@ use nmp_ffi::nip02::{
     FfiFollowActionStatus, FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot,
     NmpFollowActionStream, NmpFollowStream,
 };
-use nmp_ffi::nip22::{FfiCommentParent, FfiCommentRoot};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
     FfiDiagnosticsSnapshot, FfiFilter, FfiIdentity, FfiNotSentReason, FfiReceiptReattachment,
@@ -59,35 +58,42 @@ const SECRET_KEY: &str = "000000000000000000000000000000000000000000000000000000
 fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
     let root_author = Keys::generate().public_key();
     let root_event_id = nostr::EventId::from_slice(&[0x11; 32]).unwrap();
-    let parent_author = Keys::generate().public_key();
-    let parent_event_id = nostr::EventId::from_slice(&[0x22; 32]).unwrap();
+    let parent_keys = Keys::generate();
     let content = "closed NIP-22 parity".to_string();
     let correlation = "nip22-parity-correlation";
+    let relay = nostr::RelayUrl::parse("wss://parity.example").unwrap();
+
+    // The parent is a real comment event on an addressable root, so BOTH
+    // doors read the root scope off the same wire rows rather than either
+    // side restating it. That is the property #1243's fold buys: the caller
+    // cannot get the root wrong, on either surface.
+    let parent = nostr::EventBuilder::new(Kind::from(1111u16), "parent comment")
+        .tags([
+            nostr::Tag::parse([
+                "A".to_string(),
+                format!("30023:{}:entry", root_author.to_hex()),
+            ])
+            .unwrap(),
+            nostr::Tag::parse(["K".to_string(), "30023".to_string()]).unwrap(),
+            nostr::Tag::parse(["P".to_string(), root_author.to_hex()]).unwrap(),
+            nostr::Tag::parse(["E".to_string(), root_event_id.to_hex()]).unwrap(),
+        ])
+        .custom_created_at(nostr::Timestamp::from(1_700_000_000u64))
+        .sign_with_keys(&parent_keys)
+        .expect("parity fixture signs");
+    let row = nmp::Row {
+        event: parent.clone(),
+        sources: std::collections::BTreeSet::from([relay.clone()]),
+    };
 
     let direct = nmp_nip22::comment_intent(
-        &nmp_nip22::CommentRoot::Address {
-            author: root_author,
-            kind: 30_023,
-            identifier: "entry".to_string(),
-            event_id: Some(root_event_id),
-        },
-        nmp_nip22::CommentParent::Comment {
-            event_id: parent_event_id,
-            author: Some(parent_author),
-        },
+        &row,
         content.clone(),
         Some(CorrelationToken::try_from(correlation).unwrap()),
     );
     let ffi = nmp_ffi::nip22::comment_intent(
-        FfiCommentRoot::Address {
-            author_pubkey: root_author.to_hex(),
-            kind: 30_023,
-            identifier: "entry".to_string(),
-            event_id: Some(root_event_id.to_hex()),
-        },
-        FfiCommentParent::Comment {
-            event_id: parent_event_id.to_hex(),
-            author_pubkey: Some(parent_author.to_hex()),
+        nmp_ffi::nip22::FfiCommentTarget::Row {
+            row: nmp_ffi::convert::row_to_ffi_row(&row),
         },
         content,
         Some(correlation.to_string()),
@@ -117,17 +123,37 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
         "neither door may invent a timestamp; acceptance stamps it"
     );
 
+    // The addressable root revision stays pinned, the parent is the comment
+    // event itself, and every pointer row carries the verified hint and the
+    // author slot that the one door fills -- on both surfaces alike.
     let expected_tags = vec![
         vec![
             "A".to_string(),
             format!("30023:{}:entry", root_author.to_hex()),
+            relay.to_string(),
+            root_author.to_hex(),
+        ],
+        vec![
+            "E".to_string(),
+            root_event_id.to_hex(),
+            relay.to_string(),
+            root_author.to_hex(),
         ],
         vec!["K".to_string(), "30023".to_string()],
         vec!["P".to_string(), root_author.to_hex()],
-        vec!["E".to_string(), root_event_id.to_hex()],
-        vec!["e".to_string(), parent_event_id.to_hex()],
+        vec![
+            "e".to_string(),
+            parent.id.to_hex(),
+            relay.to_string(),
+            parent_keys.public_key().to_hex(),
+        ],
         vec!["k".to_string(), "1111".to_string()],
-        vec!["p".to_string(), parent_author.to_hex()],
+        // The `p` row carries NO hint even though the `e` row does, and that
+        // asymmetry is the honest one: an observed source is a verified fact
+        // about where THAT EVENT is, and says nothing about where to find its
+        // AUTHOR, which is an outbox fact. A caller who has resolved one
+        // states it with `from_relay`.
+        vec!["p".to_string(), parent_keys.public_key().to_hex()],
     ];
     assert_eq!(
         direct_builder
@@ -272,6 +298,16 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
             },
         ),
         (
+            // #1261: the two unsigned states are different facts, and the
+            // boundary must not fold either onto the other.
+            WriteFact::Signing(SigningState::InFlight { pubkey }),
+            FfiWriteFact::Signing {
+                state: FfiSigningState::InFlight {
+                    pubkey: pubkey.to_hex(),
+                },
+            },
+        ),
+        (
             WriteFact::Signing(SigningState::Refused {
                 reason: "signer said no".into(),
             }),
@@ -376,6 +412,10 @@ enum NormStatus {
     /// #47 Unit B: carries the parked pubkey (hex) so the direct/FFI
     /// parity proof covers the payload, not just the variant tag.
     AwaitingSigner(String),
+    /// #1261: a signer HAS the request. Carried separately from
+    /// `AwaitingSigner` because a boundary that folded the two would tell an
+    /// app every healthy write is parked on a key nobody has.
+    SigningInFlight(String),
     Signed(String),
     SigningRefused(String),
     /// Both routing axes: the relays named so far AND whether resolution can
@@ -814,6 +854,9 @@ fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
         WriteFact::Signing(SigningState::AwaitingSigner { pubkey }) => {
             NormStatus::AwaitingSigner(pubkey.to_hex())
         }
+        WriteFact::Signing(SigningState::InFlight { pubkey }) => {
+            NormStatus::SigningInFlight(pubkey.to_hex())
+        }
         WriteFact::Signing(SigningState::Signed { event_id }) => {
             NormStatus::Signed(event_id.to_hex())
         }
@@ -879,6 +922,9 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
         FfiWriteFact::Signing {
             state: FfiSigningState::AwaitingSigner { pubkey },
         } => NormStatus::AwaitingSigner(pubkey),
+        FfiWriteFact::Signing {
+            state: FfiSigningState::InFlight { pubkey },
+        } => NormStatus::SigningInFlight(pubkey),
         FfiWriteFact::Signing {
             state: FfiSigningState::Signed { event_id },
         } => NormStatus::Signed(event_id),
@@ -1662,6 +1708,7 @@ fn normalize_ffi_follow_snapshot(snapshot: FfiFollowSnapshot) -> NormFollowSnaps
 fn direct_follow_receipt_name(status: &WriteFact) -> &'static str {
     match status {
         WriteFact::Signing(SigningState::AwaitingSigner { .. }) => "awaiting_signer",
+        WriteFact::Signing(SigningState::InFlight { .. }) => "signing_in_flight",
         WriteFact::Signing(SigningState::Signed { .. }) => "signed",
         WriteFact::Signing(SigningState::Refused { .. }) => "signing_refused",
         // `complete` is the routing AXIS's own terminal, and it is the only
@@ -1702,6 +1749,9 @@ fn ffi_follow_receipt_name(status: &FfiWriteFact) -> &'static str {
         FfiWriteFact::Signing {
             state: FfiSigningState::AwaitingSigner { .. },
         } => "awaiting_signer",
+        FfiWriteFact::Signing {
+            state: FfiSigningState::InFlight { .. },
+        } => "signing_in_flight",
         FfiWriteFact::Signing {
             state: FfiSigningState::Signed { .. },
         } => "signed",

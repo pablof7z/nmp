@@ -281,6 +281,27 @@ pub use nmp_grammar::{
     WriteRouting,
 };
 
+// #1243: the one tagging door, as an APP uses it. `reply_to` is the general
+// reply verb, `text!` writes content whose inline references and rows come
+// from one statement, and `Modifiers` is the additive per-relationship
+// vocabulary an app spells on a target it is pointing at.
+pub use nmp_grammar::{
+    reply_to, text, At, InterpolatedContent, Mention, Modifiers, COMMENT_KIND, TEXT_NOTE_KIND,
+};
+// The implementor half of the same door. `RootScope` is the neutral seam a
+// PROTOCOL CRATE implements so an external content id can be a reply target
+// without `nmp-grammar` ever naming a NIP, and the rest is the support it
+// needs to do so. Every one of those crates depends on `nmp-grammar`
+// directly and takes these from there; they are re-exported here only so an
+// `nmp`-only consumer can still name the bound on `reply_to`. Doc-hidden for
+// the same reason the runtime FIFO family is: the documented product surface
+// is the two nouns plus the verbs an app calls, and a governed snapshot that
+// grows to carry implementor scaffolding stops describing that.
+#[doc(hidden)]
+pub use nmp_grammar::{
+    entity_rows, Pointer, RootScope, TagOptions, TagRows, Tagged, ThreadPosition,
+};
+
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,
 // or an app cannot even print what it read. The diagnostics snapshot family

@@ -618,6 +618,54 @@ pub struct Row {
     pub sources: BTreeSet<RelayUrl>,
 }
 
+impl Row {
+    /// The relay hint a reference row to this event carries.
+    ///
+    /// `sources` is **verified** provenance: NMP observed this exact event at
+    /// those relays, and since #1221 the set means "relays that hold it", not
+    /// "whatever delivered it first". That is the honest thing to put in a
+    /// hint slot that has, across the entire tree before #1243, been filled
+    /// exactly once.
+    ///
+    /// Which of several verified sources is the BEST hint is deliberately
+    /// still open (#1243's design record, "where relay hints come from"). The
+    /// better answer than either single fact is a relay present in both the
+    /// seen set and the author's declared NIP-65 outbox — welshman prefers
+    /// declared for staleness reasons, quartz tracks nothing and takes hints
+    /// from the caller, and NMP is unusual in holding both facts. That
+    /// computation needs NIP-65, which `nmp-grammar` cannot reach, so it
+    /// belongs at the publish door or in the app rather than folded in here.
+    /// Until it exists this is the first source in sorted order, which is
+    /// deterministic rather than arbitrary; an app that knows better states
+    /// its own with `from_relay`.
+    fn verified_hint(&self) -> Option<RelayUrl> {
+        self.sources.iter().next().cloned()
+    }
+}
+
+/// The canonical row is the ordinary reply/quote/reaction target, so it is
+/// what `EventBuilder::tag` is usually handed.
+///
+/// A `Row` adds exactly ONE thing to the bare signed event `nmp-grammar`
+/// already knows how to point at: the verified relay hint. Everything else —
+/// the thread-position reading, the letter, the author slot, the companion
+/// `p` row, the carried mentions and the dedup — is grammar's, delegated to
+/// rather than restated, so a `Row` and a bare `nostr::Event` can never drift
+/// into two dialects.
+impl nmp_grammar::RootScope for Row {
+    fn root_rows(&self, options: &nmp_grammar::TagOptions) -> Vec<nostr::Tag> {
+        nmp_grammar::event_root_rows(&self.event, self.verified_hint(), options)
+    }
+
+    fn parent_rows(&self, options: &nmp_grammar::TagOptions) -> Vec<nostr::Tag> {
+        nmp_grammar::event_parent_rows(&self.event, self.verified_hint(), options)
+    }
+
+    fn entity_kind(&self) -> Option<nostr::Kind> {
+        Some(self.event.kind)
+    }
+}
+
 /// A row-set delta (plan §7 non-goal: no ordering/windowing in M3 — raw
 /// deltas + coverage only). This is the standard reactive-query contract:
 /// `Effect::EmitRows` NEVER re-sends the query's full

@@ -15,16 +15,14 @@
 //! therefore no `engine` feature at all (unlike `nmp-nip29`, which needs
 //! one for its semantic kind:9 operation).
 
-mod build;
 mod decode;
 mod demand;
 mod intent;
 mod root;
 
-pub use build::{compose_comment_reply, compose_top_level_comment};
 pub use decode::{decode_comment, CommentDecodeError, DecodedComment};
 pub use demand::comment_thread_demand;
-pub use intent::comment_intent;
+pub use intent::{comment_intent, compose_comment};
 pub use root::{CommentParent, CommentRoot, COMMENT_KIND};
 // #1258: the external content ids moved to their own crate -- NIP-22 is
 // one consumer of them (NIP-25's kind:17 external reaction is another).

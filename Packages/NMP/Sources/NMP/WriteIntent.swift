@@ -232,7 +232,18 @@ public enum SigningState: Sendable, Hashable {
     /// **No clock ever ends this.** A device whose signer is simply not
     /// plugged in yet is not a device whose write failed; removing the queue
     /// entry is the only other exit.
+    ///
+    /// This is the state a person has to be told about, and `inFlight` is the
+    /// one it must never be confused with.
     case awaitingSigner(pubkey: String)
+    /// A signer for `pubkey` (64-char hex) HAS the request and has not
+    /// answered yet -- the ordinary state of every healthy write between
+    /// acceptance and signature promotion.
+    ///
+    /// Transient and normal: it ends when the signer answers (`signed` or
+    /// `refused`), or falls back to `awaitingSigner` if that signer becomes
+    /// unavailable. Nothing here is a reason to trouble a user.
+    case inFlight(pubkey: String)
     case signed(eventId: String)
     /// The signer answered and said no. Terminal for the whole write.
     case refused(reason: String)
@@ -240,6 +251,7 @@ public enum SigningState: Sendable, Hashable {
     init(_ ffi: FfiSigningState) {
         switch ffi {
         case .awaitingSigner(let pubkey): self = .awaitingSigner(pubkey: pubkey)
+        case .inFlight(let pubkey): self = .inFlight(pubkey: pubkey)
         case .signed(let eventId): self = .signed(eventId: eventId)
         case .refused(let reason): self = .refused(reason: reason)
         }

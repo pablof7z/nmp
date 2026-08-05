@@ -10,3 +10,9 @@ publish.workspace = true
 # `Url` variant's constructor MUST drop the fragment and normalise the
 # scheme/host/default port, which is parsing, not string surgery.
 url = "2"
+# #1243: an external content id must be able to BE a reply target. Grammar
+# defines the neutral `RootScope` seam and this crate implements it, which is
+# the direction that keeps `nmp-grammar` (`generic-value`) from ever naming a
+# NIP -- the pattern #1059 used for routing facts.
+nmp-grammar.workspace = true
+nostr.workspace = true

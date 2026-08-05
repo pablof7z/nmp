@@ -77,13 +77,23 @@ fn is_index_table(table: StoreBenchPreparedTable) -> bool {
 }
 
 fn table_from_byte(value: u8) -> Result<StoreBenchPreparedTable, String> {
+    // Match against the enum's own discriminants rather than a hand-copied
+    // literal list: a prior copy (6..=11) went stale and silently decoded the
+    // wrong table the moment #1250 folded `RelayKeys`/`RelayRefs` into
+    // `RelayIds` and shifted every later discriminant down by one.
     match value {
-        6 => Ok(StoreBenchPreparedTable::ByCreatedAt),
-        7 => Ok(StoreBenchPreparedTable::ByAuthor),
-        8 => Ok(StoreBenchPreparedTable::ByKind),
-        9 => Ok(StoreBenchPreparedTable::ByAuthorKind),
-        10 => Ok(StoreBenchPreparedTable::ByTag),
-        11 => Ok(StoreBenchPreparedTable::IndexCardinality),
+        v if v == StoreBenchPreparedTable::ByCreatedAt as u8 => {
+            Ok(StoreBenchPreparedTable::ByCreatedAt)
+        }
+        v if v == StoreBenchPreparedTable::ByAuthor as u8 => Ok(StoreBenchPreparedTable::ByAuthor),
+        v if v == StoreBenchPreparedTable::ByKind as u8 => Ok(StoreBenchPreparedTable::ByKind),
+        v if v == StoreBenchPreparedTable::ByAuthorKind as u8 => {
+            Ok(StoreBenchPreparedTable::ByAuthorKind)
+        }
+        v if v == StoreBenchPreparedTable::ByTag as u8 => Ok(StoreBenchPreparedTable::ByTag),
+        v if v == StoreBenchPreparedTable::IndexCardinality as u8 => {
+            Ok(StoreBenchPreparedTable::IndexCardinality)
+        }
         other => Err(format!("redo record has unknown table {other}")),
     }
 }
@@ -199,7 +209,22 @@ fn apply_facts(txn: &WriteTransaction, records: &[StoreBenchPreparedRecord]) -> 
         .filter(|record| !is_index_table(record.table))
     {
         match record.table {
-            StoreBenchPreparedTable::Events | StoreBenchPreparedTable::EventIds => {
+            // `events` and `event_observations` were folded into one `events`
+            // tree keyed `[event_key | col | rest]` (#1248); both columns are
+            // raw-inserted the same way store_bench.rs's
+            // `run_prepared_redb_unified_index_bench` already does. `EventIds`
+            // is the separate `event_ids` tree (32-byte id -> row key) and was
+            // never part of that fold; a prior edit merged it into this arm by
+            // mistake instead of `EventObservations`, which silently dropped
+            // `EventObservations` handling (routed to the `unexpected fact
+            // table` error below) and forced every `Events` key through a
+            // 32-byte parse it was never shaped to satisfy.
+            StoreBenchPreparedTable::Events | StoreBenchPreparedTable::EventObservations => {
+                events
+                    .insert(record.key.as_slice(), record.value.as_slice())
+                    .map_err(|error| error.to_string())?;
+            }
+            StoreBenchPreparedTable::EventIds => {
                 let key = prepared_array::<32>(&record.key, "event id")?;
                 let value = u64::from_be_bytes(prepared_array(&record.value, "event id value")?);
                 event_ids
@@ -397,7 +422,7 @@ pub fn run_prepared_redb_redo_index_bench(
 
         let mut indexes = db.begin_write().map_err(|error| error.to_string())?;
         indexes
-            .set_durability(Durability::None)
+            .set_durability(redb::Durability::None)
             .map_err(|error| error.to_string())?;
         let apply_started = Instant::now();
         apply_indexes(&indexes, &batch.records)?;
@@ -545,7 +570,7 @@ mod tests {
         }
 
         let mut indexes = db.begin_write().unwrap();
-        indexes.set_durability(Durability::None).unwrap();
+        indexes.set_durability(redb::Durability::None).unwrap();
         apply_indexes(&indexes, &records).unwrap();
         {
             let mut redo = indexes.open_table(INDEX_REDO).unwrap();
