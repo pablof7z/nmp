@@ -146,7 +146,11 @@ grep -qF 'pub fn member_list_includes(' crates/nmp/src/nip29/predicate.rs ||
   fail "member_list_includes is missing"
 grep -qF 'pub fn admin_list_includes(' crates/nmp/src/nip29/predicate.rs ||
   fail "admin_list_includes is missing"
-grep -qF 'pub enum GroupPredicate' crates/nmp/src/nip29/predicate.rs ||
+# `GroupPredicate` is a struct, and the trailing brace is load-bearing: the
+# unanchored spelling `pub enum GroupPredicate` was satisfied by
+# `pub enum GroupPredicateError` further down the same file, so this line
+# passed on a file from which `GroupPredicate` had been deleted outright.
+grep -qF 'pub struct GroupPredicate {' crates/nmp/src/nip29/predicate.rs ||
   fail "GroupPredicate is missing"
 for combinator in union intersect minus; do
   grep -qF "pub fn $combinator(" crates/nmp/src/nip29/predicate.rs ||
