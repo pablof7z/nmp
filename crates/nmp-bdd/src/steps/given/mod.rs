@@ -435,11 +435,6 @@ async fn logged_in_as_key(w: &mut NmpWorld, secret_hex: String) {
     w.log_in_as_key(&secret_hex);
 }
 
-#[given(regex = r#"^"([0-9a-fA-F]{64})" names "([^"]+)" as their write relay$"#)]
-async fn key_write_relay(w: &mut NmpWorld, secret_hex: String, relay: String) {
-    w.declare_write_relay(&secret_hex, &relay);
-}
-
 // ---- the global stalled-write list -------------------------------------
 
 /// The destination is a LITERAL URL this world deliberately never starts --
@@ -544,47 +539,6 @@ async fn draft_carries_h(w: &mut NmpWorld, value: String) {
 #[given(regex = r#"^that event (?:already )?carries a previous tag$"#)]
 async fn draft_carries_previous(w: &mut NmpWorld) {
     w.draft_add_tag("previous", "deadbeef");
-}
-
-#[given(
-    regex = r#"^an event signed earlier by "([0-9a-fA-F]{64})" of kind (\d+) with content "([^"]+)"$"#
-)]
-async fn stage_signed_event(w: &mut NmpWorld, author: String, kind: u16, content: String) {
-    w.stage_signed_event(&author, kind, &content);
-}
-
-#[given(regex = r#"^that signed event carries an h tag with value "([^"]+)"$"#)]
-async fn signed_event_carries_h(w: &mut NmpWorld, value: String) {
-    w.signed_event_add_tag("h", &value);
-}
-
-#[given(regex = r#"^that signed event carries h tags with values "([^"]+)" and "([^"]+)"$"#)]
-async fn signed_event_carries_two_h(w: &mut NmpWorld, first: String, second: String) {
-    w.signed_event_add_tag("h", &first);
-    w.signed_event_add_tag("h", &second);
-}
-
-/// Stated out loud, and staged as nothing: the event is built from the parts
-/// above and no `h` is among them.
-#[given(regex = r#"^that signed event carries no h tag$"#)]
-async fn signed_event_carries_no_h(w: &mut NmpWorld) {
-    w.assert_signed_event_has_no_context();
-}
-
-/// BINDS the scenario's id word to the id the event actually got. See
-/// `NmpWorld::id_labels` for why a real id cannot be written in a `.feature`
-/// and why a binding proves exactly what the scenario claims.
-#[given(regex = r#"^that signed event has id "([^"]+)"$"#)]
-async fn signed_event_has_id(w: &mut NmpWorld, label: String) {
-    w.bind_id_label(&label);
-}
-
-/// The pre-signed path's whole point: the id exists BEFORE publication, so an
-/// observation can already be armed on it.
-#[given(regex = r#"^I am observing a live query for exactly that id$"#)]
-async fn observing_that_id(w: &mut NmpWorld) {
-    let id = w.signed_event().id;
-    w.observe_exact_id(id, None).await;
 }
 
 // The outbox family lives next door for the same reason `then/` is a
