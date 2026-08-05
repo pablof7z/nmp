@@ -84,8 +84,12 @@ pub enum SigningState {
     /// restart replay.
     ///
     /// **No clock ever ends this.** A device whose signer is simply not
-    /// plugged in yet is not a device whose write failed; the app removing
-    /// the entry is the only other exit (`Handle::remove_publish_queue_entry`).
+    /// plugged in yet is not a device whose write failed; the app's own
+    /// decision is the only other exit, and it is two calls:
+    /// `Handle::cancel_write` ends the obligation and compensates the
+    /// optimistic row the write promised, then
+    /// `Handle::remove_publish_queue_entry` forgets the terminal receipt it
+    /// leaves behind.
     ///
     /// This is the state a person has to be told about, and [`Self::InFlight`]
     /// is the one it must never be confused with.
@@ -101,8 +105,8 @@ pub enum SigningState {
     ///
     /// Collapsing this onto [`Self::AwaitingSigner`] (#1261) makes every
     /// healthy write read as parked, and leaves the genuinely parked write —
-    /// the one whose only other exit is the app removing its entry —
-    /// impossible to pick out.
+    /// the one whose only other exit is the app cancelling it and removing
+    /// its entry — impossible to pick out.
     InFlight { pubkey: PublicKey },
     /// A signature exists and the write has an id.
     Signed { event_id: EventId },
@@ -213,17 +217,6 @@ pub enum NotSentReason {
     /// coordinate before this obligation started any wire attempt. Not a
     /// failure — for an app renewing presence it is the steady state.
     Superseded,
-    /// The app removed the queue entry while nothing was moving the write
-    /// (#1269) — the termination path #1039 named for a write parked on a
-    /// signer nobody has. The obligation was released and its optimistic row
-    /// compensated in the same step.
-    ///
-    /// Distinct from [`Self::Cancelled`] in what SURVIVES, which is the
-    /// whole difference between the two doors: a cancelled receipt is
-    /// retained and stays reattachable, a removed one no longer exists. An
-    /// app told `Cancelled` can go and read the entry back; an app told this
-    /// cannot, and must not be sent looking.
-    Removed,
 }
 
 /// The whole-write terminal. Exactly one of these ends every receipt stream,
@@ -296,8 +289,9 @@ pub enum WriteFact {
 /// and what went wrong with it" without having held a receipt stream open
 /// since acceptance. Removal is the companion half and is not optional:
 /// a write parked on a missing signer, and a permanently-failed entry, end
-/// ONLY by the app removing them, so removal is a termination path rather
-/// than housekeeping.
+/// only by the app's own decision — cancel the parked one, then remove the
+/// terminal receipt either leaves behind — so removal is a termination path
+/// rather than housekeeping.
 ///
 /// Retained receipts and correlation tokens still regrow without bound
 /// (#46); this door makes that growth visible and does not fix it.
@@ -340,16 +334,10 @@ pub enum RemoveQueueEntryError {
     UnknownReceipt {
         receipt_id: ReceiptId,
     },
-    /// Something is MOVING this write, so removing it would destroy work
-    /// that is about to finish: a signer HAS its request and the answer is
-    /// already on its way ([`SigningState::InFlight`]), or it is signed and
-    /// its relay lanes are live. Cancel it first; removal is for entries
-    /// nothing is going to move.
-    ///
-    /// A write parked on a signer nobody has is NOT this (#1269): no signer
-    /// holds a request, no signature exists, so no lane exists and no relay
-    /// can ever answer. Nothing is in motion, and removing it is the only
-    /// thing that ever ends it.
+    /// The write's obligation is still open — nothing has ended it yet,
+    /// whether it is signed with live lanes or parked on a signer nobody
+    /// has. Cancel it first; removal is for the terminal receipt that
+    /// leaves behind.
     StillActive {
         receipt_id: ReceiptId,
     },

@@ -1005,8 +1005,9 @@ pub enum FfiSigningState {
     /// only by attaching a signer for THIS key.
     ///
     /// **No clock ever ends this.** A device whose signer is simply not
-    /// plugged in yet is not a device whose write failed; removing the queue
-    /// entry is the only other exit.
+    /// plugged in yet is not a device whose write failed; the app's own
+    /// decision is the only other exit, and it is two calls: cancel the
+    /// write, then remove the terminal queue entry it leaves behind.
     ///
     /// This is the state a person has to be told about, and
     /// [`FfiSigningState::InFlight`] is the one it must never be confused
@@ -1126,10 +1127,6 @@ pub enum FfiNotSentReason {
     /// one started any wire attempt. Not a failure — for an app renewing
     /// presence it is the steady state.
     Superseded,
-    /// The app removed the queue entry while nothing was moving the write
-    /// (#1269). Distinct from `Cancelled` in what survives: a cancelled
-    /// receipt stays reattachable, a removed one no longer exists.
-    Removed,
 }
 
 /// `nmp_store::RefuseReason` mirror: why the acceptance door said no.
@@ -1191,11 +1188,10 @@ pub enum FfiRemoveQueueEntryError {
     UnknownReceipt {
         receipt_id: u64,
     },
-    /// Something is MOVING this write: a signer HAS its request and the
-    /// answer is already on its way (`FfiSigningState::InFlight`), or it is
-    /// signed and its relay lanes are live. Cancel it first; removal is for
-    /// entries nothing is going to move — which a write parked on a signer
-    /// nobody has is, so that one is removable (#1269).
+    /// The write's obligation is still open — nothing has ended it yet,
+    /// whether it is signed with live lanes or parked on a signer nobody
+    /// has. Cancel it first; removal is for the terminal receipt that
+    /// leaves behind.
     StillActive {
         receipt_id: u64,
     },

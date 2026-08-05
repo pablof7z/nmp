@@ -347,18 +347,6 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
                 },
             },
         ),
-        // #1269: the app removed a parked entry. Folding this onto
-        // `Cancelled` would send an app looking for a retained receipt that
-        // no longer exists, which is the one thing that distinguishes the
-        // two doors.
-        (
-            WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Removed)),
-            FfiWriteFact::Outcome {
-                outcome: FfiWriteOutcome::NotSent {
-                    reason: FfiNotSentReason::Removed,
-                },
-            },
-        ),
         // #1039: both event ids survive the boundary whole. Reduced to a
         // string this failure could only tell a user to redo the edit.
         (
@@ -1015,7 +1003,6 @@ fn not_sent_reason_name(reason: NotSentReason) -> &'static str {
     match reason {
         NotSentReason::Cancelled => "cancelled",
         NotSentReason::Superseded => "superseded",
-        NotSentReason::Removed => "removed",
     }
 }
 
@@ -1023,7 +1010,6 @@ fn ffi_not_sent_reason_name(reason: FfiNotSentReason) -> &'static str {
     match reason {
         FfiNotSentReason::Cancelled => "cancelled",
         FfiNotSentReason::Superseded => "superseded",
-        FfiNotSentReason::Removed => "removed",
     }
 }
 

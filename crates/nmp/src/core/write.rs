@@ -2567,50 +2567,25 @@ impl<S: EventStore> EngineCore<S> {
             .collect()
     }
 
-    /// Forget one queue entry, releasing whatever obligation it still holds
-    /// (#1039, #1269).
+    /// Forget one queue entry (#1039).
     ///
     /// This is a real TERMINATION path, not housekeeping: a write parked
     /// forever on a signer that never attached, and a permanently-failed
-    /// refused entry, end no other way.
-    ///
-    /// What makes an entry removable is a fact about what is IN MOTION, and
-    /// never about how long it has waited — a clock could only convert
-    /// ignorance into a verdict, which is the failure the whole publish
-    /// queue is shaped to avoid:
-    ///
-    /// - **A signer HAS the request** (`sign_request_in_flight`, reported as
-    ///   [`SigningState::InFlight`]). The answer that ends the wait is
-    ///   already on its way, so removal would destroy a write that is about
-    ///   to succeed. Refused.
-    /// - **The write is signed and owns delivery lanes.** A relay may still
-    ///   ack it. Refused, and the store's own open-intent check
-    ///   ([`RemoveQueueEntryOutcome::StillOpen`]) is the second half of the
-    ///   same answer for anything this reducer does not hold in memory.
-    /// - **Nothing is in motion.** No signer holds a request and no
-    ///   signature exists, so no lane exists and no relay can ever answer —
-    ///   [`SigningState::AwaitingSigner`], the park whose own docstring says
-    ///   the app removing the entry is its only other exit. Removable, and
-    ///   removing it releases the obligation: the optimistic row the write
-    ///   promised is compensated in the same step, because a row left behind
-    ///   with no obligation under it is a ghost the app can never account
-    ///   for.
-    ///
-    /// Releasing runs the same atomic compensation cancellation uses, then
-    /// forgets the receipt. Between those two durable steps the receipt is a
-    /// cancelled one, which is the honest thing for a crash to leave behind:
-    /// the obligation really was released, and the entry it left is terminal
-    /// and removable, so the app's next attempt finishes the job.
+    /// refused entry, end no other way. An entry whose obligation is still
+    /// open is refused — `cancel_write` it first, then remove the terminal
+    /// receipt cancellation leaves behind. Cancelling is what releases the
+    /// obligation and compensates the optimistic row the write promised;
+    /// this door only forgets what is already terminal, which is why it can
+    /// ask the cheap question ("is this receipt still in `pending`?") and
+    /// leave the store's own open-intent check authoritative for the rest.
     pub fn remove_publish_queue_entry(
         &mut self,
         id: ReceiptId,
-    ) -> (Result<(), RemoveQueueEntryError>, Vec<Effect>) {
-        let mut effects = Vec::new();
-        let released = match self.release_removable_obligation(id, &mut effects) {
-            Ok(released) => released,
-            Err(error) => return (Err(error), effects),
-        };
-        let result = match self.resolver.store_mut().remove_publish_queue_entry(id.0) {
+    ) -> Result<(), RemoveQueueEntryError> {
+        if self.pending.contains_key(&id) {
+            return Err(RemoveQueueEntryError::StillActive { receipt_id: id });
+        }
+        match self.resolver.store_mut().remove_publish_queue_entry(id.0) {
             Ok(RemoveQueueEntryOutcome::Removed) => Ok(()),
             Ok(RemoveQueueEntryOutcome::NotFound) => {
                 Err(RemoveQueueEntryError::UnknownReceipt { receipt_id: id })
@@ -2622,66 +2597,6 @@ impl<S: EventStore> EngineCore<S> {
                 receipt_id: id,
                 reason: error.to_string(),
             }),
-        };
-        if released && result.is_ok() {
-            // The park never produced a whole-write outcome, so without this
-            // the receipt stream would simply stop — indistinguishable from
-            // a dropped subscription, which is exactly the silence
-            // `WriteOutcome` exists to make impossible.
-            effects.push(Effect::EmitReceipt(
-                id,
-                WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Removed)),
-            ));
-            effects.extend(self.schedule_ready(self.clock));
-        }
-        (result, effects)
-    }
-
-    /// Release the still-open obligation behind a removable entry, so the
-    /// entry itself can be forgotten. `Ok(true)` when one was released,
-    /// `Ok(false)` when the entry owned none.
-    fn release_removable_obligation(
-        &mut self,
-        id: ReceiptId,
-        effects: &mut Vec<Effect>,
-    ) -> Result<bool, RemoveQueueEntryError> {
-        let Some(pending) = self.pending.get(&id) else {
-            return Ok(false);
-        };
-        if pending.sign_request_in_flight || pending.already_signed || pending.event_id.is_some() {
-            return Err(RemoveQueueEntryError::StillActive { receipt_id: id });
-        }
-        let pending = self.pending.remove(&id).expect("presence just observed");
-        match self.resolver.store_mut().cancel_write(pending.intent_id) {
-            Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
-                match self
-                    .resolver
-                    .react_to_compensation(pending.frozen.clone(), &outcome)
-                {
-                    Ok(committed) => self.apply_committed_mutation(committed, effects),
-                    Err(error) => self.degrade_store(error, effects),
-                }
-                self.forget_pending_indexes(id, &pending);
-                Ok(true)
-            }
-            // The store promoted a signature this reducer had not seen yet.
-            // A signed write owns delivery work by definition.
-            Ok(CompensateOutcome::AlreadySigned) => {
-                self.pending.insert(id, pending);
-                Err(RemoveQueueEntryError::StillActive { receipt_id: id })
-            }
-            // No open row to release. The receipt below is the whole entry.
-            Ok(CompensateOutcome::NotFound) => {
-                self.forget_pending_indexes(id, &pending);
-                Ok(true)
-            }
-            Err(error) => {
-                self.pending.insert(id, pending);
-                Err(RemoveQueueEntryError::PersistenceFailed {
-                    receipt_id: id,
-                    reason: error.to_string(),
-                })
-            }
         }
     }
 
