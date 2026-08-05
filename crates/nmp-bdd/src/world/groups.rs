@@ -38,8 +38,8 @@ use std::time::{Duration, Instant};
 use nostr::{Event, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use nmp::nip29::{self, Group, GroupContextError, GroupPublishError};
-use nmp::ReceiptStream;
 use nmp::Engine;
+use nmp::ReceiptStream;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
 
