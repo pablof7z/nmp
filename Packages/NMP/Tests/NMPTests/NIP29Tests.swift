@@ -152,6 +152,10 @@ final class NIP29Tests: XCTestCase {
             try group.deleteEvent(engine: engine, authorPubkeyHex: authorHex, eventID: String(repeating: "09", count: 32))
         )
         XCTAssertNoThrow(try group.createGroup(engine: engine, authorPubkeyHex: authorHex))
+        // #1301: the same door states a subgroup's parent on the create itself.
+        XCTAssertNoThrow(
+            try group.createGroup(engine: engine, authorPubkeyHex: authorHex, parent: "darkroom")
+        )
         XCTAssertNoThrow(try group.deleteGroup(engine: engine, authorPubkeyHex: authorHex))
         XCTAssertNoThrow(
             try group.createInvite(engine: engine, authorPubkeyHex: authorHex, code: "code")

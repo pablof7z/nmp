@@ -131,6 +131,8 @@ class NIP29Test {
             group.editMetadata(engine, authorHex, NMPGroupMetadataEdit(name = "Photographers"))
             group.deleteEvent(engine, authorHex, "09".repeat(32))
             group.createGroup(engine, authorHex)
+            // #1301: the same door states a subgroup's parent on the create itself.
+            group.createGroup(engine, authorHex, parent = "darkroom")
             group.deleteGroup(engine, authorHex)
             group.createInvite(engine, authorHex, "code")
         }

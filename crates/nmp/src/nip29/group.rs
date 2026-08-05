@@ -288,13 +288,27 @@ impl Group {
         self.publish(engine, author, nmp_nip29::delete_event(event_id))
     }
 
-    /// kind:9007 -- create the group at its hosts.
+    /// kind:9007 -- create the group at its hosts, optionally as a SUBGROUP
+    /// of one that already exists there (#1301).
+    ///
+    /// `parent` is the parent's group id -- the same relay-scoped string the
+    /// scope's group door takes, never an `naddr` and never a key. `None`
+    /// creates a root group and composes no row at all.
+    ///
+    /// The relationship is stated HERE and not on
+    /// [`edit_metadata`](Self::edit_metadata) on purpose: NIP-29's `Subgroups`
+    /// section puts parenting on kind:9002, and the only relay that implements
+    /// subgroups reads `parent` on the kind:9007 create -- validating there
+    /// that the parent exists and that the signer administers it -- while
+    /// ignoring the row entirely on a kind:9002.
+    /// [`nmp_nip29::create_group`] records the probe.
     pub fn create_group(
         &self,
         engine: &Engine,
         author: PublicKey,
+        parent: Option<&str>,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::create_group())
+        self.publish(engine, author, nmp_nip29::create_group(parent))
     }
 
     /// kind:9008 -- delete the group from its hosts.
@@ -507,7 +521,11 @@ mod tests {
                 "delete_event",
                 group.delete_event(&engine, me, EventId::from_slice(&[9; 32]).unwrap()),
             ),
-            ("create_group", group.create_group(&engine, me)),
+            ("create_group", group.create_group(&engine, me, None)),
+            (
+                "create_group under a parent",
+                group.create_group(&engine, me, Some("darkroom")),
+            ),
             ("delete_group", group.delete_group(&engine, me)),
             ("create_invite", group.create_invite(&engine, me, "code")),
         ];
