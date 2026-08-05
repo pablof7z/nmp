@@ -7,7 +7,7 @@ date: 2026-07-29
 owns:
   - the app-facing surface for reading from and writing into a NIP-29 group
   - who mints the h tag and the host route, and when
-  - the pre-signed group publication path and whose requirement it is
+  - why there is no pre-signed group publication path (withdrawn, #1292)
   - where NIP-29's own kinds (9000–9022) live
   - tombstones — contextualize_group_event, GroupPublication, GroupHostAuthority,
     group_discovery_demand, Group::new(host, group_id), GroupOperations,
@@ -169,9 +169,22 @@ PrivateNarrow, RelayListBootstrap}` (`crates/nmp-grammar/src/write.rs:207-228`)
 — `Explicit` is part of the routing redesign
 (`docs/internals/routing/auto-and-explicit.md`), which this door consumes.
 
-## 6. The pre-signed path validates `h` instead of appending — DESIGNED
+## 6. The pre-signed path validates `h` instead of appending — WITHDRAWN (#1292)
 
-`group.publish_signed(signed)` (name illustrative) takes an already-signed
+**This path is deleted, no alias.** `Group::publish` is the group's only
+write door; there is no `publish_signed`, and no surface accepts bytes an app
+signed itself into a group. The maintainer's ruling: apps must not sign their
+own bytes and keep app-local optimistic mirrors. The legitimate need it was
+built for — a signed event WITHOUT a publication — is served by
+`Engine::sign_event`, which creates no write intent, pending row, receipt,
+delivery lane, relay plan or publication and returns the exact signed event.
+`Group::validate_context` survives as a standalone predicate over an
+already-signed event; it is not a write door.
+
+The original decision is kept below as the record of what was decided and
+why it was withdrawn, not as a description of anything current.
+
+`group.publish_signed(signed)` (name illustrative) took an already-signed
 event and **validates** the `h` already present rather than appending one —
 appending would change the bytes and therefore the `EventId`. Bytes and
 `EventId` are preserved exactly; a signed event with a missing or wrong `h` is
@@ -230,7 +243,7 @@ belonging to others.
 |---|---|
 | names the host relay for a write | `Group` carries it from construction |
 | writes `WriteRouting::Explicit([host])` | minted internally by `Group` |
-| touches the `h` tag | appended (unsigned) or validated (pre-signed) by `Group` |
+| touches the `h` tag | appended by `Group` before signing |
 | gets a group-shaped stream from a second door | `Group` mints a `Demand`; `Engine::observe` is the door |
 | receives a fixed kind catalog | supplies its own `Filter` |
 
@@ -409,7 +422,8 @@ state the underlying kinds cannot establish.
   `nmp-nip29` — the door needs both the retained scope and the one opaque
   `WriteIntent`, and the engine-free lower crate cannot mint the latter.
 - `crates/nmp/src/nip29/group.rs` — `Group`'s inherent `read`,
-  `validate_context`, `publish`, `publish_signed`, and the named operations
+  `validate_context`, `publish` (the ONE write door since #1292 deleted
+  `intent`/`signed_intent`/`publish_signed`), and the named operations
   (`join_request`, `leave_request`, `add_user`, `remove_user`,
   `edit_metadata`, `delete_event`, `create_group`, `delete_group`,
   `create_invite`) — all inherent, no `GroupOperations` trait. Carries

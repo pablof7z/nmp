@@ -2473,39 +2473,6 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
     })
 }
 
-/// `nmp::WriteIntent -> FfiWriteIntent`: the projection a protocol module's
-/// own MINT door needs (#1242), so a native caller can hold the intent NMP
-/// composed and hand it to the one publish door later.
-///
-/// Total and infallible in this direction, unlike its inbound twin. Every
-/// value here was built by NMP from already-parsed types, so there is no
-/// malformed hex, no unparseable relay and no out-of-range tag row left to
-/// refuse -- refusing one would be refusing our own output.
-pub(crate) fn write_intent_to_ffi(intent: GWriteIntent) -> FfiWriteIntent {
-    FfiWriteIntent {
-        payload: match intent.payload {
-            GWritePayload::Event(builder) => FfiWritePayload::Event {
-                builder: event_builder_to_ffi(builder),
-            },
-            GWritePayload::ReplaceableEdit { builder, .. } => FfiWritePayload::Event {
-                builder: event_builder_to_ffi(builder),
-            },
-            GWritePayload::Signed(event) => FfiWritePayload::Signed {
-                id: event.id.to_hex(),
-                pubkey: event.pubkey.to_hex(),
-                created_at: event.created_at.as_secs(),
-                kind: event.kind.as_u16(),
-                tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
-                content: event.content.clone(),
-                sig: event.sig.to_string(),
-            },
-        },
-        routing: write_routing_to_ffi(intent.routing),
-        identity: identity_to_ffi(intent.identity),
-        correlation: intent.correlation.map(|token| token.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

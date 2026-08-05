@@ -19,14 +19,12 @@
 //! The families below split by the DOMAIN each claim is about, the same seam
 //! [`super`] itself uses: what reached which host, how the route was chosen and
 //! what the receipt said, the identity's own promises, kind blindness and the
-//! gate that enforces it, the reads, the pre-signed path, the refusals, the
-//! signing boundary, the door's declared shape, and the rows NIP-29's own
-//! operations carry.
+//! gate that enforces it, the reads, the refusals, the signing boundary, the
+//! door's declared shape, and the rows NIP-29's own operations carry.
 
 mod blindness;
 mod identity;
 mod operations;
-mod presigned;
 mod publish_queue;
 mod reads;
 mod refusals;

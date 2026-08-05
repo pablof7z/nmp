@@ -327,13 +327,3 @@ async fn receipt_addressed_by_event_id(w: &mut NmpWorld) {
         "the receipt's frozen id must be the id that reached the host"
     );
 }
-
-#[then(regex = r#"^the receipt is addressed by the same id "([^"]+)"$"#)]
-async fn receipt_addressed_by_label(w: &mut NmpWorld, label: String) {
-    let expected = w.labelled_id(&label);
-    assert_eq!(
-        w.published_event_id(),
-        Some(expected),
-        "a rejected pre-signed publication keeps the id it was signed with"
-    );
-}
