@@ -148,8 +148,22 @@ about current code:
   was the load-bearing consequence of that removed artifact boundary;
   [#1169](https://github.com/pablof7z/nmp/issues/1169) owns the collapsed
   engine-routed shape it returns in, as an ordinary Cargo-feature-selected
-  family inside the one native library. An app may still supply any remote
-  signer through the ordinary `SigningCapability` door; missing capabilities
+  family inside the one native library. An app supplies its own signer through
+  one of two doors, and until
+  [#1238](https://github.com/pablof7z/nmp/issues/1238) only the first existed:
+  a Rust app implements `SigningCapability` and calls `Engine::add_signer`,
+  while a Swift or Kotlin app calls `add_signer_mailbox(public_key)` and drains
+  the returned `SignerMailbox`. The second door exists because the first cannot
+  cross UniFFI at all — it is generic over a trait whose `sign` returns a
+  poll-thunk — so before #1238 an app on those platforms could register no
+  signer whatsoever, and its only identity was a secret handed to
+  `add_account`. The mailbox is a pull boundary rather than a callback because
+  NMP must not invoke app code ([#783](https://github.com/pablof7z/nmp/issues/783));
+  it has a fixed private bound and refuses past it as retryable
+  `SignerError::Unavailable`, so an app that never drains parks its own writes
+  and blocks nothing else. Collapsing the two doors onto one pull boundary, and
+  inverting the remaining AUTH-policy callback, is still open under #783.
+  Missing capabilities
   remain durable `AwaitingCapability`, and a real redb close/reopen proof
   promotes the exact frozen event, publishes, and receives a relay ACK.
   An explicitly insecure SDK-owned plaintext file checkpoint provides opt-in

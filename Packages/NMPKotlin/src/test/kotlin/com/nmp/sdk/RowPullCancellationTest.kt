@@ -43,6 +43,7 @@ import uniffi.nmp_ffi.NmpReceiptStream
 import uniffi.nmp_ffi.NmpRowPull
 import uniffi.nmp_ffi.NmpRowStream
 import uniffi.nmp_ffi.NmpSignEventHandle
+import uniffi.nmp_ffi.NmpSignerMailbox
 import uniffi.nmp_ffi.NoPointer
 import uniffi.nmp_ffi.UNIFFI_RUST_FUTURE_POLL_READY
 import uniffi.nmp_ffi.UniffiRustFutureContinuationCallback
@@ -254,6 +255,10 @@ class RowPullCancellationTest {
             `expectedPublicKey`: String,
             `callback`: FfiAuthPolicyCallback,
         ): FfiAuthPolicyRegistration = unusedByThisFalsifier()
+
+        override fun `addSignerMailbox`(`publicKey`: String): NmpSignerMailbox = unusedByThisFalsifier()
+
+        override fun `removeSignerMailbox`(`mailbox`: NmpSignerMailbox): Boolean = unusedByThisFalsifier()
 
         override fun `cancel`(`receiptId`: ULong): FfiCancelWriteOutcome = unusedByThisFalsifier()
 
