@@ -55,7 +55,7 @@ use nostr::RelayUrl;
 
 use crate::engine::Engine;
 
-pub use group::{Group, GroupPublishError, GroupReceipts};
+pub use group::{Group, GroupPublishError};
 pub use nmp_nip29::GroupContextError;
 pub use predicate::{
     admin_list_includes, all, any_of, groups_whose_record_matches, member_list_includes, GroupIds,
@@ -150,8 +150,12 @@ impl RelayScope {
     /// Contacts nothing, subscribes to nothing, and needs no active account:
     /// a kind:9021 join request into a group you cannot read yet is
     /// expressible. The returned [`Group`] retains this scope's hosts and the
-    /// id privately; neither is readable back out, so no other layer can
-    /// reconstruct the authority and route something elsewhere under it.
+    /// id privately; there is no accessor for either, so a layer that is
+    /// handed a `Group` cannot reconstruct the authority and route something
+    /// elsewhere under it. The one thing that does yield both is the write
+    /// door itself ([`Group::intent`]), which mints them into an ordinary
+    /// [`WriteIntent`](crate::WriteIntent) -- see [`Group`]'s own doc for why
+    /// that trade is the right one.
     #[must_use]
     pub fn group(&self, group_id: impl Into<String>) -> Group {
         Group::new(self.hosts.clone(), group_id.into())

@@ -278,7 +278,7 @@ async fn a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relay
     // thing optimistic publishing exists to avoid.
     let _receipts = group
         .publish_signed(&engine, event)
-        .expect("a correctly contextualized signed event is accepted");
+        .expect("a correctly contextualized signed event is accepted").statuses;
 
     let mut observed = Observed::default();
     wait_for_rows(&subscription, SETTLE, &mut observed, |rows| {
@@ -347,7 +347,7 @@ async fn an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_
 
     let receipts = group
         .publish_signed(&engine, event)
-        .expect("a correctly contextualized signed event is accepted");
+        .expect("a correctly contextualized signed event is accepted").statuses;
 
     // Phase 1 -- nothing is reachable. The row is on screen anyway, claiming
     // the cache and zero relays.
