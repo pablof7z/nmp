@@ -58,6 +58,7 @@ mod engine;
 mod error;
 mod observation;
 mod relay_information;
+mod signer_mailbox;
 mod subscription;
 
 // #827: the M3 engine, folded in from the former `nmp-engine` crate. These are
@@ -339,6 +340,14 @@ pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, Unsig
 pub use nmp_signer::{
     CryptoCapability, PendingSignerResolveError, PendingSignerSender, SignerError, SignerOp,
     SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
+};
+
+// The app-supplied signer door (#1238). A capability an app implements is
+// reached through an engine-owned pull mailbox rather than by NMP calling app
+// code (#783), which is also what lets it cross UniFFI: a generic trait whose
+// method returns a poll-thunk cannot, and a stream of immutable requests can.
+pub use crate::signer_mailbox::{
+    MailboxSigner, SignatureRequest, SignatureSettleError, SignerMailbox,
 };
 
 // The concrete mechanism types are internal by default (#52's "internal or

@@ -136,6 +136,37 @@ class NIP29Test {
         }
     }
 
+    /** #1242 in Kotlin: the mint door hands back the ordinary [WriteIntent]
+     * with every group decision already made and publishes nothing, and the
+     * app's own crash-safe token then rides that intent through the ONE
+     * general publish door (#1244). */
+    @Test
+    fun theMintDoorHandsBackAnIntentTheGeneralPublishDoorTakes() {
+        NMPEngine(NMPConfig()).use { engine ->
+            val scope = NMPRelayScope.on(listOf(host(1), host(2)))
+            val group = scope.group("photographers")
+            val authorHex = randomPubkeyHex()
+
+            val intent = group.intent(authorHex, kind = 9u, content = "first light")
+            assertEquals(WriteRouting.Explicit(listOf(host(1), host(2))), intent.routing)
+            assertEquals(Identity.Explicit(authorHex), intent.identity)
+            assertEquals(null, intent.correlation)
+            val payload = intent.payload
+            check(payload is WritePayload.Event) { "an unsigned draft mints an Event payload" }
+            assertEquals(
+                listOf(listOf("h", "photographers")),
+                payload.tags.filter { it.firstOrNull() == "h" },
+            )
+
+            val receipt = publishReceipt(engine.ffi, intent.copy(correlation = "group-write-0001"))
+            val reattached = reattachReceiptByCorrelation(engine.ffi, "group-write-0001")
+            check(reattached is ReceiptReattachment.Attached) {
+                "a correlated group write must be reattachable, got $reattached"
+            }
+            assertEquals(receipt.id, reattached.receipt.id)
+        }
+    }
+
     /** A caller-supplied `h` tag never reaches the door: the refusal is
      * synchronous and typed, before any receipt stream exists. */
     @Test
@@ -173,9 +204,9 @@ class NIP29Test {
         }
     }
 
-    /** The group write fact stream delivers ordinary [WriteFact]s, with no
-     * receipt id anywhere in its shape (#1033: group writes reach the
-     * engine's untracked publish door). */
+    /** A group write returns the ORDINARY [Receipt] -- store-issued id and
+     * all (#1244) -- and its stream delivers ordinary [WriteFact]s. There is
+     * no group-shaped receipt type and no untracked door left to reach. */
     @Test
     fun groupWriteFactStreamDeliversOrdinaryWriteFacts() =
         runBlocking {
@@ -185,6 +216,9 @@ class NIP29Test {
                 val authorHex = randomPubkeyHex()
 
                 val status = group.publish(engine, authorHex, kind = 9u, content = "hi")
+                check(status.id > 0uL) {
+                    "a group write must carry the store-issued receipt id like any other write"
+                }
                 val first = status.status.first()
                 // The composed author has no registered signer, so the first
                 // fact is the park itself -- acceptance is the publish call
