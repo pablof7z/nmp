@@ -114,6 +114,46 @@ async fn drain(stream: &NmpRowStream) {
     pull.abort();
 }
 
+/// Pull until a ticket holds a frame that carries a row transition, committing
+/// every frame that carries none. The returned ticket is left UNSETTLED, so the
+/// caller still owns the commit/abort/drop decision under test.
+///
+/// A frame with no deltas is an ordinary delivery, not an anomaly. The row
+/// mailbox carries three things -- the exact transition, this observation's
+/// acquisition evidence, and its ordered execution facts -- and the last two
+/// change with no row change at all. `QueryState::refresh_observation_evidence`
+/// emits `Effect::EmitRows(id, Vec::new(), evidence)` outright, and
+/// `Effect::EmitObservationEvidence` reaches the same mailbox through
+/// `RowsSender::send_evidence`, which composes execution facts onto an
+/// otherwise empty pending transition. Opening an observation already produces
+/// two such sends before any row exists: one execution-fact send for the
+/// branch's concrete filter, then the initial current-state frame.
+///
+/// Nor does `publish` order itself ahead of them. `Ok` is local acceptance, and
+/// the engine thread replies to `Cmd::PublishTracked` BEFORE it dispatches that
+/// write's effects, so acceptance never proves the write's `EmitRows` is
+/// already the pending transition. "The frame right after a publish carries the
+/// row" is therefore a scheduling assumption, not a property -- the same shape
+/// #1166 tracks, and what #1231 recorded when a loaded runner let this
+/// observation consume the two empty opening frames one at a time instead of
+/// conflated. Settle on the fact the assertion actually depends on: this
+/// observation delivered the row.
+async fn ticket_holding_a_transition(stream: &NmpRowStream) -> (Arc<NmpRowPull>, FfiFrame) {
+    for _ in 0..64 {
+        let ticket = stream.begin_next().expect("stream ticket is available");
+        let frame = receive(&ticket)
+            .await
+            .expect("the observation is still delivering");
+        if !frame.deltas.is_empty() {
+            return (ticket, frame);
+        }
+        ticket
+            .commit()
+            .expect("a frame carrying no transition commits like any other");
+    }
+    panic!("the observation never delivered a row transition");
+}
+
 /// Wait until the engine has composed `expected` matching rows, observed
 /// through an *independent* observation.
 ///
@@ -184,11 +224,7 @@ async fn ready_frame_is_retained_until_foreign_commit_and_replayed_after_abort()
     assert!(initial.deltas.is_empty());
 
     publish_note(&engine, 1).await;
-    let first_ticket = stream.begin_next().expect("first ticket begins");
-    let first = receive(&first_ticket)
-        .await
-        .expect("first delta reaches Rust READY");
-    assert!(!first.deltas.is_empty());
+    let (first_ticket, first) = ticket_holding_a_transition(&stream).await;
 
     publish_note(&engine, 2).await;
     assert_eq!(
@@ -213,21 +249,30 @@ async fn ready_frame_is_retained_until_foreign_commit_and_replayed_after_abort()
         .commit()
         .expect("foreign completion commits the replay");
 
-    let successor = next_committed(&stream)
-        .await
-        .expect("updates composed while the claim was retained");
-    assert_ne!(
-        successor, first,
-        "a committed frame is never replayed by the successor pull"
-    );
-
+    // Which successor frame carries the second write is not a property either,
+    // so hold the rule against EVERY frame after the commit and settle on the
+    // row set converging rather than on one frame's contents.
     let mut ids = BTreeSet::new();
     apply_ids(&mut ids, &first);
-    apply_ids(&mut ids, &successor);
-    assert_eq!(
-        ids.len(),
-        2,
-        "the replayed baseline plus composed successor converges exactly"
+    let mut converged = false;
+    for _ in 0..64 {
+        let successor = next_committed(&stream)
+            .await
+            .expect("updates composed while the claim was retained");
+        assert_ne!(
+            successor, first,
+            "a committed frame is never replayed by the successor pull"
+        );
+        apply_ids(&mut ids, &successor);
+        if ids.len() == 2 {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "the replayed baseline plus composed successors converge exactly on both rows (saw {})",
+        ids.len()
     );
 
     engine.shutdown();
@@ -501,13 +546,11 @@ async fn dropping_a_ticket_without_settling_rolls_the_delta_back_like_abort() {
     publish_note(&engine, 1).await;
 
     let first = {
-        let ticket = stream.begin_next().expect("first ticket begins");
-        receive(&ticket)
-            .await
-            .expect("the delta reaches Rust READY")
+        let (ticket, frame) = ticket_holding_a_transition(&stream).await;
         // Neither committed nor aborted: the ticket is simply released.
+        drop(ticket);
+        frame
     };
-    assert!(!first.deltas.is_empty());
 
     let retry = stream
         .begin_next()
@@ -539,16 +582,10 @@ async fn abandoning_a_parked_ticket_loses_no_row_produced_afterwards() {
 
     publish_note(&engine, 1).await;
 
-    let retry = stream
-        .begin_next()
-        .expect("the abandoned ticket released the claim");
-    let frame = receive(&retry)
-        .await
-        .expect("a row produced after the abandonment still arrives");
-    assert!(
-        !frame.deltas.is_empty(),
-        "abandoning an idle pull loses no later row"
-    );
+    // The claim was released, so tickets are available again, and the row
+    // produced after the abandonment still reaches this observation -- that
+    // fact, not which frame carries it, is what "loses no later row" means.
+    let (retry, _) = ticket_holding_a_transition(&stream).await;
     retry.commit().expect("the delta commits");
 
     engine.shutdown();
@@ -578,16 +615,9 @@ async fn aborting_a_waiting_ticket_retains_the_delta_that_arrives_meanwhile() {
         "a rollback that wins mid-flight is a typed refusal, never a delivery"
     );
 
-    let retry = stream
-        .begin_next()
-        .expect("the aborted ticket released the claim");
-    let frame = receive(&retry)
-        .await
-        .expect("the delta that arrived during the rollback is retained");
-    assert!(
-        !frame.deltas.is_empty(),
-        "a row produced during the rollback window is not lost"
-    );
+    // The claim was released, and the row produced during the rollback window
+    // still reaches this observation rather than dying with the refused ticket.
+    let (retry, _) = ticket_holding_a_transition(&stream).await;
     retry.commit().expect("the retained delta commits");
 
     engine.shutdown();
@@ -605,9 +635,7 @@ async fn a_retained_delta_survives_engine_shutdown_and_precedes_the_terminal_res
     drain(&stream).await;
     publish_note(&engine, 1).await;
 
-    let ticket = stream.begin_next().expect("ticket begins");
-    let retained = receive(&ticket).await.expect("the delta reaches READY");
-    assert!(!retained.deltas.is_empty());
+    let (ticket, retained) = ticket_holding_a_transition(&stream).await;
     ticket.abort();
 
     engine.shutdown();
@@ -617,16 +645,31 @@ async fn a_retained_delta_survives_engine_shutdown_and_precedes_the_terminal_res
         .expect("shutdown is not observation withdrawal");
     assert_eq!(
         receive(&replay).await,
-        Some(retained),
+        Some(retained.clone()),
         "a transition the engine already produced is still delivered after shutdown"
     );
     replay.commit().expect("the retained delta commits");
 
-    let terminal = stream.begin_next().expect("terminal ticket begins");
-    assert_eq!(
-        receive(&terminal).await,
-        None,
+    // End of stream FOLLOWS the retained transition; it is not required to be
+    // the immediately next frame, because frames already pending when the
+    // engine stopped are still the observation's to deliver.
+    let mut terminated = false;
+    for _ in 0..64 {
+        let terminal = stream.begin_next().expect("terminal ticket begins");
+        let frame = receive(&terminal).await;
+        terminal.commit().expect("the terminal result commits");
+        assert_ne!(
+            frame.as_ref(),
+            Some(&retained),
+            "a committed transition is never replayed after shutdown"
+        );
+        if frame.is_none() {
+            terminated = true;
+            break;
+        }
+    }
+    assert!(
+        terminated,
         "end of stream follows the retained transition, never precedes it"
     );
-    terminal.commit().expect("the terminal result commits");
 }
