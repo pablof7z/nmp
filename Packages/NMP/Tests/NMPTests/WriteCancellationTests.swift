@@ -8,8 +8,8 @@ final class WriteCancellationTests: XCTestCase {
 
     private let author = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
-    private static func collect(_ stream: ReceiptStatus) async -> [WriteStatus] {
-        var statuses: [WriteStatus] = []
+    private static func collect(_ stream: ReceiptStatus) async -> [WriteFact] {
+        var statuses: [WriteFact] = []
         do {
             for try await status in stream {
                 statuses.append(status)
@@ -53,21 +53,22 @@ final class WriteCancellationTests: XCTestCase {
                     content: "cancel through the public Swift SDK",
                     createdAt: 1_723_456_790
                 ),
-                durability: .durable,
                 routing: .auto
             )
         )
 
+        // `publish` returning a receipt IS acceptance -- there is no
+        // acceptance fact on the stream to look for, and the id it hands back
+        // is what the cancellation below is addressed to.
         XCTAssertEqual(try engine.cancel(receiptId: receipt.id), .cancelled)
         let statuses = try await Self.withTimeout {
             await Self.collect(receipt.status)
         }
-        XCTAssertTrue(statuses.contains(.accepted))
         XCTAssertFalse(statuses.contains { status in
-            if case .signed = status { return true }
+            if case .signing(.signed) = status { return true }
             return false
         })
-        XCTAssertEqual(statuses.last, .cancelled)
+        XCTAssertEqual(statuses.last, .outcome(.notSent(.cancelled)))
 
         // The cancellation transition is idempotent and the durable terminal
         // fact is independently reconstructible by id.
@@ -78,6 +79,6 @@ final class WriteCancellationTests: XCTestCase {
         let replayStatuses = try await Self.withTimeout {
             await Self.collect(replay.status)
         }
-        XCTAssertEqual(replayStatuses, [.cancelled])
+        XCTAssertEqual(replayStatuses, [.outcome(.notSent(.cancelled))])
     }
 }

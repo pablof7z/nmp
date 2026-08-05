@@ -114,7 +114,7 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
 public enum NMPFollowActionStatus: Sendable, Hashable {
     case acquiring
     case noChange(following: Bool)
-    case receipt(id: UInt64, status: WriteStatus)
+    case receipt(id: UInt64, status: WriteFact)
     case failed(NMPFollowActionFailure)
 
     init(_ ffi: FfiFollowActionStatus) {
@@ -124,7 +124,7 @@ public enum NMPFollowActionStatus: Sendable, Hashable {
         case .noChange(let following):
             self = .noChange(following: following)
         case .receipt(let receiptID, let status):
-            self = .receipt(id: receiptID, status: WriteStatus(status))
+            self = .receipt(id: receiptID, status: WriteFact(status))
         case .failed(let failure):
             self = .failed(NMPFollowActionFailure(failure))
         }
@@ -269,7 +269,10 @@ public final class NMPFollowing: ObservableObject {
         case .failed(.acquisitionTimedOut),
              .failed(.cachedOnly),
              .failed(.sourceUnavailable),
-             .receipt(_, .replaceableConflict):
+             // A stale base is the one write failure a second tap can fix:
+             // the queue entry keeps both event ids, so re-reading the
+             // current list and reapplying the change is a real retry.
+             .receipt(_, .outcome(.refused(.replaceableBaseChanged))):
             return true
         default:
             return false
@@ -337,10 +340,13 @@ public final class NMPFollowing: ObservableObject {
         case .failed:
             isActing = false
             desiredFollowing = nil
-        case .receipt(_, let status):
-            if case .replaceableConflict = status {
+        case .receipt(_, let fact):
+            if case .outcome(.refused(.replaceableBaseChanged)) = fact {
                 isActing = false
-            } else if case .failed = status {
+            } else if case .outcome(.refused) = fact {
+                isActing = false
+                desiredFollowing = nil
+            } else if case .signing(.refused) = fact {
                 isActing = false
                 desiredFollowing = nil
             }

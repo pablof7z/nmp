@@ -34,8 +34,8 @@ use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::types::{
-    FfiDurability, FfiFilter, FfiIdentity, FfiRelayInformationCachePolicy, FfiSignEventRequest,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiFilter, FfiIdentity, FfiRelayInformationCachePolicy, FfiSignEventRequest, FfiWriteIntent,
+    FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -163,7 +163,6 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
                     created_at: Some(0),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,

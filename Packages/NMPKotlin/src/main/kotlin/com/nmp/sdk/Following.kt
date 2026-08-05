@@ -162,7 +162,7 @@ sealed class FollowActionFailure {
 
 /** One pushed state of a `follow`/`unfollow` action's outcome
  * (`FfiFollowActionStatus` mirror): acquisition, no-op, atomic conflict
- * (folded into the `Receipt` case's own `WriteStatus.ReplaceableConflict`),
+ * (folded into the `Receipt` case's own `WriteOutcome.Refused`),
  * signing, routing, and relay receipt states all arrive through this one
  * typed stream. */
 sealed class FollowActionStatus {
@@ -170,7 +170,7 @@ sealed class FollowActionStatus {
 
     data class NoChange(val following: Boolean) : FollowActionStatus()
 
-    data class Receipt(val id: ULong, val status: WriteStatus) : FollowActionStatus()
+    data class Receipt(val id: ULong, val status: WriteFact) : FollowActionStatus()
 
     data class Failed(val failure: FollowActionFailure) : FollowActionStatus()
 
@@ -180,7 +180,7 @@ sealed class FollowActionStatus {
                 is FfiFollowActionStatus.Acquiring -> Acquiring
                 is FfiFollowActionStatus.NoChange -> NoChange(ffi.following)
                 is FfiFollowActionStatus.Receipt ->
-                    Receipt(ffi.receiptId, WriteStatus.from(ffi.status))
+                    Receipt(ffi.receiptId, WriteFact.from(ffi.status))
                 is FfiFollowActionStatus.Failed -> Failed(FollowActionFailure.from(ffi.failure))
             }
     }

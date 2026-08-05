@@ -11,9 +11,9 @@ use super::postings_store::crash_if_postings;
 use super::postings_store::PostingsBatch;
 use super::query::{insert_query_cardinalities, remove_query_cardinalities};
 use super::schema::{
-    persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, DELIVERY_DISPLACED, DELIVERY_INTENTS,
-    DELIVERY_KIND5_CLAIMS, DELIVERY_RECEIPTS, DELIVERY_SUPPRESS_BY_ADDR, DELIVERY_SUPPRESS_BY_ID,
-    EXPIRATION_INDEX, TOMBSTONES,
+    persist_err, EventKey, ADDR_INDEX, ADDR_TOMBSTONES, EXPIRATION_INDEX, PUBLISH_QUEUE_DISPLACED,
+    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_RECEIPTS,
+    PUBLISH_QUEUE_SUPPRESS_BY_ADDR, PUBLISH_QUEUE_SUPPRESS_BY_ID, TOMBSTONES,
 };
 #[cfg(feature = "bench-instrumentation")]
 use super::store::BenchmarkDurability;
@@ -104,9 +104,9 @@ pub(super) enum GovernedStringMap {
     AddrTombstones,
 }
 
-/// Binary durable-delivery maps reached from the same governed mutation.
+/// Binary publish-queue maps reached from the same governed mutation.
 #[derive(Clone, Copy)]
-pub(super) enum GovernedDeliveryMap {
+pub(super) enum GovernedPublishQueueMap {
     Intents,
     Receipts,
     Kind5Claims,
@@ -160,20 +160,20 @@ pub(super) trait GovernedIngestTxn {
         key: &str,
         value: &str,
     ) -> Result<(), PersistenceError>;
-    fn delivery_get(
+    fn publish_queue_get(
         &self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, PersistenceError>;
-    fn delivery_put(
+    fn publish_queue_put(
         &mut self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
         value: &[u8],
     ) -> Result<(), PersistenceError>;
-    fn delivery_remove(
+    fn publish_queue_remove(
         &mut self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, PersistenceError>;
     fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError>;
@@ -185,12 +185,12 @@ pub(super) struct RedbIngestTxn<'txn, 'batch> {
     pub(super) tombstones: redb::Table<'txn, &'static str, &'static str>,
     pub(super) addr_tombstones: redb::Table<'txn, &'static str, &'static str>,
     pub(super) expiration_index: redb::Table<'txn, &'static [u8; 40], EventKey>,
-    pub(super) delivery_intents: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
-    pub(super) delivery_receipts: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
-    pub(super) delivery_displaced: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
-    pub(super) delivery_kind5_claims: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
-    pub(super) delivery_suppress_by_id: redb::Table<'txn, &'static [u8; 64], &'static [u8]>,
-    pub(super) delivery_suppress_by_addr: redb::Table<'txn, &'static [u8], &'static [u8]>,
+    pub(super) publish_queue_intents: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) publish_queue_receipts: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) publish_queue_displaced: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) publish_queue_kind5_claims: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) publish_queue_suppress_by_id: redb::Table<'txn, &'static [u8; 64], &'static [u8]>,
+    pub(super) publish_queue_suppress_by_addr: redb::Table<'txn, &'static [u8], &'static [u8]>,
     postings: &'batch mut PostingsBatch,
 }
 
@@ -207,23 +207,23 @@ impl<'txn, 'batch> RedbIngestTxn<'txn, 'batch> {
             expiration_index: write_txn
                 .open_table(EXPIRATION_INDEX)
                 .map_err(persist_err)?,
-            delivery_intents: write_txn
-                .open_table(DELIVERY_INTENTS)
+            publish_queue_intents: write_txn
+                .open_table(PUBLISH_QUEUE_INTENTS)
                 .map_err(persist_err)?,
-            delivery_receipts: write_txn
-                .open_table(DELIVERY_RECEIPTS)
+            publish_queue_receipts: write_txn
+                .open_table(PUBLISH_QUEUE_RECEIPTS)
                 .map_err(persist_err)?,
-            delivery_displaced: write_txn
-                .open_table(DELIVERY_DISPLACED)
+            publish_queue_displaced: write_txn
+                .open_table(PUBLISH_QUEUE_DISPLACED)
                 .map_err(persist_err)?,
-            delivery_kind5_claims: write_txn
-                .open_table(DELIVERY_KIND5_CLAIMS)
+            publish_queue_kind5_claims: write_txn
+                .open_table(PUBLISH_QUEUE_KIND5_CLAIMS)
                 .map_err(persist_err)?,
-            delivery_suppress_by_id: write_txn
-                .open_table(DELIVERY_SUPPRESS_BY_ID)
+            publish_queue_suppress_by_id: write_txn
+                .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
                 .map_err(persist_err)?,
-            delivery_suppress_by_addr: write_txn
-                .open_table(DELIVERY_SUPPRESS_BY_ADDR)
+            publish_queue_suppress_by_addr: write_txn
+                .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)
                 .map_err(persist_err)?,
             postings,
         })
@@ -353,87 +353,87 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         Ok(())
     }
 
-    fn delivery_get(
+    fn publish_queue_get(
         &self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, PersistenceError> {
         let value = match map {
-            GovernedDeliveryMap::Intents => self
-                .delivery_intents
+            GovernedPublishQueueMap::Intents => self
+                .publish_queue_intents
                 .get(fixed_key::<8>(key, "delivery intent key")?)
                 .map_err(persist_err)?,
-            GovernedDeliveryMap::Receipts => self
-                .delivery_receipts
+            GovernedPublishQueueMap::Receipts => self
+                .publish_queue_receipts
                 .get(fixed_key::<8>(key, "delivery receipt key")?)
                 .map_err(persist_err)?,
-            GovernedDeliveryMap::Kind5Claims => self
-                .delivery_kind5_claims
+            GovernedPublishQueueMap::Kind5Claims => self
+                .publish_queue_kind5_claims
                 .get(fixed_key::<8>(key, "delivery kind:5 key")?)
                 .map_err(persist_err)?,
-            GovernedDeliveryMap::SuppressById => self
-                .delivery_suppress_by_id
+            GovernedPublishQueueMap::SuppressById => self
+                .publish_queue_suppress_by_id
                 .get(fixed_key::<64>(key, "delivery id-suppression key")?)
                 .map_err(persist_err)?,
-            GovernedDeliveryMap::SuppressByAddr => self
-                .delivery_suppress_by_addr
+            GovernedPublishQueueMap::SuppressByAddr => self
+                .publish_queue_suppress_by_addr
                 .get(key)
                 .map_err(persist_err)?,
         };
         Ok(value.map(|guard| guard.value().to_vec()))
     }
 
-    fn delivery_put(
+    fn publish_queue_put(
         &mut self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
         value: &[u8],
     ) -> Result<(), PersistenceError> {
         match map {
-            GovernedDeliveryMap::Intents => self
-                .delivery_intents
+            GovernedPublishQueueMap::Intents => self
+                .publish_queue_intents
                 .insert(fixed_key::<8>(key, "delivery intent key")?, value),
-            GovernedDeliveryMap::Receipts => self
-                .delivery_receipts
+            GovernedPublishQueueMap::Receipts => self
+                .publish_queue_receipts
                 .insert(fixed_key::<8>(key, "delivery receipt key")?, value),
-            GovernedDeliveryMap::Kind5Claims => self
-                .delivery_kind5_claims
+            GovernedPublishQueueMap::Kind5Claims => self
+                .publish_queue_kind5_claims
                 .insert(fixed_key::<8>(key, "delivery kind:5 key")?, value),
-            GovernedDeliveryMap::SuppressById => self
-                .delivery_suppress_by_id
+            GovernedPublishQueueMap::SuppressById => self
+                .publish_queue_suppress_by_id
                 .insert(fixed_key::<64>(key, "delivery id-suppression key")?, value),
-            GovernedDeliveryMap::SuppressByAddr => {
-                self.delivery_suppress_by_addr.insert(key, value)
+            GovernedPublishQueueMap::SuppressByAddr => {
+                self.publish_queue_suppress_by_addr.insert(key, value)
             }
         }
         .map_err(persist_err)?;
         Ok(())
     }
 
-    fn delivery_remove(
+    fn publish_queue_remove(
         &mut self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, PersistenceError> {
         let value = match map {
-            GovernedDeliveryMap::Intents => self
-                .delivery_intents
+            GovernedPublishQueueMap::Intents => self
+                .publish_queue_intents
                 .remove(fixed_key::<8>(key, "delivery intent key")?)
                 .map_err(persist_err)?,
-            GovernedDeliveryMap::Receipts => self
-                .delivery_receipts
+            GovernedPublishQueueMap::Receipts => self
+                .publish_queue_receipts
                 .remove(fixed_key::<8>(key, "delivery receipt key")?)
                 .map_err(persist_err)?,
-            GovernedDeliveryMap::Kind5Claims => self
-                .delivery_kind5_claims
+            GovernedPublishQueueMap::Kind5Claims => self
+                .publish_queue_kind5_claims
                 .remove(fixed_key::<8>(key, "delivery kind:5 key")?)
                 .map_err(persist_err)?,
-            GovernedDeliveryMap::SuppressById => self
-                .delivery_suppress_by_id
+            GovernedPublishQueueMap::SuppressById => self
+                .publish_queue_suppress_by_id
                 .remove(fixed_key::<64>(key, "delivery id-suppression key")?)
                 .map_err(persist_err)?,
-            GovernedDeliveryMap::SuppressByAddr => self
-                .delivery_suppress_by_addr
+            GovernedPublishQueueMap::SuppressByAddr => self
+                .publish_queue_suppress_by_addr
                 .remove(key)
                 .map_err(persist_err)?,
         };
@@ -442,7 +442,7 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
 
     fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError> {
         Ok(self
-            .delivery_displaced
+            .publish_queue_displaced
             .remove(key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec()))

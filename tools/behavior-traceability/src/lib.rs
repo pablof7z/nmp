@@ -61,7 +61,10 @@ mod tests {
 
     impl KnownLiveIssues {
         fn current() -> Self {
-            Self(BTreeMap::from([(1215, IssueState::Open)]))
+            Self(BTreeMap::from([
+                (1215, IssueState::Open),
+                (1253, IssueState::Open),
+            ]))
         }
     }
 

@@ -115,14 +115,16 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             let transitioned = match lane.state {
-                DeliveryLaneState::WaitingAuth | DeliveryLaneState::Terminal { .. } => continue,
-                DeliveryLaneState::InFlight { ordinal, .. } => {
+                PublishQueueLaneState::WaitingAuth | PublishQueueLaneState::Terminal { .. } => {
+                    continue
+                }
+                PublishQueueLaneState::InFlight { ordinal, .. } => {
                     let committed = self.commit_lane_suspension(
                         &lane.key,
                         lane.revision,
                         ordinal,
                         self.clock,
-                        DeliveryTransientCause::AuthRequired,
+                        PublishQueueTransientCause::AuthRequired,
                         Some("AUTH challenge received".to_string()),
                         true,
                     );
@@ -131,9 +133,9 @@ impl<S: EventStore> EngineCore<S> {
                     }
                     committed
                 }
-                DeliveryLaneState::WaitingConnection
-                | DeliveryLaneState::Eligible { .. }
-                | DeliveryLaneState::Transient { .. } => {
+                PublishQueueLaneState::WaitingConnection
+                | PublishQueueLaneState::Eligible { .. }
+                | PublishQueueLaneState::Transient { .. } => {
                     self.commit_lane_waiting(&lane.key, lane.revision, true)
                 }
             };
@@ -141,10 +143,11 @@ impl<S: EventStore> EngineCore<S> {
                 self.retry_scheduler_blocked = true;
                 continue;
             }
-            self.emit_write_status(
+            self.emit_write_fact(
                 id,
-                WriteStatus::AwaitingAuth {
+                WriteFact::Relay {
                     relay: session.relay.clone(),
+                    state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                 },
                 effects,
             );
@@ -344,7 +347,7 @@ impl<S: EventStore> EngineCore<S> {
                     )
                 })
                 .is_some_and(|candidate| candidate == *session);
-            if !exact_session || !matches!(lane.state, DeliveryLaneState::WaitingAuth) {
+            if !exact_session || !matches!(lane.state, PublishQueueLaneState::WaitingAuth) {
                 continue;
             }
             let denial = StoredAuthDenial {
@@ -354,17 +357,19 @@ impl<S: EventStore> EngineCore<S> {
             match self.commit_lane_auth_denied(&lane.key, lane.revision, denial) {
                 Ok(_) => {
                     self.remove_active_lane(id, &lane.key.relay);
-                    self.emit_write_status(
+                    self.emit_write_fact(
                         id,
-                        WriteStatus::AuthDenied {
+                        WriteFact::Relay {
                             relay: lane.key.relay.clone(),
-                            pubkey,
-                            source: public_source,
-                            reason: reason.clone(),
+                            state: RelayState::AuthFailed {
+                                pubkey,
+                                source: public_source,
+                                reason: reason.clone(),
+                            },
                         },
                         effects,
                     );
-                    self.close_if_all_lanes_terminal(id);
+                    self.close_if_all_lanes_terminal(id, effects);
                 }
                 Err(_) => {
                     // Commit-before-emit: the receipt must never claim a
@@ -1338,7 +1343,7 @@ impl<S: EventStore> EngineCore<S> {
                     if let Some((receipt_id, pending)) = self
                         .pending
                         .iter_mut()
-                        .find(|(_, pending)| pending.intent_id == Some(intent_id))
+                        .find(|(_, pending)| pending.intent_id == intent_id)
                     {
                         pending.already_signed = true;
                         pending.sign_request_in_flight = false;

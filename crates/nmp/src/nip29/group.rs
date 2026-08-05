@@ -23,16 +23,14 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{
-    Durability, EventBuilder, Filter, Identity, WriteIntent, WritePayload, WriteRouting,
-};
+use nmp_grammar::{EventBuilder, Filter, Identity, WriteIntent, WritePayload, WriteRouting};
 use nostr::{Event, EventId, PublicKey, RelayUrl};
 
 use super::read::{self, GroupReadError};
 use super::records::{GroupObservation, GroupObserveError};
-use crate::delivery::WriteStatus;
 use crate::engine::Engine;
 use crate::error::EngineError;
+use crate::publish_queue::WriteFact;
 use crate::runtime::FifoReceiver;
 use crate::LiveQuery;
 use nmp_nip29::GroupContextError;
@@ -81,7 +79,7 @@ impl std::error::Error for GroupPublishError {}
 
 /// The receipt stream a group publication returns -- the SAME stream every
 /// other publish returns, drained the same way.
-pub type GroupReceipts = FifoReceiver<WriteStatus>;
+pub type GroupReceipts = FifoReceiver<WriteFact>;
 
 /// One NIP-29 group, on the relays its scope named.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,7 +324,6 @@ impl Group {
     fn intent(&self, payload: WritePayload, identity: Identity) -> WriteIntent {
         WriteIntent {
             payload,
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(self.hosts.iter().cloned().collect()),
             identity,
             correlation: None,

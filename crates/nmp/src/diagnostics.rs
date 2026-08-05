@@ -281,10 +281,9 @@ pub struct StalledWrite {
     pub id: String,
     pub stage: StalledWriteStage,
     /// What this write is waiting for. For
-    /// [`StalledWriteStage::Unroutable`] it is the receipt's OWN park
-    /// reason, verbatim, so an operator holding both never has to decide
-    /// whether two differently-worded sentences are the same fact. Never
-    /// empty.
+    /// [`StalledWriteStage::Unroutable`] this is the only place the reason
+    /// is stated at all: the receipt itself says only that its destination
+    /// set is empty and still open. Never empty.
     pub detail: String,
     /// When this obligation was ACCEPTED, replayed verbatim across
     /// restarts. The age is `now - stalled_since`; NMP reports the instant

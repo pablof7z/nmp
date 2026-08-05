@@ -50,7 +50,6 @@ mod affected_handle_invalidation_tests {
     fn exact_signed_intent(event: SignedEvent, relay: &RelayUrl) -> WriteIntent {
         WriteIntent {
             payload: WritePayload::Signed(event),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -195,7 +194,6 @@ mod affected_handle_invalidation_tests {
                 content: "pending local row".into(),
                 created_at: Some(Timestamp::from(21u64)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay]),
             identity: Identity::Active,
             correlation: None,
@@ -203,7 +201,7 @@ mod affected_handle_invalidation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                Effect::WriteAccepted(id) => Some(*id),
                 _ => None,
             })
             .expect("local acceptance emits its receipt");
@@ -269,7 +267,6 @@ mod affected_handle_invalidation_tests {
                 content: ("newest pending").into(),
                 created_at: Some(Timestamp::from(30u64)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -277,7 +274,7 @@ mod affected_handle_invalidation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                Effect::WriteAccepted(id) => Some(*id),
                 _ => None,
             })
             .expect("local acceptance emits its receipt");
@@ -350,7 +347,6 @@ mod affected_handle_invalidation_tests {
                 },
                 expected_base: Some(predecessor.id),
             },
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay]),
             identity: Identity::Active,
             correlation: None,
@@ -358,7 +354,7 @@ mod affected_handle_invalidation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                Effect::WriteAccepted(id) => Some(*id),
                 _ => None,
             })
             .expect("replaceable acceptance emits its receipt");
@@ -421,7 +417,6 @@ mod affected_handle_invalidation_tests {
                 content: ("").into(),
                 created_at: Some(Timestamp::from(20u64)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay]),
             identity: Identity::Active,
             correlation: None,
@@ -429,7 +424,7 @@ mod affected_handle_invalidation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                Effect::WriteAccepted(id) => Some(*id),
                 _ => None,
             })
             .expect("kind5 acceptance emits its receipt");

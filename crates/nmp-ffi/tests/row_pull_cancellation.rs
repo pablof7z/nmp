@@ -15,8 +15,8 @@ use std::time::Duration;
 use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowPull, NmpRowStream};
 use nmp_ffi::types::{
-    FfiDurability, FfiEventBuilder, FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWindow,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiEventBuilder, FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWindow, FfiWriteIntent,
+    FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -41,7 +41,10 @@ fn note_query() -> FfiFilter {
 }
 
 async fn publish_note(engine: &NmpEngine, sequence: u64) {
-    let receipt = engine
+    // `publish` returning `Ok` IS acceptance: the write is durably recorded
+    // before this call returns, so the producer mutation is committed before
+    // the next cancellation cycle without reading anything off the stream.
+    engine
         .publish(FfiWriteIntent {
             payload: FfiWritePayload::Event {
                 builder: FfiEventBuilder {
@@ -51,21 +54,11 @@ async fn publish_note(engine: &NmpEngine, sequence: u64) {
                     created_at: Some(sequence),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("local acceptance succeeds");
-    let accepted = tokio::time::timeout(Duration::from_secs(5), receipt.next())
-        .await
-        .expect("acceptance fact arrives")
-        .expect("receipt pull is valid")
-        .expect("receipt has an acceptance fact");
-    assert!(
-        matches!(accepted, nmp_ffi::types::FfiWriteStatus::Accepted),
-        "the producer mutation is accepted before the next cancellation cycle"
-    );
 }
 
 async fn receive(pull: &NmpRowPull) -> Option<FfiFrame> {

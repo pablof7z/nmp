@@ -18,9 +18,10 @@ use crate::world::{format_stated_time, NmpWorld};
 
 /// Also read by `features/diagnostics/stalled-writes.feature`, whose subject
 /// is a write nothing can deliver rather than a replacement: "the obligation
-/// was accepted" is the same observable in both, and a `WriteStatus::Accepted`
-/// is what both mean. Narrowing this to something replaceable-specific would
-/// silently break that feature, so it stays the plain acceptance fact.
+/// was accepted" is the same observable in both, and `publish()` answering
+/// `Ok` is what both mean. Narrowing this to something replaceable-specific
+/// would silently break that feature, so it stays the plain acceptance
+/// answer.
 #[then(regex = r#"^the write is accepted$"#)]
 async fn the_write_is_accepted(w: &mut NmpWorld) {
     assert!(
@@ -108,15 +109,22 @@ async fn foreign_contact_list_unchanged(w: &mut NmpWorld, pubkey: String) {
     );
 }
 
+/// A stale base now takes CUSTODY and ends refused, so "nothing was
+/// journaled" can no longer mean "nothing was accepted" -- the refusal IS a
+/// queue entry. What the scenario is protecting is the second half, which is
+/// unchanged and is the load-bearing one: no event id was ever allocated, so
+/// nothing was written on top of the base that moved.
 #[then(regex = r#"^nothing was journaled and no event id was allocated$"#)]
 async fn nothing_journaled_and_no_id(w: &mut NmpWorld) {
     let statuses = w.receipt_statuses();
     assert!(
-        !statuses
-            .iter()
-            .any(|s| matches!(s, nmp::mechanism::delivery::WriteStatus::Accepted)),
-        "the precondition is checked BEFORE an intent or receipt id is allocated; saw \
-         {statuses:?}"
+        !statuses.iter().any(|s| matches!(
+            s,
+            nmp::mechanism::publish_queue::WriteFact::Signing(
+                nmp::mechanism::publish_queue::SigningState::Signed { .. }
+            )
+        )),
+        "the precondition is checked BEFORE an event id is allocated; saw {statuses:?}"
     );
 }
 

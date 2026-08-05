@@ -533,7 +533,6 @@ mod history_mutation_tests {
                 },
                 expected_base: Some(predecessor.id),
             },
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay]),
             identity: Identity::Active,
             correlation: None,
@@ -541,7 +540,7 @@ mod history_mutation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+                Effect::WriteAccepted(id) => Some(*id),
                 _ => None,
             })
             .expect("replaceable local acceptance emits a receipt");

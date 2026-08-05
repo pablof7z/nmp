@@ -145,7 +145,7 @@ forbid_text "$MACOS_WORKFLOW" "cargo fmt"
 forbid_text "$MACOS_WORKFLOW" "gradlew"
 forbid_text "$FALSIFIER_PROJECT" "FalsifierTests:"
 require_text "$BOUNDED_RELAY_TEST" "final class BoundedRelayTimeSharingTests"
-require_text "$BOUNDED_RELAY_TEST" "testDurableAutoRoutedWriteProgressesPastAwaitingRelay"
+require_text "$BOUNDED_RELAY_TEST" "testAutoRoutedWriteProgressesPastAWaitingRelayLaneWithoutClaimingSettlement"
 require_text "$BOUNDED_RELAY_TEST" "peakActiveWebSockets"
 require_text "$BOUNDED_RELAY_TEST" "testEventDrivenWaitersWithdrawExactlyOnTimeout"
 require_text "$CONTROLLED_RELAY" '"NMP Swift Test Relay"'

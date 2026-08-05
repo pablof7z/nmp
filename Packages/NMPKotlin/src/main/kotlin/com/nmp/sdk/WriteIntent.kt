@@ -2,7 +2,6 @@
 
 package com.nmp.sdk
 
-import uniffi.nmp_ffi.FfiDurability
 import uniffi.nmp_ffi.FfiAuthDenialSource
 import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiIdentity
@@ -10,7 +9,14 @@ import uniffi.nmp_ffi.FfiRetryCause
 import uniffi.nmp_ffi.FfiWriteIntent
 import uniffi.nmp_ffi.FfiWritePayload
 import uniffi.nmp_ffi.FfiWriteRouting
-import uniffi.nmp_ffi.FfiWriteStatus
+import uniffi.nmp_ffi.FfiNotSentReason
+import uniffi.nmp_ffi.FfiPublishQueueEntry
+import uniffi.nmp_ffi.FfiRefuseReason
+import uniffi.nmp_ffi.FfiRelayState
+import uniffi.nmp_ffi.FfiRelayWaiting
+import uniffi.nmp_ffi.FfiSigningState
+import uniffi.nmp_ffi.FfiWriteFact
+import uniffi.nmp_ffi.FfiWriteOutcome
 
 enum class AuthDenialSource {
     Policy,
@@ -44,30 +50,6 @@ enum class RetryCause {
                 FfiRetryCause.CONNECTION_LOST -> ConnectionLost
                 FfiRetryCause.RELAY_RATE_LIMITED -> RelayRateLimited
                 FfiRetryCause.RELAY_ERROR -> RelayError
-            }
-    }
-}
-
-/** A durability PROPERTY of a write (not a routing choice). */
-enum class Durability {
-    Durable,
-    Ephemeral,
-    AtMostOnce,
-    ;
-
-    fun toFfi(): FfiDurability =
-        when (this) {
-            Durable -> FfiDurability.DURABLE
-            Ephemeral -> FfiDurability.EPHEMERAL
-            AtMostOnce -> FfiDurability.AT_MOST_ONCE
-        }
-
-    companion object {
-        internal fun from(ffi: FfiDurability): Durability =
-            when (ffi) {
-                FfiDurability.DURABLE -> Durable
-                FfiDurability.EPHEMERAL -> Ephemeral
-                FfiDurability.AT_MOST_ONCE -> AtMostOnce
             }
     }
 }
@@ -180,7 +162,8 @@ sealed class WritePayload {
  * [WritePayload.Signed] payload it may only RESTATE the author already
  * frozen in the bytes: naming that author changes nothing, naming anybody
  * else is a consent/author contradiction that surfaces as
- * [WriteStatus.Failed] on the receipt stream with no [WriteStatus.Accepted]
+ * `NMPError.PublishRefused` from `publish` itself -- an instruction that
+ * cannot resolve is a refusal, not a parked hope
  * before it.
  *
  * [Explicit.pubkey] is 64-char HEX and nothing else. A bech32 `npub` is
@@ -189,7 +172,7 @@ sealed class WritePayload {
  * person or received from one, so an app that took an npub from a paste box
  * decodes it there -- with `decodeNostrEntity` -- and hands NMP a key.
  * Naming a pubkey with no registered signer is NOT an error: the write
- * parks as [WriteStatus.AwaitingCapability] until that capability attaches.
+ * parks as [SigningState.AwaitingSigner] until that capability attaches.
  * Acceptance pins the resolved key either way, so a later
  * [NMPEngine.setActiveAccount] cannot retarget the write. */
 sealed class Identity {
@@ -216,13 +199,12 @@ sealed class Identity {
  *
  * [identity] (#47) defaults to [Identity.Active] -- the overwhelming
  * majority of writes publish as the logged-in account, and saying so costs
- * nothing. [WriteStatus.AwaitingCapability.pubkey] (#47 Unit B) is the
+ * nothing. [SigningState.AwaitingSigner.pubkey] (#47 Unit B) is the
  * exact frozen identity parked -- the key [Identity.Explicit] named, else
  * the account active at publish time -- never the (possibly different)
  * currently active account. */
 data class WriteIntent(
     val payload: WritePayload,
-    val durability: Durability,
     val routing: WriteRouting,
     val identity: Identity = Identity.Active,
     /** Crash-safe client correlation token (#591). `null` -- the default --
@@ -241,7 +223,6 @@ data class WriteIntent(
     fun toFfi(): FfiWriteIntent =
         FfiWriteIntent(
             payload = payload.toFfi(),
-            durability = durability.toFfi(),
             routing = routing.toFfi(),
             identity = identity.toFfi(),
             correlation = correlation,
@@ -254,7 +235,6 @@ data class WriteIntent(
         internal fun from(ffi: FfiWriteIntent): WriteIntent =
             WriteIntent(
                 payload = WritePayload.from(ffi.payload),
-                durability = Durability.from(ffi.durability),
                 routing = WriteRouting.from(ffi.routing),
                 identity = Identity.from(ffi.identity),
                 correlation = ffi.correlation,
@@ -262,117 +242,285 @@ data class WriteIntent(
     }
 }
 
-/** Every state a publish's receipt stream may report (ledger #9: enqueue is
- * not converged -- many of these may arrive per publish, one per relay for
- * the terminal states). */
-sealed class WriteStatus {
-    object Accepted : WriteStatus()
+/** The signing state of the WHOLE write -- one signature, one author, one
+ * answer. */
+sealed class SigningState {
+    /** No registered signer answers for [pubkey] (64-char hex) -- the exact
+     * identity FROZEN at acceptance, never whoever is active now. Re-armed
+     * only by attaching a signer for THIS key, and re-emitted verbatim on
+     * restart replay.
+     *
+     * **No clock ever ends this.** A device whose signer is simply not
+     * plugged in yet is not a device whose write failed; removing the queue
+     * entry is the only other exit. */
+    data class AwaitingSigner(val pubkey: String) : SigningState()
 
-    object Cancelled : WriteStatus()
+    data class Signed(val eventId: String) : SigningState()
 
-    object Superseded : WriteStatus()
+    /** The signer answered and said no. Terminal for the whole write. */
+    data class Refused(val reason: String) : SigningState()
 
-    /** #47 Unit B: [pubkey] is the exact frozen identity (64-char hex) no
-     * registered signer currently answers for. Retained, not terminal --
-     * re-arrives verbatim on restart replay and resumes only when a signer
-     * for THIS pubkey attaches, never a different one. */
-    data class AwaitingCapability(val pubkey: String) : WriteStatus()
+    companion object {
+        internal fun from(ffi: FfiSigningState): SigningState =
+            when (ffi) {
+                is FfiSigningState.AwaitingSigner -> AwaitingSigner(ffi.pubkey)
+                is FfiSigningState.Signed -> Signed(ffi.eventId)
+                is FfiSigningState.Refused -> Refused(ffi.reason)
+            }
+    }
+}
 
-    data class Signed(val eventId: String) : WriteStatus()
+/** Why a relay lane is not attempting right now. Every case is a fact about
+ * the lane; none of them is a deadline. */
+sealed class RelayWaiting {
+    /** Offline time consumes no attempt ordinal, so being offline can never
+     * spend the give-up ceiling. */
+    object NotConnected : RelayWaiting()
 
-    /** Routing has not produced a single relay yet, and [detail] says what it
-     * is waiting for. Retained, not terminal, and replayed verbatim on
-     * receipt reattachment -- a route parked for a month is still visible
-     * with its reason. Nothing expires it; explicit cancellation is the one
-     * way out. Show it, with [Routed] whose [Routed.complete] is false, as
-     * "determining destinations". */
-    data class AwaitingRoute(val detail: String) : WriteStatus()
+    object NeedsAuth : RelayWaiting()
 
-    /** [relays] is what routing has named SO FAR; [complete] says whether
-     * that list can still grow. Both are independent of delivery:
-     * `complete = true` with nothing delivered is "sending 0 of n", and
-     * `complete = false` with some relays already acked is ordinary while
-     * routing is still open. */
-    data class Routed(val relays: List<String>, val complete: Boolean) : WriteStatus()
-
-    data class AwaitingRelay(val relay: String) : WriteStatus()
-
-    data class AwaitingAuth(val relay: String) : WriteStatus()
-
-    data class AuthDenied(
-        val relay: String,
-        val pubkey: String,
-        val source: AuthDenialSource,
-        val reason: String,
-    ) : WriteStatus()
-
-    data class RetryEligible(
-        val relay: String,
+    /** The last attempt failed in a way that permits another one, and
+     * [cause]/[detail] say WHY -- "we will try again" and "we will try again
+     * because the relay rate-limited us" are different messages and only the
+     * second one can be acted on. */
+    data class BackingOff(
         val attempt: ULong,
         val eligibleAt: ULong,
         val cause: RetryCause,
         val detail: String?,
-    ) : WriteStatus()
+    ) : RelayWaiting()
 
-    data class HandoffAmbiguous(val relay: String, val attempt: ULong, val observedAt: ULong) : WriteStatus()
-
-    data class Sent(val relay: String, val attempt: ULong, val writtenAt: ULong) : WriteStatus()
-
-    data class Acked(val relay: String) : WriteStatus()
-
-    data class Rejected(val relay: String, val reason: String) : WriteStatus()
-
-    data class GaveUp(val relay: String) : WriteStatus()
-
-    data class PersistenceBlocked(val relay: String) : WriteStatus()
-
-    data class RoutePersistenceBlocked(val relay: String) : WriteStatus()
-
-    data class OutcomeUnknown(val relay: String) : WriteStatus()
-
-    data class ReplaceableConflict(val expected: String?, val actual: String?) : WriteStatus()
-
-    data class Failed(val reason: String) : WriteStatus()
+    /** The lane is owned and nonterminal, but a durable fact about it could
+     * not be committed -- the local disk is refusing writes. No wire EVENT
+     * was emitted. Also latched onto the queue entry and never cleared by a
+     * later ack. */
+    data class PersistenceStalled(val detail: String) : RelayWaiting()
 
     companion object {
-        fun from(ffi: FfiWriteStatus): WriteStatus =
+        internal fun from(ffi: FfiRelayWaiting): RelayWaiting =
             when (ffi) {
-                is FfiWriteStatus.Accepted -> Accepted
-                is FfiWriteStatus.Cancelled -> Cancelled
-                is FfiWriteStatus.Superseded -> Superseded
-                is FfiWriteStatus.AwaitingCapability -> AwaitingCapability(ffi.pubkey)
-                is FfiWriteStatus.Signed -> Signed(ffi.eventId)
-                is FfiWriteStatus.AwaitingRoute -> AwaitingRoute(ffi.detail)
-                is FfiWriteStatus.Routed -> Routed(ffi.relays, ffi.complete)
-                is FfiWriteStatus.AwaitingRelay -> AwaitingRelay(ffi.relay)
-                is FfiWriteStatus.AwaitingAuth -> AwaitingAuth(ffi.relay)
-                is FfiWriteStatus.AuthDenied ->
-                    AuthDenied(
-                        ffi.relay,
-                        ffi.pubkey,
-                        AuthDenialSource.from(ffi.source),
-                        ffi.reason,
-                    )
-                is FfiWriteStatus.RetryEligible ->
-                    RetryEligible(
-                        ffi.relay,
+                is FfiRelayWaiting.NotConnected -> NotConnected
+                is FfiRelayWaiting.NeedsAuth -> NeedsAuth
+                is FfiRelayWaiting.BackingOff ->
+                    BackingOff(
                         ffi.attempt,
                         ffi.eligibleAt,
                         RetryCause.from(ffi.cause),
                         ffi.detail,
                     )
-                is FfiWriteStatus.HandoffAmbiguous ->
-                    HandoffAmbiguous(ffi.relay, ffi.attempt, ffi.observedAt)
-                is FfiWriteStatus.Sent -> Sent(ffi.relay, ffi.attempt, ffi.writtenAt)
-                is FfiWriteStatus.Acked -> Acked(ffi.relay)
-                is FfiWriteStatus.Rejected -> Rejected(ffi.relay, ffi.reason)
-                is FfiWriteStatus.GaveUp -> GaveUp(ffi.relay)
-                is FfiWriteStatus.PersistenceBlocked -> PersistenceBlocked(ffi.relay)
-                is FfiWriteStatus.RoutePersistenceBlocked -> RoutePersistenceBlocked(ffi.relay)
-                is FfiWriteStatus.OutcomeUnknown -> OutcomeUnknown(ffi.relay)
-                is FfiWriteStatus.ReplaceableConflict ->
-                    ReplaceableConflict(ffi.expected, ffi.actual)
-                is FfiWriteStatus.Failed -> Failed(ffi.reason)
+                is FfiRelayWaiting.PersistenceStalled -> PersistenceStalled(ffi.detail)
             }
+    }
+}
+
+/** What is true at ONE relay. [Published], [Rejected], [AuthFailed] and
+ * [GaveUp] are terminal for that relay; [Waiting] and [Sent] are not. */
+sealed class RelayState {
+    data class Waiting(val waiting: RelayWaiting) : RelayState()
+
+    /** Transport proved socket write + flush. Not an ack, and not terminal. */
+    data class Sent(val attempt: ULong, val writtenAt: ULong) : RelayState()
+
+    object Published : RelayState()
+
+    /** The relay authenticated the identity and refused THIS EVENT. The
+     * repair is to the event. */
+    data class Rejected(val reason: String) : RelayState()
+
+    /** The write could not be authenticated HERE. Deliberately NOT folded
+     * into [Rejected]: [source] keeps an app's own decision not to
+     * authenticate from being shown to a user as a relay refusing them. */
+    data class AuthFailed(
+        val pubkey: String,
+        val source: AuthDenialSource,
+        val reason: String,
+    ) : RelayState()
+
+    /** The attempt ceiling was reached at this relay. Terminal HERE and
+     * nowhere else: three relays published and one given up on is a success
+     * with a footnote, not a failed write. */
+    object GaveUp : RelayState()
+
+    /** Whether this relay will produce another fact. */
+    val isTerminal: Boolean
+        get() =
+            when (this) {
+                is Published, is Rejected, is AuthFailed, is GaveUp -> true
+                is Waiting, is Sent -> false
+            }
+
+    companion object {
+        internal fun from(ffi: FfiRelayState): RelayState =
+            when (ffi) {
+                is FfiRelayState.Waiting -> Waiting(RelayWaiting.from(ffi.waiting))
+                is FfiRelayState.Sent -> Sent(ffi.attempt, ffi.writtenAt)
+                is FfiRelayState.Published -> Published
+                is FfiRelayState.Rejected -> Rejected(ffi.reason)
+                is FfiRelayState.AuthFailed ->
+                    AuthFailed(
+                        ffi.pubkey,
+                        AuthDenialSource.from(ffi.source),
+                        ffi.reason,
+                    )
+                is FfiRelayState.GaveUp -> GaveUp
+            }
+    }
+}
+
+/** Why a write ended without going anywhere. */
+enum class NotSentReason {
+    Cancelled,
+
+    /** A newer accepted write won the same replaceable coordinate before this
+     * one started any wire attempt. Not a failure -- for an app renewing
+     * presence it is the steady state. */
+    Superseded,
+    ;
+
+    companion object {
+        internal fun from(ffi: FfiNotSentReason): NotSentReason =
+            when (ffi) {
+                FfiNotSentReason.CANCELLED -> Cancelled
+                FfiNotSentReason.SUPERSEDED -> Superseded
+            }
+    }
+}
+
+/** Why the acceptance door said no. */
+sealed class RefuseReason {
+    object AlreadyExpired : RefuseReason()
+
+    object Tombstoned : RefuseReason()
+
+    object ReplaceableBaseOnRegularEvent : RefuseReason()
+
+    /** A whole-value replacement lost its compare-and-swap.
+     *
+     * BOTH ids are kept, and that is what makes the failure recoverable
+     * without the user: fetch [actual], reapply the change and resubmit
+     * silently. Reduced to a string you could only tell them to redo it. */
+    data class ReplaceableBaseChanged(val expected: String?, val actual: String?) : RefuseReason()
+
+    companion object {
+        internal fun from(ffi: FfiRefuseReason): RefuseReason =
+            when (ffi) {
+                is FfiRefuseReason.AlreadyExpired -> AlreadyExpired
+                is FfiRefuseReason.Tombstoned -> Tombstoned
+                is FfiRefuseReason.ReplaceableBaseOnRegularEvent -> ReplaceableBaseOnRegularEvent
+                is FfiRefuseReason.ReplaceableBaseChanged ->
+                    ReplaceableBaseChanged(ffi.expected, ffi.actual)
+            }
+    }
+}
+
+/** The whole-write terminal. Exactly one of these ends every receipt stream,
+ * so a stream can never end in silence and you can always tell a finished
+ * write from a dropped subscription. */
+sealed class WriteOutcome {
+    /** The destination set is CLOSED and every relay in it is terminal. What
+     * happened at each is the per-relay facts; this says only that no more
+     * are coming. */
+    object Settled : WriteOutcome()
+
+    /** Routing finished -- knowledge is exhausted -- and named zero relays.
+     * Terminal: there is nowhere to publish. Distinct from a route still
+     * resolving, which parks forever. */
+    object NoDestination : WriteOutcome()
+
+    data class NotSent(val reason: NotSentReason) : WriteOutcome()
+
+    /** The store answered the acceptance instruction with a semantic no. The
+     * write is in custody as a permanently-failed entry: one row, payload
+     * intact, readable and removable through [NMPEngine.publishQueue]. */
+    data class Refused(val reason: RefuseReason) : WriteOutcome()
+
+    companion object {
+        internal fun from(ffi: FfiWriteOutcome): WriteOutcome =
+            when (ffi) {
+                is FfiWriteOutcome.Settled -> Settled
+                is FfiWriteOutcome.NoDestination -> NoDestination
+                is FfiWriteOutcome.NotSent -> NotSent(NotSentReason.from(ffi.reason))
+                is FfiWriteOutcome.Refused -> Refused(RefuseReason.from(ffi.reason))
+            }
+    }
+}
+
+/** One fact about a write, delivered on its receipt stream.
+ *
+ * Acceptance is deliberately ABSENT: `publish` returning a receipt IS
+ * acceptance, so you never ask the stream whether your write was taken.
+ * Settlement is INSPECTED, never AWAITED -- a locally accepted write is
+ * already visible through your own live query, reporting cache and zero
+ * relays. Never block a UI on this. */
+sealed class WriteFact {
+    data class Signing(val state: SigningState) : WriteFact()
+
+    data class Relay(val relay: String, val state: RelayState) : WriteFact()
+
+    /** The relays this write is INTENDED for, and whether resolution can
+     * still change its mind. [complete] flips on settled RESOLUTION, never on
+     * delivery, so `complete == true` with nothing published yet is
+     * "sending 0 of n". This is the settlement denominator.
+     *
+     * `complete == false` with an empty set is a write still learning where
+     * it goes; it parks indefinitely and NOTHING expires it. `complete ==
+     * true` with an empty set is [WriteOutcome.NoDestination]. */
+    data class Destinations(val relays: List<String>, val complete: Boolean) : WriteFact()
+
+    data class Outcome(val outcome: WriteOutcome) : WriteFact()
+
+    companion object {
+        fun from(ffi: FfiWriteFact): WriteFact =
+            when (ffi) {
+                is FfiWriteFact.Signing -> Signing(SigningState.from(ffi.state))
+                is FfiWriteFact.Relay -> Relay(ffi.relay, RelayState.from(ffi.state))
+                is FfiWriteFact.Destinations -> Destinations(ffi.relays, ffi.complete)
+                is FfiWriteFact.Outcome -> Outcome(WriteOutcome.from(ffi.outcome))
+            }
+    }
+}
+
+/** One write in your publish queue, as you read it back.
+ *
+ * Enumerating the queue answers "what have I got outstanding, and what went
+ * wrong with it" without having held a receipt stream open since acceptance.
+ * It is INSPECTION: nothing here blocks. */
+data class PublishQueueEntry(
+    val receiptId: ULong,
+    /** The frozen event id (64-char hex) -- the write's identity from
+     * acceptance onward, unchanged by signing. */
+    val eventId: String,
+    /** The identity frozen at acceptance (64-char hex). Never re-resolved. */
+    val pubkey: String,
+    val acceptedAt: ULong,
+    val signing: SigningState,
+    val relays: List<String>,
+    val routeComplete: Boolean,
+    val relayStates: List<Pair<String, RelayState>>,
+    /** `null` while the write is still in progress. */
+    val outcome: WriteOutcome?,
+    /** LATCHED. Set the first time local persistence refused a durable fact
+     * for this write, and never cleared by a later success -- an operator must
+     * not lose the only signal that the disk is failing because a relay acked
+     * afterwards. */
+    val persistenceFault: String?,
+) {
+    /** Whether this write will produce another fact. */
+    val isTerminal: Boolean get() = outcome != null
+
+    companion object {
+        internal fun from(ffi: FfiPublishQueueEntry): PublishQueueEntry =
+            PublishQueueEntry(
+                receiptId = ffi.receiptId,
+                eventId = ffi.eventId,
+                pubkey = ffi.pubkey,
+                acceptedAt = ffi.acceptedAt,
+                signing = SigningState.from(ffi.signing),
+                relays = ffi.relays,
+                routeComplete = ffi.routeComplete,
+                relayStates = ffi.relayStates.map { it.relay to RelayState.from(it.state) },
+                outcome = ffi.outcome?.let { WriteOutcome.from(it) },
+                persistenceFault = ffi.persistenceFault,
+            )
     }
 }

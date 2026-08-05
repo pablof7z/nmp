@@ -71,7 +71,7 @@ extension NmpFollowStream: NMPPullHandle {
 }
 
 extension NmpReceiptStream: NMPPullHandle {
-    func pullNext() async throws -> FfiWriteStatus? { try await next() }
+    func pullNext() async throws -> FfiWriteFact? { try await next() }
 }
 
 extension NmpFollowActionStream: NMPPullHandle {

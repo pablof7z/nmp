@@ -60,9 +60,9 @@ use nostr::{
 };
 
 use nmp_grammar::{
-    fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash,
-    Durability, Freshness, Identity, LiveQuery, RelaySessionKey, RoutingEvidence, SourceAuthority,
-    WriteIntent, WritePayload, WriteRouting,
+    fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash, Freshness,
+    Identity, LiveQuery, RelaySessionKey, RoutingEvidence, SourceAuthority, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine,
@@ -75,12 +75,12 @@ use nmp_router::{
 use nmp_signer::SignerError;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AuthDenial as StoredAuthDenial,
-    AuthDenialSource as StoredAuthDenialSource, CancelEphemeralOutcome, CloseIntentOutcome,
-    CompensateOutcome, CoverageKey, DeliveryAttemptHandoff, DeliveryAttemptOutcome,
-    DeliveryDeadlineKind, DeliveryInFlightPhase, DeliveryLane, DeliveryLaneKey, DeliveryLaneState,
-    DeliveryPostHandoffState, DeliveryTerminalOutcome, DeliveryTransientCause, DurabilityOutcome,
-    EventStore, HandoffEvidence, IntentId, IntentSigState, PersistenceError, PromoteOutcome,
-    ReceiptState, RelayObserved, WriteDurability,
+    AuthDenialSource as StoredAuthDenialSource, CloseIntentOutcome, CompensateOutcome, CoverageKey,
+    DurabilityOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState, PersistenceError,
+    PromoteOutcome, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
+    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
+    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
+    PublishQueueTransientCause, ReceiptState, RelayObserved, RemoveQueueEntryOutcome,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -88,10 +88,12 @@ use nmp_transport::{
     RelayHandle as TransportRelayHandle, RelayHealth,
 };
 
-use crate::delivery::{
-    AuthDenialSource, CancelWriteError, CancelWriteOutcome, RetryCause, WriteStatus,
-};
 use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
+use crate::publish_queue::{
+    AuthDenialSource, CancelWriteError, CancelWriteOutcome, NotSentReason, PublishQueueEntry,
+    RelayState, RelayWaiting, RemoveQueueEntryError, RetryCause, SigningState, WriteFact,
+    WriteOutcome,
+};
 use crate::relay_information_service::RelayInformationCapabilityEvidence;
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
@@ -313,9 +315,20 @@ const AUTH_MAX_FUTURE_SECS: u64 = 600;
 /// real epochs are distinct BY VALUE, not merely by phase.
 const AUTH_SEQUENCE_SENTINEL: u64 = u64::MAX;
 const MAX_GLOBAL_ATTEMPTS: usize = 32;
+/// The two shapes a local-persistence stall takes, kept as exact strings so
+/// an operator reading `RelayWaiting::PersistenceStalled` learns which one
+/// happened. They differ only in whether the resolved relay URL survives a
+/// crash — a recovery detail, not an app decision, which is why it rides
+/// `detail` rather than a second variant.
+const ATTEMPT_STALL_DETAIL: &str =
+    "the durable attempt fact could not be committed; no wire EVENT was emitted and recovery \
+     rediscovers this exact relay from its committed route revision";
+const ROUTE_STALL_DETAIL: &str =
+    "the append-only route revision could not be committed; this exact relay URL is not claimed \
+     to survive a crash";
 const DEADLINE_READ_BATCH: usize = 1_024;
 
-fn retry_delay_secs(key: &DeliveryLaneKey, ordinal: u64) -> u64 {
+fn retry_delay_secs(key: &PublishQueueLaneKey, ordinal: u64) -> u64 {
     let exponent = ordinal.saturating_sub(1).min(63) as u32;
     let base = RETRY_INITIAL_SECS
         .checked_shl(exponent)
@@ -343,7 +356,7 @@ fn retry_delay_secs(key: &DeliveryLaneKey, ordinal: u64) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RelayAckClass {
     Acked,
-    Transient(DeliveryTransientCause),
+    Transient(PublishQueueTransientCause),
     WaitingAuth,
     Rejected,
 }
@@ -357,8 +370,8 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
     };
     match prefix {
         "duplicate" => RelayAckClass::Acked,
-        "rate-limited" => RelayAckClass::Transient(DeliveryTransientCause::RelayRateLimited),
-        "error" => RelayAckClass::Transient(DeliveryTransientCause::RelayError),
+        "rate-limited" => RelayAckClass::Transient(PublishQueueTransientCause::RelayRateLimited),
+        "error" => RelayAckClass::Transient(PublishQueueTransientCause::RelayError),
         "auth-required" => RelayAckClass::WaitingAuth,
         "invalid" | "pow" | "blocked" | "restricted" | "mute" => RelayAckClass::Rejected,
         _ => RelayAckClass::Rejected,
@@ -413,17 +426,15 @@ pub struct ReceiptReplayCursor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReceiptReplayCursorState {
     receipt_id: ReceiptId,
-    receipt_status: Option<WriteStatus>,
+    receipt_status: Option<WriteFact>,
     awaiting_capability: bool,
-    /// The routing park's reason, retained so reattachment replays it
-    /// VERBATIM — whatever it said on day one it still says on day thirty,
-    /// because it is the recorded reason and not a re-derivation against
-    /// knowledge that has moved on. Bounded: one string per receipt.
-    awaiting_route: Option<String>,
+    /// Whether the destination picture has been replayed for this receipt.
+    destinations: bool,
     attempts: BTreeMap<RelayUrl, ReceiptAttemptReplayKey>,
     lane_revisions: BTreeMap<RelayUrl, u64>,
-    persistence_blocked: BTreeSet<RelayUrl>,
-    route_persistence_blocked: BTreeSet<RelayUrl>,
+    /// The relays whose persistence stall has been replayed. Latched, never
+    /// cleared: a fault a later ack papered over is still the fault.
+    persistence_stalled: BTreeSet<(RelayUrl, write::PersistenceStallKind)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -446,34 +457,93 @@ impl ReceiptReplayCursor {
                 receipt_id,
                 receipt_status: None,
                 awaiting_capability: false,
-                awaiting_route: None,
+                destinations: false,
                 attempts: BTreeMap::new(),
                 lane_revisions: BTreeMap::new(),
-                persistence_blocked: BTreeSet::new(),
-                route_persistence_blocked: BTreeSet::new(),
+                persistence_stalled: BTreeSet::new(),
             }),
         }
     }
 }
 
-/// A publish failure that occurs before any receipt identity can exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The two, and only two, ways `publish()` refuses.
+///
+/// Everything else takes CUSTODY and fails in the queue where the app can
+/// see it — no relays, no signer online, a stale replaceable base and disk
+/// trouble mid-flight all become queue entries rather than errors here.
+///
+/// **Rule 1 — NMP cannot write anything down.** No ink:
+/// [`Self::EngineShuttingDown`] and [`Self::PersistenceFailed`] — which is
+/// also where receipt-id exhaustion arrives, because the ONLY receipt-id
+/// space left is the store's own durable allocator inside the acceptance
+/// transaction, and running it out fails that transaction like any other
+/// write. The separate upper-half "unaccepted" namespace is deleted with
+/// the stream-local failure receipt it existed to identify.
+///
+/// **Rule 2 — the instruction cannot resolve.** Nothing in this class is a
+/// fact about the world; each is "you asked for something unanswerable," so
+/// nothing is pinned and nothing may park:
+/// [`Self::NoActiveAccount`], [`Self::SignatureInvalid`],
+/// [`Self::IdentityContradictsSignedAuthor`], [`Self::ReservedKind`],
+/// [`Self::EmptyExplicitRoute`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishError {
-    /// Every upper-half correlation id has already been issued. No id is
-    /// reused, wrapped into the durable lower half, or fabricated.
-    ReceiptCorrelationIdExhausted,
     /// The runtime has begun its finite cancellation/drain phase and cannot
     /// accept a new write before closing.
     EngineShuttingDown,
+    /// The acceptance transaction itself failed. Recording the failure would
+    /// need the disk that just refused, so there is no queue entry to fail
+    /// into.
+    PersistenceFailed { reason: String },
+    /// [`Identity::Active`](nmp_grammar::Identity::Active) with no account
+    /// active. Nothing is pinned, so nothing may park — and a later login
+    /// could sign as the wrong person.
+    NoActiveAccount,
+    /// A caller-supplied [`WritePayload::Signed`](nmp_grammar::WritePayload)
+    /// whose signature does not verify. Rare by construction: NMP applies
+    /// the signature itself for a builder payload.
+    SignatureInvalid { reason: String },
+    /// An explicit identity naming somebody other than a signed payload's
+    /// own author. A contradiction with no correct resolution.
+    IdentityContradictsSignedAuthor {
+        identity: PublicKey,
+        author: PublicKey,
+    },
+    /// A kind the reducer owns and no app may publish (kind:22242 is relay
+    /// authentication).
+    ReservedKind { kind: u16 },
+    /// [`WriteRouting::Explicit`](nmp_grammar::WriteRouting) naming no
+    /// relays. It never degrades into `Auto`: sending a write to relays the
+    /// caller did not choose is the failure this refusal exists to prevent.
+    EmptyExplicitRoute,
 }
 
 impl std::fmt::Display for PublishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ReceiptCorrelationIdExhausted => {
-                write!(f, "receipt correlation id namespace exhausted")
-            }
             Self::EngineShuttingDown => write!(f, "engine is shutting down"),
+            Self::PersistenceFailed { reason } => {
+                write!(f, "the write could not be recorded: {reason}")
+            }
+            Self::NoActiveAccount => write!(
+                f,
+                "publishing as the active account requires an active account"
+            ),
+            Self::SignatureInvalid { reason } => {
+                write!(f, "the supplied signature does not verify: {reason}")
+            }
+            Self::IdentityContradictsSignedAuthor { identity, author } => write!(
+                f,
+                "explicit identity {identity} does not match the signed event author {author}"
+            ),
+            Self::ReservedKind { kind } => write!(
+                f,
+                "kind:{kind} is reserved for reducer-owned relay authentication"
+            ),
+            Self::EmptyExplicitRoute => write!(
+                f,
+                "an explicit route naming no relays is refused: it never degrades into Auto"
+            ),
         }
     }
 }
@@ -504,7 +574,7 @@ impl ReattachOutcome {
 #[derive(Debug)]
 pub struct ReceiptReplayPage {
     pub outcome: ReattachOutcome,
-    pub facts: Vec<WriteStatus>,
+    pub facts: Vec<WriteFact>,
     /// `Some` means another finite replay call is required before joining
     /// live delivery. `None` means this page reached current durable truth.
     pub next_cursor: Option<ReceiptReplayCursor>,
@@ -943,15 +1013,23 @@ pub enum Effect {
     /// registered observer, latest-wins if a consumer is slow (never
     /// buffered/replayed).
     EmitDiagnostics(DiagnosticsSnapshot),
-    EmitReceipt(ReceiptId, WriteStatus),
+    EmitReceipt(ReceiptId, WriteFact),
+    /// `publish()` took CUSTODY: the write is durably recorded under this
+    /// receipt id and whatever becomes of it will be too. Not a fact on the
+    /// stream — acceptance is what the `Ok` return already says — so nothing
+    /// downstream delivers it to an observer.
+    ///
+    /// Custody is not viability: a write can be in custody and already
+    /// permanently failed.
+    WriteAccepted(ReceiptId),
     /// A correlation-idempotent publish resolved to an existing receipt.
     /// These retained facts are not new live transitions: runtime must prime
     /// only that publish caller's fresh mailbox, then join it to live delivery
     /// at the page's final cursor. Existing observers must never receive this
     /// replay.
     ReplayReceipt(ReceiptId, ReceiptReplayPage),
-    /// The publish could not even allocate a non-durable correlation id,
-    /// so no `EmitReceipt` can truthfully accompany this failure.
+    /// `publish()` refused. Nothing durable exists and nothing ever will —
+    /// see [`PublishError`] for the only two reasons that is ever true.
     PublishFailed(PublishError),
     RequestSign(ReceiptId, u64, UnsignedEvent),
     /// Execute one reducer-owned NIP-42 operation. This envelope has its own
@@ -1172,7 +1250,7 @@ struct RememberedRow {
 /// Per-receipt bookkeeping the reducer retains from `Publish` through to the
 /// last per-relay ack (or `Ephemeral`'s generation-scoped handoff effects).
 /// Ephemeral still owns a receipt-only record and status stream; what it
-/// lacks is a durable delivery obligation and canonical pending row.
+/// lacks is a publish queue obligation and canonical pending row.
 #[derive(Clone)]
 struct QuarantinedWrite {
     intent_id: IntentId,
@@ -1194,7 +1272,7 @@ struct LaneWorkerProjection {
 }
 
 impl LaneWorkerProjection {
-    fn from_recovered(lanes: &[DeliveryLane]) -> Self {
+    fn from_recovered(lanes: &[PublishQueueLane]) -> Self {
         let mut projection = Self::default();
         for lane in lanes {
             projection.apply(lane);
@@ -1204,11 +1282,11 @@ impl LaneWorkerProjection {
 
     /// Apply one exact committed post-state. Returns whether this relay was
     /// newly learned as a persisted lane and therefore needs reverse indexing.
-    fn apply(&mut self, lane: &DeliveryLane) -> bool {
+    fn apply(&mut self, lane: &PublishQueueLane) -> bool {
         let relay = lane.key.relay.clone();
         let newly_persisted = self.persisted.insert(relay.clone());
         self.uncertain.remove(&relay);
-        if matches!(lane.state, DeliveryLaneState::Terminal { .. }) {
+        if matches!(lane.state, PublishQueueLaneState::Terminal { .. }) {
             self.nonterminal.remove(&relay);
         } else {
             self.nonterminal.insert(relay);
@@ -1283,17 +1361,17 @@ fn bootstrap_retry_delay_secs(failures: u32) -> u64 {
 }
 
 struct PendingWrite {
-    durability: Durability,
     routing: WriteRouting,
     /// False only when a persisted routing snapshot cannot be decoded.
     /// Recovery keeps owning the obligation but fails closed on wire output.
     routing_valid: bool,
-    /// Store-allocated durable intent id. `None` only for Ephemeral's
-    /// receipt-only path, which never owns a pending row.
-    intent_id: Option<IntentId>,
+    /// Store-allocated durable intent id. Every write in `pending` has one:
+    /// a refusal at the acceptance door never enters `pending` at all, it
+    /// becomes a terminal-at-birth queue entry instead.
+    intent_id: IntentId,
     /// The instant this obligation was accepted -- the exact value written
     /// to `AcceptWrite::accepted_at` and replayed by
-    /// `DeliveryIntent::accepted_at`, so it is one durable fact rather than
+    /// `PublishQueueIntent::accepted_at`, so it is one durable fact rather than
     /// a process-local stopwatch. `stalled_writes` projects it verbatim;
     /// nothing here ever turns it into a duration, because a duration frozen
     /// into a snapshot goes stale the moment the snapshot stops being
@@ -1355,9 +1433,16 @@ struct PendingWrite {
     /// and one recipient still unresolved is `false`, and one that is
     /// `true` may have delivered nowhere at all.
     route_complete: bool,
-    /// The park reason last emitted for this intent, so the routing park is
-    /// idempotent across ticks and re-emitted only when it actually changes.
-    route_detail: Option<String>,
+    /// Whether the destination picture has been reported at least once. The
+    /// FIRST answer is always news, even when it equals the initial state:
+    /// "we have looked and found nothing yet" and "we have not looked yet"
+    /// are the same VALUE and a different FACT, and an app told nothing
+    /// cannot tell them apart.
+    destinations_reported: bool,
+    /// LATCHED local-persistence fault, if this write ever hit one. Set on
+    /// first observation and never cleared — a later ack does not mean the
+    /// disk recovered, and an operator must not lose the signal.
+    persistence_fault: Option<String>,
     /// The authors whose route provider this intent's last resolution still
     /// needs. This includes ordinary `Unknown` inputs and, when the complete
     /// answer has zero destinations, settled zero-route inputs that must keep
@@ -1528,11 +1613,7 @@ pub struct EngineCore<S: EventStore> {
     quarantined_auth_receipts: HashMap<ReceiptId, QuarantinedWrite>,
     clock: Timestamp,
     active_pubkey: Option<PublicKey>,
-    /// Correlation ids for failures that were never accepted use the upper
-    /// half of the namespace. Store-issued durable ids occupy the lower half
-    /// and advance independently, so reattachment can never alias one.
-    next_unaccepted_receipt: Option<u64>,
-    /// Durable delivery (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
+    /// Publish queue (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
     /// `ReceiptId` from `Publish` through to the last terminal per-relay
     /// status; `event_to_receipt` lets an inbound `OK` frame (keyed by
     /// `EventId` on the wire) find its receipt.
@@ -1550,7 +1631,7 @@ pub struct EngineCore<S: EventStore> {
     /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
     /// finding E5): `receipt_for_intent` used to be a full linear scan of
     /// `pending`, run once per due deadline in
-    /// `consume_due_delivery_deadlines`. Maintained at every real
+    /// `consume_due_publish_queue_deadlines`. Maintained at every real
     /// `pending.insert`/`pending.remove` (never at `fail_and_compensate`'s
     /// transient remove-then-reinsert, which never changes which intent a
     /// receipt owns). This mirrors `pending` exactly and needs no separate
@@ -1559,10 +1640,10 @@ pub struct EngineCore<S: EventStore> {
     intent_receipts: HashMap<IntentId, ReceiptId>,
     /// Relay -> receipts with a lane on that relay (epic #507 finding E5).
     /// A narrowing INDEX only, never a second source of truth: the store's
-    /// `DELIVERY_LANES` table stays authoritative (its keys are intent-first,
+    /// `PUBLISH_QUEUE_LANES` table stays authoritative (its keys are intent-first,
     /// and `close_terminal_intent` deliberately never deletes a closed
     /// intent's own terminal lane rows -- both `MemoryStore` and `RedbStore`
-    /// only drop `DELIVERY_INTENTS`/the deadline indexes there, per that
+    /// only drop `PUBLISH_QUEUE_INTENTS`/the deadline indexes there, per that
     /// door's own doc comment: "Receipts and all route/attempt/detail
     /// evidence are retained" -- so a durable relay-scoped secondary table
     /// would still index retained garbage and would need transactional
@@ -1573,14 +1654,14 @@ pub struct EngineCore<S: EventStore> {
     /// answers. `wake_relay_lanes` uses this to avoid re-reading every
     /// outstanding write's lanes on every relay connect/disconnect/auth
     /// event -- it only narrows WHICH intents to re-read via
-    /// `recover_delivery_lanes`, the store read itself remains the truth.
+    /// `recover_publish_queue_lanes`, the store read itself remains the truth.
     /// Kept in lockstep with each `PendingWrite::lane_projection.persisted`
     /// set by the one projection door; cleaned by walking that exact set on
     /// a real removal.
     receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
     /// Safety valve for `receipts_by_lane_relay` (epic #507 finding E5): set
     /// to true the moment ANY path could have created/learned lanes but the
-    /// index could not record them (a `bootstrap_delivery_lanes` or
+    /// index could not record them (a `bootstrap_publish_queue_lanes` or
     /// `recover_route_revisions` error during `recover_on_boot`/`on_signed`).
     /// `recover_on_boot` resets it to false at the start of its one-shot,
     /// deterministic rebuild -- the same moment `pending` itself is rebuilt
@@ -1653,8 +1734,7 @@ pub struct EngineCore<S: EventStore> {
     /// Next transport-native [`AttemptCorrelation`] to mint (issue #93).
     /// Purely volatile/in-process — never persisted, never restart-durable
     /// (the plan's own words: "no persistence migration" for this unit).
-    /// Checked, typed exhaustion, same discipline as
-    /// `next_unaccepted_receipt` above.
+    /// Checked, typed exhaustion.
     next_attempt_correlation: Option<u64>,
     /// `AttemptCorrelation` -> which receipt/relay it was minted for. Engine-
     /// owned bookkeeping only; transport never needs to understand this
@@ -1735,6 +1815,10 @@ pub struct EngineCore<S: EventStore> {
     /// This prevents a persistent I/O error from becoming recv_timeout(0)
     /// busy-spin while retaining the due row durably for recovery.
     retry_scheduler_blocked: bool,
+    /// The attempt ceiling (#1031), from
+    /// [`EngineConfig::max_publish_attempts`](crate::EngineConfig). Counts
+    /// observations, never wall-clock.
+    max_publish_attempts: u64,
     /// Test-only work counters for the affected-handle invalidation
     /// falsifier. Production pays no field or increment cost.
     #[cfg(test)]
@@ -1824,7 +1908,6 @@ impl<S: EventStore> EngineCore<S> {
             quarantined_auth_receipts: HashMap::new(),
             clock: Timestamp::from(0u64),
             active_pubkey: None,
-            next_unaccepted_receipt: Some(u64::MAX),
             pending: HashMap::new(),
             last_stalled_write_census: Vec::new(),
             event_to_receipts: HashMap::new(),
@@ -1852,6 +1935,7 @@ impl<S: EventStore> EngineCore<S> {
             relay_open_failures: BTreeMap::new(),
             transport_degraded: None,
             retry_scheduler_blocked: false,
+            max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             #[cfg(test)]
             projection_store_queries: Cell::new(0),
             #[cfg(test)]
@@ -1970,6 +2054,19 @@ impl<S: EventStore> EngineCore<S> {
     /// (`engine_loop`); left at the secure default (reject every discovered
     /// private/loopback/onion host) everywhere else, so every test and every
     /// caller that does not opt local hosts in is fail-closed by default.
+    /// Set the per-relay attempt ceiling (#1031). Zero is refused into the
+    /// finite default: a ceiling of zero would give up before ever trying,
+    /// which is a verdict without a single observation behind it.
+    #[must_use]
+    pub fn with_max_publish_attempts(mut self, max_publish_attempts: u64) -> Self {
+        self.max_publish_attempts = if max_publish_attempts == 0 {
+            crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS
+        } else {
+            max_publish_attempts
+        };
+        self
+    }
+
     #[must_use]
     pub fn with_relay_admission(mut self, admission: RelayAdmissionPolicy) -> Self {
         self.admission = admission;
@@ -2353,7 +2450,7 @@ impl<S: EventStore> EngineCore<S> {
         // because resolution is diff-and-append it costs an empty diff when
         // nothing was learned.
         self.rewrite_open_routes(&mut effects);
-        effects.extend(self.consume_due_delivery_deadlines(now));
+        effects.extend(self.consume_due_publish_queue_deadlines(now));
 
         // NIP-40 expiry (retraction-and-negative-deltas.md §3.2). The
         // deadline-armed runtime driver above dispatches this tick at the
@@ -2450,7 +2547,7 @@ impl<S: EventStore> EngineCore<S> {
             .then(|| {
                 self.resolver
                     .store()
-                    .next_delivery_deadline()
+                    .next_publish_queue_deadline()
                     .ok()
                     .flatten()
             })

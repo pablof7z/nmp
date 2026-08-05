@@ -73,9 +73,13 @@ async fn h_was_in_the_signed_bytes(w: &mut NmpWorld) {
 #[then(regex = r#"^the failure is reported as a signing failure, not as a routing failure$"#)]
 async fn failure_is_a_signing_failure(w: &mut NmpWorld) {
     let reported = w.receipt_eventually(|seen| {
-        seen.iter().any(
-            |s| matches!(s, WriteStatus::Failed(reason) if reason.to_lowercase().contains("sign")),
-        )
+        seen.iter().any(|s| {
+            matches!(
+                s,
+                WriteFact::Signing(SigningState::Refused { reason })
+                    if reason.to_lowercase().contains("sign")
+            )
+        })
     });
     assert!(
         reported,
@@ -85,7 +89,7 @@ async fn failure_is_a_signing_failure(w: &mut NmpWorld) {
     assert!(
         !w.receipt_statuses()
             .iter()
-            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.is_empty())),
+            .any(|s| matches!(s, WriteFact::Destinations { relays, .. } if relays.is_empty())),
         "an explicit route resolved fine; the failure is the signer's"
     );
 }

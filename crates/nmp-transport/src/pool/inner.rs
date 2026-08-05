@@ -744,7 +744,7 @@ fn translator_loop(
             let delivery_started = std::time::Instant::now();
             sink.on_event(pool_event);
             #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::delivery(delivery_started.elapsed());
+            crate::ingest_attribution::publish_queue(delivery_started.elapsed());
         }
     }
 }

@@ -6,7 +6,7 @@
 //! does NOT contain is a "bad signed event" variant -- that guarantee lives
 //! at `crate::core::EngineCore::on_publish`'s acceptance boundary now
 //! (Unit A0, #56, per the Fable checkpoint's Q2 ruling), so a tampered
-//! `WritePayload::Signed` surfaces on the [`WriteStatus`](crate::WriteStatus)
+//! `WritePayload::Signed` surfaces on the [`WriteFact`](crate::WriteFact)
 //! receipt stream `publish` returns, not as a sync `Err` here. Duplicating a
 //! second verify at this layer would recreate the exact entry-point-
 //! dependent hole #52 exists to kill.
@@ -75,14 +75,17 @@ pub enum EngineError {
     /// The window and the aggregate bound would be two competing owners of
     /// the same merged row-membership count.
     WindowAggregateResultLimit,
-    /// The upper-half namespace reserved for failures rejected before
-    /// durable acceptance has been completely consumed.
-    ReceiptCorrelationIdExhausted,
     /// [`Engine::shutdown`](crate::Engine::shutdown) has already run --
     /// every other verb fails closed with this variant instead of racing
     /// the engine thread's own teardown (see [`crate::Engine`]'s doc for
     /// the serialized lifecycle gate that makes this exhaustive).
     EngineClosed,
+    /// `publish()` refused the call outright: either NMP could not write
+    /// anything down, or the instruction could not resolve. Nothing durable
+    /// exists and there is no queue entry to inspect — see
+    /// [`crate::PublishError`] for the exhaustive typed reason, which this
+    /// boundary carries as its rendered sentence.
+    PublishRefused { reason: String },
 }
 
 impl std::fmt::Display for EngineError {
@@ -121,9 +124,7 @@ impl std::fmt::Display for EngineError {
                 f,
                 "a windowed observation must not also declare an aggregate result limit"
             ),
-            Self::ReceiptCorrelationIdExhausted => {
-                write!(f, "receipt correlation id namespace exhausted")
-            }
+            Self::PublishRefused { reason } => write!(f, "{reason}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
         }
     }
@@ -190,10 +191,10 @@ impl EngineError {
 
     pub(crate) fn from_publish_error(err: crate::core::PublishError) -> Self {
         match err {
-            crate::core::PublishError::ReceiptCorrelationIdExhausted => {
-                Self::ReceiptCorrelationIdExhausted
-            }
             crate::core::PublishError::EngineShuttingDown => Self::EngineClosed,
+            other => Self::PublishRefused {
+                reason: other.to_string(),
+            },
         }
     }
 
@@ -228,14 +229,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn receipt_correlation_exhaustion_maps_and_displays_truthfully() {
-        let error = EngineError::from_publish_error(
-            crate::core::PublishError::ReceiptCorrelationIdExhausted,
-        );
-        assert_eq!(error, EngineError::ReceiptCorrelationIdExhausted);
+    fn every_publish_refusal_reaches_the_boundary_with_its_own_sentence() {
+        // Rule 2 refusals are not a generic "publish failed": each names a
+        // different instruction that cannot resolve, and each has a different
+        // repair.
+        for (error, expected) in [
+            (
+                crate::core::PublishError::NoActiveAccount,
+                "publishing as the active account requires an active account",
+            ),
+            (
+                crate::core::PublishError::SignatureInvalid {
+                    reason: "bad sig".to_string(),
+                },
+                "the supplied signature does not verify: bad sig",
+            ),
+            (
+                crate::core::PublishError::ReservedKind { kind: 22242 },
+                "kind:22242 is reserved for reducer-owned relay authentication",
+            ),
+            (
+                crate::core::PublishError::PersistenceFailed {
+                    reason: "disk".to_string(),
+                },
+                "the write could not be recorded: disk",
+            ),
+        ] {
+            let mapped = EngineError::from_publish_error(error);
+            assert_eq!(
+                mapped,
+                EngineError::PublishRefused {
+                    reason: expected.to_string()
+                }
+            );
+            assert_eq!(mapped.to_string(), expected);
+        }
+        // Shutdown stays its own lifecycle fact rather than folding into the
+        // refusal class.
         assert_eq!(
-            error.to_string(),
-            "receipt correlation id namespace exhausted"
+            EngineError::from_publish_error(crate::core::PublishError::EngineShuttingDown),
+            EngineError::EngineClosed
         );
     }
 }

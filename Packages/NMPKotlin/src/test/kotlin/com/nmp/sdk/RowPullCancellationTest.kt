@@ -25,6 +25,7 @@ import uniffi.nmp_ffi.FfiCorrelationReattachment
 import uniffi.nmp_ffi.FfiFilter
 import uniffi.nmp_ffi.FfiFrame
 import uniffi.nmp_ffi.FfiLiveQuery
+import uniffi.nmp_ffi.FfiPublishQueueEntry
 import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiRelayInformation
 import uniffi.nmp_ffi.FfiRelayInformationCachePolicy
@@ -268,6 +269,10 @@ class RowPullCancellationTest {
             unusedByThisFalsifier()
 
         override fun `publish`(`intent`: FfiWriteIntent): NmpReceiptStream = unusedByThisFalsifier()
+
+        override fun `publishQueue`(): List<FfiPublishQueueEntry> = unusedByThisFalsifier()
+
+        override fun `removePublishQueueEntry`(`receiptId`: ULong): Unit = unusedByThisFalsifier()
 
         override fun `reattachByCorrelation`(`correlation`: String): FfiCorrelationReattachment =
             unusedByThisFalsifier()

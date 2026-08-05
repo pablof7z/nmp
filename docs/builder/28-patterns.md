@@ -144,7 +144,7 @@ persistence, and invalidation.
 same obligation.
 
 Transport reconnects sockets; a signer adapter owns one correlated operation;
-durable delivery owns each `(intent, relay)` attempt; one deadline scheduler
+publish queue owns each `(intent, relay)` attempt; one deadline scheduler
 owns time and concurrency.
 
 ### #17: limits cannot silently truncate

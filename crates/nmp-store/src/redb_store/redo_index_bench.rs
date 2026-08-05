@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use redb::{
-    Database, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
     WriteTransaction,
 };
 use serde::{Deserialize, Serialize};

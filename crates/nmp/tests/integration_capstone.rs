@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::RelayAdmissionPolicy;
 use nmp::mechanism::core::{AcquisitionEvidence, RowDelta, SourceStatus};
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::{RelayState, WriteFact};
 use nmp::mechanism::runtime::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, RowsReceiver};
 use nmp::{Engine, EngineConfig};
@@ -36,7 +36,7 @@ use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField, Selector,
     SetAlgebra, SetOp, SourceAuthority,
 };
-use nmp_grammar::{Durability, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{EventStore, RedbStore, RelayObserved};
@@ -124,9 +124,9 @@ fn wait_for_rows(
 }
 
 fn wait_for_status(
-    rx: &FifoReceiver<WriteStatus>,
+    rx: &FifoReceiver<WriteFact>,
     timeout: Duration,
-    pred: impl Fn(&WriteStatus) -> bool,
+    pred: impl Fn(&WriteFact) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -1164,8 +1164,8 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
 /// Plan §5 test 11, live tier: publish a `Durable` intent to TWO real
 /// relays, one of which accepts and one of which is configured to reject
 /// every event. Asserts the FULL shape of ledger #9: the first status is
-/// never a terminal (`Accepted` only), both relays are individually `Sent`
-/// to, and the two relays resolve to DIFFERENT terminals (`Acked` vs
+/// never a terminal, both relays are individually `Sent` to, and the two
+/// relays resolve to DIFFERENT per-relay terminals (`Published` vs
 /// `Rejected`) -- there is no way to read "is it sent" except by observing
 /// this per-relay stream.
 #[test]
@@ -1219,14 +1219,13 @@ fn write_ack_per_relay_over_real_relays() {
     let receipt_rx = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
         })
         .expect("receipt id allocation");
 
-    let mut seen: Vec<WriteStatus> = Vec::new();
+    let mut seen: Vec<WriteFact> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut acked_ok = false;
     let mut rejected_bad = false;
@@ -1238,8 +1237,14 @@ fn write_ack_per_relay_over_real_relays() {
         match receipt_rx.recv_timeout(remaining) {
             Ok(status) => {
                 match &status {
-                    WriteStatus::Acked(r) if r == &url_ok => acked_ok = true,
-                    WriteStatus::Rejected(r, _) if r == &url_bad => rejected_bad = true,
+                    WriteFact::Relay {
+                        relay: r,
+                        state: RelayState::Published,
+                    } if r == &url_ok => acked_ok = true,
+                    WriteFact::Relay {
+                        relay: r,
+                        state: RelayState::Rejected { reason: _ },
+                    } if r == &url_bad => rejected_bad = true,
                     _ => {}
                 }
                 seen.push(status);
@@ -1249,18 +1254,18 @@ fn write_ack_per_relay_over_real_relays() {
     }
 
     assert!(
-        matches!(seen.first(), Some(WriteStatus::Accepted)),
-        "the receipt stream's FIRST status must never be a terminal -- enqueue != converged \
+        !matches!(seen.first(), Some(WriteFact::Outcome(_))),
+        "the receipt stream's FIRST fact must never be a terminal -- enqueue != converged \
          (got: {seen:?})"
     );
     assert!(
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &url_ok)),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. } } if r == &url_ok)),
         "must observe Sent(relay_ok) (got: {seen:?})"
     );
     assert!(
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &url_bad)),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. } } if r == &url_bad)),
         "must observe Sent(relay_bad) (got: {seen:?})"
     );
     assert!(acked_ok, "relay_ok must reach Acked (got stream: {seen:?})");
@@ -1419,7 +1424,6 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
                 content: ("fresh challenge after reconnect").into(),
                 created_at: Some(Timestamp::now()),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -1427,7 +1431,7 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
         .expect("receipt id allocation");
     assert!(
         wait_for_status(&receipt, Duration::from_secs(20), |status| {
-            matches!(status, WriteStatus::Acked(acked) if acked == &url)
+            matches!(status, WriteFact::Relay { relay: acked, state: RelayState::Published } if acked == &url)
         }),
         "durable write must converge after a fresh second-generation AUTH"
     );
@@ -1590,7 +1594,6 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     let contact_receipt_rx = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&contact_list)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -1599,7 +1602,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     assert!(
         wait_for_status(&contact_receipt_rx, Duration::from_secs(10), |s| matches!(
             s,
-            WriteStatus::Acked(r) if r == &url
+            WriteFact::Relay { relay: r, state: RelayState::Published } if r == &url
         )),
         "a's contact list (naming b, c) must reach Acked"
     );
@@ -1615,7 +1618,6 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     let mute_receipt_rx = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&mute_list)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -1624,7 +1626,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     assert!(
         wait_for_status(&mute_receipt_rx, Duration::from_secs(10), |s| matches!(
             s,
-            WriteStatus::Acked(r) if r == &url
+            WriteFact::Relay { relay: r, state: RelayState::Published } if r == &url
         )),
         "a's mute list (naming c) must reach Acked"
     );

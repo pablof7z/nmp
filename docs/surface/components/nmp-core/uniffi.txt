@@ -2052,7 +2052,7 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "AlreadyAbandoned",
+            name: "AlreadyRefused",
             discr: None,
             fields: [
                 Field {
@@ -2062,7 +2062,9 @@ enum Enum {
                     docstring: None,
                 },
             ],
-            docstring: None,
+            docstring: Some(
+                "The write was refused at acceptance and is already a permanently\nfailed queue entry. There is nothing to cancel; remove it instead.",
+            ),
         },
         Variant {
             name: "PersistenceFailed",
@@ -2471,38 +2473,6 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiDurability",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "Durable",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Ephemeral",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "AtMostOnce",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: Some(
-        "`nmp::Durability` mirror (a typed PROPERTY of a write, not a routing\nchoice -- M0 amendment).",
-    ),
-}
-
-enum Enum {
     name: "FfiError",
     module_path: "nmp_ffi",
     remote: false,
@@ -2649,11 +2619,18 @@ enum Enum {
             ),
         },
         Variant {
-            name: "ReceiptCorrelationIdExhausted",
+            name: "PublishRefused",
             discr: None,
-            fields: [],
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
             docstring: Some(
-                "No upper-half correlation id remains for a publish rejected before\ndurable acceptance. No receipt or status stream was created.",
+                "`publish` refused the call outright: either NMP could not write\nanything down, or the instruction could not resolve (no active\naccount, a signature that does not verify, an explicit identity\ncontradicting a signed payload's author, a reserved kind, an empty\nexplicit route). Nothing durable exists and there is no queue entry\nto inspect.\n\nEverything else takes CUSTODY and fails in the queue where the app\ncan see it — including a stale replaceable base, which succeeds here\nand arrives as `FfiWriteOutcome::Refused`.",
             ),
         },
         Variant {
@@ -2812,7 +2789,7 @@ enum Enum {
             discr: None,
             fields: [],
             docstring: Some(
-                "[`nmp::Engine::shutdown`] has already run -- every other verb fails\nclosed with this variant instead of racing the engine thread's own\nteardown. NOTE: there is deliberately no `InvalidSignedEvent` variant\nhere anymore -- a `FfiWritePayload::Signed` that fails\n`nostr::Event::verify` is no longer rejected synchronously at this\nboundary (#52 Unit B). That guarantee moved to\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary\n(Unit A0/#56) so it holds for every entry point, not only this one;\nit surfaces on the `WriteStatus` receipt stream as `Failed` instead.",
+                "[`nmp::Engine::shutdown`] has already run -- every other verb fails\nclosed with this variant instead of racing the engine thread's own\nteardown. NOTE: there is deliberately no `InvalidSignedEvent` variant\nhere anymore -- a `FfiWritePayload::Signed` that fails\n`nostr::Event::verify` is no longer rejected synchronously at this\nboundary (#52 Unit B). That guarantee moved to\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary\n(Unit A0/#56) so it holds for every entry point, not only this one;\nit surfaces on the `WriteFact` receipt stream as `Failed` instead.",
             ),
         },
         Variant {
@@ -3269,7 +3246,7 @@ enum Enum {
                     name: "status",
                     type_: Enum {
                         module_path: "nmp_ffi",
-                        name: "FfiWriteStatus",
+                        name: "FfiWriteFact",
                     },
                     default: None,
                     docstring: None,
@@ -3518,14 +3495,14 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "This exact key, active or not -- including while fully logged out.\n\n`pubkey` is 64-char HEX and nothing else: the module-wide\n`convert::parse_pubkey` rule every other pubkey input here follows.\nA bech32 `npub` is REFUSED, however well-formed -- bech32 is\noutward-facing decoration an app decodes at its own boundary (with\n`decode_nostr_entity`) at the moment a human pasted it, not an\nencoding the write plane accepts\n(`docs/internals/conventions/bech32-boundary.md`). A malformed\nstring is a typed synchronous\n[`crate::convert::FfiError::InvalidPublicKey`] before any engine\ncall.\n\nA key with no registered signer parks as\n`FfiWriteStatus::AwaitingCapability` (retained, not terminated)\nuntil that capability attaches. Acceptance PINS the resolved key\neither way, so a later `set_active_account` cannot retarget the\nwrite.",
+                "This exact key, active or not -- including while fully logged out.\n\n`pubkey` is 64-char HEX and nothing else: the module-wide\n`convert::parse_pubkey` rule every other pubkey input here follows.\nA bech32 `npub` is REFUSED, however well-formed -- bech32 is\noutward-facing decoration an app decodes at its own boundary (with\n`decode_nostr_entity`) at the moment a human pasted it, not an\nencoding the write plane accepts\n(`docs/internals/conventions/bech32-boundary.md`). A malformed\nstring is a typed synchronous\n[`crate::convert::FfiError::InvalidPublicKey`] before any engine\ncall.\n\nA key with no registered signer parks as\n[`FfiSigningState::AwaitingSigner`] (retained, not terminated)\nuntil that capability attaches. Acceptance PINS the resolved key\neither way, so a later `set_active_account` cannot retarget the\nwrite.",
             ),
         },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The identity one write publishes under (`nmp::Identity` mirror): two\nvariants, mirrored exactly, with no third \"unset\" state on any platform.\n\n[`Active`](FfiIdentity::Active) is a positive instruction (\"whoever is\nthe active account at acceptance\"), not the absence of one -- which is\nwhy this is a closed enum rather than the nullable pubkey string it\nreplaces. On an `Event` payload the identity SELECTS the author (a\nbuilder states none, so there is nothing for it to contradict); on a\n`Signed` payload it may only RESTATE the author already frozen in the\nbytes, and naming anybody else is a consent/author contradiction\nrejected at the engine's acceptance boundary as\n`FfiWriteStatus::Failed` -- no `Accepted` ever precedes it.",
+        "The identity one write publishes under (`nmp::Identity` mirror): two\nvariants, mirrored exactly, with no third \"unset\" state on any platform.\n\n[`Active`](FfiIdentity::Active) is a positive instruction (\"whoever is\nthe active account at acceptance\"), not the absence of one -- which is\nwhy this is a closed enum rather than the nullable pubkey string it\nreplaces. On an `Event` payload the identity SELECTS the author (a\nbuilder states none, so there is nothing for it to contradict); on a\n`Signed` payload it may only RESTATE the author already frozen in the\nbytes, and naming anybody else is a consent/author contradiction\nrejected by `publish` ITSELF as\n[`FfiError::PublishRefused`](crate::convert::FfiError::PublishRefused) --\nnothing is taken into custody, so no receipt and no queue entry exist.",
     ),
 }
 
@@ -3945,6 +3922,34 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiNotSentReason",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Cancelled",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Superseded",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A newer accepted write won the same replaceable coordinate before this\none started any wire attempt. Not a failure — for an app renewing\npresence it is the steady state.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::NotSentReason` mirror.",
+    ),
+}
+
+enum Enum {
     name: "FfiReceiptReattachment",
     module_path: "nmp_ffi",
     remote: false,
@@ -3983,7 +3988,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "Result of looking up a stable retained receipt id. The `Attached` variant\ncarries the pull-based [`crate::facade::NmpReceiptStream`] that traverses\ndurable `WriteStatus` facts in finite pages and streams onward (#680).",
+        "Result of looking up a stable retained receipt id. The `Attached` variant\ncarries the pull-based [`crate::facade::NmpReceiptStream`] that traverses\ndurable `WriteFact` facts in finite pages and streams onward (#680).",
     ),
 }
 
@@ -4009,6 +4014,63 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: None,
+}
+
+enum Enum {
+    name: "FfiRefuseReason",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "AlreadyExpired",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Tombstoned",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ReplaceableBaseOnRegularEvent",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "ReplaceableBaseChanged",
+            discr: None,
+            fields: [
+                Field {
+                    name: "expected",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "actual",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A whole-value replacement lost its compare-and-swap.\n\nBOTH ids are kept, and that is what makes the failure recoverable\nwithout the user: an app fetches `actual`, reapplies the change and\nresubmits silently. Reduced to a string it could only tell them to\nredo it.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp_store::RefuseReason` mirror: why the acceptance door said no.",
+    ),
 }
 
 enum Enum {
@@ -4122,6 +4184,266 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: None,
+}
+
+enum Enum {
+    name: "FfiRelayState",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Waiting",
+            discr: None,
+            fields: [
+                Field {
+                    name: "waiting",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRelayWaiting",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Sent",
+            discr: None,
+            fields: [
+                Field {
+                    name: "attempt",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "written_at",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "Transport proved socket write + flush. Not an ack, and not terminal.",
+            ),
+        },
+        Variant {
+            name: "Published",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Rejected",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The relay authenticated the identity and refused THIS EVENT. The\nrepair is to the event.",
+            ),
+        },
+        Variant {
+            name: "AuthFailed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "source",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiAuthDenialSource",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The write could not be authenticated HERE. Deliberately NOT folded\ninto `Rejected`: `source` keeps an app's own decision not to\nauthenticate from being reported to a user as a relay refusing them.",
+            ),
+        },
+        Variant {
+            name: "GaveUp",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The attempt ceiling was reached at this relay. Terminal HERE and\nnowhere else: three relays published and one given up on is a success\nwith a footnote, not a failed write.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::RelayState` mirror: what is true at ONE relay.\n\n`Published`, `Rejected`, `AuthFailed` and `GaveUp` are terminal for that\nrelay; `Waiting` and `Sent` are not.",
+    ),
+}
+
+enum Enum {
+    name: "FfiRelayWaiting",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "NotConnected",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "Offline time consumes no attempt ordinal, so being offline can never\nspend the give-up ceiling.",
+            ),
+        },
+        Variant {
+            name: "NeedsAuth",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "BackingOff",
+            discr: None,
+            fields: [
+                Field {
+                    name: "attempt",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "eligible_at",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "cause",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRetryCause",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "detail",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The last attempt failed in a way that permits another one, and\n`cause`/`detail` say WHY — \"we will try again\" and \"we will try again\nbecause the relay rate-limited us\" are different messages and only the\nsecond one can be acted on.",
+            ),
+        },
+        Variant {
+            name: "PersistenceStalled",
+            discr: None,
+            fields: [
+                Field {
+                    name: "detail",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The lane is owned and nonterminal, but a durable fact about it could\nnot be committed — the local disk is refusing writes. No wire EVENT\nwas emitted.\n\nAlso LATCHED onto the queue entry\n([`FfiPublishQueueEntry::persistence_fault`]) and never cleared by a\nlater ack: an operator must not lose the only signal that the disk is\nfailing because a relay succeeded afterwards.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::RelayWaiting` mirror: why a relay lane is not attempting right now.\nEvery arm is a fact about the lane; none of them is a deadline.",
+    ),
+}
+
+enum Enum {
+    name: "FfiRemoveQueueEntryError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "UnknownReceipt",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "StillActive",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The write still owns open delivery work. Cancel it first; removal is\nfor entries nothing is going to move.",
+            ),
+        },
+        Variant {
+            name: "PersistenceFailed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "Typed refusal from the queue-entry removal door (#1039).",
+    ),
 }
 
 enum Enum {
@@ -4529,6 +4851,63 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiSigningState",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "AwaitingSigner",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "No registered signer answers for `pubkey` (64-char hex) — the exact\nidentity FROZEN at acceptance, never whoever is active now. Re-armed\nonly by attaching a signer for THIS key.\n\n**No clock ever ends this.** A device whose signer is simply not\nplugged in yet is not a device whose write failed; removing the queue\nentry is the only other exit.",
+            ),
+        },
+        Variant {
+            name: "Signed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "event_id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Refused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The signer answered and said no. Terminal for the whole write.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::SigningState` mirror: the signing state of the WHOLE write — one\nsignature, one author, one answer.",
+    ),
+}
+
+enum Enum {
     name: "FfiSourceAuthority",
     module_path: "nmp_ffi",
     remote: false,
@@ -4755,6 +5134,163 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiWriteFact",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Signing",
+            discr: None,
+            fields: [
+                Field {
+                    name: "state",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiSigningState",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Relay",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relay",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "state",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRelayState",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Destinations",
+            discr: None,
+            fields: [
+                Field {
+                    name: "relays",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "complete",
+                    type_: Boolean,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The relays this write is INTENDED for, and whether resolution can\nstill change its mind. `complete` flips on settled RESOLUTION, never\non delivery, so `complete: true` with nothing published yet is an\nordinary state. This is the settlement denominator.\n\n`complete: false` with an empty set is a write still learning where it\ngoes; it parks indefinitely and NOTHING expires it. `complete: true`\nwith an empty set is [`FfiWriteOutcome::NoDestination`].",
+            ),
+        },
+        Variant {
+            name: "Outcome",
+            discr: None,
+            fields: [
+                Field {
+                    name: "outcome",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiWriteOutcome",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::WriteFact` mirror: one fact about a write, delivered on its receipt\nstream.\n\nThe old flat shape mixed facts about the whole write with facts about one\nrelay, which is why \"is this terminal?\" had no answer and every consumer\nhand-wrote its own taxonomy (#1237). Here the two live on different arms\nand [`Outcome`](FfiWriteFact::Outcome) is the only thing that ends\nanything — so a stream can never end in silence, and an app can always\ntell a finished write from a dropped subscription.\n\nAcceptance is deliberately ABSENT: `publish` returning successfully IS\nacceptance, so an app never has to ask the stream whether its write was\ntaken. Settlement is INSPECTED, never AWAITED.",
+    ),
+}
+
+enum Enum {
+    name: "FfiWriteOutcome",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Settled",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The destination set is CLOSED and every relay in it is terminal. What\nhappened at each is the per-relay facts; this says only that no more\nare coming.",
+            ),
+        },
+        Variant {
+            name: "NoDestination",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "Routing finished — knowledge is exhausted — and named zero relays.\nTerminal: there is nowhere to publish. Distinct from a route still\nresolving, which parks forever.",
+            ),
+        },
+        Variant {
+            name: "NotSent",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiNotSentReason",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The write ended without going anywhere.",
+            ),
+        },
+        Variant {
+            name: "Refused",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiRefuseReason",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The store answered the acceptance instruction with a semantic no. The\nwrite is in custody as a permanently-failed entry: one row, payload\nintact, readable and removable through the queue door.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::WriteOutcome` mirror: the whole-write terminal. Exactly one of these\nends every receipt stream.",
+    ),
+}
+
+enum Enum {
     name: "FfiWritePayload",
     module_path: "nmp_ffi",
     remote: false,
@@ -4833,7 +5369,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The event payload of a write intent (`nmp::WritePayload` mirror). VISION\nP: signing and publishing are ORTHOGONAL stages -- `Event` describes an\nevent the engine stamps, freezes and signs internally (\"the key lives in\nthe engine\", ledger #12); `Signed` (#32, the M5 unlock) is a caller that\nalready holds a validly-signed event -- an external signer provider, or\na verbatim republish of somebody else's note to an archive relay -- and\nhands its fields across as-is. `Signed`'s\nfields are field-for-field [`FfiRow`] (the read-side mirror of a signed\n`nostr::Event`) plus `sig`, deliberately: the write side stays symmetric\nwith the read side rather than introducing a JSON-blob shape.\n\nThere is no `ReplaceableEdit` mirror and never was: a CAS-guarded\nreplacement crosses this boundary only as a fused semantic method\n(`NmpEngine::follow`/`unfollow`), which owns the evidence policy, the\nprecondition and the routing together. The native surface learns\n`follow(target)`, not the pieces it would otherwise have to reassemble.\n\n`Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-\nshape errors, see `convert::signed_event_from_ffi`) but NOT verified\nhere (#52 Unit B) -- `nostr::Event::verify` runs at\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit\nA0/#56) instead, so the guarantee holds for every entry point, not only\nthis one. A tampered `Signed` event still parses fine here and is\nrejected downstream, surfacing as `WriteStatus::Failed` on the receipt\nstream rather than a synchronous `FfiError`. The engine itself never\nre-signs, mutates a tag, or recomputes an id for this variant.",
+        "The event payload of a write intent (`nmp::WritePayload` mirror). VISION\nP: signing and publishing are ORTHOGONAL stages -- `Event` describes an\nevent the engine stamps, freezes and signs internally (\"the key lives in\nthe engine\", ledger #12); `Signed` (#32, the M5 unlock) is a caller that\nalready holds a validly-signed event -- an external signer provider, or\na verbatim republish of somebody else's note to an archive relay -- and\nhands its fields across as-is. `Signed`'s\nfields are field-for-field [`FfiRow`] (the read-side mirror of a signed\n`nostr::Event`) plus `sig`, deliberately: the write side stays symmetric\nwith the read side rather than introducing a JSON-blob shape.\n\nThere is no `ReplaceableEdit` mirror and never was: a CAS-guarded\nreplacement crosses this boundary only as a fused semantic method\n(`NmpEngine::follow`/`unfollow`), which owns the evidence policy, the\nprecondition and the routing together. The native surface learns\n`follow(target)`, not the pieces it would otherwise have to reassemble.\n\n`Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-\nshape errors, see `convert::signed_event_from_ffi`) but NOT verified\nhere (#52 Unit B) -- `nostr::Event::verify` runs at\n`nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit\nA0/#56) instead, so the guarantee holds for every entry point, not only\nthis one. A tampered `Signed` event still parses fine here and is\nrejected downstream, refusing the `publish` call as\n`FfiError::PublishRefused` -- an instruction that cannot resolve is a\nrefusal, not a parked hope, so nothing is taken into custody. The engine\nitself never re-signs, mutates a tag, or recomputes an id for this\nvariant.",
     ),
 }
 
@@ -4869,376 +5405,6 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "`nmp::WriteRouting` mirror. BOTH words project, deliberately: `Auto`\n(\"figure out how to route whatever I'm publishing\") and `Explicit`\n(\"use these exact relays and that is that\").\n\nAn earlier premise held that letting an app route a write to a chosen\nrelay was a dangerous primitive, and this enum having exactly ONE variant\nwas the enforcement of that ban. The premise was reversed\noutright (`docs/internals/routing/removed-routes.md` §2-3): publishing to\nchosen relays is a first-class GENERAL capability with many legitimate\nconsumers — an app offering \"publish this event to relay: [user input]\",\na wiki crate publishing to the user's preferred wiki relays, a DM crate\npublishing to two parties' DM relays, a group crate routing to its host,\nand a user right-clicking someone else's note to archive it. Guarding it\nis not protection, it is a defect, so `Explicit` is app-constructible\nhere on every platform.\n\nWhat survives from the old shape is the tripwire, not its premise: this\nexhaustive match still means a new `WriteRouting` variant landing in\n`nmp-grammar` without a corresponding `FfiWriteRouting` decision is a\ncompile error, not a silent gap.\n\n`relays` are relay-URL strings parsed at this boundary\n(`convert::parse_relay_url`); a malformed one is a typed synchronous\n[`crate::convert::FfiError::InvalidRelayUrl`] before any engine call. An\nEMPTY list is refused at the engine's acceptance door — a routing rule\nenforced once, identically, for every surface — with no receipt, no\njournal row, and no fallback to `Auto`.",
-    ),
-}
-
-enum Enum {
-    name: "FfiWriteStatus",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "Accepted",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Cancelled",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "Superseded",
-            discr: None,
-            fields: [],
-            docstring: None,
-        },
-        Variant {
-            name: "AwaitingCapability",
-            discr: None,
-            fields: [
-                Field {
-                    name: "pubkey",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: Some(
-                "`nmp::WriteStatus::AwaitingCapability` mirror (#47 Unit B): `pubkey`\n(64-char hex, the module-wide convention) is the exact identity\nFROZEN at acceptance that no registered signer currently answers\nfor -- the same pubkey [`FfiIdentity::Explicit`] pinned, or the\naccount that was active at publish time under\n[`FfiIdentity::Active`]. Retained, not\nterminal: this fact re-arrives verbatim on restart replay, and only\nregistering a signer for THIS exact pubkey resumes the write --\nnever a different (even currently-active) identity.",
-            ),
-        },
-        Variant {
-            name: "Signed",
-            discr: None,
-            fields: [
-                Field {
-                    name: "event_id",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "AwaitingRoute",
-            discr: None,
-            fields: [
-                Field {
-                    name: "detail",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: Some(
-                "`nmp::WriteStatus::AwaitingRoute` mirror: routing has not produced a\nsingle relay yet, and `detail` says what it is waiting for. Retained,\nNOT terminal, and replayed verbatim on receipt reattachment, so a\nroute parked for a month is still visible with its reason. Nothing\nexpires it; explicit cancellation is the one way out.\n\nAn app maps this (and `Routed { complete: false }`) to \"determining\ndestinations\".",
-            ),
-        },
-        Variant {
-            name: "Routed",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relays",
-                    type_: Sequence {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "complete",
-                    type_: Boolean,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: Some(
-                "`nmp::WriteStatus::Routed` mirror. `relays` is what resolution has\nnamed SO FAR; `complete` says whether it can ever grow again.\n\nThe two are separate axes from delivery: `complete: true` with\nnothing delivered is \"sending 0 of n\", and `complete: false` with\nsome relays already acked is an ordinary state while routing is\nstill open. Only `complete: true` plus every relay terminal means\n\"sent\".",
-            ),
-        },
-        Variant {
-            name: "AwaitingRelay",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "AwaitingAuth",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "AuthDenied",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "pubkey",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "source",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiAuthDenialSource",
-                    },
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "RetryEligible",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "attempt",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "eligible_at",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "cause",
-                    type_: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiRetryCause",
-                    },
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "detail",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "HandoffAmbiguous",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "attempt",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "observed_at",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Sent",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "attempt",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "written_at",
-                    type_: UInt64,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Acked",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Rejected",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "GaveUp",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "PersistenceBlocked",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "RoutePersistenceBlocked",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "OutcomeUnknown",
-            discr: None,
-            fields: [
-                Field {
-                    name: "relay",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "ReplaceableConflict",
-            discr: None,
-            fields: [
-                Field {
-                    name: "expected",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-                Field {
-                    name: "actual",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-        Variant {
-            name: "Failed",
-            discr: None,
-            fields: [
-                Field {
-                    name: "reason",
-                    type_: String,
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: None,
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: Some(
-        "The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is\nnot converged, the app's `NmpReceiptStream` may yield many of these per\npublish).",
     ),
 }
 
@@ -6550,6 +6716,128 @@ record Record {
 }
 
 record Record {
+    name: "FfiPublishQueueEntry",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "receipt_id",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "event_id",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "The frozen event id, 64-char hex — the write's identity from\nacceptance onward, unchanged by signing.",
+            ),
+        },
+        Field {
+            name: "pubkey",
+            type_: String,
+            default: None,
+            docstring: Some(
+                "The identity frozen at acceptance, 64-char hex. Never re-resolved.",
+            ),
+        },
+        Field {
+            name: "accepted_at",
+            type_: UInt64,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "signing",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiSigningState",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relays",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "route_complete",
+            type_: Boolean,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relay_states",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiQueueRelayState",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "outcome",
+            type_: Optional {
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiWriteOutcome",
+                },
+            },
+            default: None,
+            docstring: Some(
+                "`None` while the write is still in progress.",
+            ),
+        },
+        Field {
+            name: "persistence_fault",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: Some(
+                "LATCHED. Set the first time local persistence refused a durable fact\nfor this write, and never cleared by a later success.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "`nmp::PublishQueueEntry` mirror: one write in the queue, as the app reads\nit back (#1039).\n\nEnumerating the queue answers \"what have I got outstanding, and what went\nwrong with it\" without having held a receipt stream open since acceptance.\nIt is INSPECTION: nothing here blocks and nothing waits for settlement.",
+    ),
+}
+
+record Record {
+    name: "FfiQueueRelayState",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "relay",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "state",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiRelayState",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One `(relay, state)` pair on a [`FfiPublishQueueEntry`]. A record rather\nthan a map because UniFFI dictionaries key only on primitives and the\nrelay URL is the caller-meaningful half.",
+    ),
+}
+
+record Record {
     name: "FfiReferenceOccurrence",
     module_path: "nmp_ffi",
     remote: false,
@@ -7488,15 +7776,6 @@ record Record {
             type_: Enum {
                 module_path: "nmp_ffi",
                 name: "FfiWritePayload",
-            },
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "durability",
-            type_: Enum {
-                module_path: "nmp_ffi",
-                name: "FfiDurability",
             },
             default: None,
             docstring: None,
@@ -13194,7 +13473,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Enqueue a write (#680). The returned [`NmpReceiptStream`] exposes the\nstable receipt id ([`NmpReceiptStream::id`]) and streams every\n`WriteStatus` this intent ever reaches (ledger #9 -- enqueue is not\nconverged; the first value is never a terminal for a durable/\nat-most-once intent) via `async fn next()`. A caller-supplied `Signed`\npayload that fails verification is no longer a synchronous error here\n(that guarantee moved to `nmp-engine::core::EngineCore::on_publish`'s\nacceptance boundary, Unit A0/#56, so it holds for every entry point) --\nit surfaces as `WriteStatus::Failed`, the FIRST and only status the\nstream delivers, with no preceding `Accepted`. Exhaustion of the\npre-acceptance correlation namespace instead returns a typed `FfiError`\nsynchronously: no receipt id or stream exists.",
+                "Enqueue a write (#680). The returned [`NmpReceiptStream`] exposes the\nstable receipt id ([`NmpReceiptStream::id`]) and streams every\n`WriteFact` this intent ever reaches (ledger #9 -- enqueue is not\nconverged; the first value is never a terminal for a durable/\nat-most-once intent) via `async fn next()`. A caller-supplied `Signed`\npayload that fails verification is no longer a synchronous error here\n(that guarantee moved to `nmp-engine::core::EngineCore::on_publish`'s\nacceptance boundary, Unit A0/#56, so it holds for every entry point) --\nit refuses THIS CALL as `FfiError::PublishRefused`, taking nothing\ninto custody, so no receipt, no stream and no queue entry exist for\nit. Exhaustion of the pre-acceptance correlation namespace is the\nsame shape: a typed `FfiError` and no receipt id.",
             ),
             throws: Some(
                 Enum {
@@ -13205,7 +13484,56 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish",
             checksum: Some(
-                14085,
+                15544,
+            ),
+        },
+        Method {
+            name: "publish_queue",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Sequence {
+                    inner_type: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiPublishQueueEntry",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_publish_queue",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Read the app's own publish queue back (#1039).\n\nINSPECTION, never waiting: this returns what NMP knows right now and\nnever blocks on settlement.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiRemoveQueueEntryError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish_queue",
+            checksum: Some(
+                37738,
             ),
         },
         Method {
@@ -13324,7 +13652,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Attach to a retained receipt without collapsing corrupt durable\nevidence into the same result as an unknown id (#680). The `Attached`\nvariant carries an [`NmpReceiptStream`] that transparently traverses\ndurable `WriteStatus` facts in finite pages and streams onward,\ndelivered pull-based via `async fn next()`.",
+                "Attach to a retained receipt without collapsing corrupt durable\nevidence into the same result as an unknown id (#680). The `Attached`\nvariant carries an [`NmpReceiptStream`] that transparently traverses\ndurable `WriteFact` facts in finite pages and streams onward,\ndelivered pull-based via `async fn next()`.",
             ),
             throws: Some(
                 Enum {
@@ -13335,7 +13663,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_reattach_receipt",
             checksum: Some(
-                49194,
+                13863,
             ),
         },
         Method {
@@ -13539,6 +13867,56 @@ object Object {
             ),
         },
         Method {
+            name: "remove_publish_queue_entry",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_remove_publish_queue_entry",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "receipt_id",
+                        type_: UInt64,
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Forget one queue entry (#1039). The only way a write parked forever\non a missing signer, or a permanently-failed refused entry, ever ends.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiRemoveQueueEntryError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_publish_queue_entry",
+            checksum: Some(
+                20706,
+            ),
+        },
+        Method {
             name: "set_active_account",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -13578,7 +13956,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Re-root every reactive query AND the active signing capability\ntogether onto `pubkey` (`None` -> logged-out / read-only). `pubkey`\nneed not have been added via [`Self::add_account`] -- read-only\nbrowsing of an account this app holds no key for is legal; any\npublish attempted while active in that state terminates\n`WriteStatus::Failed`, never a panic (M4 plan §5).",
+                "Re-root every reactive query AND the active signing capability\ntogether onto `pubkey` (`None` -> logged-out / read-only). `pubkey`\nneed not have been added via [`Self::add_account`] -- read-only\nbrowsing of an account this app holds no key for is legal; a write\npublished while active in that state parks on\n`FfiSigningState::AwaitingSigner` until a signer for THAT key\nattaches, never a panic (M4 plan §5).",
             ),
             throws: Some(
                 Enum {
@@ -13589,7 +13967,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_set_active_account",
             checksum: Some(
-                16345,
+                55064,
             ),
         },
         Method {
@@ -14102,7 +14480,7 @@ object Object {
                 Optional {
                     inner_type: Enum {
                         module_path: "nmp_ffi",
-                        name: "FfiWriteStatus",
+                        name: "FfiWriteFact",
                     },
                 },
             ),
@@ -14124,7 +14502,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Await the next `WriteStatus`, or `None` once the write has fully\nresolved or the engine has shut down. [`FfiError::ConcurrentNext`] on\nan overlapping call.",
+                "Await the next `WriteFact`, or `None` once the write has fully\nresolved or the engine has shut down. [`FfiError::ConcurrentNext`] on\nan overlapping call.",
             ),
             throws: Some(
                 Enum {
@@ -14135,7 +14513,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpgroupreceiptstream_next",
             checksum: Some(
-                18388,
+                4174,
             ),
         },
     ],
@@ -14177,7 +14555,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "Pull-based receipt stream for a NIP-29 group write (#1033). Unlike\n[`crate::facade::NmpReceiptStream`] this stream carries NO receipt id:\nevery `FfiGroup` write reaches the engine's UNTRACKED `Engine::publish`\ndoor (never `publish_tracked`), because the store-issued receipt-id\nnamespace is a `publish`-door concern the group scope has no reason to\nsurface -- `nmp::nip29::Group::through_the_one_door`'s own doc names the\nsame door. Same ordered `WriteStatus` delivery and cancel/Drop discipline\nas every other pull stream in this crate.",
+        "Pull-based receipt stream for a NIP-29 group write (#1033). Unlike\n[`crate::facade::NmpReceiptStream`] this stream carries NO receipt id:\nevery `FfiGroup` write reaches the engine's UNTRACKED `Engine::publish`\ndoor (never `publish_tracked`), because the store-issued receipt-id\nnamespace is a `publish`-door concern the group scope has no reason to\nsurface -- `nmp::nip29::Group::through_the_one_door`'s own doc names the\nsame door. Same ordered `WriteFact` delivery and cancel/Drop discipline\nas every other pull stream in this crate.",
     ),
 }
 
@@ -14401,7 +14779,7 @@ object Object {
                 Optional {
                     inner_type: Enum {
                         module_path: "nmp_ffi",
-                        name: "FfiWriteStatus",
+                        name: "FfiWriteFact",
                     },
                 },
             ),
@@ -14423,7 +14801,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Await the next `WriteStatus`, or `None` once the intent has fully\nresolved or the engine has shut down. [`FfiError::ConcurrentNext`] on an\noverlapping call.",
+                "Await the next `WriteFact`, or `None` once the intent has fully\nresolved or the engine has shut down. [`FfiError::ConcurrentNext`] on an\noverlapping call.",
             ),
             throws: Some(
                 Enum {
@@ -14434,7 +14812,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptstream_next",
             checksum: Some(
-                20726,
+                3778,
             ),
         },
     ],
@@ -14476,7 +14854,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]\nand the `Attached` reattachment, #680). It\nexposes the stable store-issued receipt id via [`Self::id`] and delivers\nordered `WriteStatus` facts via `async fn next()`. Live delivery is a finite\nFIFO that reports typed lag. Receipt facts are durable: the persisted\ndurable-delivery Redb store is the source of truth, so a dropped or lagged stream can\nbe reattached and traverse retained facts through finite pages.",
+        "The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]\nand the `Attached` reattachment, #680). It\nexposes the stable store-issued receipt id via [`Self::id`] and delivers\nordered `WriteFact` facts via `async fn next()`. Live delivery is a finite\nFIFO that reports typed lag. Receipt facts are durable: the persisted\npublish-queue Redb store is the source of truth, so a dropped or lagged stream can\nbe reattached and traverse retained facts through finite pages.",
     ),
 }
 

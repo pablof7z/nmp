@@ -8,8 +8,8 @@
 use nostr::{EventId, PublicKey};
 
 use crate::convert::{
-    demand_to_ffi, durability_to_ffi, identity_to_ffi, parse_correlation_token, parse_pubkey,
-    write_payload_to_ffi, write_routing_to_ffi, FfiError,
+    demand_to_ffi, identity_to_ffi, parse_correlation_token, parse_pubkey, write_payload_to_ffi,
+    write_routing_to_ffi, FfiError,
 };
 use crate::types::{FfiDemand, FfiRow, FfiWriteIntent};
 
@@ -326,7 +326,7 @@ pub fn comment_intent(
 
     // NIP-22 owns this complete shape, and the FFI layer projects the
     // returned ordinary intent rather than independently re-stating its
-    // payload, durability, routing, identity, or correlation policy.
+    // payload, routing, identity, or correlation policy.
     //
     // #951's bug class is now closed on BOTH axes: every field is projected
     // TOTALLY, so a protocol module that changes which payload it composes
@@ -337,7 +337,6 @@ pub fn comment_intent(
     // a fused semantic method -- refuses as a typed value.
     let nmp::WriteIntent {
         payload,
-        durability,
         routing,
         identity,
         correlation,
@@ -345,7 +344,6 @@ pub fn comment_intent(
 
     Ok(FfiWriteIntent {
         payload: write_payload_to_ffi(payload)?,
-        durability: durability_to_ffi(durability),
         routing: write_routing_to_ffi(routing),
         identity: identity_to_ffi(identity),
         correlation: correlation.map(|token| token.to_string()),
@@ -355,9 +353,7 @@ pub fn comment_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        FfiDurability, FfiIdentity, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting,
-    };
+    use crate::types::{FfiIdentity, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting};
 
     fn podcast_root() -> FfiCommentRoot {
         FfiCommentRoot::External {
@@ -453,7 +449,6 @@ mod tests {
                 vec!["k".to_string(), "podcast:item:guid".to_string()],
             ]
         );
-        assert_eq!(intent.durability, FfiDurability::Durable);
         assert_eq!(intent.routing, FfiWriteRouting::Auto);
         assert_eq!(intent.identity, FfiIdentity::Active);
         assert_eq!(intent.correlation.as_deref(), Some("comment-correlation"));

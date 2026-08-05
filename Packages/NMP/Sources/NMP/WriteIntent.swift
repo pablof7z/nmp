@@ -34,29 +34,6 @@ public enum RetryCause: Sendable, Hashable {
     }
 }
 
-/// A durability PROPERTY of a write (not a routing choice).
-public enum Durability: Sendable, Hashable {
-    case durable
-    case ephemeral
-    case atMostOnce
-
-    func toFfi() -> FfiDurability {
-        switch self {
-        case .durable: return .durable
-        case .ephemeral: return .ephemeral
-        case .atMostOnce: return .atMostOnce
-        }
-    }
-
-    init(_ ffi: FfiDurability) {
-        switch ffi {
-        case .durable: self = .durable
-        case .ephemeral: self = .ephemeral
-        case .atMostOnce: self = .atMostOnce
-        }
-    }
-}
-
 /// Where a write is routed. The whole vocabulary is two words: `.auto`
 /// ("figure out how to route whatever I'm publishing") and `.explicit`
 /// ("use these exact relays and that is that"). There is no third case --
@@ -156,7 +133,7 @@ public enum WritePayload: Sendable, Hashable {
 /// states none, so there is nothing for it to contradict. On a `.signed`
 /// payload it may only RESTATE the author already frozen in the bytes:
 /// naming that author changes nothing, naming anybody else is a
-/// consent/author contradiction that surfaces as `WriteStatus.failed` on
+/// consent/author contradiction that surfaces as `WriteFact.failed` on
 /// the receipt stream with no `.accepted` before it.
 ///
 /// `.explicit`'s `pubkey` is 64-char HEX and nothing else. A bech32 `npub`
@@ -191,13 +168,12 @@ public enum Identity: Sendable, Hashable {
 ///
 /// `identity` (#47) defaults to `.active` -- the overwhelming majority of
 /// writes publish as the logged-in account, and saying so costs nothing.
-/// `WriteStatus.awaitingCapability`'s associated `pubkey` (#47 Unit B) is
+/// `SigningState.awaitingSigner`'s associated `pubkey` (#47 Unit B) is
 /// the exact frozen identity parked -- the key `.explicit` named, else the
 /// account that was active at publish time -- never a different,
 /// later-active account.
 public struct WriteIntent: Sendable, Hashable {
     public var payload: WritePayload
-    public var durability: Durability
     public var routing: WriteRouting
     public var identity: Identity
     /// Crash-safe client correlation token (#591). `nil` -- the default --
@@ -215,13 +191,11 @@ public struct WriteIntent: Sendable, Hashable {
 
     public init(
         payload: WritePayload,
-        durability: Durability,
         routing: WriteRouting,
         identity: Identity = .active,
         correlation: String? = nil
     ) {
         self.payload = payload
-        self.durability = durability
         self.routing = routing
         self.identity = identity
         self.correlation = correlation
@@ -232,7 +206,6 @@ public struct WriteIntent: Sendable, Hashable {
     /// directly or receive one from a typed protocol function.
     init(_ ffi: FfiWriteIntent) {
         payload = WritePayload(ffi.payload)
-        durability = Durability(ffi.durability)
         routing = WriteRouting(ffi.routing)
         identity = Identity(ffi.identity)
         correlation = ffi.correlation
@@ -241,7 +214,6 @@ public struct WriteIntent: Sendable, Hashable {
     func toFfi() -> FfiWriteIntent {
         FfiWriteIntent(
             payload: payload.toFfi(),
-            durability: durability.toFfi(),
             routing: routing.toFfi(),
             identity: identity.toFfi(),
             correlation: correlation
@@ -249,98 +221,273 @@ public struct WriteIntent: Sendable, Hashable {
     }
 }
 
-/// Every state a publish's receipt stream may report (ledger #9: enqueue is
-/// not converged -- many of these may arrive per publish, one per relay for
-/// the terminal states).
-public enum WriteStatus: Sendable, Hashable {
-    case accepted
-    case cancelled
-    case superseded
-    /// #47 Unit B: `pubkey` is the exact frozen identity (64-char hex) no
-    /// registered signer currently answers for. Retained, not terminal --
-    /// re-arrives verbatim on restart replay and resumes only when a
-    /// signer for THIS pubkey attaches, never a different one.
-    case awaitingCapability(pubkey: String)
+/// The signing state of the WHOLE write -- one signature, one author, one
+/// answer.
+public enum SigningState: Sendable, Hashable {
+    /// No registered signer answers for `pubkey` (64-char hex) -- the exact
+    /// identity FROZEN at acceptance, never whoever is active now. Re-armed
+    /// only by attaching a signer for THIS key, and re-emitted verbatim on
+    /// restart replay.
+    ///
+    /// **No clock ever ends this.** A device whose signer is simply not
+    /// plugged in yet is not a device whose write failed; removing the queue
+    /// entry is the only other exit.
+    case awaitingSigner(pubkey: String)
     case signed(eventId: String)
-    /// Routing has not produced a single relay yet, and `detail` says what it
-    /// is waiting for. Retained, not terminal, and replayed verbatim on
-    /// receipt reattachment -- a route parked for a month is still visible
-    /// with its reason. Nothing expires it; explicit cancellation is the one
-    /// way out. Show it, and `.routed` with `complete == false`, as
-    /// "determining destinations".
-    case awaitingRoute(detail: String)
-    /// `relays` is what routing has named SO FAR; `complete` says whether
-    /// that list can still grow. Both are independent of delivery:
-    /// `complete == true` with nothing delivered is "sending 0 of n", and
-    /// `complete == false` with some relays already acked is ordinary while
-    /// routing is still open.
-    case routed(relays: [String], complete: Bool)
-    case awaitingRelay(relay: String)
-    case awaitingAuth(relay: String)
-    case authDenied(
-        relay: String,
-        pubkey: String,
-        source: AuthDenialSource,
-        reason: String
-    )
-    case retryEligible(
-        relay: String,
+    /// The signer answered and said no. Terminal for the whole write.
+    case refused(reason: String)
+
+    init(_ ffi: FfiSigningState) {
+        switch ffi {
+        case .awaitingSigner(let pubkey): self = .awaitingSigner(pubkey: pubkey)
+        case .signed(let eventId): self = .signed(eventId: eventId)
+        case .refused(let reason): self = .refused(reason: reason)
+        }
+    }
+}
+
+/// Why a relay lane is not attempting right now. Every case is a fact about
+/// the lane; none of them is a deadline.
+public enum RelayWaiting: Sendable, Hashable {
+    /// Offline time consumes no attempt ordinal, so being offline can never
+    /// spend the give-up ceiling.
+    case notConnected
+    case needsAuth
+    /// The last attempt failed in a way that permits another one, and
+    /// `cause`/`detail` say WHY -- "we will try again" and "we will try again
+    /// because the relay rate-limited us" are different messages and only the
+    /// second one can be acted on.
+    case backingOff(
         attempt: UInt64,
         eligibleAt: UInt64,
         cause: RetryCause,
         detail: String?
     )
-    case handoffAmbiguous(relay: String, attempt: UInt64, observedAt: UInt64)
-    case sent(relay: String, attempt: UInt64, writtenAt: UInt64)
-    case acked(relay: String)
-    case rejected(relay: String, reason: String)
-    case gaveUp(relay: String)
-    case persistenceBlocked(relay: String)
-    case routePersistenceBlocked(relay: String)
-    case outcomeUnknown(relay: String)
-    case replaceableConflict(expected: String?, actual: String?)
-    case failed(reason: String)
+    /// The lane is owned and nonterminal, but a durable fact about it could
+    /// not be committed -- the local disk is refusing writes. No wire EVENT
+    /// was emitted. Also latched onto the queue entry and never cleared by a
+    /// later ack.
+    case persistenceStalled(detail: String)
 
-    init(_ ffi: FfiWriteStatus) {
+    init(_ ffi: FfiRelayWaiting) {
         switch ffi {
-        case .accepted: self = .accepted
-        case .cancelled: self = .cancelled
-        case .superseded: self = .superseded
-        case .awaitingCapability(let pubkey): self = .awaitingCapability(pubkey: pubkey)
-        case .signed(let eventId): self = .signed(eventId: eventId)
-        case .awaitingRoute(let detail): self = .awaitingRoute(detail: detail)
-        case .routed(let relays, let complete):
-            self = .routed(relays: relays, complete: complete)
-        case .awaitingRelay(let relay): self = .awaitingRelay(relay: relay)
-        case .awaitingAuth(let relay): self = .awaitingAuth(relay: relay)
-        case .authDenied(let relay, let pubkey, let source, let reason):
-            self = .authDenied(
-                relay: relay,
-                pubkey: pubkey,
-                source: AuthDenialSource(source),
-                reason: reason
-            )
-        case .retryEligible(let relay, let attempt, let eligibleAt, let cause, let detail):
-            self = .retryEligible(
-                relay: relay,
+        case .notConnected: self = .notConnected
+        case .needsAuth: self = .needsAuth
+        case .backingOff(let attempt, let eligibleAt, let cause, let detail):
+            self = .backingOff(
                 attempt: attempt,
                 eligibleAt: eligibleAt,
                 cause: RetryCause(cause),
                 detail: detail
             )
-        case .handoffAmbiguous(let relay, let attempt, let observedAt):
-            self = .handoffAmbiguous(relay: relay, attempt: attempt, observedAt: observedAt)
-        case .sent(let relay, let attempt, let writtenAt):
-            self = .sent(relay: relay, attempt: attempt, writtenAt: writtenAt)
-        case .acked(let relay): self = .acked(relay: relay)
-        case .rejected(let relay, let reason): self = .rejected(relay: relay, reason: reason)
-        case .gaveUp(let relay): self = .gaveUp(relay: relay)
-        case .persistenceBlocked(let relay): self = .persistenceBlocked(relay: relay)
-        case .routePersistenceBlocked(let relay): self = .routePersistenceBlocked(relay: relay)
-        case .outcomeUnknown(let relay): self = .outcomeUnknown(relay: relay)
-        case .replaceableConflict(let expected, let actual):
-            self = .replaceableConflict(expected: expected, actual: actual)
-        case .failed(let reason): self = .failed(reason: reason)
+        case .persistenceStalled(let detail): self = .persistenceStalled(detail: detail)
         }
+    }
+}
+
+/// What is true at ONE relay. `.published`, `.rejected`, `.authFailed` and
+/// `.gaveUp` are terminal for that relay; `.waiting` and `.sent` are not.
+public enum RelayState: Sendable, Hashable {
+    case waiting(RelayWaiting)
+    /// Transport proved socket write + flush. Not an ack, and not terminal.
+    case sent(attempt: UInt64, writtenAt: UInt64)
+    case published
+    /// The relay authenticated the identity and refused THIS EVENT. The
+    /// repair is to the event.
+    case rejected(reason: String)
+    /// The write could not be authenticated HERE. Deliberately NOT folded
+    /// into `.rejected`: `source` keeps an app's own decision not to
+    /// authenticate from being shown to a user as a relay refusing them.
+    case authFailed(pubkey: String, source: AuthDenialSource, reason: String)
+    /// The attempt ceiling was reached at this relay. Terminal HERE and
+    /// nowhere else: three relays published and one given up on is a success
+    /// with a footnote, not a failed write.
+    case gaveUp
+
+    /// Whether this relay will produce another fact.
+    public var isTerminal: Bool {
+        switch self {
+        case .published, .rejected, .authFailed, .gaveUp: return true
+        case .waiting, .sent: return false
+        }
+    }
+
+    init(_ ffi: FfiRelayState) {
+        switch ffi {
+        case .waiting(let waiting): self = .waiting(RelayWaiting(waiting))
+        case .sent(let attempt, let writtenAt):
+            self = .sent(attempt: attempt, writtenAt: writtenAt)
+        case .published: self = .published
+        case .rejected(let reason): self = .rejected(reason: reason)
+        case .authFailed(let pubkey, let source, let reason):
+            self = .authFailed(
+                pubkey: pubkey,
+                source: AuthDenialSource(source),
+                reason: reason
+            )
+        case .gaveUp: self = .gaveUp
+        }
+    }
+}
+
+/// Why a write ended without going anywhere.
+public enum NotSentReason: Sendable, Hashable {
+    case cancelled
+    /// A newer accepted write won the same replaceable coordinate before this
+    /// one started any wire attempt. Not a failure -- for an app renewing
+    /// presence it is the steady state.
+    case superseded
+
+    init(_ ffi: FfiNotSentReason) {
+        switch ffi {
+        case .cancelled: self = .cancelled
+        case .superseded: self = .superseded
+        }
+    }
+}
+
+/// Why the acceptance door said no.
+public enum RefuseReason: Sendable, Hashable {
+    case alreadyExpired
+    case tombstoned
+    case replaceableBaseOnRegularEvent
+    /// A whole-value replacement lost its compare-and-swap.
+    ///
+    /// BOTH ids are kept, and that is what makes the failure recoverable
+    /// without the user: fetch `actual`, reapply the change and resubmit
+    /// silently. Reduced to a string you could only tell them to redo it.
+    case replaceableBaseChanged(expected: String?, actual: String?)
+
+    init(_ ffi: FfiRefuseReason) {
+        switch ffi {
+        case .alreadyExpired: self = .alreadyExpired
+        case .tombstoned: self = .tombstoned
+        case .replaceableBaseOnRegularEvent: self = .replaceableBaseOnRegularEvent
+        case .replaceableBaseChanged(let expected, let actual):
+            self = .replaceableBaseChanged(expected: expected, actual: actual)
+        }
+    }
+}
+
+/// The whole-write terminal. Exactly one of these ends every receipt stream,
+/// so a stream can never end in silence and you can always tell a finished
+/// write from a dropped subscription.
+public enum WriteOutcome: Sendable, Hashable {
+    /// The destination set is CLOSED and every relay in it is terminal. What
+    /// happened at each is the per-relay facts; this says only that no more
+    /// are coming.
+    case settled
+    /// Routing finished -- knowledge is exhausted -- and named zero relays.
+    /// Terminal: there is nowhere to publish. Distinct from a route still
+    /// resolving, which parks forever.
+    case noDestination
+    case notSent(NotSentReason)
+    /// The store answered the acceptance instruction with a semantic no. The
+    /// write is in custody as a permanently-failed entry: one row, payload
+    /// intact, readable and removable through `Engine.publishQueue()`.
+    case refused(RefuseReason)
+
+    init(_ ffi: FfiWriteOutcome) {
+        switch ffi {
+        case .settled: self = .settled
+        case .noDestination: self = .noDestination
+        case .notSent(let reason): self = .notSent(NotSentReason(reason))
+        case .refused(let reason): self = .refused(RefuseReason(reason))
+        }
+    }
+}
+
+/// One fact about a write, delivered on its receipt stream.
+///
+/// Acceptance is deliberately ABSENT: `publish` returning a receipt IS
+/// acceptance, so you never ask the stream whether your write was taken.
+/// Settlement is INSPECTED, never AWAITED -- a locally accepted write is
+/// already visible through your own live query, reporting cache and zero
+/// relays. Never block a UI on this.
+public enum WriteFact: Sendable, Hashable {
+    case signing(SigningState)
+    case relay(relay: String, state: RelayState)
+    /// The relays this write is INTENDED for, and whether resolution can
+    /// still change its mind. `complete` flips on settled RESOLUTION, never
+    /// on delivery, so `complete == true` with nothing published yet is
+    /// "sending 0 of n". This is the settlement denominator.
+    ///
+    /// `complete == false` with an empty set is a write still learning where
+    /// it goes; it parks indefinitely and NOTHING expires it. `complete ==
+    /// true` with an empty set is `.outcome(.noDestination)`.
+    case destinations(relays: [String], complete: Bool)
+    case outcome(WriteOutcome)
+
+    init(_ ffi: FfiWriteFact) {
+        switch ffi {
+        case .signing(let state): self = .signing(SigningState(state))
+        case .relay(let relay, let state):
+            self = .relay(relay: relay, state: RelayState(state))
+        case .destinations(let relays, let complete):
+            self = .destinations(relays: relays, complete: complete)
+        case .outcome(let outcome): self = .outcome(WriteOutcome(outcome))
+        }
+    }
+}
+
+/// One write in your publish queue, as you read it back.
+///
+/// Enumerating the queue answers "what have I got outstanding, and what went
+/// wrong with it" without having held a receipt stream open since
+/// acceptance. It is INSPECTION: nothing here blocks.
+public struct PublishQueueEntry: Sendable, Hashable {
+    public let receiptID: UInt64
+    /// The frozen event id (64-char hex) -- the write's identity from
+    /// acceptance onward, unchanged by signing.
+    public let eventID: String
+    /// The identity frozen at acceptance (64-char hex). Never re-resolved.
+    public let pubkey: String
+    public let acceptedAt: UInt64
+    public let signing: SigningState
+    public let relays: [String]
+    public let routeComplete: Bool
+    public let relayStates: [(relay: String, state: RelayState)]
+    /// `nil` while the write is still in progress.
+    public let outcome: WriteOutcome?
+    /// LATCHED. Set the first time local persistence refused a durable fact
+    /// for this write, and never cleared by a later success -- an operator
+    /// must not lose the only signal that the disk is failing because a relay
+    /// acked afterwards.
+    public let persistenceFault: String?
+
+    /// Whether this write will produce another fact.
+    public var isTerminal: Bool { outcome != nil }
+
+    init(_ ffi: FfiPublishQueueEntry) {
+        receiptID = ffi.receiptId
+        eventID = ffi.eventId
+        pubkey = ffi.pubkey
+        acceptedAt = ffi.acceptedAt
+        signing = SigningState(ffi.signing)
+        relays = ffi.relays
+        routeComplete = ffi.routeComplete
+        relayStates = ffi.relayStates.map { (relay: $0.relay, state: RelayState($0.state)) }
+        outcome = ffi.outcome.map(WriteOutcome.init)
+        persistenceFault = ffi.persistenceFault
+    }
+
+    public static func == (lhs: PublishQueueEntry, rhs: PublishQueueEntry) -> Bool {
+        lhs.receiptID == rhs.receiptID
+            && lhs.eventID == rhs.eventID
+            && lhs.pubkey == rhs.pubkey
+            && lhs.acceptedAt == rhs.acceptedAt
+            && lhs.signing == rhs.signing
+            && lhs.relays == rhs.relays
+            && lhs.routeComplete == rhs.routeComplete
+            && lhs.relayStates.map(\.relay) == rhs.relayStates.map(\.relay)
+            && lhs.relayStates.map(\.state) == rhs.relayStates.map(\.state)
+            && lhs.outcome == rhs.outcome
+            && lhs.persistenceFault == rhs.persistenceFault
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(receiptID)
+        hasher.combine(eventID)
+        hasher.combine(outcome)
     }
 }

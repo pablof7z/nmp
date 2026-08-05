@@ -190,7 +190,7 @@ The names may change. These distinctions may not collapse.
 |---|---|
 | Socket connection | transport reconnects the socket |
 | One remote signing request | signer adapter owns correlation and its connection/AUTH |
-| One `(intent, relay)` delivery lane | durable delivery owns attempts and eligibility |
+| One `(intent, relay)` delivery lane | publish queue owns attempts and eligibility |
 | Time and concurrency | one engine deadline scheduler wakes eligible work |
 
 Transport does not hide durable EVENT frames in an independent buffer. The

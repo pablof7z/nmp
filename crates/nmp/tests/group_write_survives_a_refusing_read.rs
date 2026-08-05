@@ -61,8 +61,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use nmp::{
-    nip29, AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey, Row, RowDelta,
-    SourceStatus, Subscription, WriteStatus,
+    nip29, AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey, RelayState, Row,
+    RowDelta, SourceStatus, Subscription, WriteFact,
 };
 use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -210,9 +210,9 @@ fn poll_until(
 }
 
 fn drain_until_all_acked(
-    receipts: &nmp::mechanism::runtime::FifoReceiver<WriteStatus>,
+    receipts: &nmp::mechanism::runtime::FifoReceiver<WriteFact>,
     expected: &BTreeSet<RelayUrl>,
-) -> Vec<WriteStatus> {
+) -> Vec<WriteFact> {
     let deadline = Instant::now() + SETTLE;
     let mut seen = Vec::new();
     let mut acked: BTreeSet<RelayUrl> = BTreeSet::new();
@@ -226,7 +226,11 @@ fn drain_until_all_acked(
         }
         match receipts.recv_timeout(remaining) {
             Ok(status) => {
-                if let WriteStatus::Acked(relay) = &status {
+                if let WriteFact::Relay {
+                    relay,
+                    state: RelayState::Published,
+                } = &status
+                {
                     acked.insert(relay.clone());
                 }
                 seen.push(status);
@@ -283,13 +287,13 @@ async fn a_join_request_is_delivered_while_the_same_groups_read_reports_one_host
     assert!(
         write_statuses
             .iter()
-            .any(|status| matches!(status, WriteStatus::Acked(relay) if *relay == host_a.url)),
+            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == host_a.url)),
         "host A refuses READS, not writes -- it must still ack the join request: {write_statuses:?}"
     );
     assert!(
         write_statuses
             .iter()
-            .any(|status| matches!(status, WriteStatus::Acked(relay) if *relay == host_b.url)),
+            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == host_b.url)),
         "host B must ack the join request too: {write_statuses:?}"
     );
     let delivered_to_b = {

@@ -8,7 +8,7 @@ use std::time::Duration;
 use nmp::{
     fifo_channel, AcquisitionEvidence, AsyncFifoReceiver, Engine, Event, EventId, FifoReceiver,
     FifoRecvError, FifoRecvTimeoutError, FifoSender, ObservationCancel, PublicKey, RowDelta,
-    ShortfallFact, SourceStatus, WriteStatus,
+    ShortfallFact, SourceStatus, WriteFact,
 };
 
 use crate::demand::active_account_demand;
@@ -69,13 +69,8 @@ pub enum FollowActionFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FollowActionStatus {
     Acquiring,
-    NoChange {
-        following: bool,
-    },
-    Receipt {
-        receipt_id: u64,
-        status: WriteStatus,
-    },
+    NoChange { following: bool },
+    Receipt { receipt_id: u64, status: WriteFact },
     Failed(FollowActionFailure),
 }
 

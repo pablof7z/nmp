@@ -3,7 +3,7 @@
 use crate::world::acquisition::{branch_shortfall, branch_sources};
 use cucumber::then;
 
-use super::delivery::published_delivered_to;
+use super::publish_queue::published_delivered_to;
 
 use super::*;
 

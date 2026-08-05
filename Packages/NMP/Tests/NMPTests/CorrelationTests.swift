@@ -12,8 +12,8 @@ final class CorrelationTests: XCTestCase {
 
     private let author = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
-    private static func collect(_ stream: ReceiptStatus, count: Int) async -> [WriteStatus] {
-        var statuses: [WriteStatus] = []
+    private static func collect(_ stream: ReceiptStatus, count: Int) async -> [WriteFact] {
+        var statuses: [WriteFact] = []
         // #680: a receipt is a throwing `AsyncSequence`; a throw here is
         // terminal teardown, so end collection with what we have.
         do {
@@ -56,17 +56,19 @@ final class CorrelationTests: XCTestCase {
                     content: "first draft",
                     createdAt: 1_723_456_800
                 ),
-                durability: .durable,
                 routing: .auto,
                 correlation: token
             )
         )
+        // `publish` returning `first` IS the acceptance; the stream carries
+        // only what happened AFTER it, and with no signer registered for the
+        // active account that is the parked signing obligation.
         let firstStatuses = try await Self.withTimeout {
-            await Self.collect(first.status, count: 2)
+            await Self.collect(first.status, count: 1)
         }
         XCTAssertEqual(
             firstStatuses,
-            [.accepted, .awaitingCapability(pubkey: author)]
+            [.signing(.awaitingSigner(pubkey: author))]
         )
 
         // A re-composed draft -- different timestamp/content -- under the
@@ -79,18 +81,17 @@ final class CorrelationTests: XCTestCase {
                     content: "second, different draft",
                     createdAt: 1_723_456_801
                 ),
-                durability: .durable,
                 routing: .auto,
                 correlation: token
             )
         )
         XCTAssertEqual(second.id, first.id)
         let secondStatuses = try await Self.withTimeout {
-            await Self.collect(second.status, count: 2)
+            await Self.collect(second.status, count: 1)
         }
         XCTAssertEqual(
             secondStatuses,
-            [.accepted, .awaitingCapability(pubkey: author)],
+            [.signing(.awaitingSigner(pubkey: author))],
             "the retry's stream must replay the ORIGINAL obligation's facts"
         )
     }
@@ -109,13 +110,12 @@ final class CorrelationTests: XCTestCase {
                     content: "reattach by correlation",
                     createdAt: 1_723_456_900
                 ),
-                durability: .durable,
                 routing: .auto,
                 correlation: token
             )
         )
         _ = try await Self.withTimeout {
-            await Self.collect(receipt.status, count: 2)
+            await Self.collect(receipt.status, count: 1)
         }
 
         // Simulate the "app forgot the numeric id" scenario: reattach using
@@ -124,11 +124,11 @@ final class CorrelationTests: XCTestCase {
             return XCTFail("a token that resolved during publish must remain reattachable")
         }
         let replayStatuses = try await Self.withTimeout {
-            await Self.collect(replay.status, count: 2)
+            await Self.collect(replay.status, count: 1)
         }
         XCTAssertEqual(
             replayStatuses,
-            [.accepted, .awaitingCapability(pubkey: author)]
+            [.signing(.awaitingSigner(pubkey: author))]
         )
 
         // An unknown token is a distinct, typed absence.
@@ -151,8 +151,7 @@ final class CorrelationTests: XCTestCase {
                         content: "malformed correlation token",
                         createdAt: 1_723_457_000
                     ),
-                    durability: .durable,
-                    routing: .auto,
+                        routing: .auto,
                     correlation: ""
                 )
             )

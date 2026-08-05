@@ -30,20 +30,27 @@ class WriteCancellationTest {
                                     content = "cancel through the public Kotlin SDK",
                                     createdAt = 1_723_456_790uL,
                                 ),
-                            durability = Durability.Durable,
                             routing = WriteRouting.Auto,
                         ),
                     )
+                // Acceptance is `publish` returning a receipt, never a stream
+                // item: the id it hands back is the custody token everything
+                // below transitions and replays by.
+                assertTrue(receipt.id > 0uL)
 
                 val observed = async {
                     withTimeout(5_000) { receipt.status.toList() }
                 }
                 assertEquals(WriteCancellationOutcome.Cancelled, engine.cancel(receipt.id))
 
-                val statuses = observed.await()
-                assertTrue(statuses.contains(WriteStatus.Accepted))
-                assertFalse(statuses.any { it is WriteStatus.Signed })
-                assertEquals(WriteStatus.Cancelled, statuses.last())
+                val facts = observed.await()
+                assertFalse(
+                    facts.any { it is WriteFact.Signing && it.state is SigningState.Signed },
+                )
+                assertEquals(
+                    WriteFact.Outcome(WriteOutcome.NotSent(NotSentReason.Cancelled)),
+                    facts.last(),
+                )
 
                 // The cancellation transition is idempotent and the durable
                 // terminal fact is independently reconstructible by id.
@@ -52,7 +59,7 @@ class WriteCancellationTest {
                 assertTrue(reattachment is ReceiptReattachment.Attached)
                 val replay = (reattachment as ReceiptReattachment.Attached).receipt
                 assertEquals(
-                    listOf(WriteStatus.Cancelled),
+                    listOf(WriteFact.Outcome(WriteOutcome.NotSent(NotSentReason.Cancelled))),
                     withTimeout(5_000) { replay.status.toList() },
                 )
             }

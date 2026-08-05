@@ -1,24 +1,16 @@
 //! The write-intent vocabulary (#115 Fable ruling, Fork 3's dependency
-//! ruling): `Durability`, `EventBuilder`, `WritePayload`, `WriteIntent`, and
+//! ruling): `EventBuilder`, `WritePayload`, `WriteIntent`, and
 //! `WriteRouting` live here rather than `nmp-engine::outbox`: protocol modules composing a
 //! `WriteIntent` must not gain an engine dependency to do so, and this crate
 //! is already the read noun's home (`Demand`/`SourceAuthority`).
-//! `WriteStatus` and `Receipt` stay in `nmp` because they are runtime
+//! `WriteFact` and `Receipt` stay in `nmp` because they are runtime
 //! evidence rather than intent vocabulary; live delivery capabilities are
 //! runtime-private and never enter the reducer.
 //!
 //! Hard break, no compatibility alias: every caller in the workspace moved
-//! to `nmp_grammar::{Durability, WriteIntent, ...}` in the same change.
+//! to `nmp_grammar::{WriteIntent, ...}` in the same change.
 
 use nostr::{Event as SignedEvent, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp};
-
-/// A typed property of a write (M0 amendment) — not a routing choice.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum Durability {
-    Durable,
-    Ephemeral,
-    AtMostOnce,
-}
 
 /// Everything an app must say to publish an event, and everything it MAY
 /// say. The kind is the one thing NMP cannot invent, so the kind is the one
@@ -267,7 +259,6 @@ pub enum Identity {
 /// A caller's publish request.
 pub struct WriteIntent {
     pub payload: WritePayload,
-    pub durability: Durability,
     pub routing: WriteRouting,
     /// The identity this ONE write is published under, defaulting to
     /// [`Identity::Active`] ([`Identity`]'s own `Default`).
@@ -301,7 +292,7 @@ pub struct WriteIntent {
     /// intent; under `Active` that pin matters more, not less, since
     /// acceptance is the only place "whoever is active" becomes somebody.
     /// An `Explicit` identity with no registered signing capability still
-    /// ACCEPTS and parks durably (`WriteStatus::AwaitingCapability`) until
+    /// ACCEPTS and parks durably (`WriteFact::AwaitingCapability`) until
     /// that exact key's signer attaches — never a silent failure, never
     /// identity drift.
     pub identity: Identity,
@@ -435,7 +426,6 @@ mod tests {
         let builder = EventBuilder::new(nostr::Kind::TextNote).content("identity vocab");
         let default_intent = WriteIntent {
             payload: WritePayload::Event(builder.clone()),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::default(),
             correlation: None,
@@ -444,7 +434,6 @@ mod tests {
 
         let named = WriteIntent {
             payload: WritePayload::Event(builder),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(keys.public_key()),
             correlation: None,

@@ -5,14 +5,14 @@
 
 use super::*;
 
-fn public_retry_cause(cause: DeliveryTransientCause) -> Option<RetryCause> {
+fn public_retry_cause(cause: PublishQueueTransientCause) -> Option<RetryCause> {
     match cause {
-        DeliveryTransientCause::Interrupted => Some(RetryCause::Interrupted),
-        DeliveryTransientCause::AckTimeout => Some(RetryCause::AckTimeout),
-        DeliveryTransientCause::ConnectionLost => Some(RetryCause::ConnectionLost),
-        DeliveryTransientCause::RelayRateLimited => Some(RetryCause::RelayRateLimited),
-        DeliveryTransientCause::RelayError => Some(RetryCause::RelayError),
-        DeliveryTransientCause::AuthRequired => None,
+        PublishQueueTransientCause::Interrupted => Some(RetryCause::Interrupted),
+        PublishQueueTransientCause::AckTimeout => Some(RetryCause::AckTimeout),
+        PublishQueueTransientCause::ConnectionLost => Some(RetryCause::ConnectionLost),
+        PublishQueueTransientCause::RelayRateLimited => Some(RetryCause::RelayRateLimited),
+        PublishQueueTransientCause::RelayError => Some(RetryCause::RelayError),
+        PublishQueueTransientCause::AuthRequired => None,
     }
 }
 
@@ -129,7 +129,7 @@ enum ReceiptReplayFactKey {
     /// CHANGES (a second unknown settled, one recipient still missing) is a
     /// new fact worth re-emitting, while the same reason repeated on every
     /// tick is not.
-    AwaitingRoute(String),
+    Destinations,
     Attempt {
         relay: RelayUrl,
         key: ReceiptAttemptReplayKey,
@@ -138,20 +138,37 @@ enum ReceiptReplayFactKey {
         relay: RelayUrl,
         revision: u64,
     },
-    PersistenceBlocked(RelayUrl),
-    RoutePersistenceBlocked(RelayUrl),
+    /// A persistence stall, keyed by the relay AND which durable fact failed.
+    ///
+    /// Both halves are load-bearing. One relay can stall on BOTH its
+    /// append-only route revision and its attempt log, and those are two
+    /// different facts with two different recovery stories — whether the
+    /// resolved URL survives a crash. Keying on the relay alone silently
+    /// swallows whichever arrives second under paged reattachment, which is
+    /// exactly the class of loss a durable receipt exists to prevent.
+    PersistenceStalled(RelayUrl, PersistenceStallKind),
+}
+
+/// Which durable fact a persistence stall failed to commit. Not public
+/// vocabulary — the app-facing shape stays one `PersistenceStalled { detail }`
+/// per #1237 — purely the replay cursor's dedup discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum PersistenceStallKind {
+    /// The attempt log: recovery still rediscovers this exact relay from its
+    /// committed route revision.
+    Attempt,
+    /// The route revision itself: this exact URL is not claimed to survive.
+    Route,
 }
 
 impl ReceiptReplayCursor {
-    fn contains(&self, key: &ReceiptReplayFactKey, status: &WriteStatus) -> bool {
+    fn contains(&self, key: &ReceiptReplayFactKey, status: &WriteFact) -> bool {
         match key {
             ReceiptReplayFactKey::ReceiptStatus => {
                 self.state.receipt_status.as_ref() == Some(status)
             }
             ReceiptReplayFactKey::AwaitingCapability => self.state.awaiting_capability,
-            ReceiptReplayFactKey::AwaitingRoute(detail) => {
-                self.state.awaiting_route.as_ref() == Some(detail)
-            }
+            ReceiptReplayFactKey::Destinations => self.state.destinations,
             ReceiptReplayFactKey::Attempt { relay, key } => self
                 .state
                 .attempts
@@ -162,33 +179,26 @@ impl ReceiptReplayCursor {
                 .lane_revisions
                 .get(relay)
                 .is_some_and(|delivered| delivered >= revision),
-            ReceiptReplayFactKey::PersistenceBlocked(relay) => {
-                self.state.persistence_blocked.contains(relay)
-            }
-            ReceiptReplayFactKey::RoutePersistenceBlocked(relay) => {
-                self.state.route_persistence_blocked.contains(relay)
-            }
+            ReceiptReplayFactKey::PersistenceStalled(relay, kind) => self
+                .state
+                .persistence_stalled
+                .contains(&(relay.clone(), *kind)),
         }
     }
 
-    fn advance(&mut self, key: ReceiptReplayFactKey, status: WriteStatus) {
+    fn advance(&mut self, key: ReceiptReplayFactKey, status: WriteFact) {
         match key {
             ReceiptReplayFactKey::ReceiptStatus => self.state.receipt_status = Some(status),
             ReceiptReplayFactKey::AwaitingCapability => self.state.awaiting_capability = true,
-            ReceiptReplayFactKey::AwaitingRoute(detail) => {
-                self.state.awaiting_route = Some(detail);
-            }
+            ReceiptReplayFactKey::Destinations => self.state.destinations = true,
             ReceiptReplayFactKey::Attempt { relay, key } => {
                 self.state.attempts.insert(relay, key);
             }
             ReceiptReplayFactKey::Lane { relay, revision } => {
                 self.state.lane_revisions.insert(relay, revision);
             }
-            ReceiptReplayFactKey::PersistenceBlocked(relay) => {
-                self.state.persistence_blocked.insert(relay);
-            }
-            ReceiptReplayFactKey::RoutePersistenceBlocked(relay) => {
-                self.state.route_persistence_blocked.insert(relay);
+            ReceiptReplayFactKey::PersistenceStalled(relay, kind) => {
+                self.state.persistence_stalled.insert((relay, kind));
             }
         }
     }
@@ -207,8 +217,7 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
-    /// exhaustion -- same discipline as [`Self::alloc_receipt_id`]'s
-    /// `next_unaccepted_receipt` counter.
+    /// exhaustion: no id is reused or fabricated.
     pub(super) fn alloc_attempt_correlation(
         &mut self,
     ) -> Result<AttemptCorrelation, AttemptCorrelationExhausted> {
@@ -221,7 +230,7 @@ impl<S: EventStore> EngineCore<S> {
 
     /// O(1) via `intent_receipts` (epic #507 finding E5) -- this door used
     /// to be a full `self.pending` linear scan, run once per due deadline in
-    /// `consume_due_delivery_deadlines`.
+    /// `consume_due_publish_queue_deadlines`.
     pub(super) fn receipt_for_intent(&self, intent_id: IntentId) -> Option<ReceiptId> {
         self.intent_receipts.get(&intent_id).copied()
     }
@@ -233,9 +242,7 @@ impl<S: EventStore> EngineCore<S> {
     /// (`CompensateOutcome::NotFound`/`Err`), which must leave both indexes
     /// untouched because the obligation and its lanes are still live.
     pub(super) fn forget_pending_indexes(&mut self, id: ReceiptId, pending: &PendingWrite) {
-        if let Some(intent_id) = pending.intent_id {
-            self.intent_receipts.remove(&intent_id);
-        }
+        self.intent_receipts.remove(&pending.intent_id);
         // A removed write owns no projection to reconcile, so its bootstrap
         // gap is closed by the removal. Leaving the entry would keep
         // rearming a deadline for a receipt that can never bootstrap again
@@ -260,11 +267,6 @@ impl<S: EventStore> EngineCore<S> {
     /// signature has no route to be missing and a write with no route has no
     /// destination to be unreachable.
     fn stalled_write_stage(&self, pending: &PendingWrite) -> Option<(StalledWriteStage, String)> {
-        // Ephemeral owns no durable obligation: it is never retried, never
-        // recovered, and nothing about it outlives the process, so it cannot
-        // be quietly stuck for anyone to find later.
-        pending.intent_id?;
-
         if pending.event_id.is_none() && !pending.already_signed {
             // A signer request still outstanding is work in progress, not a
             // stall. Only the durable `AwaitingCapability` park -- request
@@ -283,13 +285,15 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         if pending.durable_routes.is_empty() && pending.route_blocked_relays.is_empty() {
-            // Parked with nothing resolved. `route_detail` is the exact
-            // reason the receipt was parked with; its absence means routing
-            // has not answered yet, which is not a stall.
-            return pending
-                .route_detail
-                .clone()
-                .map(|detail| (StalledWriteStage::Unroutable, detail));
+            // Parked with nothing resolved. This is the ONE stall that no
+            // clock may ever end (#1136): "we have not learned where this
+            // goes" is ignorance, and a deadline over ignorance is a verdict.
+            // It is reported so an operator can see it, never so anything
+            // can abandon it.
+            return Some((
+                StalledWriteStage::Unroutable,
+                "no destination has been resolved yet".to_string(),
+            ));
         }
 
         // Destinations exist. Stuck iff nothing is in flight and not one of
@@ -370,9 +374,7 @@ impl<S: EventStore> EngineCore<S> {
                 StalledWriteStage::Undeliverable => &mut totals.undeliverable,
             };
             *counter = counter.saturating_add(1);
-            let intent_id = pending
-                .intent_id
-                .expect("stalled_write_stage refuses an intent-less obligation");
+            let intent_id = pending.intent_id;
             rows.push(StalledWrite {
                 id: stalled_write_id(intent_id.0, &pending.frozen.id),
                 stage,
@@ -393,13 +395,121 @@ impl<S: EventStore> EngineCore<S> {
         (rows, totals)
     }
 
-    pub(super) fn emit_write_status(
+    /// Deliver one fact about a write.
+    ///
+    /// A persistence stall is LATCHED onto the pending write as well as
+    /// emitted. mosaico's `persistence_blockage_remains_visible_after_later_ack`
+    /// is the specification: it observes the fault in the stream and records
+    /// it in a different field from success, then asserts a later ack does
+    /// not erase it. A purely inspectable field would lose a blockage that
+    /// arose and resolved before the app looked, so the fault is BOTH — a
+    /// fact on the stream and a field on the queue entry that nothing later
+    /// clears. An operator must not lose the only signal that the local disk
+    /// is failing because a relay acked afterwards.
+    pub(super) fn emit_write_fact(
         &mut self,
         id: ReceiptId,
-        status: WriteStatus,
+        fact: WriteFact,
         effects: &mut Vec<Effect>,
     ) {
-        effects.push(Effect::EmitReceipt(id, status));
+        if let WriteFact::Relay {
+            state: RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }),
+            ..
+        } = &fact
+        {
+            if let Some(pending) = self.pending.get_mut(&id) {
+                if pending.persistence_fault.is_none() {
+                    pending.persistence_fault = Some(detail.clone());
+                }
+            }
+        }
+        effects.push(Effect::EmitReceipt(id, fact));
+    }
+
+    /// One lane attempt ended in a way that PERMITS another try; the ceiling
+    /// decides whether one happens (#1031).
+    ///
+    /// [`EngineConfig::max_publish_attempts`](crate::EngineConfig) counts
+    /// OBSERVATIONS, never wall-clock. Spending one takes a completed attempt
+    /// ordinal, so a lane that sat a week disconnected, or parked on AUTH,
+    /// consumed nothing and is never given up on for having waited — offline
+    /// time is not evidence. Once the destination IS known and this many
+    /// attempts have each come back failing, further attempts stop being
+    /// evidence-gathering and the lane terminalises at `GaveUp`. Per relay:
+    /// three relays published and one given up on is a success with a
+    /// footnote, not a failed write.
+    ///
+    /// Returns `false` when the durable fact could not be committed.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn retry_or_give_up(
+        &mut self,
+        id: Option<ReceiptId>,
+        key: &PublishQueueLaneKey,
+        revision: u64,
+        ordinal: u64,
+        now: Timestamp,
+        cause: PublishQueueTransientCause,
+        reason: String,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        if ordinal >= self.max_publish_attempts {
+            if self
+                .commit_lane_attempt_finish(
+                    key,
+                    revision,
+                    ordinal,
+                    PublishQueueAttemptOutcome::GaveUp,
+                    now,
+                )
+                .is_err()
+            {
+                return false;
+            }
+            if let Some(id) = id {
+                self.remove_active_lane(id, &key.relay);
+                self.emit_write_fact(
+                    id,
+                    WriteFact::Relay {
+                        relay: key.relay.clone(),
+                        state: RelayState::GaveUp,
+                    },
+                    effects,
+                );
+                self.close_if_all_lanes_terminal(id, effects);
+            }
+            return true;
+        }
+        let eligible_at = now + retry_delay_secs(key, ordinal);
+        if self
+            .commit_lane_transient(
+                key,
+                revision,
+                ordinal,
+                eligible_at,
+                cause,
+                Some(reason.clone()),
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(id) = id {
+            self.remove_active_lane(id, &key.relay);
+            self.emit_write_fact(
+                id,
+                WriteFact::Relay {
+                    relay: key.relay.clone(),
+                    state: RelayState::Waiting(RelayWaiting::BackingOff {
+                        attempt: ordinal,
+                        eligible_at,
+                        cause: public_retry_cause(cause).expect("AUTH-required has its own class"),
+                        detail: Some(reason),
+                    }),
+                },
+                effects,
+            );
+        }
+        true
     }
 
     pub(super) fn remove_active_lane(&mut self, id: ReceiptId, relay: &RelayUrl) {
@@ -409,7 +519,14 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    pub(super) fn close_if_all_lanes_terminal(&mut self, id: ReceiptId) {
+    /// Close a write whose destination set is closed and whose every lane is
+    /// terminal, and SAY SO.
+    ///
+    /// The settlement fact is the whole point: without it a receipt stream
+    /// simply stops, and an app cannot distinguish a finished write from a
+    /// dropped subscription. That silence is the original defect this
+    /// vocabulary exists to remove.
+    pub(super) fn close_if_all_lanes_terminal(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
         let Some((intent_id, event_id)) = self
             .pending
             .get(&id)
@@ -424,7 +541,7 @@ impl<S: EventStore> EngineCore<S> {
                     && pending.route_blocked_relays.is_empty()
                     && pending.lane_projection.can_close()
             })
-            .and_then(|pending| Some((pending.intent_id?, pending.event_id)))
+            .map(|pending| (pending.intent_id, pending.event_id))
         else {
             return;
         };
@@ -444,6 +561,10 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
         }
+        effects.push(Effect::EmitReceipt(
+            id,
+            WriteFact::Outcome(WriteOutcome::Settled),
+        ));
     }
 
     #[cfg(test)]
@@ -468,30 +589,29 @@ impl<S: EventStore> EngineCore<S> {
             return effects;
         };
 
-        let key = DeliveryLaneKey {
+        let key = PublishQueueLaneKey {
             intent_id,
             relay: target.session.relay.clone(),
         };
         let Ok(Some(lane)) = self
             .resolver
             .store()
-            .recover_delivery_lanes(intent_id)
+            .recover_publish_queue_lanes(intent_id)
             .map(|lanes| lanes.into_iter().find(|lane| lane.key == key))
         else {
             return effects;
         };
         if !matches!(
             lane.state,
-            DeliveryLaneState::InFlight {
+            PublishQueueLaneState::InFlight {
                 ordinal: current,
-                phase: DeliveryInFlightPhase::AwaitingHandoff,
+                phase: PublishQueueInFlightPhase::AwaitingHandoff,
             } if current == ordinal
         ) {
             return effects;
         }
 
-        let durability = self.pending.get(&target.receipt).map(|p| p.durability);
-        let detail = DeliveryAttemptHandoff {
+        let detail = PublishQueueAttemptHandoff {
             at: self.clock,
             result: match result {
                 HandoffResult::NotHandedOff => HandoffEvidence::NotHandedOff,
@@ -499,20 +619,17 @@ impl<S: EventStore> EngineCore<S> {
                 HandoffResult::Ambiguous => HandoffEvidence::Ambiguous,
             },
         };
-        let next = match (result, durability) {
-            (HandoffResult::NotHandedOff, _) => DeliveryPostHandoffState::WaitingConnection,
-            (HandoffResult::Written, _) | (HandoffResult::Ambiguous, Some(Durability::Durable)) => {
-                DeliveryPostHandoffState::AwaitingAck {
+        // An ambiguous handoff is not a fact about the write, so it produces
+        // none: the lane simply waits for ACK/timeout exactly as a proven
+        // write does. Retrying resends the IDENTICAL frozen event — same id,
+        // never re-signed — so a relay that did receive it dedupes.
+        let next = match result {
+            HandoffResult::NotHandedOff => PublishQueuePostHandoffState::WaitingConnection,
+            HandoffResult::Written | HandoffResult::Ambiguous => {
+                PublishQueuePostHandoffState::AwaitingAck {
                     deadline: self.clock + ACK_TIMEOUT_SECS,
                 }
             }
-            (HandoffResult::Ambiguous, Some(Durability::AtMostOnce)) => {
-                DeliveryPostHandoffState::Terminal {
-                    outcome: DeliveryAttemptOutcome::OutcomeUnknown,
-                    finished_at: self.clock,
-                }
-            }
-            (HandoffResult::Ambiguous, _) => return effects,
         };
         if self
             .commit_lane_handoff(&key, lane.revision, ordinal, detail, next)
@@ -521,60 +638,34 @@ impl<S: EventStore> EngineCore<S> {
             return effects;
         }
 
-        match (result, durability) {
-            (HandoffResult::Written, _) => {
-                self.emit_write_status(
+        match result {
+            HandoffResult::Written => {
+                self.emit_write_fact(
                     target.receipt,
-                    WriteStatus::Sent {
+                    WriteFact::Relay {
                         relay: target.session.relay,
-                        attempt: ordinal,
-                        written_at: self.clock,
+                        state: RelayState::Sent {
+                            attempt: ordinal,
+                            written_at: self.clock,
+                        },
                     },
                     &mut effects,
                 );
             }
-            (HandoffResult::Ambiguous, Some(Durability::AtMostOnce)) => {
-                self.emit_write_status(
-                    target.receipt,
-                    WriteStatus::HandoffAmbiguous {
-                        relay: target.session.relay.clone(),
-                        attempt: ordinal,
-                        observed_at: self.clock,
-                    },
-                    &mut effects,
-                );
-                self.remove_active_lane(target.receipt, &target.session.relay);
-                self.emit_write_status(
-                    target.receipt,
-                    WriteStatus::OutcomeUnknown(target.session.relay),
-                    &mut effects,
-                );
-                self.close_if_all_lanes_terminal(target.receipt);
-            }
-            (HandoffResult::NotHandedOff, _) => {
+            HandoffResult::NotHandedOff => {
                 self.remove_active_lane(target.receipt, &target.session.relay);
                 self.connected_relays.remove(&target.session);
-                self.emit_write_status(
+                self.emit_write_fact(
                     target.receipt,
-                    WriteStatus::AwaitingRelay {
+                    WriteFact::Relay {
                         relay: target.session.relay.clone(),
+                        state: RelayState::Waiting(RelayWaiting::NotConnected),
                     },
                     &mut effects,
                 );
                 effects.push(Effect::EnsureWriteRelay(target.session));
             }
-            (HandoffResult::Ambiguous, Some(Durability::Durable)) => {
-                self.emit_write_status(
-                    target.receipt,
-                    WriteStatus::HandoffAmbiguous {
-                        relay: target.session.relay,
-                        attempt: ordinal,
-                        observed_at: self.clock,
-                    },
-                    &mut effects,
-                );
-            }
-            (HandoffResult::Ambiguous, _) => {}
+            HandoffResult::Ambiguous => {}
         }
         effects.extend(self.schedule_ready(self.clock));
         effects
@@ -588,16 +679,14 @@ impl<S: EventStore> EngineCore<S> {
     /// `receipts_by_lane_relay`, except in its degraded fallback.
     pub(super) fn recover_all_lanes(
         &self,
-    ) -> Result<Vec<(ReceiptId, DeliveryLane)>, PersistenceError> {
+    ) -> Result<Vec<(ReceiptId, PublishQueueLane)>, PersistenceError> {
         let mut lanes = Vec::new();
         for (id, pending) in &self.pending {
-            let Some(intent_id) = pending.intent_id else {
-                continue;
-            };
+            let intent_id = pending.intent_id;
             lanes.extend(
                 self.resolver
                     .store()
-                    .recover_delivery_lanes(intent_id)?
+                    .recover_publish_queue_lanes(intent_id)?
                     .into_iter()
                     .map(|lane| (*id, lane)),
             );
@@ -621,11 +710,11 @@ impl<S: EventStore> EngineCore<S> {
         let mut eligible = Vec::new();
         for (id, lane) in lanes {
             match lane.state {
-                DeliveryLaneState::InFlight { .. } => {
+                PublishQueueLaneState::InFlight { .. } => {
                     in_flight = in_flight.saturating_add(1);
                     in_flight_relays.insert(lane.key.relay.clone());
                 }
-                DeliveryLaneState::Eligible { since } => eligible.push((since, id, lane)),
+                PublishQueueLaneState::Eligible { since } => eligible.push((since, id, lane)),
                 _ => {}
             }
         }
@@ -651,10 +740,11 @@ impl<S: EventStore> EngineCore<S> {
                     .commit_lane_waiting(&lane.key, lane.revision, false)
                     .is_ok()
                 {
-                    self.emit_write_status(
+                    self.emit_write_fact(
                         id,
-                        WriteStatus::AwaitingRelay {
+                        WriteFact::Relay {
                             relay: lane.key.relay.clone(),
+                            state: RelayState::Waiting(RelayWaiting::NotConnected),
                         },
                         &mut effects,
                     );
@@ -684,10 +774,11 @@ impl<S: EventStore> EngineCore<S> {
                     .commit_lane_waiting(&lane.key, lane.revision, true)
                     .is_ok()
                 {
-                    self.emit_write_status(
+                    self.emit_write_fact(
                         id,
-                        WriteStatus::AwaitingAuth {
+                        WriteFact::Relay {
                             relay: lane.key.relay.clone(),
+                            state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                         },
                         &mut effects,
                     );
@@ -716,9 +807,14 @@ impl<S: EventStore> EngineCore<S> {
                     if let Some(pending) = self.pending.get_mut(&id) {
                         pending.unstarted_relays.insert(lane.key.relay.clone());
                     }
-                    self.emit_write_status(
+                    self.emit_write_fact(
                         id,
-                        WriteStatus::PersistenceBlocked(lane.key.relay),
+                        WriteFact::Relay {
+                            relay: lane.key.relay,
+                            state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                                detail: ATTEMPT_STALL_DETAIL.to_string(),
+                            }),
+                        },
                         &mut effects,
                     );
                     continue;
@@ -726,9 +822,9 @@ impl<S: EventStore> EngineCore<S> {
             };
             debug_assert_eq!(
                 advanced.state,
-                DeliveryLaneState::InFlight {
+                PublishQueueLaneState::InFlight {
                     ordinal: attempt.ordinal,
-                    phase: DeliveryInFlightPhase::AwaitingHandoff,
+                    phase: PublishQueueInFlightPhase::AwaitingHandoff,
                 }
             );
             if let Some(pending) = self.pending.get_mut(&id) {
@@ -765,7 +861,7 @@ impl<S: EventStore> EngineCore<S> {
     /// `schedule_ready` at the end). The non-degraded path below instead
     /// narrows via `receipts_by_lane_relay` to exactly the receipts that
     /// actually own a lane on `session.relay`, re-reading only those
-    /// intents. (`receipts_by_lane_relay`/`DeliveryLaneKey` stay URL-keyed in the
+    /// intents. (`receipts_by_lane_relay`/`PublishQueueLaneKey` stay URL-keyed in the
     /// store — only the SESSION comparison below, derived per lane from its
     /// pending write's signing identity, decides whether a lane belongs to
     /// THIS session.)
@@ -806,13 +902,12 @@ impl<S: EventStore> EngineCore<S> {
             .into_iter()
             .collect();
 
-        let mut lanes: Vec<(ReceiptId, DeliveryLane)> = Vec::new();
+        let mut lanes: Vec<(ReceiptId, PublishQueueLane)> = Vec::new();
         for id in candidates {
-            let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id)
-            else {
+            let Some(intent_id) = self.pending.get(&id).map(|pending| pending.intent_id) else {
                 continue;
             };
-            match self.resolver.store().recover_delivery_lanes(intent_id) {
+            match self.resolver.store().recover_publish_queue_lanes(intent_id) {
                 Ok(recovered) => lanes.extend(
                     recovered
                         .into_iter()
@@ -857,7 +952,7 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         session: &RelaySessionKey,
         auth_only: bool,
-        lanes: Vec<(ReceiptId, DeliveryLane)>,
+        lanes: Vec<(ReceiptId, PublishQueueLane)>,
         effects: &mut Vec<Effect>,
     ) {
         for (id, lane) in lanes {
@@ -871,9 +966,9 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             let should_wake = if auth_only {
-                matches!(lane.state, DeliveryLaneState::WaitingAuth)
+                matches!(lane.state, PublishQueueLaneState::WaitingAuth)
             } else {
-                matches!(lane.state, DeliveryLaneState::WaitingConnection)
+                matches!(lane.state, PublishQueueLaneState::WaitingConnection)
             };
             if !should_wake {
                 continue;
@@ -900,14 +995,16 @@ impl<S: EventStore> EngineCore<S> {
             {
                 self.retry_scheduler_blocked = true;
             } else if let Some((cause, detail)) = retry_detail {
-                self.emit_write_status(
+                self.emit_write_fact(
                     id,
-                    WriteStatus::RetryEligible {
+                    WriteFact::Relay {
                         relay: lane.key.relay,
-                        attempt: lane.last_ordinal,
-                        eligible_at: self.clock,
-                        cause,
-                        detail,
+                        state: RelayState::Waiting(RelayWaiting::BackingOff {
+                            attempt: lane.last_ordinal,
+                            eligible_at: self.clock,
+                            cause,
+                            detail,
+                        }),
                     },
                     effects,
                 );
@@ -915,13 +1012,13 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    pub(super) fn consume_due_delivery_deadlines(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(super) fn consume_due_publish_queue_deadlines(&mut self, now: Timestamp) -> Vec<Effect> {
         let mut effects = Vec::new();
         loop {
             let due = match self
                 .resolver
                 .store()
-                .due_delivery_deadlines(now, DEADLINE_READ_BATCH)
+                .due_publish_queue_deadlines(now, DEADLINE_READ_BATCH)
             {
                 Ok(due) => due,
                 Err(_) => {
@@ -937,7 +1034,7 @@ impl<S: EventStore> EngineCore<S> {
                 let lane = self
                     .resolver
                     .store()
-                    .recover_delivery_lanes(deadline.key.intent_id)
+                    .recover_publish_queue_lanes(deadline.key.intent_id)
                     .ok()
                     .and_then(|lanes| {
                         lanes.into_iter().find(|lane| {
@@ -949,7 +1046,10 @@ impl<S: EventStore> EngineCore<S> {
                     continue;
                 };
                 match (deadline.kind, lane.state.clone()) {
-                    (DeliveryDeadlineKind::RetryEligible, DeliveryLaneState::Transient { .. }) => {
+                    (
+                        PublishQueueDeadlineKind::RetryEligible,
+                        PublishQueueLaneState::Transient { .. },
+                    ) => {
                         if self
                             .commit_lane_eligible(&lane.key, lane.revision, deadline.at)
                             .is_err()
@@ -958,67 +1058,23 @@ impl<S: EventStore> EngineCore<S> {
                         }
                     }
                     (
-                        DeliveryDeadlineKind::AckTimeout,
-                        DeliveryLaneState::InFlight {
+                        PublishQueueDeadlineKind::AckTimeout,
+                        PublishQueueLaneState::InFlight {
                             ordinal,
-                            phase: DeliveryInFlightPhase::AwaitingAck { .. },
+                            phase: PublishQueueInFlightPhase::AwaitingAck { .. },
                         },
                     ) => {
-                        let durability =
-                            id.and_then(|id| self.pending.get(&id).map(|p| p.durability));
-                        if durability == Some(Durability::AtMostOnce) {
-                            if self
-                                .commit_lane_attempt_finish(
-                                    &lane.key,
-                                    lane.revision,
-                                    ordinal,
-                                    DeliveryAttemptOutcome::OutcomeUnknown,
-                                    now,
-                                )
-                                .is_ok()
-                            {
-                                if let Some(id) = id {
-                                    self.remove_active_lane(id, &lane.key.relay);
-                                    self.emit_write_status(
-                                        id,
-                                        WriteStatus::OutcomeUnknown(lane.key.relay.clone()),
-                                        &mut effects,
-                                    );
-                                    self.close_if_all_lanes_terminal(id);
-                                }
-                            } else {
-                                self.retry_scheduler_blocked = true;
-                            }
-                        } else {
-                            let eligible_at = now + retry_delay_secs(&lane.key, ordinal);
-                            if self
-                                .commit_lane_transient(
-                                    &lane.key,
-                                    lane.revision,
-                                    ordinal,
-                                    eligible_at,
-                                    DeliveryTransientCause::AckTimeout,
-                                    Some("ack timeout".to_string()),
-                                )
-                                .is_ok()
-                            {
-                                if let Some(id) = id {
-                                    self.remove_active_lane(id, &lane.key.relay);
-                                    self.emit_write_status(
-                                        id,
-                                        WriteStatus::RetryEligible {
-                                            relay: lane.key.relay.clone(),
-                                            attempt: ordinal,
-                                            eligible_at,
-                                            cause: RetryCause::AckTimeout,
-                                            detail: Some("ack timeout".to_string()),
-                                        },
-                                        &mut effects,
-                                    );
-                                }
-                            } else {
-                                self.retry_scheduler_blocked = true;
-                            }
+                        if !self.retry_or_give_up(
+                            id,
+                            &lane.key.clone(),
+                            lane.revision,
+                            ordinal,
+                            now,
+                            PublishQueueTransientCause::AckTimeout,
+                            "ack timeout".to_string(),
+                            &mut effects,
+                        ) {
+                            self.retry_scheduler_blocked = true;
                         }
                     }
                     _ => self.retry_scheduler_blocked = true,
@@ -1045,7 +1101,7 @@ impl<S: EventStore> EngineCore<S> {
         // `pending`/`lane_relay_index_degraded` in the untrustworthy state
         // they must be in for a set that was never rebuilt. The one-shot
         // #122 degradation is the whole visible outcome.
-        let recovered = match self.resolver.store().recover_delivery() {
+        let recovered = match self.resolver.store().recover_publish_queue() {
             Ok(recovered) => recovered,
             Err(error) => {
                 self.lane_relay_index_degraded = true;
@@ -1081,7 +1137,10 @@ impl<S: EventStore> EngineCore<S> {
                         frozen: intent.frozen.clone(),
                     },
                 );
-                effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
+                effects.push(Effect::EmitReceipt(
+                    id,
+                    WriteFact::Signing(SigningState::Refused { reason }),
+                ));
                 continue;
             }
             let parsed_routing = Self::parse_routing_snapshot(&intent.routing);
@@ -1094,22 +1153,19 @@ impl<S: EventStore> EngineCore<S> {
             // for it.
             let routing = parsed_routing.unwrap_or(WriteRouting::Explicit(Vec::new()));
             let id = ReceiptId(intent.receipt_id);
-            let durability = match intent.durability {
-                WriteDurability::Durable => Durability::Durable,
-                WriteDurability::AtMostOnce => Durability::AtMostOnce,
-            };
             let already_signed = intent.sig_state == IntentSigState::Signed;
             self.pending.insert(
                 id,
                 PendingWrite {
-                    durability,
                     routing,
                     routing_valid,
-                    intent_id: Some(intent.intent_id),
+                    intent_id: intent.intent_id,
                     // The DURABLE acceptance instant, replayed verbatim. It is
                     // what makes a stalled-write projection identical either
                     // side of a restart: nothing here is a process-local
                     // stopwatch that a reopen would reset to zero.
+                    destinations_reported: false,
+                    persistence_fault: None,
                     accepted_at: intent.accepted_at,
                     signing_pubkey: intent.expected_pubkey,
                     frozen: intent.frozen.clone(),
@@ -1124,7 +1180,6 @@ impl<S: EventStore> EngineCore<S> {
                     lane_projection: LaneWorkerProjection::default(),
                     durable_routes: BTreeSet::new(),
                     route_complete: false,
-                    route_detail: None,
                     route_needs: BTreeSet::new(),
                 },
             );
@@ -1148,7 +1203,7 @@ impl<S: EventStore> EngineCore<S> {
                 Err(_) => {
                     // This intent may already own real persisted lanes from
                     // before this boot; skipping straight to the next intent
-                    // (as below) means `bootstrap_delivery_lanes` never runs
+                    // (as below) means `bootstrap_publish_queue_lanes` never runs
                     // for it this boot, so the reverse index can never learn
                     // those lanes -- an unprovable gap, so degrade rather
                     // than silently under-index (epic #507 finding E5).
@@ -1201,7 +1256,6 @@ impl<S: EventStore> EngineCore<S> {
                     // resolution above. That is what makes a crash cost a
                     // declared need nothing.
                     pending.route_needs = answer.author_route_needs;
-                    pending.route_detail = answer.detail;
                 }
             }
 
@@ -1221,19 +1275,14 @@ impl<S: EventStore> EngineCore<S> {
                         continue;
                     }
                 };
-            self.open_bootstrapped_lanes(
-                id,
-                durability,
-                intent.expected_pubkey,
-                lanes,
-                &mut effects,
-            );
+            self.open_bootstrapped_lanes(id, intent.expected_pubkey, lanes, &mut effects);
         }
 
         self.retry_scheduler_blocked = false;
-        effects.extend(self.consume_due_delivery_deadlines(self.clock));
+        let due = self.consume_due_publish_queue_deadlines(self.clock);
+        effects.extend(due);
         for id in recovered_ids {
-            self.close_if_all_lanes_terminal(id);
+            self.close_if_all_lanes_terminal(id, &mut effects);
         }
         // `pending` started empty in this process, so every need rebuilt
         // above is new to the protocol assembly even if the prior process
@@ -1259,10 +1308,9 @@ impl<S: EventStore> EngineCore<S> {
     /// from there.
     fn open_bootstrapped_lanes(
         &mut self,
-        id: ReceiptId,
-        durability: Durability,
+        _id: ReceiptId,
         signing_pubkey: PublicKey,
-        lanes: Vec<DeliveryLane>,
+        lanes: Vec<PublishQueueLane>,
         effects: &mut Vec<Effect>,
     ) {
         for lane in lanes {
@@ -1274,52 +1322,35 @@ impl<S: EventStore> EngineCore<S> {
             let session =
                 RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey));
             match lane.state {
-                DeliveryLaneState::InFlight {
+                PublishQueueLaneState::InFlight {
                     ordinal,
-                    phase: DeliveryInFlightPhase::AwaitingHandoff,
-                } => match durability {
-                    Durability::Durable => {
-                        let eligible_at = self.clock;
-                        let _ = self.commit_lane_transient(
-                            &lane.key,
-                            lane.revision,
-                            ordinal,
-                            eligible_at,
-                            DeliveryTransientCause::Interrupted,
-                            Some("process restarted before handoff resolved".to_string()),
-                        );
-                    }
-                    Durability::AtMostOnce => {
-                        if self
-                            .commit_lane_attempt_finish(
-                                &lane.key,
-                                lane.revision,
-                                ordinal,
-                                DeliveryAttemptOutcome::OutcomeUnknown,
-                                self.clock,
-                            )
-                            .is_ok()
-                        {
-                            effects.push(Effect::EmitReceipt(
-                                id,
-                                WriteStatus::OutcomeUnknown(lane.key.relay),
-                            ));
-                        }
-                    }
-                    Durability::Ephemeral => unreachable!(),
-                },
-                DeliveryLaneState::WaitingConnection
-                | DeliveryLaneState::Eligible { .. }
-                | DeliveryLaneState::Transient { .. } => {
+                    phase: PublishQueueInFlightPhase::AwaitingHandoff,
+                } => {
+                    // An attempt in flight across a process loss is simply
+                    // retried: the resend is the IDENTICAL frozen event, so a
+                    // relay that already took it dedupes on id.
+                    let eligible_at = self.clock;
+                    let _ = self.commit_lane_transient(
+                        &lane.key,
+                        lane.revision,
+                        ordinal,
+                        eligible_at,
+                        PublishQueueTransientCause::Interrupted,
+                        Some("process restarted before handoff resolved".to_string()),
+                    );
+                }
+                PublishQueueLaneState::WaitingConnection
+                | PublishQueueLaneState::Eligible { .. }
+                | PublishQueueLaneState::Transient { .. } => {
                     effects.push(Effect::EnsureWriteRelay(session));
                 }
-                DeliveryLaneState::InFlight {
-                    phase: DeliveryInFlightPhase::AwaitingAck { .. },
+                PublishQueueLaneState::InFlight {
+                    phase: PublishQueueInFlightPhase::AwaitingAck { .. },
                     ..
                 } => {
                     effects.push(Effect::EnsureWriteRelay(session));
                 }
-                DeliveryLaneState::WaitingAuth => {
+                PublishQueueLaneState::WaitingAuth => {
                     // A `WaitingAuth` park never survives a restart: its
                     // authenticated grant was generation-scoped to a socket
                     // this process no longer holds. Recover it as
@@ -1343,7 +1374,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.lane_relay_index_degraded = true;
                     }
                 }
-                DeliveryLaneState::Terminal { .. } => {}
+                PublishQueueLaneState::Terminal { .. } => {}
             }
         }
     }
@@ -1352,7 +1383,7 @@ impl<S: EventStore> EngineCore<S> {
     ///
     /// This is the whole way OUT of the conservative retention a failed
     /// bootstrap takes (#1000). `uncertain` is cleared only by a committed
-    /// `DeliveryLane` for that exact relay, and an intent whose bootstrap
+    /// `PublishQueueLane` for that exact relay, and an intent whose bootstrap
     /// failed owns NO lane rows — so `schedule_ready`, the deadline sweep and
     /// the wake index all find nothing for it and no committed lane fact can
     /// ever arrive on its own. Without this door a single transient store
@@ -1377,10 +1408,11 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     fn retry_lane_bootstrap(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
-        let Some((intent_id, signing_pubkey, durability)) = self.pending.get(&id).and_then(|p| {
-            p.intent_id
-                .map(|intent_id| (intent_id, p.signing_pubkey, p.durability))
-        }) else {
+        let Some((intent_id, signing_pubkey)) = self
+            .pending
+            .get(&id)
+            .map(|p| (p.intent_id, p.signing_pubkey))
+        else {
             // The write left `pending` (closed, cancelled or compensated)
             // while its gap was outstanding, so there is no projection left
             // to reconcile and nothing retains a worker on its behalf.
@@ -1405,7 +1437,7 @@ impl<S: EventStore> EngineCore<S> {
             })
             .filter(|session| self.connected_relays.contains(session))
             .collect();
-        self.open_bootstrapped_lanes(id, durability, signing_pubkey, lanes, effects);
+        self.open_bootstrapped_lanes(id, signing_pubkey, lanes, effects);
         // Boot can assume nothing is connected yet, but a retry runs
         // mid-process: a lane whose session is ALREADY live would sit in
         // `WaitingConnection` forever waiting for a `RelayConnected` that
@@ -1418,16 +1450,32 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// its retained facts. Unknown ids do not create state.
-    pub(super) fn retained_receipt_status(receipt: &nmp_store::DeliveryReceipt) -> WriteStatus {
+    pub(super) fn retained_receipt_fact(
+        receipt: &nmp_store::PublishQueueReceipt,
+    ) -> Option<WriteFact> {
         match receipt.state {
-            ReceiptState::Accepted => WriteStatus::Accepted,
-            ReceiptState::Signed => WriteStatus::Signed(receipt.frozen_id),
-            ReceiptState::Compensated => WriteStatus::Failed("write compensated".to_string()),
-            ReceiptState::Cancelled => WriteStatus::Cancelled,
-            ReceiptState::Superseded => WriteStatus::Superseded,
-            ReceiptState::Abandoned => {
-                WriteStatus::Failed("ephemeral write abandoned after restart".to_string())
+            // Acceptance is not a fact — it is what `publish()` returning
+            // `Ok` already said. A receipt that has only been accepted has
+            // nothing yet to replay.
+            ReceiptState::Accepted => None,
+            ReceiptState::Signed => Some(WriteFact::Signing(SigningState::Signed {
+                event_id: receipt.frozen_id,
+            })),
+            // Compensation is the store half of a whole-write failure; the
+            // caller-visible reason rode the signing refusal that caused it.
+            ReceiptState::Compensated => Some(WriteFact::Signing(SigningState::Refused {
+                reason: "write compensated".to_string(),
+            })),
+            ReceiptState::Cancelled => Some(WriteFact::Outcome(WriteOutcome::NotSent(
+                NotSentReason::Cancelled,
+            ))),
+            ReceiptState::Superseded => Some(WriteFact::Outcome(WriteOutcome::NotSent(
+                NotSentReason::Superseded,
+            ))),
+            ReceiptState::Refused(reason) => {
+                Some(WriteFact::Outcome(WriteOutcome::Refused(reason)))
             }
+            ReceiptState::NoDestination => Some(WriteFact::Outcome(WriteOutcome::NoDestination)),
         }
     }
 
@@ -1495,7 +1543,7 @@ impl<S: EventStore> EngineCore<S> {
                         )
                     }
                 };
-                let lanes = match self.resolver.store().recover_delivery_lanes(intent_id) {
+                let lanes = match self.resolver.store().recover_publish_queue_lanes(intent_id) {
                     Ok(lanes) => lanes,
                     Err(_) => {
                         return ReceiptReplayPage::unavailable(
@@ -1515,8 +1563,10 @@ impl<S: EventStore> EngineCore<S> {
             }
             None => (Vec::new(), Vec::new(), Vec::new()),
         };
-        let status = Self::retained_receipt_status(&receipt);
-        let mut replay = vec![(ReceiptReplayFactKey::ReceiptStatus, status)];
+        let mut replay = Vec::new();
+        if let Some(status) = Self::retained_receipt_fact(&receipt) {
+            replay.push((ReceiptReplayFactKey::ReceiptStatus, status));
+        }
         if receipt.state == ReceiptState::Accepted
             && self
                 .pending
@@ -1525,30 +1575,26 @@ impl<S: EventStore> EngineCore<S> {
         {
             replay.push((
                 ReceiptReplayFactKey::AwaitingCapability,
-                WriteStatus::AwaitingCapability {
+                WriteFact::Signing(SigningState::AwaitingSigner {
                     pubkey: receipt.expected_pubkey,
-                },
+                }),
             ));
         }
         // The routing park is retained and replayed the same way the signer
         // park is. An app that restarts, reattaches to an id it persisted,
         // and is told nothing has learned nothing -- a park nobody can see
-        // again is indistinguishable from data loss, so the reason travels
-        // with the receipt for as long as the park lasts.
-        //
-        // Boot recovery re-resolved this intent against the directory THIS
-        // process holds, so `route_detail` is the reason as it stands now,
-        // not a string carried over from a session whose knowledge has
-        // moved on.
-        if let Some(detail) = self
+        // again is indistinguishable from data loss.
+        if self
             .pending
             .get(&id)
-            .filter(|pending| pending.durable_routes.is_empty() && !pending.route_complete)
-            .and_then(|pending| pending.route_detail.clone())
+            .is_some_and(|pending| pending.durable_routes.is_empty() && !pending.route_complete)
         {
             replay.push((
-                ReceiptReplayFactKey::AwaitingRoute(detail.clone()),
-                WriteStatus::AwaitingRoute { detail },
+                ReceiptReplayFactKey::Destinations,
+                WriteFact::Destinations {
+                    relays: BTreeSet::new(),
+                    complete: false,
+                },
             ));
         }
         if receipt.intent_id.is_some() {
@@ -1578,38 +1624,37 @@ impl<S: EventStore> EngineCore<S> {
                                 awaiting_relay.insert((attempt.relay.clone(), attempt.ordinal));
                                 replay.push((
                                     replay_key(ReceiptAttemptReplayPhase::Handoff),
-                                    WriteStatus::AwaitingRelay {
+                                    WriteFact::Relay {
                                         relay: attempt.relay.clone(),
+                                        state: RelayState::Waiting(RelayWaiting::NotConnected),
                                     },
                                 ));
                             }
                             HandoffEvidence::Written => replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Handoff),
-                                WriteStatus::Sent {
+                                WriteFact::Relay {
                                     relay: attempt.relay.clone(),
-                                    attempt: attempt.ordinal,
-                                    written_at: handoff.at,
+                                    state: RelayState::Sent {
+                                        attempt: attempt.ordinal,
+                                        written_at: handoff.at,
+                                    },
                                 },
                             )),
-                            HandoffEvidence::Ambiguous => {
-                                replay.push((
-                                    replay_key(ReceiptAttemptReplayPhase::Handoff),
-                                    WriteStatus::HandoffAmbiguous {
-                                        relay: attempt.relay.clone(),
-                                        attempt: attempt.ordinal,
-                                        observed_at: handoff.at,
-                                    },
-                                ));
-                            }
+                            // An ambiguous handoff is not a fact about the
+                            // write: the lane waited for ACK/timeout exactly
+                            // as a proven write does, so there is nothing to
+                            // replay.
+                            HandoffEvidence::Ambiguous => {}
                         }
                     }
                     if let Some(transient) = detail.transient {
-                        if transient.cause == DeliveryTransientCause::AuthRequired {
+                        if transient.cause == PublishQueueTransientCause::AuthRequired {
                             awaiting_auth.insert((attempt.relay.clone(), attempt.ordinal));
                             replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Transient),
-                                WriteStatus::AwaitingAuth {
+                                WriteFact::Relay {
                                     relay: attempt.relay.clone(),
+                                    state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                                 },
                             ));
                         } else {
@@ -1620,13 +1665,15 @@ impl<S: EventStore> EngineCore<S> {
                             ));
                             replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Transient),
-                                WriteStatus::RetryEligible {
+                                WriteFact::Relay {
                                     relay: attempt.relay.clone(),
-                                    attempt: attempt.ordinal,
-                                    eligible_at: transient.eligible_at,
-                                    cause: public_retry_cause(transient.cause)
-                                        .expect("AuthRequired handled above"),
-                                    detail: transient.raw_reason,
+                                    state: RelayState::Waiting(RelayWaiting::BackingOff {
+                                        attempt: attempt.ordinal,
+                                        eligible_at: transient.eligible_at,
+                                        cause: public_retry_cause(transient.cause)
+                                            .expect("AuthRequired handled above"),
+                                        detail: transient.raw_reason,
+                                    }),
                                 },
                             ));
                         }
@@ -1637,15 +1684,19 @@ impl<S: EventStore> EngineCore<S> {
                     // deliberately moved Sent to the later transport
                     // Written result, so replaying Started as Sent would
                     // recreate the exact false claim this seam removes.
-                    DeliveryAttemptOutcome::Started => continue,
-                    DeliveryAttemptOutcome::Acked => WriteStatus::Acked(attempt.relay),
-                    DeliveryAttemptOutcome::Rejected(reason) => {
-                        WriteStatus::Rejected(attempt.relay, reason)
-                    }
-                    DeliveryAttemptOutcome::GaveUp => WriteStatus::GaveUp(attempt.relay),
-                    DeliveryAttemptOutcome::OutcomeUnknown => {
-                        WriteStatus::OutcomeUnknown(attempt.relay)
-                    }
+                    PublishQueueAttemptOutcome::Started => continue,
+                    PublishQueueAttemptOutcome::Acked => WriteFact::Relay {
+                        relay: attempt.relay,
+                        state: RelayState::Published,
+                    },
+                    PublishQueueAttemptOutcome::Rejected(reason) => WriteFact::Relay {
+                        relay: attempt.relay,
+                        state: RelayState::Rejected { reason },
+                    },
+                    PublishQueueAttemptOutcome::GaveUp => WriteFact::Relay {
+                        relay: attempt.relay,
+                        state: RelayState::GaveUp,
+                    },
                 };
                 replay.push((replay_key(ReceiptAttemptReplayPhase::Outcome), status));
             }
@@ -1658,48 +1709,52 @@ impl<S: EventStore> EngineCore<S> {
                     revision: lane.revision,
                 };
                 match lane.state {
-                    DeliveryLaneState::WaitingConnection
+                    PublishQueueLaneState::WaitingConnection
                         if !awaiting_relay
                             .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
                     {
                         replay.push((
                             replay_key,
-                            WriteStatus::AwaitingRelay {
+                            WriteFact::Relay {
                                 relay: lane.key.relay,
+                                state: RelayState::Waiting(RelayWaiting::NotConnected),
                             },
                         ));
                     }
-                    DeliveryLaneState::WaitingAuth
+                    PublishQueueLaneState::WaitingAuth
                         if !awaiting_auth
                             .contains(&(lane.key.relay.clone(), lane.last_ordinal)) =>
                     {
                         replay.push((
                             replay_key,
-                            WriteStatus::AwaitingAuth {
+                            WriteFact::Relay {
                                 relay: lane.key.relay,
+                                state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                             },
                         ));
                     }
-                    DeliveryLaneState::Terminal {
-                        outcome: DeliveryTerminalOutcome::AuthDenied(denial),
+                    PublishQueueLaneState::Terminal {
+                        outcome: PublishQueueTerminalOutcome::AuthDenied(denial),
                         ..
                     } => {
                         replay.push((
                             replay_key,
-                            WriteStatus::AuthDenied {
+                            WriteFact::Relay {
                                 relay: lane.key.relay,
-                                pubkey: receipt.expected_pubkey,
-                                source: public_auth_denial_source(denial.source),
-                                reason: denial.reason,
+                                state: RelayState::AuthFailed {
+                                    pubkey: receipt.expected_pubkey,
+                                    source: public_auth_denial_source(denial.source),
+                                    reason: denial.reason,
+                                },
                             },
                         ));
                     }
-                    DeliveryLaneState::Transient {
+                    PublishQueueLaneState::Transient {
                         ordinal,
                         eligible_at,
                         cause,
                         raw_reason,
-                    } if cause != DeliveryTransientCause::AuthRequired
+                    } if cause != PublishQueueTransientCause::AuthRequired
                         && !retry_eligible.contains(&(
                             lane.key.relay.clone(),
                             ordinal,
@@ -1708,13 +1763,15 @@ impl<S: EventStore> EngineCore<S> {
                     {
                         replay.push((
                             replay_key,
-                            WriteStatus::RetryEligible {
+                            WriteFact::Relay {
                                 relay: lane.key.relay,
-                                attempt: ordinal,
-                                eligible_at,
-                                cause: public_retry_cause(cause)
-                                    .expect("AuthRequired excluded by guard"),
-                                detail: raw_reason,
+                                state: RelayState::Waiting(RelayWaiting::BackingOff {
+                                    attempt: ordinal,
+                                    eligible_at,
+                                    cause: public_retry_cause(cause)
+                                        .expect("AuthRequired excluded by guard"),
+                                    detail: raw_reason,
+                                }),
                             },
                         ));
                     }
@@ -1725,14 +1782,30 @@ impl<S: EventStore> EngineCore<S> {
         if let Some(pending) = self.pending.get(&id) {
             for relay in &pending.unstarted_relays {
                 replay.push((
-                    ReceiptReplayFactKey::PersistenceBlocked(relay.clone()),
-                    WriteStatus::PersistenceBlocked(relay.clone()),
+                    ReceiptReplayFactKey::PersistenceStalled(
+                        relay.clone(),
+                        PersistenceStallKind::Attempt,
+                    ),
+                    WriteFact::Relay {
+                        relay: relay.clone(),
+                        state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                            detail: ATTEMPT_STALL_DETAIL.to_string(),
+                        }),
+                    },
                 ));
             }
             for relay in &pending.route_blocked_relays {
                 replay.push((
-                    ReceiptReplayFactKey::RoutePersistenceBlocked(relay.clone()),
-                    WriteStatus::RoutePersistenceBlocked(relay.clone()),
+                    ReceiptReplayFactKey::PersistenceStalled(
+                        relay.clone(),
+                        PersistenceStallKind::Route,
+                    ),
+                    WriteFact::Relay {
+                        relay: relay.clone(),
+                        state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                            detail: ROUTE_STALL_DETAIL.to_string(),
+                        }),
+                    },
                 ));
             }
         }
@@ -1780,7 +1853,7 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         id: ReceiptId,
         cursor: &ReceiptReplayCursor,
-        status: &WriteStatus,
+        status: &WriteFact,
     ) -> Option<ReceiptReplayCursor> {
         let page = self.reattach_receipt_page(id, Some(cursor.clone()), usize::MAX);
         if page.outcome != ReattachOutcome::Attached {
@@ -1835,7 +1908,7 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    // ---- durable delivery (D: intent -> signed -> routed -> sent -> acked) --
+    // ---- publish queue (D: intent -> signed -> routed -> sent -> acked) --
 
     /// `Publish` (issues #2/#3 U3): enter durable/at-most-once writes through
     /// `resolver.accept_local` exactly once. The store allocates both ids
@@ -1845,13 +1918,13 @@ impl<S: EventStore> EngineCore<S> {
     /// reattachable receipt as required by the promoted VISION.
     ///
     /// A `Signed` payload is verified here, at the acceptance boundary,
-    /// BEFORE `WriteStatus::Accepted` is ever emitted (#52 Q2). This is the
+    /// BEFORE `WriteFact::Accepted` is ever emitted (#52 Q2). This is the
     /// only publish path in the crate — `Handle::publish` is the sole entry
     /// point regardless of caller (FFI, direct-Rust, `nmp-bdd`'s
     /// `EngineThread`) — so verifying here, rather than at each caller,
     /// makes "a forged `Signed` event can never be published" true
     /// unconditionally instead of entry-point-dependent. A failed verify is
-    /// a whole-intent terminal (`WriteStatus::Failed`): no `Accepted`, no
+    /// a whole-intent terminal (`WriteFact::Failed`): no `Accepted`, no
     /// pending write recorded, no `Effect::PublishEvent`.
     ///
     /// Identity resolution (#47): a builder payload carries no author, so
@@ -1875,7 +1948,6 @@ impl<S: EventStore> EngineCore<S> {
     pub(super) fn on_publish(&mut self, intent: WriteIntent) -> Vec<Effect> {
         let WriteIntent {
             payload,
-            durability,
             routing,
             identity,
             correlation,
@@ -1888,7 +1960,7 @@ impl<S: EventStore> EngineCore<S> {
         // because sending a write to relays the caller did not choose is the
         // failure this refusal exists to prevent.
         if matches!(&routing, WriteRouting::Explicit(relays) if relays.is_empty()) {
-            return self.fail_unaccepted(EMPTY_EXPLICIT_ROUTE.to_string());
+            return self.refuse_publish(PublishError::EmptyExplicitRoute);
         }
 
         // An exact route the app named for this write is the app describing
@@ -1897,25 +1969,6 @@ impl<S: EventStore> EngineCore<S> {
         // is told the write was routed and then cannot reach it.
         if let WriteRouting::Explicit(relays) = &routing {
             self.heed_relays(relays.iter().cloned());
-        }
-
-        // #591 review (PR #604 finding 2): `Durability::Ephemeral` has no
-        // delivery row for a correlation token to name -- `accept_ephemeral`
-        // below never receives `correlation`, so a token on an ephemeral
-        // write would otherwise be silently dropped (never journaled, no
-        // later `reattach_by_correlation` could ever find it) WHILE the
-        // pre-lookup just below still ran unconditionally, so an ephemeral
-        // publish reusing a token that earlier named a DURABLE receipt
-        // would silently reattach that unrelated durable obligation instead
-        // of ever creating the ephemeral write the caller asked for. Refuse
-        // closed instead of accepting either silent behavior.
-        if durability == Durability::Ephemeral && correlation.is_some() {
-            return self.fail_unaccepted(
-                "ephemeral writes cannot carry a correlation token: there is no durable delivery \
-                 row for the token to name, and reusing an earlier durable token here would \
-                 silently reattach that unrelated obligation instead of accepting this write"
-                    .to_string(),
-            );
         }
 
         // #591: a token that already resolves to a previously-accepted
@@ -1931,7 +1984,7 @@ impl<S: EventStore> EngineCore<S> {
             match self.resolver.store().lookup_correlation(token.as_ref()) {
                 Ok(Some(existing_receipt_id)) => {
                     let receipt_id = ReceiptId(existing_receipt_id);
-                    let mut page = self.reattach_receipt(receipt_id);
+                    let page = self.reattach_receipt(receipt_id);
                     // A repeated durable correlation is a finite replay of
                     // the existing obligation, not a second write. Keep that
                     // replay distinct from a new live fact so runtime can
@@ -1945,21 +1998,26 @@ impl<S: EventStore> EngineCore<S> {
                     // retained identity behind fabricated acceptance.
                     let status = match page.outcome {
                         ReattachOutcome::Attached => unreachable!("handled above"),
-                        ReattachOutcome::NotFound => WriteStatus::Failed(
-                            "correlation token resolved to a receipt id the store can no longer find"
+                        ReattachOutcome::NotFound => PublishError::PersistenceFailed {
+                            reason:
+                                "correlation token resolved to a receipt id the store can no longer find"
+                                    .to_string(),
+                        },
+                        ReattachOutcome::RetainedButUnreadable => PublishError::PersistenceFailed {
+                            reason: "correlation token resolved to a retained but unreadable receipt"
                                 .to_string(),
-                        ),
-                        ReattachOutcome::RetainedButUnreadable => WriteStatus::Failed(
-                            "correlation token resolved to a retained but unreadable receipt"
-                                .to_string(),
-                        ),
+                        },
                     };
                     debug_assert!(page.facts.is_empty());
-                    page.facts.push(status);
-                    return vec![Effect::ReplayReceipt(receipt_id, page)];
+                    let _ = page;
+                    return self.refuse_publish(status);
                 }
                 Ok(None) => {}
-                Err(err) => return self.fail_unaccepted(err.to_string()),
+                Err(err) => {
+                    return self.refuse_publish(PublishError::PersistenceFailed {
+                        reason: err.to_string(),
+                    })
+                }
             }
         }
 
@@ -1985,15 +2043,9 @@ impl<S: EventStore> EngineCore<S> {
             WritePayload::Signed(event) => event.kind,
         };
         if payload_kind == nostr::Kind::Authentication {
-            return self.fail_unaccepted(
-                "kind:22242 is reserved for reducer-owned relay authentication".to_string(),
-            );
-        }
-
-        if replaceable_base.is_some() && durability == Durability::Ephemeral {
-            return self.fail_unaccepted(
-                "replaceable edits require durable or at-most-once acceptance".to_string(),
-            );
+            return self.refuse_publish(PublishError::ReservedKind {
+                kind: payload_kind.as_u16(),
+            });
         }
 
         let signing_pubkey = match &payload {
@@ -2011,12 +2063,7 @@ impl<S: EventStore> EngineCore<S> {
                 // is pinned, so nothing may park.
                 Identity::Active => match self.active_pubkey {
                     Some(active) => active,
-                    None => {
-                        return self.fail_unaccepted(
-                            "publishing as the active account requires an active account"
-                                .to_string(),
-                        );
-                    }
+                    None => return self.refuse_publish(PublishError::NoActiveAccount),
                 },
             },
             // Already-signed payloads are verified verbatim and never ask a
@@ -2026,10 +2073,10 @@ impl<S: EventStore> EngineCore<S> {
             // contradiction and fails closed before acceptance (#47).
             WritePayload::Signed(event) => match identity {
                 Identity::Explicit(pk) if pk != event.pubkey => {
-                    return self.fail_unaccepted(format!(
-                        "explicit identity {pk} does not match the signed event author {}",
-                        event.pubkey
-                    ));
+                    return self.refuse_publish(PublishError::IdentityContradictsSignedAuthor {
+                        identity: pk,
+                        author: event.pubkey,
+                    });
                 }
                 Identity::Explicit(_) | Identity::Active => event.pubkey,
             },
@@ -2037,124 +2084,134 @@ impl<S: EventStore> EngineCore<S> {
 
         if let WritePayload::Signed(event) = &payload {
             if let Err(err) = event.verify() {
-                return self.fail_unaccepted(err.to_string());
+                return self.refuse_publish(PublishError::SignatureInvalid {
+                    reason: err.to_string(),
+                });
             }
         }
 
         let mut frozen = Self::freeze_payload(&payload, signing_pubkey, self.clock);
 
-        let (id, intent_id, already_signed, accepted_signed_event, committed, retired_intents) =
-            if durability == Durability::Ephemeral {
-                match self
-                    .resolver
-                    .store_mut()
-                    .accept_ephemeral(frozen.id, signing_pubkey)
-                {
-                    Ok(receipt_id) => (ReceiptId(receipt_id), None, false, None, None, Vec::new()),
-                    Err(err) => return self.fail_unaccepted(err.to_string()),
-                }
-            } else {
-                let store_durability = match durability {
-                    Durability::Durable => WriteDurability::Durable,
-                    Durability::AtMostOnce => WriteDurability::AtMostOnce,
-                    Durability::Ephemeral => unreachable!("handled above"),
-                };
-                let accept = AcceptWrite {
-                    frozen: frozen.clone(),
-                    replaceable_base,
-                    monotonic_stamp,
-                    expected_pubkey: signing_pubkey,
-                    signing_identity_ref: signing_pubkey.to_hex(),
-                    durability: store_durability,
-                    routing: Self::routing_snapshot(&routing),
-                    // Treat an unsigned acceptance as reattachable signer work.
-                    // If a signer is already present the immediate request below
-                    // promotes it; if not, restart safely re-requests it.
-                    sig_state: match payload {
-                        WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
-                            IntentSigState::AwaitingSigner
-                        }
-                        WritePayload::Signed(_) => IntentSigState::Pending,
-                    },
-                    accepted_at: self.clock,
-                    correlation,
-                };
-                let LocalAcceptResult { outcome, committed } =
-                    match self.resolver.accept_local(accept) {
-                        Ok(value) => value,
-                        Err(err) => return self.fail_unaccepted(err.to_string()),
-                    };
-                let Some(intent_id) = outcome.journaled_intent_id() else {
-                    let AcceptOutcome::Refused(reason) = outcome else {
-                        unreachable!("only Refused omits journal ids")
-                    };
-                    return match reason {
-                        nmp_store::RefuseReason::ReplaceableBaseChanged { expected, actual } => {
-                            self.fail_unaccepted_with_status(WriteStatus::ReplaceableConflict {
-                                expected,
-                                actual,
-                            })
-                        }
-                        other => self.fail_unaccepted(format!("write refused: {other:?}")),
-                    };
-                };
-                let receipt_id = outcome
-                    .journaled_receipt_id()
-                    .expect("journaled intent always has a receipt id");
-                // The acceptance transaction may have moved a replaceable
-                // edit's `created_at` forward against the row it CAS-ed, which
-                // re-derives the id. The body it actually froze is the one
-                // everything downstream must target — the signer request, the
-                // pending row, the delivered bytes.
-                if let Some(row) = outcome.accepted_row() {
-                    if row.event.id != frozen.id {
-                        frozen = SignedEvent::new(
-                            row.event.id,
-                            row.event.pubkey,
-                            row.event.created_at,
-                            row.event.kind,
-                            row.event.tags.clone(),
-                            row.event.content.clone(),
-                            sentinel_signature(),
-                        );
+        let (id, intent_id, already_signed, accepted_signed_event, committed, retired_intents) = {
+            let accept = AcceptWrite {
+                frozen: frozen.clone(),
+                replaceable_base,
+                monotonic_stamp,
+                expected_pubkey: signing_pubkey,
+                signing_identity_ref: signing_pubkey.to_hex(),
+                routing: Self::routing_snapshot(&routing),
+                // Treat an unsigned acceptance as reattachable signer work.
+                // If a signer is already present the immediate request below
+                // promotes it; if not, restart safely re-requests it.
+                sig_state: match payload {
+                    WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
+                        IntentSigState::AwaitingSigner
                     }
-                }
-                let accepted_signed_event = match &outcome {
-                    AcceptOutcome::Duplicate { row, .. }
-                        if row.event.sig != sentinel_signature() =>
-                    {
-                        Some(row.event.clone())
-                    }
-                    _ => None,
-                };
-                let retired_intents = match &outcome {
-                    AcceptOutcome::Superseded { retired, .. } => retired.clone(),
-                    _ => Vec::new(),
-                };
-                (
-                    ReceiptId(receipt_id),
-                    Some(intent_id),
-                    accepted_signed_event.is_some(),
-                    accepted_signed_event,
-                    Some(committed),
-                    retired_intents,
-                )
+                    WritePayload::Signed(_) => IntentSigState::Pending,
+                },
+                accepted_at: self.clock,
+                correlation,
             };
+            let LocalAcceptResult { outcome, committed } = match self.resolver.accept_local(accept)
+            {
+                Ok(value) => value,
+                // Rule 1: recording anything at all needs the disk that just
+                // refused. There is no queue entry to fail into.
+                Err(err) => {
+                    return self.refuse_publish(PublishError::PersistenceFailed {
+                        reason: err.to_string(),
+                    })
+                }
+            };
+            let Some(intent_id) = outcome.journaled_intent_id() else {
+                let AcceptOutcome::Refused(reason) = outcome else {
+                    unreachable!("only Refused omits journal ids")
+                };
+                // CUSTODY. The store was working and said no, which is an
+                // answer the app is entitled to read back — so the refusal
+                // becomes a one-row, permanently-failed queue entry rather
+                // than an error on the call. `ReplaceableBaseChanged` keeps
+                // both event ids, which is what lets an app fetch what is
+                // actually there, reapply the user's change and resubmit
+                // without ever troubling them.
+                return match self.resolver.store_mut().accept_refused(
+                    frozen.id,
+                    signing_pubkey,
+                    reason,
+                ) {
+                    Ok(receipt_id) => {
+                        let id = ReceiptId(receipt_id);
+                        vec![
+                            Effect::WriteAccepted(id),
+                            Effect::EmitReceipt(
+                                id,
+                                WriteFact::Outcome(WriteOutcome::Refused(reason)),
+                            ),
+                        ]
+                    }
+                    Err(err) => self.refuse_publish(PublishError::PersistenceFailed {
+                        reason: err.to_string(),
+                    }),
+                };
+            };
+            let receipt_id = outcome
+                .journaled_receipt_id()
+                .expect("journaled intent always has a receipt id");
+            // The acceptance transaction may have moved a replaceable
+            // edit's `created_at` forward against the row it CAS-ed, which
+            // re-derives the id. The body it actually froze is the one
+            // everything downstream must target — the signer request, the
+            // pending row, the delivered bytes.
+            if let Some(row) = outcome.accepted_row() {
+                if row.event.id != frozen.id {
+                    frozen = SignedEvent::new(
+                        row.event.id,
+                        row.event.pubkey,
+                        row.event.created_at,
+                        row.event.kind,
+                        row.event.tags.clone(),
+                        row.event.content.clone(),
+                        sentinel_signature(),
+                    );
+                }
+            }
+            let accepted_signed_event = match &outcome {
+                AcceptOutcome::Duplicate { row, .. } if row.event.sig != sentinel_signature() => {
+                    Some(row.event.clone())
+                }
+                _ => None,
+            };
+            let retired_intents = match &outcome {
+                AcceptOutcome::Superseded { retired, .. } => retired.clone(),
+                _ => Vec::new(),
+            };
+            (
+                ReceiptId(receipt_id),
+                Some(intent_id),
+                accepted_signed_event.is_some(),
+                accepted_signed_event,
+                Some(committed),
+                retired_intents,
+            )
+        };
 
-        let mut effects = Vec::new();
-        effects.push(Effect::EmitReceipt(id, WriteStatus::Accepted));
+        // Acceptance IS `publish()` returning `Ok`, never a stream item: an
+        // app that must ask the stream whether its write was accepted is an
+        // app being made to wait on something it already knows.
+        let mut effects = vec![Effect::WriteAccepted(id)];
 
         self.pending.insert(
             id,
             PendingWrite {
-                durability,
                 routing,
                 routing_valid: true,
-                intent_id,
+                intent_id: intent_id.expect("a journaled acceptance always has an intent id"),
                 // Exactly the value handed to `AcceptWrite::accepted_at`
                 // above, so the in-process projection and the one a later
-                // boot rebuilds from `DeliveryIntent` are the same instant.
+                // boot rebuilds from `PublishQueueIntent` are the same instant.
                 accepted_at: self.clock,
+                destinations_reported: false,
+                persistence_fault: None,
                 signing_pubkey,
                 frozen: frozen.clone(),
                 already_signed,
@@ -2168,7 +2225,6 @@ impl<S: EventStore> EngineCore<S> {
                 lane_projection: LaneWorkerProjection::default(),
                 durable_routes: BTreeSet::new(),
                 route_complete: false,
-                route_detail: None,
                 route_needs: BTreeSet::new(),
             },
         );
@@ -2189,7 +2245,11 @@ impl<S: EventStore> EngineCore<S> {
 
         for retired in retired_intents {
             let retired_id = ReceiptId(retired.receipt_id);
-            self.emit_write_status(retired_id, WriteStatus::Superseded, &mut effects);
+            self.emit_write_fact(
+                retired_id,
+                WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Superseded)),
+                &mut effects,
+            );
             if let Some(retired_pending) = self.pending.remove(&retired_id) {
                 self.forget_pending_indexes(retired_id, &retired_pending);
                 if let Some(event_id) = retired_pending.event_id {
@@ -2240,7 +2300,7 @@ impl<S: EventStore> EngineCore<S> {
 
     /// `SignerCompleted` (plan §3.4 step 2 continuation): the runtime's
     /// signer capability resolved. Explicit rejection and invalid signer
-    /// output are whole-intent terminals (`WriteStatus::Failed`). Transport
+    /// output are whole-intent terminals (`WriteFact::Failed`). Transport
     /// absence, timeout, and disconnect return the retained obligation to
     /// `AwaitingCapability` so the exact frozen identity can be reattached.
     pub(super) fn on_signer_completed(
@@ -2264,9 +2324,9 @@ impl<S: EventStore> EngineCore<S> {
                     self.fail_and_compensate(id, err.to_string(), &mut effects);
                 } else if let Some(pending) = self.pending.get_mut(&id) {
                     let signing_pubkey = pending.signing_pubkey;
-                    let status = WriteStatus::AwaitingCapability {
+                    let status = WriteFact::Signing(SigningState::AwaitingSigner {
                         pubkey: signing_pubkey,
-                    };
+                    });
                     effects.push(Effect::EmitReceipt(id, status));
                     effects.push(Effect::RearmSignerIfAvailable(signing_pubkey));
                 }
@@ -2282,9 +2342,9 @@ impl<S: EventStore> EngineCore<S> {
                 return effects;
             }
             pending.sign_request_in_flight = false;
-            let status = WriteStatus::AwaitingCapability {
+            let status = WriteFact::Signing(SigningState::AwaitingSigner {
                 pubkey: pending.signing_pubkey,
-            };
+            });
             effects.push(Effect::EmitReceipt(id, status));
         }
         effects
@@ -2318,7 +2378,7 @@ impl<S: EventStore> EngineCore<S> {
     /// receipt fact come from the same reducer turn.
     pub(super) fn retained_cancel_result(
         id: ReceiptId,
-        receipt: &nmp_store::DeliveryReceipt,
+        receipt: &nmp_store::PublishQueueReceipt,
     ) -> Result<CancelWriteOutcome, CancelWriteError> {
         match receipt.state {
             ReceiptState::Cancelled => Ok(CancelWriteOutcome::Cancelled),
@@ -2330,10 +2390,175 @@ impl<S: EventStore> EngineCore<S> {
                 Err(CancelWriteError::AlreadyCompensated { receipt_id: id })
             }
             ReceiptState::Superseded => Err(CancelWriteError::AlreadySuperseded { receipt_id: id }),
-            ReceiptState::Abandoned => Err(CancelWriteError::AlreadyAbandoned { receipt_id: id }),
+            ReceiptState::Refused(_) => Err(CancelWriteError::AlreadyRefused { receipt_id: id }),
+            // Terminal already: routing finished and named nobody. There is
+            // no obligation left to cancel, only an entry to remove.
+            ReceiptState::NoDestination => Err(CancelWriteError::AlreadyRefused { receipt_id: id }),
             ReceiptState::Accepted => Err(CancelWriteError::PersistenceFailed {
                 receipt_id: id,
                 reason: "accepted receipt has no live cancellation owner".to_string(),
+            }),
+        }
+    }
+
+    /// Enumerate the app's own publish queue (#1039).
+    ///
+    /// Every retained receipt, in receipt-id order, with what NMP knows
+    /// about it right now: the signing state, the intended destination set
+    /// and whether it is closed, per-relay state, the whole-write outcome if
+    /// it has one, and any LATCHED persistence fault.
+    ///
+    /// This is how an app answers "what have I got outstanding, and what
+    /// went wrong with it" without having held a receipt stream open since
+    /// acceptance. It is INSPECTION: nothing here blocks, and nothing here
+    /// waits for settlement.
+    ///
+    /// It does not fix #46. Retained receipts and correlation tokens still
+    /// regrow without bound; this door makes that growth visible, which is
+    /// the first thing a retention rule will need.
+    pub fn publish_queue_entries(&self) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
+        let receipts = self.resolver.store().enumerate_publish_queue_receipts()?;
+        let mut entries = Vec::with_capacity(receipts.len());
+        for receipt in receipts {
+            let id = ReceiptId(receipt.receipt_id);
+            let pending = self.pending.get(&id);
+            let signing = match receipt.state {
+                ReceiptState::Signed => SigningState::Signed {
+                    event_id: receipt.frozen_id,
+                },
+                ReceiptState::Compensated => SigningState::Refused {
+                    reason: "write compensated".to_string(),
+                },
+                _ => SigningState::AwaitingSigner {
+                    pubkey: receipt.expected_pubkey,
+                },
+            };
+            let outcome = match receipt.state {
+                ReceiptState::Cancelled => Some(WriteOutcome::NotSent(NotSentReason::Cancelled)),
+                ReceiptState::Superseded => Some(WriteOutcome::NotSent(NotSentReason::Superseded)),
+                ReceiptState::Refused(reason) => Some(WriteOutcome::Refused(reason)),
+                ReceiptState::NoDestination => Some(WriteOutcome::NoDestination),
+                ReceiptState::Accepted | ReceiptState::Signed => match pending {
+                    // Routing finished and named nobody. Terminal, and the
+                    // one terminal that leaves its open-work row behind (see
+                    // `apply_route_answer`).
+                    Some(pending)
+                        if pending.route_complete && pending.durable_routes.is_empty() =>
+                    {
+                        Some(WriteOutcome::NoDestination)
+                    }
+                    // Still open work: no outcome yet.
+                    Some(_) => None,
+                    // The open-work row is gone and every lane finished.
+                    None => {
+                        (receipt.state == ReceiptState::Signed).then_some(WriteOutcome::Settled)
+                    }
+                },
+                ReceiptState::Compensated => None,
+            };
+            let relay_states = pending
+                .map(|pending| self.relay_states_for(pending))
+                .unwrap_or_default();
+            entries.push(PublishQueueEntry {
+                receipt_id: id,
+                event_id: receipt.frozen_id,
+                pubkey: receipt.expected_pubkey,
+                accepted_at: pending.map_or(Timestamp::from(0u64), |pending| pending.accepted_at),
+                signing,
+                relays: pending
+                    .map(|pending| pending.durable_routes.clone())
+                    .unwrap_or_default(),
+                route_complete: pending.is_none_or(|pending| pending.route_complete),
+                relay_states,
+                outcome,
+                persistence_fault: pending.and_then(|pending| pending.persistence_fault.clone()),
+            });
+        }
+        Ok(entries)
+    }
+
+    fn relay_states_for(&self, pending: &PendingWrite) -> Vec<(RelayUrl, RelayState)> {
+        let Ok(lanes) = self
+            .resolver
+            .store()
+            .recover_publish_queue_lanes(pending.intent_id)
+        else {
+            return Vec::new();
+        };
+        lanes
+            .into_iter()
+            .map(|lane| {
+                let state = match lane.state {
+                    PublishQueueLaneState::WaitingConnection => {
+                        RelayState::Waiting(RelayWaiting::NotConnected)
+                    }
+                    PublishQueueLaneState::WaitingAuth => {
+                        RelayState::Waiting(RelayWaiting::NeedsAuth)
+                    }
+                    PublishQueueLaneState::Transient {
+                        ordinal,
+                        eligible_at,
+                        cause,
+                        ref raw_reason,
+                    } => match public_retry_cause(cause) {
+                        Some(cause) => RelayState::Waiting(RelayWaiting::BackingOff {
+                            attempt: ordinal,
+                            eligible_at,
+                            cause,
+                            detail: raw_reason.clone(),
+                        }),
+                        None => RelayState::Waiting(RelayWaiting::NeedsAuth),
+                    },
+                    PublishQueueLaneState::Eligible { .. }
+                    | PublishQueueLaneState::InFlight { .. } => {
+                        RelayState::Waiting(RelayWaiting::NotConnected)
+                    }
+                    PublishQueueLaneState::Terminal { ref outcome, .. } => match outcome {
+                        PublishQueueTerminalOutcome::Acked => RelayState::Published,
+                        PublishQueueTerminalOutcome::Rejected(reason) => RelayState::Rejected {
+                            reason: reason.clone(),
+                        },
+                        PublishQueueTerminalOutcome::GaveUp => RelayState::GaveUp,
+                        PublishQueueTerminalOutcome::AuthDenied(denial) => RelayState::AuthFailed {
+                            pubkey: pending.signing_pubkey,
+                            source: match denial.source {
+                                StoredAuthDenialSource::Policy => AuthDenialSource::Policy,
+                                StoredAuthDenialSource::Signer => AuthDenialSource::Signer,
+                                StoredAuthDenialSource::Relay => AuthDenialSource::Relay,
+                            },
+                            reason: denial.reason.clone(),
+                        },
+                    },
+                };
+                (lane.key.relay, state)
+            })
+            .collect()
+    }
+
+    /// Forget one queue entry (#1039).
+    ///
+    /// This is a real TERMINATION path, not housekeeping: a write parked
+    /// forever on a signer that never attached, and a permanently-failed
+    /// refused entry, end no other way. A write that still owns open
+    /// delivery work is refused — cancel it first.
+    pub fn remove_publish_queue_entry(
+        &mut self,
+        id: ReceiptId,
+    ) -> Result<(), RemoveQueueEntryError> {
+        if self.pending.contains_key(&id) {
+            return Err(RemoveQueueEntryError::StillActive { receipt_id: id });
+        }
+        match self.resolver.store_mut().remove_publish_queue_entry(id.0) {
+            Ok(RemoveQueueEntryOutcome::Removed) => Ok(()),
+            Ok(RemoveQueueEntryOutcome::NotFound) => {
+                Err(RemoveQueueEntryError::UnknownReceipt { receipt_id: id })
+            }
+            Ok(RemoveQueueEntryOutcome::StillOpen) => {
+                Err(RemoveQueueEntryError::StillActive { receipt_id: id })
+            }
+            Err(error) => Err(RemoveQueueEntryError::PersistenceFailed {
+                receipt_id: id,
+                reason: error.to_string(),
             }),
         }
     }
@@ -2359,7 +2584,10 @@ impl<S: EventStore> EngineCore<S> {
                             Err(error) => self.degrade_store(error, &mut effects),
                         }
                         self.quarantined_auth_receipts.remove(&id);
-                        effects.push(Effect::EmitReceipt(id, WriteStatus::Cancelled));
+                        effects.push(Effect::EmitReceipt(
+                            id,
+                            WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled)),
+                        ));
                         effects.extend(self.schedule_ready(self.clock));
                         return (Ok(CancelWriteOutcome::Cancelled), effects);
                     }
@@ -2421,7 +2649,8 @@ impl<S: EventStore> EngineCore<S> {
             );
         }
 
-        if let Some(intent_id) = pending.intent_id {
+        {
+            let intent_id = pending.intent_id;
             match self.resolver.store_mut().cancel_write(intent_id) {
                 Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
                     match self
@@ -2482,71 +2711,13 @@ impl<S: EventStore> EngineCore<S> {
                     );
                 }
             }
-        } else {
-            match self.resolver.store_mut().cancel_ephemeral_receipt(id.0) {
-                Ok(CancelEphemeralOutcome::Cancelled) => {}
-                Ok(CancelEphemeralOutcome::AlreadyCancelled) => {
-                    self.pending.insert(id, pending);
-                    return (Ok(CancelWriteOutcome::Cancelled), effects);
-                }
-                Ok(CancelEphemeralOutcome::AlreadySigned) => {
-                    let event_id = pending.frozen.id;
-                    self.pending.insert(id, pending);
-                    return (
-                        Err(CancelWriteError::AlreadySigned {
-                            receipt_id: id,
-                            event_id,
-                        }),
-                        effects,
-                    );
-                }
-                Ok(CancelEphemeralOutcome::AlreadyAbandoned) => {
-                    self.pending.insert(id, pending);
-                    return (
-                        Err(CancelWriteError::AlreadyAbandoned { receipt_id: id }),
-                        effects,
-                    );
-                }
-                Ok(CancelEphemeralOutcome::AlreadyCompensated) => {
-                    self.pending.insert(id, pending);
-                    return (
-                        Err(CancelWriteError::AlreadyCompensated { receipt_id: id }),
-                        effects,
-                    );
-                }
-                Ok(CancelEphemeralOutcome::AlreadySuperseded) => {
-                    self.pending.insert(id, pending);
-                    return (
-                        Err(CancelWriteError::AlreadySuperseded { receipt_id: id }),
-                        effects,
-                    );
-                }
-                Ok(CancelEphemeralOutcome::NotFound | CancelEphemeralOutcome::NotEphemeral) => {
-                    self.pending.insert(id, pending);
-                    return (
-                        Err(CancelWriteError::PersistenceFailed {
-                            receipt_id: id,
-                            reason: "ephemeral cancellation owner does not match retained receipt"
-                                .to_string(),
-                        }),
-                        effects,
-                    );
-                }
-                Err(error) => {
-                    self.pending.insert(id, pending);
-                    return (
-                        Err(CancelWriteError::PersistenceFailed {
-                            receipt_id: id,
-                            reason: error.to_string(),
-                        }),
-                        effects,
-                    );
-                }
-            }
         }
 
         self.forget_pending_indexes(id, &pending);
-        effects.push(Effect::EmitReceipt(id, WriteStatus::Cancelled));
+        effects.push(Effect::EmitReceipt(
+            id,
+            WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled)),
+        ));
         effects.extend(self.schedule_ready(self.clock));
         (Ok(CancelWriteOutcome::Cancelled), effects)
     }
@@ -2578,7 +2749,8 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         let mut co_receipts = Vec::new();
-        if let Some(intent_id) = pending.intent_id {
+        {
+            let intent_id = pending.intent_id;
             if !pending.already_signed {
                 match self
                     .resolver
@@ -2595,7 +2767,7 @@ impl<S: EventStore> EngineCore<S> {
                             if let Some((receipt_id, co_pending)) = self
                                 .pending
                                 .iter_mut()
-                                .find(|(_, candidate)| candidate.intent_id == Some(co_intent))
+                                .find(|(_, candidate)| candidate.intent_id == co_intent)
                             {
                                 co_pending.already_signed = true;
                                 co_receipts.push(*receipt_id);
@@ -2616,30 +2788,6 @@ impl<S: EventStore> EngineCore<S> {
                     }
                 }
             }
-        } else {
-            match self.resolver.store_mut().mark_ephemeral_signed(id.0) {
-                Ok(true) => {}
-                Ok(false) => {
-                    if let Some(pending) = self.pending.get_mut(&id) {
-                        pending.sign_request_in_flight = false;
-                    }
-                    self.degrade_store(
-                        PersistenceError::invariant(
-                            "accepted ephemeral receipt disappeared during signature promotion"
-                                .to_string(),
-                        ),
-                        effects,
-                    );
-                    return;
-                }
-                Err(error) => {
-                    if let Some(pending) = self.pending.get_mut(&id) {
-                        pending.sign_request_in_flight = false;
-                    }
-                    self.degrade_store(error, effects);
-                    return;
-                }
-            }
         }
 
         for co_receipt in co_receipts {
@@ -2652,7 +2800,10 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         if let Some(pending) = self.pending.get_mut(&id) {
-            effects.push(Effect::EmitReceipt(id, WriteStatus::Signed(event.id)));
+            effects.push(Effect::EmitReceipt(
+                id,
+                WriteFact::Signing(SigningState::Signed { event_id: event.id }),
+            ));
             if !pending.routing_valid {
                 return;
             }
@@ -2670,57 +2821,8 @@ impl<S: EventStore> EngineCore<S> {
         else {
             return;
         };
-        let relays = answer.relays.clone();
 
-        if let Some(write_access) = self
-            .pending
-            .get(&id)
-            .filter(|pending| pending.durability == Durability::Ephemeral)
-            .map(|pending| AccessContext::Nip42(pending.signing_pubkey))
-        {
-            // Ephemeral is dispatched and forgotten in this one turn, so it
-            // has exactly one resolution moment and no later one can change
-            // the picture: report it whole, right here.
-            self.emit_write_status(
-                id,
-                WriteStatus::Routed {
-                    relays: relays.clone(),
-                    complete: answer.complete,
-                },
-                effects,
-            );
-            for relay in relays {
-                let Ok(correlation) = self.alloc_attempt_correlation() else {
-                    continue;
-                };
-                self.attempt_correlations.insert(
-                    correlation,
-                    AttemptCorrelationTarget {
-                        receipt: id,
-                        // The ephemeral handoff rides the intent's
-                        // identity-scoped authenticated session (#8 U2),
-                        // never the relay's Public read session.
-                        session: RelaySessionKey::new(relay.clone(), write_access),
-                        lane: None,
-                    },
-                );
-                effects.push(Effect::PublishEvent(
-                    RelaySessionKey::new(relay, write_access),
-                    event.clone(),
-                    correlation,
-                ));
-            }
-            // Ephemeral never owns a durable lane (`intent_id` is `None`),
-            // so there is nothing for `forget_pending_indexes` to find, but
-            // calling it keeps this a single uniform cleanup discipline for
-            // every real `pending` removal (epic #507 finding E5).
-            if let Some(pending) = self.pending.remove(&id) {
-                self.forget_pending_indexes(id, &pending);
-            }
-            return;
-        }
-
-        let Some(intent_id) = self.pending.get(&id).and_then(|pending| pending.intent_id) else {
+        let Some(intent_id) = self.pending.get(&id).map(|pending| pending.intent_id) else {
             return;
         };
         // A signed intent is addressable by event id whether or not routing
@@ -2749,12 +2851,12 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         id: ReceiptId,
         signing_pubkey: PublicKey,
-        lanes: Vec<DeliveryLane>,
+        lanes: Vec<PublishQueueLane>,
         effects: &mut Vec<Effect>,
     ) {
         let write_access = AccessContext::Nip42(signing_pubkey);
         for lane in lanes {
-            if matches!(lane.state, DeliveryLaneState::WaitingConnection) {
+            if matches!(lane.state, PublishQueueLaneState::WaitingConnection) {
                 // The freshly-bootstrapped lane's connectivity check is
                 // against the intent's identity-scoped authenticated
                 // session (#8 U2), the exact session `schedule_ready` will
@@ -2763,10 +2865,11 @@ impl<S: EventStore> EngineCore<S> {
                 if self.connected_relays.contains(&session) {
                     let _ = self.commit_lane_eligible(&lane.key, lane.revision, self.clock);
                 } else {
-                    self.emit_write_status(
+                    self.emit_write_fact(
                         id,
-                        WriteStatus::AwaitingRelay {
+                        WriteFact::Relay {
                             relay: lane.key.relay.clone(),
+                            state: RelayState::Waiting(RelayWaiting::NotConnected),
                         },
                         effects,
                     );
@@ -2893,19 +2996,12 @@ impl<S: EventStore> EngineCore<S> {
         None
     }
 
-    pub(super) fn fail_unaccepted(&mut self, reason: String) -> Vec<Effect> {
-        self.fail_unaccepted_with_status(WriteStatus::Failed(reason))
-    }
-
-    pub(super) fn fail_unaccepted_with_status(&mut self, status: WriteStatus) -> Vec<Effect> {
-        // No store id exists on refusal/persistence failure by contract.
-        // This correlation id is stream-local only and never enters the
-        // durable receipt namespace.
-        let id = match self.alloc_receipt_id() {
-            Ok(id) => id,
-            Err(err) => return vec![Effect::PublishFailed(err)],
-        };
-        vec![Effect::EmitReceipt(id, status)]
+    /// `publish()` refuses. Nothing durable exists and nothing ever will:
+    /// there is no queue entry to inspect, nothing to retry and nothing to
+    /// remove, so the caller learns it synchronously instead of being handed
+    /// a receipt that will never say anything.
+    pub(super) fn refuse_publish(&mut self, error: PublishError) -> Vec<Effect> {
+        vec![Effect::PublishFailed(error)]
     }
 
     pub(super) fn fail_and_compensate(
@@ -2918,7 +3014,8 @@ impl<S: EventStore> EngineCore<S> {
             return;
         };
 
-        if let Some(intent_id) = pending.intent_id {
+        {
+            let intent_id = pending.intent_id;
             match self.resolver.store_mut().compensate_write(intent_id) {
                 Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
                     // The store compensation already committed; reacting only
@@ -2957,13 +3054,15 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        // Reached only when `intent_id` was `None` (Ephemeral -- nothing to
-        // clean) or compensation actually committed (a real, permanent
-        // removal): both `NotFound`/`Err` arms above reinsert `pending`
-        // untouched and return early, so the indexes must stay untouched
-        // for those (epic #507 finding E5).
+        // Reached only when compensation actually committed (a real,
+        // permanent removal): both `NotFound`/`Err` arms above reinsert
+        // `pending` untouched and return early, so the indexes must stay
+        // untouched for those (epic #507 finding E5).
         self.forget_pending_indexes(id, &pending);
-        effects.push(Effect::EmitReceipt(id, WriteStatus::Failed(reason)));
+        effects.push(Effect::EmitReceipt(
+            id,
+            WriteFact::Signing(SigningState::Refused { reason }),
+        ));
     }
 
     /// Execute a routing STRATEGY against what the engine knows right now.
@@ -3061,24 +3160,31 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         if answer.relays.is_empty() {
-            // A resolution that named NOTHING has not decided anything, so it
-            // cannot retire. Zero destinations is an unroutable park, never a
-            // "we know where this goes" — and the difference is load-bearing:
-            // a retired route is never re-executed, so calling this complete
-            // would strand the write permanently the moment its author's
-            // author routes settled absent, which is the very defect this design
-            // exists to remove.
+            // `complete` is a statement about KNOWLEDGE EXHAUSTION, never
+            // about delivery, and a zero-destination answer is exactly where
+            // that distinction earns its keep.
             //
-            // Every contributing author is therefore still declared as a
-            // need, settled or not: with nothing else to go on, the author's
-            // (or a tagged key's) routes appearing later is the ONLY thing
-            // that can unpark this write, so discovery must keep covering
-            // them rather than tearing down on a settlement that produced no
-            // destination. Nothing auto-abandons.
+            // Some contributor still `Unknown` means we are STILL LOOKING.
+            // Nothing accumulates in that state — another day of not knowing
+            // is not more evidence than the first day — so the write parks
+            // indefinitely, with no cap of any kind, and every contributing
+            // author stays declared as a need because a later positive
+            // replacement is the only thing that can unpark it.
+            //
+            // Every contributor settled, and between them they named nothing,
+            // means we have FINISHED looking. There is nowhere to publish,
+            // and saying so is a fact rather than a guess — the write
+            // terminates as `WriteOutcome::NoDestination` instead of waiting
+            // forever on knowledge that has already arrived and said no.
+            // (Owner ruling on #1237/#1031; this reverses the older doctrine
+            // that a zero-destination answer could never retire.)
+            let still_learning = !answer.author_route_needs.is_empty();
             answer.detail = Some(self.no_destination_detail(&author, &recipients));
-            answer.author_route_needs.insert(author);
-            answer.author_route_needs.extend(recipients);
-            answer.complete = false;
+            answer.complete = !still_learning;
+            if still_learning {
+                answer.author_route_needs.insert(author);
+                answer.author_route_needs.extend(recipients);
+            }
             return answer;
         }
 
@@ -3231,11 +3337,7 @@ impl<S: EventStore> EngineCore<S> {
         if !pending.routing_valid || pending.event_id.is_none() || pending.route_complete {
             return;
         }
-        let Some(intent_id) = pending.intent_id else {
-            // Ephemeral owns no durable lane or revision log; `on_signed`
-            // dispatches it inline and forgets it.
-            return;
-        };
+        let intent_id = pending.intent_id;
         let answer = self.resolve_routes(&pending.routing, &pending.frozen);
         self.apply_route_answer(id, intent_id, answer, effects);
     }
@@ -3295,8 +3397,10 @@ impl<S: EventStore> EngineCore<S> {
             let Some(pending) = self.pending.get_mut(&id) else {
                 return;
             };
-            let changed =
-                pending.durable_routes != union || pending.route_complete != answer.complete;
+            let changed = !pending.destinations_reported
+                || pending.durable_routes != union
+                || pending.route_complete != answer.complete;
+            pending.destinations_reported = true;
             pending.durable_routes = union.clone();
             pending.route_complete = answer.complete;
             pending.route_needs = answer.author_route_needs.clone();
@@ -3307,30 +3411,75 @@ impl<S: EventStore> EngineCore<S> {
         // doing: the routing picture is emitted ahead of any lane fact, so an
         // app never sees a relay it was never told about.
         if union.is_empty() {
-            // Nothing routable yet. PARK -- retained, visible, and naming what
-            // it waits for. Never a terminal failure: the event is signed,
-            // journaled and durable, and the directory was merely young.
-            let detail = answer
-                .detail
-                .unwrap_or_else(|| "routing produced no destinations".to_string());
-            let unchanged = self
-                .pending
-                .get(&id)
-                .is_some_and(|pending| pending.route_detail.as_ref() == Some(&detail));
-            if !unchanged {
-                if let Some(pending) = self.pending.get_mut(&id) {
-                    pending.route_detail = Some(detail.clone());
+            // The two empty-destination situations, kept apart by the one
+            // fact that distinguishes them (#1236 dissolves here).
+            //
+            // `RouteAnswer::complete` is a statement about KNOWLEDGE
+            // EXHAUSTION, never about delivery. So:
+            //
+            // - `!complete` — still learning. PARK, indefinitely, with no
+            //   cap of any kind. Nothing expires it, because a user who was
+            //   merely offline must never lose a message NMP never proved
+            //   undeliverable. It ends when knowledge is exhausted (becoming
+            //   the case below), when a route appears, or when the app
+            //   removes the entry.
+            // - `complete` — knowledge IS exhausted and named zero relays.
+            //   There is nowhere to publish, and saying so is a fact rather
+            //   than a guess.
+            // `picture_changed` is the ONE authority on whether this is news:
+            // it was computed against the pending state BEFORE that state was
+            // updated, so re-deriving it here would compare the new value
+            // with itself and silently suppress every park (the defect the
+            // BDD suite caught: nine scenarios saw a receipt containing only
+            // `Signing(Signed)` and nothing else).
+            if picture_changed {
+                self.emit_write_fact(
+                    id,
+                    WriteFact::Destinations {
+                        relays: BTreeSet::new(),
+                        complete: answer.complete,
+                    },
+                    effects,
+                );
+                if answer.complete {
+                    // Knowledge is exhausted and it named nobody. Terminal.
+                    //
+                    // The open-work row goes with it. This write owns no
+                    // lanes at all, which is the exact precondition of
+                    // `close_unroutable_intent` (the structural complement
+                    // of `close_terminal_intent`'s non-empty all-terminal
+                    // set), so the store can check the shape itself rather
+                    // than being told a routing verdict. Leaving the row
+                    // behind would strand the entry: the removal door
+                    // refuses an open intent, cancellation refuses a signed
+                    // one, and boot would replay it forever — on the FIRST
+                    // publish of a fresh install with no reachable relay
+                    // list, which is the commonest path there is.
+                    //
+                    // The RECEIPT is retained and reattachable either way,
+                    // so the app can still read back what happened and why.
+                    let closed = self
+                        .resolver
+                        .store_mut()
+                        .close_unroutable_intent(intent_id)
+                        .is_ok();
+                    self.emit_write_fact(
+                        id,
+                        WriteFact::Outcome(WriteOutcome::NoDestination),
+                        effects,
+                    );
+                    if closed {
+                        if let Some(pending) = self.pending.remove(&id) {
+                            self.forget_pending_indexes(id, &pending);
+                        }
+                    }
                 }
-                self.emit_write_status(id, WriteStatus::AwaitingRoute { detail }, effects);
             }
         } else {
-            if let Some(pending) = self.pending.get_mut(&id) {
-                pending.route_detail = None;
-            }
             if picture_changed {
-                self.emit_write_status(
+                self.emit_write_fact(
                     id,
-                    WriteStatus::Routed {
+                    WriteFact::Destinations {
                         relays: union.clone(),
                         complete: answer.complete,
                     },
@@ -3340,7 +3489,16 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         for relay in blocked {
-            self.emit_write_status(id, WriteStatus::RoutePersistenceBlocked(relay), effects);
+            self.emit_write_fact(
+                id,
+                WriteFact::Relay {
+                    relay,
+                    state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                        detail: ROUTE_STALL_DETAIL.to_string(),
+                    }),
+                },
+                effects,
+            );
         }
 
         if committed {
@@ -3353,9 +3511,14 @@ impl<S: EventStore> EngineCore<S> {
                     // lanes" (epic #507 finding E5).
                     self.lane_relay_index_degraded = true;
                     for relay in &new_relays {
-                        self.emit_write_status(
+                        self.emit_write_fact(
                             id,
-                            WriteStatus::PersistenceBlocked(relay.clone()),
+                            WriteFact::Relay {
+                                relay: relay.clone(),
+                                state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                                    detail: ATTEMPT_STALL_DETAIL.to_string(),
+                                }),
+                            },
                             effects,
                         );
                     }
@@ -3386,7 +3549,7 @@ impl<S: EventStore> EngineCore<S> {
         let before = self.author_route_needs();
         for id in open {
             self.rewrite_route(id, effects);
-            self.close_if_all_lanes_terminal(id);
+            self.close_if_all_lanes_terminal(id, effects);
         }
         self.resync_route_needs(before, effects);
     }
@@ -3427,9 +3590,7 @@ impl<S: EventStore> EngineCore<S> {
             let Some(pending) = self.pending.get(&id) else {
                 continue;
             };
-            let Some(intent_id) = pending.intent_id else {
-                continue;
-            };
+            let intent_id = pending.intent_id;
             // An OK is only trusted from the exact session this pending write
             // publishes on (#8 U2: the intent's identity-scoped Nip42 write
             // session, frozen at acceptance). An ack arriving on any other
@@ -3443,22 +3604,22 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             let relay = &session.relay;
-            let key = DeliveryLaneKey {
+            let key = PublishQueueLaneKey {
                 intent_id,
                 relay: relay.clone(),
             };
             let lane = self
                 .resolver
                 .store()
-                .recover_delivery_lanes(intent_id)
+                .recover_publish_queue_lanes(intent_id)
                 .ok()
                 .and_then(|lanes| lanes.into_iter().find(|lane| lane.key == key));
             let Some(lane) = lane else {
                 continue;
             };
-            let DeliveryLaneState::InFlight {
+            let PublishQueueLaneState::InFlight {
                 ordinal,
-                phase: DeliveryInFlightPhase::AwaitingAck { .. },
+                phase: PublishQueueInFlightPhase::AwaitingAck { .. },
             } = lane.state
             else {
                 continue;
@@ -3471,14 +3632,21 @@ impl<S: EventStore> EngineCore<S> {
                             &key,
                             lane.revision,
                             ordinal,
-                            DeliveryAttemptOutcome::Acked,
+                            PublishQueueAttemptOutcome::Acked,
                             self.clock,
                         )
                         .is_ok()
                     {
                         self.remove_active_lane(id, relay);
-                        self.emit_write_status(id, WriteStatus::Acked(relay.clone()), effects);
-                        self.close_if_all_lanes_terminal(id);
+                        self.emit_write_fact(
+                            id,
+                            WriteFact::Relay {
+                                relay: relay.clone(),
+                                state: RelayState::Published,
+                            },
+                            effects,
+                        );
+                        self.close_if_all_lanes_terminal(id, effects);
                     }
                 }
                 RelayAckClass::Rejected => {
@@ -3487,47 +3655,37 @@ impl<S: EventStore> EngineCore<S> {
                             &key,
                             lane.revision,
                             ordinal,
-                            DeliveryAttemptOutcome::Rejected(message.clone()),
+                            PublishQueueAttemptOutcome::Rejected(message.clone()),
                             self.clock,
                         )
                         .is_ok()
                     {
                         self.remove_active_lane(id, relay);
-                        self.emit_write_status(
+                        self.emit_write_fact(
                             id,
-                            WriteStatus::Rejected(relay.clone(), message.clone()),
-                            effects,
-                        );
-                        self.close_if_all_lanes_terminal(id);
-                    }
-                }
-                RelayAckClass::Transient(cause) => {
-                    let eligible_at = self.clock + retry_delay_secs(&key, ordinal);
-                    if self
-                        .commit_lane_transient(
-                            &key,
-                            lane.revision,
-                            ordinal,
-                            eligible_at,
-                            *cause,
-                            Some(message.clone()),
-                        )
-                        .is_ok()
-                    {
-                        self.remove_active_lane(id, relay);
-                        self.emit_write_status(
-                            id,
-                            WriteStatus::RetryEligible {
+                            WriteFact::Relay {
                                 relay: relay.clone(),
-                                attempt: ordinal,
-                                eligible_at,
-                                cause: public_retry_cause(*cause)
-                                    .expect("AUTH-required has its own class"),
-                                detail: Some(message.clone()),
+                                state: RelayState::Rejected {
+                                    reason: message.clone(),
+                                },
                             },
                             effects,
                         );
+                        self.close_if_all_lanes_terminal(id, effects);
                     }
+                }
+                RelayAckClass::Transient(cause) => {
+                    let now = self.clock;
+                    self.retry_or_give_up(
+                        Some(id),
+                        &key,
+                        lane.revision,
+                        ordinal,
+                        now,
+                        *cause,
+                        message.clone(),
+                        effects,
+                    );
                 }
                 RelayAckClass::WaitingAuth => {
                     self.auth_probe_sessions.remove(session);
@@ -3538,17 +3696,18 @@ impl<S: EventStore> EngineCore<S> {
                             lane.revision,
                             ordinal,
                             self.clock,
-                            DeliveryTransientCause::AuthRequired,
+                            PublishQueueTransientCause::AuthRequired,
                             Some(message.clone()),
                             true,
                         )
                         .is_ok()
                     {
                         self.remove_active_lane(id, relay);
-                        self.emit_write_status(
+                        self.emit_write_fact(
                             id,
-                            WriteStatus::AwaitingAuth {
+                            WriteFact::Relay {
                                 relay: relay.clone(),
+                                state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                             },
                             effects,
                         );
@@ -3584,73 +3743,38 @@ impl<S: EventStore> EngineCore<S> {
             }
             let relay = &session.relay;
             match lane.state {
-                DeliveryLaneState::Eligible { .. } => {
+                PublishQueueLaneState::Eligible { .. } => {
                     if self
                         .commit_lane_waiting(&lane.key, lane.revision, false)
                         .is_ok()
                     {
-                        self.emit_write_status(
+                        self.emit_write_fact(
                             id,
-                            WriteStatus::AwaitingRelay {
+                            WriteFact::Relay {
                                 relay: relay.clone(),
+                                state: RelayState::Waiting(RelayWaiting::NotConnected),
                             },
                             effects,
                         );
                     }
                 }
-                DeliveryLaneState::InFlight {
+                PublishQueueLaneState::InFlight {
                     ordinal,
-                    phase: DeliveryInFlightPhase::AwaitingAck { .. },
+                    phase: PublishQueueInFlightPhase::AwaitingAck { .. },
                 } => {
-                    let durability = self.pending.get(&id).map(|pending| pending.durability);
-                    if durability == Some(Durability::AtMostOnce) {
-                        if self
-                            .commit_lane_attempt_finish(
-                                &lane.key,
-                                lane.revision,
-                                ordinal,
-                                DeliveryAttemptOutcome::OutcomeUnknown,
-                                self.clock,
-                            )
-                            .is_ok()
-                        {
-                            self.remove_active_lane(id, relay);
-                            self.emit_write_status(
-                                id,
-                                WriteStatus::OutcomeUnknown(relay.clone()),
-                                effects,
-                            );
-                            self.close_if_all_lanes_terminal(id);
-                        }
-                    } else {
-                        let eligible_at = self.clock + retry_delay_secs(&lane.key, ordinal);
-                        if self
-                            .commit_lane_transient(
-                                &lane.key,
-                                lane.revision,
-                                ordinal,
-                                eligible_at,
-                                DeliveryTransientCause::ConnectionLost,
-                                Some("connection lost while awaiting ACK".to_string()),
-                            )
-                            .is_ok()
-                        {
-                            self.remove_active_lane(id, relay);
-                            self.emit_write_status(
-                                id,
-                                WriteStatus::RetryEligible {
-                                    relay: relay.clone(),
-                                    attempt: ordinal,
-                                    eligible_at,
-                                    cause: RetryCause::ConnectionLost,
-                                    detail: Some("connection lost while awaiting ACK".to_string()),
-                                },
-                                effects,
-                            );
-                        }
-                    }
+                    let now = self.clock;
+                    self.retry_or_give_up(
+                        Some(id),
+                        &lane.key,
+                        lane.revision,
+                        ordinal,
+                        now,
+                        PublishQueueTransientCause::ConnectionLost,
+                        "connection lost while awaiting ACK".to_string(),
+                        effects,
+                    );
                 }
-                DeliveryLaneState::WaitingAuth => {
+                PublishQueueLaneState::WaitingAuth => {
                     // A `WaitingAuth` park is authenticated-generation-scoped:
                     // the relay demanded auth on THIS socket, and that grant
                     // (and any in-flight challenge) died with the disconnect.
@@ -3666,38 +3790,24 @@ impl<S: EventStore> EngineCore<S> {
                         .commit_lane_waiting(&lane.key, lane.revision, false)
                         .is_ok()
                     {
-                        self.emit_write_status(
+                        self.emit_write_fact(
                             id,
-                            WriteStatus::AwaitingRelay {
+                            WriteFact::Relay {
                                 relay: relay.clone(),
+                                state: RelayState::Waiting(RelayWaiting::NotConnected),
                             },
                             effects,
                         );
                     }
                 }
-                DeliveryLaneState::WaitingConnection
-                | DeliveryLaneState::Transient { .. }
-                | DeliveryLaneState::InFlight {
-                    phase: DeliveryInFlightPhase::AwaitingHandoff,
+                PublishQueueLaneState::WaitingConnection
+                | PublishQueueLaneState::Transient { .. }
+                | PublishQueueLaneState::InFlight {
+                    phase: PublishQueueInFlightPhase::AwaitingHandoff,
                     ..
                 }
-                | DeliveryLaneState::Terminal { .. } => {}
+                | PublishQueueLaneState::Terminal { .. } => {}
             }
         }
-    }
-    pub(super) fn alloc_receipt_id(&mut self) -> Result<ReceiptId, PublishError> {
-        const FIRST_UNACCEPTED_ID: u64 = 1u64 << 63;
-        let current = self
-            .next_unaccepted_receipt
-            .ok_or(PublishError::ReceiptCorrelationIdExhausted)?;
-        debug_assert!(current >= FIRST_UNACCEPTED_ID);
-        self.next_unaccepted_receipt = (current > FIRST_UNACCEPTED_ID).then_some(current - 1);
-        Ok(ReceiptId(current))
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_next_unaccepted_receipt_for_test(&mut self, next: Option<u64>) {
-        assert!(next.is_none_or(|id| id >= (1u64 << 63)));
-        self.next_unaccepted_receipt = next;
     }
 }

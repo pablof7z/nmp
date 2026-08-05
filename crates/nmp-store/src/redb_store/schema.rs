@@ -107,26 +107,24 @@ pub(super) type RelayKey = u32;
 /// Breaking v6 event schema. Compatibility is intentionally not carried:
 /// immutable notes, local state, interned relay observations, raw-id lookup,
 /// and compact primary keys are independent tables from the first byte.
-pub(super) const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events_v6");
+pub(super) const EVENTS: TableDefinition<EventKey, &[u8]> = TableDefinition::new("events");
 pub(super) const EVENT_IDS: TableDefinition<&[u8; 32], EventKey> =
-    TableDefinition::new("event_ids_v6");
+    TableDefinition::new("event_ids");
 pub(super) const EVENT_LOCAL: TableDefinition<EventKey, &[u8]> =
-    TableDefinition::new("event_local_v6");
+    TableDefinition::new("event_local");
 pub(super) const EVENT_STORE_META: TableDefinition<&str, EventKey> =
-    TableDefinition::new("event_store_meta_v6");
+    TableDefinition::new("event_store_meta");
 pub(super) const NEXT_EVENT_KEY: &str = "next_event_key";
-pub(super) const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays_v6");
-pub(super) const RELAY_KEYS: TableDefinition<&str, RelayKey> =
-    TableDefinition::new("relay_keys_v6");
-pub(super) const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs_v6");
-pub(super) const RELAY_META: TableDefinition<&str, RelayKey> =
-    TableDefinition::new("relay_meta_v6");
+pub(super) const RELAYS: TableDefinition<RelayKey, &str> = TableDefinition::new("relays");
+pub(super) const RELAY_KEYS: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_keys");
+pub(super) const RELAY_REFS: TableDefinition<RelayKey, u64> = TableDefinition::new("relay_refs");
+pub(super) const RELAY_META: TableDefinition<&str, RelayKey> = TableDefinition::new("relay_meta");
 pub(super) const NEXT_RELAY_KEY: &str = "next_relay_key";
 /// Fixed-width key: `event_key:u64-be | relay_key:u32-be`; value is the
 /// greatest observation timestamp in seconds.
 pub(super) const EVENT_OBSERVATIONS: TableDefinition<&[u8; 12], u64> =
-    TableDefinition::new("event_observations_v6");
-pub(super) const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta_v6");
+    TableDefinition::new("event_observations");
+pub(super) const SCHEMA_META: TableDefinition<&str, u64> = TableDefinition::new("schema_meta");
 pub(super) const SCHEMA_VERSION_KEY: &str = "version";
 /// The ONE exact current schema epoch (#867). NMP carries no persistent-schema
 /// compatibility obligation in this architecture cut: there is no pre-current
@@ -139,7 +137,7 @@ pub(super) const SCHEMA_VERSION_KEY: &str = "version";
 /// accepted writes, lanes, attempts, receipts, and route facts — because they
 /// share one `redb::Database` transaction boundary and are therefore one
 /// epoch, not seven independently-versioned ones.
-pub(super) const SCHEMA_VERSION: u64 = 12;
+pub(super) const SCHEMA_VERSION: u64 = 13;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
@@ -150,8 +148,7 @@ pub(super) const SCHEMA_VERSION: u64 = 12;
 // caches their pages. A larger Redb cache retains duplicate hot pages and
 // makes the one-million-event working set scale with query traffic.
 pub(super) const REDB_CACHE_BYTES: usize = 12 * 1024 * 1024;
-pub(super) const ADDR_INDEX: TableDefinition<&str, EventKey> =
-    TableDefinition::new("addr_index_v6");
+pub(super) const ADDR_INDEX: TableDefinition<&str, EventKey> = TableDefinition::new("addr_index");
 pub(super) const COVERAGE: TableDefinition<&str, &str> = TableDefinition::new("coverage");
 /// Permanent kind:5 tombstones for individual event ids
 /// (retraction-and-negative-deltas.md §2/§7). Key: `"{id_hex}:{author_hex}"`
@@ -175,7 +172,7 @@ pub(super) const ADDR_TOMBSTONES: TableDefinition<&str, &str> =
 /// byte ordering matches numeric deadline order without decimal/hex work;
 /// value: the canonical event's compact surrogate key.
 pub(super) const EXPIRATION_INDEX: TableDefinition<&[u8; 40], EventKey> =
-    TableDefinition::new("expiration_index_v6");
+    TableDefinition::new("expiration_index");
 /// Binary ordered indexes all end in the same sortable suffix:
 /// `created_at:u64-be | !event_id:[u8;32]`. Reverse scans therefore yield
 /// `created_at DESC, event_id ASC` and can stop exactly at the visible limit.
@@ -185,18 +182,18 @@ pub(super) const EXPIRATION_INDEX: TableDefinition<&[u8; 40], EventKey> =
 /// solely so benchmark variants can measure the alternative physical shape.
 #[cfg(feature = "bench-instrumentation")]
 pub(super) const BY_CREATED_AT: TableDefinition<&[u8; 40], EventKey> =
-    TableDefinition::new("by_created_at_v6");
+    TableDefinition::new("by_created_at");
 #[cfg(feature = "bench-instrumentation")]
 pub(super) const BY_AUTHOR: TableDefinition<&[u8; 72], EventKey> =
-    TableDefinition::new("by_author_time_v6");
+    TableDefinition::new("by_author_time");
 #[cfg(feature = "bench-instrumentation")]
 pub(super) const BY_KIND: TableDefinition<&[u8; 42], EventKey> =
-    TableDefinition::new("by_kind_time_v6");
+    TableDefinition::new("by_kind_time");
 /// Comparison-only historical index shape used by benchmark variants; never
 /// opened by [`crate::RedbStore`] and not part of the current schema epoch.
 #[cfg(feature = "bench-instrumentation")]
 pub(super) const COMPARISON_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
-    TableDefinition::new("by_author_kind_time_v6");
+    TableDefinition::new("by_author_kind_time");
 /// NIP-01 single-letter tag index, borrowing nostrdb's clustered
 /// `(tag,value,created_at)` layout. The binary key is:
 ///
@@ -212,21 +209,20 @@ pub(super) const COMPARISON_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey>
 ///
 /// Comparison-only, exactly like [`BY_CREATED_AT`].
 #[cfg(feature = "bench-instrumentation")]
-pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag_v6");
+pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag");
 /// Immutable packed ordered-postings artifacts. Packed postings are the
 /// current query-authoritative representation.
 pub(super) const POSTINGS_SEGMENTS: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("postings_segments_v8");
+    TableDefinition::new("postings_segments");
 pub(super) const POSTINGS_DICTIONARIES: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("postings_dictionaries_v8");
+    TableDefinition::new("postings_dictionaries");
 pub(super) const POSTINGS_RUN_META: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("postings_run_meta_v8");
+    TableDefinition::new("postings_run_meta");
 pub(super) const POSTINGS_RUN_BY_MIN: TableDefinition<u64, u64> =
-    TableDefinition::new("postings_run_by_min_v8");
+    TableDefinition::new("postings_run_by_min");
 pub(super) const POSTINGS_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("postings_dead_keys_v8");
-pub(super) const POSTINGS_META: TableDefinition<&str, u64> =
-    TableDefinition::new("postings_meta_v8");
+    TableDefinition::new("postings_dead_keys");
+pub(super) const POSTINGS_META: TableDefinition<&str, u64> = TableDefinition::new("postings_meta");
 pub(super) const POSTINGS_NEXT_RUN_ID: &str = "next_run_id";
 pub(super) const POSTINGS_READY: &str = "query_ready";
 /// Uniform sampled live-row counts for every ordered-index prefix. Keys are
@@ -243,7 +239,7 @@ pub(super) const INDEX_CARDINALITY_VERSION: u64 = 3;
 pub(super) const INDEX_CARDINALITY_SAMPLE_META: TableDefinition<&str, &[u8]> =
     TableDefinition::new("index_cardinality_sample_meta");
 pub(super) const INDEX_CARDINALITY_SAMPLE_KEY: &str = "key";
-/// Fresh durable-delivery v1 namespace (#1027). The key widths are the
+/// Fresh publish-queue v1 namespace (#1027). The key widths are the
 /// semantic contract, not redb's numeric layout:
 ///
 /// - intent/receipt: `u64-be`;
@@ -253,40 +249,40 @@ pub(super) const INDEX_CARDINALITY_SAMPLE_KEY: &str = "key";
 /// - route revision: `intent:u64-be | ordinal:u64-be`;
 /// - deadline: `time:u64-be | intent:u64-be | relay:u32-be`.
 ///
-/// Values use the explicit codec in `delivery_codec.rs`. No previous
+/// Values use the explicit codec in `publish_queue_codec.rs`. No previous
 /// execution table is opened, read, transformed, or deleted.
-pub(super) const DELIVERY_INTENTS: TableDefinition<&[u8; 8], &[u8]> =
-    TableDefinition::new("delivery_intents_v1");
-pub(super) const DELIVERY_DISPLACED: TableDefinition<&[u8; 8], &[u8]> =
-    TableDefinition::new("delivery_displaced_v1");
-pub(super) const DELIVERY_ATTEMPTS: TableDefinition<&[u8; 20], &[u8]> =
-    TableDefinition::new("delivery_attempts_v1");
-pub(super) const DELIVERY_ROUTE_REVISIONS: TableDefinition<&[u8; 16], &[u8]> =
-    TableDefinition::new("delivery_route_revisions_v1");
-pub(super) const DELIVERY_LANES: TableDefinition<&[u8; 12], &[u8]> =
-    TableDefinition::new("delivery_lanes_v1");
-pub(super) const DELIVERY_DEADLINES: TableDefinition<&[u8; 20], &[u8]> =
-    TableDefinition::new("delivery_deadlines_v1");
-pub(super) const DELIVERY_DEADLINES_BY_INTENT: TableDefinition<&[u8; 20], &[u8]> =
-    TableDefinition::new("delivery_deadlines_by_intent_v1");
-pub(super) const DELIVERY_ATTEMPT_DETAILS: TableDefinition<&[u8; 20], &[u8]> =
-    TableDefinition::new("delivery_attempt_details_v1");
-pub(super) const DELIVERY_META: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("delivery_meta_v1");
-pub(super) const DELIVERY_RECEIPTS: TableDefinition<&[u8; 8], &[u8]> =
-    TableDefinition::new("delivery_receipts_v1");
-pub(super) const DELIVERY_CORRELATIONS: TableDefinition<&[u8], &[u8; 8]> =
-    TableDefinition::new("delivery_correlations_v1");
-pub(super) const DELIVERY_RELAYS: TableDefinition<&[u8; 4], &[u8]> =
-    TableDefinition::new("delivery_relays_v1");
-pub(super) const DELIVERY_RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
-    TableDefinition::new("delivery_relay_ids_v1");
-pub(super) const DELIVERY_KIND5_CLAIMS: TableDefinition<&[u8; 8], &[u8]> =
-    TableDefinition::new("delivery_kind5_claims_v1");
-pub(super) const DELIVERY_SUPPRESS_BY_ID: TableDefinition<&[u8; 64], &[u8]> =
-    TableDefinition::new("delivery_suppress_by_id_v1");
-pub(super) const DELIVERY_SUPPRESS_BY_ADDR: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("delivery_suppress_by_addr_v1");
+pub(super) const PUBLISH_QUEUE_INTENTS: TableDefinition<&[u8; 8], &[u8]> =
+    TableDefinition::new("publish_queue_intents");
+pub(super) const PUBLISH_QUEUE_DISPLACED: TableDefinition<&[u8; 8], &[u8]> =
+    TableDefinition::new("publish_queue_displaced");
+pub(super) const PUBLISH_QUEUE_ATTEMPTS: TableDefinition<&[u8; 20], &[u8]> =
+    TableDefinition::new("publish_queue_attempts");
+pub(super) const PUBLISH_QUEUE_ROUTE_REVISIONS: TableDefinition<&[u8; 16], &[u8]> =
+    TableDefinition::new("publish_queue_route_revisions");
+pub(super) const PUBLISH_QUEUE_LANES: TableDefinition<&[u8; 12], &[u8]> =
+    TableDefinition::new("publish_queue_lanes");
+pub(super) const PUBLISH_QUEUE_DEADLINES: TableDefinition<&[u8; 20], &[u8]> =
+    TableDefinition::new("publish_queue_deadlines");
+pub(super) const PUBLISH_QUEUE_DEADLINES_BY_INTENT: TableDefinition<&[u8; 20], &[u8]> =
+    TableDefinition::new("publish_queue_deadlines_by_intent");
+pub(super) const PUBLISH_QUEUE_ATTEMPT_DETAILS: TableDefinition<&[u8; 20], &[u8]> =
+    TableDefinition::new("publish_queue_attempt_details");
+pub(super) const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("publish_queue_meta");
+pub(super) const PUBLISH_QUEUE_RECEIPTS: TableDefinition<&[u8; 8], &[u8]> =
+    TableDefinition::new("publish_queue_receipts");
+pub(super) const PUBLISH_QUEUE_CORRELATIONS: TableDefinition<&[u8], &[u8; 8]> =
+    TableDefinition::new("publish_queue_correlations");
+pub(super) const PUBLISH_QUEUE_RELAYS: TableDefinition<&[u8; 4], &[u8]> =
+    TableDefinition::new("publish_queue_relays");
+pub(super) const PUBLISH_QUEUE_RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
+    TableDefinition::new("publish_queue_relay_ids");
+pub(super) const PUBLISH_QUEUE_KIND5_CLAIMS: TableDefinition<&[u8; 8], &[u8]> =
+    TableDefinition::new("publish_queue_kind5_claims");
+pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ID: TableDefinition<&[u8; 64], &[u8]> =
+    TableDefinition::new("publish_queue_suppress_by_id");
+pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ADDR: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("publish_queue_suppress_by_addr");
 
 /// The `tombstones` table's key for one (target id, claiming author) pair —
 /// see [`TOMBSTONES`]'s doc for why this is composite, not just the id.

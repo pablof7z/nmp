@@ -16,7 +16,7 @@ use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority
 use nmp_store::{
     coverage_key, sentinel_signature, AcceptWrite, CoverageInterval, EventCursor, EventStore,
     GcRetentionSet, InsertOutcome, IntentSigState, MemoryStore, Provenance, RedbStore,
-    RefuseReason, RelayObserved, RetractReason, StoredEvent, WriteDurability,
+    RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -1858,7 +1858,6 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
                 monotonic_stamp: false,
                 expected_pubkey: k.public_key(),
                 signing_identity_ref: "coverage-proof".into(),
-                durability: WriteDurability::Durable,
                 routing: "coverage-proof".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(220u64),
@@ -2035,7 +2034,6 @@ fn a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_b
                 monotonic_stamp: false,
                 expected_pubkey: k.public_key(),
                 signing_identity_ref: "optimistic-1182".into(),
-                durability: WriteDurability::Durable,
                 routing: "optimistic-1182".into(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(500u64),

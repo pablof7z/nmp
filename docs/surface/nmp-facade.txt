@@ -13,7 +13,6 @@ pub use nmp::CryptoCapability
 pub use nmp::Demand
 pub use nmp::DemandError
 pub use nmp::Derived
-pub use nmp::Durability
 pub use nmp::Event
 pub use nmp::EventBuilder
 pub use nmp::EventId
@@ -31,6 +30,7 @@ pub use nmp::NostrEntityError
 pub use nmp::PendingSignerResolveError
 pub use nmp::PendingSignerSender
 pub use nmp::PublicKey
+pub use nmp::RefuseReason
 pub use nmp::RelayUrl
 pub use nmp::Selector
 pub use nmp::SetAlgebra
@@ -395,7 +395,7 @@ pub fn nmp::nip29::group(impl core::iter::traits::collect::IntoIterator<Item = n
 pub fn nmp::nip29::groups_whose_record_matches(nmp_grammar::binding::Filter) -> core::result::Result<nmp::nip29::GroupIds, nmp::nip29::GroupPredicateError>
 pub fn nmp::nip29::member_list_includes(nmp_grammar::binding::Binding) -> nmp::nip29::GroupIds
 pub fn nmp::nip29::on(impl core::iter::traits::collect::IntoIterator<Item = nostr::types::url::RelayUrl>) -> core::result::Result<nmp::nip29::RelayScope, nmp::nip29::RelayScopeError>
-pub type nmp::nip29::GroupReceipts = nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteStatus>
+pub type nmp::nip29::GroupReceipts = nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteFact>
 pub enum nmp::AuthDenialSource
 pub nmp::AuthDenialSource::Policy
 pub nmp::AuthDenialSource::Relay
@@ -516,10 +516,10 @@ impl core::marker::UnsafeUnpin for nmp::AuthPolicyResolveError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyResolveError
 impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyResolveError
 pub enum nmp::CancelWriteError
-pub nmp::CancelWriteError::AlreadyAbandoned
-pub nmp::CancelWriteError::AlreadyAbandoned::receipt_id: nmp::ReceiptId
 pub nmp::CancelWriteError::AlreadyCompensated
 pub nmp::CancelWriteError::AlreadyCompensated::receipt_id: nmp::ReceiptId
+pub nmp::CancelWriteError::AlreadyRefused
+pub nmp::CancelWriteError::AlreadyRefused::receipt_id: nmp::ReceiptId
 pub nmp::CancelWriteError::AlreadySigned
 pub nmp::CancelWriteError::AlreadySigned::event_id: nostr::event::id::EventId
 pub nmp::CancelWriteError::AlreadySigned::receipt_id: nmp::ReceiptId
@@ -580,7 +580,8 @@ pub nmp::EngineError::InvalidRelayUrl::url: alloc::string::String
 pub nmp::EngineError::InvalidSecretKey
 pub nmp::EngineError::ObservationUnavailable
 pub nmp::EngineError::ObservationUnavailable::reason: alloc::string::String
-pub nmp::EngineError::ReceiptCorrelationIdExhausted
+pub nmp::EngineError::PublishRefused
+pub nmp::EngineError::PublishRefused::reason: alloc::string::String
 pub nmp::EngineError::SignerMissingPublicKey
 pub nmp::EngineError::StoreAlreadyOpen
 pub nmp::EngineError::StoreAlreadyOpen::path: alloc::string::String
@@ -617,11 +618,30 @@ impl core::marker::Unpin for nmp::EngineError
 impl core::marker::UnsafeUnpin for nmp::EngineError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::EngineError
 impl core::panic::unwind_safe::UnwindSafe for nmp::EngineError
+pub enum nmp::NotSentReason
+pub nmp::NotSentReason::Cancelled
+pub nmp::NotSentReason::Superseded
+impl core::clone::Clone for nmp::NotSentReason
+pub fn nmp::NotSentReason::clone(&self) -> nmp::NotSentReason
+impl core::cmp::Eq for nmp::NotSentReason
+impl core::cmp::PartialEq for nmp::NotSentReason
+pub fn nmp::NotSentReason::eq(&self, &nmp::NotSentReason) -> bool
+impl core::fmt::Debug for nmp::NotSentReason
+pub fn nmp::NotSentReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::NotSentReason
+impl core::marker::StructuralPartialEq for nmp::NotSentReason
+impl core::marker::Freeze for nmp::NotSentReason
+impl core::marker::Send for nmp::NotSentReason
+impl core::marker::Sync for nmp::NotSentReason
+impl core::marker::Unpin for nmp::NotSentReason
+impl core::marker::UnsafeUnpin for nmp::NotSentReason
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::NotSentReason
+impl core::panic::unwind_safe::UnwindSafe for nmp::NotSentReason
 pub enum nmp::ReceiptReattachment
 pub nmp::ReceiptReattachment::Attached
 pub nmp::ReceiptReattachment::Attached::id: nmp::ReceiptId
 pub nmp::ReceiptReattachment::Attached::next_cursor: core::option::Option<nmp::core::ReceiptReplayCursor>
-pub nmp::ReceiptReattachment::Attached::statuses: nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteStatus>
+pub nmp::ReceiptReattachment::Attached::statuses: nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteFact>
 pub nmp::ReceiptReattachment::NotFound
 pub nmp::ReceiptReattachment::RetainedButUnreadable
 impl core::marker::Freeze for nmp::ReceiptReattachment
@@ -717,6 +737,88 @@ impl core::marker::Unpin for nmp::RelayInformationRequestError
 impl core::marker::UnsafeUnpin for nmp::RelayInformationRequestError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationRequestError
 impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationRequestError
+pub enum nmp::RelayState
+pub nmp::RelayState::AuthFailed
+pub nmp::RelayState::AuthFailed::pubkey: nostr::key::public_key::PublicKey
+pub nmp::RelayState::AuthFailed::reason: alloc::string::String
+pub nmp::RelayState::AuthFailed::source: nmp::AuthDenialSource
+pub nmp::RelayState::GaveUp
+pub nmp::RelayState::Published
+pub nmp::RelayState::Rejected
+pub nmp::RelayState::Rejected::reason: alloc::string::String
+pub nmp::RelayState::Sent
+pub nmp::RelayState::Sent::attempt: u64
+pub nmp::RelayState::Sent::written_at: nostr::types::time::Timestamp
+pub nmp::RelayState::Waiting(nmp::RelayWaiting)
+impl nmp::RelayState
+pub fn nmp::RelayState::is_terminal(&self) -> bool
+impl core::clone::Clone for nmp::RelayState
+pub fn nmp::RelayState::clone(&self) -> nmp::RelayState
+impl core::cmp::Eq for nmp::RelayState
+impl core::cmp::PartialEq for nmp::RelayState
+pub fn nmp::RelayState::eq(&self, &nmp::RelayState) -> bool
+impl core::fmt::Debug for nmp::RelayState
+pub fn nmp::RelayState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::RelayState
+impl core::marker::Freeze for nmp::RelayState
+impl core::marker::Send for nmp::RelayState
+impl core::marker::Sync for nmp::RelayState
+impl core::marker::Unpin for nmp::RelayState
+impl core::marker::UnsafeUnpin for nmp::RelayState
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayState
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayState
+pub enum nmp::RelayWaiting
+pub nmp::RelayWaiting::BackingOff
+pub nmp::RelayWaiting::BackingOff::attempt: u64
+pub nmp::RelayWaiting::BackingOff::cause: nmp::RetryCause
+pub nmp::RelayWaiting::BackingOff::detail: core::option::Option<alloc::string::String>
+pub nmp::RelayWaiting::BackingOff::eligible_at: nostr::types::time::Timestamp
+pub nmp::RelayWaiting::NeedsAuth
+pub nmp::RelayWaiting::NotConnected
+pub nmp::RelayWaiting::PersistenceStalled
+pub nmp::RelayWaiting::PersistenceStalled::detail: alloc::string::String
+impl core::clone::Clone for nmp::RelayWaiting
+pub fn nmp::RelayWaiting::clone(&self) -> nmp::RelayWaiting
+impl core::cmp::Eq for nmp::RelayWaiting
+impl core::cmp::PartialEq for nmp::RelayWaiting
+pub fn nmp::RelayWaiting::eq(&self, &nmp::RelayWaiting) -> bool
+impl core::fmt::Debug for nmp::RelayWaiting
+pub fn nmp::RelayWaiting::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::RelayWaiting
+impl core::marker::Freeze for nmp::RelayWaiting
+impl core::marker::Send for nmp::RelayWaiting
+impl core::marker::Sync for nmp::RelayWaiting
+impl core::marker::Unpin for nmp::RelayWaiting
+impl core::marker::UnsafeUnpin for nmp::RelayWaiting
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayWaiting
+impl core::panic::unwind_safe::UnwindSafe for nmp::RelayWaiting
+pub enum nmp::RemoveQueueEntryError
+pub nmp::RemoveQueueEntryError::EngineClosed
+pub nmp::RemoveQueueEntryError::PersistenceFailed
+pub nmp::RemoveQueueEntryError::PersistenceFailed::reason: alloc::string::String
+pub nmp::RemoveQueueEntryError::PersistenceFailed::receipt_id: nmp::ReceiptId
+pub nmp::RemoveQueueEntryError::StillActive
+pub nmp::RemoveQueueEntryError::StillActive::receipt_id: nmp::ReceiptId
+pub nmp::RemoveQueueEntryError::UnknownReceipt
+pub nmp::RemoveQueueEntryError::UnknownReceipt::receipt_id: nmp::ReceiptId
+impl core::clone::Clone for nmp::RemoveQueueEntryError
+pub fn nmp::RemoveQueueEntryError::clone(&self) -> nmp::RemoveQueueEntryError
+impl core::cmp::Eq for nmp::RemoveQueueEntryError
+impl core::cmp::PartialEq for nmp::RemoveQueueEntryError
+pub fn nmp::RemoveQueueEntryError::eq(&self, &nmp::RemoveQueueEntryError) -> bool
+impl core::error::Error for nmp::RemoveQueueEntryError
+impl core::fmt::Debug for nmp::RemoveQueueEntryError
+pub fn nmp::RemoveQueueEntryError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::RemoveQueueEntryError
+pub fn nmp::RemoveQueueEntryError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::RemoveQueueEntryError
+impl core::marker::Freeze for nmp::RemoveQueueEntryError
+impl core::marker::Send for nmp::RemoveQueueEntryError
+impl core::marker::Sync for nmp::RemoveQueueEntryError
+impl core::marker::Unpin for nmp::RemoveQueueEntryError
+impl core::marker::UnsafeUnpin for nmp::RemoveQueueEntryError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RemoveQueueEntryError
+impl core::panic::unwind_safe::UnwindSafe for nmp::RemoveQueueEntryError
 pub enum nmp::RequestRowsError
 pub nmp::RequestRowsError::EngineClosed
 pub nmp::RequestRowsError::StoreUnavailable
@@ -832,6 +934,28 @@ impl core::marker::Unpin for nmp::SignEventError
 impl core::marker::UnsafeUnpin for nmp::SignEventError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignEventError
 impl core::panic::unwind_safe::UnwindSafe for nmp::SignEventError
+pub enum nmp::SigningState
+pub nmp::SigningState::AwaitingSigner
+pub nmp::SigningState::AwaitingSigner::pubkey: nostr::key::public_key::PublicKey
+pub nmp::SigningState::Refused
+pub nmp::SigningState::Refused::reason: alloc::string::String
+pub nmp::SigningState::Signed
+pub nmp::SigningState::Signed::event_id: nostr::event::id::EventId
+impl core::clone::Clone for nmp::SigningState
+pub fn nmp::SigningState::clone(&self) -> nmp::SigningState
+impl core::cmp::Eq for nmp::SigningState
+impl core::cmp::PartialEq for nmp::SigningState
+pub fn nmp::SigningState::eq(&self, &nmp::SigningState) -> bool
+impl core::fmt::Debug for nmp::SigningState
+pub fn nmp::SigningState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::SigningState
+impl core::marker::Freeze for nmp::SigningState
+impl core::marker::Send for nmp::SigningState
+impl core::marker::Sync for nmp::SigningState
+impl core::marker::Unpin for nmp::SigningState
+impl core::marker::UnsafeUnpin for nmp::SigningState
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SigningState
+impl core::panic::unwind_safe::UnwindSafe for nmp::SigningState
 pub enum nmp::SourceStatus
 pub nmp::SourceStatus::AuthDenied
 pub nmp::SourceStatus::AwaitingAuth
@@ -923,66 +1047,50 @@ impl core::marker::Unpin for nmp::WindowLoad
 impl core::marker::UnsafeUnpin for nmp::WindowLoad
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::WindowLoad
 impl core::panic::unwind_safe::UnwindSafe for nmp::WindowLoad
-pub enum nmp::WriteStatus
-pub nmp::WriteStatus::Accepted
-pub nmp::WriteStatus::Acked(nostr::types::url::RelayUrl)
-pub nmp::WriteStatus::AuthDenied
-pub nmp::WriteStatus::AuthDenied::pubkey: nostr::key::public_key::PublicKey
-pub nmp::WriteStatus::AuthDenied::reason: alloc::string::String
-pub nmp::WriteStatus::AuthDenied::relay: nostr::types::url::RelayUrl
-pub nmp::WriteStatus::AuthDenied::source: nmp::AuthDenialSource
-pub nmp::WriteStatus::AwaitingAuth
-pub nmp::WriteStatus::AwaitingAuth::relay: nostr::types::url::RelayUrl
-pub nmp::WriteStatus::AwaitingCapability
-pub nmp::WriteStatus::AwaitingCapability::pubkey: nostr::key::public_key::PublicKey
-pub nmp::WriteStatus::AwaitingRelay
-pub nmp::WriteStatus::AwaitingRelay::relay: nostr::types::url::RelayUrl
-pub nmp::WriteStatus::AwaitingRoute
-pub nmp::WriteStatus::AwaitingRoute::detail: alloc::string::String
-pub nmp::WriteStatus::Cancelled
-pub nmp::WriteStatus::Failed(alloc::string::String)
-pub nmp::WriteStatus::GaveUp(nostr::types::url::RelayUrl)
-pub nmp::WriteStatus::HandoffAmbiguous
-pub nmp::WriteStatus::HandoffAmbiguous::attempt: u64
-pub nmp::WriteStatus::HandoffAmbiguous::observed_at: nostr::types::time::Timestamp
-pub nmp::WriteStatus::HandoffAmbiguous::relay: nostr::types::url::RelayUrl
-pub nmp::WriteStatus::OutcomeUnknown(nostr::types::url::RelayUrl)
-pub nmp::WriteStatus::PersistenceBlocked(nostr::types::url::RelayUrl)
-pub nmp::WriteStatus::Rejected(nostr::types::url::RelayUrl, alloc::string::String)
-pub nmp::WriteStatus::ReplaceableConflict
-pub nmp::WriteStatus::ReplaceableConflict::actual: core::option::Option<nostr::event::id::EventId>
-pub nmp::WriteStatus::ReplaceableConflict::expected: core::option::Option<nostr::event::id::EventId>
-pub nmp::WriteStatus::RetryEligible
-pub nmp::WriteStatus::RetryEligible::attempt: u64
-pub nmp::WriteStatus::RetryEligible::cause: nmp::RetryCause
-pub nmp::WriteStatus::RetryEligible::detail: core::option::Option<alloc::string::String>
-pub nmp::WriteStatus::RetryEligible::eligible_at: nostr::types::time::Timestamp
-pub nmp::WriteStatus::RetryEligible::relay: nostr::types::url::RelayUrl
-pub nmp::WriteStatus::RoutePersistenceBlocked(nostr::types::url::RelayUrl)
-pub nmp::WriteStatus::Routed
-pub nmp::WriteStatus::Routed::complete: bool
-pub nmp::WriteStatus::Routed::relays: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
-pub nmp::WriteStatus::Sent
-pub nmp::WriteStatus::Sent::attempt: u64
-pub nmp::WriteStatus::Sent::relay: nostr::types::url::RelayUrl
-pub nmp::WriteStatus::Sent::written_at: nostr::types::time::Timestamp
-pub nmp::WriteStatus::Signed(nostr::event::id::EventId)
-pub nmp::WriteStatus::Superseded
-impl core::clone::Clone for nmp::WriteStatus
-pub fn nmp::WriteStatus::clone(&self) -> nmp::WriteStatus
-impl core::cmp::Eq for nmp::WriteStatus
-impl core::cmp::PartialEq for nmp::WriteStatus
-pub fn nmp::WriteStatus::eq(&self, &nmp::WriteStatus) -> bool
-impl core::fmt::Debug for nmp::WriteStatus
-pub fn nmp::WriteStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for nmp::WriteStatus
-impl core::marker::Freeze for nmp::WriteStatus
-impl core::marker::Send for nmp::WriteStatus
-impl core::marker::Sync for nmp::WriteStatus
-impl core::marker::Unpin for nmp::WriteStatus
-impl core::marker::UnsafeUnpin for nmp::WriteStatus
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::WriteStatus
-impl core::panic::unwind_safe::UnwindSafe for nmp::WriteStatus
+pub enum nmp::WriteFact
+pub nmp::WriteFact::Destinations
+pub nmp::WriteFact::Destinations::complete: bool
+pub nmp::WriteFact::Destinations::relays: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
+pub nmp::WriteFact::Outcome(nmp::WriteOutcome)
+pub nmp::WriteFact::Relay
+pub nmp::WriteFact::Relay::relay: nostr::types::url::RelayUrl
+pub nmp::WriteFact::Relay::state: nmp::RelayState
+pub nmp::WriteFact::Signing(nmp::SigningState)
+impl core::clone::Clone for nmp::WriteFact
+pub fn nmp::WriteFact::clone(&self) -> nmp::WriteFact
+impl core::cmp::Eq for nmp::WriteFact
+impl core::cmp::PartialEq for nmp::WriteFact
+pub fn nmp::WriteFact::eq(&self, &nmp::WriteFact) -> bool
+impl core::fmt::Debug for nmp::WriteFact
+pub fn nmp::WriteFact::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::WriteFact
+impl core::marker::Freeze for nmp::WriteFact
+impl core::marker::Send for nmp::WriteFact
+impl core::marker::Sync for nmp::WriteFact
+impl core::marker::Unpin for nmp::WriteFact
+impl core::marker::UnsafeUnpin for nmp::WriteFact
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::WriteFact
+impl core::panic::unwind_safe::UnwindSafe for nmp::WriteFact
+pub enum nmp::WriteOutcome
+pub nmp::WriteOutcome::NoDestination
+pub nmp::WriteOutcome::NotSent(nmp::NotSentReason)
+pub nmp::WriteOutcome::Refused(nmp_store::RefuseReason)
+pub nmp::WriteOutcome::Settled
+impl core::clone::Clone for nmp::WriteOutcome
+pub fn nmp::WriteOutcome::clone(&self) -> nmp::WriteOutcome
+impl core::cmp::Eq for nmp::WriteOutcome
+impl core::cmp::PartialEq for nmp::WriteOutcome
+pub fn nmp::WriteOutcome::eq(&self, &nmp::WriteOutcome) -> bool
+impl core::fmt::Debug for nmp::WriteOutcome
+pub fn nmp::WriteOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::WriteOutcome
+impl core::marker::Freeze for nmp::WriteOutcome
+impl core::marker::Send for nmp::WriteOutcome
+impl core::marker::Sync for nmp::WriteOutcome
+impl core::marker::Unpin for nmp::WriteOutcome
+impl core::marker::UnsafeUnpin for nmp::WriteOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::WriteOutcome
+impl core::panic::unwind_safe::UnwindSafe for nmp::WriteOutcome
 pub struct nmp::AccountRegistration
 impl nmp::AccountRegistration
 pub fn nmp::AccountRegistration::public_key(&self) -> nostr::key::public_key::PublicKey
@@ -1164,13 +1272,15 @@ pub fn nmp::Engine::cancel(&self, nmp::ReceiptId) -> core::result::Result<nmp::C
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
 pub fn nmp::Engine::observe(&self, nmp_grammar::live_query::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
-pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteStatus>, nmp::EngineError>
+pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteFact>, nmp::EngineError>
+pub fn nmp::Engine::publish_queue(&self) -> core::result::Result<alloc::vec::Vec<nmp::PublishQueueEntry>, nmp::RemoveQueueEntryError>
 pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::reattach_by_correlation(&self, alloc::string::String) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp::ReceiptId) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
 pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>
 pub fn nmp::Engine::remove_account(&self, &nmp::AccountRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::remove_auth_policy(&self, &nmp::AuthPolicyRegistration) -> core::result::Result<bool, nmp::EngineError>
+pub fn nmp::Engine::remove_publish_queue_entry(&self, nmp::ReceiptId) -> core::result::Result<(), nmp::RemoveQueueEntryError>
 pub fn nmp::Engine::remove_signer(&self, nmp::SignerRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
 pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
@@ -1191,6 +1301,7 @@ pub nmp::EngineConfig::app_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::fallback_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::indexer_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::max_auth_capabilities: usize
+pub nmp::EngineConfig::max_publish_attempts: u64
 pub nmp::EngineConfig::max_relays: usize
 pub nmp::EngineConfig::store_path: core::option::Option<alloc::string::String>
 pub nmp::EngineConfig::tor_reachable: bool
@@ -1269,6 +1380,34 @@ impl core::marker::Unpin for nmp::ObservationEvidence
 impl core::marker::UnsafeUnpin for nmp::ObservationEvidence
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::ObservationEvidence
 impl core::panic::unwind_safe::UnwindSafe for nmp::ObservationEvidence
+pub struct nmp::PublishQueueEntry
+pub nmp::PublishQueueEntry::accepted_at: nostr::types::time::Timestamp
+pub nmp::PublishQueueEntry::event_id: nostr::event::id::EventId
+pub nmp::PublishQueueEntry::outcome: core::option::Option<nmp::WriteOutcome>
+pub nmp::PublishQueueEntry::persistence_fault: core::option::Option<alloc::string::String>
+pub nmp::PublishQueueEntry::pubkey: nostr::key::public_key::PublicKey
+pub nmp::PublishQueueEntry::receipt_id: nmp::ReceiptId
+pub nmp::PublishQueueEntry::relay_states: alloc::vec::Vec<(nostr::types::url::RelayUrl, nmp::RelayState)>
+pub nmp::PublishQueueEntry::relays: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
+pub nmp::PublishQueueEntry::route_complete: bool
+pub nmp::PublishQueueEntry::signing: nmp::SigningState
+impl nmp::PublishQueueEntry
+pub fn nmp::PublishQueueEntry::is_terminal(&self) -> bool
+impl core::clone::Clone for nmp::PublishQueueEntry
+pub fn nmp::PublishQueueEntry::clone(&self) -> nmp::PublishQueueEntry
+impl core::cmp::Eq for nmp::PublishQueueEntry
+impl core::cmp::PartialEq for nmp::PublishQueueEntry
+pub fn nmp::PublishQueueEntry::eq(&self, &nmp::PublishQueueEntry) -> bool
+impl core::fmt::Debug for nmp::PublishQueueEntry
+pub fn nmp::PublishQueueEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::PublishQueueEntry
+impl core::marker::Freeze for nmp::PublishQueueEntry
+impl core::marker::Send for nmp::PublishQueueEntry
+impl core::marker::Sync for nmp::PublishQueueEntry
+impl core::marker::Unpin for nmp::PublishQueueEntry
+impl core::marker::UnsafeUnpin for nmp::PublishQueueEntry
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::PublishQueueEntry
+impl core::panic::unwind_safe::UnwindSafe for nmp::PublishQueueEntry
 pub struct nmp::ReceiptId(pub u64)
 impl core::clone::Clone for nmp::ReceiptId
 pub fn nmp::ReceiptId::clone(&self) -> nmp::ReceiptId
@@ -1294,7 +1433,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::ReceiptId
 impl core::panic::unwind_safe::UnwindSafe for nmp::ReceiptId
 pub struct nmp::ReceiptStream
 pub nmp::ReceiptStream::id: nmp::ReceiptId
-pub nmp::ReceiptStream::statuses: nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteStatus>
+pub nmp::ReceiptStream::statuses: nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteFact>
 impl core::marker::Freeze for nmp::ReceiptStream
 impl core::marker::Send for nmp::ReceiptStream
 impl core::marker::Sync for nmp::ReceiptStream
@@ -1608,6 +1747,7 @@ impl core::marker::Unpin for nmp::WindowHandle
 impl core::marker::UnsafeUnpin for nmp::WindowHandle
 impl !core::panic::unwind_safe::RefUnwindSafe for nmp::WindowHandle
 impl !core::panic::unwind_safe::UnwindSafe for nmp::WindowHandle
+pub const nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS: u64
 pub trait nmp::AuthPolicy: core::marker::Send
 pub fn nmp::AuthPolicy::evaluate(&self, nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp
 pub type nmp::AuthPolicyResult = core::result::Result<nmp::AuthPolicyDecision, nmp::AuthPolicyError>
@@ -7961,56 +8101,6 @@ reexport nmp::DemandError => nmp_grammar::descriptor::DemandError
 reexport nmp::Derived => nmp_grammar::binding::Derived
 {
   "previously_defined": "nmp_grammar::binding::Derived"
-}
-reexport nmp::Durability => nmp_grammar::write::Durability
-{
-  "attrs": [],
-  "inner": {
-    "enum": {
-      "generics": {
-        "params": [],
-        "where_predicates": []
-      },
-      "has_stripped_variants": false,
-      "variants": [
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "Durable",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "Ephemeral",
-          "visibility": "default"
-        },
-        {
-          "attrs": [],
-          "inner": {
-            "variant": {
-              "discriminant": null,
-              "kind": "plain"
-            }
-          },
-          "name": "AtMostOnce",
-          "visibility": "default"
-        }
-      ]
-    }
-  },
-  "name": "Durability",
-  "visibility": "public"
 }
 reexport nmp::Event => nostr::event::Event
 {
@@ -27269,25 +27359,6 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                 }
               },
               "name": "payload",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": null,
-                    "path": "Durability",
-                    "resolved_item": {
-                      "definition": {
-                        "previously_defined": "nmp_grammar::write::Durability"
-                      },
-                      "path": "nmp_grammar::write::Durability"
-                    }
-                  }
-                }
-              },
-              "name": "durability",
               "visibility": "public"
             },
             {

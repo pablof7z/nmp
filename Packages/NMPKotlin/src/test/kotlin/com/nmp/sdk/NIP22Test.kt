@@ -168,8 +168,9 @@ class NIP22Test {
 
     /** #572's offline-signer durable acceptance + restart reattachment
      * falsifier: compose a comment intent while the active identity has no
-     * signer, publish, observe `Accepted` + `AwaitingCapability` (the
-     * canonical "locally pending" state), and prove the SAME token
+     * signer, publish (acceptance IS the return), observe the park at
+     * `Signing(AwaitingSigner)` -- the canonical "locally pending" state
+     * -- and prove the SAME token
      * reattaches the identical obligation. */
     @Test
     fun offlineSignerDurableAcceptanceAndCorrelationReattachment() =
@@ -186,10 +187,10 @@ class NIP22Test {
                         correlation = token,
                     )
                 val receipt = engine.publish(intent)
-                val statuses = withTimeout(5_000) { receipt.status.take(2).toList() }
+                val facts = withTimeout(5_000) { receipt.status.take(1).toList() }
                 assertEquals(
-                    listOf(WriteStatus.Accepted, WriteStatus.AwaitingCapability(author)),
-                    statuses,
+                    listOf(WriteFact.Signing(SigningState.AwaitingSigner(author))),
+                    facts,
                 )
 
                 // The app never learned the numeric receipt id (it only minted
@@ -198,10 +199,15 @@ class NIP22Test {
                 val reattachment = engine.reattachReceipt(token)
                 assertTrue(reattachment is ReceiptReattachment.Attached)
                 val replay = (reattachment as ReceiptReattachment.Attached).receipt
-                val replayStatuses = withTimeout(5_000) { replay.status.take(2).toList() }
+                // A reattachment REPLAYS the retained obligation: both parks,
+                // the unattached signer and the unresolved route.
+                val replayFacts = withTimeout(5_000) { replay.status.take(2).toList() }
                 assertEquals(
-                    listOf(WriteStatus.Accepted, WriteStatus.AwaitingCapability(author)),
-                    replayStatuses,
+                    listOf(
+                        WriteFact.Signing(SigningState.AwaitingSigner(author)),
+                        WriteFact.Destinations(emptyList(), false),
+                    ),
+                    replayFacts,
                 )
             }
         }
@@ -236,7 +242,6 @@ class NIP22Test {
             ),
             payload.tags,
         )
-        assertEquals(Durability.Durable, intent.durability)
         assertEquals(WriteRouting.Auto, intent.routing)
         assertEquals(Identity.Active, intent.identity)
         assertEquals(null, intent.correlation)
@@ -267,7 +272,7 @@ class NIP22Test {
                         content = "visible through the ordinary query path",
                     )
                 val receipt = engine.publish(intent)
-                withTimeout(5_000) { receipt.status.take(2).toList() }
+                withTimeout(5_000) { receipt.status.take(1).toList() }
 
                 val row = withTimeout(5_000) { rowFlow.first { it.rows.isNotEmpty() } }.rows.first()
                 assertEquals(author, row.pubkey)

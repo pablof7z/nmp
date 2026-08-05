@@ -78,7 +78,28 @@ pub struct EngineConfig {
     /// attempt then fails with
     /// [`EngineError::AuthCapabilityRegistryFull`](crate::EngineError::AuthCapabilityRegistryFull).
     pub max_auth_capabilities: usize,
+    /// How many failed attempts at ONE relay are enough evidence to stop
+    /// (#1031). Reaching it terminalises that lane as `RelayState::GaveUp`;
+    /// other relays are unaffected.
+    ///
+    /// It counts OBSERVATIONS, never wall-clock, and that is the whole
+    /// reason it is legitimate: "we tried N times and it failed N times" is
+    /// evidence, while "N seconds passed" converts ignorance into a verdict.
+    /// Time spent disconnected, parked on AUTH, or waiting for a route
+    /// consumes no attempt and can never exhaust this.
+    ///
+    /// It bounds DELIVERY only. A write whose destination is not yet known,
+    /// or whose signer has not attached, has no ceiling of any kind: it ends
+    /// when knowledge is exhausted, when the signer arrives, or when the app
+    /// removes it.
+    pub max_publish_attempts: u64,
 }
+
+/// Enough failures at one relay to call it: roughly a day of the capped
+/// 3s-doubling-to-300s backoff schedule, which is long enough that a relay
+/// having a bad afternoon is not abandoned and short enough that a relay
+/// that is simply gone stops holding an obligation open forever.
+pub const DEFAULT_MAX_PUBLISH_ATTEMPTS: u64 = 16;
 
 impl Default for EngineConfig {
     fn default() -> Self {
@@ -91,6 +112,7 @@ impl Default for EngineConfig {
             tor_reachable: false,
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
             max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
+            max_publish_attempts: DEFAULT_MAX_PUBLISH_ATTEMPTS,
         }
     }
 }

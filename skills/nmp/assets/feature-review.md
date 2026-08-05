@@ -35,7 +35,7 @@
 - [ ] Unowned schema/authority cannot be forged.
 - [ ] Canonical query/store path is the only read truth.
 - [ ] Final composition is deterministic and foreign fields survive.
-- [ ] Core signs once and durable delivery owns publication.
+- [ ] Core signs once and publish queue owns publication.
 - [ ] Rust/native observable facts agree.
 - [ ] Cancellation, shutdown, and pressure refusal are bounded.
 - [ ] Disabled/unused module leaves raw NMP useful.

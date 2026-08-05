@@ -173,7 +173,7 @@ public final class NMPGroup: @unchecked Sendable {
         tags: [[String]] = [],
         content: String = "",
         createdAt: UInt64? = nil
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.publish(
                 engine: engine.concreteFfiEngine,
@@ -181,7 +181,7 @@ public final class NMPGroup: @unchecked Sendable {
                 builder: FfiEventBuilder(kind: kind, tags: tags, content: content, createdAt: createdAt)
             )
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// Publish an ALREADY-SIGNED event into the group. The `h` it already
@@ -190,11 +190,11 @@ public final class NMPGroup: @unchecked Sendable {
     public func publishSigned(
         engine: NMPEngine,
         event: NMPSignedEvent
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.publishSigned(engine: engine.concreteFfiEngine, event: event.toFfiSignedEvent())
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9021 -- ask to join. Publishable with no subscription at all.
@@ -202,22 +202,22 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         inviteCode: String? = nil
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.joinRequest(engine: engine.concreteFfiEngine, author: authorPubkeyHex, inviteCode: inviteCode)
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9022 -- leave.
     public func leaveRequest(
         engine: NMPEngine,
         authorPubkeyHex: String
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.leaveRequest(engine: engine.concreteFfiEngine, author: authorPubkeyHex)
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9000 -- add a member, optionally with a role.
@@ -226,13 +226,13 @@ public final class NMPGroup: @unchecked Sendable {
         authorPubkeyHex: String,
         pubkeyHex: String,
         role: String? = nil
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.addUser(
                 engine: engine.concreteFfiEngine, author: authorPubkeyHex, pubkey: pubkeyHex, role: role
             )
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9001 -- remove a member.
@@ -240,11 +240,11 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         pubkeyHex: String
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.removeUser(engine: engine.concreteFfiEngine, author: authorPubkeyHex, pubkey: pubkeyHex)
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9002 -- set the group's display fields. An omitted field emits
@@ -254,13 +254,13 @@ public final class NMPGroup: @unchecked Sendable {
         authorPubkeyHex: String,
         name: String? = nil,
         about: String? = nil
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.editMetadata(
                 engine: engine.concreteFfiEngine, author: authorPubkeyHex, name: name, about: about
             )
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9005 -- delete one group-hosted event.
@@ -268,33 +268,33 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         eventID: String
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.deleteEvent(engine: engine.concreteFfiEngine, author: authorPubkeyHex, eventId: eventID)
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9007 -- create the group at its hosts.
     public func createGroup(
         engine: NMPEngine,
         authorPubkeyHex: String
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.createGroup(engine: engine.concreteFfiEngine, author: authorPubkeyHex)
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9008 -- delete the group from its hosts.
     public func deleteGroup(
         engine: NMPEngine,
         authorPubkeyHex: String
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.deleteGroup(engine: engine.concreteFfiEngine, author: authorPubkeyHex)
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 
     /// kind:9009 -- mint an invite code redeemable by `joinRequest`.
@@ -302,11 +302,11 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         code: String
-    ) throws -> NMPGroupWriteStatus {
+    ) throws -> NMPGroupWriteFacts {
         let receipts = try nmpRethrowing {
             try ffi.createInvite(engine: engine.concreteFfiEngine, author: authorPubkeyHex, code: code)
         }
-        return NMPGroupWriteStatus(handle: receipts)
+        return NMPGroupWriteFacts(handle: receipts)
     }
 }
 
@@ -430,10 +430,10 @@ extension NMPSignedEvent {
 }
 
 extension NmpGroupReceiptStream: NMPPullHandle {
-    func pullNext() async throws -> FfiWriteStatus? { try await next() }
+    func pullNext() async throws -> FfiWriteFact? { try await next() }
 }
 
-/// The ordered `WriteStatus` facts one group write's write reaches, pulled
+/// The ordered `WriteFact` facts one group write's write reaches, pulled
 /// from its untracked receipt handle (#1033). UNLIKE `ReceiptStatus` this
 /// carries NO receipt id: every `NMPGroup` write reaches the engine's
 /// untracked publish door (never `publish_tracked`), because the
@@ -441,8 +441,8 @@ extension NmpGroupReceiptStream: NMPPullHandle {
 /// scope has no reason to surface. Iterate with `for try await`; the handle
 /// is single-consumer, so a second concurrent iterator surfaces
 /// `NMPError.concurrentNext` rather than hanging.
-public struct NMPGroupWriteStatus: AsyncSequence, Sendable {
-    public typealias Element = WriteStatus
+public struct NMPGroupWriteFacts: AsyncSequence, Sendable {
+    public typealias Element = WriteFact
 
     private let handle: NmpGroupReceiptStream
     private let iteratorGate = NMPPullIteratorGate()
@@ -453,15 +453,15 @@ public struct NMPGroupWriteStatus: AsyncSequence, Sendable {
 
     public func makeAsyncIterator() -> Iterator {
         let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { status in
-            WriteStatus(status)
+            WriteFact(status)
         }
         return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        let core: NMPPullIteratorCore<NmpGroupReceiptStream, WriteStatus>
+        let core: NMPPullIteratorCore<NmpGroupReceiptStream, WriteFact>
 
-        public mutating func next() async throws -> WriteStatus? {
+        public mutating func next() async throws -> WriteFact? {
             try await core.next()
         }
     }

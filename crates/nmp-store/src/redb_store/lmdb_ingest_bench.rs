@@ -21,7 +21,7 @@ use crate::MemoryStore;
 
 use super::canonical::{observation_key, observation_relay_key};
 use super::ingest::insert_with_tables;
-use super::ingest_txn::{GovernedDeliveryMap, GovernedIngestTxn, GovernedStringMap};
+use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap, GovernedStringMap};
 use super::postings::{
     compact_segment, encode_dictionary, encode_run, merge_dead_blocks, shard_for,
     validate_run_metas, CompactionSegmentSource, DeadKeys, DictionaryView, Family, Membership,
@@ -104,12 +104,12 @@ struct LmdbDatabases {
     tombstones: BytesDb,
     addr_tombstones: BytesDb,
     expiration: BytesDb,
-    delivery_intents: BytesDb,
-    delivery_receipts: BytesDb,
-    delivery_displaced: BytesDb,
-    delivery_kind5_claims: BytesDb,
-    delivery_suppress_by_id: BytesDb,
-    delivery_suppress_by_addr: BytesDb,
+    publish_queue_intents: BytesDb,
+    publish_queue_receipts: BytesDb,
+    publish_queue_displaced: BytesDb,
+    publish_queue_kind5_claims: BytesDb,
+    publish_queue_suppress_by_id: BytesDb,
+    publish_queue_suppress_by_addr: BytesDb,
     segments: BytesDb,
     dictionaries: BytesDb,
     run_meta: BytesDb,
@@ -125,32 +125,32 @@ impl LmdbDatabases {
                 .map_err(lmdb_err)
         };
         Ok(Self {
-            events: create("events_v6")?,
-            event_ids: create("event_ids_v6")?,
-            event_local: create("event_local_v6")?,
-            event_store_meta: create("event_store_meta_v6")?,
-            observations: create("event_observations_v6")?,
-            relays: create("relays_v6")?,
-            relay_keys: create("relay_keys_v6")?,
-            relay_refs: create("relay_refs_v6")?,
-            relay_meta: create("relay_meta_v6")?,
+            events: create("events")?,
+            event_ids: create("event_ids")?,
+            event_local: create("event_local")?,
+            event_store_meta: create("event_store_meta")?,
+            observations: create("event_observations")?,
+            relays: create("relays")?,
+            relay_keys: create("relay_keys")?,
+            relay_refs: create("relay_refs")?,
+            relay_meta: create("relay_meta")?,
             cardinality: create("index_cardinality")?,
-            addr_index: create("addr_index_v6")?,
+            addr_index: create("addr_index")?,
             tombstones: create("tombstones")?,
             addr_tombstones: create("addr_tombstones")?,
-            expiration: create("expiration_index_v6")?,
-            delivery_intents: create("delivery_intents")?,
-            delivery_receipts: create("delivery_receipts")?,
-            delivery_displaced: create("delivery_displaced_v6")?,
-            delivery_kind5_claims: create("delivery_kind5_claims")?,
-            delivery_suppress_by_id: create("delivery_suppress_by_id")?,
-            delivery_suppress_by_addr: create("delivery_suppress_by_addr")?,
-            segments: create("postings_segments_v8")?,
-            dictionaries: create("postings_dictionaries_v8")?,
-            run_meta: create("postings_run_meta_v8")?,
-            run_by_min: create("postings_run_by_min_v8")?,
-            dead_keys: create("postings_dead_keys_v8")?,
-            postings_meta: create("postings_meta_v8")?,
+            expiration: create("expiration_index")?,
+            publish_queue_intents: create("publish_queue_intents")?,
+            publish_queue_receipts: create("publish_queue_receipts")?,
+            publish_queue_displaced: create("publish_queue_displaced")?,
+            publish_queue_kind5_claims: create("publish_queue_kind5_claims")?,
+            publish_queue_suppress_by_id: create("publish_queue_suppress_by_id")?,
+            publish_queue_suppress_by_addr: create("publish_queue_suppress_by_addr")?,
+            segments: create("postings_segments")?,
+            dictionaries: create("postings_dictionaries")?,
+            run_meta: create("postings_run_meta")?,
+            run_by_min: create("postings_run_by_min")?,
+            dead_keys: create("postings_dead_keys")?,
+            postings_meta: create("postings_meta")?,
         })
     }
 }
@@ -272,12 +272,12 @@ pub fn run_lmdb_governed_ingest_bench(
     };
     let read = reopened.read_txn().map_err(|error| error.to_string())?;
     let events_db = reopened
-        .open_database::<Bytes, Bytes>(&read, Some("events_v6"))
+        .open_database::<Bytes, Bytes>(&read, Some("events"))
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "reopened LMDB has no events table".to_owned())?;
     let reopened_rows = events_db.len(&read).map_err(|error| error.to_string())?;
     let event_ids_db = reopened
-        .open_database::<Bytes, Bytes>(&read, Some("event_ids_v6"))
+        .open_database::<Bytes, Bytes>(&read, Some("event_ids"))
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "reopened LMDB has no event-id table".to_owned())?;
     let reopened_ids = event_ids_db
@@ -339,32 +339,32 @@ fn open_databases(env: &Env, txn: &RoTxn<'_>) -> Result<LmdbDatabases, String> {
             .ok_or_else(|| format!("reopened LMDB has no {name} database"))
     };
     Ok(LmdbDatabases {
-        events: open("events_v6")?,
-        event_ids: open("event_ids_v6")?,
-        event_local: open("event_local_v6")?,
-        event_store_meta: open("event_store_meta_v6")?,
-        observations: open("event_observations_v6")?,
-        relays: open("relays_v6")?,
-        relay_keys: open("relay_keys_v6")?,
-        relay_refs: open("relay_refs_v6")?,
-        relay_meta: open("relay_meta_v6")?,
+        events: open("events")?,
+        event_ids: open("event_ids")?,
+        event_local: open("event_local")?,
+        event_store_meta: open("event_store_meta")?,
+        observations: open("event_observations")?,
+        relays: open("relays")?,
+        relay_keys: open("relay_keys")?,
+        relay_refs: open("relay_refs")?,
+        relay_meta: open("relay_meta")?,
         cardinality: open("index_cardinality")?,
-        addr_index: open("addr_index_v6")?,
+        addr_index: open("addr_index")?,
         tombstones: open("tombstones")?,
         addr_tombstones: open("addr_tombstones")?,
-        expiration: open("expiration_index_v6")?,
-        delivery_intents: open("delivery_intents")?,
-        delivery_receipts: open("delivery_receipts")?,
-        delivery_displaced: open("delivery_displaced_v6")?,
-        delivery_kind5_claims: open("delivery_kind5_claims")?,
-        delivery_suppress_by_id: open("delivery_suppress_by_id")?,
-        delivery_suppress_by_addr: open("delivery_suppress_by_addr")?,
-        segments: open("postings_segments_v8")?,
-        dictionaries: open("postings_dictionaries_v8")?,
-        run_meta: open("postings_run_meta_v8")?,
-        run_by_min: open("postings_run_by_min_v8")?,
-        dead_keys: open("postings_dead_keys_v8")?,
-        postings_meta: open("postings_meta_v8")?,
+        expiration: open("expiration_index")?,
+        publish_queue_intents: open("publish_queue_intents")?,
+        publish_queue_receipts: open("publish_queue_receipts")?,
+        publish_queue_displaced: open("publish_queue_displaced")?,
+        publish_queue_kind5_claims: open("publish_queue_kind5_claims")?,
+        publish_queue_suppress_by_id: open("publish_queue_suppress_by_id")?,
+        publish_queue_suppress_by_addr: open("publish_queue_suppress_by_addr")?,
+        segments: open("postings_segments")?,
+        dictionaries: open("postings_dictionaries")?,
+        run_meta: open("postings_run_meta")?,
+        run_by_min: open("postings_run_by_min")?,
+        dead_keys: open("postings_dead_keys")?,
+        postings_meta: open("postings_meta")?,
     })
 }
 
@@ -709,13 +709,13 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         }
     }
 
-    fn delivery_db(&self, map: GovernedDeliveryMap) -> BytesDb {
+    fn publish_queue_db(&self, map: GovernedPublishQueueMap) -> BytesDb {
         match map {
-            GovernedDeliveryMap::Intents => self.db.delivery_intents,
-            GovernedDeliveryMap::Receipts => self.db.delivery_receipts,
-            GovernedDeliveryMap::Kind5Claims => self.db.delivery_kind5_claims,
-            GovernedDeliveryMap::SuppressById => self.db.delivery_suppress_by_id,
-            GovernedDeliveryMap::SuppressByAddr => self.db.delivery_suppress_by_addr,
+            GovernedPublishQueueMap::Intents => self.db.publish_queue_intents,
+            GovernedPublishQueueMap::Receipts => self.db.publish_queue_receipts,
+            GovernedPublishQueueMap::Kind5Claims => self.db.publish_queue_kind5_claims,
+            GovernedPublishQueueMap::SuppressById => self.db.publish_queue_suppress_by_id,
+            GovernedPublishQueueMap::SuppressByAddr => self.db.publish_queue_suppress_by_addr,
         }
     }
 }
@@ -943,35 +943,35 @@ impl GovernedIngestTxn for LmdbIngestTxn<'_, '_, '_> {
             .map_err(lmdb_err)
     }
 
-    fn delivery_get(
+    fn publish_queue_get(
         &self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, PersistenceError> {
         Ok(self
-            .delivery_db(map)
+            .publish_queue_db(map)
             .get(self.txn, key)
             .map_err(lmdb_err)?
             .map(<[u8]>::to_vec))
     }
 
-    fn delivery_put(
+    fn publish_queue_put(
         &mut self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
         value: &[u8],
     ) -> Result<(), PersistenceError> {
-        self.delivery_db(map)
+        self.publish_queue_db(map)
             .put(self.txn, key, value)
             .map_err(lmdb_err)
     }
 
-    fn delivery_remove(
+    fn publish_queue_remove(
         &mut self,
-        map: GovernedDeliveryMap,
+        map: GovernedPublishQueueMap,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, PersistenceError> {
-        let db = self.delivery_db(map);
+        let db = self.publish_queue_db(map);
         let value = db
             .get(self.txn, key)
             .map_err(lmdb_err)?
@@ -983,12 +983,12 @@ impl GovernedIngestTxn for LmdbIngestTxn<'_, '_, '_> {
     fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError> {
         let value = self
             .db
-            .delivery_displaced
+            .publish_queue_displaced
             .get(self.txn, key)
             .map_err(lmdb_err)?
             .map(<[u8]>::to_vec);
         self.db
-            .delivery_displaced
+            .publish_queue_displaced
             .delete(self.txn, key)
             .map_err(lmdb_err)?;
         Ok(value)

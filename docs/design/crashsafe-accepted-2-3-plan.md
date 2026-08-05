@@ -612,7 +612,7 @@ logic.
    typed failure to the caller with **no journal residue** — nothing to recover,
    all in the same transaction.
 4. **R4 — Ephemeral is receipt-only.** Per the promoted VISION and landed U1
-   contract, `Durability::Ephemeral` never enters the durable delivery journal
+   contract, `Durability::Ephemeral` never enters the publish queue journal
    and never gains a pending store row, but it still receives a store-allocated,
    reattachable receipt through `accept_ephemeral`. Durable **and** AtMostOnce
    use `accept_write`. An unfinished ephemeral receipt becomes `Abandoned` on

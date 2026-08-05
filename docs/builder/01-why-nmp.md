@@ -17,7 +17,7 @@ NMP owns:
 - the canonical event and write-obligation store;
 - demand compilation, relay planning, and subscription coalescing;
 - provenance, replacement, deletion, expiry, and acquisition evidence;
-- signing orchestration, durable delivery attempts, and receipts; and
+- signing orchestration, publish queue attempts, and receipts; and
 - diagnostics that explain the resulting work.
 
 The app owns:

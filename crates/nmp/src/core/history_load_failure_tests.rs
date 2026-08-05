@@ -4,10 +4,11 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, CancelEphemeralOutcome, CompensateOutcome, CompensationReason,
-    CoverageInterval, CoverageKey, DeliveryAttempt, DeliveryIntent, DeliveryReceipt,
-    DeliveryRouteRevision, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
-    MemoryStore, PersistenceError, PromoteOutcome, RelayObserved, RetractReason, StoredEvent,
+    AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
+    CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome, MemoryStore,
+    PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent, PublishQueueReceipt,
+    PublishQueueRouteRevision, RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason,
+    StoredEvent,
 };
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
 
@@ -131,16 +132,6 @@ impl EventStore for FailingReadStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write_with_state(intent_id, reason)
     }
-
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
-    }
     fn insert(
         &mut self,
         event: Event,
@@ -218,14 +209,14 @@ impl EventStore for FailingReadStore {
         self.inner.compensate_write(intent_id)
     }
 
-    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
-        self.inner.recover_delivery()
+    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
+        self.inner.recover_publish_queue()
     }
 
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
+    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
 
@@ -237,30 +228,45 @@ impl EventStore for FailingReadStore {
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<DeliveryRouteRevision, PersistenceError> {
+    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
         self.inner.record_route_revision(intent_id, relays)
     }
 
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
 
     fn recover_attempts(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
 
-    fn accept_ephemeral(
+    fn enumerate_publish_queue_receipts(
+        &self,
+    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
+        self.inner.enumerate_publish_queue_receipts()
+    }
+
+    fn remove_publish_queue_entry(
+        &mut self,
+        receipt_id: u64,
+    ) -> Result<RemoveQueueEntryOutcome, PersistenceError> {
+        self.inner.remove_publish_queue_entry(receipt_id)
+    }
+
+    fn accept_refused(
         &mut self,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        reason: RefuseReason,
     ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
+        self.inner
+            .accept_refused(frozen_id, expected_pubkey, reason)
     }
 }
 

@@ -50,7 +50,7 @@ Do not add a callback registry that chooses routing, admission, signer, ordering
 1. Accept semantic app input, not raw tags for fields the module owns.
 2. Compose immutable stages; each module contributes only its own fields.
 3. Fail before acceptance on validation or authority conflict.
-4. Let core resolve/pin the signer, accept the canonical pending row, sign once, and route through durable delivery.
+4. Let core resolve/pin the signer, accept the canonical pending row, sign once, and route through publish queue.
 5. Preserve core receipt facts. Map only module-owned composition failures.
 6. Never mutate a signed event, access signer secrets, write store indexes, open transport, or create an optimistic row lane.
 

@@ -158,7 +158,7 @@ fn published_receipt(effects: &[Effect]) -> ReceiptId {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+            Effect::WriteAccepted(id) => Some(*id),
             _ => None,
         })
         .expect("durable write was accepted")
@@ -171,14 +171,13 @@ fn publish_waiting_auth(fixture: &mut Fixture, content: &str) -> (ReceiptId, nos
         .unwrap();
     let effects = fixture.core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(event.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay })
+        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
             if relay == &fixture.session.relay
     )));
     (published_receipt(&effects), event)
@@ -199,11 +198,13 @@ fn exact_policy_denial_commits_before_emit_and_replays_the_same_terminal_fact() 
             reason: "account not permitted".into(),
         },
     ));
-    let expected = WriteStatus::AuthDenied {
+    let expected = WriteFact::Relay {
         relay: fixture.session.relay.clone(),
-        pubkey: fixture.keys.public_key(),
-        source: AuthDenialSource::Policy,
-        reason: "account not permitted".into(),
+        state: RelayState::AuthFailed {
+            pubkey: fixture.keys.public_key(),
+            source: AuthDenialSource::Policy,
+            reason: "account not permitted".into(),
+        },
     };
     assert!(denied.iter().any(
         |effect| matches!(effect, Effect::EmitReceipt(id, status) if *id == receipt && status == &expected)
@@ -219,10 +220,10 @@ fn exact_policy_denial_commits_before_emit_and_replays_the_same_terminal_fact() 
         .intent_id
         .unwrap();
     assert!(matches!(
-        fixture.core.resolver.store().recover_delivery_lanes(intent).unwrap()[0].state,
-        DeliveryLaneState::Terminal {
+        fixture.core.resolver.store().recover_publish_queue_lanes(intent).unwrap()[0].state,
+        PublishQueueLaneState::Terminal {
             ordinal: 0,
-            outcome: DeliveryTerminalOutcome::AuthDenied(StoredAuthDenial {
+            outcome: PublishQueueTerminalOutcome::AuthDenied(StoredAuthDenial {
                 source: StoredAuthDenialSource::Policy,
                 ref reason,
             }),
@@ -248,7 +249,6 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
         .unwrap();
     let published = fixture.core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(event.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -273,19 +273,19 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
     let (challenged, token) = fixture.challenge("fast policy denial");
     assert!(challenged.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::AwaitingAuth { relay })
+        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
             if *id == receipt && relay == &fixture.session.relay
     )));
-    let intent = fixture.core.pending[&receipt].intent_id.unwrap();
+    let intent = fixture.core.pending[&receipt].intent_id;
     assert!(matches!(
         fixture
             .core
             .resolver
             .store()
-            .recover_delivery_lanes(intent)
+            .recover_publish_queue_lanes(intent)
             .unwrap()[0]
             .state,
-        DeliveryLaneState::WaitingAuth
+        PublishQueueLaneState::WaitingAuth
     ));
 
     let token = token.unwrap();
@@ -301,11 +301,7 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
         effect,
         Effect::EmitReceipt(
             id,
-            WriteStatus::AuthDenied {
-                source: AuthDenialSource::Policy,
-                reason,
-                ..
-            }
+            WriteFact::Relay { state: RelayState::AuthFailed { source: AuthDenialSource::Policy, reason, .. }, .. }
         ) if *id == receipt && reason == "fast refusal"
     )));
 
@@ -327,11 +323,11 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
             .core
             .resolver
             .store()
-            .recover_delivery_lanes(intent)
+            .recover_publish_queue_lanes(intent)
             .unwrap()[0]
             .state,
-        DeliveryLaneState::Terminal {
-            outcome: DeliveryTerminalOutcome::AuthDenied(_),
+        PublishQueueLaneState::Terminal {
+            outcome: PublishQueueTerminalOutcome::AuthDenied(_),
             ..
         }
     ));
@@ -355,11 +351,7 @@ fn signer_rejection_and_correlated_auth_ok_false_are_the_other_exact_denials() {
         effect,
         Effect::EmitReceipt(
             id,
-            WriteStatus::AuthDenied {
-                source: AuthDenialSource::Signer,
-                reason,
-                ..
-            }
+            WriteFact::Relay { state: RelayState::AuthFailed { source: AuthDenialSource::Signer, reason, .. }, .. }
         ) if *id == receipt && reason == "user declined signature"
     )));
 
@@ -374,11 +366,7 @@ fn signer_rejection_and_correlated_auth_ok_false_are_the_other_exact_denials() {
         effect,
         Effect::EmitReceipt(
             id,
-            WriteStatus::AuthDenied {
-                source: AuthDenialSource::Relay,
-                reason,
-                ..
-            }
+            WriteFact::Relay { state: RelayState::AuthFailed { source: AuthDenialSource::Relay, reason, .. }, .. }
         ) if *id == receipt && reason == "auth result"
     )));
 }
@@ -406,18 +394,18 @@ fn auth_error_unavailable_and_subscription_closed_never_terminalize_a_write() {
             .handle(EngineMsg::AuthPolicyCompleted(policy, instance, outcome));
         assert!(!effects.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(id, WriteStatus::AuthDenied { .. }) if *id == receipt
+            Effect::EmitReceipt(id, WriteFact::Relay { state: RelayState::AuthFailed { .. }, .. }) if *id == receipt
         )));
-        let intent = fixture.core.pending[&receipt].intent_id.unwrap();
+        let intent = fixture.core.pending[&receipt].intent_id;
         assert_eq!(
             fixture
                 .core
                 .resolver
                 .store()
-                .recover_delivery_lanes(intent)
+                .recover_publish_queue_lanes(intent)
                 .unwrap()[0]
                 .state,
-            DeliveryLaneState::WaitingAuth
+            PublishQueueLaneState::WaitingAuth
         );
     }
 
@@ -434,18 +422,18 @@ fn auth_error_unavailable_and_subscription_closed_never_terminalize_a_write() {
     ));
     assert!(!effects.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::AuthDenied { .. }) if *id == receipt
+        Effect::EmitReceipt(id, WriteFact::Relay { state: RelayState::AuthFailed { .. }, .. }) if *id == receipt
     )));
-    let intent = closed.core.pending[&receipt].intent_id.unwrap();
+    let intent = closed.core.pending[&receipt].intent_id;
     assert_eq!(
         closed
             .core
             .resolver
             .store()
-            .recover_delivery_lanes(intent)
+            .recover_publish_queue_lanes(intent)
             .unwrap()[0]
             .state,
-        DeliveryLaneState::WaitingAuth
+        PublishQueueLaneState::WaitingAuth
     );
 
     let (_, policy) = closed.challenge("after closure");
@@ -496,7 +484,6 @@ fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
                 .sign_with_keys(keys)
                 .unwrap(),
         ),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Explicit(keys.public_key()),
         correlation: None,
@@ -536,25 +523,21 @@ fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
         effect,
         Effect::EmitReceipt(
             id,
-            WriteStatus::AuthDenied {
-                pubkey,
-                source: AuthDenialSource::Policy,
-                ..
-            }
+            WriteFact::Relay { state: RelayState::AuthFailed { pubkey, source: AuthDenialSource::Policy, .. }, .. }
         ) if *id == alice_receipt && *pubkey == alice.public_key()
     )));
     assert!(!denied.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::AuthDenied { .. }) if *id == bob_receipt
+        Effect::EmitReceipt(id, WriteFact::Relay { state: RelayState::AuthFailed { .. }, .. }) if *id == bob_receipt
     )));
-    let bob_intent = core.pending[&bob_receipt].intent_id.unwrap();
+    let bob_intent = core.pending[&bob_receipt].intent_id;
     assert_eq!(
         core.resolver
             .store()
-            .recover_delivery_lanes(bob_intent)
+            .recover_publish_queue_lanes(bob_intent)
             .unwrap()[0]
             .state,
-        DeliveryLaneState::WaitingAuth
+        PublishQueueLaneState::WaitingAuth
     );
 
     let bob_released = core.handle(EngineMsg::AuthProbeReleased(
@@ -603,7 +586,6 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
     ));
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(event.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![denied_relay.clone(), ordinary_relay.clone()]),
         identity: Identity::Explicit(keys.public_key()),
         correlation: None,
@@ -640,7 +622,7 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
         effect,
         Effect::EmitReceipt(
             id,
-            WriteStatus::AuthDenied { relay, .. }
+            WriteFact::Relay { relay, state: RelayState::AuthFailed { .. } }
         ) if *id == receipt && relay == &denied_relay
     )));
     assert!(core.pending.contains_key(&receipt));
@@ -671,7 +653,7 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::Acked(relay))
+        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published })
             if *id == receipt && relay == &ordinary_relay
     )));
     assert!(!core.pending.contains_key(&receipt));
@@ -969,18 +951,20 @@ fn auth_state_stays_one_entry_per_session_under_churn_and_kind_is_reserved() {
             nmp_grammar::EventBuilder::new(Kind::Authentication)
                 .content("ordinary publish forbidden"),
         ),
-        durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::EmitReceipt(
-            _,
-            WriteStatus::Failed(reason)
-        ) if reason == "kind:22242 is reserved for reducer-owned relay authentication"
-    )));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PublishFailed(PublishError::ReservedKind {
+                kind: 22242
+            })]
+        ),
+        "a reducer-owned kind is refused at the door, with nothing taken into \
+         custody: {effects:?}"
+    );
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -1000,14 +984,13 @@ fn only_exact_ready_wakes_the_current_waiting_auth_write_once() {
         .unwrap();
     let parked = fixture.core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(event.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
     assert!(parked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay })
+        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
             if relay == &fixture.session.relay
     )));
     assert!(!parked
@@ -1051,7 +1034,6 @@ fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds()
         .unwrap();
     let parked = fixture.core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(event.clone()),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -1061,7 +1043,7 @@ fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
     assert!(parked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { relay })
+        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
             if relay == &fixture.session.relay
     )));
 
@@ -1085,7 +1067,13 @@ fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds()
     );
     assert!(!released.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteStatus::AwaitingAuth { .. })
+        Effect::EmitReceipt(
+            _,
+            WriteFact::Relay {
+                state: RelayState::Waiting(RelayWaiting::NeedsAuth),
+                ..
+            }
+        )
     )));
     assert!(!fixture.core.auth_sessions.contains_key(&fixture.session));
 }

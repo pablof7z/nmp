@@ -175,7 +175,7 @@ fn local_signer(keys: &Keys) -> LocalKeySigner {
 /// A real signer that also counts how many times it was ASKED to sign.
 ///
 /// "No signer was asked for anything" is otherwise unobservable from the
-/// receipt stream: `WriteStatus::Signed` is a lifecycle beat the engine
+/// receipt stream: `WriteFact::Signed` is a lifecycle beat the engine
 /// emits for an already-signed payload too, so reading it would make the
 /// assertion mean something other than what it says. Counting the actual
 /// capability call is the fact, and it stays a fact whether the write was

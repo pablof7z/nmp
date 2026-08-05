@@ -18,8 +18,7 @@ use std::time::Duration;
 
 use nmp::mechanism::runtime::FifoReceiver;
 use nmp::{
-    Durability, Engine, EngineConfig, Identity, WriteIntent, WritePayload, WriteRouting,
-    WriteStatus,
+    Engine, EngineConfig, Identity, RelayState, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -36,7 +35,7 @@ fn note(content: &str) -> WritePayload {
     })
 }
 
-fn acked_relays(receipts: &FifoReceiver<WriteStatus>, budget: Duration) -> BTreeSet<String> {
+fn acked_relays(receipts: &FifoReceiver<WriteFact>, budget: Duration) -> BTreeSet<String> {
     let deadline = std::time::Instant::now() + budget;
     let mut acked = BTreeSet::new();
     let mut seen = Vec::new();
@@ -46,7 +45,10 @@ fn acked_relays(receipts: &FifoReceiver<WriteStatus>, budget: Duration) -> BTree
             panic!("no relay acknowledged the write; saw {seen:?}");
         }
         match receipts.recv_timeout(remaining) {
-            Ok(WriteStatus::Acked(relay)) => {
+            Ok(WriteFact::Relay {
+                relay,
+                state: RelayState::Published,
+            }) => {
                 acked.insert(relay.to_string());
             }
             Ok(status) => seen.push(status),
@@ -88,7 +90,6 @@ async fn an_app_declared_loopback_relay_is_reached_with_an_empty_allowlist() {
     let tracked = engine
         .publish_tracked(WriteIntent {
             payload: note("reaching the relay this app declared"),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
