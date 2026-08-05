@@ -210,8 +210,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 "owns that bound",
         )
 
-    /** #1033: `NMPGroup.validateContext`/`publishSigned` was given an event
-     * carrying no `h` tag naming any group at all. */
+    /** #1033: `NMPGroup.validateContext` was given an event carrying no `h`
+     * tag naming any group at all. */
     data class GroupContextMissing(val expected: String) :
         NMPError("event carries no h tag; expected group $expected")
 

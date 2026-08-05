@@ -146,8 +146,8 @@ public enum NMPError: Error, Sendable, Equatable {
     /// #1033: a read selection handed to `NMPGroup.read` already declared a
     /// `since`/`until`/`limit` timeline bound the group door itself owns.
     case groupCallerSuppliedTimeline
-    /// #1033: `NMPGroup.validateContext`/`publishSigned` was given an event
-    /// carrying no `h` tag naming any group at all.
+    /// #1033: `NMPGroup.validateContext` was given an event carrying no `h`
+    /// tag naming any group at all.
     case groupContextMissing(expected: String)
     /// #1033: an already-signed event's `h` tag names a different group
     /// than the one it was handed to.
