@@ -2379,7 +2379,7 @@ enum Enum {
                     name: "target",
                     type_: Enum {
                         module_path: "nmp_ffi",
-                        name: "FfiNip73Target",
+                        name: "FfiNip73",
                     },
                     default: None,
                     docstring: None,
@@ -2967,7 +2967,7 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "InvalidNip73Target",
+            name: "InvalidNip73",
             discr: None,
             fields: [
                 Field {
@@ -2978,7 +2978,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "#572: an `FfiNip73Target` failed `nmp_nip22::Nip73Target`'s\nconstructor validation (an empty `I`/`K` cell).",
+                "#572/#1258: an `FfiNip73` failed `nmp_nip73::Nip73`'s constructor\nvalidation (an empty `I`/`K` cell, or a `Url` that is not an\nabsolute URL and therefore cannot be normalised).",
             ),
         },
         Variant {
@@ -3745,17 +3745,30 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiNip73Target",
+    name: "FfiNip73",
     module_path: "nmp_ffi",
     remote: false,
     discr_type: None,
     variants: [
         Variant {
-            name: "PodcastEpisodeGuid",
+            name: "PodcastEpisode",
             discr: None,
             fields: [
                 Field {
                     name: "guid",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Url",
+            discr: None,
+            fields: [
+                Field {
+                    name: "url",
                     type_: String,
                     default: None,
                     docstring: None,
@@ -3786,7 +3799,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "A validated NIP-73 external-content target (`nmp::nip22::Nip73Target`\nmirror).",
+        "A validated NIP-73 external content id (`nmp::nip22::Nip73` mirror).\n\n`Url` carries the CALLER'S spelling on the way in and the CANONICAL one\non the way out: `nmp::nip22::Nip73::url` normalises it (NIP-73's table:\n*\"URL, normalized, no fragment\"*), so a native caller who sends\n`HTTPS://Example.COM/p#x` and then reads the id back sees\n`https://example.com/p`. Normalising on this side of the boundary too\nwould be a second owner of one rule.",
     ),
 }
 
