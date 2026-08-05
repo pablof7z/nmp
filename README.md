@@ -99,11 +99,15 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   kind:10002; the optional `nmp/nip65` facade publishes it through the ordinary
   tracked write door and privately assembles automatic route discovery.
   Native projection remains explicit follow-up work.
-- ✅ NIP-22 comments over NIP-73 targets — typed root/parent validation,
-  thread demand, decode, and deterministic composition across Rust, FFI,
-  Swift, and Kotlin. Composition is an engine-free protocol function returning
-  the ordinary `WriteIntent`; apps publish it through the one generic
-  `publish` → `Receipt` lifecycle.
+- ✅ NIP-73 external content ids — the `(i, k)` pair naming something that is
+  not a Nostr event, in its own crate because several NIPs consume them and
+  none owns them. Podcast episodes, `web` URLs (canonicalised: normalised, no
+  fragment), and an already-canonical general pair.
+- ✅ NIP-22 comments over NIP-73 external content ids — typed root/parent
+  validation, thread demand, decode, and deterministic composition across
+  Rust, FFI, Swift, and Kotlin. Composition is an engine-free protocol
+  function returning the ordinary `WriteIntent`; apps publish it through the
+  one generic `publish` → `Receipt` lifecycle.
 - ✅ Optional parser-only content module (source-ranged plaintext/Markdown and
   NIP-19 occurrences), exact five-variant locator values shared by
   Rust/Swift/Kotlin, and a SwiftUI family whose app-selected components—not

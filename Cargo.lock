@@ -2131,8 +2131,10 @@ dependencies = [
  "nmp-content",
  "nmp-grammar",
  "nmp-nip02",
+ "nmp-nip18",
  "nmp-nip29",
  "nmp-nip51",
+ "nmp-nipc7",
  "nmp-store",
  "nostr 0.44.4",
  "redb",
@@ -2194,10 +2196,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-nip18"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
+ "nostr 0.44.4",
+]
+
+[[package]]
 name = "nmp-nip22"
 version = "0.1.0"
 dependencies = [
  "nmp-grammar",
+ "nmp-nip73",
  "nostr 0.44.4",
 ]
 
@@ -2240,6 +2251,15 @@ dependencies = [
  "nmp-asset",
  "nmp-blossom",
  "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip73"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
+ "nostr 0.44.4",
+ "url",
 ]
 
 [[package]]

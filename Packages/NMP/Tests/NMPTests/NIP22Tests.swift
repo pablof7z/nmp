@@ -42,7 +42,7 @@ final class NIP22Tests: XCTestCase {
     /// Root-thread demand scopes kind:1111 by the uppercase `#I` tag --
     /// never a parent-only lowercase `#i` shortcut.
     func testCommentThreadDemandScopesKind1111ByUppercaseITag() throws {
-        let root = CommentRoot.external(target: .podcastEpisodeGuid(guid: "guid-1"))
+        let root = CommentRoot.external(target: .podcastEpisode(guid: "guid-1"))
         let demand = try commentThreadDemand(root: root)
         XCTAssertEqual(demand.selection.kinds, [1111])
     }
@@ -64,7 +64,7 @@ final class NIP22Tests: XCTestCase {
             )
         )
         let decoded = try! decodeComment(row)
-        XCTAssertEqual(decoded.root, .external(target: .podcastEpisodeGuid(guid: "guid-1")))
+        XCTAssertEqual(decoded.root, .external(target: .podcastEpisode(guid: "guid-1")))
         XCTAssertEqual(decoded.parent, .root)
         XCTAssertEqual(decoded.content, "nice episode")
     }
@@ -174,8 +174,7 @@ final class NIP22Tests: XCTestCase {
 
         let token = "nip22-offline-signer-token"
         let intent = try NMP.commentIntent(
-            root: .external(target: .podcastEpisodeGuid(guid: "guid-offline")),
-            parent: .root,
+            on: .root(.external(target: .podcastEpisode(guid: "guid-offline"))),
             content: "great show",
             correlation: token
         )
@@ -207,8 +206,7 @@ final class NIP22Tests: XCTestCase {
     /// actually owns: the exact tag rows, in the exact order.
     func testComposedCommentPinsTheExactTagRows() throws {
         let intent = try NMP.commentIntent(
-            root: .external(target: .podcastEpisodeGuid(guid: "golden-guid-572")),
-            parent: .root,
+            on: .root(.external(target: .podcastEpisode(guid: "golden-guid-572"))),
             content: "golden fixture content"
         )
         guard case .event(let kind, let tags, let content, let createdAt) = intent.payload else {
@@ -236,13 +234,12 @@ final class NIP22Tests: XCTestCase {
         defer { engine.shutdown() }
         try engine.setActiveAccount(author)
 
-        let root = CommentRoot.external(target: .podcastEpisodeGuid(guid: "guid-query-path"))
+        let root = CommentRoot.external(target: .podcastEpisode(guid: "guid-query-path"))
         let demand = try commentThreadDemand(root: root)
         let query = try engine.observe(demand)
 
         let intent = try NMP.commentIntent(
-            root: root,
-            parent: .root,
+            on: .root(root),
             content: "visible through the ordinary query path"
         )
         let receipt = try await engine.publish(intent)

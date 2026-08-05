@@ -1,4 +1,4 @@
-// Typed NIP-22 comments over NIP-73 external targets (#572/#822). Demand,
+// Typed NIP-22 comments over NIP-73 external content ids (#572/#822/#1258). Demand,
 // decode, and composition are pure protocol-owned functions. Composition
 // returns NMP's ordinary WriteIntent; publication remains exclusively on
 // NMPEngine.publish. Mirrors NIP22.swift.
@@ -8,30 +8,40 @@ package com.nmp.sdk
 import uniffi.nmp_ffi.FfiCommentDecodeException
 import uniffi.nmp_ffi.FfiCommentParent
 import uniffi.nmp_ffi.FfiCommentRoot
+import uniffi.nmp_ffi.FfiCommentTarget
 import uniffi.nmp_ffi.FfiDecodedComment
-import uniffi.nmp_ffi.FfiNip73Target
+import uniffi.nmp_ffi.FfiNip73
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.commentIntent as ffiCommentIntent
 import uniffi.nmp_ffi.commentThreadDemand as ffiCommentThreadDemand
 import uniffi.nmp_ffi.decodeComment as ffiDecodeComment
 
-/** A validated NIP-73 external-content target (`FfiNip73Target` mirror). */
-sealed class Nip73Target {
-    data class PodcastEpisodeGuid(val guid: String) : Nip73Target()
+/** A validated NIP-73 external content id (`FfiNip73` mirror).
+ *
+ * [Url] states the page a caller means; Rust normalises it (NIP-73's table:
+ * "URL, normalized, no fragment"), so a value read back from a decoded
+ * comment carries the canonical spelling rather than the one that was sent.
+ * Normalising here as well would be a second owner of one rule. */
+sealed class Nip73 {
+    data class PodcastEpisode(val guid: String) : Nip73()
 
-    data class General(val value: String, val kind: String) : Nip73Target()
+    data class Url(val url: String) : Nip73()
 
-    internal fun toFfi(): FfiNip73Target =
+    data class General(val value: String, val kind: String) : Nip73()
+
+    internal fun toFfi(): FfiNip73 =
         when (this) {
-            is PodcastEpisodeGuid -> FfiNip73Target.PodcastEpisodeGuid(guid)
-            is General -> FfiNip73Target.General(value, kind)
+            is PodcastEpisode -> FfiNip73.PodcastEpisode(guid)
+            is Url -> FfiNip73.Url(url)
+            is General -> FfiNip73.General(value, kind)
         }
 
     companion object {
-        internal fun from(ffi: FfiNip73Target): Nip73Target =
+        internal fun from(ffi: FfiNip73): Nip73 =
             when (ffi) {
-                is FfiNip73Target.PodcastEpisodeGuid -> PodcastEpisodeGuid(ffi.guid)
-                is FfiNip73Target.General -> General(ffi.value, ffi.kind)
+                is FfiNip73.PodcastEpisode -> PodcastEpisode(ffi.guid)
+                is FfiNip73.Url -> Url(ffi.url)
+                is FfiNip73.General -> General(ffi.value, ffi.kind)
             }
     }
 }
@@ -53,7 +63,7 @@ sealed class CommentRoot {
         val eventId: String? = null,
     ) : CommentRoot()
 
-    data class External(val target: Nip73Target) : CommentRoot()
+    data class External(val target: Nip73) : CommentRoot()
 
     internal fun toFfi(): FfiCommentRoot =
         when (this) {
@@ -68,7 +78,7 @@ sealed class CommentRoot {
                 is FfiCommentRoot.Event -> Event(ffi.eventId, ffi.kind, ffi.authorPubkey)
                 is FfiCommentRoot.Address ->
                     Address(ffi.authorPubkey, ffi.kind, ffi.identifier, ffi.eventId)
-                is FfiCommentRoot.External -> External(Nip73Target.from(ffi.target))
+                is FfiCommentRoot.External -> External(Nip73.from(ffi.target))
             }
     }
 }
@@ -220,22 +230,45 @@ fun decodeComment(row: Row): DecodedComment {
     }
 }
 
-/** Compose a durable, author-outbox-routed NIP-22 comment as NMP's ordinary
- * [WriteIntent] (#822). It names no author and reads no clock -- the engine
- * resolves the identity and stamps the time at acceptance -- so composition
- * still owns no engine state or lifecycle. [correlation] passes through
- * unchanged; publish the result through [NMPEngine.publish]. */
+/** What a comment is being written on (`FfiCommentTarget` mirror).
+ *
+ * The two shapes are the two things an app actually holds. [Root] describes
+ * an entity by its parts -- what an app has for an external content id, or
+ * after decoding a comment. [Row] is an event NMP observed, and its own
+ * thread position is read off its own rows: replying to a deep comment and
+ * commenting on a root are then the same call, and the root cannot be
+ * restated wrongly by a caller who thought it knew. */
+sealed class CommentTarget {
+    data class Root(val root: CommentRoot) : CommentTarget()
+
+    data class Row(val row: com.nmp.sdk.Row) : CommentTarget()
+
+    internal fun toFfi(): FfiCommentTarget =
+        when (this) {
+            is Root -> FfiCommentTarget.Root(root.toFfi())
+            is Row -> FfiCommentTarget.Row(row.toFfi())
+        }
+}
+
+/** Compose a NIP-22 comment on [target] as NMP's ordinary [WriteIntent]
+ * (#822). It names no author and reads no clock -- the engine resolves the
+ * identity and stamps the time at acceptance -- so composition still owns no
+ * engine state or lifecycle. [correlation] passes through unchanged; publish
+ * the result through [NMPEngine.publish].
+ *
+ * This always composes a kind:1111 comment, including on a text note, where
+ * [replyTo] would compose a NIP-10 reply instead. An app that wants "the
+ * ordinary reply for whatever this is" calls that; an app that wants "a
+ * NIP-22 comment on this specifically" calls this. */
 fun commentIntent(
-    root: CommentRoot,
-    parent: CommentParent,
+    target: CommentTarget,
     content: String,
     correlation: String? = null,
 ): WriteIntent =
     WriteIntent.from(
         nmpRethrowing {
             ffiCommentIntent(
-                root.toFfi(),
-                parent.toFfi(),
+                target.toFfi(),
                 content,
                 correlation,
             )

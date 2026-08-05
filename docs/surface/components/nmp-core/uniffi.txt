@@ -2299,7 +2299,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "A comment's direct parent (`nmp::nip22::CommentParent` mirror).",
+        "A comment's direct parent (`nmp::nip22::CommentParent` mirror).\n\nDECODE-ONLY since #1243. It used to be half of a composition input, and\nthat was the defect: a caller who states the parent separately from the\nroot can state a pair that never existed together on the wire. Composing\nnow names ONE target ([`FfiCommentTarget`]) and reads the parent from it,\nso there is no from-FFI direction left to write.",
     ),
 }
 
@@ -2379,7 +2379,7 @@ enum Enum {
                     name: "target",
                     type_: Enum {
                         module_path: "nmp_ffi",
-                        name: "FfiNip73Target",
+                        name: "FfiNip73",
                     },
                     default: None,
                     docstring: None,
@@ -2392,6 +2392,52 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "The root of a NIP-22 comment thread (`nmp::nip22::CommentRoot` mirror).",
+    ),
+}
+
+enum Enum {
+    name: "FfiCommentTarget",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Root",
+            discr: None,
+            fields: [
+                Field {
+                    name: "root",
+                    type_: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiCommentRoot",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Row",
+            discr: None,
+            fields: [
+                Field {
+                    name: "row",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiRow",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "What a comment is being written on.\n\nThe two shapes are the two things an app actually holds. `Root` describes\nan entity by its parts -- what an app has for an external content id, or\nafter decoding a comment. `Row` is an event NMP observed, and its own\nthread position is read off its own rows, so replying to a deep comment\nand commenting on a root are the same call: the root cannot be restated\nwrongly by a caller who thought it knew, which is the correction\namethyst#629 needed.",
     ),
 }
 
@@ -2967,7 +3013,7 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "InvalidNip73Target",
+            name: "InvalidNip73",
             discr: None,
             fields: [
                 Field {
@@ -2978,7 +3024,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "#572: an `FfiNip73Target` failed `nmp_nip22::Nip73Target`'s\nconstructor validation (an empty `I`/`K` cell).",
+                "#572/#1258: an `FfiNip73` failed `nmp_nip73::Nip73`'s constructor\nvalidation (an empty `I`/`K` cell, or a `Url` that is not an\nabsolute URL and therefore cannot be normalised).",
             ),
         },
         Variant {
@@ -3745,17 +3791,30 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiNip73Target",
+    name: "FfiNip73",
     module_path: "nmp_ffi",
     remote: false,
     discr_type: None,
     variants: [
         Variant {
-            name: "PodcastEpisodeGuid",
+            name: "PodcastEpisode",
             discr: None,
             fields: [
                 Field {
                     name: "guid",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "Url",
+            discr: None,
+            fields: [
+                Field {
+                    name: "url",
                     type_: String,
                     default: None,
                     docstring: None,
@@ -3786,7 +3845,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "A validated NIP-73 external-content target (`nmp::nip22::Nip73Target`\nmirror).",
+        "A validated NIP-73 external content id (`nmp::nip22::Nip73` mirror).\n\n`Url` carries the CALLER'S spelling on the way in and the CANONICAL one\non the way out: `nmp::nip22::Nip73::url` normalises it (NIP-73's table:\n*\"URL, normalized, no fragment\"*), so a native caller who sends\n`HTTPS://Example.COM/p#x` and then reads the id back sees\n`https://example.com/p`. Normalising on this side of the boundary too\nwould be a second owner of one rule.",
     ),
 }
 
@@ -8394,25 +8453,81 @@ function Function {
 }
 
 function Function {
-    name: "comment_intent",
+    name: "chat_reply",
     module_path: "nmp_ffi",
     is_async: false,
     arguments: [
         Argument {
-            name: "root",
-            type_: Enum {
+            name: "target",
+            type_: Record {
                 module_path: "nmp_ffi",
-                name: "FfiCommentRoot",
+                name: "FfiRow",
             },
             by_ref: false,
             optional: false,
             default: None,
         },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiEventBuilder",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_chat_reply",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "target",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiEventBuilder",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose a NIP-C7 kind:9 chat reply to `target`.\n\nC7 offers its own verb rather than an arm in the general dispatcher\nbecause kind:9 must NOT become a NIP-22 comment: NIP-29 clients MUST only\nfetch kind 9, so a 1111 reply in a group would be invisible to every one\nof them. The reply row is `e`, not `q`.\n\nIt composes SCHEMA ONLY — no `h` row, no notification policy, no routing.\nA group's `h` row and its relay set come from `FfiGroup::publish`, which\ntakes exactly this value.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_chat_reply",
+    checksum: Some(
+        11119,
+    ),
+}
+
+function Function {
+    name: "comment_intent",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
         Argument {
-            name: "parent",
+            name: "target",
             type_: Enum {
                 module_path: "nmp_ffi",
-                name: "FfiCommentParent",
+                name: "FfiCommentTarget",
             },
             by_ref: false,
             optional: false,
@@ -8446,22 +8561,11 @@ function Function {
         is_async: false,
         arguments: [
             FfiArgument {
-                name: "root",
+                name: "target",
                 type_: RustBuffer(
                     Some(
                         ExternalFfiMetadata {
-                            name: "FfiCommentRoot",
-                            module_path: "nmp_ffi",
-                        },
-                    ),
-                ),
-            },
-            FfiArgument {
-                name: "parent",
-                type_: RustBuffer(
-                    Some(
-                        ExternalFfiMetadata {
-                            name: "FfiCommentParent",
+                            name: "FfiCommentTarget",
                             module_path: "nmp_ffi",
                         },
                     ),
@@ -8504,7 +8608,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_comment_intent",
     checksum: Some(
-        39539,
+        55782,
     ),
 }
 
@@ -9088,6 +9192,138 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_simple_groups_list_tolerant",
     checksum: Some(
         23498,
+    ),
+}
+
+function Function {
+    name: "reply_to",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "target",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiEventBuilder",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_reply_to",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "target",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiEventBuilder",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose the ordinary reply to `target`.\n\nTwo-way and no more: a text note threads through NIP-10, and everything\nelse becomes a NIP-22 comment. The split reads the TARGET's kind, and the\nroot/parent determination underneath reads neither the target's kind nor\nthe composing one — it reads the target's own rows, so a reply composed by\nan app that believes it is replying to a root and one composed by an app\nthat knows better produce the same bytes.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reply_to",
+    checksum: Some(
+        40630,
+    ),
+}
+
+function Function {
+    name: "repost",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "target",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiEventBuilder",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_repost",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "target",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiEventBuilder",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose a NIP-18 repost of `target`.\n\nNIP-18 owns both kinds, so the two-way split happens inside it: a reposted\ntext note is a kind:6 and anything else is a kind:16 that states what it\nreposted. A caller never picks a kind.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_repost",
+    checksum: Some(
+        25255,
     ),
 }
 

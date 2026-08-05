@@ -184,6 +184,28 @@ public final class NMPGroup: @unchecked Sendable {
         return NMPGroupWriteFacts(handle: receipts)
     }
 
+    /// Publish a draft composed by the tagging door (#1243) into the group.
+    ///
+    /// The `h` row and the group's relay set stay this door's, exactly as for
+    /// the field-by-field overload above: a composer owns the SCHEMA and the
+    /// group owns the CONTEXT, and neither reaches into the other. What this
+    /// adds is that a `chatReply(to:)` no longer has to be taken apart into
+    /// kind/tags/content just to be published where it belongs.
+    public func publish(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        payload: WritePayload
+    ) throws -> NMPGroupWriteFacts {
+        guard case .event(let kind, let tags, let content, let createdAt) = payload else {
+            // A pre-signed event carries its own `h` already and is validated
+            // rather than contextualized -- that is `publishSigned(_:)`.
+            throw NMPError.groupCallerSuppliedContext
+        }
+        return try publish(
+            engine: engine, authorPubkeyHex: authorPubkeyHex, kind: kind, tags: tags,
+            content: content, createdAt: createdAt)
+    }
+
     /// Publish an ALREADY-SIGNED event into the group. The `h` it already
     /// carries is validated, never appended or repaired -- see
     /// `validateContext(_:)`'s doc for the exact refusals.
