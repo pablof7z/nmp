@@ -148,22 +148,20 @@ about current code:
   was the load-bearing consequence of that removed artifact boundary;
   [#1169](https://github.com/pablof7z/nmp/issues/1169) owns the collapsed
   engine-routed shape it returns in, as an ordinary Cargo-feature-selected
-  family inside the one native library. An app supplies its own signer through
-  one of two doors, and until
-  [#1238](https://github.com/pablof7z/nmp/issues/1238) only the first existed:
-  a Rust app implements `SigningCapability` and calls `Engine::add_signer`,
-  while a Swift or Kotlin app calls `add_signer_mailbox(public_key)` and drains
-  the returned `SignerMailbox`. The second door exists because the first cannot
-  cross UniFFI at all — it is generic over a trait whose `sign` returns a
-  poll-thunk — so before #1238 an app on those platforms could register no
-  signer whatsoever, and its only identity was a secret handed to
-  `add_account`. The mailbox is a pull boundary rather than a callback because
-  NMP must not invoke app code ([#783](https://github.com/pablof7z/nmp/issues/783));
-  it has a fixed private bound and refuses past it as retryable
-  `SignerError::Unavailable`, so an app that never drains parks its own writes
-  and blocks nothing else. Collapsing the two doors onto one pull boundary, and
-  inverting the remaining AUTH-policy callback, is still open under #783.
-  Missing capabilities
+  family inside the one native library. An app gives NMP an identity by handing
+  over key material: `Engine::add_account` takes the secret, crosses FFI, and
+  is what a Swift or Kotlin app calls. A Rust app that wants to keep custody
+  instead implements `SigningCapability` and calls `Engine::add_signer`; that
+  trait is generic over a `sign` returning a poll-thunk, so it does not cross
+  UniFFI, and there is currently **no FFI-crossing door for a signing
+  capability the app itself implements** — a Secure Enclave or hardware-backed
+  key reachable only from Swift or Kotlin has no way in. Whatever closes that
+  gap must keep NMP the owner of when to sign and what, with the app's adapter
+  merely interfacing to the hardware; the deleted app-supplied signer mailbox
+  ([#1290](https://github.com/pablof7z/nmp/issues/1290)) inverted that
+  ownership and was removed rather than kept. Inverting the remaining
+  AUTH-policy callback is still open under
+  [#783](https://github.com/pablof7z/nmp/issues/783). Missing capabilities
   remain durable `AwaitingCapability`, and a real redb close/reopen proof
   promotes the exact frozen event, publishes, and receives a relay ACK.
   An explicitly insecure SDK-owned plaintext file checkpoint provides opt-in
