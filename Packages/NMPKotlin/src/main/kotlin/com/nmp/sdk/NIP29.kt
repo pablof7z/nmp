@@ -21,19 +21,13 @@
 //   val receipt = group.publish(engine, authorPubkeyHex = pubkeyHex, kind = 9u, content = "hi")
 //   receipt.status.collect { ... }
 //
-//   // Mint now, submit later through your own choke-point (#1242) -- and
-//   // stamp your own crash-safe token on the way past (#1244):
-//   val intent = group.intent(authorPubkeyHex = pubkeyHex, kind = 9u, content = "hi")
-//       .copy(correlation = myPersistedToken)
-//   val receipt = publishReceipt(engine.ffi, intent)
-//
 // `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` wrap the opaque
 // `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` UniFFI objects exactly like
 // `BlossomAuthorization` wraps `FfiBlossomAuthorization` in Blossom.kt -- a
 // proven Rust value carried across the boundary, never a second mirrored
 // copy of NIP-29's own vocabulary. Neither type exposes its retained hosts
-// or group id back out through an accessor; the write door does yield both,
-// inside the ordinary `WriteIntent` it mints -- see [NMPGroup.intent].
+// or group id back out through an accessor, and no door hands back an
+// unpublished intent that would yield them (#1292).
 //
 // Deliberately absent, same as before #1033: a fixed group-content kind
 // catalog and a kind:9 composer -- NIP-29 owns neither; C7 and client
@@ -175,42 +169,17 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         nmpRethrowing { ffi.validateContext(event.toFfiSignedEvent()) }
     }
 
-    /** Mint the group-contextualized [WriteIntent] for an unsigned draft and
-     * publish NOTHING (#1242).
+    /** Publish an unsigned draft into the group, as [authorPubkeyHex] -- the
+     * group's ONE write door (#1292).
      *
-     * This is the write door. The `h` row is appended before signing, the
-     * route is the scope's own hosts, and [authorPubkeyHex] is frozen as an
-     * exact decoded hex pubkey rather than the active-account selector
-     * (#878). Hand the result to `publishReceipt` -- the SAME door every
-     * other write takes -- whenever the app's own write path is ready.
+     * The `h` row is appended before signing, the route is the scope's own
+     * hosts, and [authorPubkeyHex] is frozen as an exact decoded hex pubkey
+     * rather than the active-account selector (#878). Returns the ORDINARY
+     * [Receipt], store-issued [Receipt.id] included.
      *
-     * [WriteIntent.correlation] on the returned intent is `null`, and filling
-     * it in is how a group write becomes recoverable after a crash (#1244):
-     * an app that persisted its own token before writing copies it in here
-     * and finds the write again with the correlation reattach door. */
-    fun intent(
-        authorPubkeyHex: String,
-        kind: UShort,
-        tags: List<List<String>> = emptyList(),
-        content: String = "",
-        createdAt: ULong? = null,
-    ): WriteIntent =
-        WriteIntent.from(
-            nmpRethrowing {
-                ffi.intent(authorPubkeyHex, FfiEventBuilder(kind, tags, content, createdAt))
-            },
-        )
-
-    /** Mint the group-contextualized [WriteIntent] for an ALREADY-SIGNED
-     * event, and publish nothing (#1242). The `h` it already carries is
-     * validated, never appended or repaired -- see [validateContext]'s doc
-     * for the exact refusals, which fire HERE, before any intent exists. */
-    fun signedIntent(event: NMPSignedEvent): WriteIntent =
-        WriteIntent.from(nmpRethrowing { ffi.signedIntent(event.toFfiSignedEvent()) })
-
-    /** [intent] handed straight to the one publish door -- the inline
-     * spelling, for an app with no separate submit stage. Returns the
-     * ORDINARY [Receipt], store-issued [Receipt.id] included. */
+     * An app that needs a signed event WITHOUT publishing it asks the engine
+     * for exactly that: the engine's sign-event door creates no write intent,
+     * receipt or publication and hands back the signed event. */
     fun publish(
         engine: NMPEngine,
         authorPubkeyHex: String,
@@ -236,8 +205,8 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
      * group owns the CONTEXT, and neither reaches into the other. What this
      * adds is that a [chatReply] no longer has to be taken apart into
      * kind/tags/content just to be published where it belongs. A pre-signed
-     * payload carries its own `h` already and is validated rather than
-     * contextualized -- that is [publishSigned]. */
+     * payload carries its own `h` already; the group door contextualizes a
+     * draft and takes nothing else (#1292). */
     fun publish(
         engine: NMPEngine,
         authorPubkeyHex: String,
@@ -255,28 +224,6 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
                 )
             is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
         }
-
-    /** [intent] over a draft the tagging door composed (#1242 + #1243): mint
-     * the group's own intent from a composed payload and publish nothing. */
-    fun intent(
-        authorPubkeyHex: String,
-        payload: WritePayload,
-    ): WriteIntent =
-        when (payload) {
-            is WritePayload.Event ->
-                intent(
-                    authorPubkeyHex,
-                    payload.kind,
-                    payload.tags,
-                    payload.content,
-                    payload.createdAt,
-                )
-            is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
-        }
-
-    /** [signedIntent] handed straight to the one publish door. */
-    fun publishSigned(engine: NMPEngine, event: NMPSignedEvent): Receipt =
-        receiptFrom(nmpRethrowing { ffi.publishSigned(engine.ffi, event.toFfiSignedEvent()) })
 
     /** kind:9021 -- ask to join. Publishable with no subscription at all. */
     fun joinRequest(

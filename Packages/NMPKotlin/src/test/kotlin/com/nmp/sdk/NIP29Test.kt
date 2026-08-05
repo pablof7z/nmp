@@ -136,37 +136,6 @@ class NIP29Test {
         }
     }
 
-    /** #1242 in Kotlin: the mint door hands back the ordinary [WriteIntent]
-     * with every group decision already made and publishes nothing, and the
-     * app's own crash-safe token then rides that intent through the ONE
-     * general publish door (#1244). */
-    @Test
-    fun theMintDoorHandsBackAnIntentTheGeneralPublishDoorTakes() {
-        NMPEngine(NMPConfig()).use { engine ->
-            val scope = NMPRelayScope.on(listOf(host(1), host(2)))
-            val group = scope.group("photographers")
-            val authorHex = randomPubkeyHex()
-
-            val intent = group.intent(authorHex, kind = 9u, content = "first light")
-            assertEquals(WriteRouting.Explicit(listOf(host(1), host(2))), intent.routing)
-            assertEquals(Identity.Explicit(authorHex), intent.identity)
-            assertEquals(null, intent.correlation)
-            val payload = intent.payload
-            check(payload is WritePayload.Event) { "an unsigned draft mints an Event payload" }
-            assertEquals(
-                listOf(listOf("h", "photographers")),
-                payload.tags.filter { it.firstOrNull() == "h" },
-            )
-
-            val receipt = publishReceipt(engine.ffi, intent.copy(correlation = "group-write-0001"))
-            val reattached = reattachReceiptByCorrelation(engine.ffi, "group-write-0001")
-            check(reattached is ReceiptReattachment.Attached) {
-                "a correlated group write must be reattachable, got $reattached"
-            }
-            assertEquals(receipt.id, reattached.receipt.id)
-        }
-    }
-
     /** #1281: a several-group write reaches the one publish door and comes
      * back with the ordinary store-issued receipt id. */
     @Test

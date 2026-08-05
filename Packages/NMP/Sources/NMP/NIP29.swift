@@ -28,19 +28,13 @@
 //   let receipt = try group.publish(engine: engine, authorPubkeyHex: pubkeyHex, kind: 9, content: "hi")
 //   for try await frame in receipt.status { ... }
 //
-//   // Mint now, submit later through your own choke-point (#1242) -- and
-//   // stamp your own crash-safe token on the way past (#1244):
-//   var intent = try group.intent(authorPubkeyHex: pubkeyHex, kind: 9, content: "hi")
-//   intent.correlation = myPersistedToken
-//   let receipt = try await engine.publish(intent)
-//
 // `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` wrap the opaque
 // `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` UniFFI objects exactly like
 // `BlossomAuthorization` wraps `FfiBlossomAuthorization` in Blossom.swift --
 // a proven Rust value carried across the boundary, never a second mirrored
 // copy of NIP-29's own vocabulary. Neither type exposes its retained hosts
-// or group id back out through an accessor; the write door does yield both,
-// inside the ordinary `WriteIntent` it mints -- see `NMPGroup.intent`.
+// or group id back out through an accessor, and no door hands back an
+// unpublished intent that would yield them (#1292).
 //
 // Deliberately absent, same as before #1033: a fixed group-content kind
 // catalog and a kind:9 composer -- NIP-29 owns neither; C7 and client
@@ -183,50 +177,17 @@ public final class NMPGroup: @unchecked Sendable {
         try nmpRethrowing { try ffi.validateContext(event: event.toFfiSignedEvent()) }
     }
 
-    /// Mint the group-contextualized `WriteIntent` for an unsigned draft and
-    /// publish NOTHING (#1242).
+    /// Publish an unsigned draft into the group, as `authorPubkeyHex` -- the
+    /// group's ONE write door (#1292).
     ///
-    /// This is the write door. The `h` row is appended before signing, the
-    /// route is the scope's own hosts, and `authorPubkeyHex` is frozen as an
-    /// exact decoded hex pubkey rather than the active-account selector
-    /// (#878). Hand the result to `NMPEngine.publish(_:)` -- the SAME door
-    /// every other write takes -- whenever the app's own write path is ready
-    /// for it.
+    /// The `h` row is appended before signing, the route is the scope's own
+    /// hosts, and `authorPubkeyHex` is frozen as an exact decoded hex pubkey
+    /// rather than the active-account selector (#878). Returns the ORDINARY
+    /// `Receipt`, store-issued `id` included.
     ///
-    /// `correlation` on the returned intent is `nil`, and filling it in is
-    /// how a group write becomes recoverable after a crash (#1244): an app
-    /// that persisted its own token before writing sets it here and finds the
-    /// write again with `NMPEngine.reattachReceipt(correlation:)`.
-    public func intent(
-        authorPubkeyHex: String,
-        kind: UInt16,
-        tags: [[String]] = [],
-        content: String = "",
-        createdAt: UInt64? = nil
-    ) throws -> WriteIntent {
-        let ffiIntent = try nmpRethrowing {
-            try ffi.intent(
-                author: authorPubkeyHex,
-                builder: FfiEventBuilder(kind: kind, tags: tags, content: content, createdAt: createdAt)
-            )
-        }
-        return WriteIntent(ffiIntent)
-    }
-
-    /// Mint the group-contextualized `WriteIntent` for an ALREADY-SIGNED
-    /// event, and publish nothing (#1242). The `h` it already carries is
-    /// validated, never appended or repaired -- see `validateContext(_:)`'s
-    /// doc for the exact refusals, which fire HERE, before any intent exists.
-    public func signedIntent(_ event: NMPSignedEvent) throws -> WriteIntent {
-        let ffiIntent = try nmpRethrowing {
-            try ffi.signedIntent(event: event.toFfiSignedEvent())
-        }
-        return WriteIntent(ffiIntent)
-    }
-
-    /// `intent(...)` handed straight to the one publish door -- the inline
-    /// spelling, for an app with no separate submit stage. Returns the
-    /// ORDINARY `Receipt`, store-issued `id` included.
+    /// An app that needs a signed event WITHOUT publishing it asks the engine
+    /// for exactly that: `NMPEngine.signEvent(...)` creates no write intent,
+    /// receipt or publication and hands back the signed event.
     public func publish(
         engine: NMPEngine,
         authorPubkeyHex: String,
@@ -258,39 +219,13 @@ public final class NMPGroup: @unchecked Sendable {
         payload: WritePayload
     ) throws -> Receipt {
         guard case .event(let kind, let tags, let content, let createdAt) = payload else {
-            // A pre-signed event carries its own `h` already and is validated
-            // rather than contextualized -- that is `publishSigned(_:)`.
+            // A pre-signed event carries its own `h` already; the group door
+            // contextualizes a draft and takes nothing else (#1292).
             throw NMPError.groupCallerSuppliedContext
         }
         return try publish(
             engine: engine, authorPubkeyHex: authorPubkeyHex, kind: kind, tags: tags,
             content: content, createdAt: createdAt)
-    }
-
-    /// `intent(authorPubkeyHex:kind:...)` over a draft the tagging door
-    /// composed (#1242 + #1243): mint the group's own intent from a composed
-    /// payload and publish nothing.
-    public func intent(
-        authorPubkeyHex: String,
-        payload: WritePayload
-    ) throws -> WriteIntent {
-        guard case .event(let kind, let tags, let content, let createdAt) = payload else {
-            throw NMPError.groupCallerSuppliedContext
-        }
-        return try intent(
-            authorPubkeyHex: authorPubkeyHex, kind: kind, tags: tags, content: content,
-            createdAt: createdAt)
-    }
-
-    /// `signedIntent(_:)` handed straight to the one publish door.
-    public func publishSigned(
-        engine: NMPEngine,
-        event: NMPSignedEvent
-    ) throws -> Receipt {
-        let receipts = try nmpRethrowing {
-            try ffi.publishSigned(engine: engine.concreteFfiEngine, event: event.toFfiSignedEvent())
-        }
-        return Receipt(handle: receipts)
     }
 
     /// kind:9021 -- ask to join. Publishable with no subscription at all.
