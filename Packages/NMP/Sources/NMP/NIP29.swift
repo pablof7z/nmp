@@ -741,16 +741,7 @@ public struct NMPGroupSnapshot: Sendable, Hashable {
     /// Exactly what each host that answered signed, in host order.
     public let perHost: [NMPHostRecords]
 
-    /// The records this observation ASKED for. Settlement alone cannot tell a
-    /// settled empty list apart from a list nobody requested, and
-    /// `.absent` would be a lie in the second case (#1234).
-    public let selected: Set<NMPGroupRecord>
-
     private let disagreements: Set<NMPGroupRecord>
-    /// Retained verbatim so `memberListing(_:)`/`adminListing(_:)` ask Rust
-    /// the question instead of re-deriving the answer here. It is the same
-    /// record this value was built from, copied once.
-    private let ffi: FfiGroupSnapshot
 
     init(_ ffi: FfiGroupSnapshot) {
         self.id = ffi.id
@@ -760,8 +751,6 @@ public struct NMPGroupSnapshot: Sendable, Hashable {
         self.availability = NMPGroupAvailability(ffi.availability)
         self.perHost = ffi.perHost.map(NMPHostRecords.init)
         self.disagreements = Set(ffi.disagreements.map(NMPGroupRecord.init))
-        self.selected = Set(ffi.selected.map(NMPGroupRecord.init))
-        self.ffi = ffi
     }
 
     /// Exactly what `host` signed, or `nil` if it has published none of the
@@ -774,54 +763,6 @@ public struct NMPGroupSnapshot: Sendable, Hashable {
     /// a dig-in affordance is worth offering.
     public func differs(_ record: NMPGroupRecord) -> Bool {
         disagreements.contains(record)
-    }
-
-    /// What these hosts PROVE about `subjectPubkeyHex`'s place in their
-    /// kind:39002 member lists (#1234).
-    ///
-    /// This is the answer a moderation receipt cannot give: an acked
-    /// kind:9000 says a host took the request, and only this says the list
-    /// reflects it. `subjectPubkeyHex` is 64-char hex; a malformed one throws
-    /// rather than reading as a settled absence.
-    public func memberListing(_ subjectPubkeyHex: String) throws -> NMPListing {
-        NMPListing(
-            try nmpRethrowing {
-                try NMPFFI.memberListing(snapshot: ffi, subject: subjectPubkeyHex)
-            })
-    }
-
-    /// The kind:39001 half. Same rule as `memberListing(_:)`.
-    public func adminListing(_ subjectPubkeyHex: String) throws -> NMPListing {
-        NMPListing(
-            try nmpRethrowing {
-                try NMPFFI.adminListing(snapshot: ffi, subject: subjectPubkeyHex)
-            })
-    }
-}
-
-/// What a group's hosts currently PROVE about one subject's place in one of
-/// NIP-29's relay-signed lists (`FfiListing` mirror, #1234).
-///
-/// Three cases because NIP-29 admits three. Collapsing the last two is the
-/// mistake: an app that renders `.unestablished` as "not a member" shows a
-/// false negative every time a relay is still reconciling.
-public enum NMPListing: Sendable, Hashable {
-    /// At least one host's own signed record names this subject, with the
-    /// hosts that named it and the role each of them wrote.
-    case named([NMPListedSubject])
-    /// Every host in the scope has ESTABLISHED this record and none names the
-    /// subject. Rests on settlement, never on a timer.
-    case absent
-    /// Not every host has established this record yet, or the observation
-    /// never asked for it. Absence is not evidence here.
-    case unestablished
-
-    init(_ ffi: FfiListing) {
-        switch ffi {
-        case .named(let entries): self = .named(entries.map(NMPListedSubject.init))
-        case .absent: self = .absent
-        case .unestablished: self = .unestablished
-        }
     }
 }
 
