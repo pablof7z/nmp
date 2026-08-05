@@ -168,6 +168,12 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidNip73(val reason: String) :
         NMPError("invalid NIP-73 external content id: $reason")
 
+    /** #155: a [Reaction.Emoji] said something the caller did not mean -- the
+     * empty string, which NIP-25 reads as a like, or a NIP-30 `:shortcode:`,
+     * which needs a companion `emoji` row this door does not write. */
+    data class InvalidReaction(val reason: String) :
+        NMPError("invalid reaction: $reason")
+
     /** #973: a composer returned a compare-and-swap replaceable edit, which
      * has no wire form on purpose -- a replaceable precondition crosses this
      * boundary only inside the semantic method that owns it
@@ -322,6 +328,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidCorrelationToken ->
                     InvalidCorrelationToken(ffi.got, ffi.reason)
                 is FfiException.InvalidNip73 -> InvalidNip73(ffi.reason)
+                is FfiException.InvalidReaction -> InvalidReaction(ffi.reason)
                 is FfiException.ReplaceableEditHasNoWireForm -> ReplaceableEditHasNoWireForm
                 is FfiException.EmptyRelayScope -> EmptyRelayScope
                 is FfiException.GroupCallerSuppliedContext -> GroupCallerSuppliedContext

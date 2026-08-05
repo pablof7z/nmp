@@ -154,6 +154,61 @@ class TaggingTest {
         )
     }
 
+    /** #155's own report, closed at the boundary it named: a native app
+     * composes a reaction through NMP instead of hand-writing `kind: 7` with its
+     * own `e` and `p` rows, and the door fills the hint, the author slot and the
+     * `k` row an app-written pair never carried. */
+    @Test
+    fun reactionIsKindSevenAndCarriesWhatTheOneDoorFills() {
+        val target = row(1u, sources = listOf("wss://relay.example"))
+        val composed = event(react(target, Reaction.Like))
+        assertEquals(7u.toUShort(), composed.kind)
+        assertEquals("+", composed.content)
+
+        val eRow = composed.tags.first { it[0] == "e" }
+        assertEquals(target.id, eRow[1])
+        assertEquals("wss://relay.example", eRow[2])
+        assertEquals(target.pubkey, eRow[3])
+        assertTrue(composed.tags.any { it[0] == "p" && it[1] == target.pubkey })
+        assertTrue(composed.tags.any { it[0] == "k" && it[1] == "1" })
+    }
+
+    /** The three readings NIP-25 defines. An app never writes the content
+     * bytes, so it cannot spell "like" by accident. */
+    @Test
+    fun theReactionVocabularyIsNip25sThreeReadings() {
+        fun content(reaction: Reaction) = event(react(row(1u), reaction)).content
+        assertEquals("+", content(Reaction.Like))
+        assertEquals("-", content(Reaction.Dislike))
+        assertEquals("\uD83D\uDD25", content(Reaction.Emoji("\uD83D\uDD25")))
+    }
+
+    /** NIP-25 says there MUST always be an `e` tag set to the id of the event
+     * being reacted to, so reacting to a reply names the REPLY -- a client
+     * tallying by the first `e` cannot credit the thread root with a reaction
+     * nobody gave it. */
+    @Test
+    fun reactingToAReplyNamesTheReplyAndNeverItsRoot() {
+        val rootId = "f".repeat(64)
+        val reply = row(1u, tags = listOf(listOf("e", rootId, "", "root")))
+        val composed = event(react(reply, Reaction.Like))
+        val eRows = composed.tags.filter { it[0] == "e" }
+        assertEquals(1, eRows.size)
+        assertEquals(reply.id, eRows[0][1])
+    }
+
+    /** Both refusals are typed and synchronous: an empty emoji is NIP-25's
+     * spelling of a LIKE, and a NIP-30 `:shortcode:` needs a companion `emoji`
+     * row this door does not write. */
+    @Test
+    fun anEmojiThatWouldSaySomethingElseRefuses() {
+        for (emoji in listOf("", ":soapbox:")) {
+            assertFailsWith<NMPError.InvalidReaction> {
+                react(row(1u), Reaction.Emoji(emoji))
+            }
+        }
+    }
+
     /** A malformed key is a typed refusal; nothing partial escapes. */
     @Test
     fun aMalformedNamedKeyRefuses() {

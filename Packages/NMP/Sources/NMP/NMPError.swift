@@ -126,6 +126,11 @@ public enum NMPError: Error, Sendable, Equatable {
     /// #572/#1258: an `Nip73` failed its constructor validation (an empty
     /// `I`/`K` cell).
     case invalidNip73(reason: String)
+    /// #155: a `Reaction.emoji` said something the caller did not mean --
+    /// the empty string, which NIP-25 reads as a like, or a NIP-30
+    /// `:shortcode:`, which needs a companion `emoji` row this door does not
+    /// write.
+    case invalidReaction(reason: String)
     /// #973: a composer returned a compare-and-swap replaceable edit, which
     /// has no wire form on purpose -- a replaceable precondition crosses
     /// this boundary only inside the semantic method that owns it
@@ -234,6 +239,8 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .invalidCorrelationToken(got: got, reason: reason)
         case .InvalidNip73(let reason):
             self = .invalidNip73(reason: reason)
+        case .InvalidReaction(let reason):
+            self = .invalidReaction(reason: reason)
         case .ReplaceableEditHasNoWireForm: self = .replaceableEditHasNoWireForm
         case .EmptyRelayScope: self = .emptyRelayScope
         case .GroupCallerSuppliedContext: self = .groupCallerSuppliedContext
@@ -350,6 +357,8 @@ extension NMPError: LocalizedError {
             "Invalid correlation token \(got.debugDescription): \(reason)"
         case .invalidNip73(let reason):
             "Invalid NIP-73 external content id: \(reason)"
+        case .invalidReaction(let reason):
+            "Invalid reaction: \(reason)"
         case .replaceableEditHasNoWireForm:
             "A replaceable edit crosses this boundary only inside the semantic method that owns its precondition, never as a payload"
         case .emptyRelayScope:

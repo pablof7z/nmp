@@ -2132,6 +2132,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-nip02",
  "nmp-nip18",
+ "nmp-nip25",
  "nmp-nip29",
  "nmp-nip51",
  "nmp-nipc7",
@@ -2209,6 +2210,14 @@ version = "0.1.0"
 dependencies = [
  "nmp-grammar",
  "nmp-nip73",
+ "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip25"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
  "nostr 0.44.4",
 ]
 

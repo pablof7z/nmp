@@ -58,6 +58,10 @@ members = [
     # NIP-18 reposts (#1243). NIP-18 owns BOTH kinds (6 and 16), so its
     # two-way split is internal and needs no cross-crate dispatch.
     "crates/nmp-nip18",
+    # NIP-25 reactions (#155): the kind:7 owner. It owns the kind, what the
+    # content means (`+`/`-`/an emoji, which are the spec's own three readings)
+    # and the entity the reaction points at; it owns no write policy.
+    "crates/nmp-nip25",
     # #818 Fjall journal-write-error falsifier. ONLY the harness is a member,
     # so `cargo test --workspace` runs the regression instead of letting it rot
     # behind a bespoke lane. It depends on no Fjall crate: the three pinned
@@ -111,6 +115,7 @@ nmp-test-support = { path = "crates/nmp-test-support" }
 nmp-nip22 = { path = "crates/nmp-nip22" }
 nmp-nip73 = { path = "crates/nmp-nip73" }
 nmp-nip18 = { path = "crates/nmp-nip18" }
+nmp-nip25 = { path = "crates/nmp-nip25" }
 proptest = "1"
 uniffi = "0.29"
 serde = { version = "1", features = ["derive"] }
