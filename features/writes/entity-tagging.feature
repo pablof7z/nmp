@@ -38,8 +38,8 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-001
     # nmp:status=built
-    # nmp:evidence=rust:nmp-grammar::tagging::tests::same_target_yields_same_rows_regardless_of_caller
-    # nmp:evidence=rust:nmp-grammar::tagging::tests::a_root_is_tagged_with_a_single_root_marked_row
+    # nmp:evidence=rust:nmp-grammar::same_target_yields_same_rows_regardless_of_caller
+    # nmp:evidence=rust:nmp-grammar::a_root_is_tagged_with_a_single_root_marked_row
     # nmp:falsifier=Make the door read the composing kind, or let a caller state root-vs-reply; tagging one reply from a reply composer and from a reaction composer must then differ, or a reply to a reply must name the target as its own root.
     Scenario: The same target tagged from different composers yields the same rows
       Given an event that is itself a reply to a thread root
@@ -49,7 +49,7 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-002
     # nmp:status=built
-    # nmp:evidence=rust:nmp-grammar::tagging::tests::every_wire_reply_shape_reads_to_the_same_thread_position
+    # nmp:evidence=rust:nmp-grammar::every_wire_reply_shape_reads_to_the_same_thread_position
     # nmp:falsifier=Drop the no-root-marker case, or treat applesauce's duplicate-id pair as malformed; a reply written by current rust-nostr or by applesauce then reads to a different thread position than the identical reply written by NMP.
     Scenario: Every wire shape that means one thread position reads to that position
       Given replies written as a marked root-and-reply pair, as positional rows, with only a "reply" marker, and as applesauce's two rows carrying one id
@@ -61,8 +61,8 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-003
     # nmp:status=built
-    # nmp:evidence=rust:nmp-grammar::tagging::tests::every_pointer_emits_its_author_row_unless_declined
-    # nmp:evidence=rust:nmp-ffi::tagging::tests::a_native_chat_reply_is_kind_9_and_points_with_e
+    # nmp:evidence=rust:nmp-grammar::every_pointer_emits_its_author_row_unless_declined
+    # nmp:evidence=rust:nmp-ffi::a_native_chat_reply_is_kind_9_and_points_with_e
     # nmp:falsifier=Stop emitting the companion p row, or drop the author from the reference row's own slot when the p row is declined; the parent author stops being notified with nothing visibly missing, which is the bug quartz shipped.
     Scenario: A pointer carries its author, its hint, and its companion notification
       Given an event NMP observed at a relay
@@ -73,8 +73,8 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-004
     # nmp:status=built
-    # nmp:evidence=rust:nmp-grammar::tagging::tests::carry_forward_and_dedup_behave_identically_on_every_path
-    # nmp:evidence=rust:nmp-grammar::tagging::tests::modifiers_compose_in_any_order
+    # nmp:evidence=rust:nmp-grammar::carry_forward_and_dedup_behave_identically_on_every_path
+    # nmp:evidence=rust:nmp-grammar::modifiers_compose_in_any_order
     # nmp:falsifier=Let one internal path dedupe and another not, or strip the composing account's own "p" row automatically; a duplicate on the wire becomes a duplicate here, or an agent adding itself to a group publishes an operation naming nobody.
     Scenario: Carry-forward differs per relationship and dedupes the same way everywhere
       Given an event that mentions one person twice and the composing account once
@@ -87,8 +87,8 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-005
     # nmp:status=built
-    # nmp:evidence=rust:nmp-grammar::tagging::tests::nip22_root_scope_is_uppercase_with_no_marker_slot
-    # nmp:evidence=rust:nmp-nip22::intent::tests::replying_to_a_comment_keeps_the_root_the_wire_states
+    # nmp:evidence=rust:nmp-grammar::nip22_root_scope_is_uppercase_with_no_marker_slot
+    # nmp:evidence=rust:nmp-nip22::replying_to_a_comment_keeps_the_root_the_wire_states
     # nmp:falsifier=Put a "root" or "reply" marker on a comment's rows, or let the caller restate the root while replying to a comment; the first is the mistake NDK shipped and reverted, and the second lets an app pin a reply to a thread it is not in.
     Scenario: A comment's root scope is uppercase and unmarked
       When an app comments on an article
@@ -99,7 +99,7 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-006
     # nmp:status=built
-    # nmp:evidence=rust:nmp-nipc7::tests::chat_reply_points_with_e_and_never_q_or_h_or_previous_rows
+    # nmp:evidence=rust:nmp-nipc7::chat_reply_points_with_e_and_never_q_or_h_or_previous_rows
     # nmp:evidence=swift:NMP::TaggingTests.testChatReplyIsKindNineAndPointsWithE
     # nmp:evidence=kotlin:NMPKotlin::TaggingTest.chatReplyIsKindNineAndPointsWithE
     # nmp:falsifier=Route kind:9 replies through the general reply verb, or restore the "q" reply row; a group chat reply becomes a kind 1111 no NIP-29 client will ever fetch, or points with the marker that keeps it out of its own thread.
@@ -113,8 +113,8 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-007
     # nmp:status=built
-    # nmp:evidence=rust:nmp-grammar::text::tests::an_inline_reference_and_its_row_come_from_one_statement
-    # nmp:evidence=rust:nmp-grammar::text::tests::interpolated_rows_never_disturb_the_rows_a_composer_stated
+    # nmp:evidence=rust:nmp-grammar::an_inline_reference_and_its_row_come_from_one_statement
+    # nmp:evidence=rust:nmp-grammar::interpolated_rows_never_disturb_the_rows_a_composer_stated
     # nmp:falsifier=Let content be written separately from the rows its references need; a quote row appears with nothing in the content quoting it, which is what made the old chat reply unrenderable, or a mention appears in content with no "p" row to notify anyone.
     Scenario: Naming someone inside a message emits the row that resolves them
       When an app writes a message naming a person and an event inline
@@ -125,8 +125,8 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-008
     # nmp:status=built
-    # nmp:evidence=rust:nmp-nip18::tests::reposting_a_reply_names_the_reply_and_never_its_root
-    # nmp:evidence=rust:nmp-nip18::tests::a_text_note_reposts_as_kind_6_and_anything_else_as_kind_16_plus_k
+    # nmp:evidence=rust:nmp-nip18::reposting_a_reply_names_the_reply_and_never_its_root
+    # nmp:evidence=rust:nmp-nip18::a_text_note_reposts_as_kind_6_and_anything_else_as_kind_16_plus_k
     # nmp:falsifier=Thread a repost's rows; a reposted reply then emits the root's "e" row first, and a NIP-18 reader takes the first "e" as the reposted event, so the user reposts a note they never chose.
     Scenario: Reposting a reply reposts that reply
       When a user reposts a note that is itself a reply
