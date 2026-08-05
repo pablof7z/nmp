@@ -20,9 +20,21 @@ import uniffi.nmp_ffi.NmpSignerMailbox
  *
  * The door is a stream, not a callback. NMP does not call into the app
  * (#783): it enqueues immutable requests and returns, and the app drains them
- * on its own dispatcher. That is what makes a signer that takes ten seconds
- * because a person is looking at a confirmation screen an ordinary case
- * rather than a stalled engine.
+ * on its own dispatcher. The reason is not that a person is slow -- NMP's
+ * ready-or-pending capability shape already absorbs human time without
+ * holding anything, which is what the AUTH policy does today. It is that #783
+ * requires it, that the one remaining callback is invoked with the capability
+ * mutex held on a shared-runtime task, and that making "NMP calls you" safe
+ * across UniFFI cost a 752-line five-state Condvar linearization this door
+ * does not need.
+ *
+ * Cancellation is deliberately NOT bridged the way the row flow bridges it.
+ * A query handle's `cancel` ends one stream; this mailbox IS the app's
+ * signer, so a `finally { cancel() }` would silently park every later write
+ * for that key the first time a collecting scope died. Kotlin needs no bridge
+ * at all -- UniFFI's generated `suspendCancellableCoroutine` frees the parked
+ * Rust future -- while Swift needs [NMPSignerMailbox.unpark], the
+ * non-destructive wake this file also exposes.
  */
 
 /**
@@ -160,7 +172,25 @@ class NMPSignerMailbox internal constructor(
     suspend fun next(): NMPSignatureRequest? =
         nmpRethrowing { ffi.next() }?.let(::NMPSignatureRequest)
 
-    /** The requests as a cold [Flow], ending when the mailbox does. */
+    /**
+     * The requests as a cold [Flow], ending when the mailbox does -- or when
+     * the collecting scope is cancelled, which ends only this collection.
+     *
+     * There is deliberately no `finally { cancel() }` here, unlike the row
+     * flow. A query handle's cancel ends one stream; this mailbox IS the
+     * app's signer, so tying it to a collecting scope would silently park
+     * every later write for this key the first time a screen went away. Nor
+     * is a `finally { unpark() }` needed: UniFFI's generated Kotlin parks in
+     * `suspendCancellableCoroutine` and frees the Rust future in its own
+     * `finally`, so a cancelled collection already releases the single-reader
+     * claim and the registration simply stays live. (Swift has no such luck
+     * -- its generated parking is `withUnsafeContinuation` -- which is why
+     * [unpark] exists at all.)
+     *
+     * The one visible cost: a request already lifted out of the queue when
+     * the collector dies is dropped, which the engine hears as the ordinary
+     * retryable unavailable and the write parks for the next drain.
+     */
     fun requests(): Flow<NMPSignatureRequest> =
         flow {
             while (true) {
@@ -171,11 +201,21 @@ class NMPSignerMailbox internal constructor(
     /**
      * Stop accepting requests and end a parked [next].
      *
-     * This does NOT remove the registration: writes for this key then park on
-     * an unavailable signer, exactly as they do before any signer attaches.
-     * [NMPEngine.removeSigner] removes it.
+     * Destructive, and the only destructive verb here: this app stops being
+     * the signer for [publicKey], so writes for that key park on an
+     * unavailable signer exactly as they do before any signer attaches. It
+     * does NOT remove the registration -- [NMPEngine.removeSigner] does. To
+     * end a drain without giving up the signer, cancel the collecting scope
+     * (or call [unpark]).
      */
     fun cancel() = ffi.cancel()
+
+    /**
+     * End one [next] without closing the mailbox. A parked drain ends now;
+     * with none parked the next [next] ends instead. Everything else -- the
+     * registration, the queued requests, the ability to sign -- survives.
+     */
+    fun unpark() = ffi.unpark()
 }
 
 internal fun NMPSignedEvent.toFfi() =

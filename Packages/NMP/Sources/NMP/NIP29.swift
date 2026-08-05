@@ -330,17 +330,21 @@ public final class NMPGroup: @unchecked Sendable {
         return Receipt(handle: receipts)
     }
 
-    /// kind:9002 -- set the group's display fields. An omitted field emits
-    /// no tag at all, so it is left untouched rather than cleared.
+    /// kind:9002 -- state part of the group's metadata (#1282).
+    ///
+    /// Composes NIP-29's own 9002 rows and invents none: `name`, `about` and
+    /// `picture`, plus the `public`/`private` and `open`/`closed` markers
+    /// that decide who may read the group and whether join requests are
+    /// honoured. An omitted field emits no tag, so it is left untouched
+    /// rather than cleared.
     public func editMetadata(
         engine: NMPEngine,
         authorPubkeyHex: String,
-        name: String? = nil,
-        about: String? = nil
+        edit: NMPGroupMetadataEdit
     ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.editMetadata(
-                engine: engine.concreteFfiEngine, author: authorPubkeyHex, name: name, about: about
+                engine: engine.concreteFfiEngine, author: authorPubkeyHex, edit: edit.toFfi()
             )
         }
         return Receipt(handle: receipts)
@@ -390,6 +394,83 @@ public final class NMPGroup: @unchecked Sendable {
             try ffi.createInvite(engine: engine.concreteFfiEngine, author: authorPubkeyHex, code: code)
         }
         return Receipt(handle: receipts)
+    }
+}
+
+/// Who may READ a group's messages (`nmp::nip29::ReadAccess` mirror, #1282).
+///
+/// NIP-29 spells the restricted state `["private"]`; the reference relay's
+/// kind:9002 parser spells the permissive one `["public"]`, which is the only
+/// way an edit can say "turn it back off".
+public enum NMPReadAccess: Sendable, Hashable {
+    /// `["public"]` -- anyone may read the group's messages.
+    case `public`
+    /// `["private"]` -- only members may read the group's messages.
+    case `private`
+
+    func toFfi() -> FfiReadAccess {
+        switch self {
+        case .public: return .public
+        case .private: return .private
+        }
+    }
+}
+
+/// Whether JOIN REQUESTS are honoured (`nmp::nip29::JoinAccess` mirror,
+/// #1282). Independent of `NMPReadAccess`: a group can be publicly readable
+/// and still closed to new members.
+public enum NMPJoinAccess: Sendable, Hashable {
+    /// `["open"]` -- join requests are honoured.
+    case open
+    /// `["closed"]` -- join requests are ignored.
+    case closed
+
+    func toFfi() -> FfiJoinAccess {
+        switch self {
+        case .open: return .open
+        case .closed: return .closed
+        }
+    }
+}
+
+/// What one kind:9002 edit says about a group
+/// (`nmp::nip29::GroupMetadataEdit` mirror, #1282).
+///
+/// Every field is optional: `nil` leaves that row out of the draft entirely,
+/// so it is not touched and never cleared. That is why the two markers are
+/// two-valued enums rather than `Bool`s -- "make it public" and "do not
+/// decide" are different statements, and one `Bool` cannot make both.
+public struct NMPGroupMetadataEdit: Sendable, Hashable {
+    /// The `name` row -- the group's display name.
+    public var name: String?
+    /// The `about` row -- the group's description.
+    public var about: String?
+    /// The `picture` row. The tag NAME is NIP-29's; which URL goes in it is
+    /// entirely the app's product policy.
+    public var picture: String?
+    /// Who may read the group's messages.
+    public var readAccess: NMPReadAccess?
+    /// Whether join requests are honoured.
+    public var joinAccess: NMPJoinAccess?
+
+    public init(
+        name: String? = nil,
+        about: String? = nil,
+        picture: String? = nil,
+        readAccess: NMPReadAccess? = nil,
+        joinAccess: NMPJoinAccess? = nil
+    ) {
+        self.name = name
+        self.about = about
+        self.picture = picture
+        self.readAccess = readAccess
+        self.joinAccess = joinAccess
+    }
+
+    func toFfi() -> FfiGroupMetadataEdit {
+        FfiGroupMetadataEdit(
+            name: name, about: about, picture: picture,
+            readAccess: readAccess?.toFfi(), joinAccess: joinAccess?.toFfi())
     }
 }
 

@@ -53,6 +53,9 @@ import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiGroup
 import uniffi.nmp_ffi.FfiGroupIds
+import uniffi.nmp_ffi.FfiGroupMetadataEdit
+import uniffi.nmp_ffi.FfiJoinAccess
+import uniffi.nmp_ffi.FfiReadAccess
 import uniffi.nmp_ffi.FfiGroupPredicate
 import uniffi.nmp_ffi.FfiRelayScope
 import uniffi.nmp_ffi.FfiSignedEvent
@@ -293,16 +296,20 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
             nmpRethrowing { ffi.removeUser(engine.ffi, authorPubkeyHex, pubkeyHex) },
         )
 
-    /** kind:9002 -- set the group's display fields. An omitted field emits
-     * no tag at all, so it is left untouched rather than cleared. */
+    /** kind:9002 -- state part of the group's metadata (#1282).
+     *
+     * Composes NIP-29's own 9002 rows and invents none: `name`, `about` and
+     * `picture`, plus the `public`/`private` and `open`/`closed` markers that
+     * decide who may read the group and whether join requests are honoured.
+     * An omitted field emits no tag, so it is left untouched rather than
+     * cleared. */
     fun editMetadata(
         engine: NMPEngine,
         authorPubkeyHex: String,
-        name: String? = null,
-        about: String? = null,
+        edit: NMPGroupMetadataEdit,
     ): Receipt =
         receiptFrom(
-            nmpRethrowing { ffi.editMetadata(engine.ffi, authorPubkeyHex, name, about) },
+            nmpRethrowing { ffi.editMetadata(engine.ffi, authorPubkeyHex, edit.toFfi()) },
         )
 
     /** kind:9005 -- delete one group-hosted event. */
@@ -324,6 +331,68 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         receiptFrom(
             nmpRethrowing { ffi.createInvite(engine.ffi, authorPubkeyHex, code) },
         )
+}
+
+/** Who may READ a group's messages (`nmp::nip29::ReadAccess` mirror, #1282).
+ *
+ * NIP-29 spells the restricted state `["private"]`; the reference relay's
+ * kind:9002 parser spells the permissive one `["public"]`, which is the only
+ * way an edit can say "turn it back off". */
+enum class NMPReadAccess {
+    /** `["public"]` -- anyone may read the group's messages. */
+    PUBLIC,
+
+    /** `["private"]` -- only members may read the group's messages. */
+    PRIVATE,
+    ;
+
+    internal fun toFfi(): FfiReadAccess =
+        when (this) {
+            PUBLIC -> FfiReadAccess.PUBLIC
+            PRIVATE -> FfiReadAccess.PRIVATE
+        }
+}
+
+/** Whether JOIN REQUESTS are honoured (`nmp::nip29::JoinAccess` mirror,
+ * #1282). Independent of [NMPReadAccess]: a group can be publicly readable
+ * and still closed to new members. */
+enum class NMPJoinAccess {
+    /** `["open"]` -- join requests are honoured. */
+    OPEN,
+
+    /** `["closed"]` -- join requests are ignored. */
+    CLOSED,
+    ;
+
+    internal fun toFfi(): FfiJoinAccess =
+        when (this) {
+            OPEN -> FfiJoinAccess.OPEN
+            CLOSED -> FfiJoinAccess.CLOSED
+        }
+}
+
+/** What one kind:9002 edit says about a group
+ * (`nmp::nip29::GroupMetadataEdit` mirror, #1282).
+ *
+ * Every field is optional: `null` leaves that row out of the draft entirely,
+ * so it is not touched and never cleared. That is why the two markers are
+ * two-valued enums rather than `Boolean`s -- "make it public" and "do not
+ * decide" are different statements, and one `Boolean` cannot make both. */
+data class NMPGroupMetadataEdit(
+    /** The `name` row -- the group's display name. */
+    val name: String? = null,
+    /** The `about` row -- the group's description. */
+    val about: String? = null,
+    /** The `picture` row. The tag NAME is NIP-29's; which URL goes in it is
+     * entirely the app's product policy. */
+    val picture: String? = null,
+    /** Who may read the group's messages. */
+    val readAccess: NMPReadAccess? = null,
+    /** Whether join requests are honoured. */
+    val joinAccess: NMPJoinAccess? = null,
+) {
+    internal fun toFfi(): FfiGroupMetadataEdit =
+        FfiGroupMetadataEdit(name, about, picture, readAccess?.toFfi(), joinAccess?.toFfi())
 }
 
 /** Which groups an observation covers (`nmp::nip29::GroupPredicate`/

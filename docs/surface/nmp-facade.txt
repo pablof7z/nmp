@@ -63,9 +63,12 @@ pub use nmp::nip29::GROUP_MEMBERS_KIND
 pub use nmp::nip29::GROUP_METADATA_KIND
 pub use nmp::nip29::GroupContextError
 pub use nmp::nip29::GroupMetadata
+pub use nmp::nip29::GroupMetadataEdit
 pub use nmp::nip29::GroupRecord
+pub use nmp::nip29::JoinAccess
 pub use nmp::nip29::ListedRecord
 pub use nmp::nip29::ListedSubject
+pub use nmp::nip29::ReadAccess
 pub use nmp::nip29::add_user
 pub use nmp::nip29::create_group
 pub use nmp::nip29::create_invite
@@ -270,7 +273,7 @@ pub fn nmp::nip29::Group::create_group(&self, &nmp::Engine, nostr::key::public_k
 pub fn nmp::nip29::Group::create_invite(&self, &nmp::Engine, nostr::key::public_key::PublicKey, &str) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::delete_event(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nostr::event::id::EventId) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::delete_group(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
-pub fn nmp::nip29::Group::edit_metadata(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::edit_metadata(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nmp_nip29::operations::GroupMetadataEdit) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::intent(&self, nostr::key::public_key::PublicKey, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp_grammar::write::WriteIntent, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::join_request(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::leave_request(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
@@ -1715,6 +1718,7 @@ pub struct nmp::SignerMailbox
 impl nmp::SignerMailbox
 pub fn nmp::SignerMailbox::cancel(&self)
 pub async fn nmp::SignerMailbox::next(&self) -> core::result::Result<core::option::Option<nmp::SignatureRequest>, nmp::runtime::diagnostics_channel::ConcurrentNext>
+pub fn nmp::SignerMailbox::unpark(&self)
 impl !core::marker::Freeze for nmp::SignerMailbox
 impl core::marker::Send for nmp::SignerMailbox
 impl core::marker::Sync for nmp::SignerMailbox
