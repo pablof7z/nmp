@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import errno
 import importlib.util
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -29,11 +33,105 @@ sys.modules[SPEC.name] = authorization
 SPEC.loader.exec_module(authorization)
 
 
+# The fixtures are real Git repositories on purpose: the program under test
+# makes promises about exact 40-character object ids and canonical raw diffs, so
+# a mocked repository would prove nothing. Real repositories also mean real
+# background work. `git commit` spawns a detached `git maintenance run --auto`
+# that keeps writing under `.git/objects` after the foreground command has
+# already returned, so a scratch tree can refill between `os.scandir` and
+# `os.rmdir` and removal fails with ENOTEMPTY. Two independent mechanisms keep
+# that off this suite's exit status: FIXTURE_GIT_ENVIRONMENT stops the
+# background work from being started, and remove_scratch_tree refuses to turn a
+# removal it cannot complete into a test result.
+FIXTURE_GIT_ENVIRONMENT = {
+    # Ambient configuration is not an input to a falsifier. Whatever the host,
+    # the developer or the CI image has configured, the fixtures see exactly the
+    # settings below and nothing else.
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "maintenance.auto",
+    "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "gc.auto",
+    "GIT_CONFIG_VALUE_1": "0",
+    "GIT_CONFIG_KEY_2": "init.defaultBranch",
+    "GIT_CONFIG_VALUE_2": "master",
+}
+
+SCRATCH_REMOVAL_ATTEMPTS = 5
+SCRATCH_REMOVAL_BACKOFF_SECONDS = 0.05
+
+
+def remove_scratch_tree(root: Path) -> None:
+    """Remove a fixture scratch tree without ever raising.
+
+    A scratch tree this suite cannot delete says nothing about the program under
+    test. Every assertion has already run by the time this is called, so the
+    only honest outcomes are "removed" and "reported on stderr" — never a test
+    error that reads like a governance verdict.
+    """
+    failure: OSError | None = None
+    for attempt in range(SCRATCH_REMOVAL_ATTEMPTS):
+        try:
+            shutil.rmtree(root)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            failure = error
+            time.sleep(SCRATCH_REMOVAL_BACKOFF_SECONDS * (attempt + 1))
+    print(
+        "test-surface-migration-authorization: leaving scratch tree behind, "
+        f"{root} could not be removed: {failure}",
+        file=sys.stderr,
+    )
+
+
+class ScratchRemovalTests(unittest.TestCase):
+    def test_removal_retries_a_tree_that_refills_and_stays_silent(self) -> None:
+        attempts: list[Path] = []
+
+        def refill_twice(root: Path) -> None:
+            attempts.append(root)
+            if len(attempts) < 3:
+                raise OSError(errno.ENOTEMPTY, "Directory not empty", str(root))
+
+        stderr = io.StringIO()
+        with mock.patch.object(shutil, "rmtree", refill_twice), mock.patch.object(
+            time, "sleep", lambda _seconds: None
+        ), contextlib.redirect_stderr(stderr):
+            remove_scratch_tree(Path("scratch"))
+
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_removal_reports_a_stuck_tree_instead_of_raising(self) -> None:
+        attempts: list[Path] = []
+
+        def always_refill(root: Path) -> None:
+            attempts.append(root)
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", str(root))
+
+        stderr = io.StringIO()
+        with mock.patch.object(shutil, "rmtree", always_refill), mock.patch.object(
+            time, "sleep", lambda _seconds: None
+        ), contextlib.redirect_stderr(stderr):
+            remove_scratch_tree(Path("scratch"))
+
+        self.assertEqual(len(attempts), SCRATCH_REMOVAL_ATTEMPTS)
+        self.assertIn("leaving scratch tree behind", stderr.getvalue())
+        self.assertIn("Directory not empty", stderr.getvalue())
+
+
 class MigrationAuthorizationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(tempfile.mkdtemp(prefix="surface-migration-authorization-"))
+        self.addCleanup(remove_scratch_tree, self.root)
         self.git("init", "-q")
+        # Repo-local settings so every git process that touches this fixture is
+        # bound by them, including the ones the program under test spawns.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
         self.git("config", "user.email", "surface@example.invalid")
         self.git("config", "user.name", "SurfaceTest")
 
@@ -95,13 +193,11 @@ class MigrationAuthorizationTests(unittest.TestCase):
         self.issue = self.make_issue()
         self.statuses = [self.make_status()]
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
-
     def git(self, *args: str) -> str:
         return subprocess.check_output(
             ["git", "-C", str(self.root), *args],
             text=True,
+            env={**os.environ, **FIXTURE_GIT_ENVIRONMENT},
         ).strip()
 
     def write(self, relative: str, content: str) -> None:
@@ -256,6 +352,49 @@ class MigrationAuthorizationTests(unittest.TestCase):
             issue_number=issue_number,
         )
         return snapshot, description, pull_request, issue, [status]
+
+    def test_fixture_repository_is_sealed_against_ambient_git_configuration(
+        self,
+    ) -> None:
+        hostile_home = Path(tempfile.mkdtemp(prefix="surface-hostile-gitconfig-"))
+        self.addCleanup(remove_scratch_tree, hostile_home)
+        hostile = hostile_home / "gitconfig"
+        hostile.write_text(
+            "[maintenance]\n\tauto = true\n"
+            "[gc]\n\tauto = 1\n\tautoDetach = true\n"
+            "[init]\n\tdefaultBranch = ambient\n",
+            encoding="utf-8",
+        )
+        ambient = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_CONFIG")
+        }
+        ambient["GIT_CONFIG_GLOBAL"] = str(hostile)
+        ambient["GIT_CONFIG_SYSTEM"] = str(hostile)
+
+        # This suite's own git calls carry the pin, so ambient settings lose.
+        with mock.patch.dict(os.environ, ambient, clear=True):
+            self.assertEqual(
+                self.git("config", "--get", "init.defaultBranch"),
+                "master",
+            )
+            self.assertEqual(
+                self.git("config", "--get", "maintenance.auto"),
+                "false",
+            )
+
+        # A git process the program under test spawns carries no pin, so the
+        # repository's own configuration has to be what disables background work.
+        for key, expected in (("maintenance.auto", "false"), ("gc.auto", "0")):
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(self.root), "config", "--get", key],
+                    text=True,
+                    env=ambient,
+                ).strip(),
+                expected,
+            )
 
     def test_production_policy_protects_the_complete_program_and_itself(self) -> None:
         policy = authorization.PRODUCTION_POLICY
@@ -1057,8 +1196,10 @@ class MigrationAuthorizationTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(
-        MigrationAuthorizationTests
+    loader = unittest.defaultTestLoader
+    suite = unittest.TestSuite(
+        loader.loadTestsFromTestCase(case)
+        for case in (ScratchRemovalTests, MigrationAuthorizationTests)
     )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if result.wasSuccessful():
