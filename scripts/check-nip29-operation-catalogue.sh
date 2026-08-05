@@ -187,8 +187,11 @@ done
 # `publishSigned` are deliberately kind-BLIND (the escape hatch this
 # scenario says an app wanting a chat or reaction composer must use
 # instead) -- excluded here for that reason, not by oversight.
-RUST_EXCLUDED="new|read|read_branches|observe|observe_records|validate_context|publish|publish_signed|intent|through_the_one_door"
-CAMEL_EXCLUDED="read|observeRecords|validateContext|publish|publishSigned"
+# `intent`/`signed_intent` join that list for the same reason (#1242): they
+# are the kind-BLIND mint half of the same escape hatch, and `publish`/
+# `publish_signed` are now literally those two calls plus the engine hand-off.
+RUST_EXCLUDED="new|read|read_branches|observe|observe_records|validate_context|publish|publish_signed|intent|signed_intent|mint|through_the_one_door"
+CAMEL_EXCLUDED="read|observeRecords|validateContext|publish|publishSigned|intent|signedIntent"
 
 check_exact_catalogue() {
   local file=$1 keyword=$2 start_regex=$3 excluded=$4
