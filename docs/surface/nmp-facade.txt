@@ -225,27 +225,6 @@ impl core::marker::Unpin for nmp::nip29::GroupWaitError
 impl core::marker::UnsafeUnpin for nmp::nip29::GroupWaitError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupWaitError
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupWaitError
-pub enum nmp::nip29::Listing
-pub nmp::nip29::Listing::Absent
-pub nmp::nip29::Listing::Named(alloc::vec::Vec<nmp_nip29::records::ListedSubject>)
-pub nmp::nip29::Listing::Unestablished
-impl nmp::nip29::Listing
-pub fn nmp::nip29::Listing::of(alloc::vec::Vec<nmp_nip29::records::ListedSubject>, bool) -> Self
-impl core::clone::Clone for nmp::nip29::Listing
-pub fn nmp::nip29::Listing::clone(&self) -> nmp::nip29::Listing
-impl core::cmp::Eq for nmp::nip29::Listing
-impl core::cmp::PartialEq for nmp::nip29::Listing
-pub fn nmp::nip29::Listing::eq(&self, &nmp::nip29::Listing) -> bool
-impl core::fmt::Debug for nmp::nip29::Listing
-pub fn nmp::nip29::Listing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for nmp::nip29::Listing
-impl core::marker::Freeze for nmp::nip29::Listing
-impl core::marker::Send for nmp::nip29::Listing
-impl core::marker::Sync for nmp::nip29::Listing
-impl core::marker::Unpin for nmp::nip29::Listing
-impl core::marker::UnsafeUnpin for nmp::nip29::Listing
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::Listing
-impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::Listing
 pub enum nmp::nip29::RelayScopeError
 pub nmp::nip29::RelayScopeError::EmptyRelaySet
 impl core::clone::Clone for nmp::nip29::RelayScopeError
@@ -365,12 +344,9 @@ pub nmp::nip29::GroupSnapshot::id: alloc::string::String
 pub nmp::nip29::GroupSnapshot::members: alloc::vec::Vec<nmp_nip29::records::ListedSubject>
 pub nmp::nip29::GroupSnapshot::metadata: core::option::Option<nmp_nip29::records::GroupMetadata>
 pub nmp::nip29::GroupSnapshot::per_host: alloc::collections::btree::map::BTreeMap<nostr::types::url::RelayUrl, nmp::nip29::HostRecords>
-pub nmp::nip29::GroupSnapshot::selected: alloc::collections::btree::set::BTreeSet<nmp_nip29::records::GroupRecord>
 impl nmp::nip29::GroupSnapshot
-pub fn nmp::nip29::GroupSnapshot::admin_listing(&self, nostr::key::public_key::PublicKey) -> nmp::nip29::Listing
 pub fn nmp::nip29::GroupSnapshot::at(&self, &nostr::types::url::RelayUrl) -> core::option::Option<&nmp::nip29::HostRecords>
 pub fn nmp::nip29::GroupSnapshot::differs(&self, nmp_nip29::records::GroupRecord) -> bool
-pub fn nmp::nip29::GroupSnapshot::member_listing(&self, nostr::key::public_key::PublicKey) -> nmp::nip29::Listing
 impl core::clone::Clone for nmp::nip29::GroupSnapshot
 pub fn nmp::nip29::GroupSnapshot::clone(&self) -> nmp::nip29::GroupSnapshot
 impl core::cmp::Eq for nmp::nip29::GroupSnapshot
