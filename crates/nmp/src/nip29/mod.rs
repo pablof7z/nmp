@@ -79,7 +79,7 @@ pub use nmp_nip29::{GroupMetadata, GroupRecord, ListedRecord, ListedSubject};
 // the ordinary path.
 pub use nmp_nip29::{
     add_user, create_group, create_invite, delete_event, delete_group, edit_metadata, join_request,
-    leave_request, remove_user,
+    leave_request, remove_user, GroupMetadataEdit, JoinAccess, ReadAccess,
 };
 // The kinds NIP-29 itself defines for describing a group. Named because
 // NIP-29 names them -- unlike a group's CONTENT kinds, which are the app's to
