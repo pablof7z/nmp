@@ -1,8 +1,7 @@
 use super::schema::{
-    persist_err, EventKey, RelayKey, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
-    EVENT_STORE_META, INDEX_CARDINALITY, INDEX_CARDINALITY_SAMPLE_KEY,
-    INDEX_CARDINALITY_SAMPLE_META, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META,
-    RELAY_REFS,
+    decode_relay_row, encode_relay_row, event_all_columns_bounds, event_local_key, event_row_key,
+    observation_bounds, observation_key, observation_relay_key, persist_err, EventKey, RelayKey,
+    EVENTS, EVENT_IDS, NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_IDS, STORE_META,
 };
 use super::{
     binary_event, BTreeMap, Event, EventId, HashMap, LocalOrigin, PersistenceError, Provenance,
@@ -50,26 +49,22 @@ pub(super) fn encode_stored_event_record(record: &StoredEventRecord) -> Vec<u8> 
     encode_stored_event(&record_to_stored_event(record))
 }
 
-pub(super) fn observation_key(event_key: EventKey, relay_key: RelayKey) -> [u8; 12] {
-    let mut key = [0u8; 12];
-    key[..8].copy_from_slice(&event_key.to_be_bytes());
-    key[8..].copy_from_slice(&relay_key.to_be_bytes());
-    key
-}
-
-pub(super) fn observation_range(event_key: EventKey) -> ([u8; 12], [u8; 12]) {
-    (
-        observation_key(event_key, RelayKey::MIN),
-        observation_key(event_key, RelayKey::MAX),
-    )
-}
-
-pub(super) fn observation_relay_key(key: &[u8]) -> RelayKey {
-    RelayKey::from_be_bytes(
-        key[8..12]
-            .try_into()
-            .expect("validated observation key is twelve bytes"),
-    )
+/// Decode one observation value. Fallible rather than a `try_into().expect()`:
+/// the value now shares a tree with the note row and the local sidecar, so a
+/// wrong-width value must refuse the read instead of panicking inside a write
+/// transaction.
+pub(super) fn decode_observed_at(
+    event_key: EventKey,
+    relay_key: RelayKey,
+    value: &[u8],
+) -> Result<u64, PersistenceError> {
+    let bytes: [u8; 8] = value.try_into().map_err(|_| {
+        PersistenceError::invariant(format!(
+            "observation for event {event_key} relay {relay_key} is {} bytes, expected 8",
+            value.len()
+        ))
+    })?;
+    Ok(u64::from_be_bytes(bytes))
 }
 
 /// Fold one persisted observation into the typed relay identity exposed to
@@ -95,7 +90,7 @@ pub(super) fn observation_event_key(key: &[u8]) -> EventKey {
     EventKey::from_be_bytes(
         key[..8]
             .try_into()
-            .expect("validated observation key is twelve bytes"),
+            .expect("validated observation key is thirteen bytes"),
     )
 }
 
@@ -103,16 +98,18 @@ pub(super) fn observation_event_key(key: &[u8]) -> EventKey {
 /// value makes it hard for a write path to mutate the immutable note without
 /// also considering its raw-id mapping, local state, and relay observations.
 pub(super) struct CanonicalWriteTables<'txn> {
-    pub(super) events: redb::Table<'txn, EventKey, &'static [u8]>,
+    /// The one canonical event tree. The note row, the local sidecar and the
+    /// relay observations are columns of the same event key, so one handle
+    /// serves all three — redb permits a table to be open once per write
+    /// transaction.
+    pub(super) events: redb::Table<'txn, &'static [u8], &'static [u8]>,
     pub(super) event_ids: redb::Table<'txn, &'static [u8; 32], EventKey>,
-    pub(super) local: redb::Table<'txn, EventKey, &'static [u8]>,
-    pub(super) store_meta: redb::Table<'txn, &'static str, EventKey>,
-    pub(super) observations: redb::Table<'txn, &'static [u8; 12], u64>,
-    pub(super) relays: redb::Table<'txn, RelayKey, &'static str>,
-    pub(super) relay_keys: redb::Table<'txn, &'static str, RelayKey>,
-    pub(super) relay_refs: redb::Table<'txn, RelayKey, u64>,
-    pub(super) relay_meta: redb::Table<'txn, &'static str, RelayKey>,
-    pub(super) cardinality: redb::Table<'txn, &'static [u8], u64>,
+    /// The one durable-scalar tree. Both surrogate allocators live here, so
+    /// one handle serves both — redb permits a table to be open once per
+    /// write transaction.
+    pub(super) store_meta: redb::Table<'txn, &'static str, u64>,
+    pub(super) relays: redb::Table<'txn, RelayKey, &'static [u8]>,
+    pub(super) relay_ids: redb::Table<'txn, &'static str, RelayKey>,
     /// Surrogate allocators are loaded once per write transaction and only
     /// flushed if consumed. A large ingest batch therefore writes each hot
     /// metadata row once, in the same atomic commit as its events/indexes.
@@ -123,66 +120,36 @@ pub(super) struct CanonicalWriteTables<'txn> {
     /// Effective counts touched by this transaction. Busy batches commonly
     /// share one relay, so the durable hot row is read and written once.
     pub(super) relay_ref_counts: HashMap<RelayKey, u64>,
-    /// Net live-row changes by ordered-index prefix. A governed batch can
-    /// touch the same busy room/kind hundreds of times; persisting once per
-    /// prefix keeps the single-writer transaction cheap.
-    pub(super) cardinality_deltas: HashMap<Vec<u8>, i64>,
-    pub(super) cardinality_sample_key: [u8; 32],
 }
 
 impl<'txn> CanonicalWriteTables<'txn> {
     pub(super) fn open(write_txn: &'txn redb::WriteTransaction) -> Result<Self, PersistenceError> {
-        let store_meta = write_txn
-            .open_table(EVENT_STORE_META)
-            .map_err(persist_err)?;
+        let store_meta = write_txn.open_table(STORE_META).map_err(persist_err)?;
         let next_event_key = store_meta
             .get(NEXT_EVENT_KEY)
             .map_err(persist_err)?
             .map(|guard| guard.value())
             .unwrap_or(1);
-        let relay_meta = write_txn.open_table(RELAY_META).map_err(persist_err)?;
-        let next_relay_key = relay_meta
+        let next_relay_key = store_meta
             .get(NEXT_RELAY_KEY)
             .map_err(persist_err)?
-            .map(|guard| guard.value())
-            .unwrap_or(1);
-        let cardinality_sample_meta = write_txn
-            .open_table(INDEX_CARDINALITY_SAMPLE_META)
-            .map_err(persist_err)?;
-        let cardinality_sample_key = cardinality_sample_meta
-            .get(INDEX_CARDINALITY_SAMPLE_KEY)
-            .map_err(persist_err)?
-            .ok_or_else(|| {
-                PersistenceError::invariant("missing cardinality sample key".to_owned())
-            })?
-            .value()
-            .try_into()
+            .map(|guard| RelayKey::try_from(guard.value()))
+            .transpose()
             .map_err(|_| {
-                PersistenceError::invariant("invalid cardinality sample key length".to_owned())
-            })?;
-        drop(cardinality_sample_meta);
+                PersistenceError::invariant("relay surrogate allocator overflows u32".to_owned())
+            })?
+            .unwrap_or(1);
         Ok(Self {
             events: write_txn.open_table(EVENTS).map_err(persist_err)?,
             event_ids: write_txn.open_table(EVENT_IDS).map_err(persist_err)?,
-            local: write_txn.open_table(EVENT_LOCAL).map_err(persist_err)?,
             store_meta,
-            observations: write_txn
-                .open_table(EVENT_OBSERVATIONS)
-                .map_err(persist_err)?,
             relays: write_txn.open_table(RELAYS).map_err(persist_err)?,
-            relay_keys: write_txn.open_table(RELAY_KEYS).map_err(persist_err)?,
-            relay_refs: write_txn.open_table(RELAY_REFS).map_err(persist_err)?,
-            relay_meta,
-            cardinality: write_txn
-                .open_table(INDEX_CARDINALITY)
-                .map_err(persist_err)?,
+            relay_ids: write_txn.open_table(RELAY_IDS).map_err(persist_err)?,
             next_event_key,
             next_relay_key,
             event_allocator_dirty: false,
             relay_allocator_dirty: false,
             relay_ref_counts: HashMap::new(),
-            cardinality_deltas: HashMap::new(),
-            cardinality_sample_key,
         })
     }
 
@@ -198,10 +165,17 @@ impl<'txn> CanonicalWriteTables<'txn> {
         &self,
         key: EventKey,
     ) -> Result<Option<StoredEvent>, PersistenceError> {
-        let Some(event_bytes) = self.events.get(key).map_err(persist_err)? else {
+        let Some(event_bytes) = self
+            .events
+            .get(event_row_key(key).as_slice())
+            .map_err(persist_err)?
+        else {
             return Ok(None);
         };
-        let local_bytes = self.local.get(key).map_err(persist_err)?;
+        let local_bytes = self
+            .events
+            .get(event_local_key(key).as_slice())
+            .map_err(persist_err)?;
         let event = StoredEventView::from_trusted(event_bytes.value())
             .map_err(|error| {
                 PersistenceError::invariant(format!("decode canonical event view: {error:?}"))
@@ -228,8 +202,8 @@ impl<'txn> CanonicalWriteTables<'txn> {
         &self,
         key: EventKey,
     ) -> Result<Option<LocalOrigin>, PersistenceError> {
-        self.local
-            .get(key)
+        self.events
+            .get(event_local_key(key).as_slice())
             .map_err(persist_err)?
             .map(|bytes| {
                 binary_event::decode_local(bytes.value()).map_err(|error| {
@@ -243,11 +217,11 @@ impl<'txn> CanonicalWriteTables<'txn> {
         &self,
         event_key: EventKey,
     ) -> Result<BTreeMap<RelayUrl, Timestamp>, PersistenceError> {
-        let (lower, upper) = observation_range(event_key);
+        let (lower, upper) = observation_bounds(event_key);
         let mut seen = BTreeMap::new();
         for entry in self
-            .observations
-            .range::<&[u8; 12]>(&lower..=&upper)
+            .events
+            .range(lower.as_slice()..=upper.as_slice())
             .map_err(persist_err)?
         {
             let (encoded_key, at) = entry.map_err(persist_err)?;
@@ -255,7 +229,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
             // An observation naming a relay key the dictionary no longer
             // holds is a broken relational invariant, not "unobserved":
             // dropping it here would silently shrink exact source coverage.
-            let relay = self
+            let row = self
                 .relays
                 .get(relay_key)
                 .map_err(persist_err)?
@@ -264,12 +238,14 @@ impl<'txn> CanonicalWriteTables<'txn> {
                         "observation for event {event_key} points at missing relay {relay_key}"
                     ))
                 })?;
-            let relay = RelayUrl::parse(relay.value()).map_err(|error| {
+            let (_refs, url) = decode_relay_row(relay_key, row.value())?;
+            let relay = RelayUrl::parse(url).map_err(|error| {
                 PersistenceError::invariant(format!(
                     "decode interned relay URL {relay_key}: {error}"
                 ))
             })?;
-            fold_seen_at(&mut seen, relay, Timestamp::from(at.value()));
+            let at = decode_observed_at(event_key, relay_key, at.value())?;
+            fold_seen_at(&mut seen, relay, Timestamp::from(at));
         }
         Ok(seen)
     }
@@ -303,18 +279,30 @@ impl<'txn> CanonicalWriteTables<'txn> {
     }
 
     pub(super) fn intern_relay(&mut self, relay: &RelayUrl) -> Result<RelayKey, PersistenceError> {
-        if let Some(existing) = self.relay_keys.get(relay.as_str()).map_err(persist_err)? {
+        if let Some(existing) = self.relay_ids.get(relay.as_str()).map_err(persist_err)? {
             return Ok(existing.value());
         }
         let key = self.allocate_relay_key()?;
         self.relays
-            .insert(key, relay.as_str())
+            .insert(key, encode_relay_row(0, relay.as_str()).as_slice())
             .map_err(persist_err)?;
-        self.relay_keys
+        self.relay_ids
             .insert(relay.as_str(), key)
             .map_err(persist_err)?;
-        self.relay_refs.insert(key, 0).map_err(persist_err)?;
         Ok(key)
+    }
+
+    /// The durable `(refcount, url)` of one interned relay.
+    fn relay_row(&self, relay_key: RelayKey) -> Result<(u64, String), PersistenceError> {
+        let row = self
+            .relays
+            .get(relay_key)
+            .map_err(persist_err)?
+            .ok_or_else(|| {
+                PersistenceError::invariant(format!("interned relay {relay_key} has no row"))
+            })?;
+        let (refs, url) = decode_relay_row(relay_key, row.value())?;
+        Ok((refs, url.to_owned()))
     }
 
     pub(super) fn effective_relay_ref(
@@ -324,14 +312,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
         if let Some(current) = self.relay_ref_counts.get(&relay_key) {
             return Ok(*current);
         }
-        let current = self
-            .relay_refs
-            .get(relay_key)
-            .map_err(persist_err)?
-            .ok_or_else(|| {
-                PersistenceError::invariant(format!("interned relay {relay_key} has no refcount"))
-            })?
-            .value();
+        let (current, _url) = self.relay_row(relay_key)?;
         self.relay_ref_counts.insert(relay_key, current);
         Ok(current)
     }
@@ -360,21 +341,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
         Ok(())
     }
 
-    pub(super) fn adjust_cardinality(
-        &mut self,
-        key: Vec<u8>,
-        delta: i64,
-    ) -> Result<(), PersistenceError> {
-        let current = self.cardinality_deltas.entry(key).or_default();
-        *current = current.checked_add(delta).ok_or_else(|| {
-            PersistenceError::invariant("index cardinality delta overflow".to_owned())
-        })?;
-        Ok(())
-    }
-
     /// Flush every transaction-local mutation exactly once before the caller
-    /// commits: surrogate high-water marks, relay refcounts, and index
-    /// cardinalities remain part of the same crash-atomic event transaction.
+    /// commits: surrogate high-water marks and relay refcounts remain part of
+    /// the same crash-atomic event transaction.
     pub(super) fn flush_pending(&mut self) -> Result<(), PersistenceError> {
         if self.event_allocator_dirty {
             self.store_meta
@@ -383,77 +352,24 @@ impl<'txn> CanonicalWriteTables<'txn> {
             self.event_allocator_dirty = false;
         }
         if self.relay_allocator_dirty {
-            self.relay_meta
-                .insert(NEXT_RELAY_KEY, self.next_relay_key)
+            self.store_meta
+                .insert(NEXT_RELAY_KEY, u64::from(self.next_relay_key))
                 .map_err(persist_err)?;
             self.relay_allocator_dirty = false;
         }
         for (relay_key, effective) in std::mem::take(&mut self.relay_ref_counts) {
-            let persisted = self
-                .relay_refs
-                .get(relay_key)
-                .map_err(persist_err)?
-                .ok_or_else(|| {
-                    PersistenceError::invariant(format!(
-                        "interned relay {relay_key} has no refcount"
-                    ))
-                })?
-                .value();
+            let (persisted, url) = self.relay_row(relay_key)?;
             if effective > 0 {
                 if effective == persisted {
                     continue;
                 }
-                self.relay_refs
-                    .insert(relay_key, effective)
+                self.relays
+                    .insert(relay_key, encode_relay_row(effective, &url).as_slice())
                     .map_err(persist_err)?;
                 continue;
             }
-            let relay = self
-                .relays
-                .get(relay_key)
-                .map_err(persist_err)?
-                .ok_or_else(|| {
-                    PersistenceError::invariant(format!(
-                        "interned relay {relay_key} has a refcount but no URL row"
-                    ))
-                })?
-                .value()
-                .to_owned();
-            self.relay_refs.remove(relay_key).map_err(persist_err)?;
             self.relays.remove(relay_key).map_err(persist_err)?;
-            self.relay_keys
-                .remove(relay.as_str())
-                .map_err(persist_err)?;
-        }
-        for (key, delta) in std::mem::take(&mut self.cardinality_deltas) {
-            if delta == 0 {
-                continue;
-            }
-            let persisted = self
-                .cardinality
-                .get(key.as_slice())
-                .map_err(persist_err)?
-                .map(|guard| guard.value())
-                .unwrap_or(0);
-            let effective = if delta > 0 {
-                persisted.checked_add(delta as u64)
-            } else {
-                persisted.checked_sub(delta.unsigned_abs())
-            }
-            .ok_or_else(|| {
-                PersistenceError::invariant(format!(
-                    "index cardinality underflow/overflow for prefix {key:?}"
-                ))
-            })?;
-            if effective == 0 {
-                self.cardinality
-                    .remove(key.as_slice())
-                    .map_err(persist_err)?;
-            } else {
-                self.cardinality
-                    .insert(key.as_slice(), effective)
-                    .map_err(persist_err)?;
-            }
+            self.relay_ids.remove(url.as_str()).map_err(persist_err)?;
         }
         Ok(())
     }
@@ -467,15 +383,19 @@ impl<'txn> CanonicalWriteTables<'txn> {
         let relay_key = self.intern_relay(relay)?;
         let encoded_key = observation_key(event_key, relay_key);
         let existing = self
-            .observations
-            .get(&encoded_key)
+            .events
+            .get(encoded_key.as_slice())
             .map_err(persist_err)?
-            .map(|guard| guard.value());
+            .map(|guard| decode_observed_at(event_key, relay_key, guard.value()))
+            .transpose()?;
         if existing.is_some_and(|existing| existing >= at.as_secs()) {
             return Ok(false);
         }
-        self.observations
-            .insert(&encoded_key, at.as_secs())
+        self.events
+            .insert(
+                encoded_key.as_slice(),
+                at.as_secs().to_be_bytes().as_slice(),
+            )
             .map_err(persist_err)?;
         if existing.is_none() {
             self.increment_relay_ref(relay_key)?;
@@ -490,8 +410,8 @@ impl<'txn> CanonicalWriteTables<'txn> {
     ) -> Result<(), PersistenceError> {
         let encoded_key = observation_key(event_key, relay_key);
         if self
-            .observations
-            .remove(&encoded_key)
+            .events
+            .remove(encoded_key.as_slice())
             .map_err(persist_err)?
             .is_some()
         {
@@ -504,10 +424,10 @@ impl<'txn> CanonicalWriteTables<'txn> {
         &mut self,
         event_key: EventKey,
     ) -> Result<(), PersistenceError> {
-        let (lower, upper) = observation_range(event_key);
+        let (lower, upper) = observation_bounds(event_key);
         let relay_keys = self
-            .observations
-            .range::<&[u8; 12]>(&lower..=&upper)
+            .events
+            .range(lower.as_slice()..=upper.as_slice())
             .map_err(persist_err)?
             .map(|entry| {
                 entry
@@ -537,7 +457,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
         #[cfg(feature = "bench-instrumentation")]
         let insert_started = std::time::Instant::now();
         self.events
-            .insert(key, event_bytes.as_slice())
+            .insert(event_row_key(key).as_slice(), event_bytes.as_slice())
             .map_err(persist_err)?;
         self.event_ids
             .insert(event.id.as_bytes(), key)
@@ -545,8 +465,8 @@ impl<'txn> CanonicalWriteTables<'txn> {
         if let Some(local) = &provenance.local {
             let encoded =
                 binary_event::encode_local(local).expect("redb: encode canonical local state");
-            self.local
-                .insert(key, encoded.as_slice())
+            self.events
+                .insert(event_local_key(key).as_slice(), encoded.as_slice())
                 .map_err(persist_err)?;
         }
         for (relay, at) in &provenance.seen {
@@ -565,7 +485,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
         let encoded =
             binary_event::encode_event(event).expect("redb: encode immutable canonical event");
         self.events
-            .insert(key, encoded.as_slice())
+            .insert(event_row_key(key).as_slice(), encoded.as_slice())
             .map_err(persist_err)?;
         Ok(())
     }
@@ -579,7 +499,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
         for relay in existing.keys() {
             if !provenance.seen.contains_key(relay) {
                 let relay_key = self
-                    .relay_keys
+                    .relay_ids
                     .get(relay.as_str())
                     .map_err(persist_err)?
                     .ok_or_else(|| {
@@ -596,12 +516,15 @@ impl<'txn> CanonicalWriteTables<'txn> {
                 let relay_key = self.intern_relay(relay)?;
                 let encoded_key = observation_key(key, relay_key);
                 let was_absent = self
-                    .observations
-                    .get(&encoded_key)
+                    .events
+                    .get(encoded_key.as_slice())
                     .map_err(persist_err)?
                     .is_none();
-                self.observations
-                    .insert(&encoded_key, at.as_secs())
+                self.events
+                    .insert(
+                        encoded_key.as_slice(),
+                        at.as_secs().to_be_bytes().as_slice(),
+                    )
                     .map_err(persist_err)?;
                 if was_absent {
                     self.increment_relay_ref(relay_key)?;
@@ -619,24 +542,36 @@ impl<'txn> CanonicalWriteTables<'txn> {
         if let Some(local) = local {
             let encoded =
                 binary_event::encode_local(&local).expect("redb: encode canonical local state");
-            self.local
-                .insert(key, encoded.as_slice())
+            self.events
+                .insert(event_local_key(key).as_slice(), encoded.as_slice())
                 .map_err(persist_err)?;
         } else {
-            self.local.remove(key).map_err(persist_err)?;
+            self.events
+                .remove(event_local_key(key).as_slice())
+                .map_err(persist_err)?;
         }
         Ok(())
     }
 
+    /// Forget event `key` entirely.
+    ///
+    /// Every column of the event -- the note row, the local sidecar, and each
+    /// relay observation -- lives under the same `event_key` prefix, so this
+    /// is ONE range delete rather than four coordinated deletes across three
+    /// trees. The relay refcounts still have to be decremented per observation
+    /// before the rows go, since they belong to the relay dictionary rather
+    /// than to this event.
     pub(super) fn remove_by_key(
         &mut self,
         key: EventKey,
         id: &EventId,
     ) -> Result<(), PersistenceError> {
-        self.events.remove(key).map_err(persist_err)?;
-        self.event_ids.remove(id.as_bytes()).map_err(persist_err)?;
-        self.local.remove(key).map_err(persist_err)?;
         self.remove_all_observations(key)?;
+        self.event_ids.remove(id.as_bytes()).map_err(persist_err)?;
+        let (lower, upper) = event_all_columns_bounds(key);
+        self.events
+            .retain_in(lower.as_slice()..=upper.as_slice(), |_key, _value| false)
+            .map_err(persist_err)?;
         Ok(())
     }
 }

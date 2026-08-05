@@ -3416,7 +3416,16 @@ fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
 /// that same one row again.
 #[test]
 fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
-    const EVENTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("events");
+    const EVENTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("events");
+    /// The canonical note-row column of the folded event key space (#1248):
+    /// `[event_key:u64-be | 0]`.
+    const EVENT_COL_ROW: u8 = 0;
+    fn event_row_key(event_key: u64) -> [u8; 9] {
+        let mut key = [0u8; 9];
+        key[..8].copy_from_slice(&event_key.to_be_bytes());
+        key[8] = EVENT_COL_ROW;
+        key
+    }
     const EVENT_IDS_TABLE: TableDefinition<&[u8; 32], u64> = TableDefinition::new("event_ids");
     const DISPLACED_TABLE: TableDefinition<&[u8; 8], &[u8]> =
         TableDefinition::new("publish_queue_displaced");
@@ -3461,12 +3470,15 @@ fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
         .expect("read target row")
         .expect("target id mapping")
         .value();
-    assert!(events.get(target_key).expect("read target row").is_some());
+    assert!(events
+        .get(event_row_key(target_key).as_slice())
+        .expect("read target row")
+        .is_some());
     let persisted_event_rows = events
         .iter()
         .expect("iterate events")
         .map(|entry| entry.expect("read events entry"))
-        .filter(|(key, _)| key.value() == target_key)
+        .filter(|(key, _)| key.value() == event_row_key(target_key))
         .count();
     assert_eq!(persisted_event_rows, 1);
 

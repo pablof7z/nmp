@@ -19,9 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::MemoryStore;
 
-use super::canonical::{observation_key, observation_relay_key};
 use super::ingest::insert_with_tables;
-use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap, GovernedStringMap};
+use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap};
 use super::postings::{
     compact_segment, encode_dictionary, encode_run, merge_dead_blocks, shard_for,
     validate_run_metas, CompactionSegmentSource, DeadKeys, DictionaryView, Family, Membership,
@@ -31,6 +30,7 @@ use super::query::{
     author_cardinality_key, event_is_cardinality_sample, global_cardinality_key,
     kind_cardinality_key, tag_cardinality_key, tag_index_prefix,
 };
+use super::schema::{observation_key, observation_relay_key};
 use super::schema::{EventKey, RelayKey};
 use super::{
     binary_event, EventStore, LocalOrigin, PersistenceError, Provenance, RelayObserved,
@@ -102,7 +102,6 @@ struct LmdbDatabases {
     cardinality: BytesDb,
     addr_index: BytesDb,
     tombstones: BytesDb,
-    addr_tombstones: BytesDb,
     expiration: BytesDb,
     publish_queue_intents: BytesDb,
     publish_queue_receipts: BytesDb,
@@ -137,7 +136,6 @@ impl LmdbDatabases {
             cardinality: create("index_cardinality")?,
             addr_index: create("addr_index")?,
             tombstones: create("tombstones")?,
-            addr_tombstones: create("addr_tombstones")?,
             expiration: create("expiration_index")?,
             publish_queue_intents: create("publish_queue_intents")?,
             publish_queue_receipts: create("publish_queue_receipts")?,
@@ -351,7 +349,6 @@ fn open_databases(env: &Env, txn: &RoTxn<'_>) -> Result<LmdbDatabases, String> {
         cardinality: open("index_cardinality")?,
         addr_index: open("addr_index")?,
         tombstones: open("tombstones")?,
-        addr_tombstones: open("addr_tombstones")?,
         expiration: open("expiration_index")?,
         publish_queue_intents: open("publish_queue_intents")?,
         publish_queue_receipts: open("publish_queue_receipts")?,
@@ -702,13 +699,6 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         Ok(())
     }
 
-    fn string_db(&self, map: GovernedStringMap) -> BytesDb {
-        match map {
-            GovernedStringMap::Tombstones => self.db.tombstones,
-            GovernedStringMap::AddrTombstones => self.db.addr_tombstones,
-        }
-    }
-
     fn publish_queue_db(&self, map: GovernedPublishQueueMap) -> BytesDb {
         match map {
             GovernedPublishQueueMap::Intents => self.db.publish_queue_intents,
@@ -916,30 +906,19 @@ impl GovernedIngestTxn for LmdbIngestTxn<'_, '_, '_> {
         Ok(())
     }
 
-    fn string_get(
-        &self,
-        map: GovernedStringMap,
-        key: &str,
-    ) -> Result<Option<String>, PersistenceError> {
-        self.string_db(map)
-            .get(self.txn, key.as_bytes())
+    fn tombstone_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PersistenceError> {
+        Ok(self
+            .db
+            .tombstones
+            .get(self.txn, key)
             .map_err(lmdb_err)?
-            .map(|bytes| {
-                std::str::from_utf8(bytes)
-                    .map(str::to_owned)
-                    .map_err(lmdb_err)
-            })
-            .transpose()
+            .map(<[u8]>::to_vec))
     }
 
-    fn string_put(
-        &mut self,
-        map: GovernedStringMap,
-        key: &str,
-        value: &str,
-    ) -> Result<(), PersistenceError> {
-        self.string_db(map)
-            .put(self.txn, key.as_bytes(), value.as_bytes())
+    fn tombstone_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), PersistenceError> {
+        self.db
+            .tombstones
+            .put(self.txn, key, value)
             .map_err(lmdb_err)
     }
 
