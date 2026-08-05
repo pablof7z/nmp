@@ -44,10 +44,13 @@ independently enabled schema kinds and calls `group.read(filter)`, which
 scopes by `h` and returns one ordinary `LiveQuery` (one branch per scope host,
 folded automatically — never a per-host list the app merges), taken through
 the one `observe` door. Writes go through the same `Group`:
-`group.publish(&engine, author, builder)` (plus `publish_signed` and the named
-9000-9022 operations) preserves the draft's kind and schema, appends exactly
-one `h` before signing, and routes `Explicit` to every host in the scope, not
-one. Discovery across the scope is the ordinary query language, not a closed leaf
+`group.publish(&engine, author, builder)` (plus the named 9000-9022
+operations) preserves the draft's kind and schema, appends exactly one `h`
+before signing, and routes `Explicit` to every host in the scope, not one. It
+is the group's ONLY write door: there is no mint-without-publish door and no
+pre-signed group publication (#1292, deleted no alias). An app that needs a
+signed event WITHOUT publishing it calls `Engine::sign_event`, which creates
+no write intent, receipt or publication and hands back the signed event. Discovery across the scope is the ordinary query language, not a closed leaf
 set: `nip29::groups_whose_record_matches(Filter)` names the groups whose own
 relay-signed record matches an ordinary live-query filter at the branch host,
 and `member_list_includes`/`admin_list_includes` are shorthands over it that

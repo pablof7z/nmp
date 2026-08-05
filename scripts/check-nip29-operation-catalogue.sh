@@ -8,8 +8,8 @@
 #   (013) those nine names are the ONLY named operation composers a group
 #         offers -- no chat composer, no reaction composer, on any surface.
 #         An app that wants either builds the event itself with the ordinary
-#         kind-blind `publish`/`publishSigned` escape hatch, which is
-#         DELIBERATELY excluded from this check for that reason (so is
+#         kind-blind `publish` escape hatch, which is DELIBERATELY
+#         excluded from this check for that reason (so is
 #         `read`/`validateContext`/`on`/`group`, which are not operations at
 #         all).
 #
@@ -22,9 +22,9 @@
 #
 # #1124 (PROTOCOL-WHATTHEAPPNEVERDOES-002/003) widens (012)'s exact-shape
 # check to the group's own general escape hatch and read door --
-# `publish`/`publishSigned`/`read` -- so "no write or read operation accepts
-# a per-call relay, route, or raw context tag" is proven for EVERY way an
-# app can reach a group write or read, not only the nine named operations.
+# `publish`/`read` -- so "no write or read operation accepts a per-call
+# relay, route, or raw context tag" is proven for EVERY way an app can reach
+# a group write or read, not only the nine named operations.
 # `on`/`group`/`observeRecords` stay excluded, as before: naming hosts once at
 # scope construction is the one legal exception this claim is not about.
 #
@@ -121,8 +121,8 @@ check_signature_shape() {
   fi
 }
 
-# Narrower than check_signature_shape, deliberately: `publish`/`publishSigned`
-# are the general kind-blind escape hatch, so a caller-supplied kind and raw
+# Narrower than check_signature_shape, deliberately: `publish` is the
+# general kind-blind escape hatch, so a caller-supplied kind and raw
 # tags are LEGAL there (that is the whole reason the escape hatch exists --
 # "Legal general capabilities that must remain legal", #1124). What must
 # still never appear is a per-call relay, route or host -- naming one of
@@ -155,7 +155,7 @@ for op in "${CAMEL_OPS[@]}"; do
 done
 
 # #1124 (PROTOCOL-WHATTHEAPPNEVERDOES-002/003): the group's own general
-# escape hatch and its read door -- `publish`/`publishSigned`/`read`, on
+# escape hatch and its read door -- `publish`/`read`, on
 # every surface -- take no per-call relay, route or raw context/tag
 # parameter EITHER, the same shape check (012) already proves for the nine
 # named operations. `on` is deliberately excluded: it is the one legal place
@@ -164,8 +164,8 @@ done
 # construction is illegal. `group`/`observe` are likewise excluded: a
 # group id (a `String`) and a `GroupPredicate` value are not a relay, route,
 # or raw context tag.
-RUST_INFRA_OPS=(publish publish_signed read)
-CAMEL_INFRA_OPS=(publish publishSigned read)
+RUST_INFRA_OPS=(publish read)
+CAMEL_INFRA_OPS=(publish read)
 
 for op in "${RUST_INFRA_OPS[@]}"; do
   check_no_routing_parameter "$RUST_FACADE" "pub fn" "$op"
@@ -182,16 +182,20 @@ done
 # is the group's READ door, kind-blind over the three records NIP-29 defines
 # to describe a group, and not one of the nine things NIP-29 lets you DO.
 # `read`/`validateContext`(`_context`)/
-# `publish`/`publishSigned`/`on`/`group`/predicate composition
-# are infrastructure, not NIP-29-owned operations, and `publish`/
-# `publishSigned` are deliberately kind-BLIND (the escape hatch this
-# scenario says an app wanting a chat or reaction composer must use
-# instead) -- excluded here for that reason, not by oversight.
-# `intent`/`signed_intent` join that list for the same reason (#1242): they
-# are the kind-BLIND mint half of the same escape hatch, and `publish`/
-# `publish_signed` are now literally those two calls plus the engine hand-off.
-RUST_EXCLUDED="new|read|read_branches|observe|observe_records|validate_context|publish|publish_signed|intent|signed_intent|mint|through_the_one_door"
-CAMEL_EXCLUDED="read|observeRecords|validateContext|publish|publishSigned|intent|signedIntent"
+# `publish`/`on`/`group`/predicate composition
+# are infrastructure, not NIP-29-owned operations, and `publish` is
+# deliberately kind-BLIND (the escape hatch this scenario says an app
+# wanting a chat or reaction composer must use instead) -- excluded here
+# for that reason, not by oversight. `mint` is `publish`'s own private
+# routing/identity seam and is not a surface at all.
+#
+# `intent`/`signed_intent`/`publish_signed` were excluded here for the same
+# reason until #1292 DELETED them: the group hands back no unpublished
+# intent and publishes no caller-signed bytes, so their absence from this
+# list is what makes reintroducing one fail as an undeclared tenth
+# operation. Do not re-add them.
+RUST_EXCLUDED="new|read|read_branches|observe|observe_records|validate_context|publish|mint"
+CAMEL_EXCLUDED="read|observeRecords|validateContext|publish"
 
 check_exact_catalogue() {
   local file=$1 keyword=$2 start_regex=$3 excluded=$4
