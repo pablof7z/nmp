@@ -389,9 +389,13 @@ state the underlying kinds cannot establish.
 
 **Current source anchors:**
 
-- `crates/nmp-nip29/src/context.rs` — the `h` row: `contextualize`,
+- `crates/nmp-nip29/src/context.rs` — the `h` rows: `contextualize`,
   `validate_context`, `group_demand_at` (one host's complete read branch for
-  one group id). Kind-blind; mints no `previous` tag. Carries the schema- and
+  one group id). Both write-side functions take a nonempty SET of group ids
+  (#1281): `contextualize` appends one `h` per id in the set's canonical
+  order and `validate_context` requires an already-signed event's `h` rows to
+  name exactly that set, each once. One group is the one-element case, with
+  no separate path. Kind-blind; mints no `previous` tag. Carries the schema- and
   no-`previous`-preservation falsifiers
   (`draft_kind_and_schema_survive_except_for_appended_h`,
   `publication_never_synthesizes_previous`).
@@ -414,13 +418,22 @@ state the underlying kinds cannot establish.
 - `crates/nmp-nip29/src/operations.rs` — the typed 9000–9022 composers,
   unchanged in shape by this issue.
 - `crates/nmp/src/nip29/mod.rs` — `nip29::on`, `RelayScope`,
-  `RelayScope::group`, `RelayScope::observe`, the `nip29::group(hosts, id)`
+  `RelayScope::group`, `RelayScope::groups`, `RelayScope::observe`, the `nip29::group(hosts, id)`
   sugar, and the falsifier that
   exists to prove per-host stamping survives nesting,
   `scope_stamps_exact_hosts_on_every_nested_nip29_demand`. `nmp::nip29` is a
   real module here (`crates/nmp/src/lib.rs:160`), not a re-export of
   `nmp-nip29` — the door needs both the retained scope and the one opaque
   `WriteIntent`, and the engine-free lower crate cannot mint the latter.
+- `crates/nmp/src/nip29/groups.rs` (#1281/#1283) — `Groups`, the WRITE
+  CONTEXT: the scope's hosts plus the set of ids one event claims, with
+  `contextualize`, `validate_context`, `intent`, `signed_intent`, `publish`
+  and `publish_signed`. Write-only by design — a read, a roster and every
+  9000-9022 action are per-group by definition, so a plural of any of them
+  would be an aggregate this crate would have to invent a meaning for.
+  `Group`'s whole write half delegates to a private one-element `Groups`, so
+  "one group is the one-element case" is a property of the code
+  (`a_group_write_is_the_one_element_case_of_a_several_group_write`).
 - `crates/nmp/src/nip29/group.rs` — `Group`'s inherent `read`,
   `validate_context`, `publish` (the ONE write door since #1292 deleted
   `intent`/`signed_intent`/`publish_signed`), and the named operations

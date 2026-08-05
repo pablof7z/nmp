@@ -44,11 +44,12 @@ cd "$ROOT"
 fail() { echo "nip29-operation-catalogue: $*" >&2; exit 1; }
 
 RUST_FACADE=crates/nmp/src/nip29/group.rs
+RUST_GROUPS=crates/nmp/src/nip29/groups.rs
 RUST_FFI=crates/nmp-ffi/src/nip29.rs
 SWIFT=Packages/NMP/Sources/NMP/NIP29.swift
 KOTLIN=Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt
 
-for path in "$RUST_FACADE" "$RUST_FFI" "$SWIFT" "$KOTLIN"; do
+for path in "$RUST_FACADE" "$RUST_GROUPS" "$RUST_FFI" "$SWIFT" "$KOTLIN"; do
   [[ -f $path ]] || fail "required surface file is missing: $path"
 done
 
@@ -174,6 +175,18 @@ done
 for op in "${CAMEL_INFRA_OPS[@]}"; do
   check_no_routing_parameter "$SWIFT" "public func" "$op"
   check_no_routing_parameter "$KOTLIN" "fun" "$op"
+done
+
+# #1281: `Groups` is the SEVERAL-group write context. It offers no named
+# operation at all -- every 9000-9022 action names one group by definition --
+# so (013) has nothing to enumerate on it. It offers exactly ONE door, and
+# (012)'s routing rule must hold for it: naming hosts once at scope
+# construction stays the one legal exception, and `groups(ids)` is a narrowing
+# exactly as `group(id)` is, not a per-call route.
+RUST_GROUPS_INFRA_OPS=(publish)
+
+for op in "${RUST_GROUPS_INFRA_OPS[@]}"; do
+  check_no_routing_parameter "$RUST_GROUPS" "pub fn" "$op"
 done
 
 # (013): those nine names are the WHOLE named-operation catalogue -- no
