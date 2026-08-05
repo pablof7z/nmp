@@ -251,8 +251,9 @@ sealed class SigningState {
      * restart replay.
      *
      * **No clock ever ends this.** A device whose signer is simply not
-     * plugged in yet is not a device whose write failed; removing the queue
-     * entry is the only other exit.
+     * plugged in yet is not a device whose write failed; the app's own
+     * decision is the only other exit, and it is two calls: cancel the
+     * write, then remove the terminal queue entry it leaves behind.
      *
      * This is the state a person has to be told about, and [InFlight] is the
      * one it must never be confused with. */

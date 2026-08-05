@@ -180,7 +180,7 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     # nmp:id=WRITES-PARKED-015
     # nmp:status=built
     # nmp:evidence=rust:nmp::a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer
-    # nmp:falsifier=Collapse in-flight signing onto the parked-signer state; every healthy write reads as stuck, and the app cannot find the writes whose only termination path is its own removal.
+    # nmp:falsifier=Collapse in-flight signing onto the parked-signer state; every healthy write reads as stuck, and the app cannot find the writes whose only termination path is its own decision to cancel and remove them.
     Scenario: A write whose signer is mid-round-trip is not reported as parked
       # The defect a consumer hit building its own diagnostic: a write
       # published milliseconds earlier, with its signer attached and working,
