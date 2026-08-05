@@ -1740,6 +1740,7 @@ pub struct nmp::SignerMailbox
 impl nmp::SignerMailbox
 pub fn nmp::SignerMailbox::cancel(&self)
 pub async fn nmp::SignerMailbox::next(&self) -> core::result::Result<core::option::Option<nmp::SignatureRequest>, nmp::runtime::diagnostics_channel::ConcurrentNext>
+pub fn nmp::SignerMailbox::unpark(&self)
 impl !core::marker::Freeze for nmp::SignerMailbox
 impl core::marker::Send for nmp::SignerMailbox
 impl core::marker::Sync for nmp::SignerMailbox

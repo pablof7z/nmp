@@ -8,13 +8,26 @@
 //! `add_account` — which is why 29er-next shipped a plaintext `nsec` in its
 //! sandbox and two paragraphs of apology in its identity sheet.
 //!
-//! The door is deliberately NOT a `callback_interface`. The only one on this
-//! surface is the AUTH policy bridge, and #783 exists to invert it: NMP must
-//! not invoke app code. A signer is the capability where that matters most —
-//! answering takes exactly as long as a person takes to approve something on
-//! a hardware device or a phone, and a capability NMP calls into is one that
-//! can freeze the caller for that long. So the app receives a stream of
-//! immutable requests it drains on its own executor, and NMP calls nothing.
+//! The door is deliberately NOT a `callback_interface`, and not because a
+//! person is slow: a ready-or-pending capability already absorbs human time
+//! without holding anything, which is exactly what the AUTH policy's own
+//! contract says it does. The reasons are that #783 mandates the inversion and
+//! names `capability.sign` in its falsifier 1; that the one remaining callback
+//! is called with the capability mutex held on a shared-runtime task
+//! (`crates/nmp/src/runtime/auth.rs`), which is the harm #783 describes; and
+//! that making "NMP calls you" safe across THIS boundary cost the 752-line
+//! five-state Condvar linearization in `crates/nmp-ffi/src/auth.rs`, which a
+//! mailbox does not need. So the app receives a stream of immutable requests
+//! it drains on its own executor, and NMP calls nothing.
+//!
+//! The foreign side of that stream has one hazard this module owns. UniFFI's
+//! generated Swift parks on `withUnsafeContinuation`, which task cancellation
+//! does not resume, so a cancelled Swift drain never frees its Rust future and
+//! that future keeps the mailbox's single-reader claim forever — every later
+//! `next` would be `ConcurrentNext`. [`NmpSignerMailbox::unpark`] is the
+//! non-destructive way out, and it is deliberately not `cancel`: this object
+//! IS the app's signer, so closing it because a view went away would park
+//! every later write for that key.
 
 use std::sync::{Arc, Mutex};
 
@@ -213,16 +226,34 @@ impl NmpSignerMailbox {
         match self.mailbox.next().await {
             Ok(Some(request)) => Ok(Some(NmpSignatureRequest::new(request))),
             Ok(None) => Ok(None),
-            Err(_) => Err(FfiError::ConcurrentNext),
+            // Named, not wildcarded: `nmp::ConcurrentNext` has exactly one
+            // variant today, and a second one must fail to compile here rather
+            // than be silently reported as this one.
+            Err(nmp::ConcurrentNext) => Err(FfiError::ConcurrentNext),
         }
     }
 
     /// Stop accepting requests and wake a parked [`Self::next`] to `None`.
-    /// Idempotent. This does not remove the registration — writes for this key
-    /// then park on an unavailable signer, exactly as they do before any
-    /// signer attaches. `NmpEngine::remove_signer_mailbox` removes it.
+    /// Idempotent, and **destructive**: writes for this key then park on an
+    /// unavailable signer, exactly as they do before any signer attaches. It
+    /// does not remove the registration — `NmpEngine::remove_signer_mailbox`
+    /// does that.
     pub fn cancel(&self) {
         self.mailbox.cancel();
+    }
+
+    /// End one [`Self::next`] to `None` **without** closing the mailbox. A
+    /// parked reader ends now; with none parked the next one ends instead, so
+    /// a foreign cancellation handler may call this either side of the await
+    /// it belongs to.
+    ///
+    /// This is what a drain whose task is being torn down needs, and
+    /// [`Self::cancel`] is not: after an unpark the registration, the backlog
+    /// and the capability are untouched, and the next `next` parks again as
+    /// normal. The hand-written SDK layers call it from their cancellation
+    /// paths, which is the only reason an app usually does not have to.
+    pub fn unpark(&self) {
+        self.mailbox.unpark();
     }
 }
 
@@ -513,6 +544,58 @@ mod tests {
             ),
             "got {outcome:?}"
         );
+    }
+
+    /// The non-destructive exit, at the tier the SDKs actually call. A drain
+    /// that goes away must free the single-reader claim without closing the
+    /// mailbox, so the very next drain still gets its request and the write
+    /// still gets its signature.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ffi_unparking_a_drain_frees_the_mailbox_without_closing_it() {
+        let engine = engine();
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+
+        let mailbox = engine.add_signer_mailbox(pubkey.clone()).unwrap();
+        engine.set_active_account(Some(pubkey.clone())).unwrap();
+
+        // A drain parks with nothing to read, then its owner walks away.
+        let parked = tokio::spawn({
+            let mailbox = Arc::clone(&mailbox);
+            async move { mailbox.next().await }
+        });
+        tokio::task::yield_now().await;
+        mailbox.unpark();
+        assert!(
+            parked
+                .await
+                .unwrap()
+                .expect("an unpark is not a ConcurrentNext")
+                .is_none(),
+            "the abandoned drain ends"
+        );
+
+        // The signer still signs: had `unpark` closed the mailbox this write
+        // would park forever, and had it left the reader claim held the next
+        // call would be ConcurrentNext.
+        let handle = engine
+            .sign_event(FfiSignEventRequest {
+                created_at: 5,
+                kind: 1,
+                tags: Vec::new(),
+                content: "the replacement drain signs".to_string(),
+            })
+            .unwrap();
+        let request = mailbox
+            .next()
+            .await
+            .expect("the mailbox outlived the drain that left")
+            .expect("and still delivers");
+        request
+            .resolve(app_side_signature(&request.unsigned_event(), &keys))
+            .expect("the engine is still waiting");
+        let signed = handle.signed().await.expect("the signature is accepted");
+        assert_eq!(signed.content, "the replacement drain signs");
     }
 
     /// The mailbox is the exact-instance registration proof, with the same
