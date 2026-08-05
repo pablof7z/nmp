@@ -281,7 +281,8 @@ async fn a_join_request_is_delivered_while_the_same_groups_read_reports_one_host
     // ---- the write: the SAME group value, no read prerequisite ---------
     let receipts = group
         .join_request(&engine, writer, None)
-        .expect("a join request is accepted with no subscription open at all");
+        .expect("a join request is accepted with no subscription open at all")
+        .statuses;
     let expected_hosts = BTreeSet::from([host_a.url.clone(), host_b.url.clone()]);
     let write_statuses = drain_until_all_acked(&receipts, &expected_hosts);
     assert!(

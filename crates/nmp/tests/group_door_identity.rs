@@ -168,7 +168,8 @@ async fn a_join_request_is_publishable_with_no_subscription_at_all() {
         .group(GROUP_ID);
     let receipts = group
         .join_request(&engine, writer, Some("dark-slide-42"))
-        .expect("a join request is accepted with no prior read");
+        .expect("a join request is accepted with no prior read")
+        .statuses;
     let statuses = drain_until(&receipts, |status| {
         matches!(
             status,
@@ -233,7 +234,8 @@ async fn one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_
             writer,
             EventBuilder::new(Kind::from(9u16)).content("first"),
         )
-        .expect("first write, from the retained handle");
+        .expect("first write, from the retained handle")
+        .statuses;
     drain_until(&receipts1, |s| {
         matches!(
             s,
@@ -268,7 +270,8 @@ async fn one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_
             writer,
             EventBuilder::new(Kind::from(10u16)).content("second"),
         )
-        .expect("second write, from the retained handle, after both reads were dropped");
+        .expect("second write, from the retained handle, after both reads were dropped")
+        .statuses;
     drain_until(&receipts2, |s| {
         matches!(
             s,
@@ -321,7 +324,8 @@ async fn a_moderation_rejection_reports_the_hosts_exact_message_and_is_never_acc
         .group(GROUP_ID);
     let receipts = group
         .remove_user(&engine, moderator, subject)
-        .expect("the door accepts the intent even though the host will refuse it");
+        .expect("the door accepts the intent even though the host will refuse it")
+        .statuses;
 
     let statuses = drain_until(&receipts, |status| {
         matches!(
@@ -385,7 +389,8 @@ async fn a_moderation_rejection_is_a_host_fact_not_a_routing_failure() {
         .group(GROUP_ID);
     let receipts = group
         .remove_user(&engine, moderator, subject)
-        .expect("the door accepts the intent for the whole scope");
+        .expect("the door accepts the intent for the whole scope")
+        .statuses;
 
     let expected = BTreeSet::from([refusing.url.clone(), accepting.url.clone()]);
     let mut seen = Vec::new();

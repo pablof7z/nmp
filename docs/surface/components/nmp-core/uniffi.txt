@@ -10925,7 +10925,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -10966,7 +10966,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -10984,7 +10984,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_add_user",
             checksum: Some(
-                42100,
+                32278,
             ),
         },
         Method {
@@ -11016,7 +11016,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11045,7 +11045,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -11063,7 +11063,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_create_group",
             checksum: Some(
-                57701,
+                13311,
             ),
         },
         Method {
@@ -11102,7 +11102,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11137,7 +11137,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -11155,7 +11155,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_create_invite",
             checksum: Some(
-                55786,
+                39545,
             ),
         },
         Method {
@@ -11194,7 +11194,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11229,7 +11229,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -11247,7 +11247,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_delete_event",
             checksum: Some(
-                10816,
+                20504,
             ),
         },
         Method {
@@ -11279,7 +11279,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11308,7 +11308,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -11326,7 +11326,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_delete_group",
             checksum: Some(
-                60536,
+                50790,
             ),
         },
         Method {
@@ -11376,7 +11376,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11417,7 +11417,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -11435,7 +11435,94 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_edit_metadata",
             checksum: Some(
-                8907,
+                34654,
+            ),
+        },
+        Method {
+            name: "intent",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "builder",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiEventBuilder",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiWriteIntent",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_intent",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "builder",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiEventBuilder",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiWriteIntent",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Mint the group-contextualized write intent for an unsigned draft and\npublish NOTHING (`nmp::nip29::Group::intent` mirror, #1242).\n\nThe whole product of the write door: the `h` row is appended before\nsigning, the route is the scope's own hosts, and `author` is frozen as\nan exact decoded pubkey rather than the active-account selector (#878).\nHand the result to `NmpEngine::publish` -- the SAME door every other\nwrite takes -- when the app's own write path is ready for it.\n\n`correlation` on the returned intent is `None`, and filling it in is\nhow a group write becomes recoverable after a crash (#1244): an app\nthat persisted its own token before writing sets it here and finds the\nwrite again with `NmpEngine::reattachByCorrelation`.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_intent",
+            checksum: Some(
+                63138,
             ),
         },
         Method {
@@ -11476,7 +11563,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11511,7 +11598,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -11529,7 +11616,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_join_request",
             checksum: Some(
-                15189,
+                63339,
             ),
         },
         Method {
@@ -11561,7 +11648,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11590,7 +11677,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -11608,7 +11695,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_leave_request",
             checksum: Some(
-                20519,
+                44540,
             ),
         },
         Method {
@@ -11734,7 +11821,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11774,14 +11861,14 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Publish any unsigned draft into the group, as `author`\n(`nmp::nip29::Group::publish` mirror). `author` is an exact decoded\npubkey, never the active-account selector: a semantic group write\nfreezes who is writing at composition time (#878).",
+                "[`Self::intent`] handed straight to the one publish door\n(`nmp::nip29::Group::publish` mirror) -- the inline spelling, for an\napp with no separate submit stage. Returns the ORDINARY\n[`NmpReceiptStream`], store-issued receipt id included.",
             ),
             throws: Some(
                 Enum {
@@ -11792,7 +11879,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_publish",
             checksum: Some(
-                5905,
+                49697,
             ),
         },
         Method {
@@ -11827,7 +11914,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -11861,14 +11948,14 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Publish an ALREADY-SIGNED event into the group\n(`nmp::nip29::Group::publish_signed` mirror). The `h` it already\ncarries is validated, never appended or repaired -- see\n[`Self::validate_context`]'s doc for the exact refusals.",
+                "[`Self::signed_intent`] handed straight to the one publish door\n(`nmp::nip29::Group::publish_signed` mirror).",
             ),
             throws: Some(
                 Enum {
@@ -11879,7 +11966,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_publish_signed",
             checksum: Some(
-                16375,
+                13577,
             ),
         },
         Method {
@@ -11992,7 +12079,7 @@ object Object {
             return_type: Some(
                 Object {
                     module_path: "nmp_ffi",
-                    name: "NmpGroupReceiptStream",
+                    name: "NmpReceiptStream",
                     imp: Struct,
                 },
             ),
@@ -12027,7 +12114,7 @@ object Object {
                 ],
                 return_type: Some(
                     RustArcPtr(
-                        "NmpGroupReceiptStream",
+                        "NmpReceiptStream",
                     ),
                 ),
                 has_rust_call_status_arg: true,
@@ -12045,7 +12132,81 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_remove_user",
             checksum: Some(
-                31842,
+                26621,
+            ),
+        },
+        Method {
+            name: "signed_intent",
+            object_name: "FfiGroup",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "event",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiSignedEvent",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiWriteIntent",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_signed_intent",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroup",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "event",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiSignedEvent",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiWriteIntent",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Mint the group-contextualized write intent for an ALREADY-SIGNED\nevent, and publish nothing (`nmp::nip29::Group::signed_intent`\nmirror, #1242). The `h` it already carries is validated, never\nappended or repaired -- see [`Self::validate_context`]'s doc for the\nexact refusals, which now fire HERE, before any intent exists.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_signed_intent",
+            checksum: Some(
+                49844,
             ),
         },
         Method {
@@ -14928,136 +15089,6 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "Pull-based following-relationship observation handle (#680). Each `next()`\nawaits the engine's waker-driven async row mailbox and folds a complete\nself-contained relationship snapshot inline — no NMP-owned OS thread per\nobservation. `None` is the terminal signal (the demand was withdrawn or the\nengine shut down). `Drop`/`cancel` withdraw the observation.",
-    ),
-}
-
-object Object {
-    name: "NmpGroupReceiptStream",
-    imp: Struct,
-    module_path: "nmp_ffi",
-    remote: false,
-    constructors: [],
-    methods: [
-        Method {
-            name: "cancel",
-            object_name: "NmpGroupReceiptStream",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: None,
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpgroupreceiptstream_cancel",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpGroupReceiptStream",
-                        ),
-                    },
-                ],
-                return_type: None,
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Withdraw this stream now, rather than waiting for `Drop`. Safe to\ncall more than once; safe to never call at all.",
-            ),
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpgroupreceiptstream_cancel",
-            checksum: Some(
-                37332,
-            ),
-        },
-        Method {
-            name: "next",
-            object_name: "NmpGroupReceiptStream",
-            object_module_path: "nmp_ffi",
-            is_async: true,
-            object_impl: Struct,
-            arguments: [],
-            return_type: Some(
-                Optional {
-                    inner_type: Enum {
-                        module_path: "nmp_ffi",
-                        name: "FfiWriteFact",
-                    },
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpgroupreceiptstream_next",
-                is_async: true,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpGroupReceiptStream",
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    Handle,
-                ),
-                has_rust_call_status_arg: false,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Await the next `WriteFact`, or `None` once the write has fully\nresolved or the engine has shut down. [`FfiError::ConcurrentNext`] on\nan overlapping call.",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpgroupreceiptstream_next",
-            checksum: Some(
-                4174,
-            ),
-        },
-    ],
-    uniffi_traits: [],
-    trait_impls: [],
-    ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_nmpgroupreceiptstream",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "NmpGroupReceiptStream",
-                ),
-            },
-        ],
-        return_type: Some(
-            RustArcPtr(
-                "NmpGroupReceiptStream",
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_nmpgroupreceiptstream",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "NmpGroupReceiptStream",
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: true,
-        is_object_free_function: true,
-    },
-    ffi_init_callback: None,
-    docstring: Some(
-        "Pull-based receipt stream for a NIP-29 group write (#1033). Unlike\n[`crate::facade::NmpReceiptStream`] this stream carries NO receipt id:\nevery `FfiGroup` write reaches the engine's UNTRACKED `Engine::publish`\ndoor (never `publish_tracked`), because the store-issued receipt-id\nnamespace is a `publish`-door concern the group scope has no reason to\nsurface -- `nmp::nip29::Group::through_the_one_door`'s own doc names the\nsame door. Same ordered `WriteFact` delivery and cancel/Drop discipline\nas every other pull stream in this crate.",
     ),
 }
 
