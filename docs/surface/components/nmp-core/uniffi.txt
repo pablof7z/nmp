@@ -16345,13 +16345,13 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Stop accepting requests and wake a parked [`Self::next`] to `None`.\nIdempotent. This does not remove the registration — writes for this key\nthen park on an unavailable signer, exactly as they do before any\nsigner attaches. `NmpEngine::remove_signer_mailbox` removes it.",
+                "Stop accepting requests and wake a parked [`Self::next`] to `None`.\nIdempotent, and **destructive**: writes for this key then park on an\nunavailable signer, exactly as they do before any signer attaches. It\ndoes not remove the registration — `NmpEngine::remove_signer_mailbox`\ndoes that.",
             ),
             throws: None,
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpsignermailbox_cancel",
             checksum: Some(
-                3723,
+                3344,
             ),
         },
         Method {
@@ -16439,6 +16439,39 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpsignermailbox_public_key",
             checksum: Some(
                 16516,
+            ),
+        },
+        Method {
+            name: "unpark",
+            object_name: "NmpSignerMailbox",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpsignermailbox_unpark",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpSignerMailbox",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "End one [`Self::next`] to `None` **without** closing the mailbox. A\nparked reader ends now; with none parked the next one ends instead, so\na foreign cancellation handler may call this either side of the await\nit belongs to.\n\nThis is what a drain whose task is being torn down needs, and\n[`Self::cancel`] is not: after an unpark the registration, the backlog\nand the capability are untouched, and the next `next` parks again as\nnormal. The hand-written SDK layers call it from their cancellation\npaths, which is the only reason an app usually does not have to.",
+            ),
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpsignermailbox_unpark",
+            checksum: Some(
+                33372,
             ),
         },
     ],
