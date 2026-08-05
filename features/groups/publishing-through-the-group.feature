@@ -39,8 +39,7 @@ Feature: A group publication is handed an event and nothing else
   # nmp:id=PROTOCOL-PUBLISHINGTHROUGHTHEGROUP-003
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_group_write_routes_explicitly_to_every_host_in_the_scope
-  # nmp:evidence=rust:nmp::the_route_follows_the_group_not_whichever_key_signed_the_pre_signed_event
-  # nmp:falsifier=deriving the write route from anything other than the scope's own retained host set (a caller parameter, the active identity's relay list, or the signer's own key) makes a_group_write_routes_explicitly_to_every_host_in_the_scope see a route that is not exactly the scope's hosts, and makes the_route_follows_the_group_not_whichever_key_signed_the_pre_signed_event see two differently-signed pre-signed events route differently
+  # nmp:falsifier=deriving the write route from anything other than the scope's own retained host set (a caller parameter, the active identity's relay list, or the signer's own key) makes a_group_write_routes_explicitly_to_every_host_in_the_scope see a route that is not exactly the scope's hosts
   @nip29
   Scenario: The route is minted by the group, not spelled by the app
     When I publish an event of kind 9 with content "first light" through the group
@@ -86,8 +85,7 @@ Feature: A group publication is handed an event and nothing else
   # nmp:id=PROTOCOL-PUBLISHINGTHROUGHTHEGROUP-007
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_anything_outside_the_scope
-  # nmp:evidence=rust:nmp::a_host_rejection_of_a_pre_signed_event_is_an_ordinary_receipt_tied_to_its_unchanged_known_id
-  # nmp:falsifier=re-routing a rejected host's write to a relay outside the scope, or suppressing the independent Acked fact from the other host, makes a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_anything_outside_the_scope see relays_named_by(...) include a third relay or lose one of the two expected per-host facts; the same re-routing makes a_host_rejection_of_a_pre_signed_event_is_an_ordinary_receipt_tied_to_its_unchanged_known_id see the rejected write attempted at a second relay
+  # nmp:falsifier=re-routing a rejected host's write to a relay outside the scope, or suppressing the independent Acked fact from the other host, makes a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_anything_outside_the_scope see relays_named_by(...) include a third relay or lose one of the two expected per-host facts
   @nip29
   Scenario: A host that rejects the write says so, and nothing is tried elsewhere
     Given relay "wss://relay.groups.example" rejects every event
