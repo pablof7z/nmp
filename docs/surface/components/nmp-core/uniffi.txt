@@ -4868,7 +4868,22 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "No registered signer answers for `pubkey` (64-char hex) — the exact\nidentity FROZEN at acceptance, never whoever is active now. Re-armed\nonly by attaching a signer for THIS key.\n\n**No clock ever ends this.** A device whose signer is simply not\nplugged in yet is not a device whose write failed; removing the queue\nentry is the only other exit.",
+                "No registered signer answers for `pubkey` (64-char hex) — the exact\nidentity FROZEN at acceptance, never whoever is active now. Re-armed\nonly by attaching a signer for THIS key.\n\n**No clock ever ends this.** A device whose signer is simply not\nplugged in yet is not a device whose write failed; removing the queue\nentry is the only other exit.\n\nThis is the state a person has to be told about, and\n[`FfiSigningState::InFlight`] is the one it must never be confused\nwith.",
+            ),
+        },
+        Variant {
+            name: "InFlight",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "A signer for `pubkey` (64-char hex) HAS the request and has not\nanswered yet — the ordinary state of every healthy write between\nacceptance and signature promotion.\n\nTransient and normal: it ends when the signer answers (`Signed` or\n`Refused`), or falls back to `AwaitingSigner` if that signer becomes\nunavailable. Nothing here is a reason to trouble a user (#1261).",
             ),
         },
         Variant {

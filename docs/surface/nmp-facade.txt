@@ -937,6 +937,8 @@ impl core::panic::unwind_safe::UnwindSafe for nmp::SignEventError
 pub enum nmp::SigningState
 pub nmp::SigningState::AwaitingSigner
 pub nmp::SigningState::AwaitingSigner::pubkey: nostr::key::public_key::PublicKey
+pub nmp::SigningState::InFlight
+pub nmp::SigningState::InFlight::pubkey: nostr::key::public_key::PublicKey
 pub nmp::SigningState::Refused
 pub nmp::SigningState::Refused::reason: alloc::string::String
 pub nmp::SigningState::Signed

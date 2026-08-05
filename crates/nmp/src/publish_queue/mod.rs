@@ -86,7 +86,24 @@ pub enum SigningState {
     /// **No clock ever ends this.** A device whose signer is simply not
     /// plugged in yet is not a device whose write failed; the app removing
     /// the entry is the only other exit (`Handle::remove_publish_queue_entry`).
+    ///
+    /// This is the state a person has to be told about, and [`Self::InFlight`]
+    /// is the one it must never be confused with.
     AwaitingSigner { pubkey: PublicKey },
+    /// A signer for `pubkey` HAS the request and has not answered yet — the
+    /// ordinary state of every healthy write between acceptance and
+    /// signature promotion.
+    ///
+    /// Transient and normal, and it ends on a fact rather than a clock: the
+    /// signer answers ([`Self::Signed`] or [`Self::Refused`]), or the signer
+    /// becomes unavailable and the write falls back to
+    /// [`Self::AwaitingSigner`]. Nothing here is a reason to trouble a user.
+    ///
+    /// Collapsing this onto [`Self::AwaitingSigner`] (#1261) makes every
+    /// healthy write read as parked, and leaves the genuinely parked write —
+    /// the one whose only other exit is the app removing its entry —
+    /// impossible to pick out.
+    InFlight { pubkey: PublicKey },
     /// A signature exists and the write has an id.
     Signed { event_id: EventId },
     /// The signer answered and said no. Terminal for the whole write: there
