@@ -244,8 +244,8 @@ enum Probe {
             kind: 9,
             content: "Swift NMP consumer published chat"
         )
-        defer { chat.cancel() }
-        let chatStatuses = try await waitForStatuses(chat, seconds: context.args.settleSeconds) {
+        defer { chat.status.cancel() }
+        let chatStatuses = try await waitForStatuses(chat.status, seconds: context.args.settleSeconds) {
             acked($0, relay: context.args.relayA) && acked($0, relay: context.args.relayB)
         }
         print("PROOF swift_publish kind=9 outcomes=\(chatStatuses)")
@@ -257,8 +257,8 @@ enum Probe {
             tags: [["d", "swift-nmp-consumer-article"]],
             content: "Swift NMP consumer published long-form event"
         )
-        defer { article.cancel() }
-        let articleStatuses = try await waitForStatuses(article, seconds: context.args.settleSeconds) {
+        defer { article.status.cancel() }
+        let articleStatuses = try await waitForStatuses(article.status, seconds: context.args.settleSeconds) {
             acked($0, relay: context.args.relayA) && acked($0, relay: context.args.relayB)
         }
         print("PROOF swift_publish kind=30023 outcomes=\(articleStatuses)")
@@ -269,8 +269,8 @@ enum Probe {
             kind: 9,
             content: "Swift mixed-outcome publication"
         )
-        defer { mixed.cancel() }
-        let mixedStatuses = try await waitForStatuses(mixed, seconds: context.args.settleSeconds) {
+        defer { mixed.status.cancel() }
+        let mixedStatuses = try await waitForStatuses(mixed.status, seconds: context.args.settleSeconds) {
             acked($0, relay: context.args.relayA) && rejected($0, relay: context.args.relayB)
         }
         print("PROOF swift_publish mixed_group=\(mixedGroupID) outcomes=\(mixedStatuses)")
