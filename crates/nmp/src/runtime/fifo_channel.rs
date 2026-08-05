@@ -20,6 +20,12 @@
 //! [`AsyncFifoReceiver::next`] with no blocked OS thread. Termination is the
 //! same two-cause enum: producer `Drop` (`ProducerGone` — drain then end) vs
 //! consumer [`FifoReceiver::close`] (`Cancelled` — end now, drop the backlog).
+//!
+//! [`AsyncFifoReceiver::unpark`] is neither: it ends one parked `next()` and
+//! changes no channel state at all. A foreign drain loop whose task is
+//! cancelled needs exactly that — its await must return, but a channel whose
+//! producer is a live engine capability must survive the reader that walked
+//! away (`signer_mailbox.rs`, where `close` would park every later write).
 
 use std::collections::VecDeque;
 use std::future::poll_fn;
@@ -40,6 +46,16 @@ struct Queue<T> {
     items: VecDeque<T>,
     state: FifoState,
     waker: Option<Waker>,
+    /// One pending non-destructive wake, consumed by the first poll that sees
+    /// it. Distinct from [`FifoState::Cancelled`]: the channel stays open and
+    /// keeps its backlog, and only one `next()` ends.
+    ///
+    /// Armed whether or not a reader is parked, because the caller is a
+    /// foreign cancellation handler that can run either side of the park —
+    /// Swift's fires before the operation body when the task was already
+    /// cancelled. A wake that only worked against an already-parked reader
+    /// would leave exactly that ordering hanging forever.
+    unparked: bool,
     close_hook: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
@@ -97,6 +113,7 @@ pub fn fifo_channel<T>() -> (FifoSender<T>, FifoReceiver<T>) {
             items: VecDeque::new(),
             state: FifoState::Open,
             waker: None,
+            unparked: false,
             close_hook: None,
         }),
         cvar: Condvar::new(),
@@ -230,6 +247,14 @@ impl<T> FifoReceiver<T> {
             queue.waker = None;
             return Poll::Ready(Ok(None));
         }
+        // A pending unpark ends this one `next()` and nothing else. It is
+        // checked before the backlog deliberately: the reader being unparked
+        // is going away, so a queued value must stay queued for whoever
+        // drains next rather than being handed to a consumer that has left.
+        if std::mem::take(&mut queue.unparked) {
+            queue.waker = None;
+            return Poll::Ready(Ok(None));
+        }
         if let Some(value) = queue.items.pop_front() {
             queue.waker = None;
             return Poll::Ready(Ok(Some(value)));
@@ -266,6 +291,37 @@ impl<T> FifoReceiver<T> {
         if let Some(close_hook) = close_hook {
             close_hook();
         }
+    }
+
+    /// End exactly one `next()` **without** closing the channel: the backlog,
+    /// the producer and the channel state are untouched, so the `next()` after
+    /// that parks again as normal.
+    ///
+    /// A parked reader ends now; with none parked the arm is consumed by the
+    /// next poll instead. One call ends one await either way, which is what
+    /// makes this safe to call from a cancellation handler that races the
+    /// await it belongs to.
+    fn unpark(&self) {
+        let waker = {
+            let mut queue = self.inner.queue.lock().unwrap();
+            queue.unparked = true;
+            queue.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    /// Forget the waker one `next()` future registered, when that future is
+    /// dropped — which is what a cancelled Kotlin collection does, since
+    /// UniFFI frees the Rust future on the way out. A stale waker left behind
+    /// would be woken instead of the reader that replaces it.
+    ///
+    /// A pending unpark is deliberately NOT cleared here: it belongs to the
+    /// await that ends next, and the future being dropped may be the one that
+    /// never got to consume it.
+    fn end_park(&self) {
+        self.inner.queue.lock().unwrap().waker = None;
     }
 
     /// Install one consumer-lifecycle callback. Receipt streams use this to
@@ -317,7 +373,10 @@ impl<T> AsyncFifoReceiver<T> {
         if self.reading.swap(true, Ordering::AcqRel) {
             return Err(FifoNextError::ConcurrentNext);
         }
-        let _guard = ReadingGuard(&self.reading);
+        let _guard = ReadingGuard {
+            reading: &self.reading,
+            rx: &self.rx,
+        };
         poll_fn(|cx| self.rx.poll_recv(cx)).await
     }
 
@@ -325,13 +384,25 @@ impl<T> AsyncFifoReceiver<T> {
     pub fn close(&self) {
         self.rx.close();
     }
+
+    /// End one `next()` to `None` without closing the channel — the
+    /// non-destructive counterpart to [`close`](Self::close), for a consumer
+    /// whose own task is going away while the channel must outlive it. A
+    /// parked reader ends now; with none parked the next one ends instead.
+    pub fn unpark(&self) {
+        self.rx.unpark();
+    }
 }
 
-struct ReadingGuard<'a>(&'a AtomicBool);
+struct ReadingGuard<'a, T> {
+    reading: &'a AtomicBool,
+    rx: &'a FifoReceiver<T>,
+}
 
-impl Drop for ReadingGuard<'_> {
+impl<T> Drop for ReadingGuard<'_, T> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.rx.end_park();
+        self.reading.store(false, Ordering::Release);
     }
 }
 
@@ -404,6 +475,85 @@ mod tests {
         });
         drop(dropped);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn unpark_ends_one_next_and_leaves_the_channel_usable() {
+        let (tx, rx) = fifo_channel::<u32>();
+        let rx = Arc::new(rx.into_async());
+
+        let parked = tokio::spawn({
+            let rx = Arc::clone(&rx);
+            async move { rx.next().await }
+        });
+        tokio::task::yield_now().await;
+        rx.unpark();
+        assert_eq!(
+            parked.await.unwrap(),
+            Ok(None),
+            "an unparked reader ends its own next(), not with an error"
+        );
+
+        // Nothing about the channel changed: it still delivers.
+        assert!(tx.send(1));
+        assert_eq!(rx.next().await, Ok(Some(1)));
+    }
+
+    /// One call ends one await whichever side of the park it lands on. The
+    /// foreign cancellation handler this exists for can run before the await
+    /// body does, so a wake that only worked against an already-parked reader
+    /// would hang exactly the case it was added to fix.
+    #[tokio::test]
+    async fn unpark_before_the_park_still_ends_that_await() {
+        let (tx, rx) = fifo_channel::<u32>();
+        let rx = rx.into_async();
+        rx.unpark();
+        assert_eq!(rx.next().await, Ok(None), "the armed unpark is consumed");
+        // And only that one: the arm is spent, so the channel is live again.
+        assert!(tx.send(3));
+        assert_eq!(rx.next().await, Ok(Some(3)));
+    }
+
+    #[tokio::test]
+    async fn unpark_retains_a_value_that_raced_it() {
+        let (tx, rx) = fifo_channel::<u32>();
+        let rx = Arc::new(rx.into_async());
+
+        let parked = tokio::spawn({
+            let rx = Arc::clone(&rx);
+            async move { rx.next().await }
+        });
+        tokio::task::yield_now().await;
+        rx.unpark();
+        // The producer sends into the window between the unpark and the
+        // woken poll. The departing reader must not swallow it.
+        assert!(tx.send(7));
+        assert_eq!(parked.await.unwrap(), Ok(None));
+        assert_eq!(
+            rx.next().await,
+            Ok(Some(7)),
+            "a value that raced the unpark stays queued for the next drainer"
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoning_a_parked_next_leaves_no_waker_behind() {
+        let (tx, rx) = fifo_channel::<u32>();
+        let rx = rx.into_async();
+        // A cancelled Kotlin collection drops its future exactly like this:
+        // UniFFI frees the Rust future on the way out. The reader guard must
+        // clear the waker it registered and release the single-reader claim.
+        {
+            let mut parked = std::pin::pin!(rx.next());
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(std::future::Future::poll(parked.as_mut(), &mut cx).is_pending());
+        }
+        tx.send(4);
+        assert_eq!(
+            rx.next().await,
+            Ok(Some(4)),
+            "the replacement reader must own the channel, not inherit a dead waker"
+        );
     }
 
     #[test]

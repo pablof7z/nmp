@@ -9,9 +9,23 @@
 //
 // The door is a stream, not a callback. NMP does not call into the app
 // (#783): it enqueues immutable requests and returns, and the app drains them
-// on its own executor. That is what makes a signer that takes ten seconds
-// because a person is looking at a confirmation screen an ordinary case
-// rather than a stalled engine.
+// on its own executor. The reason is not that a person is slow -- NMP's
+// ready-or-pending capability shape already absorbs human time without
+// holding anything, which is what the AUTH policy does today. It is that
+// #783 requires it, that the one remaining callback is invoked with the
+// capability mutex held on a shared-runtime task, and that making "NMP calls
+// you" safe across UniFFI cost a 752-line five-state Condvar linearization
+// this door does not need.
+//
+// Cancellation is bridged here, and deliberately NOT the way `PullDriver`
+// bridges it. UniFFI's generated Swift parks on `withUnsafeContinuation`,
+// which task cancellation does not resume, so a cancelled drain would never
+// free its Rust future -- and that future holds the mailbox's single-reader
+// claim, so every later `next()` would fail as `.concurrentNext`. But
+// `cancel()` is the wrong wake: a query handle's cancel ends one stream,
+// while this mailbox IS the app's signer, so closing it because a view went
+// away would silently park every later write for that key. `unpark()` is the
+// non-destructive wake, and it is what the cancellation handler calls.
 
 import Foundation
 import NMPFFI
@@ -137,6 +151,10 @@ public final class NMPSignatureRequest: @unchecked Sendable {
 /// Exactly one drainer at a time: two concurrent `next()` calls would each
 /// believe they held the only copy of a take-once answer, so the second is
 /// refused rather than silently losing a request.
+///
+/// Cancelling the draining task ends the loop and nothing else -- the
+/// registration survives it, and a replacement task may start draining
+/// immediately. Only `cancel()` gives up the signer.
 public final class NMPSignerMailbox: @unchecked Sendable {
     /// The key this mailbox signs for.
     public let publicKey: String
@@ -149,9 +167,24 @@ public final class NMPSignerMailbox: @unchecked Sendable {
     }
 
     /// Await the next signature request, or `nil` once the mailbox is closed
-    /// and drained.
+    /// and drained -- or once the awaiting task is cancelled.
+    ///
+    /// Cancelling the task that is parked here ends only this await. The
+    /// mailbox stays registered and keeps its queue, so a replacement drain
+    /// (a new `.task(id:)` generation, say) picks up exactly where this one
+    /// stopped. Use `cancel()` when the app really is giving up the signer.
     public func next() async throws -> NMPSignatureRequest? {
-        let request = try await nmpRethrowingAsync { try await ffi.next() }
+        let request = try await withTaskCancellationHandler {
+            try await nmpRethrowingAsync { try await ffi.next() }
+        } onCancel: {
+            // NOT `cancel()`. That closes the mailbox and parks every later
+            // write for this key; an ordinary task cancellation must not
+            // destroy the app's signer. `unpark()` ends one await and is
+            // ordering-safe: this handler fires before the operation body
+            // when the task was already cancelled on the way in, and the arm
+            // is then consumed by the await it was meant for.
+            ffi.unpark()
+        }
         return request.map(NMPSignatureRequest.init)
     }
 
@@ -162,11 +195,24 @@ public final class NMPSignerMailbox: @unchecked Sendable {
 
     /// Stop accepting requests and end a parked `next()`.
     ///
-    /// This does NOT remove the registration: writes for this key then park on
-    /// an unavailable signer, exactly as they do before any signer attaches.
-    /// `NMPEngine.removeSigner(_:)` removes it.
+    /// Destructive, and the only destructive verb here: this app stops being
+    /// the signer for `publicKey`, so writes for that key park on an
+    /// unavailable signer exactly as they do before any signer attaches. It
+    /// does NOT remove the registration -- `NMPEngine.removeSigner(_:)` does.
+    /// To end a drain without giving up the signer, cancel the draining task
+    /// (or call `unpark()`).
     public func cancel() {
         ffi.cancel()
+    }
+
+    /// End one `next()` without closing the mailbox. A parked drain ends now;
+    /// with none parked the next `next()` ends instead.
+    ///
+    /// `next()` already does this for its own task's cancellation, so an app
+    /// needs this only to stop a drain from somewhere else. Everything else --
+    /// the registration, the queued requests, the ability to sign -- survives.
+    public func unpark() {
+        ffi.unpark()
     }
 }
 
