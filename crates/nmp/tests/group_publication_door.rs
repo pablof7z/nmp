@@ -414,7 +414,7 @@ async fn a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_aut
             keys.public_key(),
             EventBuilder::new(Kind::from(GROUP_KIND)).content("first light"),
         )
-        .expect("the group publication is accepted");
+        .expect("the group publication is accepted").statuses;
     let expected_hosts = BTreeSet::from([host_a.url.clone(), host_b.url.clone()]);
     let statuses = drain_until_all_acked(&receipts, &expected_hosts);
 
@@ -532,7 +532,7 @@ async fn a_caller_supplied_context_is_refused_before_relay_contact_and_differs_f
             keys.public_key(),
             EventBuilder::new(Kind::from(GROUP_KIND)).content("first light"),
         )
-        .expect("an ordinary draft is accepted at the door");
+        .expect("an ordinary draft is accepted at the door").statuses;
     let statuses = drain_until(&receipts, |status| {
         matches!(
             status,
@@ -577,7 +577,7 @@ async fn a_signing_failure_leaves_no_event_frame_and_no_delivery_implying_receip
             keys.public_key(),
             EventBuilder::new(Kind::from(GROUP_KIND)).content("first light"),
         )
-        .expect("the door accepts the draft; the signer fails afterward");
+        .expect("the door accepts the draft; the signer fails afterward").statuses;
     let statuses = drain_until(&receipts, |status| {
         matches!(
             status,
@@ -643,7 +643,7 @@ async fn publish_signed_delivers_the_callers_exact_pre_signed_bytes_to_every_hos
         .group(GROUP_ID);
     let receipts = group
         .publish_signed(&engine, signed.clone())
-        .expect("a correctly-contextualized signed event is accepted");
+        .expect("a correctly-contextualized signed event is accepted").statuses;
     let statuses = drain_until(
         &receipts,
         |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == host_b.url),
@@ -722,7 +722,7 @@ async fn the_pre_signed_event_s_own_id_is_known_before_publication_and_matches_a
 
     let receipts = group
         .publish_signed(&engine, pre_signed)
-        .expect("a correctly contextualized signed event is accepted");
+        .expect("a correctly contextualized signed event is accepted").statuses;
     drain_until(&receipts, |status| {
         matches!(
             status,
@@ -797,7 +797,7 @@ async fn a_pre_signed_event_from_another_author_routes_only_to_the_host_never_to
 
     let receipts = group
         .publish_signed(&engine, pre_signed.clone())
-        .expect("a correctly contextualized signed event from another author is accepted");
+        .expect("a correctly contextualized signed event from another author is accepted").statuses;
     let statuses = drain_until(&receipts, |status| {
         matches!(
             status,
@@ -867,7 +867,7 @@ async fn a_host_rejection_of_a_pre_signed_event_is_an_ordinary_receipt_tied_to_i
 
     let receipts = group
         .publish_signed(&engine, pre_signed)
-        .expect("a correctly contextualized signed event is accepted");
+        .expect("a correctly contextualized signed event is accepted").statuses;
     let statuses = drain_until(&receipts, |status| {
         matches!(
             status,
@@ -1060,14 +1060,14 @@ async fn two_groups_on_two_hosts_never_bleed_into_each_other_at_the_wire() {
             keys.public_key(),
             EventBuilder::new(Kind::from(GROUP_KIND)).content("first light"),
         )
-        .expect("the photographers publication is accepted");
+        .expect("the photographers publication is accepted").statuses;
     let darkroom_receipts = darkroom
         .publish(
             &engine,
             keys.public_key(),
             EventBuilder::new(Kind::from(GROUP_KIND)).content("still wet"),
         )
-        .expect("the darkroom publication is accepted");
+        .expect("the darkroom publication is accepted").statuses;
     drain_until(&photographers_receipts, |status| {
         matches!(
             status,
@@ -1160,7 +1160,7 @@ async fn a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_a
             keys.public_key(),
             EventBuilder::new(Kind::from(GROUP_KIND)).content("first light"),
         )
-        .expect("the publish door accepts a two-host group write");
+        .expect("the publish door accepts a two-host group write").statuses;
 
     // Drain until BOTH a per-host Acked and a per-host Rejected have landed,
     // as two SEPARATE ordinary facts -- never one flattened into the other.

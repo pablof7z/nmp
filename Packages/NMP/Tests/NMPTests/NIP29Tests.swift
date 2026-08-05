@@ -156,6 +156,50 @@ final class NIP29Tests: XCTestCase {
         )
     }
 
+    /// #1242 in Swift: the mint door hands back the ordinary `WriteIntent`
+    /// with every group decision already made and publishes nothing, and the
+    /// app's own crash-safe token then rides that intent through the ONE
+    /// general publish door (#1244).
+    func testTheMintDoorHandsBackAnIntentTheGeneralPublishDoorTakes() async throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        let scope = try NMPRelayScope.on([host(1), host(2)])
+        let group = scope.group("photographers")
+        let authorHex = randomPubkeyHex()
+
+        var intent = try group.intent(authorPubkeyHex: authorHex, kind: 9, content: "first light")
+        XCTAssertEqual(intent.routing, .explicit(relays: [host(1), host(2)]))
+        XCTAssertEqual(intent.identity, .explicit(pubkey: authorHex))
+        XCTAssertNil(intent.correlation, "the token is the caller's to mint")
+        guard case let .event(kind, tags, _, _) = intent.payload else {
+            return XCTFail("an unsigned draft must mint an .event payload, got \(intent.payload)")
+        }
+        XCTAssertEqual(kind, 9)
+        XCTAssertEqual(
+            tags.filter { $0.first == "h" }, [["h", "photographers"]],
+            "exactly one context row, appended by the door"
+        )
+
+        intent.correlation = "group-write-0001"
+        let receipt = try await engine.publish(intent)
+        let reattached = try engine.reattachReceipt(correlation: "group-write-0001")
+        guard case let .attached(recovered) = reattached else {
+            return XCTFail("a correlated group write must be reattachable, got \(reattached)")
+        }
+        XCTAssertEqual(recovered.id, receipt.id)
+    }
+
+    /// A group write returns the ORDINARY `Receipt` -- store-issued id and
+    /// all (#1244). There is no group-shaped receipt type left.
+    func testAGroupWriteCarriesTheStoreIssuedReceiptID() throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        let scope = try NMPRelayScope.on([host(1)])
+        let group = scope.group("photographers")
+        let receipt = try group.publish(
+            engine: engine, authorPubkeyHex: randomPubkeyHex(), kind: 9, content: "hi"
+        )
+        XCTAssertGreaterThan(receipt.id, 0)
+    }
+
     /// A caller-supplied `h` tag never reaches the door: the refusal is
     /// synchronous and typed, before any receipt stream exists.
     func testACallerSuppliedContextNeverReachesTheDoor() throws {

@@ -18,15 +18,22 @@
 //
 //   val group = scope.group("photographers")                // narrows, contacts nothing
 //   val query = group.read(NMPFilter(kinds = listOf(9u)))    // #h-scoped, per-host branches
-//   val status = group.publish(engine, authorPubkeyHex = pubkeyHex, kind = 9u, content = "hi")
-//   status.collect { ... }
+//   val receipt = group.publish(engine, authorPubkeyHex = pubkeyHex, kind = 9u, content = "hi")
+//   receipt.status.collect { ... }
+//
+//   // Mint now, submit later through your own choke-point (#1242) -- and
+//   // stamp your own crash-safe token on the way past (#1244):
+//   val intent = group.intent(authorPubkeyHex = pubkeyHex, kind = 9u, content = "hi")
+//       .copy(correlation = myPersistedToken)
+//   val receipt = publishReceipt(engine.ffi, intent)
 //
 // `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` wrap the opaque
 // `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` UniFFI objects exactly like
 // `BlossomAuthorization` wraps `FfiBlossomAuthorization` in Blossom.kt -- a
 // proven Rust value carried across the boundary, never a second mirrored
 // copy of NIP-29's own vocabulary. Neither type exposes its retained hosts
-// or group id back out.
+// or group id back out through an accessor; the write door does yield both,
+// inside the ordinary `WriteIntent` it mints -- see [NMPGroup.intent].
 //
 // Deliberately absent, same as before #1033: a fixed group-content kind
 // catalog and a kind:9 composer -- NIP-29 owns neither; C7 and client
@@ -57,7 +64,6 @@ import uniffi.nmp_ffi.FfiGroupSnapshot
 import uniffi.nmp_ffi.FfiHostRecords
 import uniffi.nmp_ffi.FfiListedRecord
 import uniffi.nmp_ffi.FfiListedSubject
-import uniffi.nmp_ffi.NmpGroupReceiptStream
 import uniffi.nmp_ffi.NmpGroupRecordsStream
 import uniffi.nmp_ffi.adminListIncludes as ffiAdminListIncludes
 import uniffi.nmp_ffi.anyOf as ffiAnyOf
@@ -153,9 +159,42 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         nmpRethrowing { ffi.validateContext(event.toFfiSignedEvent()) }
     }
 
-    /** Publish an unsigned draft into the group, as [authorPubkeyHex] (exact
-     * decoded hex, never the active-account selector -- a semantic group
-     * write freezes who is writing at composition time, #878). */
+    /** Mint the group-contextualized [WriteIntent] for an unsigned draft and
+     * publish NOTHING (#1242).
+     *
+     * This is the write door. The `h` row is appended before signing, the
+     * route is the scope's own hosts, and [authorPubkeyHex] is frozen as an
+     * exact decoded hex pubkey rather than the active-account selector
+     * (#878). Hand the result to `publishReceipt` -- the SAME door every
+     * other write takes -- whenever the app's own write path is ready.
+     *
+     * [WriteIntent.correlation] on the returned intent is `null`, and filling
+     * it in is how a group write becomes recoverable after a crash (#1244):
+     * an app that persisted its own token before writing copies it in here
+     * and finds the write again with the correlation reattach door. */
+    fun intent(
+        authorPubkeyHex: String,
+        kind: UShort,
+        tags: List<List<String>> = emptyList(),
+        content: String = "",
+        createdAt: ULong? = null,
+    ): WriteIntent =
+        WriteIntent.from(
+            nmpRethrowing {
+                ffi.intent(authorPubkeyHex, FfiEventBuilder(kind, tags, content, createdAt))
+            },
+        )
+
+    /** Mint the group-contextualized [WriteIntent] for an ALREADY-SIGNED
+     * event, and publish nothing (#1242). The `h` it already carries is
+     * validated, never appended or repaired -- see [validateContext]'s doc
+     * for the exact refusals, which fire HERE, before any intent exists. */
+    fun signedIntent(event: NMPSignedEvent): WriteIntent =
+        WriteIntent.from(nmpRethrowing { ffi.signedIntent(event.toFfiSignedEvent()) })
+
+    /** [intent] handed straight to the one publish door -- the inline
+     * spelling, for an app with no separate submit stage. Returns the
+     * ORDINARY [Receipt], store-issued [Receipt.id] included. */
     fun publish(
         engine: NMPEngine,
         authorPubkeyHex: String,
@@ -163,8 +202,8 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         tags: List<List<String>> = emptyList(),
         content: String = "",
         createdAt: ULong? = null,
-    ): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(
+    ): Receipt =
+        receiptFrom(
             nmpRethrowing {
                 ffi.publish(
                     engine.ffi,
@@ -174,27 +213,23 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
             },
         )
 
-    /** Publish an ALREADY-SIGNED event into the group. The `h` it already
-     * carries is validated, never appended or repaired -- see
-     * [validateContext]'s doc for the exact refusals. */
-    fun publishSigned(engine: NMPEngine, event: NMPSignedEvent): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(
-            nmpRethrowing { ffi.publishSigned(engine.ffi, event.toFfiSignedEvent()) },
-        )
+    /** [signedIntent] handed straight to the one publish door. */
+    fun publishSigned(engine: NMPEngine, event: NMPSignedEvent): Receipt =
+        receiptFrom(nmpRethrowing { ffi.publishSigned(engine.ffi, event.toFfiSignedEvent()) })
 
     /** kind:9021 -- ask to join. Publishable with no subscription at all. */
     fun joinRequest(
         engine: NMPEngine,
         authorPubkeyHex: String,
         inviteCode: String? = null,
-    ): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(
+    ): Receipt =
+        receiptFrom(
             nmpRethrowing { ffi.joinRequest(engine.ffi, authorPubkeyHex, inviteCode) },
         )
 
     /** kind:9022 -- leave. */
-    fun leaveRequest(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(nmpRethrowing { ffi.leaveRequest(engine.ffi, authorPubkeyHex) })
+    fun leaveRequest(engine: NMPEngine, authorPubkeyHex: String): Receipt =
+        receiptFrom(nmpRethrowing { ffi.leaveRequest(engine.ffi, authorPubkeyHex) })
 
     /** kind:9000 -- add a member, optionally with a role. */
     fun addUser(
@@ -202,14 +237,14 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         authorPubkeyHex: String,
         pubkeyHex: String,
         role: String? = null,
-    ): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(
+    ): Receipt =
+        receiptFrom(
             nmpRethrowing { ffi.addUser(engine.ffi, authorPubkeyHex, pubkeyHex, role) },
         )
 
     /** kind:9001 -- remove a member. */
-    fun removeUser(engine: NMPEngine, authorPubkeyHex: String, pubkeyHex: String): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(
+    fun removeUser(engine: NMPEngine, authorPubkeyHex: String, pubkeyHex: String): Receipt =
+        receiptFrom(
             nmpRethrowing { ffi.removeUser(engine.ffi, authorPubkeyHex, pubkeyHex) },
         )
 
@@ -220,28 +255,28 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         authorPubkeyHex: String,
         name: String? = null,
         about: String? = null,
-    ): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(
+    ): Receipt =
+        receiptFrom(
             nmpRethrowing { ffi.editMetadata(engine.ffi, authorPubkeyHex, name, about) },
         )
 
     /** kind:9005 -- delete one group-hosted event. */
-    fun deleteEvent(engine: NMPEngine, authorPubkeyHex: String, eventId: String): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(
+    fun deleteEvent(engine: NMPEngine, authorPubkeyHex: String, eventId: String): Receipt =
+        receiptFrom(
             nmpRethrowing { ffi.deleteEvent(engine.ffi, authorPubkeyHex, eventId) },
         )
 
     /** kind:9007 -- create the group at its hosts. */
-    fun createGroup(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(nmpRethrowing { ffi.createGroup(engine.ffi, authorPubkeyHex) })
+    fun createGroup(engine: NMPEngine, authorPubkeyHex: String): Receipt =
+        receiptFrom(nmpRethrowing { ffi.createGroup(engine.ffi, authorPubkeyHex) })
 
     /** kind:9008 -- delete the group from its hosts. */
-    fun deleteGroup(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(nmpRethrowing { ffi.deleteGroup(engine.ffi, authorPubkeyHex) })
+    fun deleteGroup(engine: NMPEngine, authorPubkeyHex: String): Receipt =
+        receiptFrom(nmpRethrowing { ffi.deleteGroup(engine.ffi, authorPubkeyHex) })
 
     /** kind:9009 -- mint an invite code redeemable by [joinRequest]. */
-    fun createInvite(engine: NMPEngine, authorPubkeyHex: String, code: String): NMPGroupWriteFacts =
-        NMPGroupWriteFacts.from(
+    fun createInvite(engine: NMPEngine, authorPubkeyHex: String, code: String): Receipt =
+        receiptFrom(
             nmpRethrowing { ffi.createInvite(engine.ffi, authorPubkeyHex, code) },
         )
 }
@@ -333,33 +368,6 @@ class NMPGroupIds private constructor(internal val ffi: FfiGroupIds) {
 
 private fun NMPSignedEvent.toFfiSignedEvent(): FfiSignedEvent =
     FfiSignedEvent(id, pubkey, createdAt, kind, tags, content, signature)
-
-/** The ordered [WriteFact] facts one group write's write reaches, pulled
- * from its untracked receipt handle (#1033). UNLIKE [Receipt] this carries
- * NO receipt id: every [NMPGroup] write reaches the engine's untracked
- * publish door (never `publish_tracked`), because the store-issued
- * receipt-id namespace is a `publish`-door concern the group scope has no
- * reason to surface. The [status] `Flow` is a cold pull loop over `next()`
- * -- FIFO write facts, no folding and no conflation. Collection-scope
- * teardown withdraws the live stream via `handle.cancel()`. */
-class NMPGroupWriteFacts private constructor(val status: Flow<WriteFact>) {
-    companion object {
-        internal fun from(stream: NmpGroupReceiptStream): NMPGroupWriteFacts =
-            NMPGroupWriteFacts(groupWriteStatusFlow(stream))
-    }
-}
-
-private fun groupWriteStatusFlow(stream: NmpGroupReceiptStream): Flow<WriteFact> =
-    flow {
-        try {
-            while (true) {
-                val status = nmpRethrowingAsync { stream.next() } ?: break
-                emit(WriteFact.from(status))
-            }
-        } finally {
-            stream.cancel()
-        }
-    }
 
 // ===========================================================================
 // The relay-signed group records (#1233).

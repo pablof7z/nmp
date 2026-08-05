@@ -260,8 +260,17 @@ fi
 
 # One publish door. The group binding composes an intent and hands it over;
 # it never grows a write lifecycle of its own.
-grep -qF 'engine.publish(intent)' crates/nmp/src/nip29/group.rs ||
+#
+# #1244 moved the hand-off from `Engine::publish` to `Engine::publish_tracked`
+# -- the SAME door with the store-issued receipt id no longer thrown away, not
+# a second one (`publish` is literally `publish_tracked(..).map(|r| r.statuses)`).
+# The untracked spelling is banned outright below so the id cannot be dropped
+# again by an edit that looks harmless.
+grep -qF 'publish_tracked(intent)' crates/nmp/src/nip29/group.rs ||
   fail "the group binding no longer routes through the one publish door"
+if grep -nE 'engine\.publish\(' crates/nmp/src/nip29/group.rs; then
+  fail "a group write reached the receipt-id-discarding publish spelling (#1244)"
+fi
 if grep -nE 'publish_composed' crates/nmp/src/nip29/group.rs; then
   fail "a second write lifecycle for groups appeared"
 fi
