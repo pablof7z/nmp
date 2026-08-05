@@ -271,9 +271,10 @@ pub enum FfiError {
         got: String,
         reason: String,
     },
-    /// #572: an `FfiNip73Target` failed `nmp_nip22::Nip73Target`'s
-    /// constructor validation (an empty `I`/`K` cell).
-    InvalidNip73Target {
+    /// #572/#1258: an `FfiNip73` failed `nmp_nip73::Nip73`'s constructor
+    /// validation (an empty `I`/`K` cell, or a `Url` that is not an
+    /// absolute URL and therefore cannot be normalised).
+    InvalidNip73 {
         reason: String,
     },
     /// #1033 `FfiRelayScope::on` was called with no host at all
@@ -638,7 +639,7 @@ impl std::fmt::Display for FfiError {
             Self::InvalidCorrelationToken { got, reason } => {
                 write!(f, "invalid correlation token {got:?}: {reason}")
             }
-            Self::InvalidNip73Target { reason } => write!(f, "invalid NIP-73 target: {reason}"),
+            Self::InvalidNip73 { reason } => write!(f, "invalid NIP-73 external content id: {reason}"),
             Self::EmptyRelayScope => {
                 write!(f, "a NIP-29 relay scope must name at least one host relay")
             }
@@ -1564,6 +1565,9 @@ fn signing_state_to_ffi(state: &GSigningState) -> FfiSigningState {
         GSigningState::AwaitingSigner { pubkey } => FfiSigningState::AwaitingSigner {
             pubkey: pubkey.to_hex(),
         },
+        GSigningState::InFlight { pubkey } => FfiSigningState::InFlight {
+            pubkey: pubkey.to_hex(),
+        },
         GSigningState::Signed { event_id } => FfiSigningState::Signed {
             event_id: event_id.to_hex(),
         },
@@ -1942,6 +1946,17 @@ mod write_fact_tests {
                 GWriteStatus::Signing(GSigningState::AwaitingSigner { pubkey }),
                 FfiWriteFact::Signing {
                     state: FfiSigningState::AwaitingSigner {
+                        pubkey: pubkey.to_hex(),
+                    },
+                },
+            ),
+            (
+                // #1261: a signature in flight must not arrive on the far
+                // side of the boundary as a write parked on a key nobody
+                // has a signer for.
+                GWriteStatus::Signing(GSigningState::InFlight { pubkey }),
+                FfiWriteFact::Signing {
+                    state: FfiSigningState::InFlight {
                         pubkey: pubkey.to_hex(),
                     },
                 },

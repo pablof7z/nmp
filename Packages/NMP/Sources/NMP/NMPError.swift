@@ -123,9 +123,9 @@ public enum NMPError: Error, Sendable, Equatable {
     /// given a token that failed `CorrelationToken`'s bounded/non-empty
     /// validation.
     case invalidCorrelationToken(got: String, reason: String)
-    /// #572: an `Nip73Target` failed its constructor validation (an empty
+    /// #572/#1258: an `Nip73` failed its constructor validation (an empty
     /// `I`/`K` cell).
-    case invalidNip73Target(reason: String)
+    case invalidNip73(reason: String)
     /// #973: a composer returned a compare-and-swap replaceable edit, which
     /// has no wire form on purpose -- a replaceable precondition crosses
     /// this boundary only inside the semantic method that owns it
@@ -225,8 +225,8 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
         case .InvalidCorrelationToken(let got, let reason):
             self = .invalidCorrelationToken(got: got, reason: reason)
-        case .InvalidNip73Target(let reason):
-            self = .invalidNip73Target(reason: reason)
+        case .InvalidNip73(let reason):
+            self = .invalidNip73(reason: reason)
         case .ReplaceableEditHasNoWireForm: self = .replaceableEditHasNoWireForm
         case .EmptyRelayScope: self = .emptyRelayScope
         case .GroupCallerSuppliedContext: self = .groupCallerSuppliedContext
@@ -340,8 +340,8 @@ extension NMPError: LocalizedError {
             "Relay information unavailable: \(kind)"
         case .invalidCorrelationToken(let got, let reason):
             "Invalid correlation token \(got.debugDescription): \(reason)"
-        case .invalidNip73Target(let reason):
-            "Invalid NIP-73 target: \(reason)"
+        case .invalidNip73(let reason):
+            "Invalid NIP-73 external content id: \(reason)"
         case .replaceableEditHasNoWireForm:
             "A replaceable edit crosses this boundary only inside the semantic method that owns its precondition, never as a payload"
         case .emptyRelayScope:

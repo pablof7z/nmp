@@ -146,7 +146,11 @@ grep -qF 'pub fn member_list_includes(' crates/nmp/src/nip29/predicate.rs ||
   fail "member_list_includes is missing"
 grep -qF 'pub fn admin_list_includes(' crates/nmp/src/nip29/predicate.rs ||
   fail "admin_list_includes is missing"
-grep -qF 'pub enum GroupPredicate' crates/nmp/src/nip29/predicate.rs ||
+# `GroupPredicate` is a struct, and the trailing brace is load-bearing: the
+# unanchored spelling `pub enum GroupPredicate` was satisfied by
+# `pub enum GroupPredicateError` further down the same file, so this line
+# passed on a file from which `GroupPredicate` had been deleted outright.
+grep -qF 'pub struct GroupPredicate {' crates/nmp/src/nip29/predicate.rs ||
   fail "GroupPredicate is missing"
 for combinator in union intersect minus; do
   grep -qF "pub fn $combinator(" crates/nmp/src/nip29/predicate.rs ||
@@ -275,13 +279,35 @@ if grep -nE 'publish_composed' crates/nmp/src/nip29/group.rs; then
   fail "a second write lifecycle for groups appeared"
 fi
 
-# C7 itself owns the exact kind and q reply schema, independently of NIP-29.
+# C7 itself owns the exact kind and reply schema, independently of NIP-29.
+#
+# #1243 CORRECTED what this clause pinned. It used to require
+# `Tag::parse(["q"` in the C7 crate and a falsifier named
+# `reply_uses_q_and_no_e_p_h_or_previous_rows` -- so the gate was pinning the
+# defect. A `q` row is NIP-18's QUOTE marker, and its whole stated purpose is
+# that "quote reposts are not pulled and included as replies in threads": a C7
+# client reading one correctly places the message OUTSIDE the thread it is
+# replying to. The composer also emitted that `q` with nothing in the content
+# quoting it, so the half-formed quote could not render either. A C7 reply
+# points with `e`. The gate now pins that, and pins the absence of the
+# retired spelling so it cannot come back.
 grep -qF 'pub const CHAT_KIND: u16 = 9;' crates/nmp-nipc7/src/lib.rs ||
   fail "C7 kind:9 ownership is missing"
-grep -qF 'Tag::parse(["q"' crates/nmp-nipc7/src/lib.rs ||
-  fail "C7 q-reply construction is missing"
-grep -qF 'reply_uses_q_and_no_e_p_h_or_previous_rows' crates/nmp-nipc7/src/lib.rs ||
-  fail "C7 q-only reply falsifier is missing"
+grep -qF 'pub fn chat_reply(' crates/nmp-nipc7/src/lib.rs ||
+  fail "C7 reply verb is missing"
+grep -qF 'chat_reply_points_with_e_and_never_q_or_h_or_previous_rows' \
+  crates/nmp-nipc7/src/lib.rs ||
+  fail "C7 e-reply falsifier is missing"
+# Bounded with explicit character classes rather than `\b`, which BSD grep
+# does not honour in ERE: the surviving verb IS spelled `chatReply` in Swift
+# and Kotlin, and an unbounded pattern flags it as its own tombstone.
+retired_c7=$(grep -RInE \
+  'compose_chat_reply|composeChatReply|(^|[^A-Za-z0-9_])ChatReply([^A-Za-z0-9_]|$)|reply_uses_q_and_no_e_p_h_or_previous_rows' \
+  crates/ Packages/ skills/ tools/ || true)
+if [[ -n $retired_c7 ]]; then
+  printf '%s\n' "$retired_c7"
+  fail "the retired C7 q-reply composer or its falsifier reappeared"
+fi
 
 # The superseded monolithic native projection must stay deleted. This source
 # corpus deliberately excludes append-only surface history.

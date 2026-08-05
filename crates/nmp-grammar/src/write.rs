@@ -67,16 +67,44 @@ impl EventBuilder {
         }
     }
 
-    pub fn content(mut self, content: impl Into<String>) -> Self {
-        self.content = content.into();
+    /// State the content. A plain `&str`/`String` passes through unchanged;
+    /// a [`crate::text!`] value ALSO carries the rows its inline references
+    /// require, which are appended here so the rendered mention and the row
+    /// that resolves it can never diverge (`crate::InterpolatedContent`).
+    pub fn content(mut self, content: impl Into<crate::InterpolatedContent>) -> Self {
+        let content = content.into();
+        self.content = content.text;
+        self.tags.extend(content.rows);
         self
     }
 
-    /// Append one tag, in order. Call it repeatedly, or set the public
-    /// `tags` field, to carry a whole list.
-    pub fn tag(mut self, tag: Tag) -> Self {
-        self.tags.push(tag);
+    /// Point at something, or append one exact row.
+    ///
+    /// Handed an entity ([`crate::RootScope`] — a `Row`, an event, a NIP-73
+    /// external content id), this is the ONE door that fills what the library
+    /// already knows: the letter from the entity's shape, the relay hint from
+    /// what NMP observed, the author in the row's own author slot, the
+    /// companion `p` row and the parent's carried mentions. It reads the
+    /// TARGET's thread position and never the kind being composed
+    /// (`crate::ThreadPosition`), and `crate::Modifiers` states the per-
+    /// relationship differences additively.
+    ///
+    /// Handed a bare [`Tag`], it is the same exact escape hatch it has always
+    /// been: appended in order, validated against nothing, reordered never.
+    ///
+    /// Both land in the same function, so dedup and hint-filling cannot drift
+    /// between two internal paths — the caution NDK's two divergent reply
+    /// branches supply.
+    pub fn tag(mut self, target: impl crate::TagRows) -> Self {
+        self.tags.extend(target.tag_rows());
         self
+    }
+
+    /// Compose a reply to `target` — see [`crate::reply_to`], which this
+    /// forwards to so the verb is reachable where a caller already holds the
+    /// builder type.
+    pub fn reply_to<T: crate::RootScope>(target: &T) -> Self {
+        crate::reply_to(target)
     }
 
     /// State the timestamp instead of having it stamped at acceptance —

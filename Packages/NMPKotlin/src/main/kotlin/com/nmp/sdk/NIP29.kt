@@ -213,6 +213,51 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
             },
         )
 
+    /** Publish a draft composed by the tagging door (#1243) into the group.
+     *
+     * The `h` row and the group's relay set stay this door's, exactly as for
+     * the field-by-field overload above: a composer owns the SCHEMA and the
+     * group owns the CONTEXT, and neither reaches into the other. What this
+     * adds is that a [chatReply] no longer has to be taken apart into
+     * kind/tags/content just to be published where it belongs. A pre-signed
+     * payload carries its own `h` already and is validated rather than
+     * contextualized -- that is [publishSigned]. */
+    fun publish(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        payload: WritePayload,
+    ): Receipt =
+        when (payload) {
+            is WritePayload.Event ->
+                publish(
+                    engine,
+                    authorPubkeyHex,
+                    payload.kind,
+                    payload.tags,
+                    payload.content,
+                    payload.createdAt,
+                )
+            is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
+        }
+
+    /** [intent] over a draft the tagging door composed (#1242 + #1243): mint
+     * the group's own intent from a composed payload and publish nothing. */
+    fun intent(
+        authorPubkeyHex: String,
+        payload: WritePayload,
+    ): WriteIntent =
+        when (payload) {
+            is WritePayload.Event ->
+                intent(
+                    authorPubkeyHex,
+                    payload.kind,
+                    payload.tags,
+                    payload.content,
+                    payload.createdAt,
+                )
+            is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
+        }
+
     /** [signedIntent] handed straight to the one publish door. */
     fun publishSigned(engine: NMPEngine, event: NMPSignedEvent): Receipt =
         receiptFrom(nmpRethrowing { ffi.publishSigned(engine.ffi, event.toFfiSignedEvent()) })
