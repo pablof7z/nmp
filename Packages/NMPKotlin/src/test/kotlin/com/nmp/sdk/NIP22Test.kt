@@ -181,8 +181,7 @@ class NIP22Test {
                 val token = "kotlin-nip22-offline-signer-token"
                 val intent =
                     commentIntent(
-                        root = CommentRoot.External(Nip73.PodcastEpisode("guid-offline")),
-                        parent = CommentParent.Root,
+                        target = CommentTarget.Root(CommentRoot.External(Nip73.PodcastEpisode("guid-offline"))),
                         content = "great show",
                         correlation = token,
                     )
@@ -225,8 +224,7 @@ class NIP22Test {
     fun composedCommentPinsTheExactTagRows() {
         val intent =
             commentIntent(
-                root = CommentRoot.External(Nip73.PodcastEpisode("golden-guid-572")),
-                parent = CommentParent.Root,
+                target = CommentTarget.Root(CommentRoot.External(Nip73.PodcastEpisode("golden-guid-572"))),
                 content = "golden fixture content",
             )
         val payload = intent.payload as WritePayload.Event
@@ -267,8 +265,7 @@ class NIP22Test {
 
                 val intent =
                     commentIntent(
-                        root = root,
-                        parent = CommentParent.Root,
+                        target = CommentTarget.Root(root),
                         content = "visible through the ordinary query path",
                     )
                 val receipt = engine.publish(intent)
