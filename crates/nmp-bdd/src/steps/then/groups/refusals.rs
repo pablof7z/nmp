@@ -16,9 +16,9 @@ async fn refused_mismatched_context(w: &mut NmpWorld) {
     assert_refusal(w, "MismatchedContext");
 }
 
-#[then(regex = r#"^the publication is refused with a typed ambiguous-group-context error$"#)]
-async fn refused_ambiguous_context(w: &mut NmpWorld) {
-    assert_refusal(w, "AmbiguousContext");
+#[then(regex = r#"^the publication is refused with a typed repeated-group-context error$"#)]
+async fn refused_repeated_context(w: &mut NmpWorld) {
+    assert_refusal(w, "RepeatedContext");
 }
 
 #[then(regex = r#"^the publication is refused with a typed caller-supplied-h error$"#)]

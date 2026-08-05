@@ -297,24 +297,34 @@ pub enum FfiError {
     /// mirror). An unsigned draft already carried a `previous` row, which
     /// the group never mints and never accepts from a caller.
     GroupCallerSuppliedTimeline,
-    /// #1033 (`nmp::nip29::GroupContextError::MissingContext` mirror). A
-    /// pre-signed event handed to `FfiGroup::publish_signed`/
-    /// `FfiGroup::validate_context` carries no `h` row at all.
+    /// #1281 (`nmp::nip29::GroupContextError::NoGroupNamed` mirror).
+    /// `FfiRelayScope::groups` was called with no group id at all. An event
+    /// with no `h` row is not in a group, so there is nothing to
+    /// contextualize and no honest route to mint -- the same refusal shape
+    /// [`Self::EmptyRelayScope`] makes on the relay axis.
+    EmptyGroupSet,
+    /// #1033/#1281 (`nmp::nip29::GroupContextError::MissingContext` mirror).
+    /// A pre-signed event handed to `FfiGroup::publish_signed`/
+    /// `FfiGroup::validate_context` carries no `h` row at all. `expected` is
+    /// the whole set the door was asked for, in canonical order -- one id
+    /// for an `FfiGroup`, several for an `FfiGroups`.
     GroupContextMissing {
-        expected: String,
+        expected: Vec<String>,
     },
-    /// #1033 (`nmp::nip29::GroupContextError::MismatchedContext` mirror). A
-    /// pre-signed event names a different group than the one publishing or
-    /// validating it.
+    /// #1033/#1281 (`nmp::nip29::GroupContextError::MismatchedContext`
+    /// mirror). A pre-signed event names a different SET of groups than the
+    /// one publishing or validating it -- too few, too many, or the wrong
+    /// ones. An event carrying a second `h` row beside the right one reports
+    /// both in `found`.
     GroupContextMismatched {
-        found: String,
-        expected: String,
+        found: Vec<String>,
+        expected: Vec<String>,
     },
-    /// #1033 (`nmp::nip29::GroupContextError::AmbiguousContext` mirror). A
-    /// pre-signed event carries more than one `h` row, so which group it
-    /// claims to be in has no single answer.
-    GroupContextAmbiguous {
-        expected: String,
+    /// #1281 (`nmp::nip29::GroupContextError::RepeatedContext` mirror). A
+    /// pre-signed event names the right groups but repeats one of them in a
+    /// second `h` row, which is not a row the door would ever mint.
+    GroupContextRepeated {
+        repeated: Vec<String>,
     },
     /// #1245 (`nmp::nip29::GroupContextError::RecordsAreNotContextScoped`
     /// mirror). A selection handed to `FfiGroup::read` named one of NIP-29's
@@ -366,14 +376,22 @@ impl From<nmp::nip29::GroupContextError> for FfiError {
             nmp::nip29::GroupContextError::CallerSuppliedTimeline => {
                 Self::GroupCallerSuppliedTimeline
             }
+            nmp::nip29::GroupContextError::NoGroupNamed => Self::EmptyGroupSet,
             nmp::nip29::GroupContextError::MissingContext { expected } => {
-                Self::GroupContextMissing { expected }
+                Self::GroupContextMissing {
+                    expected: expected.into_iter().collect(),
+                }
             }
             nmp::nip29::GroupContextError::MismatchedContext { found, expected } => {
-                Self::GroupContextMismatched { found, expected }
+                Self::GroupContextMismatched {
+                    found: found.into_iter().collect(),
+                    expected: expected.into_iter().collect(),
+                }
             }
-            nmp::nip29::GroupContextError::AmbiguousContext { expected } => {
-                Self::GroupContextAmbiguous { expected }
+            nmp::nip29::GroupContextError::RepeatedContext { repeated } => {
+                Self::GroupContextRepeated {
+                    repeated: repeated.into_iter().collect(),
+                }
             }
             nmp::nip29::GroupContextError::RecordsAreNotContextScoped { kinds } => {
                 Self::GroupRecordsNotContextScoped {
@@ -656,16 +674,21 @@ impl std::fmt::Display for FfiError {
                 "the 'previous' tag belongs to the group, not to the caller, and the group \
                  never mints one"
             ),
+            Self::EmptyGroupSet => write!(
+                f,
+                "a group write must name at least one group: an event with no 'h' row is not \
+                 in a group at all"
+            ),
             Self::GroupContextMissing { expected } => {
                 write!(f, "pre-signed event carries no 'h' row (expected {expected:?})")
             }
             Self::GroupContextMismatched { found, expected } => write!(
                 f,
-                "pre-signed event names group {found:?}, expected {expected:?}"
+                "pre-signed event names groups {found:?}, expected {expected:?}"
             ),
-            Self::GroupContextAmbiguous { expected } => write!(
+            Self::GroupContextRepeated { repeated } => write!(
                 f,
-                "pre-signed event carries more than one 'h' row (expected {expected:?})"
+                "pre-signed event names groups {repeated:?} in more than one 'h' row"
             ),
             Self::GroupRecordsNotContextScoped { kinds } => write!(
                 f,

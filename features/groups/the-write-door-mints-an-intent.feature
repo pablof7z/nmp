@@ -69,7 +69,7 @@ Feature: The NIP-29 write door mints an intent, and the app owns the token on it
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_caller_supplied_context_is_refused_before_any_intent_exists
   # nmp:evidence=rust:nmp::the_signed_mint_door_refuses_every_ill_scoped_event_including_a_second_h_row
-  # nmp:falsifier=Moving either context refusal downstream of the mint -- so an intent exists before the caller error is decided -- makes a_caller_supplied_context_is_refused_before_any_intent_exists see an Ok instead of the typed refusal; dropping the AmbiguousContext arm makes the_signed_mint_door_refuses_every_ill_scoped_event_including_a_second_h_row accept an event claiming two groups, which is the asymmetric hole a real consumer had left open in its own hand-rolled check.
+  # nmp:falsifier=Moving either context refusal downstream of the mint -- so an intent exists before the caller error is decided -- makes a_caller_supplied_context_is_refused_before_any_intent_exists see an Ok instead of the typed refusal; comparing only the h rows the door recognises, instead of the whole set it found against the whole set it was asked for, makes the_signed_mint_door_refuses_every_ill_scoped_event_including_a_second_h_row accept an event claiming a group it was not asked for, which is the asymmetric hole a real consumer had left open in its own hand-rolled check.
   @nip29
   Scenario: A caller error is decided at mint time, before any intent exists
     Given an unsigned event of kind 9 with content "first light"

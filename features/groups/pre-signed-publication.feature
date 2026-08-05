@@ -71,14 +71,26 @@ Feature: A pre-signed event is published unchanged, and its h is validated
 
   # nmp:id=PROTOCOL-PRESIGNEDPUBLICATION-005
   # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::a_signed_event_with_two_context_rows_is_ambiguous
-  # nmp:falsifier=picking the first h row instead of refusing a signed event with two h rows makes a_signed_event_with_two_context_rows_is_ambiguous observe Ok instead of AmbiguousContext
+  # nmp:evidence=rust:nmp-nip29::a_signed_event_naming_a_group_the_door_was_not_asked_for_is_refused
+  # nmp:falsifier=picking the h rows the door recognises and ignoring the rest, instead of comparing the whole set it found against the whole set it was asked for, makes a_signed_event_naming_a_group_the_door_was_not_asked_for_is_refused observe Ok instead of MismatchedContext
   @nip29
-  Scenario: A signed event with more than one h tag is refused
+  Scenario: A signed event naming a group the door was not asked for is refused
     Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "first light"
     And that signed event carries h tags with values "photographers" and "darkroom"
     When I publish that signed event through the group
-    Then the publication is refused with a typed ambiguous-group-context error
+    Then the publication is refused with a typed mismatched-group-context error
+    And relay "wss://relay.groups.example" received no event
+
+  # nmp:id=PROTOCOL-PRESIGNEDPUBLICATION-008
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip29::a_signed_event_repeating_a_group_is_refused_even_though_the_set_is_right
+  # nmp:falsifier=comparing only the SET of h values, so a repeated row collapses and passes, makes a_signed_event_repeating_a_group_is_refused_even_though_the_set_is_right observe Ok instead of RepeatedContext -- which is the strictness the retired AmbiguousContext provided for the one-group case
+  @nip29
+  Scenario: A signed event that repeats a group in a second h row is refused
+    Given an event signed earlier by "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce" of kind 9 with content "first light"
+    And that signed event carries h tags with values "photographers" and "photographers"
+    When I publish that signed event through the group
+    Then the publication is refused with a typed repeated-group-context error
     And relay "wss://relay.groups.example" received no event
 
   # nmp:id=PROTOCOL-PRESIGNEDPUBLICATION-006

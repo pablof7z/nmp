@@ -77,6 +77,19 @@ public final class NMPRelayScope: @unchecked Sendable {
         NMPGroup(ffi.group(groupId: groupID))
     }
 
+    /// Narrow to the SEVERAL groups one write belongs to, keeping the same
+    /// hosts (#1281).
+    ///
+    /// The write-only sibling of `group(_:)`, for the one event shape a
+    /// single group id cannot express: a kind:30315 session status is
+    /// addressable at `(author, d=status)` and carries one `h` per room the
+    /// session occupies, so publishing it once per room would make each copy
+    /// replace the last. An empty set throws `NMPError.emptyGroupSet` -- an
+    /// event with no `h` row is not in a group at all.
+    public func groups(_ groupIDs: [String]) throws -> NMPGroups {
+        try NMPGroups(nmpRethrowing { try ffi.groups(groupIds: groupIDs) })
+    }
+
     /// Watch the relay-signed records of every group matching `predicate`.
     /// One complete branch per host; each delivered element is the complete
     /// set of `NMPGroupSnapshot`s for the groups currently matching. The app
@@ -168,6 +181,37 @@ public final class NMPGroup: @unchecked Sendable {
     /// building a write out of it.
     public func validateContext(_ event: NMPSignedEvent) throws {
         try nmpRethrowing { try ffi.validateContext(event: event.toFfiSignedEvent()) }
+    }
+
+    /// Apply this group's own id to a draft the CALLER will sign itself
+    /// (#1283).
+    ///
+    /// `intent(...)` is the door for an app that lets NMP sign; this is the
+    /// door for an app that signs its own bytes, which is any app that shows
+    /// a message locally the moment it is composed -- an event id only exists
+    /// once the body is frozen, and `signedIntent(_:)` deliberately VALIDATES
+    /// the `h` rather than appending it.
+    ///
+    /// Sign the returned payload and hand it back to `signedIntent(_:)`: the
+    /// group id is then named once, by construction, rather than spelled a
+    /// second time by the app and only checked at the end.
+    ///
+    /// A draft already carrying an `h` or a `previous` row is refused
+    /// whichever value it holds -- those rows belong to the group.
+    public func contextualize(_ payload: WritePayload) throws -> WritePayload {
+        guard case .event(let kind, let tags, let content, let createdAt) = payload else {
+            // A pre-signed event carries its own `h` already and is validated
+            // rather than contextualized -- that is `signedIntent(_:)`.
+            throw NMPError.groupCallerSuppliedContext
+        }
+        let builder = try nmpRethrowing {
+            try ffi.contextualize(
+                builder: FfiEventBuilder(
+                    kind: kind, tags: tags, content: content, createdAt: createdAt))
+        }
+        return .event(
+            kind: builder.kind, tags: builder.tags, content: builder.content,
+            createdAt: builder.createdAt)
     }
 
     /// Mint the group-contextualized `WriteIntent` for an unsigned draft and
@@ -388,6 +432,108 @@ public final class NMPGroup: @unchecked Sendable {
     ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.createInvite(engine: engine.concreteFfiEngine, author: authorPubkeyHex, code: code)
+        }
+        return Receipt(handle: receipts)
+    }
+}
+
+/// The groups one write belongs to (`nmp::nip29::Groups`/`FfiGroups`
+/// mirror, #1281), obtained from `NMPRelayScope.groups(_:)`.
+///
+/// A WRITE CONTEXT and nothing else. There is no read door, no records
+/// observation and no named operation on it, because each of those is
+/// per-group by definition -- a roster is one group's, and every 9000-9022
+/// moderation action names one group. A write is the one thing that is
+/// genuinely plural.
+public final class NMPGroups: @unchecked Sendable {
+    let ffi: FfiGroups
+
+    init(_ ffi: FfiGroups) {
+        self.ffi = ffi
+    }
+
+    /// Apply the retained group ids to a draft the CALLER will sign itself.
+    /// One `h` row per id, appended before anything is signed; sign the
+    /// result and hand it to `signedIntent(_:)` and the ids are never spelled
+    /// by the app at all.
+    public func contextualize(_ payload: WritePayload) throws -> WritePayload {
+        guard case .event(let kind, let tags, let content, let createdAt) = payload else {
+            throw NMPError.groupCallerSuppliedContext
+        }
+        let builder = try nmpRethrowing {
+            try ffi.contextualize(
+                builder: FfiEventBuilder(
+                    kind: kind, tags: tags, content: content, createdAt: createdAt))
+        }
+        return .event(
+            kind: builder.kind, tags: builder.tags, content: builder.content,
+            createdAt: builder.createdAt)
+    }
+
+    /// Ask whether an already-signed event names exactly these groups,
+    /// without building a write out of it.
+    public func validateContext(_ event: NMPSignedEvent) throws {
+        try nmpRethrowing { try ffi.validateContext(event: event.toFfiSignedEvent()) }
+    }
+
+    /// Mint the contextualized `WriteIntent` for an unsigned draft and
+    /// publish NOTHING. `NMPGroup.intent(...)` at a larger arity, not a
+    /// second door: same appended-before-signing rows, same explicit route
+    /// over the scope's whole host set, same frozen exact author, same `nil`
+    /// correlation for the caller to stamp.
+    public func intent(
+        authorPubkeyHex: String,
+        kind: UInt16,
+        tags: [[String]] = [],
+        content: String = "",
+        createdAt: UInt64? = nil
+    ) throws -> WriteIntent {
+        let ffiIntent = try nmpRethrowing {
+            try ffi.intent(
+                author: authorPubkeyHex,
+                builder: FfiEventBuilder(kind: kind, tags: tags, content: content, createdAt: createdAt)
+            )
+        }
+        return WriteIntent(ffiIntent)
+    }
+
+    /// Mint the contextualized `WriteIntent` for an ALREADY-SIGNED event, and
+    /// publish nothing. The `h` rows it carries are validated against the
+    /// retained set, never appended -- a set too small, too large, wrong,
+    /// absent or right-but-repeated throws.
+    public func signedIntent(_ event: NMPSignedEvent) throws -> WriteIntent {
+        let ffiIntent = try nmpRethrowing {
+            try ffi.signedIntent(event: event.toFfiSignedEvent())
+        }
+        return WriteIntent(ffiIntent)
+    }
+
+    /// `intent(...)` handed straight to the one publish door.
+    public func publish(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        kind: UInt16,
+        tags: [[String]] = [],
+        content: String = "",
+        createdAt: UInt64? = nil
+    ) throws -> Receipt {
+        let receipts = try nmpRethrowing {
+            try ffi.publish(
+                engine: engine.concreteFfiEngine,
+                author: authorPubkeyHex,
+                builder: FfiEventBuilder(kind: kind, tags: tags, content: content, createdAt: createdAt)
+            )
+        }
+        return Receipt(handle: receipts)
+    }
+
+    /// `signedIntent(_:)` handed straight to the one publish door.
+    public func publishSigned(
+        engine: NMPEngine,
+        event: NMPSignedEvent
+    ) throws -> Receipt {
+        let receipts = try nmpRethrowing {
+            try ffi.publishSigned(engine: engine.concreteFfiEngine, event: event.toFfiSignedEvent())
         }
         return Receipt(handle: receipts)
     }

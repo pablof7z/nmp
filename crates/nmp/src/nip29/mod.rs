@@ -44,6 +44,7 @@
 //! onto a binding the caller supplied.
 
 mod group;
+mod groups;
 mod predicate;
 mod read;
 mod records;
@@ -56,6 +57,7 @@ use nostr::RelayUrl;
 use crate::engine::Engine;
 
 pub use group::{Group, GroupPublishError};
+pub use groups::Groups;
 pub use nmp_nip29::GroupContextError;
 pub use predicate::{
     admin_list_includes, all, any_of, groups_whose_record_matches, member_list_includes, GroupIds,
@@ -159,6 +161,33 @@ impl RelayScope {
     #[must_use]
     pub fn group(&self, group_id: impl Into<String>) -> Group {
         Group::new(self.hosts.clone(), group_id.into())
+    }
+
+    /// Narrow to the SEVERAL groups one write belongs to, keeping the same
+    /// hosts (#1281).
+    ///
+    /// The write-only sibling of [`Self::group`], for the one event shape a
+    /// single group id cannot express: a kind:30315 session status is
+    /// addressable at `(author, d=status)` and carries one `h` per room the
+    /// session occupies, so publishing it once per room would make each copy
+    /// replace the last. See [`Groups`] for why every workaround is worse.
+    ///
+    /// Fallible for exactly the reason [`on`] is: the id set is
+    /// caller-supplied and can be empty, and an event with no `h` row is not
+    /// in a group at all. Duplicates collapse and order is the id order, so
+    /// two callers naming the same rooms differently get the SAME value.
+    ///
+    /// It is a write context and nothing else — no read, no records, no
+    /// named operation. Those are all per-group by definition, and
+    /// [`Self::group`] is where they live.
+    pub fn groups(
+        &self,
+        group_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Groups, GroupContextError> {
+        Groups::new(
+            self.hosts.clone(),
+            group_ids.into_iter().map(Into::into).collect(),
+        )
     }
 
     /// Watch the relay-signed records of every group matching `predicate`.

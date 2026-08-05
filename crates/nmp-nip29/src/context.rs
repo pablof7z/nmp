@@ -64,15 +64,36 @@ pub enum GroupContextError {
     /// the group, they are ABOUT it, and they are read through the group's
     /// own records door instead.
     RecordsAreNotContextScoped { kinds: BTreeSet<u16> },
+    /// A write was composed for no group at all (#1281). An event with no
+    /// `h` row is not in a group, so there is nothing for the door to
+    /// contextualize and no honest route to mint. The refusal is at
+    /// construction, which is what keeps every method below infallible with
+    /// respect to the group set -- the same shape
+    /// [`crate::GroupContextError`]'s relay-side counterpart
+    /// (`nmp::nip29::RelayScopeError::EmptyRelaySet`) already has.
+    NoGroupNamed,
     /// A pre-signed event carries no `h` at all. Appending one would change
     /// the bytes and therefore the `EventId`, so this is a refusal rather
     /// than a repair.
-    MissingContext { expected: String },
-    /// A pre-signed event names a different group than the one publishing it.
-    MismatchedContext { found: String, expected: String },
-    /// A pre-signed event carries more than one `h` row, so which group it
-    /// claims to be in has no single answer.
-    AmbiguousContext { expected: String },
+    MissingContext { expected: BTreeSet<String> },
+    /// A pre-signed event names a different SET of groups than the one
+    /// publishing it -- too few, too many, or the wrong ones. One group is
+    /// the one-element case: an event carrying `["h", "darkroom"]` published
+    /// through `photographers` reports `found: {darkroom}`,
+    /// `expected: {photographers}`, and an event carrying a second `h` row
+    /// beside the right one reports both in `found`.
+    MismatchedContext {
+        found: BTreeSet<String>,
+        expected: BTreeSet<String>,
+    },
+    /// A pre-signed event names the same group in more than one `h` row.
+    ///
+    /// The set of groups it claims is right, so this is not a
+    /// [`Self::MismatchedContext`]; what is wrong is that the rows are not
+    /// the rows this door would ever mint. Refusing keeps the pre-signed
+    /// path exactly as strict as the unsigned one, which appends each id
+    /// once and only once.
+    RepeatedContext { repeated: BTreeSet<String> },
 }
 
 impl std::fmt::Display for GroupContextError {
@@ -102,20 +123,27 @@ impl std::fmt::Display for GroupContextError {
                     kinds.join(", ")
                 )
             }
+            Self::NoGroupNamed => write!(
+                f,
+                "a group write must name at least one group: an event with no \
+                 '{CONTEXT_TAG}' row is not in a group at all"
+            ),
             Self::MissingContext { expected } => write!(
                 f,
-                "a signed event carries no '{CONTEXT_TAG}' tag, so it is not in group \
-                 {expected:?}; appending one would change its event id"
+                "a signed event carries no '{CONTEXT_TAG}' tag, so it is not in {}; \
+                 appending one would change its event id",
+                named(expected)
             ),
             Self::MismatchedContext { found, expected } => write!(
                 f,
-                "a signed event names group {found:?}, but it is being published through \
-                 group {expected:?}"
+                "a signed event names {}, but it is being published through {}",
+                named(found),
+                named(expected)
             ),
-            Self::AmbiguousContext { expected } => write!(
+            Self::RepeatedContext { repeated } => write!(
                 f,
-                "a signed event carries more than one '{CONTEXT_TAG}' tag, so its membership \
-                 of group {expected:?} has no single answer"
+                "a signed event names {} in more than one '{CONTEXT_TAG}' row",
+                named(repeated)
             ),
         }
     }
@@ -162,17 +190,32 @@ pub fn group_demand_at(
     Ok(crate::discovery::pinned_public_at(host, selection))
 }
 
-/// Append the group's own `h` row to a draft, refusing a draft that already
-/// claims either tag this crate owns. Every other field and tag survives
-/// verbatim, in the caller's own order.
+/// Append one `h` row per group in `group_ids` to a draft, refusing a draft
+/// that already claims either tag this crate owns. Every other field and tag
+/// survives verbatim, in the caller's own order; the appended rows follow the
+/// set's own canonical order, so two callers naming the same groups in
+/// different orders compose the identical bytes.
+///
+/// One group is the ONE-ELEMENT case and has no separate path: a write that
+/// belongs to several groups at once -- a kind:30315 session status carrying
+/// one `h` per room the session occupies (#1281) -- is the same call with a
+/// larger set. There is no arity anywhere below this line.
 ///
 /// The append happens on the BUILDER -- before the stamp/sign step -- so the
-/// context tag is inside the bytes that get signed and is covered by the id
-/// and the signature.
+/// context tags are inside the bytes that get signed and are covered by the
+/// id and the signature.
+///
+/// `group_ids` is proved nonempty by whoever formed it
+/// ([`GroupContextError::NoGroupNamed`] is decided at that construction, not
+/// here), exactly as [`crate::group_records_at`]'s record selection is.
 pub fn contextualize(
-    group_id: &str,
+    group_ids: &BTreeSet<String>,
     builder: EventBuilder,
 ) -> Result<EventBuilder, GroupContextError> {
+    debug_assert!(
+        !group_ids.is_empty(),
+        "the door proves its group set is nonempty before contextualizing"
+    );
     for tag in &builder.tags {
         match tag.as_slice().first().map(String::as_str) {
             Some(name) if name == CONTEXT_TAG.to_string() => {
@@ -182,51 +225,81 @@ pub fn contextualize(
             _ => {}
         }
     }
-    Ok(builder.tag(
-        Tag::parse([CONTEXT_TAG.to_string().as_str(), group_id])
-            .expect("'h' is a well-formed non-empty row"),
-    ))
+    Ok(group_ids.iter().fold(builder, |builder, group_id| {
+        builder.tag(
+            Tag::parse([CONTEXT_TAG.to_string().as_str(), group_id.as_str()])
+                .expect("'h' is a well-formed non-empty row"),
+        )
+    }))
 }
 
-/// Validate the `h` an ALREADY-SIGNED event carries. Nothing is appended,
-/// nothing is re-signed, nothing is recomputed -- appending would change the
-/// bytes and therefore the `EventId`, which is the whole reason an app signs
-/// first. A missing, wrong or duplicated `h` is a typed refusal.
-pub fn validate_context(group_id: &str, event: &Event) -> Result<(), GroupContextError> {
+/// Validate the `h` rows an ALREADY-SIGNED event carries. Nothing is
+/// appended, nothing is re-signed, nothing is recomputed -- appending would
+/// change the bytes and therefore the `EventId`, which is the whole reason an
+/// app signs first.
+///
+/// The event's `h` rows must name EXACTLY `group_ids`, each once. Naming none
+/// is [`GroupContextError::MissingContext`], naming a different set is
+/// [`GroupContextError::MismatchedContext`], and naming the right set with a
+/// row repeated is [`GroupContextError::RepeatedContext`] -- which is the
+/// refusal that keeps this path exactly as strict as
+/// [`contextualize`], whose rows a set can never repeat.
+pub fn validate_context(
+    group_ids: &BTreeSet<String>,
+    event: &Event,
+) -> Result<(), GroupContextError> {
+    debug_assert!(
+        !group_ids.is_empty(),
+        "the door proves its group set is nonempty before validating"
+    );
     let context = CONTEXT_TAG.to_string();
-    let mut values = event
-        .tags
-        .iter()
-        .filter_map(|tag| {
-            let row = tag.as_slice();
-            (row.first() == Some(&context)).then(|| {
-                row.get(1)
-                    .map(String::to_string)
-                    .unwrap_or_else(String::new)
-            })
-        })
-        .peekable();
-    let Some(found) = values.next() else {
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut repeated: BTreeSet<String> = BTreeSet::new();
+    let mut rows = 0usize;
+    for tag in event.tags.iter() {
+        let row = tag.as_slice();
+        if row.first() != Some(&context) {
+            continue;
+        }
+        rows += 1;
+        let value = row
+            .get(1)
+            .map(String::to_string)
+            .unwrap_or_else(String::new);
+        if !found.insert(value.clone()) {
+            repeated.insert(value);
+        }
+    }
+    if rows == 0 {
         return Err(GroupContextError::MissingContext {
-            expected: group_id.to_string(),
-        });
-    };
-    if values.peek().is_some() {
-        return Err(GroupContextError::AmbiguousContext {
-            expected: group_id.to_string(),
+            expected: group_ids.clone(),
         });
     }
-    if found != group_id {
+    if &found != group_ids {
         return Err(GroupContextError::MismatchedContext {
             found,
-            expected: group_id.to_string(),
+            expected: group_ids.clone(),
         });
+    }
+    if !repeated.is_empty() {
+        return Err(GroupContextError::RepeatedContext { repeated });
     }
     Ok(())
 }
 
 fn context_tag() -> IndexedTagName {
     IndexedTagName::new(CONTEXT_TAG).expect("'h' is a single ASCII letter")
+}
+
+/// One group named as `group "x"`, several as `groups "x", "y"` -- so a
+/// refusal message reads as a sentence at either arity without a caller
+/// having to know which one it got.
+fn named(group_ids: &BTreeSet<String>) -> String {
+    let listed: Vec<String> = group_ids.iter().map(|id| format!("{id:?}")).collect();
+    match listed.len() {
+        1 => format!("group {}", listed[0]),
+        _ => format!("groups {}", listed.join(", ")),
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +309,25 @@ mod tests {
     use nostr::{EventId, Keys, Kind, Timestamp, UnsignedEvent};
 
     const GROUP: &str = "photographers";
+
+    /// The one-element case, spelled once so every single-group test below
+    /// reads exactly as it did when the door took a bare `&str`.
+    fn one(group_id: &str) -> BTreeSet<String> {
+        BTreeSet::from([group_id.to_string()])
+    }
+
+    fn many<'a>(group_ids: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+        group_ids.into_iter().map(str::to_string).collect()
+    }
+
+    fn context_rows(builder: &EventBuilder) -> Vec<String> {
+        builder
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+            .map(|tag| tag.as_slice()[1].clone())
+            .collect()
+    }
 
     fn host() -> RelayUrl {
         RelayUrl::parse("wss://groups.example.com").expect("a well-formed host")
@@ -280,7 +372,7 @@ mod tests {
     fn contextualize_takes_the_identical_path_for_every_kind_familiar_or_not() {
         for kind in [9021u16, 7, 30315, 44815, 20, 1] {
             let built = contextualize(
-                GROUP,
+                &one(GROUP),
                 EventBuilder::new(Kind::from(kind)).content("whatever this is"),
             )
             .unwrap_or_else(|error| panic!("kind {kind} must contextualize cleanly: {error}"));
@@ -309,7 +401,7 @@ mod tests {
             .tag(Tag::parse(["imeta", "url https://cdn.example/sunset.jpg"]).unwrap())
             .created_at(created_at);
 
-        let built = contextualize(GROUP, draft).expect("a plain draft is contextualizable");
+        let built = contextualize(&one(GROUP), draft).expect("a plain draft is contextualizable");
         assert_eq!(built.kind, Kind::from(20u16));
         assert_eq!(built.content, "draft content");
         assert_eq!(built.created_at, Some(created_at));
@@ -335,7 +427,7 @@ mod tests {
     /// whatever the caller already signed verbatim.
     #[test]
     fn the_unsigned_door_never_invents_a_previous_tag() {
-        let built = contextualize(GROUP, EventBuilder::new(Kind::from(30023u16))).unwrap();
+        let built = contextualize(&one(GROUP), EventBuilder::new(Kind::from(30023u16))).unwrap();
         assert_eq!(rows(&built), vec![vec!["h".to_string(), GROUP.to_string()]]);
     }
 
@@ -345,7 +437,7 @@ mod tests {
         let draft = EventBuilder::new(Kind::from(9u16))
             .content("reply")
             .tag(Tag::parse(["q", &parent.to_hex(), "wss://chat.example.com"]).unwrap());
-        let built = contextualize(GROUP, draft).unwrap();
+        let built = contextualize(&one(GROUP), draft).unwrap();
         assert_eq!(rows(&built)[0][0], "q");
         assert_eq!(
             rows(&built).last().unwrap(),
@@ -360,7 +452,7 @@ mod tests {
     fn caller_supplied_own_h_is_refused_before_signing_or_routing() {
         let draft = EventBuilder::new(Kind::from(9u16)).tag(Tag::parse(["h", GROUP]).unwrap());
         assert_eq!(
-            contextualize(GROUP, draft).err(),
+            contextualize(&one(GROUP), draft).err(),
             Some(GroupContextError::CallerSuppliedContext)
         );
     }
@@ -372,7 +464,7 @@ mod tests {
     fn caller_supplied_other_group_h_is_refused_the_same_way() {
         let draft = EventBuilder::new(Kind::from(9u16)).tag(Tag::parse(["h", "darkroom"]).unwrap());
         assert_eq!(
-            contextualize(GROUP, draft).err(),
+            contextualize(&one(GROUP), draft).err(),
             Some(GroupContextError::CallerSuppliedContext)
         );
     }
@@ -382,7 +474,7 @@ mod tests {
     fn a_caller_supplied_previous_is_refused() {
         let draft = EventBuilder::new(Kind::from(9u16)).tag(timeline_tag());
         assert_eq!(
-            contextualize(GROUP, draft).err(),
+            contextualize(&one(GROUP), draft).err(),
             Some(GroupContextError::CallerSuppliedTimeline)
         );
     }
@@ -398,7 +490,7 @@ mod tests {
             .tag(Tag::parse(["h", GROUP]).unwrap())
             .tag(timeline_tag());
         assert_eq!(
-            contextualize(GROUP, h_first).err(),
+            contextualize(&one(GROUP), h_first).err(),
             Some(GroupContextError::CallerSuppliedContext),
             "h was the caller's first tag, so the refusal names h, not previous"
         );
@@ -407,7 +499,7 @@ mod tests {
             .tag(timeline_tag())
             .tag(Tag::parse(["h", GROUP]).unwrap());
         assert_eq!(
-            contextualize(GROUP, previous_first).err(),
+            contextualize(&one(GROUP), previous_first).err(),
             Some(GroupContextError::CallerSuppliedTimeline),
             "previous was the caller's first tag, so the refusal names previous, not h -- \
              precedence follows the caller's own tag order, not a fixed check order"
@@ -421,7 +513,7 @@ mod tests {
     #[test]
     fn the_builder_handed_onward_for_signing_already_carries_exactly_one_h_row() {
         let built = contextualize(
-            GROUP,
+            &one(GROUP),
             EventBuilder::new(Kind::from(9u16)).content("first light"),
         )
         .unwrap();
@@ -440,7 +532,7 @@ mod tests {
     #[test]
     fn the_delivered_event_s_id_and_signature_cover_the_h_tag() {
         let built = contextualize(
-            GROUP,
+            &one(GROUP),
             EventBuilder::new(Kind::from(9u16)).content("first light"),
         )
         .unwrap();
@@ -485,9 +577,9 @@ mod tests {
     fn a_signed_event_with_no_context_is_refused_not_repaired() {
         let event = signed(Vec::new());
         assert_eq!(
-            validate_context(GROUP, &event).err(),
+            validate_context(&one(GROUP), &event).err(),
             Some(GroupContextError::MissingContext {
-                expected: GROUP.to_string()
+                expected: one(GROUP)
             })
         );
         assert!(!event
@@ -500,29 +592,34 @@ mod tests {
     #[test]
     fn a_signed_event_naming_another_group_names_both_in_its_refusal() {
         let event = signed(vec![Tag::parse(["h", "darkroom"]).unwrap()]);
-        let error = validate_context(GROUP, &event).expect_err("another group's h is a refusal");
+        let error =
+            validate_context(&one(GROUP), &event).expect_err("another group's h is a refusal");
         assert_eq!(
             error,
             GroupContextError::MismatchedContext {
-                found: "darkroom".to_string(),
-                expected: GROUP.to_string(),
+                found: one("darkroom"),
+                expected: one(GROUP),
             }
         );
         let said = error.to_string();
         assert!(said.contains("darkroom") && said.contains(GROUP), "{said}");
     }
 
-    /// PROTOCOL-PRESIGNEDPUBLICATION-005.
+    /// PROTOCOL-PRESIGNEDPUBLICATION-005: a signed event claiming a group
+    /// this door was not asked for is refused, and the refusal NAMES the
+    /// whole set it found beside the whole set expected -- so a caller can
+    /// see which room leaked in rather than only that something did.
     #[test]
-    fn a_signed_event_with_two_context_rows_is_ambiguous() {
+    fn a_signed_event_naming_a_group_the_door_was_not_asked_for_is_refused() {
         let event = signed(vec![
             Tag::parse(["h", GROUP]).unwrap(),
             Tag::parse(["h", "darkroom"]).unwrap(),
         ]);
         assert_eq!(
-            validate_context(GROUP, &event).err(),
-            Some(GroupContextError::AmbiguousContext {
-                expected: GROUP.to_string()
+            validate_context(&one(GROUP), &event).err(),
+            Some(GroupContextError::MismatchedContext {
+                found: many([GROUP, "darkroom"]),
+                expected: one(GROUP),
             })
         );
     }
@@ -530,7 +627,180 @@ mod tests {
     #[test]
     fn a_correctly_contextualized_signed_event_validates() {
         let event = signed(vec![Tag::parse(["h", GROUP]).unwrap()]);
-        assert_eq!(validate_context(GROUP, &event), Ok(()));
+        assert_eq!(validate_context(&one(GROUP), &event), Ok(()));
+    }
+
+    /// #1281, the write with no door. A kind:30315 session status is
+    /// addressable at `(author, d=status)` and carries one `h` per room the
+    /// session occupies, so publishing it once per room would make each copy
+    /// REPLACE the last -- several `h` rows on one event is the only correct
+    /// shape, not a convenience. One call composes all of them.
+    #[test]
+    fn a_draft_for_several_groups_carries_one_h_row_per_group() {
+        let built = contextualize(
+            &many(["darkroom", GROUP, "studio"]),
+            EventBuilder::new(Kind::from(30315u16)).tag(Tag::parse(["d", "status"]).unwrap()),
+        )
+        .expect("a plain draft contextualizes for several groups");
+        assert_eq!(
+            context_rows(&built),
+            vec![
+                "darkroom".to_string(),
+                GROUP.to_string(),
+                "studio".to_string()
+            ],
+            "one h row per group, in the set's own canonical order"
+        );
+        assert_eq!(
+            rows(&built)[0],
+            vec!["d".to_string(), "status".to_string()],
+            "the app's own addressable coordinate survives ahead of the appended rows"
+        );
+    }
+
+    /// The set is canonical, so the composed BYTES are: two callers naming
+    /// the same rooms in different orders, or naming one twice, compose the
+    /// identical event. An `h` row can therefore never be repeated on the
+    /// unsigned path -- which is what makes
+    /// [`GroupContextError::RepeatedContext`] a claim about pre-signed bytes
+    /// alone.
+    #[test]
+    fn the_composed_rows_do_not_depend_on_the_callers_own_order_or_repetition() {
+        let forwards = contextualize(&many(["a", "b", "c"]), EventBuilder::new(Kind::from(9u16)))
+            .expect("three rooms contextualize");
+        let backwards = contextualize(
+            &many(["c", "b", "a", "b"]),
+            EventBuilder::new(Kind::from(9u16)),
+        )
+        .expect("the same three rooms, differently spelled, contextualize");
+        assert_eq!(context_rows(&forwards), context_rows(&backwards));
+        assert_eq!(context_rows(&forwards), vec!["a", "b", "c"]);
+    }
+
+    /// The ownership refusals do not weaken at the larger arity: a caller's
+    /// own `h` is still refused whichever of the named rooms it happens to
+    /// name, and a `previous` row still is too.
+    #[test]
+    fn a_caller_supplied_row_is_refused_at_the_several_group_arity_too() {
+        let groups = many([GROUP, "darkroom"]);
+        assert_eq!(
+            contextualize(
+                &groups,
+                EventBuilder::new(Kind::from(9u16)).tag(Tag::parse(["h", GROUP]).unwrap())
+            )
+            .err(),
+            Some(GroupContextError::CallerSuppliedContext)
+        );
+        assert_eq!(
+            contextualize(
+                &groups,
+                EventBuilder::new(Kind::from(9u16)).tag(Tag::parse(["h", "elsewhere"]).unwrap())
+            )
+            .err(),
+            Some(GroupContextError::CallerSuppliedContext),
+            "the refusal is about who owns the row, not about which value it held"
+        );
+        assert_eq!(
+            contextualize(
+                &groups,
+                EventBuilder::new(Kind::from(9u16)).tag(timeline_tag())
+            )
+            .err(),
+            Some(GroupContextError::CallerSuppliedTimeline)
+        );
+    }
+
+    /// The pre-signed half of #1281: a signed event's `h` rows must name
+    /// EXACTLY the rooms it is being published into. Too few is as wrong as
+    /// too many -- a status that dropped a room silently stops rendering
+    /// there, which is the failure this validation exists to make loud.
+    #[test]
+    fn a_signed_event_for_several_groups_must_name_exactly_those_groups() {
+        let all_three = many(["a", "b", "c"]);
+        let complete = signed(vec![
+            Tag::parse(["h", "a"]).unwrap(),
+            Tag::parse(["h", "b"]).unwrap(),
+            Tag::parse(["h", "c"]).unwrap(),
+        ]);
+        assert_eq!(validate_context(&all_three, &complete), Ok(()));
+
+        let short = signed(vec![
+            Tag::parse(["h", "a"]).unwrap(),
+            Tag::parse(["h", "b"]).unwrap(),
+        ]);
+        assert_eq!(
+            validate_context(&all_three, &short).err(),
+            Some(GroupContextError::MismatchedContext {
+                found: many(["a", "b"]),
+                expected: all_three.clone(),
+            }),
+            "a room the app forgot to sign in must be a refusal, not a quiet partial write"
+        );
+
+        let over = signed(vec![
+            Tag::parse(["h", "a"]).unwrap(),
+            Tag::parse(["h", "b"]).unwrap(),
+            Tag::parse(["h", "c"]).unwrap(),
+            Tag::parse(["h", "d"]).unwrap(),
+        ]);
+        assert_eq!(
+            validate_context(&all_three, &over).err(),
+            Some(GroupContextError::MismatchedContext {
+                found: many(["a", "b", "c", "d"]),
+                expected: all_three.clone(),
+            })
+        );
+
+        assert_eq!(
+            validate_context(&all_three, &signed(Vec::new())).err(),
+            Some(GroupContextError::MissingContext {
+                expected: all_three
+            })
+        );
+    }
+
+    /// The refusal the retired `AmbiguousContext` used to make for the
+    /// one-group case, kept rather than lost: a signed event whose `h` rows
+    /// name the right SET but repeat one of them is still refused, because
+    /// those are not rows [`contextualize`] could ever have produced.
+    ///
+    /// Without this variant a set comparison alone would say `Ok` here,
+    /// which would be strictly weaker than the door was before #1281.
+    #[test]
+    fn a_signed_event_repeating_a_group_is_refused_even_though_the_set_is_right() {
+        let event = signed(vec![
+            Tag::parse(["h", GROUP]).unwrap(),
+            Tag::parse(["h", GROUP]).unwrap(),
+        ]);
+        let error = validate_context(&one(GROUP), &event)
+            .expect_err("a repeated row is not a row this door mints");
+        assert_eq!(
+            error,
+            GroupContextError::RepeatedContext {
+                repeated: one(GROUP)
+            }
+        );
+        assert!(error.to_string().contains(GROUP), "{error}");
+    }
+
+    /// A refusal reads as a sentence at either arity -- `group "x"` for one,
+    /// `groups "x", "y"` for several -- so the message never leaks which
+    /// internal shape produced it.
+    #[test]
+    fn a_refusal_names_one_group_singular_and_several_plural() {
+        let single = GroupContextError::MissingContext {
+            expected: one(GROUP),
+        }
+        .to_string();
+        assert!(
+            single.contains("group \"photographers\"") && !single.contains("groups"),
+            "{single}"
+        );
+        let plural = GroupContextError::MissingContext {
+            expected: many(["a", "b"]),
+        }
+        .to_string();
+        assert!(plural.contains("groups \"a\", \"b\""), "{plural}");
     }
 
     #[test]

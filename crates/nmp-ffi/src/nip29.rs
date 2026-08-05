@@ -50,9 +50,9 @@ use nmp::nip29::{
 use nostr::RelayUrl;
 
 use crate::convert::{
-    event_builder_from_ffi, filter_from_ffi, group_ids_binding_from_ffi, live_query_to_ffi,
-    parse_event_id, parse_pubkey, signed_event_from_ffi, subjects_binding_from_ffi,
-    write_intent_to_ffi, FfiError,
+    event_builder_from_ffi, event_builder_to_ffi, filter_from_ffi, group_ids_binding_from_ffi,
+    live_query_to_ffi, parse_event_id, parse_pubkey, signed_event_from_ffi,
+    subjects_binding_from_ffi, write_intent_to_ffi, FfiError,
 };
 use crate::facade::{NmpEngine, NmpReceiptStream};
 use crate::types::{
@@ -61,6 +61,20 @@ use crate::types::{
 
 fn parse_host(host: String) -> Result<RelayUrl, FfiError> {
     RelayUrl::parse(&host).map_err(|_| FfiError::InvalidRelayUrl { got: host })
+}
+
+/// The seven-field reassembly every pre-signed door on this surface does,
+/// spelled once.
+fn signed_event(event: FfiSignedEvent) -> Result<nostr::Event, FfiError> {
+    signed_event_from_ffi(
+        event.id,
+        event.pubkey,
+        event.created_at,
+        event.kind,
+        event.tags,
+        event.content,
+        event.sig,
+    )
 }
 
 /// The relays a group lives on -- named once, retained privately inside the
@@ -97,6 +111,21 @@ impl FfiRelayScope {
         Arc::new(FfiGroup {
             inner: self.inner.group(group_id),
         })
+    }
+
+    /// Narrow to the SEVERAL groups one write belongs to, keeping the same
+    /// hosts (`nmp::nip29::RelayScope::groups` mirror, #1281).
+    ///
+    /// The write-only sibling of [`Self::group`], for the one event shape a
+    /// single group id cannot express: a kind:30315 session status is
+    /// addressable at `(author, d=status)` and carries one `h` per room the
+    /// session occupies, so publishing it once per room would make each copy
+    /// replace the last. An empty set is [`FfiError::EmptyGroupSet`] -- an
+    /// event with no `h` row is not in a group at all.
+    pub fn groups(&self, group_ids: Vec<String>) -> Result<Arc<FfiGroups>, FfiError> {
+        Ok(Arc::new(FfiGroups {
+            inner: self.inner.groups(group_ids)?,
+        }))
     }
 
     /// Watch the relay-signed records of every group matching `predicate`
@@ -183,6 +212,26 @@ impl FfiGroup {
         )?;
         self.inner.validate_context(&event)?;
         Ok(())
+    }
+
+    /// Apply this group's own id to a draft the CALLER will sign itself
+    /// (`nmp::nip29::Group::contextualize` mirror, #1283).
+    ///
+    /// [`Self::intent`] is the door for an app that lets NMP sign; this is
+    /// the door for an app that signs its own bytes, which is any app that
+    /// shows a message locally the moment it is composed -- an event id only
+    /// exists once the body is frozen, and [`Self::signed_intent`]
+    /// deliberately VALIDATES the `h` rather than appending it.
+    ///
+    /// Without it such an app had to reach past this object for the `h` row
+    /// and then hand the signed result back to [`Self::signed_intent`],
+    /// naming the group id twice with nothing checking the two agreed until
+    /// the second call. The refusals are [`Self::intent`]'s own: a draft
+    /// already carrying an `h` or a `previous` row is refused whichever value
+    /// it holds.
+    pub fn contextualize(&self, builder: FfiEventBuilder) -> Result<FfiEventBuilder, FfiError> {
+        let builder = event_builder_from_ffi(builder)?;
+        Ok(event_builder_to_ffi(self.inner.contextualize(builder)?))
     }
 
     /// Mint the group-contextualized write intent for an unsigned draft and
@@ -377,6 +426,96 @@ impl FfiGroup {
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
         let receipts = self.inner.create_invite(&engine.engine, author, &code)?;
+        Ok(NmpReceiptStream::new(receipts))
+    }
+}
+
+/// The groups one write belongs to (`nmp::nip29::Groups` mirror, #1281),
+/// built with [`FfiRelayScope::groups`].
+///
+/// A WRITE CONTEXT and nothing else. There is no read door, no records
+/// observation and no named operation on it, because each of those is
+/// per-group by definition -- a roster is one group's, and every 9000-9022
+/// moderation action names one group. A write is the one thing that is
+/// genuinely plural.
+///
+/// Opaque for the same reason [`FfiGroup`] is: it yields back neither its
+/// hosts nor its ids, so no layer handed one can reconstruct the authority
+/// and route something elsewhere under it.
+#[derive(Debug, uniffi::Object)]
+pub struct FfiGroups {
+    inner: nip29::Groups,
+}
+
+#[uniffi::export]
+impl FfiGroups {
+    /// Apply the retained group ids to a draft the CALLER will sign itself
+    /// (`nmp::nip29::Groups::contextualize` mirror). One `h` row per id,
+    /// appended before anything is signed; hand the signed result to
+    /// [`Self::signed_intent`] and the ids are never spelled by the app at
+    /// all.
+    pub fn contextualize(&self, builder: FfiEventBuilder) -> Result<FfiEventBuilder, FfiError> {
+        let builder = event_builder_from_ffi(builder)?;
+        Ok(event_builder_to_ffi(self.inner.contextualize(builder)?))
+    }
+
+    /// Ask whether an already-signed event names exactly these groups
+    /// (`nmp::nip29::Groups::validate_context` mirror).
+    pub fn validate_context(&self, event: FfiSignedEvent) -> Result<(), FfiError> {
+        self.inner.validate_context(&signed_event(event)?)?;
+        Ok(())
+    }
+
+    /// Mint the contextualized write intent for an unsigned draft and publish
+    /// NOTHING (`nmp::nip29::Groups::intent` mirror). Same appended-before-
+    /// signing rows, same explicit route over the scope's whole host set,
+    /// same frozen exact author, same `correlation: None` for the caller to
+    /// stamp -- [`FfiGroup::intent`] at a larger arity, not a second door.
+    pub fn intent(
+        &self,
+        author: String,
+        builder: FfiEventBuilder,
+    ) -> Result<FfiWriteIntent, FfiError> {
+        let author = parse_pubkey(&author)?;
+        let builder = event_builder_from_ffi(builder)?;
+        Ok(write_intent_to_ffi(self.inner.intent(author, builder)?))
+    }
+
+    /// Mint the contextualized write intent for an ALREADY-SIGNED event, and
+    /// publish nothing (`nmp::nip29::Groups::signed_intent` mirror). The `h`
+    /// rows it carries are validated against the retained set, never appended
+    /// -- a set too small, too large, wrong, absent or right-but-repeated is a
+    /// typed refusal.
+    pub fn signed_intent(&self, event: FfiSignedEvent) -> Result<FfiWriteIntent, FfiError> {
+        Ok(write_intent_to_ffi(
+            self.inner.signed_intent(signed_event(event)?)?,
+        ))
+    }
+
+    /// [`Self::intent`] handed straight to the one publish door
+    /// (`nmp::nip29::Groups::publish` mirror).
+    pub fn publish(
+        &self,
+        engine: Arc<NmpEngine>,
+        author: String,
+        builder: FfiEventBuilder,
+    ) -> Result<Arc<NmpReceiptStream>, FfiError> {
+        let author = parse_pubkey(&author)?;
+        let builder = event_builder_from_ffi(builder)?;
+        let receipts = self.inner.publish(&engine.engine, author, builder)?;
+        Ok(NmpReceiptStream::new(receipts))
+    }
+
+    /// [`Self::signed_intent`] handed straight to the one publish door
+    /// (`nmp::nip29::Groups::publish_signed` mirror).
+    pub fn publish_signed(
+        &self,
+        engine: Arc<NmpEngine>,
+        event: FfiSignedEvent,
+    ) -> Result<Arc<NmpReceiptStream>, FfiError> {
+        let receipts = self
+            .inner
+            .publish_signed(&engine.engine, signed_event(event)?)?;
         Ok(NmpReceiptStream::new(receipts))
     }
 }
@@ -739,7 +878,9 @@ pub fn any_of(ids: FfiBinding) -> Result<Arc<FfiGroupIds>, FfiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FfiAccessContext, FfiIdentityField, FfiSourceAuthority};
+    use crate::types::{
+        FfiAccessContext, FfiIdentityField, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting,
+    };
 
     fn host(n: u16) -> String {
         format!("wss://host-{n}.example.com")
@@ -1125,23 +1266,111 @@ mod tests {
     }
 
     /// The signed mint door refuses every ill-scoped event at the boundary,
-    /// INCLUDING an event claiming two groups -- the asymmetric hole a real
-    /// consumer had left open in its own hand-rolled check.
+    /// INCLUDING an event claiming a group it was not asked for -- the
+    /// asymmetric hole a real consumer had left open in its own hand-rolled
+    /// check. The refusal names the whole set found beside the whole set
+    /// expected, so a caller can see which room leaked in.
     #[test]
-    fn the_signed_mint_door_refuses_an_event_claiming_two_groups() {
+    fn the_signed_mint_door_refuses_an_event_claiming_a_group_it_was_not_asked_for() {
         let keys = nostr::Keys::generate();
         let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
         let group = scope.group("photographers".to_string());
-        let ambiguous = nostr::EventBuilder::new(nostr::Kind::from(9u16), "content")
+        let extra = nostr::EventBuilder::new(nostr::Kind::from(9u16), "content")
             .tag(nostr::Tag::parse(["h", "photographers"]).unwrap())
             .tag(nostr::Tag::parse(["h", "darkroom"]).unwrap())
             .sign_with_keys(&keys)
             .expect("a well-formed draft signs");
-        match group.signed_intent(to_ffi_signed(&ambiguous)) {
-            Err(FfiError::GroupContextAmbiguous { expected }) => {
-                assert_eq!(expected, "photographers");
+        match group.signed_intent(to_ffi_signed(&extra)) {
+            Err(FfiError::GroupContextMismatched { found, expected }) => {
+                assert_eq!(
+                    found,
+                    vec!["darkroom".to_string(), "photographers".to_string()]
+                );
+                assert_eq!(expected, vec!["photographers".to_string()]);
             }
-            other => panic!("expected GroupContextAmbiguous, got {other:?}"),
+            other => panic!("expected GroupContextMismatched, got {other:?}"),
+        }
+    }
+
+    /// #1281 across the boundary: one intent, one `h` row per named room,
+    /// minted by the door with the caller naming neither a relay nor an `h`.
+    #[test]
+    fn a_several_group_write_crosses_the_boundary_as_one_intent_with_every_h_row() {
+        let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
+        let rooms = scope
+            .groups(vec!["darkroom".to_string(), "photographers".to_string()])
+            .expect("a nonempty group set");
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let intent = rooms
+            .intent(
+                author,
+                FfiEventBuilder {
+                    kind: 30315,
+                    tags: vec![vec!["d".to_string(), "status".to_string()]],
+                    content: String::new(),
+                    created_at: None,
+                },
+            )
+            .expect("a plain draft contextualizes for several groups");
+        match intent.payload {
+            FfiWritePayload::Event { builder } => assert_eq!(
+                builder
+                    .tags
+                    .iter()
+                    .filter(|row| row.first().map(String::as_str) == Some("h"))
+                    .map(|row| row[1].clone())
+                    .collect::<Vec<String>>(),
+                vec!["darkroom".to_string(), "photographers".to_string()]
+            ),
+            other => panic!("an unsigned draft must mint an Event payload, got {other:?}"),
+        }
+        match intent.routing {
+            FfiWriteRouting::Explicit { relays } => assert_eq!(relays, vec![host(1), host(2)]),
+            other => panic!("a group write is never Auto, got {other:?}"),
+        }
+    }
+
+    /// #1281's refusal at the boundary: naming no group forms no write
+    /// context at all.
+    #[test]
+    fn a_write_context_over_no_group_is_never_formed_across_the_boundary() {
+        let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
+        match scope.groups(Vec::new()) {
+            Err(FfiError::EmptyGroupSet) => {}
+            other => panic!("expected EmptyGroupSet, got {other:?}"),
+        }
+    }
+
+    /// #1283 across the boundary: the contextualized draft comes back with
+    /// the retained id already in it, so an app that signs its own bytes
+    /// never spells the group id.
+    #[test]
+    fn the_self_signing_door_hands_back_a_draft_that_already_carries_the_retained_id() {
+        let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
+        let group = scope.group("photographers".to_string());
+        let built = group
+            .contextualize(FfiEventBuilder {
+                kind: 9,
+                tags: Vec::new(),
+                content: "first light".to_string(),
+                created_at: None,
+            })
+            .expect("the retained id contextualizes the caller's own draft");
+        assert_eq!(
+            built.tags,
+            vec![vec!["h".to_string(), "photographers".to_string()]]
+        );
+        assert_eq!(built.kind, 9);
+        assert_eq!(built.content, "first light");
+
+        match group.contextualize(FfiEventBuilder {
+            kind: 9,
+            tags: vec![vec!["h".to_string(), "photographers".to_string()]],
+            content: String::new(),
+            created_at: None,
+        }) {
+            Err(FfiError::GroupCallerSuppliedContext) => {}
+            other => panic!("expected GroupCallerSuppliedContext, got {other:?}"),
         }
     }
 
@@ -1194,7 +1423,7 @@ mod tests {
             .expect("a well-formed draft signs");
         match group.validate_context(to_ffi_signed(&bare)) {
             Err(FfiError::GroupContextMissing { expected }) => {
-                assert_eq!(expected, "photographers");
+                assert_eq!(expected, vec!["photographers".to_string()]);
             }
             other => panic!("expected GroupContextMissing, got {other:?}"),
         }

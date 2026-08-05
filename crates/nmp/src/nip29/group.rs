@@ -53,9 +53,10 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{EventBuilder, Filter, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{EventBuilder, Filter, WriteIntent};
 use nostr::{Event, EventId, PublicKey, RelayUrl};
 
+use super::groups::Groups;
 use super::read::{self, GroupReadError};
 use super::records::{GroupObservation, GroupObserveError};
 use crate::engine::Engine;
@@ -195,7 +196,52 @@ impl Group {
     /// Ask whether an already-signed event belongs to this group, without
     /// building a write out of it.
     pub fn validate_context(&self, event: &Event) -> Result<(), GroupContextError> {
-        nmp_nip29::validate_context(&self.id, event)
+        self.write_context().validate_context(event)
+    }
+
+    /// Apply this group's own id to a draft the CALLER will sign itself
+    /// (#1283).
+    ///
+    /// [`Self::intent`] is the door for an app that lets NMP sign. This is
+    /// the door for an app that signs its own bytes -- any app that shows a
+    /// message locally the moment it is composed, because an `EventId` only
+    /// exists once the body is frozen. Such an app needs the `h` row inside
+    /// the bytes it signs, and [`Self::signed_intent`] deliberately validates
+    /// rather than appends.
+    ///
+    /// Without this door that app reached past the facade to
+    /// `nmp_nip29::contextualize(group_id, builder)` and then handed the
+    /// signed result to `group.signed_intent(...)` -- naming the group id
+    /// TWICE, from two crates, with nothing checking that the two agreed
+    /// until the second call. That is precisely the failure the retained id
+    /// exists to make unrepresentable, only caught rather than prevented, and
+    /// caught one signature too late.
+    ///
+    /// With it, the sign-yourself path is structurally identical to the
+    /// sign-through-NMP one and the id is named once, by construction:
+    ///
+    /// ```text
+    /// let signed = sign(group.contextualize(builder)?, keys);
+    /// let intent = group.signed_intent(signed)?;
+    /// ```
+    ///
+    /// The refusals are [`Self::intent`]'s own, for the same reason: a draft
+    /// already carrying an `h` or a `previous` row is refused whichever value
+    /// it holds, because those rows belong to the group and not to the
+    /// caller.
+    pub fn contextualize(&self, builder: EventBuilder) -> Result<EventBuilder, GroupContextError> {
+        self.write_context().contextualize(builder)
+    }
+
+    /// This group as the one-element write context it is.
+    ///
+    /// Not an accessor: [`Groups`] retains its hosts and ids as privately as
+    /// `Group` does and yields neither back. It is the single place the
+    /// write half of a `Group` lives, so "one group is the one-element case"
+    /// is a fact about the code rather than a claim in a doc comment.
+    fn write_context(&self) -> Groups {
+        Groups::new(self.hosts.clone(), BTreeSet::from([self.id.clone()]))
+            .expect("a one-element group set is nonempty")
     }
 
     /// Mint the group-contextualized [`WriteIntent`] for an unsigned draft,
@@ -232,11 +278,7 @@ impl Group {
         author: PublicKey,
         builder: EventBuilder,
     ) -> Result<WriteIntent, GroupPublishError> {
-        let contextualized = nmp_nip29::contextualize(&self.id, builder)?;
-        Ok(self.mint(
-            WritePayload::Event(contextualized),
-            Identity::Explicit(author),
-        ))
+        self.write_context().intent(author, builder)
     }
 
     /// Mint the group-contextualized [`WriteIntent`] for an ALREADY-SIGNED
@@ -250,9 +292,7 @@ impl Group {
     /// There is no author argument. A signed event already fixed its author;
     /// accepting a second selector would let the two disagree.
     pub fn signed_intent(&self, event: Event) -> Result<WriteIntent, GroupPublishError> {
-        nmp_nip29::validate_context(&self.id, &event)?;
-        let author = event.pubkey;
-        Ok(self.mint(WritePayload::Signed(event), Identity::Explicit(author)))
+        self.write_context().signed_intent(event)
     }
 
     /// [`Self::intent`] handed straight to the one publish door -- the
@@ -373,26 +413,6 @@ impl Group {
         self.publish(engine, author, nmp_nip29::create_invite(code))
     }
 
-    /// The one shape a group write has. `Explicit(every host)` is minted
-    /// HERE, from the scope the app named once: no caller supplies it and no
-    /// engine derives it. The `h` tag carries the GROUP ID, never a relay, so
-    /// the hosts are not derivable from the event and no resolver could ever
-    /// compute them.
-    ///
-    /// `correlation: None` is not a decision this door is entitled to make
-    /// differently. A correlation token is minted and persisted by the app
-    /// BEFORE it writes -- that is the entire point of it (#591) -- so the
-    /// only honest value here is the absence, and [`Self::intent`]'s caller
-    /// is the one that can fill it in.
-    fn mint(&self, payload: WritePayload, identity: Identity) -> WriteIntent {
-        WriteIntent {
-            payload,
-            routing: WriteRouting::Explicit(self.hosts.iter().cloned().collect()),
-            identity,
-            correlation: None,
-        }
-    }
-
     /// The whole engine-facing body of this type: hand a group-minted intent
     /// to the one publish door. Named so a reader can see there is exactly
     /// one, and so a second write lifecycle could not be added without
@@ -417,6 +437,7 @@ impl Group {
 mod tests {
     use super::*;
     use crate::nip29;
+    use nmp_grammar::{Identity, WritePayload, WriteRouting};
     use nostr::{Keys, Kind, Tag, Timestamp, UnsignedEvent};
 
     const GROUP: &str = "photographers";
@@ -683,7 +704,7 @@ mod tests {
             group.signed_intent(signed(Vec::new())).err(),
             Some(GroupPublishError::Context(
                 GroupContextError::MissingContext {
-                    expected: GROUP.to_string()
+                    expected: BTreeSet::from([GROUP.to_string()])
                 }
             ))
         );
@@ -693,8 +714,8 @@ mod tests {
                 .err(),
             Some(GroupPublishError::Context(
                 GroupContextError::MismatchedContext {
-                    found: "darkroom".to_string(),
-                    expected: GROUP.to_string()
+                    found: BTreeSet::from(["darkroom".to_string()]),
+                    expected: BTreeSet::from([GROUP.to_string()])
                 }
             ))
         );
@@ -706,11 +727,27 @@ mod tests {
                 ]))
                 .err(),
             Some(GroupPublishError::Context(
-                GroupContextError::AmbiguousContext {
-                    expected: GROUP.to_string()
+                GroupContextError::MismatchedContext {
+                    found: BTreeSet::from(["darkroom".to_string(), GROUP.to_string()]),
+                    expected: BTreeSet::from([GROUP.to_string()])
                 }
             )),
-            "an event claiming two groups has no single answer and must never mint an intent"
+            "a group this door was not asked for must never mint an intent, and the \
+             refusal must name the whole set that leaked in"
+        );
+        assert_eq!(
+            group
+                .signed_intent(signed(vec![
+                    Tag::parse(["h", GROUP]).unwrap(),
+                    Tag::parse(["h", GROUP]).unwrap(),
+                ]))
+                .err(),
+            Some(GroupPublishError::Context(
+                GroupContextError::RepeatedContext {
+                    repeated: BTreeSet::from([GROUP.to_string()])
+                }
+            )),
+            "the right set spelled twice is still not rows this door would mint"
         );
     }
 
@@ -806,6 +843,112 @@ mod tests {
             );
         }
         engine.shutdown();
+    }
+
+    /// THE #1283 falsifier: an app that signs its own bytes names the group
+    /// id ZERO times. Before this door existed the same path was
+    /// `nmp_nip29::contextualize(group_id, builder)` followed by
+    /// `group.signed_intent(...)` -- the id spelled twice, from two crates,
+    /// with nothing checking the two agreed until the second call.
+    #[test]
+    fn a_self_signed_write_is_composed_and_minted_from_the_same_retained_id() {
+        let signer = Keys::generate();
+        let group = group([host(1), host(2)]);
+        let draft = group
+            .contextualize(EventBuilder::new(Kind::from(9u16)).content("first light"))
+            .expect("the retained id contextualizes the caller's own draft");
+        assert_eq!(
+            draft
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+                .map(|tag| tag.as_slice()[1].clone())
+                .collect::<Vec<String>>(),
+            vec![GROUP.to_string()],
+            "exactly the retained id, appended by the door"
+        );
+
+        let signed = UnsignedEvent::new(
+            signer.public_key(),
+            Timestamp::from(1_700_000_000u64),
+            draft.kind,
+            draft.tags.clone(),
+            draft.content.clone(),
+        )
+        .sign_with_keys(&signer)
+        .expect("fixture keys sign cleanly");
+        let known_id = signed.id;
+
+        let intent = group
+            .signed_intent(signed)
+            .expect("bytes this very group contextualized must validate against it");
+        assert_eq!(routed(&intent), vec![host(1), host(2)]);
+        match intent.payload {
+            WritePayload::Signed(out) => assert_eq!(
+                out.id, known_id,
+                "the id the app already showed on screen survives the mint unchanged"
+            ),
+            _ => panic!("a pre-signed event must mint a Signed payload"),
+        }
+    }
+
+    /// `contextualize` carries the SAME ownership refusals `intent` does --
+    /// it is the same call with the signing step left to the caller, not a
+    /// laxer back door into the `h` row.
+    #[test]
+    fn the_self_signing_door_refuses_a_caller_supplied_row_exactly_as_the_mint_door_does() {
+        let group = group([host(1)]);
+        for row in [
+            Tag::parse(["h", GROUP]).unwrap(),
+            Tag::parse(["h", "darkroom"]).unwrap(),
+        ] {
+            assert_eq!(
+                group
+                    .contextualize(EventBuilder::new(Kind::from(9u16)).tag(row.clone()))
+                    .err(),
+                Some(GroupContextError::CallerSuppliedContext),
+                "{row:?} belongs to the group, not to the caller"
+            );
+        }
+        assert_eq!(
+            group
+                .contextualize(
+                    EventBuilder::new(Kind::from(9u16))
+                        .tag(Tag::parse(["previous", "deadbeef"]).unwrap())
+                )
+                .err(),
+            Some(GroupContextError::CallerSuppliedTimeline)
+        );
+    }
+
+    /// One group is the ONE-ELEMENT case in code, not merely in prose: the
+    /// intent a `Group` mints is byte-identical to the one a one-element
+    /// `Groups` mints from the same scope, payload, route and identity.
+    #[test]
+    fn a_group_write_is_the_one_element_case_of_a_several_group_write() {
+        let me = author();
+        let scope = nip29::on([host(1), host(2)]).expect("a nonempty scope");
+        let draft = || EventBuilder::new(Kind::from(9u16)).content("first light");
+        let single = scope
+            .group(GROUP)
+            .intent(me, draft())
+            .expect("a plain draft contextualizes");
+        let plural = scope
+            .groups([GROUP])
+            .expect("a one-element group set is nonempty")
+            .intent(me, draft())
+            .expect("a plain draft contextualizes");
+        assert_eq!(routed(&single), routed(&plural));
+        assert_eq!(single.identity, plural.identity);
+        assert_eq!(single.correlation, plural.correlation);
+        match (single.payload, plural.payload) {
+            (WritePayload::Event(one), WritePayload::Event(many)) => {
+                assert_eq!(one.kind, many.kind);
+                assert_eq!(one.content, many.content);
+                assert_eq!(one.tags, many.tags);
+            }
+            _ => panic!("both doors must mint an Event payload"),
+        }
     }
 
     /// The read half has no verb of its own: the group mints a live query and

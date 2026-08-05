@@ -53,6 +53,7 @@ import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiGroup
 import uniffi.nmp_ffi.FfiGroupIds
+import uniffi.nmp_ffi.FfiGroups
 import uniffi.nmp_ffi.FfiGroupPredicate
 import uniffi.nmp_ffi.FfiRelayScope
 import uniffi.nmp_ffi.FfiSignedEvent
@@ -75,6 +76,18 @@ import uniffi.nmp_ffi.memberListIncludes as ffiMemberListIncludes
 class NMPRelayScope private constructor(internal val ffi: FfiRelayScope) {
     /** Narrow to one group id, keeping the same hosts. Contacts nothing. */
     fun group(groupId: String): NMPGroup = NMPGroup(ffi.group(groupId))
+
+    /** Narrow to the SEVERAL groups one write belongs to, keeping the same
+     * hosts (#1281).
+     *
+     * The write-only sibling of [group], for the one event shape a single
+     * group id cannot express: a kind:30315 session status is addressable at
+     * `(author, d=status)` and carries one `h` per room the session occupies,
+     * so publishing it once per room would make each copy replace the last.
+     * An empty set throws `NMPError.EmptyGroupSet` -- an event with no `h`
+     * row is not in a group at all. */
+    fun groups(groupIds: List<String>): NMPGroups =
+        NMPGroups(nmpRethrowing { ffi.groups(groupIds) })
 
     /** Watch the relay-signed records of every group matching [predicate].
      * One complete branch per host; each emitted element is the complete set
@@ -158,6 +171,37 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
     fun validateContext(event: NMPSignedEvent) {
         nmpRethrowing { ffi.validateContext(event.toFfiSignedEvent()) }
     }
+
+    /** Apply this group's own id to a draft the CALLER will sign itself
+     * (#1283).
+     *
+     * [intent] is the door for an app that lets NMP sign; this is the door
+     * for an app that signs its own bytes, which is any app that shows a
+     * message locally the moment it is composed -- an event id only exists
+     * once the body is frozen, and [signedIntent] deliberately VALIDATES the
+     * `h` rather than appending it.
+     *
+     * Sign the returned payload and hand it back to [signedIntent]: the group
+     * id is then named once, by construction, rather than spelled a second
+     * time by the app and only checked at the end. A draft already carrying
+     * an `h` or a `previous` row is refused whichever value it holds. */
+    fun contextualize(payload: WritePayload): WritePayload =
+        when (payload) {
+            is WritePayload.Event ->
+                nmpRethrowing {
+                    ffi.contextualize(
+                        FfiEventBuilder(
+                            payload.kind,
+                            payload.tags,
+                            payload.content,
+                            payload.createdAt,
+                        ),
+                    )
+                }.toPayload()
+            // A pre-signed event carries its own `h` already and is validated
+            // rather than contextualized -- that is [signedIntent].
+            is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
+        }
 
     /** Mint the group-contextualized [WriteIntent] for an unsigned draft and
      * publish NOTHING (#1242).
@@ -324,6 +368,90 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         receiptFrom(
             nmpRethrowing { ffi.createInvite(engine.ffi, authorPubkeyHex, code) },
         )
+}
+
+/** The groups one write belongs to (`nmp::nip29::Groups`/`FfiGroups` mirror,
+ * #1281), obtained from [NMPRelayScope.groups].
+ *
+ * A WRITE CONTEXT and nothing else. There is no read door, no records
+ * observation and no named operation on it, because each of those is
+ * per-group by definition -- a roster is one group's, and every 9000-9022
+ * moderation action names one group. A write is the one thing that is
+ * genuinely plural. */
+class NMPGroups internal constructor(internal val ffi: FfiGroups) {
+    /** Apply the retained group ids to a draft the CALLER will sign itself.
+     * One `h` row per id, appended before anything is signed; sign the result
+     * and hand it to [signedIntent] and the ids are never spelled by the app
+     * at all. */
+    fun contextualize(payload: WritePayload): WritePayload =
+        when (payload) {
+            is WritePayload.Event ->
+                nmpRethrowing {
+                    ffi.contextualize(
+                        FfiEventBuilder(
+                            payload.kind,
+                            payload.tags,
+                            payload.content,
+                            payload.createdAt,
+                        ),
+                    )
+                }.toPayload()
+            is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
+        }
+
+    /** Ask whether an already-signed event names exactly these groups,
+     * without building a write out of it. */
+    fun validateContext(event: NMPSignedEvent) {
+        nmpRethrowing { ffi.validateContext(event.toFfiSignedEvent()) }
+    }
+
+    /** Mint the contextualized [WriteIntent] for an unsigned draft and
+     * publish NOTHING. [NMPGroup.intent] at a larger arity, not a second
+     * door: same appended-before-signing rows, same explicit route over the
+     * scope's whole host set, same frozen exact author, same `null`
+     * correlation for the caller to stamp. */
+    fun intent(
+        authorPubkeyHex: String,
+        kind: UShort,
+        tags: List<List<String>> = emptyList(),
+        content: String = "",
+        createdAt: ULong? = null,
+    ): WriteIntent =
+        WriteIntent.from(
+            nmpRethrowing {
+                ffi.intent(authorPubkeyHex, FfiEventBuilder(kind, tags, content, createdAt))
+            },
+        )
+
+    /** Mint the contextualized [WriteIntent] for an ALREADY-SIGNED event, and
+     * publish nothing. The `h` rows it carries are validated against the
+     * retained set, never appended -- a set too small, too large, wrong,
+     * absent or right-but-repeated throws. */
+    fun signedIntent(event: NMPSignedEvent): WriteIntent =
+        WriteIntent.from(nmpRethrowing { ffi.signedIntent(event.toFfiSignedEvent()) })
+
+    /** [intent] handed straight to the one publish door. */
+    fun publish(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        kind: UShort,
+        tags: List<List<String>> = emptyList(),
+        content: String = "",
+        createdAt: ULong? = null,
+    ): Receipt =
+        receiptFrom(
+            nmpRethrowing {
+                ffi.publish(
+                    engine.ffi,
+                    authorPubkeyHex,
+                    FfiEventBuilder(kind, tags, content, createdAt),
+                )
+            },
+        )
+
+    /** [signedIntent] handed straight to the one publish door. */
+    fun publishSigned(engine: NMPEngine, event: NMPSignedEvent): Receipt =
+        receiptFrom(nmpRethrowing { ffi.publishSigned(engine.ffi, event.toFfiSignedEvent()) })
 }
 
 /** Which groups an observation covers (`nmp::nip29::GroupPredicate`/

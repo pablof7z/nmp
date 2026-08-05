@@ -200,6 +200,58 @@ final class NIP29Tests: XCTestCase {
         XCTAssertGreaterThan(receipt.id, 0)
     }
 
+    /// #1281: one intent, one `h` row per named room, minted by the door
+    /// with the app naming neither a relay nor an `h`.
+    func testASeveralGroupWriteMintsOneIntentCarryingEveryHRow() throws {
+        let scope = try NMPRelayScope.on([host(1), host(2)])
+        let rooms = try scope.groups(["darkroom", "photographers"])
+        let intent = try rooms.intent(
+            authorPubkeyHex: randomPubkeyHex(), kind: 30315, tags: [["d", "status"]]
+        )
+        XCTAssertEqual(intent.routing, .explicit(relays: [host(1), host(2)]))
+        guard case let .event(_, tags, _, _) = intent.payload else {
+            return XCTFail("an unsigned draft must mint an .event payload, got \(intent.payload)")
+        }
+        XCTAssertEqual(
+            tags.filter { $0.first == "h" },
+            [["h", "darkroom"], ["h", "photographers"]],
+            "one h row per room, so the one replaceable event renders in both"
+        )
+    }
+
+    /// #1281: naming no group at all forms no write context.
+    func testAWriteContextOverNoGroupIsNeverFormed() throws {
+        let scope = try NMPRelayScope.on([host(1)])
+        XCTAssertThrowsError(try scope.groups([])) { error in
+            guard case NMPError.emptyGroupSet = error else {
+                return XCTFail("expected .emptyGroupSet, got \(error)")
+            }
+        }
+    }
+
+    /// #1283: the contextualised draft already carries the retained id, so
+    /// an app that signs its own bytes never spells the group id.
+    func testTheSelfSigningDoorHandsBackADraftCarryingTheRetainedID() throws {
+        let group = try NMPRelayScope.on([host(1)]).group("photographers")
+        let contextualised = try group.contextualize(
+            .event(kind: 9, content: "first light")
+        )
+        guard case let .event(kind, tags, content, _) = contextualised else {
+            return XCTFail("a draft contextualises to a draft, got \(contextualised)")
+        }
+        XCTAssertEqual(kind, 9)
+        XCTAssertEqual(content, "first light")
+        XCTAssertEqual(tags, [["h", "photographers"]])
+
+        XCTAssertThrowsError(
+            try group.contextualize(.event(kind: 9, tags: [["h", "photographers"]]))
+        ) { error in
+            guard case NMPError.groupCallerSuppliedContext = error else {
+                return XCTFail("expected .groupCallerSuppliedContext, got \(error)")
+            }
+        }
+    }
+
     /// A caller-supplied `h` tag never reaches the door: the refusal is
     /// synchronous and typed, before any receipt stream exists.
     func testACallerSuppliedContextNeverReachesTheDoor() throws {
