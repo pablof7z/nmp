@@ -138,7 +138,7 @@ internal fun cancelWrite(engine: NmpEngineInterface, receiptId: ULong): WriteCan
  * growing or dropping silently; reattachment transparently traverses durable
  * facts in finite pages. Collection-scope teardown withdraws the LIVE stream
  * via `handle.cancel()`; the durable receipt itself is untouched. */
-private fun receiptFrom(stream: NmpReceiptStream): Receipt =
+internal fun receiptFrom(stream: NmpReceiptStream): Receipt =
     Receipt(id = stream.id(), status = receiptStatusFlow(stream))
 
 private fun receiptStatusFlow(stream: NmpReceiptStream): Flow<WriteFact> =

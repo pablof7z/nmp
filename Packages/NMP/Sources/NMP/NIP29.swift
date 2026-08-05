@@ -25,15 +25,22 @@
 //
 //   let group = scope.group("photographers")               // narrows, contacts nothing
 //   let query = try group.read(NMPFilter(kinds: [9]))       // #h-scoped, per-host branches
-//   let status = try group.publish(engine: engine, author: pubkeyHex, kind: 9, content: "hi")
-//   for try await frame in status { ... }
+//   let receipt = try group.publish(engine: engine, authorPubkeyHex: pubkeyHex, kind: 9, content: "hi")
+//   for try await frame in receipt.status { ... }
+//
+//   // Mint now, submit later through your own choke-point (#1242) -- and
+//   // stamp your own crash-safe token on the way past (#1244):
+//   var intent = try group.intent(authorPubkeyHex: pubkeyHex, kind: 9, content: "hi")
+//   intent.correlation = myPersistedToken
+//   let receipt = try await engine.publish(intent)
 //
 // `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` wrap the opaque
 // `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` UniFFI objects exactly like
 // `BlossomAuthorization` wraps `FfiBlossomAuthorization` in Blossom.swift --
 // a proven Rust value carried across the boundary, never a second mirrored
 // copy of NIP-29's own vocabulary. Neither type exposes its retained hosts
-// or group id back out.
+// or group id back out through an accessor; the write door does yield both,
+// inside the ordinary `WriteIntent` it mints -- see `NMPGroup.intent`.
 //
 // Deliberately absent, same as before #1033: a fixed group-content kind
 // catalog and a kind:9 composer -- NIP-29 owns neither; C7 and client
@@ -163,9 +170,50 @@ public final class NMPGroup: @unchecked Sendable {
         try nmpRethrowing { try ffi.validateContext(event: event.toFfiSignedEvent()) }
     }
 
-    /// Publish an unsigned draft into the group, as `authorPubkeyHex`
-    /// (exact decoded hex, never the active-account selector -- a semantic
-    /// group write freezes who is writing at composition time, #878).
+    /// Mint the group-contextualized `WriteIntent` for an unsigned draft and
+    /// publish NOTHING (#1242).
+    ///
+    /// This is the write door. The `h` row is appended before signing, the
+    /// route is the scope's own hosts, and `authorPubkeyHex` is frozen as an
+    /// exact decoded hex pubkey rather than the active-account selector
+    /// (#878). Hand the result to `NMPEngine.publish(_:)` -- the SAME door
+    /// every other write takes -- whenever the app's own write path is ready
+    /// for it.
+    ///
+    /// `correlation` on the returned intent is `nil`, and filling it in is
+    /// how a group write becomes recoverable after a crash (#1244): an app
+    /// that persisted its own token before writing sets it here and finds the
+    /// write again with `NMPEngine.reattachReceipt(correlation:)`.
+    public func intent(
+        authorPubkeyHex: String,
+        kind: UInt16,
+        tags: [[String]] = [],
+        content: String = "",
+        createdAt: UInt64? = nil
+    ) throws -> WriteIntent {
+        let ffiIntent = try nmpRethrowing {
+            try ffi.intent(
+                author: authorPubkeyHex,
+                builder: FfiEventBuilder(kind: kind, tags: tags, content: content, createdAt: createdAt)
+            )
+        }
+        return WriteIntent(ffiIntent)
+    }
+
+    /// Mint the group-contextualized `WriteIntent` for an ALREADY-SIGNED
+    /// event, and publish nothing (#1242). The `h` it already carries is
+    /// validated, never appended or repaired -- see `validateContext(_:)`'s
+    /// doc for the exact refusals, which fire HERE, before any intent exists.
+    public func signedIntent(_ event: NMPSignedEvent) throws -> WriteIntent {
+        let ffiIntent = try nmpRethrowing {
+            try ffi.signedIntent(event: event.toFfiSignedEvent())
+        }
+        return WriteIntent(ffiIntent)
+    }
+
+    /// `intent(...)` handed straight to the one publish door -- the inline
+    /// spelling, for an app with no separate submit stage. Returns the
+    /// ORDINARY `Receipt`, store-issued `id` included.
     public func publish(
         engine: NMPEngine,
         authorPubkeyHex: String,
@@ -173,7 +221,7 @@ public final class NMPGroup: @unchecked Sendable {
         tags: [[String]] = [],
         content: String = "",
         createdAt: UInt64? = nil
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.publish(
                 engine: engine.concreteFfiEngine,
@@ -181,7 +229,7 @@ public final class NMPGroup: @unchecked Sendable {
                 builder: FfiEventBuilder(kind: kind, tags: tags, content: content, createdAt: createdAt)
             )
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// Publish a draft composed by the tagging door (#1243) into the group.
@@ -195,7 +243,7 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         payload: WritePayload
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         guard case .event(let kind, let tags, let content, let createdAt) = payload else {
             // A pre-signed event carries its own `h` already and is validated
             // rather than contextualized -- that is `publishSigned(_:)`.
@@ -206,17 +254,30 @@ public final class NMPGroup: @unchecked Sendable {
             content: content, createdAt: createdAt)
     }
 
-    /// Publish an ALREADY-SIGNED event into the group. The `h` it already
-    /// carries is validated, never appended or repaired -- see
-    /// `validateContext(_:)`'s doc for the exact refusals.
+    /// `intent(authorPubkeyHex:kind:...)` over a draft the tagging door
+    /// composed (#1242 + #1243): mint the group's own intent from a composed
+    /// payload and publish nothing.
+    public func intent(
+        authorPubkeyHex: String,
+        payload: WritePayload
+    ) throws -> WriteIntent {
+        guard case .event(let kind, let tags, let content, let createdAt) = payload else {
+            throw NMPError.groupCallerSuppliedContext
+        }
+        return try intent(
+            authorPubkeyHex: authorPubkeyHex, kind: kind, tags: tags, content: content,
+            createdAt: createdAt)
+    }
+
+    /// `signedIntent(_:)` handed straight to the one publish door.
     public func publishSigned(
         engine: NMPEngine,
         event: NMPSignedEvent
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.publishSigned(engine: engine.concreteFfiEngine, event: event.toFfiSignedEvent())
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9021 -- ask to join. Publishable with no subscription at all.
@@ -224,22 +285,22 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         inviteCode: String? = nil
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.joinRequest(engine: engine.concreteFfiEngine, author: authorPubkeyHex, inviteCode: inviteCode)
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9022 -- leave.
     public func leaveRequest(
         engine: NMPEngine,
         authorPubkeyHex: String
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.leaveRequest(engine: engine.concreteFfiEngine, author: authorPubkeyHex)
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9000 -- add a member, optionally with a role.
@@ -248,13 +309,13 @@ public final class NMPGroup: @unchecked Sendable {
         authorPubkeyHex: String,
         pubkeyHex: String,
         role: String? = nil
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.addUser(
                 engine: engine.concreteFfiEngine, author: authorPubkeyHex, pubkey: pubkeyHex, role: role
             )
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9001 -- remove a member.
@@ -262,11 +323,11 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         pubkeyHex: String
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.removeUser(engine: engine.concreteFfiEngine, author: authorPubkeyHex, pubkey: pubkeyHex)
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9002 -- set the group's display fields. An omitted field emits
@@ -276,13 +337,13 @@ public final class NMPGroup: @unchecked Sendable {
         authorPubkeyHex: String,
         name: String? = nil,
         about: String? = nil
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.editMetadata(
                 engine: engine.concreteFfiEngine, author: authorPubkeyHex, name: name, about: about
             )
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9005 -- delete one group-hosted event.
@@ -290,33 +351,33 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         eventID: String
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.deleteEvent(engine: engine.concreteFfiEngine, author: authorPubkeyHex, eventId: eventID)
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9007 -- create the group at its hosts.
     public func createGroup(
         engine: NMPEngine,
         authorPubkeyHex: String
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.createGroup(engine: engine.concreteFfiEngine, author: authorPubkeyHex)
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9008 -- delete the group from its hosts.
     public func deleteGroup(
         engine: NMPEngine,
         authorPubkeyHex: String
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.deleteGroup(engine: engine.concreteFfiEngine, author: authorPubkeyHex)
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 
     /// kind:9009 -- mint an invite code redeemable by `joinRequest`.
@@ -324,11 +385,11 @@ public final class NMPGroup: @unchecked Sendable {
         engine: NMPEngine,
         authorPubkeyHex: String,
         code: String
-    ) throws -> NMPGroupWriteFacts {
+    ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.createInvite(engine: engine.concreteFfiEngine, author: authorPubkeyHex, code: code)
         }
-        return NMPGroupWriteFacts(handle: receipts)
+        return Receipt(handle: receipts)
     }
 }
 
@@ -448,49 +509,6 @@ extension NMPSignedEvent {
             id: id, pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags,
             content: content, sig: signature
         )
-    }
-}
-
-extension NmpGroupReceiptStream: NMPPullHandle {
-    func pullNext() async throws -> FfiWriteFact? { try await next() }
-}
-
-/// The ordered `WriteFact` facts one group write's write reaches, pulled
-/// from its untracked receipt handle (#1033). UNLIKE `ReceiptStatus` this
-/// carries NO receipt id: every `NMPGroup` write reaches the engine's
-/// untracked publish door (never `publish_tracked`), because the
-/// store-issued receipt-id namespace is a `publish`-door concern the group
-/// scope has no reason to surface. Iterate with `for try await`; the handle
-/// is single-consumer, so a second concurrent iterator surfaces
-/// `NMPError.concurrentNext` rather than hanging.
-public struct NMPGroupWriteFacts: AsyncSequence, Sendable {
-    public typealias Element = WriteFact
-
-    private let handle: NmpGroupReceiptStream
-    private let iteratorGate = NMPPullIteratorGate()
-
-    init(handle: NmpGroupReceiptStream) {
-        self.handle = handle
-    }
-
-    public func makeAsyncIterator() -> Iterator {
-        let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { status in
-            WriteFact(status)
-        }
-        return Iterator(core: core)
-    }
-
-    public struct Iterator: AsyncIteratorProtocol {
-        let core: NMPPullIteratorCore<NmpGroupReceiptStream, WriteFact>
-
-        public mutating func next() async throws -> WriteFact? {
-            try await core.next()
-        }
-    }
-
-    /// Stop delivering live status frames to this stream. Idempotent.
-    public func cancel() {
-        handle.cancel()
     }
 }
 
