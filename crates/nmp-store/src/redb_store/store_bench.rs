@@ -21,8 +21,8 @@ use super::query::{
 };
 use super::schema::{
     encode_relay_row, event_row_key, observation_key, BY_AUTHOR, BY_CREATED_AT, BY_KIND, BY_TAG,
-    COMPARISON_BY_AUTHOR_KIND, EVENTS, EVENT_IDS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS,
-    RELAY_IDS,
+    COMPARISON_BY_AUTHOR_KIND, EVENTS, EVENT_COL_OBSERVATION, EVENT_COL_ROW, EVENT_IDS,
+    INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_IDS,
 };
 use super::*;
 
@@ -171,6 +171,31 @@ pub enum StoreBenchPreparedTable {
     ByAuthorKind = 8,
     ByTag = 9,
     IndexCardinality = 10,
+}
+
+impl StoreBenchPreparedTable {
+    /// Every table in the measurement protocol, in discriminant order.
+    ///
+    /// `COUNT` is read off the last discriminant and is the array's declared
+    /// length, so adding, removing, or renumbering a variant without updating
+    /// `ALL` is a length mismatch the compiler rejects. That matters because
+    /// #1250's fold shifted these discriminants and left hand-copied literal
+    /// lists elsewhere decoding the wrong table (#1260); nothing may hold a
+    /// second, silently-divergent copy of this set.
+    pub const COUNT: usize = Self::IndexCardinality as usize + 1;
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Events,
+        Self::EventIds,
+        Self::EventObservations,
+        Self::Relays,
+        Self::RelayIds,
+        Self::ByCreatedAt,
+        Self::ByAuthor,
+        Self::ByKind,
+        Self::ByAuthorKind,
+        Self::ByTag,
+        Self::IndexCardinality,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,8 +404,8 @@ pub fn prepare_equivalent_store_corpus(
         batches.push(StoreBenchPreparedBatch { records });
     }
 
-    let mut unique_keys: Vec<BTreeSet<Vec<u8>>> = (0..=StoreBenchPreparedTable::IndexCardinality
-        as u32)
+    let mut unique_keys: Vec<BTreeSet<Vec<u8>>> = StoreBenchPreparedTable::ALL
+        .iter()
         .map(|_| BTreeSet::new())
         .collect();
     for record in batches.iter().flat_map(|batch| &batch.records) {
@@ -835,6 +860,35 @@ fn unified_index_key(table: StoreBenchPreparedTable, key: &[u8]) -> Result<Vec<u
     Ok(unified)
 }
 
+/// Which prepared table one [`EVENTS`] row belongs to.
+///
+/// #1248 folded `event_observations` into [`EVENTS`] as a column of the event
+/// key, so one tree now answers for two prepared tables and a row count alone
+/// can no longer tell them apart. Reading the tree back therefore filters on
+/// the column byte, the same discipline `gc`'s canonical-row scan uses.
+fn events_column_table(key: &[u8]) -> Result<StoreBenchPreparedTable, String> {
+    match key.get(8).copied() {
+        Some(EVENT_COL_ROW) => Ok(StoreBenchPreparedTable::Events),
+        Some(EVENT_COL_OBSERVATION) => Ok(StoreBenchPreparedTable::EventObservations),
+        Some(other) => Err(format!("events row has unexpected column {other}")),
+        None => Err("events row key is shorter than its column byte".to_owned()),
+    }
+}
+
+/// Count the reopened [`EVENTS`] tree into its two prepared tables.
+fn count_reopened_events(
+    read_txn: &redb::ReadTransaction,
+    reopened_table_rows: &mut [u64],
+) -> Result<(), String> {
+    let events = read_txn.open_table(EVENTS).map_err(|e| e.to_string())?;
+    for entry in events.iter().map_err(|e| e.to_string())? {
+        let (key, _) = entry.map_err(|e| e.to_string())?;
+        let table = events_column_table(key.value())?;
+        reopened_table_rows[table as usize] += 1;
+    }
+    Ok(())
+}
+
 fn init_prepared_unified_database(path: &Path) -> Result<Database, String> {
     let db = Database::builder()
         .set_cache_size(REDB_CACHE_BYTES)
@@ -970,11 +1024,7 @@ pub fn run_prepared_redb_unified_index_bench(
     let reopened = Database::open(path).map_err(|error| error.to_string())?;
     let read_txn = reopened.begin_read().map_err(|error| error.to_string())?;
     let mut reopened_table_rows = vec![0u64; corpus.expected_table_rows.len()];
-    reopened_table_rows[StoreBenchPreparedTable::Events as usize] = read_txn
-        .open_table(EVENTS)
-        .map_err(|e| e.to_string())?
-        .len()
-        .map_err(|e| e.to_string())?;
+    count_reopened_events(&read_txn, &mut reopened_table_rows)?;
     reopened_table_rows[StoreBenchPreparedTable::EventIds as usize] = read_txn
         .open_table(EVENT_IDS)
         .map_err(|e| e.to_string())?
@@ -1208,51 +1258,82 @@ pub fn run_prepared_redb_store_bench(
     let reopen_started = Instant::now();
     let reopened = Database::open(path).map_err(|error| error.to_string())?;
     let read_txn = reopened.begin_read().map_err(|error| error.to_string())?;
-    let reopened_table_rows = vec![
-        read_txn
-            .open_table(EVENTS)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(EVENT_IDS)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(RELAYS)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(RELAY_IDS)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(BY_CREATED_AT)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(BY_AUTHOR)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(BY_KIND)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(COMPARISON_BY_AUTHOR_KIND)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(BY_TAG)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read_txn
-            .open_table(INDEX_CARDINALITY)
-            .map_err(|e| e.to_string())?
-            .len(),
-    ]
-    .into_iter()
-    .map(|rows| rows.map_err(|error| error.to_string()))
-    .collect::<Result<Vec<_>, _>>()?;
+    // Each count names the table it belongs to. The positional `vec![...]`
+    // this replaces had ten entries against eleven prepared tables and no
+    // `EventObservations` slot at all, so every count from `Relays` onward
+    // landed one table early and `exact_reopen` could never be true: #1248
+    // folded `event_observations` into EVENTS and #1250 folded
+    // `RelayKeys`/`RelayRefs` into `RelayIds`, and a list ordered by hand
+    // cannot survive either.
+    let mut reopened_table_rows = vec![0u64; corpus.expected_table_rows.len()];
+    count_reopened_events(&read_txn, &mut reopened_table_rows)?;
+    for (table, rows) in [
+        (
+            StoreBenchPreparedTable::EventIds,
+            read_txn
+                .open_table(EVENT_IDS)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+        (
+            StoreBenchPreparedTable::Relays,
+            read_txn
+                .open_table(RELAYS)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+        (
+            StoreBenchPreparedTable::RelayIds,
+            read_txn
+                .open_table(RELAY_IDS)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+        (
+            StoreBenchPreparedTable::ByCreatedAt,
+            read_txn
+                .open_table(BY_CREATED_AT)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+        (
+            StoreBenchPreparedTable::ByAuthor,
+            read_txn
+                .open_table(BY_AUTHOR)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+        (
+            StoreBenchPreparedTable::ByKind,
+            read_txn
+                .open_table(BY_KIND)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+        (
+            StoreBenchPreparedTable::ByAuthorKind,
+            read_txn
+                .open_table(COMPARISON_BY_AUTHOR_KIND)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+        (
+            StoreBenchPreparedTable::ByTag,
+            read_txn
+                .open_table(BY_TAG)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+        (
+            StoreBenchPreparedTable::IndexCardinality,
+            read_txn
+                .open_table(INDEX_CARDINALITY)
+                .map_err(|e| e.to_string())?
+                .len(),
+        ),
+    ] {
+        reopened_table_rows[table as usize] = rows.map_err(|error| error.to_string())?;
+    }
     let reopened_rows = reopened_table_rows[StoreBenchPreparedTable::Events as usize];
     drop(read_txn);
     drop(reopened);
@@ -1425,15 +1506,31 @@ mod prepared_tests {
         let prepared = prepare_equivalent_store_corpus(&events, 1).unwrap();
         assert_eq!(prepared.events, 2);
         assert_eq!(prepared.batches.len(), 2);
-        assert_eq!(prepared.expected_table_rows.len(), 12);
+        assert_eq!(
+            prepared.expected_table_rows.len(),
+            StoreBenchPreparedTable::COUNT
+        );
         assert!(prepared.record_bytes > prepared.encoded_event_bytes);
 
+        // The corpus exists to give every engine the work `RedbStore` itself
+        // does, so it must reach every prepared table but one: `ByAuthorKind`
+        // backs `COMPARISON_BY_AUTHOR_KIND`, an alternative index shape
+        // `RedbStore` never opens and only the comparison variants measure.
+        // Naming that exception by variant is the point — the previous
+        // spelling, `(0..=11).filter(|table| *table != 9)`, was a hand-copied
+        // discriminant list, and #1250's fold left it demanding a table set
+        // that no longer exists.
         let tables: BTreeSet<_> = prepared
             .batches
             .iter()
             .flat_map(|batch| batch.records.iter().map(|record| record.table as u32))
             .collect();
-        assert_eq!(tables, (0..=11).filter(|table| *table != 9).collect());
+        let nmp_maintained: BTreeSet<_> = StoreBenchPreparedTable::ALL
+            .iter()
+            .filter(|table| **table != StoreBenchPreparedTable::ByAuthorKind)
+            .map(|table| *table as u32)
+            .collect();
+        assert_eq!(tables, nmp_maintained);
 
         let global_key = global_cardinality_key();
         let global_values: Vec<_> = prepared
