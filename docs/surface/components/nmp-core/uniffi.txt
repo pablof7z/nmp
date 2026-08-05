@@ -13065,93 +13065,6 @@ object Object {
     constructors: [],
     methods: [
         Method {
-            name: "intent",
-            object_name: "FfiGroups",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "author",
-                    type_: String,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "builder",
-                    type_: Record {
-                        module_path: "nmp_ffi",
-                        name: "FfiEventBuilder",
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Record {
-                    module_path: "nmp_ffi",
-                    name: "FfiWriteIntent",
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffigroups_intent",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "FfiGroups",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "author",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                    FfiArgument {
-                        name: "builder",
-                        type_: RustBuffer(
-                            Some(
-                                ExternalFfiMetadata {
-                                    name: "FfiEventBuilder",
-                                    module_path: "nmp_ffi",
-                                },
-                            ),
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustBuffer(
-                        Some(
-                            ExternalFfiMetadata {
-                                name: "FfiWriteIntent",
-                                module_path: "nmp_ffi",
-                            },
-                        ),
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Mint the contextualized write intent for an unsigned draft and publish\nNOTHING (`nmp::nip29::Groups::intent` mirror). Same appended-before-\nsigning rows, same explicit route over the scope's whole host set,\nsame frozen exact author, same `correlation: None` for the caller to\nstamp -- [`FfiGroup::intent`] at a larger arity, not a second door.",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroups_intent",
-            checksum: Some(
-                9396,
-            ),
-        },
-        Method {
             name: "publish",
             object_name: "FfiGroups",
             object_module_path: "nmp_ffi",
@@ -13237,7 +13150,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "[`Self::intent`] handed straight to the one publish door\n(`nmp::nip29::Groups::publish` mirror).",
+                "Publish one event into every retained group, through the ONE publish\ndoor (`nmp::nip29::Groups::publish` mirror).\n\nThe whole door: one `h` row per retained id appended before signing,\nthe route minted from the scope's own hosts, an exact frozen author.\nThe app names neither a relay nor an `h` row and never holds a write\nintent -- NMP contextualizes, signs and publishes.",
             ),
             throws: Some(
                 Enum {
@@ -13248,7 +13161,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroups_publish",
             checksum: Some(
-                63807,
+                24043,
             ),
         },
     ],
@@ -13290,7 +13203,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The groups one write belongs to (`nmp::nip29::Groups` mirror, #1281),\nbuilt with [`FfiRelayScope::groups`].\n\nA WRITE CONTEXT and nothing else. There is no read door, no records\nobservation and no named operation on it, because each of those is\nper-group by definition -- a roster is one group's, and every 9000-9022\nmoderation action names one group. A write is the one thing that is\ngenuinely plural.\n\nTwo methods, both UNSIGNED: NMP appends the `h` rows and NMP signs. There\nis deliberately no pre-signed spelling and no way to obtain a draft to\nsign yourself.\n\nOpaque for the same reason [`FfiGroup`] is: it yields back neither its\nhosts nor its ids, so no layer handed one can reconstruct the authority\nand route something elsewhere under it.",
+        "The groups one write belongs to (`nmp::nip29::Groups` mirror, #1281),\nbuilt with [`FfiRelayScope::groups`].\n\nA WRITE CONTEXT and nothing else. There is no read door, no records\nobservation and no named operation on it, because each of those is\nper-group by definition -- a roster is one group's, and every 9000-9022\nmoderation action names one group. A write is the one thing that is\ngenuinely plural.\n\nONE method. NMP appends the `h` rows, NMP signs, NMP publishes. There is\ndeliberately no pre-signed spelling, no way to obtain a draft to sign\nyourself, and no mint-without-publish door -- an app that wants NMP to\nsign without publishing uses `NmpEngine::sign_event`.\n\nOpaque for the same reason [`FfiGroup`] is: it yields back neither its\nhosts nor its ids, so no layer handed one can reconstruct the authority\nand route something elsewhere under it.",
     ),
 }
 

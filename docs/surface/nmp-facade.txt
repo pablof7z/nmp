@@ -388,7 +388,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupSnapshot
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupSnapshot
 pub struct nmp::nip29::Groups
 impl nmp::nip29::Groups
-pub fn nmp::nip29::Groups::intent(&self, nostr::key::public_key::PublicKey, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp_grammar::write::WriteIntent, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Groups::publish(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 impl core::clone::Clone for nmp::nip29::Groups
 pub fn nmp::nip29::Groups::clone(&self) -> nmp::nip29::Groups
