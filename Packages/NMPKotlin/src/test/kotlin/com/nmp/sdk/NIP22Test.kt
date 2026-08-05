@@ -204,7 +204,10 @@ class NIP22Test {
                 assertEquals(
                     listOf(
                         WriteFact.Signing(SigningState.AwaitingSigner(author)),
-                        WriteFact.Destinations(emptyList(), false),
+                        // The park names nobody: this write is held on its SIGNER,
+                        // so no route lookup is outstanding to name. The reason
+                        // it is stuck is the signing fact above it.
+                        WriteFact.Destinations(emptyList(), false, emptyList()),
                     ),
                     replayFacts,
                 )

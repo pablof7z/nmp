@@ -396,9 +396,12 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
             WriteFact::Signing(SigningState::AwaitingSigner {
                 pubkey: keys.public_key()
             }),
+            // Nobody is named, truthfully: this write is held on its
+            // SIGNER, so no route lookup is outstanding for it to wait on.
             WriteFact::Destinations {
                 relays: BTreeSet::new(),
-                complete: false
+                complete: false,
+                awaiting_author_routes: BTreeSet::new(),
             },
         ]
     );
@@ -493,10 +496,12 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
             }),
             WriteFact::Destinations {
                 relays: BTreeSet::new(),
-                complete: false
+                complete: false,
+                awaiting_author_routes: BTreeSet::new(),
             },
         ],
-        "the parked pubkey must be the frozen override B, never the active account A"
+        "the parked pubkey must be the frozen override B, never the active account A; the \
+         route park names nobody because an unsigned write has no route lookup outstanding"
     );
 
     // Post-restart retarget attempts: activating A (the OLD active account)

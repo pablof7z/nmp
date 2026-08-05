@@ -283,9 +283,31 @@ pub enum WriteFact {
     /// it goes; it parks indefinitely and NOTHING expires it.
     /// `complete: true` with an empty set is [`WriteOutcome::NoDestination`],
     /// which follows immediately.
+    ///
+    /// `awaiting_author_routes` is WHY resolution is still open, as keys
+    /// rather than as a sentence: every public key whose author routes this
+    /// write is still waiting on. A later positive route fact for any one of
+    /// them is the only thing that can move the picture, so this set is both
+    /// the reason and the list of repairs — an app can name the people it is
+    /// waiting for, and an operator can see whether the wait is a missing
+    /// discovery source or a user who has never published a relay list.
+    /// Non-empty implies `complete: false`; a settled resolution has nothing
+    /// left to wait on and always names nobody. The converse does NOT hold,
+    /// and the case is worth knowing: an open picture that names nobody is a
+    /// write whose routing has not run at all, because the write is not
+    /// signed yet and there is no frozen recipient set to resolve against.
+    /// It is held on its SIGNER, and [`Self::Signing`] is the fact that says
+    /// so — naming an author here would invent a route lookup that is not
+    /// outstanding.
+    ///
+    /// It is deliberately not a rendered string. "Still determining" and
+    /// "nowhere to send" were once one English sentence, which no program
+    /// could branch on (#1236); the branch is `complete`, and this set is the
+    /// detail behind the open side of it.
     Destinations {
         relays: BTreeSet<RelayUrl>,
         complete: bool,
+        awaiting_author_routes: BTreeSet<PublicKey>,
     },
     Outcome(WriteOutcome),
 }

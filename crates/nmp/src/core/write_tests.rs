@@ -10,6 +10,29 @@ mod receipt_allocator_tests {
     use nmp_store::{MemoryStore, RedbStore, RefuseReason};
     use nostr::{Keys, Kind};
 
+    /// The same frozen note, `p`-tagging the given recipients — the shape
+    /// whose route answer has more than one contributor to wait on.
+    fn frozen_note_mentioning(author: PublicKey, recipients: &[PublicKey]) -> SignedEvent {
+        let created_at = Timestamp::from(1_700_000_000);
+        let kind = Kind::TextNote;
+        let tags = nostr::Tags::from_list(
+            recipients
+                .iter()
+                .map(|r| nostr::Tag::public_key(*r))
+                .collect(),
+        );
+        let content = "route need".to_string();
+        SignedEvent::new(
+            EventId::new(&author, &created_at, &kind, &tags, &content),
+            author,
+            created_at,
+            kind,
+            tags,
+            content,
+            nmp_store::sentinel_signature(),
+        )
+    }
+
     fn frozen_note(author: PublicKey) -> SignedEvent {
         let created_at = Timestamp::from(1_700_000_000);
         let kind = Kind::TextNote;
@@ -260,14 +283,12 @@ mod receipt_allocator_tests {
         // Finished looking, twice over. A settled-but-empty list and a
         // settled absence are both answers, and an answer that names nobody
         // means there is nowhere to publish.
-        for (label, detail_label, facts) in [
+        for (label, facts) in [
             (
                 "Present empty",
-                "Present outbound",
                 FixtureRoutingFacts::new().with_author_routes(author, [], []),
             ),
             (
-                "Absent",
                 "Absent",
                 FixtureRoutingFacts::new().with_author_absent(author),
             ),
@@ -283,14 +304,74 @@ mod receipt_allocator_tests {
                 answer.author_route_needs.is_empty(),
                 "{label} has nothing left to look up, so it must not hold a provider open on a question already answered: {answer:?}"
             );
-            assert!(
-                answer
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains(detail_label)),
-                "the answer must still distinguish {label} truthfully: {answer:?}"
-            );
         }
+    }
+
+    /// A park can NARROW without its relay set or its completeness moving,
+    /// and when it does, the waiting set is the only thing that carries the
+    /// news.
+    ///
+    /// This is what makes the waiting set load-bearing in `rewrite_route`'s
+    /// `picture_changed`. One of two unlooked-up recipients settling is a
+    /// real change an app can act on — one fewer person to chase — and both
+    /// of the other two axes are byte-identical across it. A receipt that
+    /// compared only `relays` and `complete` would report the FIRST reason
+    /// and then go silent while the reason changed underneath the app, which
+    /// is the same "stuck, and you cannot tell why" defect #1236 is about.
+    #[test]
+    fn a_narrowing_park_moves_only_the_waiting_set() {
+        let author = Keys::generate().public_key();
+        let outbox = RelayUrl::parse("wss://outbox-a.example").unwrap();
+        let settling = Keys::generate().public_key();
+        let staying = Keys::generate().public_key();
+        let event = frozen_note_mentioning(author, &[settling, staying]);
+
+        // Both recipients unlooked-up: the answer waits on both.
+        let before = EngineCore::new_with_fixture_routing_facts(
+            MemoryStore::new(),
+            FixtureRoutingFacts::new().with_outbound_routes(author, [outbox.clone()]),
+            10,
+        )
+        .resolve_routes(&WriteRouting::Auto, &event);
+
+        // One of them settles as a definitive absence. It contributes no
+        // relay, so the destination set cannot move.
+        let after = EngineCore::new_with_fixture_routing_facts(
+            MemoryStore::new(),
+            FixtureRoutingFacts::new()
+                .with_outbound_routes(author, [outbox.clone()])
+                .with_author_absent(settling),
+            10,
+        )
+        .resolve_routes(&WriteRouting::Auto, &event);
+
+        assert_eq!(
+            before.relays, after.relays,
+            "the settling recipient names no relay, so the destination set must not move: \
+             {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            (before.complete, after.complete),
+            (false, false),
+            "one recipient settling does not exhaust knowledge while the other is unknown: \
+             {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            before.author_route_needs,
+            BTreeSet::from([settling, staying]),
+            "an open answer waits on every unlooked-up recipient: {before:?}"
+        );
+        assert_eq!(
+            after.author_route_needs,
+            BTreeSet::from([staying]),
+            "a settled recipient must leave the waiting set, or the app keeps chasing an \
+             answer that already arrived: {after:?}"
+        );
+        assert_ne!(
+            before.author_route_needs, after.author_route_needs,
+            "the waiting set is the ONLY axis carrying this change, which is why the receipt \
+             must compare it before deciding the picture is unchanged"
+        );
     }
 
     #[test]
