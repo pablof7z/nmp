@@ -251,8 +251,9 @@ sealed class SigningState {
      * restart replay.
      *
      * **No clock ever ends this.** A device whose signer is simply not
-     * plugged in yet is not a device whose write failed; removing the queue
-     * entry is the only other exit.
+     * plugged in yet is not a device whose write failed; the app's own
+     * decision is the only other exit, and it is two calls: cancel the
+     * write, then remove the terminal queue entry it leaves behind.
      *
      * This is the state a person has to be told about, and [InFlight] is the
      * one it must never be confused with. */
@@ -388,11 +389,6 @@ enum class NotSentReason {
      * one started any wire attempt. Not a failure -- for an app renewing
      * presence it is the steady state. */
     Superseded,
-
-    /** The app removed the queue entry while nothing was moving the write
-     * (#1269). Distinct from [Cancelled] in what survives: a cancelled
-     * receipt stays reattachable, a removed one no longer exists. */
-    Removed,
     ;
 
     companion object {
@@ -400,7 +396,6 @@ enum class NotSentReason {
             when (ffi) {
                 FfiNotSentReason.CANCELLED -> Cancelled
                 FfiNotSentReason.SUPERSEDED -> Superseded
-                FfiNotSentReason.REMOVED -> Removed
             }
     }
 }

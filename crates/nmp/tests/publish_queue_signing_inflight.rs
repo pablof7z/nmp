@@ -9,13 +9,14 @@
 //!   ends when the signer answers.
 //! - **B** names a key no signer answers for. Nothing is in flight and
 //!   nothing ever will be until a signer for THAT key attaches. No clock
-//!   ends it; the app removing the entry is the only other exit, which is
-//!   the termination path #1039's removal door exists to serve.
+//!   ends it; the app cancelling it and then removing its entry is the only
+//!   other exit, which is the termination path #1039's removal door exists
+//!   to serve.
 //!
 //! Collapsing the two makes every healthy write read as stuck (mosaico's
 //! first `mosaico doctor` draft did exactly that) and leaves the genuinely
 //! parked write — the one whose only termination path is the app's own
-//! removal — invisible.
+//! decision — invisible.
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};

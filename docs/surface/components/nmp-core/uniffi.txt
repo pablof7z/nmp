@@ -4046,14 +4046,6 @@ enum Enum {
                 "A newer accepted write won the same replaceable coordinate before this\none started any wire attempt. Not a failure — for an app renewing\npresence it is the steady state.",
             ),
         },
-        Variant {
-            name: "Removed",
-            discr: None,
-            fields: [],
-            docstring: Some(
-                "The app removed the queue entry while nothing was moving the write\n(#1269). Distinct from `Cancelled` in what survives: a cancelled\nreceipt stays reattachable, a removed one no longer exists.",
-            ),
-        },
     ],
     shape: Enum,
     non_exhaustive: false,
@@ -4551,7 +4543,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "Something is MOVING this write: a signer HAS its request and the\nanswer is already on its way (`FfiSigningState::InFlight`), or it is\nsigned and its relay lanes are live. Cancel it first; removal is for\nentries nothing is going to move — which a write parked on a signer\nnobody has is, so that one is removable (#1269).",
+                "The write's obligation is still open — nothing has ended it yet,\nwhether it is signed with live lanes or parked on a signer nobody\nhas. Cancel it first; removal is for the terminal receipt that\nleaves behind.",
             ),
         },
         Variant {
@@ -5011,7 +5003,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "No registered signer answers for `pubkey` (64-char hex) — the exact\nidentity FROZEN at acceptance, never whoever is active now. Re-armed\nonly by attaching a signer for THIS key.\n\n**No clock ever ends this.** A device whose signer is simply not\nplugged in yet is not a device whose write failed; removing the queue\nentry is the only other exit.\n\nThis is the state a person has to be told about, and\n[`FfiSigningState::InFlight`] is the one it must never be confused\nwith.",
+                "No registered signer answers for `pubkey` (64-char hex) — the exact\nidentity FROZEN at acceptance, never whoever is active now. Re-armed\nonly by attaching a signer for THIS key.\n\n**No clock ever ends this.** A device whose signer is simply not\nplugged in yet is not a device whose write failed; the app's own\ndecision is the only other exit, and it is two calls: cancel the\nwrite, then remove the terminal queue entry it leaves behind.\n\nThis is the state a person has to be told about, and\n[`FfiSigningState::InFlight`] is the one it must never be confused\nwith.",
             ),
         },
         Variant {
@@ -14440,7 +14432,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Forget one queue entry, releasing whatever obligation it still holds\n(#1039, #1269). The only way a write parked forever on a missing\nsigner, or a permanently-failed refused entry, ever ends. A write\nsomething is still MOVING — a signer holding its request, or live\nrelay lanes — is refused instead.",
+                "Forget one queue entry (#1039). How a write parked forever on a\nmissing signer, or a permanently-failed refused entry, ever ends —\nthe parked one through `cancel_write` first, which ends the obligation\nand compensates the optimistic row, leaving the terminal receipt this\ndoor then forgets. An entry whose obligation is still open is refused.",
             ),
             throws: Some(
                 Enum {
@@ -14451,7 +14443,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_publish_queue_entry",
             checksum: Some(
-                43281,
+                5185,
             ),
         },
         Method {
