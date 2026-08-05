@@ -2439,7 +2439,8 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("direct publish must enqueue");
+        .expect("direct publish must enqueue")
+        .statuses;
     let receipts = collect_direct_receipts(receipt_rx, &relay_url, ReadUntil::RelayTerminal);
     assert_eq!(
         receipts,
@@ -2631,7 +2632,8 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("direct auth-parked publish must enqueue");
+        .expect("direct auth-parked publish must enqueue")
+        .statuses;
     let receipts = collect_direct_receipts_until_awaiting_auth(&receipt_rx, &relay_url);
     assert_eq!(
         receipt_rx.recv_timeout(Duration::from_secs(2)),
@@ -2757,7 +2759,8 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
             identity: Identity::Explicit(override_pubkey),
             correlation: None,
         })
-        .expect("direct override publish must enqueue");
+        .expect("direct override publish must enqueue")
+        .statuses;
     let receipts = collect_direct_receipts(receipt_rx, &relay_url, ReadUntil::RelayTerminal);
 
     anchor_cancel.cancel();
@@ -2982,7 +2985,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
         "reattach-live",
     );
     let tracked = engine
-        .publish_tracked(WriteIntent {
+        .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
@@ -2990,7 +2993,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
         })
         .expect("direct publish must enqueue");
 
-    // #1237: acceptance is `publish_tracked` returning `Ok`, not a fact. The
+    // #1237: acceptance is `publish` returning `Ok`, not a fact. The
     // park is the whole retained prefix.
     let deadline = Instant::now() + WAIT;
     assert_eq!(
@@ -3136,7 +3139,7 @@ fn run_direct_correlation() -> CorrelationProof {
     };
 
     let first = engine
-        .publish_tracked(WriteIntent {
+        .publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
                 kind: Kind::Custom(CORRELATION_KIND),
                 tags: (vec![]).into_iter().collect(),
@@ -3152,7 +3155,7 @@ fn run_direct_correlation() -> CorrelationProof {
     // A re-composed draft with a DIFFERENT body and timestamp, same token:
     // must reattach the existing obligation, never enqueue a second write.
     let second = engine
-        .publish_tracked(WriteIntent {
+        .publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
                 kind: Kind::Custom(CORRELATION_KIND),
                 tags: (vec![]).into_iter().collect(),
@@ -3272,7 +3275,7 @@ fn run_direct_cancellation() -> CancellationProof {
         .set_active_account(Some(keys.public_key()))
         .expect("direct account must activate");
     let tracked = engine
-        .publish_tracked(WriteIntent {
+        .publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
                 kind: Kind::Custom(REATTACH_LIVE_KIND),
                 tags: (vec![]).into_iter().collect(),
@@ -3427,7 +3430,7 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
             correlation: None,
         };
         let first = engine
-            .publish_tracked(write("reattach-terminal-first", WRITE_CREATED_AT))
+            .publish(write("reattach-terminal-first", WRITE_CREATED_AT))
             .expect("direct publish must enqueue");
         let deadline = Instant::now() + WAIT;
         assert_eq!(
@@ -3437,7 +3440,7 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
             })
         );
         engine
-            .publish_tracked(write("reattach-terminal-second", WRITE_CREATED_AT + 1))
+            .publish(write("reattach-terminal-second", WRITE_CREATED_AT + 1))
             .expect("the newer write at the same replaceable coordinate must enqueue");
         assert_eq!(
             drain_direct_replay(&first.statuses, "direct terminal-setup supersession"),
@@ -3819,7 +3822,8 @@ async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<No
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("direct explicit publish must enqueue");
+        .expect("direct explicit publish must enqueue")
+        .statuses;
     let receipts = collect_direct_receipts(receipt_rx, &relay_url, ReadUntil::WholeWriteTerminal);
     engine.shutdown();
     receipts

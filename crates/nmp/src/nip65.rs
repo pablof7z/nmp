@@ -33,7 +33,7 @@ impl Nip65Operations for Engine {
         &self,
         request: BootstrapRelayList,
     ) -> Result<ReceiptStream, EngineError> {
-        self.publish_tracked(request.into_write_intent())
+        self.publish(request.into_write_intent())
     }
 }
 

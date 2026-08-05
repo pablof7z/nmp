@@ -1223,7 +1223,8 @@ fn write_ack_per_relay_over_real_relays() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
 
     let mut seen: Vec<WriteFact> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -1428,7 +1429,8 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&receipt, Duration::from_secs(20), |status| {
             matches!(status, WriteFact::Relay { relay: acked, state: RelayState::Published } if acked == &url)
@@ -1598,7 +1600,8 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&contact_receipt_rx, Duration::from_secs(10), |s| matches!(
             s,
@@ -1622,7 +1625,8 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&mute_receipt_rx, Duration::from_secs(10), |s| matches!(
             s,

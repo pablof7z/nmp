@@ -9,7 +9,6 @@ reset_persistent_store
 new
 observe
 publish
-publish_tracked
 reattach_receipt
 add_account
 add_signer

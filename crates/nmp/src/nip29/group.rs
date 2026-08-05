@@ -24,7 +24,7 @@
 //! One door (#1292). It contextualizes the draft, mints the ordinary opaque
 //! [`WriteIntent`] -- `h` row appended before signing, route minted from the
 //! retained scope, author frozen -- and hands it to
-//! [`Engine::publish_tracked`]. Every named operation is that same call with
+//! [`Engine::publish`]. Every named operation is that same call with
 //! a composed builder; there is no second contextualization, no
 //! group-shaped receipt and no group-shaped retry, and no surface hands an
 //! unpublished intent back to an app. The returned [`ReceiptStream`] is the
@@ -216,9 +216,7 @@ impl Group {
             WritePayload::Event(contextualized),
             Identity::Explicit(author),
         );
-        engine
-            .publish_tracked(intent)
-            .map_err(GroupPublishError::Engine)
+        engine.publish(intent).map_err(GroupPublishError::Engine)
     }
 
     /// kind:9021 -- ask to join. Publishable with no subscription at all:

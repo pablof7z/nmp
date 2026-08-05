@@ -142,7 +142,8 @@ fn a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer()
             identity: Identity::Explicit(held_pubkey),
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     started_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("the engine must hand the attached signer the request");
@@ -155,7 +156,8 @@ fn a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer()
             identity: Identity::Explicit(parked_pubkey),
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&parked_receipt, Duration::from_secs(5), |fact| matches!(
             fact,

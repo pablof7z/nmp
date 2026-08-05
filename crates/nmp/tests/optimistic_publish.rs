@@ -357,7 +357,8 @@ async fn an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_
             identity: Identity::Explicit(me.public_key()),
             correlation: None,
         })
-        .expect("an already-signed event is accepted by the one publish door");
+        .expect("an already-signed event is accepted by the one publish door")
+        .statuses;
 
     // Phase 1 -- nothing is reachable. The row is on screen anyway, claiming
     // the cache and zero relays.

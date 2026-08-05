@@ -246,7 +246,8 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&receipt_as_b, Duration::from_secs(5), |s| matches!(
             s,
@@ -275,7 +276,8 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&receipt_wrong, Duration::from_secs(5), |s| matches!(
             s,
@@ -301,7 +303,8 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&receipt_as_a, Duration::from_secs(5), |s| matches!(
             s,
@@ -400,7 +403,8 @@ fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
             matches!(
@@ -474,7 +478,8 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("the engine is open");
+        .expect("the engine is open")
+        .statuses;
     // Acceptance is the `Ok` above; the stream carries only what follows it.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline && b_calls.load(Ordering::SeqCst) == 0 {
@@ -520,7 +525,8 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),
@@ -577,7 +583,8 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),
@@ -645,7 +652,8 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(wait_for_status(
         &receipt,
         Duration::from_secs(5),
@@ -736,7 +744,8 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
             identity: Identity::Explicit(b.public_key()),
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
             matches!(status, WriteFact::Signing(SigningState::Signed { event_id: id }) if *id == expected.id)
@@ -795,7 +804,8 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(wait_for_status(
         &receipt_default,
         Duration::from_secs(5),
@@ -847,7 +857,8 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
             identity: Identity::Explicit(b.public_key()),
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
             matches!(
@@ -921,7 +932,8 @@ fn an_explicit_identity_signs_while_logged_out() {
             identity: Identity::Explicit(b.public_key()),
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
             matches!(status, WriteFact::Signing(SigningState::Signed { event_id: id }) if *id == expected.id)

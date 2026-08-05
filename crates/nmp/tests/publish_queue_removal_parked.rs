@@ -179,7 +179,8 @@ fn a_write_parked_on_a_missing_signer_is_removable_and_one_being_signed_is_not()
             identity: Identity::Explicit(parked_pubkey),
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
     assert!(
         wait_for_status(&parked_receipt, Duration::from_secs(5), |fact| matches!(
             fact,

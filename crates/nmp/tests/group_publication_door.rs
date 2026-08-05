@@ -379,7 +379,8 @@ async fn a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_aut
             identity: nmp::Identity::Active,
             correlation: None,
         })
-        .expect("an Auto publish is accepted");
+        .expect("an Auto publish is accepted")
+        .statuses;
     let auto_statuses = drain_until(&auto_receipts, |status| {
         matches!(
             status,

@@ -1865,7 +1865,7 @@ impl<S: EventStore> EngineCore<S> {
 
     /// #591: recover a receipt id from a caller-generated correlation token
     /// -- the door a client uses after a crash that happened BEFORE it
-    /// could durably record the `Receipt.id` `publish_tracked` returned.
+    /// could durably record the `Receipt.id` `publish` returned.
     /// A resolved token is translated to its receipt id and handed straight
     /// to [`Self::reattach_receipt`], reusing its exact finite replay
     /// behavior unchanged: no new outcome enum, no separate machinery. The

@@ -219,11 +219,9 @@ impl ReceiptState {
     /// publishing step in this world goes through here, so "the door refused
     /// it" is recorded the same way wherever it happens rather than
     /// `expect`ed away at one call site and handled at another.
-    pub(super) fn from_publish(
-        result: Result<nmp::mechanism::runtime::FifoReceiver<WriteFact>, PublishError>,
-    ) -> Self {
+    pub(super) fn from_publish(result: Result<nmp::ReceiptStream, PublishError>) -> Self {
         match result {
-            Ok(rx) => Self::new(rx),
+            Ok(receipt) => Self::new(receipt.statuses),
             Err(error) => Self::refused(error),
         }
     }
