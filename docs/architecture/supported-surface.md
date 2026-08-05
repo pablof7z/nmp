@@ -30,10 +30,15 @@ NIP-29 Group publication is a Rust-and-FFI surface, multi-relay
 single-host `group_discovery_demand`/`Group::new(host, id)` door with no
 alias). `nmp::nip29::on(hosts)` names a caller-supplied relay set — fallible,
 since an app-supplied set can be empty — and returns a `RelayScope` narrowed
-to one `Group` via `.group(id)`. `Group`'s inherent `publish`/`publish_signed`
-and named operations mint the ordinary opaque `WriteIntent` and submit it
-through the existing `Engine::publish` lifecycle; every write routes
-`WriteRouting::Explicit` to the whole scope, never one host. Reads mint one
+to one `Group` via `.group(id)`. `Group::publish` and the named operations
+mint the ordinary opaque `WriteIntent` and submit it through the existing
+`Engine::publish` lifecycle; every write routes `WriteRouting::Explicit` to
+the whole scope, never one host. `publish` is the group's ONLY write door
+([#1292](https://github.com/pablof7z/nmp/issues/1292) deleted
+`Group::intent`/`signed_intent`/`publish_signed`, no alias): the group hands
+back no unpublished intent and publishes no bytes an app signed itself, and
+an app that needs a signed event without publishing it uses
+`Engine::sign_event`. Reads mint one
 ordinary `LiveQuery` per group or discovery predicate, never a group-specific
 observe door. `nmp-ffi` projects the full `FfiRelayScope`/`FfiGroup`/
 `FfiGroupPredicate`/`FfiGroupIds` read-and-write surface. Swift and Kotlin do not yet

@@ -179,11 +179,9 @@ fn a_group_read_is_one_branch_per_host_scoped_by_h() {
     }
 }
 
-/// Every named group operation -- and the two generic `publish`/
-/// `publish_signed` doors -- reach the ONE untracked publish door
-/// (`NmpGroupReceiptStream`, no receipt id) headless: no relay in the
-/// scope needs to be reachable for the write to be ACCEPTED at the
-/// engine's door.
+/// Every named group operation -- and the generic `publish` door -- reach
+/// the ONE publish door headless: no relay in the scope needs to be
+/// reachable for the write to be ACCEPTED at the engine's door.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_group_operation_reaches_the_one_publish_door() {
     let engine = engine();

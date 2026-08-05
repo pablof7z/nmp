@@ -158,15 +158,20 @@ for combinator in union intersect minus; do
 done
 
 # What the gate pins now is the door, not the deleted seam: the facade
-# `Group` type, its two write-intent-minting publish methods (unsigned and
-# pre-signed), and BOTH PROPERTIES the old falsifiers proved, carried over
-# verbatim under their own names but relocated to where the code now lives.
+# `Group` type, its ONE write door, and BOTH PROPERTIES the old falsifiers
+# proved, carried over verbatim under their own names but relocated to where
+# the code now lives.
+#
+# #1292 deleted `publish_signed` along with `intent`/`signed_intent`: the
+# group publishes a draft it contextualizes itself and nothing else, and an
+# app that needs a signed event without publishing it uses
+# `Engine::sign_event`. This gate required `pub fn publish_signed(` by name
+# until then; that requirement is gone rather than relaxed, and re-adding it
+# would require re-adding a door the maintainer removed.
 grep -qF 'pub struct Group {' crates/nmp/src/nip29/group.rs ||
   fail "the NIP-29 Group door is missing"
 grep -qF 'pub fn publish(' crates/nmp/src/nip29/group.rs ||
   fail "the unsigned group publish door is missing"
-grep -qF 'pub fn publish_signed(' crates/nmp/src/nip29/group.rs ||
-  fail "the pre-signed group publish door is missing"
 grep -qF 'draft_kind_and_schema_survive_except_for_appended_h' \
   crates/nmp-nip29/src/context.rs ||
   fail "draft schema preservation falsifier is missing"
@@ -262,8 +267,9 @@ if grep -nE 'fn subscribe|fn stream' crates/nmp/src/nip29/*.rs; then
   fail "a group-shaped subscribe/stream lifecycle appeared beside the one observe door"
 fi
 
-# One publish door. The group binding composes an intent and hands it over;
-# it never grows a write lifecycle of its own.
+# One publish door, and after #1292 exactly one door reaches it. The group
+# binding composes an intent inside `publish` and hands it over; it never
+# grows a write lifecycle of its own and never returns an unpublished intent.
 #
 # #1244 moved the hand-off from `Engine::publish` to `Engine::publish_tracked`
 # -- the SAME door with the store-issued receipt id no longer thrown away, not

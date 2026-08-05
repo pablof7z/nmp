@@ -8,11 +8,10 @@
 //! ```text
 //! nip29::on([host_a, host_b])?.group("photographers")
 //!     .publish(&engine, author, builder)          // -> Explicit(hosts)
-//!     .publish_signed(&engine, event)              // -> Explicit(hosts), no mutation
 //! nip29::on([host_a, host_b])?.observe(&engine, predicate, records)  // -> one branch per host
 //! ```
 //!
-//! Four claims, each proved end to end over real sockets against real
+//! Three claims, each proved end to end over real sockets against real
 //! in-process relays rather than by inspecting a minted value:
 //!
 //!   1. a group read/publication routes to the WHOLE relay set as
@@ -20,15 +19,12 @@
 //!      relay -- `a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_author_outbox`;
 //!   2. exactly one signed `h` tag reaches the wire, no other context tag --
 //!      folded into the same test, checked at every host;
-//!   3. pre-signed bytes stay exact: the event a caller already signed is
-//!      byte-identical to what every host receives --
-//!      `publish_signed_delivers_the_callers_exact_pre_signed_bytes_to_every_host`;
-//!   4. the wire-level consequence of per-host demand stamping: one host's
+//!   3. the wire-level consequence of per-host demand stamping: one host's
 //!      OWN member-list evidence must never answer for another host's
 //!      listing of the SAME group id --
 //!      `a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group`.
 //!
-//! (4) deliberately does not re-check the mutation-level graph shape --
+//! (3) deliberately does not re-check the mutation-level graph shape --
 //! `crates/nmp/src/nip29/mod.rs`'s own
 //! `scope_stamps_exact_hosts_on_every_nested_nip29_demand` already pins that
 //! every nested `Demand` is stamped with the exact host. What THAT test
@@ -58,13 +54,13 @@ use nmp::nip29::{
     GroupRecord, GroupSnapshot,
 };
 use nmp::{
-    Binding, Engine, EngineConfig, EventBuilder, Filter, RelayState, RowDelta, SignerError,
-    SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
-    SigningState, WriteFact,
+    Binding, Engine, EngineConfig, EventBuilder, RelayState, SignerError, SignerOp,
+    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, SigningState,
+    WriteFact,
 };
 use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
-use nostr::{JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
+use nostr::{Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 const GROUP_ID: &str = "photographers";
 const GROUP_KIND: u16 = 9;
@@ -101,9 +97,9 @@ fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
     engine
 }
 
-/// A bare engine with no indexer at all -- the shape a purely `Explicit`
-/// (`publish_signed`) or purely `Pinned` (records observation) call needs, and
-/// nothing more: neither operation ever consults a directory.
+/// A bare engine with no indexer at all -- the shape a purely `Pinned`
+/// (records observation) call needs, and nothing more: it never consults a
+/// directory.
 fn bare_engine() -> Engine {
     Engine::new(EngineConfig {
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
@@ -609,310 +605,6 @@ async fn a_signing_failure_leaves_no_event_frame_and_no_delivery_implying_receip
         host.contact_count(),
         0,
         "a signing failure never contacts the relay at all"
-    );
-
-    engine.shutdown();
-    host.shutdown();
-}
-
-/// Falsifier 3: pre-signed bytes stay exact. The caller signs the event
-/// itself (with its own correct `h` row already in place) and hands the
-/// EXACT `Event` to `publish_signed`. What reaches every host in the scope
-/// must be byte-identical to what the caller signed -- same id, same
-/// signature, same canonical JSON -- because `publish_signed` VALIDATES the
-/// context row rather than appending one, and appending (or re-signing)
-/// would change the bytes and therefore the `EventId` the caller already
-/// holds.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn publish_signed_delivers_the_callers_exact_pre_signed_bytes_to_every_host() {
-    let author = Keys::generate();
-    let host_a = ScriptedRelay::start(&RelayConfig::default()).await;
-    let host_b = ScriptedRelay::start(&RelayConfig::default()).await;
-    let engine = bare_engine();
-
-    let signed = UnsignedEvent::new(
-        author.public_key(),
-        Timestamp::from(1_700_000_000u64),
-        Kind::from(GROUP_KIND),
-        vec![tag2("h", GROUP_ID)],
-        "already signed, byte for byte".to_string(),
-    )
-    .sign_with_keys(&author)
-    .expect("fixture keys sign cleanly");
-    let sent_json = signed.as_json();
-
-    let group = nip29::on([host_a.url.clone(), host_b.url.clone()])
-        .expect("two hosts form a scope")
-        .group(GROUP_ID);
-    let receipts = group
-        .publish_signed(&engine, signed.clone())
-        .expect("a correctly-contextualized signed event is accepted")
-        .statuses;
-    let statuses = drain_until(
-        &receipts,
-        |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == host_b.url),
-    );
-    assert_eq!(
-        relays_named_by(&statuses),
-        BTreeSet::from([host_a.url.clone(), host_b.url.clone()]),
-        "a pre-signed group write routes Explicit to every host in the scope, same as a draft"
-    );
-
-    for (host_name, host) in [("A", &host_a), ("B", &host_b)] {
-        let delivered = wait_for_events(host, 1);
-        assert_eq!(
-            delivered.len(),
-            1,
-            "host {host_name} received exactly one event"
-        );
-        let received = &delivered[0];
-        assert_eq!(
-            received.id, signed.id,
-            "host {host_name}: the event id the caller already computed must be unchanged"
-        );
-        assert_eq!(
-            received.sig, signed.sig,
-            "host {host_name}: the signature the caller already produced must be unchanged"
-        );
-        assert_eq!(
-            received.as_json(),
-            sent_json,
-            "host {host_name}: the canonical bytes that crossed the wire must be byte-identical \
-             to what the caller signed -- no re-append, no re-sign, no reorder"
-        );
-    }
-
-    engine.shutdown();
-    host_a.shutdown();
-    host_b.shutdown();
-}
-
-// ===========================================================================
-// PROTOCOL-PRESIGNEDPUBLICATION-002 -- the id is known BEFORE publication, so
-// an app can arm a live query on the event's own real, dynamically computed
-// id (never a fixed fixture label) before the write ever goes out.
-// ===========================================================================
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_pre_signed_event_s_own_id_is_known_before_publication_and_matches_a_live_query_armed_on_it(
-) {
-    let me = Keys::generate();
-    let host = ScriptedRelay::start(&RelayConfig::default()).await;
-    let engine = bare_engine();
-    let group = group(&host.url);
-
-    let pre_signed = UnsignedEvent::new(
-        me.public_key(),
-        Timestamp::from(1_700_000_001u64),
-        Kind::from(GROUP_KIND),
-        vec![Tag::parse(["h", GROUP_ID]).unwrap()],
-        "arm on my own id before I publish".to_string(),
-    )
-    .sign_with_keys(&me)
-    .expect("fixture keys sign cleanly");
-    // The id is a real, runtime-computed fact -- never a fixed hex fixture
-    // label -- and it is known to the app BEFORE the write is issued.
-    let known_id = pre_signed.id;
-
-    let query = group
-        .read(Filter {
-            ids: Some(Binding::Literal(BTreeSet::from([known_id.to_hex()]))),
-            ..Filter::default()
-        })
-        .expect("a live query armed on the exact id opens");
-    let subscription = engine
-        .observe(query, None)
-        .expect("a live query armed on the exact id opens");
-
-    let receipts = group
-        .publish_signed(&engine, pre_signed)
-        .expect("a correctly contextualized signed event is accepted")
-        .statuses;
-    drain_until(&receipts, |status| {
-        matches!(
-            status,
-            WriteFact::Relay {
-                relay: _,
-                state: RelayState::Published
-            }
-        )
-    });
-
-    let deadline = Instant::now() + SETTLE;
-    let mut matched = false;
-    while Instant::now() < deadline && !matched {
-        let frame = subscription
-            .recv_timeout(SETTLE)
-            .expect("receive a projection from the armed query");
-        matched = frame
-            .deltas
-            .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == known_id));
-    }
-    assert!(
-        matched,
-        "the query armed on the event's own pre-known id must match the event that reached the host"
-    );
-
-    drop(subscription);
-    engine.shutdown();
-    host.shutdown();
-}
-
-// ===========================================================================
-// PROTOCOL-PRESIGNEDPUBLICATION-006 (wire witness) -- the route follows the
-// group, never the signature: a pre-signed event authored by SOMEONE ELSE
-// still lands only at the group's host, and that author's own real,
-// discoverable write relay is never contacted.
-// ===========================================================================
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pre_signed_event_from_another_author_routes_only_to_the_host_never_to_their_own_outbox()
-{
-    let me = Keys::generate();
-    let author = Keys::generate();
-
-    let indexer = ScriptedRelay::start(&RelayConfig::default()).await;
-    let author_outbox = ScriptedRelay::start(&RelayConfig::default()).await;
-    let host = ScriptedRelay::start(&RelayConfig::default()).await;
-    indexer
-        .seed_relay_list(
-            &author,
-            &[author_outbox.url.to_string()],
-            &[],
-            1_700_000_000,
-        )
-        .await;
-
-    // The engine has a REAL, indexer-discoverable route for the author's own
-    // outbox -- it would find it if it ever looked. `publish_signed` never
-    // looks, because a group write is always `Explicit`.
-    let engine = engine_reading_lists_from(&indexer, &me);
-    let group = group(&host.url);
-
-    let pre_signed = UnsignedEvent::new(
-        author.public_key(),
-        Timestamp::from(1_700_000_002u64),
-        Kind::from(GROUP_KIND),
-        vec![Tag::parse(["h", GROUP_ID]).unwrap()],
-        "not mine".to_string(),
-    )
-    .sign_with_keys(&author)
-    .expect("fixture keys sign cleanly");
-
-    let receipts = group
-        .publish_signed(&engine, pre_signed.clone())
-        .expect("a correctly contextualized signed event from another author is accepted")
-        .statuses;
-    let statuses = drain_until(&receipts, |status| {
-        matches!(
-            status,
-            WriteFact::Relay {
-                relay: _,
-                state: RelayState::Published
-            }
-        )
-    });
-
-    assert_eq!(
-        relays_named_by(&statuses),
-        BTreeSet::from([host.url.clone()]),
-        "every relay fact this write produced names the host and nothing else"
-    );
-    let delivered = wait_for_events(&host, 1);
-    assert_eq!(delivered[0], pre_signed);
-    assert_eq!(
-        delivered[0].pubkey,
-        author.public_key(),
-        "the signature still belongs to the original author, not to me"
-    );
-    assert!(
-        author_outbox.admitted_events().is_empty(),
-        "the author's own outbox must never receive a group write published on their behalf"
-    );
-    assert_eq!(
-        author_outbox.contact_count(),
-        0,
-        "the author's own outbox must never even be CONTACTED for a group write"
-    );
-
-    engine.shutdown();
-    host.shutdown();
-    author_outbox.shutdown();
-    indexer.shutdown();
-}
-
-// ===========================================================================
-// PROTOCOL-PRESIGNEDPUBLICATION-007 -- a host rejection of a pre-signed
-// event is an ORDINARY receipt, tied to the same pre-known id: no re-sign,
-// no re-route.
-// ===========================================================================
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_host_rejection_of_a_pre_signed_event_is_an_ordinary_receipt_tied_to_its_unchanged_known_id(
-) {
-    let me = Keys::generate();
-    let host = ScriptedRelay::start(&RelayConfig {
-        reject_writes: Some("blocked: host refuses every event".to_string()),
-        ..RelayConfig::default()
-    })
-    .await;
-    let engine = bare_engine();
-    let group = group(&host.url);
-
-    let pre_signed = UnsignedEvent::new(
-        me.public_key(),
-        Timestamp::from(1_700_000_003u64),
-        Kind::from(GROUP_KIND),
-        vec![Tag::parse(["h", GROUP_ID]).unwrap()],
-        "first light".to_string(),
-    )
-    .sign_with_keys(&me)
-    .expect("fixture keys sign cleanly");
-    let known_id = pre_signed.id;
-
-    let receipts = group
-        .publish_signed(&engine, pre_signed)
-        .expect("a correctly contextualized signed event is accepted")
-        .statuses;
-    let statuses = drain_until(&receipts, |status| {
-        matches!(
-            status,
-            WriteFact::Relay {
-                relay: _,
-                state: RelayState::Rejected { reason: _ }
-            }
-        )
-    });
-
-    assert!(
-        statuses.iter().any(|status| matches!(
-            status,
-            WriteFact::Relay { relay, state: RelayState::Rejected { reason: message } }
-                if relay == &host.url && message.contains("host refuses every event")
-        )),
-        "the receipt must carry an ordinary per-relay Rejected fact: {statuses:?}"
-    );
-    // `WriteFact::Signed` is an ordinary lifecycle beat the engine emits
-    // for an already-signed payload too, so the falsifiable claim here is
-    // narrower and stronger: IF it appears, it must name the exact id the
-    // caller already had, never a freshly minted one.
-    assert!(
-        statuses
-            .iter()
-            .all(|status| !matches!(status, WriteFact::Signing(SigningState::Signed { event_id: id }) if *id != known_id)),
-        "a pre-signed event must never be re-signed into a different id: {statuses:?}"
-    );
-    assert_eq!(
-        relays_named_by(&statuses),
-        BTreeSet::from([host.url.clone()]),
-        "the rejected write must never have been re-routed anywhere else"
-    );
-    let attempted = host.wire_record().event_ids;
-    assert_eq!(
-        attempted,
-        vec![known_id.to_hex()],
-        "the id attempted on the wire is the exact id the caller already knew"
     );
 
     engine.shutdown();
