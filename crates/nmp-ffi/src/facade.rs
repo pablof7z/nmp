@@ -32,7 +32,6 @@ use crate::convert::{
     WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
-use crate::signer::NmpSignerMailbox;
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
     FfiFilter, FfiFrame, FfiLiveQuery, FfiPublishQueueEntry, FfiReceiptReattachment,
@@ -293,41 +292,6 @@ impl NmpEngine {
         registration: Arc<FfiAccountRegistration>,
     ) -> Result<bool, FfiError> {
         Ok(self.engine.remove_account(&registration.inner)?)
-    }
-
-    /// Register a signing capability this APP owns, for exactly `public_key`
-    /// (#1238).
-    ///
-    /// [`Self::add_account`] is the door for a key NMP itself holds; it takes
-    /// the secret. This one takes no secret and no callable — only the public
-    /// key the app can sign for — and returns the mailbox of signature
-    /// requests to drain on the app's own executor. It is how a hardware
-    /// signer, a remote bunker, a Keychain-backed key, or anything else the
-    /// app implements becomes an identity NMP can publish as.
-    ///
-    /// NMP never invokes the app (#783): it enqueues immutable requests and
-    /// returns. An app that registers a mailbox and never drains it delays
-    /// only its own signing — requests past the mailbox's fixed private bound
-    /// are refused as unavailable, which parks those writes exactly as an
-    /// unattached signer does, and nothing else in the engine waits.
-    pub fn add_signer_mailbox(
-        &self,
-        public_key: String,
-    ) -> Result<Arc<NmpSignerMailbox>, FfiError> {
-        let parsed = parse_pubkey(&public_key)?;
-        let (registration, mailbox) = self.engine.add_signer_mailbox(parsed)?;
-        Ok(NmpSignerMailbox::new(
-            mailbox,
-            registration,
-            parsed.to_hex(),
-        ))
-    }
-
-    /// Detach only the signer installation proven by `mailbox`. Repeated or
-    /// stale cleanup returns `false` and can never detach a replacement
-    /// registered for the same key.
-    pub fn remove_signer_mailbox(&self, mailbox: Arc<NmpSignerMailbox>) -> Result<bool, FfiError> {
-        Ok(self.engine.remove_signer(mailbox.registration())?)
     }
 
     /// Install a native-owned authorization policy for one exact account.
