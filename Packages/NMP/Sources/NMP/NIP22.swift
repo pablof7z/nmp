@@ -187,22 +187,45 @@ public func decodeComment(_ row: Row) throws -> DecodedComment {
     }
 }
 
-/// Compose a durable, author-outbox-routed NIP-22 comment as NMP's ordinary
-/// `WriteIntent` (#822). It names no author and reads no clock -- the engine
-/// resolves the identity and stamps the time at acceptance -- so composition
-/// still owns no engine state or lifecycle. `correlation` passes through
-/// unchanged; publish the result through `NMPEngine.publish(_:)`.
+/// What a comment is being written on (`FfiCommentTarget` mirror).
+///
+/// The two shapes are the two things an app actually holds. `.root` describes
+/// an entity by its parts -- what an app has for an external content id, or
+/// after decoding a comment. `.row` is an event NMP observed, and its own
+/// thread position is read off its own rows: replying to a deep comment and
+/// commenting on a root are then the same call, and the root cannot be
+/// restated wrongly by a caller who thought it knew.
+public enum CommentTarget: Sendable, Hashable {
+    case root(CommentRoot)
+    case row(Row)
+
+    func toFfi() -> FfiCommentTarget {
+        switch self {
+        case .root(let root): return .root(root: root.toFfi())
+        case .row(let row): return .row(row: row.toFfi())
+        }
+    }
+}
+
+/// Compose a NIP-22 comment on `target` as NMP's ordinary `WriteIntent`
+/// (#822). It names no author and reads no clock -- the engine resolves the
+/// identity and stamps the time at acceptance -- so composition still owns no
+/// engine state or lifecycle. `correlation` passes through unchanged; publish
+/// the result through `NMPEngine.publish(_:)`.
+///
+/// This always composes a kind:1111 comment, including on a text note, where
+/// `replyTo(_:)` would compose a NIP-10 reply instead. An app that wants "the
+/// ordinary reply for whatever this is" calls that; an app that wants "a
+/// NIP-22 comment on this specifically" calls this.
 public func commentIntent(
-    root: CommentRoot,
-    parent: CommentParent,
+    on target: CommentTarget,
     content: String,
     correlation: String? = nil
 ) throws -> WriteIntent {
     try WriteIntent(
         nmpRethrowing {
             try NMPFFI.commentIntent(
-                root: root.toFfi(),
-                parent: parent.toFfi(),
+                target: target.toFfi(),
                 content: content,
                 correlation: correlation
             )
