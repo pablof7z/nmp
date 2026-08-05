@@ -211,8 +211,7 @@ impl Group {
         author: PublicKey,
         builder: EventBuilder,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        let contextualized =
-            nmp_nip29::contextualize(&BTreeSet::from([self.id.clone()]), builder)?;
+        let contextualized = nmp_nip29::contextualize(&BTreeSet::from([self.id.clone()]), builder)?;
         let intent = self.mint(
             WritePayload::Event(contextualized),
             Identity::Explicit(author),
