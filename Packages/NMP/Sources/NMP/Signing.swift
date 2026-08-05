@@ -42,28 +42,6 @@ public struct NMPSignedEvent: Sendable, Hashable {
     public let content: String
     public let signature: String
 
-    /// Build a signed event an app's own signer produced, to answer an
-    /// `NMPSignatureRequest` with (#1238). Every field is the exact NIP-01
-    /// value; NMP verifies the whole event against the frozen request before
-    /// it can reach a relay.
-    public init(
-        id: String,
-        pubkey: String,
-        createdAt: UInt64,
-        kind: UInt16,
-        tags: [[String]],
-        content: String,
-        signature: String
-    ) {
-        self.id = id
-        self.pubkey = pubkey
-        self.createdAt = createdAt
-        self.kind = kind
-        self.tags = tags
-        self.content = content
-        self.signature = signature
-    }
-
     init(_ ffi: FfiSignedEvent) {
         id = ffi.id
         pubkey = ffi.pubkey
