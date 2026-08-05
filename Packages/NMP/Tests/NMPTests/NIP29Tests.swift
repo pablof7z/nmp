@@ -291,29 +291,6 @@ final class NIP29Tests: XCTestCase {
         }
     }
 
-    /// #1283: the contextualised draft already carries the retained id, so
-    /// an app that signs its own bytes never spells the group id.
-    func testTheSelfSigningDoorHandsBackADraftCarryingTheRetainedID() throws {
-        let group = try NMPRelayScope.on([host(1)]).group("photographers")
-        let contextualised = try group.contextualize(
-            .event(kind: 9, content: "first light")
-        )
-        guard case let .event(kind, tags, content, _) = contextualised else {
-            return XCTFail("a draft contextualises to a draft, got \(contextualised)")
-        }
-        XCTAssertEqual(kind, 9)
-        XCTAssertEqual(content, "first light")
-        XCTAssertEqual(tags, [["h", "photographers"]])
-
-        XCTAssertThrowsError(
-            try group.contextualize(.event(kind: 9, tags: [["h", "photographers"]]))
-        ) { error in
-            guard case NMPError.groupCallerSuppliedContext = error else {
-                return XCTFail("expected .groupCallerSuppliedContext, got \(error)")
-            }
-        }
-    }
-
     private func ffiSnapshot(
         members: [FfiListedSubject],
         availability: FfiGroupAvailability,

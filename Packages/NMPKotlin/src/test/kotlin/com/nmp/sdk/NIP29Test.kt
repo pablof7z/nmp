@@ -197,24 +197,6 @@ class NIP29Test {
         assertEquals(NMPError.EmptyGroupSet, error)
     }
 
-    /** #1283: the contextualised draft already carries the retained id, so
-     * an app that signs its own bytes never spells the group id. */
-    @Test
-    fun theSelfSigningDoorHandsBackADraftCarryingTheRetainedId() {
-        val group = NMPRelayScope.on(listOf(host(1))).group("photographers")
-        val contextualised =
-            group.contextualize(WritePayload.Event(kind = 9u, content = "first light"))
-        check(contextualised is WritePayload.Event) { "a draft contextualises to a draft" }
-        assertEquals(listOf(listOf("h", "photographers")), contextualised.tags)
-        assertEquals("first light", contextualised.content)
-
-        assertThrows(NMPError.GroupCallerSuppliedContext::class.java) {
-            group.contextualize(
-                WritePayload.Event(kind = 9u, tags = listOf(listOf("h", "photographers"))),
-            )
-        }
-    }
-
     /** #1234 in Kotlin: the negative rests on SETTLEMENT, so the same row set
      * answers differently while one relay is still acquiring -- the
      * distinction a moderation receipt structurally cannot make. */

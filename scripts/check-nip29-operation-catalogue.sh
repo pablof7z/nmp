@@ -165,8 +165,8 @@ done
 # construction is illegal. `group`/`observe` are likewise excluded: a
 # group id (a `String`) and a `GroupPredicate` value are not a relay, route,
 # or raw context tag.
-RUST_INFRA_OPS=(publish publish_signed read contextualize)
-CAMEL_INFRA_OPS=(publish publishSigned read contextualize)
+RUST_INFRA_OPS=(publish publish_signed read)
+CAMEL_INFRA_OPS=(publish publishSigned read)
 
 for op in "${RUST_INFRA_OPS[@]}"; do
   check_no_routing_parameter "$RUST_FACADE" "pub fn" "$op"
@@ -179,11 +179,11 @@ done
 
 # #1281: `Groups` is the SEVERAL-group write context. It offers no named
 # operation at all -- every 9000-9022 action names one group by definition --
-# so (013) has nothing to enumerate on it. What must still hold is (012)'s
-# routing rule for the write/compose doors it DOES offer: naming hosts once
-# at scope construction stays the one legal exception, and `groups(ids)` is
-# a narrowing exactly as `group(id)` is, not a per-call route.
-RUST_GROUPS_INFRA_OPS=(contextualize validate_context intent signed_intent publish publish_signed)
+# so (013) has nothing to enumerate on it. It offers exactly two doors, both
+# UNSIGNED, and (012)'s routing rule must hold for both: naming hosts once at
+# scope construction stays the one legal exception, and `groups(ids)` is a
+# narrowing exactly as `group(id)` is, not a per-call route.
+RUST_GROUPS_INFRA_OPS=(intent publish)
 
 for op in "${RUST_GROUPS_INFRA_OPS[@]}"; do
   check_no_routing_parameter "$RUST_GROUPS" "pub fn" "$op"
@@ -203,12 +203,11 @@ done
 # `intent`/`signed_intent` join that list for the same reason (#1242): they
 # are the kind-BLIND mint half of the same escape hatch, and `publish`/
 # `publish_signed` are now literally those two calls plus the engine hand-off.
-# `contextualize` joins the excluded list for the same reason `intent` did
-# (#1283): it is the kind-BLIND compose half of the same escape hatch --
-# `intent` is literally `contextualize` plus the mint -- and not one of the
-# nine things NIP-29 lets you DO. `write_context` is private plumbing.
-RUST_EXCLUDED="new|read|read_branches|observe|observe_records|validate_context|contextualize|write_context|publish|publish_signed|intent|signed_intent|mint|through_the_one_door"
-CAMEL_EXCLUDED="read|observeRecords|validateContext|contextualize|publish|publishSigned|intent|signedIntent"
+# `write_context`/`ids` are private plumbing on `Group`, and `mint` is the one
+# place a group `WriteIntent` is assembled (it lives on `Groups` now, which
+# is what makes one group the one-element case in the code).
+RUST_EXCLUDED="new|read|read_branches|observe|observe_records|validate_context|write_context|ids|publish|publish_signed|intent|signed_intent|mint|through_the_one_door"
+CAMEL_EXCLUDED="read|observeRecords|validateContext|publish|publishSigned|intent|signedIntent"
 
 check_exact_catalogue() {
   local file=$1 keyword=$2 start_regex=$3 excluded=$4

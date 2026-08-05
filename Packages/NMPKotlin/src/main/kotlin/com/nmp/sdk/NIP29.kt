@@ -172,37 +172,6 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         nmpRethrowing { ffi.validateContext(event.toFfiSignedEvent()) }
     }
 
-    /** Apply this group's own id to a draft the CALLER will sign itself
-     * (#1283).
-     *
-     * [intent] is the door for an app that lets NMP sign; this is the door
-     * for an app that signs its own bytes, which is any app that shows a
-     * message locally the moment it is composed -- an event id only exists
-     * once the body is frozen, and [signedIntent] deliberately VALIDATES the
-     * `h` rather than appending it.
-     *
-     * Sign the returned payload and hand it back to [signedIntent]: the group
-     * id is then named once, by construction, rather than spelled a second
-     * time by the app and only checked at the end. A draft already carrying
-     * an `h` or a `previous` row is refused whichever value it holds. */
-    fun contextualize(payload: WritePayload): WritePayload =
-        when (payload) {
-            is WritePayload.Event ->
-                nmpRethrowing {
-                    ffi.contextualize(
-                        FfiEventBuilder(
-                            payload.kind,
-                            payload.tags,
-                            payload.content,
-                            payload.createdAt,
-                        ),
-                    )
-                }.toPayload()
-            // A pre-signed event carries its own `h` already and is validated
-            // rather than contextualized -- that is [signedIntent].
-            is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
-        }
-
     /** Mint the group-contextualized [WriteIntent] for an unsigned draft and
      * publish NOTHING (#1242).
      *
@@ -377,34 +346,12 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
  * observation and no named operation on it, because each of those is
  * per-group by definition -- a roster is one group's, and every 9000-9022
  * moderation action names one group. A write is the one thing that is
- * genuinely plural. */
+ * genuinely plural.
+ *
+ * Two methods, both UNSIGNED: NMP appends the `h` rows and NMP signs. There
+ * is deliberately no pre-signed spelling and no way to obtain a draft to sign
+ * yourself. */
 class NMPGroups internal constructor(internal val ffi: FfiGroups) {
-    /** Apply the retained group ids to a draft the CALLER will sign itself.
-     * One `h` row per id, appended before anything is signed; sign the result
-     * and hand it to [signedIntent] and the ids are never spelled by the app
-     * at all. */
-    fun contextualize(payload: WritePayload): WritePayload =
-        when (payload) {
-            is WritePayload.Event ->
-                nmpRethrowing {
-                    ffi.contextualize(
-                        FfiEventBuilder(
-                            payload.kind,
-                            payload.tags,
-                            payload.content,
-                            payload.createdAt,
-                        ),
-                    )
-                }.toPayload()
-            is WritePayload.Signed -> throw NMPError.GroupCallerSuppliedContext
-        }
-
-    /** Ask whether an already-signed event names exactly these groups,
-     * without building a write out of it. */
-    fun validateContext(event: NMPSignedEvent) {
-        nmpRethrowing { ffi.validateContext(event.toFfiSignedEvent()) }
-    }
-
     /** Mint the contextualized [WriteIntent] for an unsigned draft and
      * publish NOTHING. [NMPGroup.intent] at a larger arity, not a second
      * door: same appended-before-signing rows, same explicit route over the
@@ -422,13 +369,6 @@ class NMPGroups internal constructor(internal val ffi: FfiGroups) {
                 ffi.intent(authorPubkeyHex, FfiEventBuilder(kind, tags, content, createdAt))
             },
         )
-
-    /** Mint the contextualized [WriteIntent] for an ALREADY-SIGNED event, and
-     * publish nothing. The `h` rows it carries are validated against the
-     * retained set, never appended -- a set too small, too large, wrong,
-     * absent or right-but-repeated throws. */
-    fun signedIntent(event: NMPSignedEvent): WriteIntent =
-        WriteIntent.from(nmpRethrowing { ffi.signedIntent(event.toFfiSignedEvent()) })
 
     /** [intent] handed straight to the one publish door. */
     fun publish(
@@ -449,9 +389,6 @@ class NMPGroups internal constructor(internal val ffi: FfiGroups) {
             },
         )
 
-    /** [signedIntent] handed straight to the one publish door. */
-    fun publishSigned(engine: NMPEngine, event: NMPSignedEvent): Receipt =
-        receiptFrom(nmpRethrowing { ffi.publishSigned(engine.ffi, event.toFfiSignedEvent()) })
 }
 
 /** Which groups an observation covers (`nmp::nip29::GroupPredicate`/
