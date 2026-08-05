@@ -121,7 +121,7 @@ impl NmpWorld {
     /// The past-tense BDD setup for a write whose background says discovery
     /// already finished without finding the author's relay list.
     ///
-    /// `publish_tracked` returns after acceptance, before the real indexer
+    /// `publish` returns after acceptance, before the real indexer
     /// EOSE that settles the author's routes as `Absent` may arrive. A
     /// process-boundary scenario must observe that causal revision before
     /// stopping the engine, or it is testing whether scheduler timing
@@ -302,11 +302,10 @@ impl NmpWorld {
     /// stable receipt id so this obligation can be reattached across a
     /// restart, and opens the one receipt stream the publish owns.
     ///
-    /// `publish_tracked` rather than `publish` because the id is the only
-    /// handle a restarted app has: a scenario that stops the process and asks
-    /// what became of a write is asking through exactly that id, and a world
-    /// that threw it away could only answer about a stream that no longer
-    /// exists.
+    /// The id the one publish door returns is the only handle a restarted
+    /// app has: a scenario that stops the process and asks what became of a
+    /// write is asking through exactly that id, and a world that threw it
+    /// away could only answer about a stream that no longer exists.
     ///
     /// A refusal is recorded rather than raised: `publish()` returning `Err`
     /// IS the observable several scenarios assert on (an empty explicit
@@ -320,7 +319,7 @@ impl NmpWorld {
         // second later than the instant the engine recorded, which would make
         // a correct row look fabricated.
         self.last_publish_at = Some(nostr::Timestamp::now());
-        match self.handle().publish_tracked(intent) {
+        match self.handle().publish(intent) {
             Ok(stream) => {
                 self.last_receipt_id = Some(stream.id);
                 self.receipts.push(ReceiptState::new(stream.statuses));

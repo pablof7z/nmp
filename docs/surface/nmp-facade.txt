@@ -1303,9 +1303,8 @@ pub fn nmp::Engine::cancel(&self, nmp::ReceiptId) -> core::result::Result<nmp::C
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
 pub fn nmp::Engine::observe(&self, nmp_grammar::live_query::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
-pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteFact>, nmp::EngineError>
+pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::publish_queue(&self) -> core::result::Result<alloc::vec::Vec<nmp::PublishQueueEntry>, nmp::RemoveQueueEntryError>
-pub fn nmp::Engine::publish_tracked(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::ReceiptStream, nmp::EngineError>
 pub fn nmp::Engine::reattach_by_correlation(&self, alloc::string::String) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp::ReceiptId) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
 pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>

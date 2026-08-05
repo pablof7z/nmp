@@ -601,7 +601,7 @@ fn prepare_set_following_with_timeout(
                 ComposeFollowResult::Publish(intent) => *intent,
             };
 
-            let receipt = match engine.publish_tracked(intent) {
+            let receipt = match engine.publish(intent) {
                 Ok(receipt) => receipt,
                 Err(error) => {
                     let failure = match error {

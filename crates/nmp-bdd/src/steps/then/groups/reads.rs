@@ -167,7 +167,7 @@ async fn no_stream_of_its_own(w: &mut NmpWorld) {
     let surface = w.group_surface();
     // #1033 merged the pure door and its engine binding into one file, and
     // #1242 replaced the door's own receipt alias with `ReceiptStream`
-    // itself -- the SAME value `Engine::publish_tracked` returns for every
+    // itself -- the SAME value `Engine::publish` returns for every
     // other write, receipt id included. Naming it is reuse, not a
     // group-shaped stream of its own, so lines mentioning it are excused
     // from the scan below; everything else must still name none of these.

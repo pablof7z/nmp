@@ -22,11 +22,10 @@
 //! calls `shutdown` too, so a dropped-without-`shutdown` `Engine` still
 //! tears down `EngineThread` cleanly rather than detaching it.
 
-use crate::runtime::FifoReceiver;
 use std::sync::Mutex;
 
 use crate::core::ReceiptId;
-use crate::publish_queue::{PublishQueueEntry, RemoveQueueEntryError, WriteFact};
+use crate::publish_queue::{PublishQueueEntry, RemoveQueueEntryError};
 use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
@@ -640,13 +639,19 @@ impl Engine {
     }
 
     /// Noun 2: enqueue a write -- the call itself never blocks on routing/
-    /// wire/ack, but its return value is not fire-and-forget: the
-    /// `Receiver` is the caller's one way to observe how the intent
+    /// wire/ack, but its return value is not fire-and-forget: the returned
+    /// [`ReceiptStream`] is the caller's one way to observe how the intent
     /// resolved, and every `WriteFact` it ever reaches streams through it
     /// (ledger #9 -- enqueue is not converged). Returning `Ok` IS
     /// acceptance, so there is no acceptance fact on the stream. A tampered
     /// `WritePayload::Signed` cannot resolve, so it is refused by this call
     /// itself and nothing is taken into custody -- see this module's doc.
+    ///
+    /// The receipt carries the stable store-issued
+    /// [`ReceiptId`](crate::ReceiptId) that process-later reattachment
+    /// needs, so acceptance never hands back less than the whole receipt.
+    /// Pre-acceptance correlation-id exhaustion returns a typed error
+    /// without creating a receipt at all.
     ///
     /// Identity (#47): with [`Identity::Active`] — the default — a builder
     /// payload signs as the CURRENT active account, and fails closed
@@ -662,19 +667,8 @@ impl Engine {
     /// already frozen in the bytes, so an explicit identity may only
     /// RESTATE it: naming anybody else cannot resolve, so this call refuses
     /// it and takes nothing into custody.
-    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteFact>, EngineError> {
+    pub fn publish(&self, intent: WriteIntent) -> Result<ReceiptStream, EngineError> {
         self.with_handle(|handle| handle.publish(intent))?
-            .map_err(EngineError::from_publish_error)
-    }
-
-    /// Enqueue a write while retaining the stable store-issued receipt id
-    /// needed for process-later reattachment. Pre-acceptance correlation-id
-    /// exhaustion returns a typed error without creating a receipt.
-    /// Identity resolution follows [`Self::publish`]'s contract exactly:
-    /// the [`Identity::Active`] default, or an [`Identity::Explicit`] key,
-    /// either way resolved and pinned at acceptance (#47).
-    pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, EngineError> {
-        self.with_handle(|handle| handle.publish_tracked(intent))?
             .map_err(EngineError::from_publish_error)
     }
 
@@ -694,7 +688,7 @@ impl Engine {
     }
 
     /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably persist the `ReceiptId` `publish_tracked` returned --
+    /// could durably persist the `ReceiptId` `publish` returned --
     /// looked up by the caller's own crash-safe correlation token instead.
     /// Otherwise identical to [`Self::reattach_receipt`].
     pub fn reattach_by_correlation(
@@ -1062,7 +1056,7 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     use super::*;
-    use crate::publish_queue::{NotSentReason, SigningState, WriteOutcome};
+    use crate::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
     use nostr::Keys;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1431,7 +1425,7 @@ mod tests {
             .set_active_account(Some(keys.public_key()))
             .expect("engine open");
         let receipt = engine
-            .publish_tracked(WriteIntent {
+            .publish(WriteIntent {
                 payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
                     kind: Kind::TextNote,
                     tags: (Vec::new()).into_iter().collect(),
@@ -1443,7 +1437,7 @@ mod tests {
                 correlation: None,
             })
             .expect("accept write");
-        // `publish_tracked` returning `Ok` IS acceptance -- there is no
+        // `publish` returning `Ok` IS acceptance -- there is no
         // acceptance fact to wait for on the stream.
 
         assert_eq!(engine.cancel(receipt.id), Ok(CancelWriteOutcome::Cancelled));
@@ -1490,7 +1484,7 @@ mod tests {
             .set_active_account(Some(keys.public_key()))
             .expect("engine open");
         let receipt = engine
-            .publish_tracked(WriteIntent {
+            .publish(WriteIntent {
                 payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
                     kind: Kind::TextNote,
                     tags: (Vec::new()).into_iter().collect(),
@@ -1853,7 +1847,7 @@ mod tests {
 
         let publish = |content: &str| {
             engine
-                .publish_tracked(WriteIntent {
+                .publish(WriteIntent {
                     payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
                         kind: Kind::TextNote,
                         tags: (Vec::new()).into_iter().collect(),
@@ -1910,7 +1904,7 @@ mod tests {
 
         let publish = |created_at| {
             engine
-                .publish_tracked(WriteIntent {
+                .publish(WriteIntent {
                     payload: nmp_grammar::WritePayload::Event(
                         nmp_grammar::EventBuilder::new(Kind::Metadata)
                             .content(format!("metadata at {created_at}"))
@@ -2479,7 +2473,8 @@ mod tests {
                 identity: Identity::Explicit(pk_b),
                 correlation: None,
             })
-            .expect("engine is open");
+            .expect("engine is open")
+            .statuses;
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut signed_as_b = false;

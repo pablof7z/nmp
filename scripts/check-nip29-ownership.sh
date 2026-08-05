@@ -271,16 +271,17 @@ fi
 # binding composes an intent inside `publish` and hands it over; it never
 # grows a write lifecycle of its own and never returns an unpublished intent.
 #
-# #1244 moved the hand-off from `Engine::publish` to `Engine::publish_tracked`
-# -- the SAME door with the store-issued receipt id no longer thrown away, not
-# a second one (`publish` is literally `publish_tracked(..).map(|r| r.statuses)`).
-# The untracked spelling is banned outright below so the id cannot be dropped
-# again by an edit that looks harmless.
-grep -qF 'publish_tracked(intent)' crates/nmp/src/nip29/group.rs ||
+# #1244 moved the hand-off to the receipt-id-preserving spelling and banned
+# the untracked one here, because two engine doors existed and a group write
+# could still reach the lossy one. #848 DELETED that second door: `publish` is
+# now the tracked door itself and `publish_tracked` is gone, so the ban has no
+# referent -- there is no spelling of `Engine::publish` that discards the id,
+# and `ReceiptStream` is the only thing acceptance can return. The property
+# #1244 policed is now carried by the type, which is where
+# `docs/bug-class-ledger.md` says it belongs; a grep asserting the absence of a
+# deleted method would only be asserting a dead approach.
+grep -qF '.publish(intent)' crates/nmp/src/nip29/group.rs ||
   fail "the group binding no longer routes through the one publish door"
-if grep -nE 'engine\.publish\(' crates/nmp/src/nip29/group.rs; then
-  fail "a group write reached the receipt-id-discarding publish spelling (#1244)"
-fi
 if grep -nE 'publish_composed' crates/nmp/src/nip29/group.rs; then
   fail "a second write lifecycle for groups appeared"
 fi

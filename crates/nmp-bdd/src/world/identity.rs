@@ -202,7 +202,7 @@ impl NmpWorld {
     /// naming no identity` / `... naming identity "<hex>"`.
     pub async fn publish_composed_event(&mut self, kind: u16, text: &str, identity: Identity) {
         self.ensure_started().await;
-        let result = self.handle().publish_tracked(WriteIntent {
+        let result = self.handle().publish(WriteIntent {
             payload: WritePayload::Event(
                 EventBuilder::new(nostr::Kind::Custom(kind)).content(text),
             ),
