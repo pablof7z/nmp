@@ -5329,9 +5329,17 @@ enum Enum {
                     default: None,
                     docstring: None,
                 },
+                Field {
+                    name: "awaiting_author_routes",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    default: None,
+                    docstring: None,
+                },
             ],
             docstring: Some(
-                "The relays this write is INTENDED for, and whether resolution can\nstill change its mind. `complete` flips on settled RESOLUTION, never\non delivery, so `complete: true` with nothing published yet is an\nordinary state. This is the settlement denominator.\n\n`complete: false` with an empty set is a write still learning where it\ngoes; it parks indefinitely and NOTHING expires it. `complete: true`\nwith an empty set is [`FfiWriteOutcome::NoDestination`].",
+                "The relays this write is INTENDED for, and whether resolution can\nstill change its mind. `complete` flips on settled RESOLUTION, never\non delivery, so `complete: true` with nothing published yet is an\nordinary state. This is the settlement denominator.\n\n`complete: false` with an empty set is a write still learning where it\ngoes; it parks indefinitely and NOTHING expires it. `complete: true`\nwith an empty set is [`FfiWriteOutcome::NoDestination`].\n\n`awaiting_author_routes` is WHY resolution is still open, as 64-char\nhex public keys rather than as a sentence: every author whose routes\nthis write is still waiting on, in sorted key order. A later positive\nroute fact for any one of them is the only thing that can move the\npicture, so the set is both the reason and the list of repairs.\nNon-empty implies `complete: false`; a settled resolution has nothing\nleft to wait on and always names nobody. The converse does NOT hold:\nan open picture naming nobody is a write whose routing has not run at\nall because it is not signed yet, and `Signing` is the fact that says\nwhat it IS held on. Never a rendered message — a park an app can only\nprint is a park it cannot act on (#1236).",
             ),
         },
         Variant {

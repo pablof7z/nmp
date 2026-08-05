@@ -21,7 +21,7 @@
 
 use std::collections::BTreeSet;
 
-use nostr::Timestamp;
+use nostr::{PublicKey, Timestamp};
 
 use nmp_router::RelayUrl;
 
@@ -40,9 +40,32 @@ fn parked_open(fact: &WriteFact) -> bool {
         fact,
         WriteFact::Destinations {
             relays,
-            complete: false
+            complete: false,
+            ..
         } if relays.is_empty()
     )
+}
+
+/// WHO an open destination picture is still waiting on, unioned over every
+/// such fact the receipt has reported.
+///
+/// This is the park's REASON, and it is a set of keys rather than a sentence
+/// on purpose: a step that could only match prose would pass on any prose
+/// (#1236). Unioned across facts because a park re-reports as the answer
+/// narrows, and a scenario asking "does it say who" is asking about the whole
+/// stream, not about whichever beat arrived last.
+fn awaited_authors(seen: &[WriteFact]) -> BTreeSet<PublicKey> {
+    seen.iter()
+        .filter_map(|fact| match fact {
+            WriteFact::Destinations {
+                complete: false,
+                awaiting_author_routes,
+                ..
+            } => Some(awaiting_author_routes.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 impl NmpWorld {
@@ -157,6 +180,32 @@ impl NmpWorld {
             seen.iter()
                 .any(|s| matches!(s, WriteFact::Outcome(WriteOutcome::NoDestination)))
         };
+        if self.restarted_receipt.is_some() {
+            return self.restarted_receipt_eventually(matches);
+        }
+        self.receipt_eventually(matches)
+    }
+
+    /// Bounded wait for the park to NAME somebody: an open destination
+    /// picture whose waiting set is non-empty.
+    ///
+    /// The claim behind `the receipt says why it is still determining
+    /// destinations`. It is a strictly stronger claim than
+    /// [`Self::parked_without_destination`] -- a park with an empty waiting
+    /// set satisfies that one and fails this one, which is the difference
+    /// between proving a park exists and proving it says anything.
+    pub fn park_names_an_author(&mut self) -> bool {
+        let matches = |seen: &[WriteFact]| !awaited_authors(seen).is_empty();
+        if self.restarted_receipt.is_some() {
+            return self.restarted_receipt_eventually(matches);
+        }
+        self.receipt_eventually(matches)
+    }
+
+    /// Bounded wait for the park to name ONE specific author -- the form a
+    /// scenario uses when it staged exactly whose relay list is missing.
+    pub fn park_awaits(&mut self, author: PublicKey) -> bool {
+        let matches = move |seen: &[WriteFact]| awaited_authors(seen).contains(&author);
         if self.restarted_receipt.is_some() {
             return self.restarted_receipt_eventually(matches);
         }

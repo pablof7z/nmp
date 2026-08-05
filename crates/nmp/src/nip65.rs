@@ -242,7 +242,16 @@ mod tests {
     /// `WriteOutcome::NoDestination`, which is knowledge exhausted, and the
     /// distinction is the whole point -- one waits forever, the other is a
     /// terminal.
-    fn assert_parked_on_unknown_route<S: EventStore>(core: &mut EngineCore<S>, receipt: ReceiptId) {
+    ///
+    /// The park must also still NAME who it is waiting on after a reattach:
+    /// the reason is replayed off the same reducer memory a live resolution
+    /// writes, so an app that restarts and reattaches learns the same thing
+    /// it would have learned by holding the stream open.
+    fn assert_parked_on_unknown_route<S: EventStore>(
+        core: &mut EngineCore<S>,
+        receipt: ReceiptId,
+        awaited: &PublicKey,
+    ) {
         let replay = core.reattach_receipt(receipt);
         assert!(replay.is_attached(), "the durable receipt must reattach");
         assert!(
@@ -250,10 +259,12 @@ mod tests {
                 fact,
                 WriteFact::Destinations {
                     relays,
-                    complete: false
+                    complete: false,
+                    awaiting_author_routes,
                 } if relays.is_empty()
+                    && awaiting_author_routes == &BTreeSet::from([*awaited])
             )),
-            "the receipt must remain visibly parked on route knowledge: {:?}",
+            "a reattached park must remain visible AND say who it waits on: {:?}",
             replay.facts
         );
         assert!(
@@ -375,11 +386,15 @@ mod tests {
                         id,
                         WriteFact::Destinations {
                             relays,
-                            complete: false
+                            complete: false,
+                            awaiting_author_routes,
                         }
-                    ) if *id == receipt && relays.is_empty()
+                    ) if *id == receipt
+                        && relays.is_empty()
+                        && awaiting_author_routes == &BTreeSet::from([author.public_key()])
                 )),
-                "a first-install Auto write must park instead of dying: {effects:?}"
+                "a first-install Auto write must park instead of dying, and the park must say \
+                 whose relay list it is waiting for: {effects:?}"
             );
             (receipt, event)
         };
@@ -393,7 +408,7 @@ mod tests {
             )),
             "boot must name the exact author route the park is waiting on: {booted:?}"
         );
-        assert_parked_on_unknown_route(&mut core, recovered_receipt);
+        assert_parked_on_unknown_route(&mut core, recovered_receipt, &author.public_key());
 
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
         let (fresh_receipt, fresh_event, fresh_effects) =
@@ -405,13 +420,17 @@ mod tests {
                     id,
                     WriteFact::Destinations {
                         relays,
-                        complete: false
+                        complete: false,
+                        awaiting_author_routes,
                     }
-                ) if *id == fresh_receipt && relays.is_empty()
+                ) if *id == fresh_receipt
+                    && relays.is_empty()
+                    && awaiting_author_routes == &BTreeSet::from([author.public_key()])
             )),
-            "the fresh write must enter the same visible park: {fresh_effects:?}"
+            "the fresh write must enter the same visible park, naming the same author: \
+             {fresh_effects:?}"
         );
-        assert_parked_on_unknown_route(&mut core, fresh_receipt);
+        assert_parked_on_unknown_route(&mut core, fresh_receipt, &author.public_key());
 
         let relay_list = EventBuilder::new(Kind::RelayList, "")
             .tag(
@@ -447,8 +466,13 @@ mod tests {
                     WriteFact::Destinations {
                         relays,
                         complete: true,
+                        awaiting_author_routes,
                     },
-                ) if relays == &BTreeSet::from([outbox.clone()]) => Some(*id),
+                ) if relays == &BTreeSet::from([outbox.clone()])
+                    && awaiting_author_routes.is_empty() =>
+                {
+                    Some(*id)
+                }
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
