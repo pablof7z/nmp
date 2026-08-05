@@ -246,7 +246,7 @@ async fn a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relay
     assert_ne!(host_a, host_b, "two distinct unreachable hosts");
 
     let engine = engine();
-    let group = nip29::on([host_a, host_b])
+    let group = nip29::on([host_a.clone(), host_b.clone()])
         .expect("two hosts form a scope")
         .group(GROUP_ID);
 
@@ -276,10 +276,14 @@ async fn a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relay
     // never come. Acceptance IS this call returning `Ok`: there is no
     // acceptance fact to wait for, and waiting for one would be the very
     // thing optimistic publishing exists to avoid.
-    let _receipts = group
-        .publish_signed(&engine, event)
-        .expect("a correctly contextualized signed event is accepted")
-        .statuses;
+    let _receipts = engine
+        .publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            routing: WriteRouting::Explicit(vec![host_a, host_b]),
+            identity: Identity::Explicit(me.public_key()),
+            correlation: None,
+        })
+        .expect("an already-signed event is accepted by the one publish door");
 
     let mut observed = Observed::default();
     wait_for_rows(&subscription, SETTLE, &mut observed, |rows| {
@@ -346,10 +350,14 @@ async fn an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_
         )
         .expect("a NIP-29 read is an ordinary live query");
 
-    let receipts = group
-        .publish_signed(&engine, event)
-        .expect("a correctly contextualized signed event is accepted")
-        .statuses;
+    let receipts = engine
+        .publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            routing: WriteRouting::Explicit(vec![accepting_url.clone(), rejecting_url.clone()]),
+            identity: Identity::Explicit(me.public_key()),
+            correlation: None,
+        })
+        .expect("an already-signed event is accepted by the one publish door");
 
     // Phase 1 -- nothing is reachable. The row is on screen anyway, claiming
     // the cache and zero relays.
