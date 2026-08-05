@@ -164,7 +164,7 @@ impl std::fmt::Debug for SignatureRequest {
 /// The app's end of one registered signer: a stream of signature requests to
 /// drain on the app's own executor.
 ///
-/// Dropping or [`close`](Self::close)ing it does not remove the registration —
+/// Dropping or [`cancel`](Self::cancel)ling it does not remove the registration —
 /// [`Engine::remove_signer`](crate::Engine::remove_signer) does that, with the
 /// exact registration proof. A closed mailbox simply answers every subsequent
 /// request as unavailable, which parks writes for that key instead of failing
@@ -194,8 +194,10 @@ impl SignerMailbox {
     }
 
     /// Stop accepting requests and wake a parked [`next`](Self::next) to
-    /// `None`. Idempotent.
-    pub fn close(&self) {
+    /// `None`. Idempotent. Spelled `cancel` to match every other pull handle
+    /// on this surface, and because `close` is already taken by the object
+    /// lifecycle UniFFI generates for the FFI projection.
+    pub fn cancel(&self) {
         self.requests.close();
     }
 }
@@ -382,7 +384,7 @@ mod tests {
     async fn a_closed_mailbox_parks_writes_instead_of_stranding_them() {
         let key = fixture_key();
         let (signer, mailbox) = mailbox_signer(key);
-        mailbox.close();
+        mailbox.cancel();
 
         let operation = signer.sign(unsigned(key, "after close"));
         assert_eq!(operation.recv_async().await, Err(SignerError::Unavailable));

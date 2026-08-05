@@ -175,7 +175,7 @@ class NMPSignerMailbox internal constructor(
      * an unavailable signer, exactly as they do before any signer attaches.
      * [NMPEngine.removeSigner] removes it.
      */
-    fun close() = ffi.close()
+    fun cancel() = ffi.cancel()
 }
 
 internal fun NMPSignedEvent.toFfi() =

@@ -142,13 +142,17 @@ impl NmpSignatureRequest {
     /// Malformed hex in `signed` is
     /// [`FfiSignatureSettleError::MalformedSignedEvent`] and does NOT spend
     /// the request: the app can correct it and settle again.
+    ///
+    /// The parameter is `event` rather than `signed` because `signed` is a C
+    /// keyword: UniFFI spells parameter names straight into the generated C
+    /// header, where `RustBuffer signed` does not compile.
     pub fn resolve(
         &self,
-        signed: crate::types::FfiSignedEvent,
+        event: crate::types::FfiSignedEvent,
     ) -> Result<(), FfiSignatureSettleError> {
         // Parse BEFORE taking, so a malformed answer is a correctable mistake
         // rather than a request the app has irrevocably burned.
-        let parsed = signed_event_from_ffi(signed)?;
+        let parsed = signed_event_from_ffi(event)?;
         self.take()?.resolve(parsed).map_err(Into::into)
     }
 
@@ -217,8 +221,8 @@ impl NmpSignerMailbox {
     /// Idempotent. This does not remove the registration — writes for this key
     /// then park on an unavailable signer, exactly as they do before any
     /// signer attaches. `NmpEngine::remove_signer_mailbox` removes it.
-    pub fn close(&self) {
-        self.mailbox.close();
+    pub fn cancel(&self) {
+        self.mailbox.cancel();
     }
 }
 

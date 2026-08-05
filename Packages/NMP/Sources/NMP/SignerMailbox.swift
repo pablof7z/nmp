@@ -100,7 +100,7 @@ public final class NMPSignatureRequest: @unchecked Sendable {
     /// Answer with a signature over exactly `body`.
     public func resolve(_ signed: NMPSignedEvent) throws {
         do {
-            try ffi.resolve(signed: signed.toFfi())
+            try ffi.resolve(event: signed.toFfi())
         } catch let error as FfiSignatureSettleError {
             throw NMPSignatureSettleError(error)
         }
@@ -165,8 +165,8 @@ public final class NMPSignerMailbox: @unchecked Sendable {
     /// This does NOT remove the registration: writes for this key then park on
     /// an unavailable signer, exactly as they do before any signer attaches.
     /// `NMPEngine.removeSigner(_:)` removes it.
-    public func close() {
-        ffi.close()
+    public func cancel() {
+        ffi.cancel()
     }
 }
 
