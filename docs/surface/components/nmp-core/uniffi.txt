@@ -3071,7 +3071,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "#1033 (`nmp::nip29::GroupContextError::MissingContext` mirror). A\npre-signed event handed to `FfiGroup::publish_signed`/\n`FfiGroup::validate_context` carries no `h` row at all.",
+                "#1033 (`nmp::nip29::GroupContextError::MissingContext` mirror). A\nsigned event handed to `FfiGroup::validate_context` carries no `h` row\nat all.",
             ),
         },
         Variant {
@@ -3092,7 +3092,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "#1033 (`nmp::nip29::GroupContextError::MismatchedContext` mirror). A\npre-signed event names a different group than the one publishing or\nvalidating it.",
+                "#1033 (`nmp::nip29::GroupContextError::MismatchedContext` mirror). A\nsigned event names a different group than the one validating it.",
             ),
         },
         Variant {
