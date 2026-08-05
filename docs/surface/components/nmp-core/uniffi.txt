@@ -11236,6 +11236,15 @@ object Object {
                     optional: false,
                     default: None,
                 },
+                Argument {
+                    name: "parent",
+                    type_: Optional {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
             ],
             return_type: Some(
                 Object {
@@ -11266,6 +11275,12 @@ object Object {
                             None,
                         ),
                     },
+                    FfiArgument {
+                        name: "parent",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
                 ],
                 return_type: Some(
                     RustArcPtr(
@@ -11276,7 +11291,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "kind:9007 -- create the group at its hosts.",
+                "kind:9007 -- create the group at its hosts, optionally as a SUBGROUP\nof one that already exists there (#1301).\n\n`parent` is the parent's group id -- a relay-scoped string, never an\n`naddr`. `None` creates a root group and composes no row at all. The\nrelationship rides on the create and not on an edit; see\n`nmp::nip29::Group::create_group` for why.",
             ),
             throws: Some(
                 Enum {
@@ -11287,7 +11302,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_create_group",
             checksum: Some(
-                13311,
+                57851,
             ),
         },
         Method {

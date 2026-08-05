@@ -248,7 +248,7 @@ impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::RelayScopeError
 pub struct nmp::nip29::Group
 impl nmp::nip29::Group
 pub fn nmp::nip29::Group::add_user(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
-pub fn nmp::nip29::Group::create_group(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
+pub fn nmp::nip29::Group::create_group(&self, &nmp::Engine, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::create_invite(&self, &nmp::Engine, nostr::key::public_key::PublicKey, &str) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::delete_event(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nostr::event::id::EventId) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::delete_group(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
