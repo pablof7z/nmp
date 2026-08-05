@@ -8,6 +8,7 @@ package com.nmp.sdk
 import uniffi.nmp_ffi.FfiCommentDecodeException
 import uniffi.nmp_ffi.FfiCommentParent
 import uniffi.nmp_ffi.FfiCommentRoot
+import uniffi.nmp_ffi.FfiCommentTarget
 import uniffi.nmp_ffi.FfiDecodedComment
 import uniffi.nmp_ffi.FfiNip73
 import uniffi.nmp_ffi.FfiRow
@@ -229,22 +230,45 @@ fun decodeComment(row: Row): DecodedComment {
     }
 }
 
-/** Compose a durable, author-outbox-routed NIP-22 comment as NMP's ordinary
- * [WriteIntent] (#822). It names no author and reads no clock -- the engine
- * resolves the identity and stamps the time at acceptance -- so composition
- * still owns no engine state or lifecycle. [correlation] passes through
- * unchanged; publish the result through [NMPEngine.publish]. */
+/** What a comment is being written on (`FfiCommentTarget` mirror).
+ *
+ * The two shapes are the two things an app actually holds. [Root] describes
+ * an entity by its parts -- what an app has for an external content id, or
+ * after decoding a comment. [Row] is an event NMP observed, and its own
+ * thread position is read off its own rows: replying to a deep comment and
+ * commenting on a root are then the same call, and the root cannot be
+ * restated wrongly by a caller who thought it knew. */
+sealed class CommentTarget {
+    data class Root(val root: CommentRoot) : CommentTarget()
+
+    data class Row(val row: com.nmp.sdk.Row) : CommentTarget()
+
+    internal fun toFfi(): FfiCommentTarget =
+        when (this) {
+            is Root -> FfiCommentTarget.Root(root.toFfi())
+            is Row -> FfiCommentTarget.Row(row.toFfi())
+        }
+}
+
+/** Compose a NIP-22 comment on [target] as NMP's ordinary [WriteIntent]
+ * (#822). It names no author and reads no clock -- the engine resolves the
+ * identity and stamps the time at acceptance -- so composition still owns no
+ * engine state or lifecycle. [correlation] passes through unchanged; publish
+ * the result through [NMPEngine.publish].
+ *
+ * This always composes a kind:1111 comment, including on a text note, where
+ * [replyTo] would compose a NIP-10 reply instead. An app that wants "the
+ * ordinary reply for whatever this is" calls that; an app that wants "a
+ * NIP-22 comment on this specifically" calls this. */
 fun commentIntent(
-    root: CommentRoot,
-    parent: CommentParent,
+    target: CommentTarget,
     content: String,
     correlation: String? = null,
 ): WriteIntent =
     WriteIntent.from(
         nmpRethrowing {
             ffiCommentIntent(
-                root.toFfi(),
-                parent.toFfi(),
+                target.toFfi(),
                 content,
                 correlation,
             )

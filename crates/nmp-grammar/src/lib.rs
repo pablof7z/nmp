@@ -23,6 +23,8 @@ mod live_query;
 mod nip19;
 pub mod relay;
 mod selector;
+mod tagging;
+mod text;
 mod write;
 
 pub use binding::{Binding, Derived, Filter, SetAlgebra, SetOp};
@@ -38,6 +40,11 @@ pub use indexed_tag_name::IndexedTagName;
 pub use live_query::{LiveQuery, LiveQueryError};
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};
 pub use selector::{IdentityField, Selector};
+pub use tagging::{
+    entity_rows, event_parent_rows, event_root_rows, reply_to, Modifiers, Pointer, RootScope,
+    TagOptions, TagRows, Tagged, ThreadPosition, COMMENT_KIND, TEXT_NOTE_KIND,
+};
+pub use text::{At, InterpolatedContent, Mention};
 pub use write::{
     CorrelationToken, CorrelationTokenError, EventBuilder, Identity, WriteIntent, WritePayload,
     WriteRouting,
