@@ -349,11 +349,16 @@ public enum NotSentReason: Sendable, Hashable {
     /// one started any wire attempt. Not a failure -- for an app renewing
     /// presence it is the steady state.
     case superseded
+    /// The app removed the queue entry while nothing was moving the write
+    /// (#1269). Distinct from `cancelled` in what survives: a cancelled
+    /// receipt stays reattachable, a removed one no longer exists.
+    case removed
 
     init(_ ffi: FfiNotSentReason) {
         switch ffi {
         case .cancelled: self = .cancelled
         case .superseded: self = .superseded
+        case .removed: self = .removed
         }
     }
 }

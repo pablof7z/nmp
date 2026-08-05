@@ -213,6 +213,17 @@ pub enum NotSentReason {
     /// coordinate before this obligation started any wire attempt. Not a
     /// failure — for an app renewing presence it is the steady state.
     Superseded,
+    /// The app removed the queue entry while nothing was moving the write
+    /// (#1269) — the termination path #1039 named for a write parked on a
+    /// signer nobody has. The obligation was released and its optimistic row
+    /// compensated in the same step.
+    ///
+    /// Distinct from [`Self::Cancelled`] in what SURVIVES, which is the
+    /// whole difference between the two doors: a cancelled receipt is
+    /// retained and stays reattachable, a removed one no longer exists. An
+    /// app told `Cancelled` can go and read the entry back; an app told this
+    /// cannot, and must not be sent looking.
+    Removed,
 }
 
 /// The whole-write terminal. Exactly one of these ends every receipt stream,
@@ -329,8 +340,16 @@ pub enum RemoveQueueEntryError {
     UnknownReceipt {
         receipt_id: ReceiptId,
     },
-    /// The write still owns open work — it is signed and lanes are live.
-    /// Cancel it first; removal is for entries nothing is going to move.
+    /// Something is MOVING this write, so removing it would destroy work
+    /// that is about to finish: a signer HAS its request and the answer is
+    /// already on its way ([`SigningState::InFlight`]), or it is signed and
+    /// its relay lanes are live. Cancel it first; removal is for entries
+    /// nothing is going to move.
+    ///
+    /// A write parked on a signer nobody has is NOT this (#1269): no signer
+    /// holds a request, no signature exists, so no lane exists and no relay
+    /// can ever answer. Nothing is in motion, and removing it is the only
+    /// thing that ever ends it.
     StillActive {
         receipt_id: ReceiptId,
     },
