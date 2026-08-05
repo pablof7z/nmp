@@ -50,9 +50,9 @@ use nmp::nip29::{
 use nostr::RelayUrl;
 
 use crate::convert::{
-    event_builder_from_ffi, event_builder_to_ffi, filter_from_ffi, group_ids_binding_from_ffi,
-    live_query_to_ffi, parse_event_id, parse_pubkey, signed_event_from_ffi,
-    subjects_binding_from_ffi, write_intent_to_ffi, FfiError,
+    event_builder_from_ffi, filter_from_ffi, group_ids_binding_from_ffi, live_query_to_ffi,
+    parse_event_id, parse_pubkey, signed_event_from_ffi, subjects_binding_from_ffi,
+    write_intent_to_ffi, FfiError,
 };
 use crate::facade::{NmpEngine, NmpReceiptStream};
 use crate::types::{
@@ -61,20 +61,6 @@ use crate::types::{
 
 fn parse_host(host: String) -> Result<RelayUrl, FfiError> {
     RelayUrl::parse(&host).map_err(|_| FfiError::InvalidRelayUrl { got: host })
-}
-
-/// The seven-field reassembly every pre-signed door on this surface does,
-/// spelled once.
-fn signed_event(event: FfiSignedEvent) -> Result<nostr::Event, FfiError> {
-    signed_event_from_ffi(
-        event.id,
-        event.pubkey,
-        event.created_at,
-        event.kind,
-        event.tags,
-        event.content,
-        event.sig,
-    )
 }
 
 /// The relays a group lives on -- named once, retained privately inside the
@@ -212,26 +198,6 @@ impl FfiGroup {
         )?;
         self.inner.validate_context(&event)?;
         Ok(())
-    }
-
-    /// Apply this group's own id to a draft the CALLER will sign itself
-    /// (`nmp::nip29::Group::contextualize` mirror, #1283).
-    ///
-    /// [`Self::intent`] is the door for an app that lets NMP sign; this is
-    /// the door for an app that signs its own bytes, which is any app that
-    /// shows a message locally the moment it is composed -- an event id only
-    /// exists once the body is frozen, and [`Self::signed_intent`]
-    /// deliberately VALIDATES the `h` rather than appending it.
-    ///
-    /// Without it such an app had to reach past this object for the `h` row
-    /// and then hand the signed result back to [`Self::signed_intent`],
-    /// naming the group id twice with nothing checking the two agreed until
-    /// the second call. The refusals are [`Self::intent`]'s own: a draft
-    /// already carrying an `h` or a `previous` row is refused whichever value
-    /// it holds.
-    pub fn contextualize(&self, builder: FfiEventBuilder) -> Result<FfiEventBuilder, FfiError> {
-        let builder = event_builder_from_ffi(builder)?;
-        Ok(event_builder_to_ffi(self.inner.contextualize(builder)?))
     }
 
     /// Mint the group-contextualized write intent for an unsigned draft and
@@ -439,6 +405,10 @@ impl FfiGroup {
 /// moderation action names one group. A write is the one thing that is
 /// genuinely plural.
 ///
+/// Two methods, both UNSIGNED: NMP appends the `h` rows and NMP signs. There
+/// is deliberately no pre-signed spelling and no way to obtain a draft to
+/// sign yourself.
+///
 /// Opaque for the same reason [`FfiGroup`] is: it yields back neither its
 /// hosts nor its ids, so no layer handed one can reconstruct the authority
 /// and route something elsewhere under it.
@@ -449,23 +419,6 @@ pub struct FfiGroups {
 
 #[uniffi::export]
 impl FfiGroups {
-    /// Apply the retained group ids to a draft the CALLER will sign itself
-    /// (`nmp::nip29::Groups::contextualize` mirror). One `h` row per id,
-    /// appended before anything is signed; hand the signed result to
-    /// [`Self::signed_intent`] and the ids are never spelled by the app at
-    /// all.
-    pub fn contextualize(&self, builder: FfiEventBuilder) -> Result<FfiEventBuilder, FfiError> {
-        let builder = event_builder_from_ffi(builder)?;
-        Ok(event_builder_to_ffi(self.inner.contextualize(builder)?))
-    }
-
-    /// Ask whether an already-signed event names exactly these groups
-    /// (`nmp::nip29::Groups::validate_context` mirror).
-    pub fn validate_context(&self, event: FfiSignedEvent) -> Result<(), FfiError> {
-        self.inner.validate_context(&signed_event(event)?)?;
-        Ok(())
-    }
-
     /// Mint the contextualized write intent for an unsigned draft and publish
     /// NOTHING (`nmp::nip29::Groups::intent` mirror). Same appended-before-
     /// signing rows, same explicit route over the scope's whole host set,
@@ -481,17 +434,6 @@ impl FfiGroups {
         Ok(write_intent_to_ffi(self.inner.intent(author, builder)?))
     }
 
-    /// Mint the contextualized write intent for an ALREADY-SIGNED event, and
-    /// publish nothing (`nmp::nip29::Groups::signed_intent` mirror). The `h`
-    /// rows it carries are validated against the retained set, never appended
-    /// -- a set too small, too large, wrong, absent or right-but-repeated is a
-    /// typed refusal.
-    pub fn signed_intent(&self, event: FfiSignedEvent) -> Result<FfiWriteIntent, FfiError> {
-        Ok(write_intent_to_ffi(
-            self.inner.signed_intent(signed_event(event)?)?,
-        ))
-    }
-
     /// [`Self::intent`] handed straight to the one publish door
     /// (`nmp::nip29::Groups::publish` mirror).
     pub fn publish(
@@ -503,19 +445,6 @@ impl FfiGroups {
         let author = parse_pubkey(&author)?;
         let builder = event_builder_from_ffi(builder)?;
         let receipts = self.inner.publish(&engine.engine, author, builder)?;
-        Ok(NmpReceiptStream::new(receipts))
-    }
-
-    /// [`Self::signed_intent`] handed straight to the one publish door
-    /// (`nmp::nip29::Groups::publish_signed` mirror).
-    pub fn publish_signed(
-        &self,
-        engine: Arc<NmpEngine>,
-        event: FfiSignedEvent,
-    ) -> Result<Arc<NmpReceiptStream>, FfiError> {
-        let receipts = self
-            .inner
-            .publish_signed(&engine.engine, signed_event(event)?)?;
         Ok(NmpReceiptStream::new(receipts))
     }
 }
@@ -1569,39 +1498,6 @@ mod tests {
         match scope.groups(Vec::new()) {
             Err(FfiError::EmptyGroupSet) => {}
             other => panic!("expected EmptyGroupSet, got {other:?}"),
-        }
-    }
-
-    /// #1283 across the boundary: the contextualized draft comes back with
-    /// the retained id already in it, so an app that signs its own bytes
-    /// never spells the group id.
-    #[test]
-    fn the_self_signing_door_hands_back_a_draft_that_already_carries_the_retained_id() {
-        let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
-        let group = scope.group("photographers".to_string());
-        let built = group
-            .contextualize(FfiEventBuilder {
-                kind: 9,
-                tags: Vec::new(),
-                content: "first light".to_string(),
-                created_at: None,
-            })
-            .expect("the retained id contextualizes the caller's own draft");
-        assert_eq!(
-            built.tags,
-            vec![vec!["h".to_string(), "photographers".to_string()]]
-        );
-        assert_eq!(built.kind, 9);
-        assert_eq!(built.content, "first light");
-
-        match group.contextualize(FfiEventBuilder {
-            kind: 9,
-            tags: vec![vec!["h".to_string(), "photographers".to_string()]],
-            content: String::new(),
-            created_at: None,
-        }) {
-            Err(FfiError::GroupCallerSuppliedContext) => {}
-            other => panic!("expected GroupCallerSuppliedContext, got {other:?}"),
         }
     }
 

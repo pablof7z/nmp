@@ -266,7 +266,6 @@ impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::RelayScopeError
 pub struct nmp::nip29::Group
 impl nmp::nip29::Group
 pub fn nmp::nip29::Group::add_user(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nostr::key::public_key::PublicKey, core::option::Option<&str>) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
-pub fn nmp::nip29::Group::contextualize(&self, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp_grammar::write::EventBuilder, nmp_nip29::context::GroupContextError>
 pub fn nmp::nip29::Group::create_group(&self, &nmp::Engine, nostr::key::public_key::PublicKey) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::create_invite(&self, &nmp::Engine, nostr::key::public_key::PublicKey, &str) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Group::delete_event(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nostr::event::id::EventId) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
@@ -386,12 +385,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupSnapshot
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupSnapshot
 pub struct nmp::nip29::Groups
 impl nmp::nip29::Groups
-pub fn nmp::nip29::Groups::contextualize(&self, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp_grammar::write::EventBuilder, nmp_nip29::context::GroupContextError>
 pub fn nmp::nip29::Groups::intent(&self, nostr::key::public_key::PublicKey, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp_grammar::write::WriteIntent, nmp::nip29::GroupPublishError>
 pub fn nmp::nip29::Groups::publish(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
-pub fn nmp::nip29::Groups::publish_signed(&self, &nmp::Engine, nostr::event::Event) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
-pub fn nmp::nip29::Groups::signed_intent(&self, nostr::event::Event) -> core::result::Result<nmp_grammar::write::WriteIntent, nmp::nip29::GroupPublishError>
-pub fn nmp::nip29::Groups::validate_context(&self, &nostr::event::Event) -> core::result::Result<(), nmp_nip29::context::GroupContextError>
 impl core::clone::Clone for nmp::nip29::Groups
 pub fn nmp::nip29::Groups::clone(&self) -> nmp::nip29::Groups
 impl core::cmp::Eq for nmp::nip29::Groups

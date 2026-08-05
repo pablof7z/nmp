@@ -74,7 +74,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{EventBuilder, Filter, WriteIntent};
+use nmp_grammar::{EventBuilder, Filter, Identity, WriteIntent, WritePayload};
 use nostr::{Event, EventId, PublicKey, RelayUrl};
 
 use super::groups::Groups;
@@ -218,52 +218,22 @@ impl Group {
     /// Ask whether an already-signed event belongs to this group, without
     /// building a write out of it.
     pub fn validate_context(&self, event: &Event) -> Result<(), GroupContextError> {
-        self.write_context().validate_context(event)
-    }
-
-    /// Apply this group's own id to a draft the CALLER will sign itself
-    /// (#1283).
-    ///
-    /// [`Self::intent`] is the door for an app that lets NMP sign. This is
-    /// the door for an app that signs its own bytes -- any app that shows a
-    /// message locally the moment it is composed, because an `EventId` only
-    /// exists once the body is frozen. Such an app needs the `h` row inside
-    /// the bytes it signs, and [`Self::signed_intent`] deliberately validates
-    /// rather than appends.
-    ///
-    /// Without this door that app reached past the facade to
-    /// `nmp_nip29::contextualize(group_id, builder)` and then handed the
-    /// signed result to `group.signed_intent(...)` -- naming the group id
-    /// TWICE, from two crates, with nothing checking that the two agreed
-    /// until the second call. That is precisely the failure the retained id
-    /// exists to make unrepresentable, only caught rather than prevented, and
-    /// caught one signature too late.
-    ///
-    /// With it, the sign-yourself path is structurally identical to the
-    /// sign-through-NMP one and the id is named once, by construction:
-    ///
-    /// ```text
-    /// let signed = sign(group.contextualize(builder)?, keys);
-    /// let intent = group.signed_intent(signed)?;
-    /// ```
-    ///
-    /// The refusals are [`Self::intent`]'s own, for the same reason: a draft
-    /// already carrying an `h` or a `previous` row is refused whichever value
-    /// it holds, because those rows belong to the group and not to the
-    /// caller.
-    pub fn contextualize(&self, builder: EventBuilder) -> Result<EventBuilder, GroupContextError> {
-        self.write_context().contextualize(builder)
+        nmp_nip29::validate_context(&self.ids(), event)
     }
 
     /// This group as the one-element write context it is.
     ///
     /// Not an accessor: [`Groups`] retains its hosts and ids as privately as
-    /// `Group` does and yields neither back. It is the single place the
-    /// write half of a `Group` lives, so "one group is the one-element case"
-    /// is a fact about the code rather than a claim in a doc comment.
+    /// `Group` does and yields neither back. Every intent a `Group` mints is
+    /// assembled by `Groups::mint`, so "one group is the one-element case" is
+    /// a fact about the code rather than a claim in a doc comment.
     fn write_context(&self) -> Groups {
-        Groups::new(self.hosts.clone(), BTreeSet::from([self.id.clone()]))
-            .expect("a one-element group set is nonempty")
+        Groups::new(self.hosts.clone(), self.ids()).expect("a one-element group set is nonempty")
+    }
+
+    /// This group's id as the one-element set the context vocabulary takes.
+    fn ids(&self) -> BTreeSet<String> {
+        BTreeSet::from([self.id.clone()])
     }
 
     /// Mint the group-contextualized [`WriteIntent`] for an unsigned draft,
@@ -314,7 +284,11 @@ impl Group {
     /// There is no author argument. A signed event already fixed its author;
     /// accepting a second selector would let the two disagree.
     pub fn signed_intent(&self, event: Event) -> Result<WriteIntent, GroupPublishError> {
-        self.write_context().signed_intent(event)
+        self.validate_context(&event)?;
+        let author = event.pubkey;
+        Ok(self
+            .write_context()
+            .mint(WritePayload::Signed(event), Identity::Explicit(author)))
     }
 
     /// [`Self::intent`] handed straight to the one publish door -- the
@@ -865,82 +839,6 @@ mod tests {
             );
         }
         engine.shutdown();
-    }
-
-    /// THE #1283 falsifier: an app that signs its own bytes names the group
-    /// id ZERO times. Before this door existed the same path was
-    /// `nmp_nip29::contextualize(group_id, builder)` followed by
-    /// `group.signed_intent(...)` -- the id spelled twice, from two crates,
-    /// with nothing checking the two agreed until the second call.
-    #[test]
-    fn a_self_signed_write_is_composed_and_minted_from_the_same_retained_id() {
-        let signer = Keys::generate();
-        let group = group([host(1), host(2)]);
-        let draft = group
-            .contextualize(EventBuilder::new(Kind::from(9u16)).content("first light"))
-            .expect("the retained id contextualizes the caller's own draft");
-        assert_eq!(
-            draft
-                .tags
-                .iter()
-                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
-                .map(|tag| tag.as_slice()[1].clone())
-                .collect::<Vec<String>>(),
-            vec![GROUP.to_string()],
-            "exactly the retained id, appended by the door"
-        );
-
-        let signed = UnsignedEvent::new(
-            signer.public_key(),
-            Timestamp::from(1_700_000_000u64),
-            draft.kind,
-            draft.tags.clone(),
-            draft.content.clone(),
-        )
-        .sign_with_keys(&signer)
-        .expect("fixture keys sign cleanly");
-        let known_id = signed.id;
-
-        let intent = group
-            .signed_intent(signed)
-            .expect("bytes this very group contextualized must validate against it");
-        assert_eq!(routed(&intent), vec![host(1), host(2)]);
-        match intent.payload {
-            WritePayload::Signed(out) => assert_eq!(
-                out.id, known_id,
-                "the id the app already showed on screen survives the mint unchanged"
-            ),
-            _ => panic!("a pre-signed event must mint a Signed payload"),
-        }
-    }
-
-    /// `contextualize` carries the SAME ownership refusals `intent` does --
-    /// it is the same call with the signing step left to the caller, not a
-    /// laxer back door into the `h` row.
-    #[test]
-    fn the_self_signing_door_refuses_a_caller_supplied_row_exactly_as_the_mint_door_does() {
-        let group = group([host(1)]);
-        for row in [
-            Tag::parse(["h", GROUP]).unwrap(),
-            Tag::parse(["h", "darkroom"]).unwrap(),
-        ] {
-            assert_eq!(
-                group
-                    .contextualize(EventBuilder::new(Kind::from(9u16)).tag(row.clone()))
-                    .err(),
-                Some(GroupContextError::CallerSuppliedContext),
-                "{row:?} belongs to the group, not to the caller"
-            );
-        }
-        assert_eq!(
-            group
-                .contextualize(
-                    EventBuilder::new(Kind::from(9u16))
-                        .tag(Tag::parse(["previous", "deadbeef"]).unwrap())
-                )
-                .err(),
-            Some(GroupContextError::CallerSuppliedTimeline)
-        );
     }
 
     /// One group is the ONE-ELEMENT case in code, not merely in prose: the

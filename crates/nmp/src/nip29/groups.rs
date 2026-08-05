@@ -6,6 +6,11 @@
 //! event claims -- and it exists because a legitimate NIP-29 write had no
 //! door at all.
 //!
+//! It has exactly two methods and both are the UNSIGNED door: NMP appends the
+//! `h` rows, NMP signs, and the app reads its own write back through the
+//! subscription it already holds. There is deliberately no pre-signed
+//! spelling here and no way to obtain a draft to sign yourself.
+//!
 //! # The write that had no door
 //!
 //! A kind:30315 session status is addressable at `(author, d=status)` and
@@ -18,12 +23,28 @@
 //! author ends up visible in exactly one room, whichever wrote last. Picking
 //! one room and dropping the rest changes what the event says. Composing it
 //! under one room and letting the app append the other rows is refused by
-//! [`Group::contextualize`](super::Group::contextualize), correctly: the `h`
-//! row belongs to the door.
+//! the contextualizer, correctly: the `h` row belongs to the door.
 //!
 //! So an app that needed this hand-minted a [`WriteIntent`] -- spelling its
 //! own [`WriteRouting::Explicit`] and writing its own `h` rows -- which is
 //! exactly what #1242 removed for every other group write.
+//!
+//! # No pre-signed door, and the evidence for why none is needed
+//!
+//! The consumer that reported this reached the multi-`h` shape by routing its
+//! status through a PRE-SIGNED path, so it would be easy to assume a
+//! pre-signed multi-group door is what it needs. Its own source says
+//! otherwise. The unsigned path already computed the event id WITHOUT signing
+//! -- an id is a hash of `(author, created_at, kind, tags, content)` and a
+//! signature was never an input -- and the refusal that pushed status onto
+//! the signed path said, verbatim, that "exact multi-group events must be
+//! pre-signed". That was an ARITY limit, not an id-timing requirement, and
+//! this type removes it. Nothing consumed the status id either: a kind:30315
+//! status is addressable at `(author, d)`, and its reader is keyed by that
+//! coordinate.
+//!
+//! So the several-group case needs the unsigned door and only the unsigned
+//! door.
 //!
 //! # It is the same door, at a larger arity
 //!
@@ -50,7 +71,7 @@
 use std::collections::BTreeSet;
 
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
-use nostr::{Event, PublicKey, RelayUrl};
+use nostr::{PublicKey, RelayUrl};
 
 use super::group::GroupPublishError;
 use crate::engine::Engine;
@@ -86,61 +107,29 @@ impl Groups {
         Ok(Self { hosts, ids })
     }
 
-    /// Apply the retained group ids to a draft the CALLER will sign itself
-    /// (#1283, at this arity).
-    ///
-    /// One `h` row per retained id, appended before anything is signed, and
-    /// the ids are named nowhere by the caller. Hand the signed result back
-    /// to [`Self::signed_intent`] and the write is complete without the ids
-    /// ever being spelled at all:
-    ///
-    /// ```text
-    /// let signed = sign(groups.contextualize(builder)?, keys);
-    /// let intent = groups.signed_intent(signed)?;
-    /// ```
-    ///
-    /// A draft that already carries an `h` row is refused, whichever value it
-    /// holds -- the refusal is about who owns the row.
-    pub fn contextualize(&self, builder: EventBuilder) -> Result<EventBuilder, GroupContextError> {
-        nmp_nip29::contextualize(&self.ids, builder)
-    }
-
-    /// Ask whether an already-signed event names exactly these groups,
-    /// without building a write out of it.
-    pub fn validate_context(&self, event: &Event) -> Result<(), GroupContextError> {
-        nmp_nip29::validate_context(&self.ids, event)
-    }
-
     /// Mint the contextualized [`WriteIntent`] for an unsigned draft, as
     /// `author`, and publish NOTHING.
     ///
-    /// [`Group::intent`](super::Group::intent) with a larger set: the same
-    /// appended-before-signing rows, the same [`WriteRouting::Explicit`] over
-    /// the scope's whole host set, the same frozen exact author (#878), and
-    /// the same `correlation: None` for the caller to stamp (#1244).
+    /// [`Group::intent`](super::Group::intent) with a larger set, and the
+    /// same door: one `h` row per retained id appended BEFORE the stamp/sign
+    /// step so every row is inside the bytes that get signed,
+    /// [`WriteRouting::Explicit`] over the scope's whole host set, an exact
+    /// frozen author (#878), and `correlation: None` for the caller to stamp
+    /// (#1244).
+    ///
+    /// The app names neither a relay nor an `h` row. A draft that already
+    /// carries an `h` is refused whichever value it holds, because the row
+    /// belongs to the retained scope and not to the caller.
     pub fn intent(
         &self,
         author: PublicKey,
         builder: EventBuilder,
     ) -> Result<WriteIntent, GroupPublishError> {
-        let contextualized = self.contextualize(builder)?;
+        let contextualized = nmp_nip29::contextualize(&self.ids, builder)?;
         Ok(self.mint(
             WritePayload::Event(contextualized),
             Identity::Explicit(author),
         ))
-    }
-
-    /// Mint the contextualized [`WriteIntent`] for an ALREADY-SIGNED event,
-    /// and publish nothing.
-    ///
-    /// The `h` rows it already carries are VALIDATED against the retained
-    /// set, never appended: appending would change the bytes and therefore
-    /// the `EventId` the caller already has. A set that is too small, too
-    /// large, wrong, absent, or right-but-repeated is a typed refusal.
-    pub fn signed_intent(&self, event: Event) -> Result<WriteIntent, GroupPublishError> {
-        self.validate_context(&event)?;
-        let author = event.pubkey;
-        Ok(self.mint(WritePayload::Signed(event), Identity::Explicit(author)))
     }
 
     /// [`Self::intent`] handed straight to the one publish door.
@@ -155,23 +144,14 @@ impl Groups {
             .map_err(GroupPublishError::Engine)
     }
 
-    /// [`Self::signed_intent`] handed straight to the one publish door.
-    pub fn publish_signed(
-        &self,
-        engine: &Engine,
-        event: Event,
-    ) -> Result<ReceiptStream, GroupPublishError> {
-        engine
-            .publish_tracked(self.signed_intent(event)?)
-            .map_err(GroupPublishError::Engine)
-    }
-
-    /// The one shape a group write has, identical to
-    /// [`Group`](super::Group)'s: `Explicit(every host)` minted from the
-    /// scope the app named once. The `h` rows carry GROUP IDS, never relays,
-    /// so the hosts are not derivable from the event and no resolver could
-    /// compute them.
-    fn mint(&self, payload: WritePayload, identity: Identity) -> WriteIntent {
+    /// The one shape a group write has, and the ONLY place a group
+    /// [`WriteIntent`] is assembled -- [`Group`](super::Group)'s doors mint
+    /// through this one too, which is what makes "one group is the
+    /// one-element case" a property of the code. `Explicit(every host)` comes
+    /// from the scope the app named once; the `h` rows carry GROUP IDS, never
+    /// relays, so the hosts are not derivable from the event and no resolver
+    /// could compute them.
+    pub(super) fn mint(&self, payload: WritePayload, identity: Identity) -> WriteIntent {
         WriteIntent {
             payload,
             routing: WriteRouting::Explicit(self.hosts.iter().cloned().collect()),
@@ -185,7 +165,7 @@ impl Groups {
 mod tests {
     use super::*;
     use crate::nip29;
-    use nostr::{Keys, Kind, Tag, Timestamp, UnsignedEvent};
+    use nostr::{Keys, Kind, Tag};
 
     fn host(n: u16) -> RelayUrl {
         RelayUrl::parse(&format!("wss://host-{n}.example.com")).expect("a well-formed host")
@@ -223,18 +203,6 @@ mod tests {
                 .collect(),
             _ => panic!("an unsigned draft must mint an Event payload"),
         }
-    }
-
-    fn status(tags: Vec<Tag>, signer: &Keys) -> Event {
-        UnsignedEvent::new(
-            signer.public_key(),
-            Timestamp::from(1_700_000_000u64),
-            Kind::from(30315u16),
-            tags,
-            String::new(),
-        )
-        .sign_with_keys(signer)
-        .expect("fixture keys sign cleanly")
     }
 
     /// THE #1281 falsifier: one minted intent, one addressable coordinate,
@@ -311,60 +279,6 @@ mod tests {
             context_rows(&together),
             vec!["darkroom".to_string(), "photographers".to_string()],
             "the multi-h write is the only spelling that survives the collision"
-        );
-    }
-
-    /// #1283 at this arity: an app that signs its own bytes names the rooms
-    /// ONCE. The ids never appear in app code between composition and mint.
-    #[test]
-    fn a_self_signed_write_names_the_rooms_once_and_mints_from_the_same_value() {
-        let signer = Keys::generate();
-        let rooms = rooms();
-        let draft = rooms
-            .contextualize(
-                nmp_grammar::EventBuilder::new(Kind::from(30315u16))
-                    .tag(Tag::parse(["d", "status"]).unwrap()),
-            )
-            .expect("the retained ids contextualize the caller's own draft");
-        let signed = UnsignedEvent::new(
-            signer.public_key(),
-            Timestamp::from(1_700_000_000u64),
-            draft.kind,
-            draft.tags.clone(),
-            draft.content.clone(),
-        )
-        .sign_with_keys(&signer)
-        .expect("fixture keys sign cleanly");
-        let known_id = signed.id;
-
-        let intent = rooms
-            .signed_intent(signed)
-            .expect("bytes this very value contextualized must validate against it");
-        match intent.payload {
-            WritePayload::Signed(out) => assert_eq!(
-                out.id, known_id,
-                "the id the app already showed on screen survives the mint"
-            ),
-            _ => panic!("a pre-signed event must mint a Signed payload"),
-        }
-    }
-
-    /// The pre-signed refusals hold over the SET: a status missing one room
-    /// is refused rather than published into the rooms it did name, because
-    /// a silently narrowed status stops rendering where the app believes it
-    /// still shows.
-    #[test]
-    fn a_signed_write_missing_one_room_is_refused_not_narrowed() {
-        let signer = Keys::generate();
-        let short = status(vec![Tag::parse(["h", "darkroom"]).unwrap()], &signer);
-        assert_eq!(
-            rooms().signed_intent(short).err(),
-            Some(GroupPublishError::Context(
-                GroupContextError::MismatchedContext {
-                    found: BTreeSet::from(["darkroom".to_string()]),
-                    expected: BTreeSet::from(["darkroom".to_string(), "photographers".to_string()]),
-                }
-            ))
         );
     }
 
@@ -445,31 +359,17 @@ mod tests {
         engine.shutdown();
     }
 
-    /// The inline spellings reach the same door.
+    /// The inline spelling reaches the same one publish door.
     #[test]
-    fn the_inline_doors_reach_the_one_publish_door() {
+    fn the_inline_door_reaches_the_one_publish_door() {
         let engine = engine();
-        let rooms = rooms();
-        let receipts = rooms
+        let receipts = rooms()
             .publish(
                 &engine,
                 author(),
                 nmp_grammar::EventBuilder::new(Kind::from(30315u16)),
             )
             .expect("the publish door accepts a multi-group write");
-        drop(receipts);
-
-        let signer = Keys::generate();
-        let complete = status(
-            vec![
-                Tag::parse(["h", "darkroom"]).unwrap(),
-                Tag::parse(["h", "photographers"]).unwrap(),
-            ],
-            &signer,
-        );
-        let receipts = rooms
-            .publish_signed(&engine, complete)
-            .expect("the publish door accepts a pre-signed multi-group write");
         drop(receipts);
         engine.shutdown();
     }

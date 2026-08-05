@@ -77,11 +77,11 @@ pub enum GroupContextError {
     /// than a repair.
     MissingContext { expected: BTreeSet<String> },
     /// A pre-signed event names a different SET of groups than the one
-    /// publishing it -- too few, too many, or the wrong ones. One group is
-    /// the one-element case: an event carrying `["h", "darkroom"]` published
-    /// through `photographers` reports `found: {darkroom}`,
-    /// `expected: {photographers}`, and an event carrying a second `h` row
-    /// beside the right one reports both in `found`.
+    /// publishing it. An event carrying `["h", "darkroom"]` published through
+    /// `photographers` reports `found: {darkroom}`,
+    /// `expected: {photographers}`; an event carrying a second `h` row beside
+    /// the right one reports both in `found`, which is what the retired
+    /// row-COUNT check could never say.
     MismatchedContext {
         found: BTreeSet<String>,
         expected: BTreeSet<String>,
@@ -201,6 +201,9 @@ pub fn group_demand_at(
 /// one `h` per room the session occupies (#1281) -- is the same call with a
 /// larger set. There is no arity anywhere below this line.
 ///
+/// This is the door every group write takes: NMP appends the rows, NMP signs,
+/// and the app never spells an `h`.
+///
 /// The append happens on the BUILDER -- before the stamp/sign step -- so the
 /// context tags are inside the bytes that get signed and are covered by the
 /// id and the signature.
@@ -242,8 +245,14 @@ pub fn contextualize(
 /// is [`GroupContextError::MissingContext`], naming a different set is
 /// [`GroupContextError::MismatchedContext`], and naming the right set with a
 /// row repeated is [`GroupContextError::RepeatedContext`] -- which is the
-/// refusal that keeps this path exactly as strict as
-/// [`contextualize`], whose rows a set can never repeat.
+/// refusal that keeps this path exactly as strict as [`contextualize`], whose
+/// rows a set can never repeat.
+///
+/// Set-shaped because the vocabulary is, not because a several-group
+/// pre-signed door exists: there is none. What the set buys at the one-group
+/// arity is a refusal that names the whole set it FOUND beside the whole set
+/// it expected, so an event carrying a second `h` reports both rather than
+/// only that something was wrong.
 pub fn validate_context(
     group_ids: &BTreeSet<String>,
     event: &Event,
@@ -710,55 +719,6 @@ mod tests {
         );
     }
 
-    /// The pre-signed half of #1281: a signed event's `h` rows must name
-    /// EXACTLY the rooms it is being published into. Too few is as wrong as
-    /// too many -- a status that dropped a room silently stops rendering
-    /// there, which is the failure this validation exists to make loud.
-    #[test]
-    fn a_signed_event_for_several_groups_must_name_exactly_those_groups() {
-        let all_three = many(["a", "b", "c"]);
-        let complete = signed(vec![
-            Tag::parse(["h", "a"]).unwrap(),
-            Tag::parse(["h", "b"]).unwrap(),
-            Tag::parse(["h", "c"]).unwrap(),
-        ]);
-        assert_eq!(validate_context(&all_three, &complete), Ok(()));
-
-        let short = signed(vec![
-            Tag::parse(["h", "a"]).unwrap(),
-            Tag::parse(["h", "b"]).unwrap(),
-        ]);
-        assert_eq!(
-            validate_context(&all_three, &short).err(),
-            Some(GroupContextError::MismatchedContext {
-                found: many(["a", "b"]),
-                expected: all_three.clone(),
-            }),
-            "a room the app forgot to sign in must be a refusal, not a quiet partial write"
-        );
-
-        let over = signed(vec![
-            Tag::parse(["h", "a"]).unwrap(),
-            Tag::parse(["h", "b"]).unwrap(),
-            Tag::parse(["h", "c"]).unwrap(),
-            Tag::parse(["h", "d"]).unwrap(),
-        ]);
-        assert_eq!(
-            validate_context(&all_three, &over).err(),
-            Some(GroupContextError::MismatchedContext {
-                found: many(["a", "b", "c", "d"]),
-                expected: all_three.clone(),
-            })
-        );
-
-        assert_eq!(
-            validate_context(&all_three, &signed(Vec::new())).err(),
-            Some(GroupContextError::MissingContext {
-                expected: all_three
-            })
-        );
-    }
-
     /// The refusal the retired `AmbiguousContext` used to make for the
     /// one-group case, kept rather than lost: a signed event whose `h` rows
     /// name the right SET but repeat one of them is still refused, because
@@ -783,103 +743,6 @@ mod tests {
         assert!(error.to_string().contains(GROUP), "{error}");
     }
 
-    /// THE asymmetry falsifier, and the one with real consumer history.
-    ///
-    /// A consumer once refused a multi-`h` write on the UNSIGNED path and not
-    /// on the signed one, and reached the shape it wanted by routing a
-    /// kind:30315 session status through the signed path specifically to
-    /// exploit that gap. #1274 closed it by running NMP's own validation on
-    /// both paths; #1281 widens what "either arity" means, and this test is
-    /// what stops the gap reopening at the new arity.
-    ///
-    /// The claim is exact: at EVERY arity, the only `h` set a signed event may
-    /// carry is the one the door was asked for, and the bytes that validate
-    /// are exactly what [`contextualize`] would have composed for that same
-    /// set. So there is no laxity on the signed path that the unsigned path
-    /// lacks, and no spelling of "sign it yourself to get past the refusal".
-    ///
-    /// What makes a multi-`h` write legitimate is therefore never a property
-    /// of the EVENT -- it is the retained set the door holds. The identical
-    /// bytes that validate through `{a, b}` are refused through `{a}`.
-    #[test]
-    fn the_signed_path_is_exactly_as_strict_as_the_unsigned_one_at_every_arity() {
-        let h = |ids: &[&str]| -> Vec<Tag> {
-            ids.iter()
-                .map(|id| Tag::parse(["h", id]).expect("a two-value row is well-formed"))
-                .collect()
-        };
-        for retained in [many(["a"]), many(["a", "b"]), many(["a", "b", "c"])] {
-            let ids: Vec<&str> = retained.iter().map(String::as_str).collect();
-
-            // The unsigned door's own output is the reference: whatever it
-            // composes is exactly what the signed door must accept.
-            let composed = contextualize(&retained, EventBuilder::new(Kind::from(30315u16)))
-                .unwrap_or_else(|error| panic!("{retained:?} must contextualize: {error}"));
-            assert_eq!(
-                context_rows(&composed),
-                ids.iter()
-                    .map(|id| (*id).to_string())
-                    .collect::<Vec<String>>(),
-                "the unsigned door must compose exactly the retained set"
-            );
-            assert_eq!(
-                validate_context(&retained, &signed(h(&ids))),
-                Ok(()),
-                "the signed door must accept exactly the bytes the unsigned door composes"
-            );
-
-            // Every NEIGHBOUR of that set is refused: one group more, one
-            // fewer, one swapped for a stranger, one repeated. None of these
-            // is expressible on the unsigned path at all, so accepting any of
-            // them would be laxity the signed path alone had.
-            let one_more: Vec<&str> = ids.iter().copied().chain(["elsewhere"]).collect();
-            assert!(
-                validate_context(&retained, &signed(h(&one_more))).is_err(),
-                "{retained:?}: a group the door was not asked for must be refused"
-            );
-
-            let one_fewer: Vec<&str> = ids.iter().copied().skip(1).collect();
-            assert!(
-                validate_context(&retained, &signed(h(&one_fewer))).is_err(),
-                "{retained:?}: a dropped group must be refused, never quietly narrowed"
-            );
-
-            let mut swapped: Vec<&str> = ids.clone();
-            swapped[0] = "elsewhere";
-            assert!(
-                validate_context(&retained, &signed(h(&swapped))).is_err(),
-                "{retained:?}: a swapped group must be refused even though the count matches"
-            );
-
-            let repeated: Vec<&str> = ids.iter().copied().chain([ids[0]]).collect();
-            assert_eq!(
-                validate_context(&retained, &signed(h(&repeated))).err(),
-                Some(GroupContextError::RepeatedContext {
-                    repeated: one(ids[0])
-                }),
-                "{retained:?}: a repeated row is not a row the unsigned door could mint"
-            );
-        }
-
-        // The same bytes, two doors: legality is the DOOR's property, never
-        // the event's. This is the sentence the whole design turns on.
-        let both = signed(vec![
-            Tag::parse(["h", "a"]).unwrap(),
-            Tag::parse(["h", "b"]).unwrap(),
-        ]);
-        assert_eq!(validate_context(&many(["a", "b"]), &both), Ok(()));
-        assert_eq!(
-            validate_context(&one("a"), &both).err(),
-            Some(GroupContextError::MismatchedContext {
-                found: many(["a", "b"]),
-                expected: one("a"),
-            }),
-            "an identical event is legitimate through the door that named both rooms and \
-             refused through the door that named one -- no property of the bytes alone \
-             makes a multi-h write acceptable"
-        );
-    }
-
     /// A refusal reads as a sentence at either arity -- `group "x"` for one,
     /// `groups "x", "y"` for several -- so the message never leaks which
     /// internal shape produced it.
@@ -893,8 +756,9 @@ mod tests {
             single.contains("group \"photographers\"") && !single.contains("groups"),
             "{single}"
         );
-        let plural = GroupContextError::MissingContext {
-            expected: many(["a", "b"]),
+        let plural = GroupContextError::MismatchedContext {
+            found: many(["a", "b"]),
+            expected: one("a"),
         }
         .to_string();
         assert!(plural.contains("groups \"a\", \"b\""), "{plural}");
