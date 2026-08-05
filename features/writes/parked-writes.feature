@@ -159,6 +159,31 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       When I remove that entry from my publish queue
       Then my publish queue no longer holds that entry
 
+  Rule: A signature in flight is not a park, and the queue says which one it is
+
+    # A park and a round trip are both "not signed yet" and nothing else
+    # about them is alike. A signer holding the request ends on a fact that
+    # is already on its way -- the signer's answer. A key nobody has a
+    # signer for ends on a fact that may never come, which is why the app
+    # removing the entry is its only other exit. Telling a person about the
+    # second is the point of the enumeration door; telling them about the
+    # first is crying wolf on every healthy write.
+
+    # nmp:id=WRITES-PARKED-015
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer
+    # nmp:falsifier=Collapse in-flight signing onto the parked-signer state; every healthy write reads as stuck, and the app cannot find the writes whose only termination path is its own removal.
+    Scenario: A write whose signer is mid-round-trip is not reported as parked
+      # The defect a consumer hit building its own diagnostic: a write
+      # published milliseconds earlier, with its signer attached and working,
+      # was reported in exactly the state the docs say no clock ever ends.
+      Given a signer for my account has taken a write's signature request and not answered yet
+      And another write names a key no signer answers for
+      When I enumerate my publish queue
+      Then the entry whose signer holds the request reports the signature in flight for my account
+      And the entry naming the unheld key reports the write awaiting a signer for that key
+      And the two entries do not report the same signing state
+
   Rule: Exhausted knowledge naming zero relays is terminal, not a park
 
     # nmp:id=WRITES-PARKED-008
