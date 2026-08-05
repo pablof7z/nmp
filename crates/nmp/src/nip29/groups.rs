@@ -397,9 +397,11 @@ mod tests {
     }
 
     /// A caller-supplied `h` is refused at this arity too, and it is refused
-    /// BEFORE any intent exists -- where a caller error belongs.
+    /// BEFORE any intent exists -- where a caller error belongs. Named
+    /// distinctly from `Group`'s own one-group proof so a governed
+    /// `nmp:evidence` locator resolves to exactly one executable test.
     #[test]
-    fn a_caller_supplied_context_is_refused_before_any_intent_exists() {
+    fn a_caller_supplied_context_is_refused_before_any_several_group_intent_exists() {
         assert_eq!(
             rooms()
                 .intent(
