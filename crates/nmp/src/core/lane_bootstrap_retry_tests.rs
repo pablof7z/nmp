@@ -1,8 +1,8 @@
 //! Falsifiers for the way OUT of conservative lane retention (#1000).
 //!
-//! #988 made a failed `bootstrap_delivery_lanes` retain every route candidate
+//! #988 made a failed `bootstrap_publish_queue_lanes` retain every route candidate
 //! as `uncertain`, which is right, and then gave that retention no exit:
-//! `uncertain` is cleared only by a committed `DeliveryLane` for that exact
+//! `uncertain` is cleared only by a committed `PublishQueueLane` for that exact
 //! relay, and an intent whose bootstrap failed owns no lane rows for any
 //! other path to commit. These tests pin both halves — retention while the
 //! projection is genuinely unknown, AND release once the store answers.
@@ -39,7 +39,6 @@ fn publish_narrow<S: EventStore>(
             content: format!("bootstrap retry {created_at}"),
             created_at: Some(Timestamp::from(created_at)),
         }),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(Vec::from_iter(relays.to_vec())),
         identity: Identity::Active,
         correlation: None,
@@ -113,17 +112,15 @@ fn durable_worker_oracle<S: EventStore>(core: &EngineCore<S>) -> BTreeSet<RelayS
                 .cloned()
                 .map(|relay| RelaySessionKey::new(relay, access)),
         );
-        if let Some(intent_id) = pending.intent_id {
-            expected.extend(
-                core.resolver
-                    .store()
-                    .recover_delivery_lanes(intent_id)
-                    .expect("oracle lane recovery")
-                    .into_iter()
-                    .filter(|lane| !matches!(lane.state, DeliveryLaneState::Terminal { .. }))
-                    .map(|lane| RelaySessionKey::new(lane.key.relay, access)),
-            );
-        }
+        expected.extend(
+            core.resolver
+                .store()
+                .recover_publish_queue_lanes(pending.intent_id)
+                .expect("oracle lane recovery")
+                .into_iter()
+                .filter(|lane| !matches!(lane.state, PublishQueueLaneState::Terminal { .. }))
+                .map(|lane| RelaySessionKey::new(lane.key.relay, access)),
+        );
     }
     expected
 }
@@ -151,9 +148,15 @@ fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq:
     assert!(
         blocked.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(id, WriteStatus::PersistenceBlocked(_)) if *id == receipt
+            Effect::EmitReceipt(
+                id,
+                WriteFact::Relay {
+                    state: RelayState::Waiting(RelayWaiting::PersistenceStalled { .. }),
+                    ..
+                }
+            ) if *id == receipt
         )),
-        "the injected bootstrap failure must surface as PersistenceBlocked, got {blocked:?}"
+        "the injected bootstrap failure must surface as a persistence stall, got {blocked:?}"
     );
 
     // Retention first: while the projection is genuinely unknown BOTH route
@@ -237,7 +240,7 @@ fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
         publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 705);
     assert!(parked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::AwaitingAuth { .. }) if *id == receipt
+        Effect::EmitReceipt(id, WriteFact::Relay { state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. }) if *id == receipt
     )));
 
     let challenged = core.handle(EngineMsg::RelayFrame(
@@ -270,18 +273,18 @@ fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
     assert!(
         !denied.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(id, WriteStatus::AuthDenied { .. }) if *id == receipt
+            Effect::EmitReceipt(id, WriteFact::Relay { state: RelayState::AuthFailed { .. }, .. }) if *id == receipt
         )),
         "a terminal receipt fact must not precede its failed commit: {denied:?}"
     );
-    let intent = core.pending[&receipt].intent_id.unwrap();
+    let intent = core.pending[&receipt].intent_id;
     assert_eq!(
         core.resolver
             .store()
-            .recover_delivery_lanes(intent)
+            .recover_publish_queue_lanes(intent)
             .unwrap()[0]
             .state,
-        DeliveryLaneState::WaitingAuth
+        PublishQueueLaneState::WaitingAuth
     );
 }
 

@@ -12,11 +12,12 @@ import NMPFFI
 /// side of each case).
 ///
 /// NOTE: there is deliberately no `.invalidSignedEvent` case anymore -- a
-/// `WritePayload.signed` event that fails `nostr::Event::verify` is no
-/// longer rejected synchronously here (#52 Unit B: the guarantee moved to
-/// `nmp-engine`'s acceptance boundary so it holds for every entry point, not
-/// only this one). It surfaces on `Receipt.status` instead, as
-/// `WriteStatus.failed`, the first and only status delivered.
+/// `WritePayload.signed` event that fails `nostr::Event::verify` is rejected
+/// at `nmp-engine`'s acceptance boundary rather than here, so the guarantee
+/// holds for every entry point rather than only this one -- and because that
+/// instruction can never resolve, it surfaces as `.publishRefused` from
+/// `publish` itself rather than as a fact on a receipt stream nothing will
+/// ever add to.
 /// Receipt-correlation exhaustion is synchronous because no truthful
 /// `Receipt` or status stream can be created without an identity.
 ///
@@ -35,7 +36,17 @@ public enum NMPError: Error, Sendable, Equatable {
     case signerUnavailable(String)
     case signerRejected(String)
     case invalidSignerOutput(String)
-    case receiptCorrelationIdExhausted
+    /// `publish` refused the call outright: either NMP could not write
+    /// anything down, or the instruction could not resolve (no active
+    /// account, a signature that does not verify, an explicit identity
+    /// contradicting a signed payload's author, a reserved kind, an empty
+    /// explicit route). Nothing durable exists and there is no queue entry to
+    /// inspect.
+    ///
+    /// Everything else takes CUSTODY and fails in the queue where you can see
+    /// it -- including a stale replaceable base, which succeeds here and
+    /// arrives as `WriteOutcome.refused`.
+    case publishRefused(String)
     case storeOpenFailed(String)
     /// #489: `NmpEngineConfig.storePath` names a persistent store already
     /// owned by this or another process. No second database owner and no
@@ -180,7 +191,7 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .authCapabilityInstanceExhausted
         case .NoActiveSigner: self = .noActiveSigner
         case .InvalidSignRequest(let reason): self = .invalidSignRequest(reason)
-        case .ReceiptCorrelationIdExhausted: self = .receiptCorrelationIdExhausted
+        case .PublishRefused(let reason): self = .publishRefused(reason)
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .StoreAlreadyOpen(let path): self = .storeAlreadyOpen(path)
         case .StoreResetFailed(let reason): self = .storeResetFailed(reason)
@@ -273,8 +284,8 @@ extension NMPError: LocalizedError {
             "Signer rejected the request: \(reason)"
         case .invalidSignerOutput(let reason):
             "Invalid signer output: \(reason)"
-        case .receiptCorrelationIdExhausted:
-            "Receipt correlation ID namespace exhausted"
+        case .publishRefused(let reason):
+            reason
         case .storeOpenFailed(let reason):
             "Could not open store: \(reason)"
         case .storeAlreadyOpen(let path):

@@ -6,9 +6,7 @@
 //! the timestamp at acceptance, which is why this whole crate keeps its zero
 //! engine dependency without taking either as a parameter.
 
-use nmp_grammar::{
-    CorrelationToken, Durability, Identity, WriteIntent, WritePayload, WriteRouting,
-};
+use nmp_grammar::{CorrelationToken, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use crate::build::{compose_comment_reply, compose_top_level_comment};
 use crate::root::{CommentParent, CommentRoot};
@@ -32,7 +30,6 @@ pub fn comment_intent(
     };
     WriteIntent {
         payload: WritePayload::Event(builder),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation,
@@ -50,13 +47,12 @@ mod tests {
     }
 
     #[test]
-    fn comment_intent_is_a_builder_durable_auto() {
+    fn comment_intent_is_a_builder_on_the_auto_route() {
         let intent = comment_intent(&podcast_root(), CommentParent::Root, "hi".to_string(), None);
         assert!(matches!(
             &intent.payload,
             WritePayload::Event(builder) if builder.created_at.is_none()
         ));
-        assert_eq!(intent.durability, Durability::Durable);
         assert!(matches!(intent.routing, WriteRouting::Auto));
         assert_eq!(intent.identity, Identity::Active);
         assert!(intent.correlation.is_none());

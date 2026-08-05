@@ -584,15 +584,6 @@ pub struct FfiAcquisitionEvidence {
     pub shortfall: Vec<FfiShortfallFact>,
 }
 
-/// `nmp::Durability` mirror (a typed PROPERTY of a write, not a routing
-/// choice -- M0 amendment).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub enum FfiDurability {
-    Durable,
-    Ephemeral,
-    AtMostOnce,
-}
-
 /// `nmp::WriteRouting` mirror. BOTH words project, deliberately: `Auto`
 /// ("figure out how to route whatever I'm publishing") and `Explicit`
 /// ("use these exact relays and that is that").
@@ -677,9 +668,11 @@ pub struct FfiEventBuilder {
 /// `nmp-engine::core::EngineCore::on_publish`'s acceptance boundary (Unit
 /// A0/#56) instead, so the guarantee holds for every entry point, not only
 /// this one. A tampered `Signed` event still parses fine here and is
-/// rejected downstream, surfacing as `WriteStatus::Failed` on the receipt
-/// stream rather than a synchronous `FfiError`. The engine itself never
-/// re-signs, mutates a tag, or recomputes an id for this variant.
+/// rejected downstream, refusing the `publish` call as
+/// `FfiError::PublishRefused` -- an instruction that cannot resolve is a
+/// refusal, not a parked hope, so nothing is taken into custody. The engine
+/// itself never re-signs, mutates a tag, or recomputes an id for this
+/// variant.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWritePayload {
     Event {
@@ -706,8 +699,9 @@ pub enum FfiWritePayload {
 /// builder states none, so there is nothing for it to contradict); on a
 /// `Signed` payload it may only RESTATE the author already frozen in the
 /// bytes, and naming anybody else is a consent/author contradiction
-/// rejected at the engine's acceptance boundary as
-/// `FfiWriteStatus::Failed` -- no `Accepted` ever precedes it.
+/// rejected by `publish` ITSELF as
+/// [`FfiError::PublishRefused`](crate::convert::FfiError::PublishRefused) --
+/// nothing is taken into custody, so no receipt and no queue entry exist.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiIdentity {
     /// Whoever is the active account at acceptance time.
@@ -726,7 +720,7 @@ pub enum FfiIdentity {
     /// call.
     ///
     /// A key with no registered signer parks as
-    /// `FfiWriteStatus::AwaitingCapability` (retained, not terminated)
+    /// [`FfiSigningState::AwaitingSigner`] (retained, not terminated)
     /// until that capability attaches. Acceptance PINS the resolved key
     /// either way, so a later `set_active_account` cannot retarget the
     /// write.
@@ -737,7 +731,6 @@ pub enum FfiIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiWriteIntent {
     pub payload: FfiWritePayload,
-    pub durability: FfiDurability,
     pub routing: FfiWriteRouting,
     /// `nmp::WriteIntent::identity` mirror -- see [`FfiIdentity`].
     ///
@@ -964,108 +957,252 @@ pub enum FfiRetryCause {
     RelayError,
 }
 
-/// The receipt STREAM (`nmp::WriteStatus` mirror; ledger #9 — enqueue is
-/// not converged, the app's `NmpReceiptStream` may yield many of these per
-/// publish).
+/// `nmp::WriteFact` mirror: one fact about a write, delivered on its receipt
+/// stream.
+///
+/// The old flat shape mixed facts about the whole write with facts about one
+/// relay, which is why "is this terminal?" had no answer and every consumer
+/// hand-wrote its own taxonomy (#1237). Here the two live on different arms
+/// and [`Outcome`](FfiWriteFact::Outcome) is the only thing that ends
+/// anything — so a stream can never end in silence, and an app can always
+/// tell a finished write from a dropped subscription.
+///
+/// Acceptance is deliberately ABSENT: `publish` returning successfully IS
+/// acceptance, so an app never has to ask the stream whether its write was
+/// taken. Settlement is INSPECTED, never AWAITED.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
-pub enum FfiWriteStatus {
-    Accepted,
-    Cancelled,
-    Superseded,
-    /// `nmp::WriteStatus::AwaitingCapability` mirror (#47 Unit B): `pubkey`
-    /// (64-char hex, the module-wide convention) is the exact identity
-    /// FROZEN at acceptance that no registered signer currently answers
-    /// for -- the same pubkey [`FfiIdentity::Explicit`] pinned, or the
-    /// account that was active at publish time under
-    /// [`FfiIdentity::Active`]. Retained, not
-    /// terminal: this fact re-arrives verbatim on restart replay, and only
-    /// registering a signer for THIS exact pubkey resumes the write --
-    /// never a different (even currently-active) identity.
-    AwaitingCapability {
+pub enum FfiWriteFact {
+    Signing {
+        state: FfiSigningState,
+    },
+    Relay {
+        relay: String,
+        state: FfiRelayState,
+    },
+    /// The relays this write is INTENDED for, and whether resolution can
+    /// still change its mind. `complete` flips on settled RESOLUTION, never
+    /// on delivery, so `complete: true` with nothing published yet is an
+    /// ordinary state. This is the settlement denominator.
+    ///
+    /// `complete: false` with an empty set is a write still learning where it
+    /// goes; it parks indefinitely and NOTHING expires it. `complete: true`
+    /// with an empty set is [`FfiWriteOutcome::NoDestination`].
+    Destinations {
+        relays: Vec<String>,
+        complete: bool,
+    },
+    Outcome {
+        outcome: FfiWriteOutcome,
+    },
+}
+
+/// `nmp::SigningState` mirror: the signing state of the WHOLE write — one
+/// signature, one author, one answer.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiSigningState {
+    /// No registered signer answers for `pubkey` (64-char hex) — the exact
+    /// identity FROZEN at acceptance, never whoever is active now. Re-armed
+    /// only by attaching a signer for THIS key.
+    ///
+    /// **No clock ever ends this.** A device whose signer is simply not
+    /// plugged in yet is not a device whose write failed; removing the queue
+    /// entry is the only other exit.
+    AwaitingSigner {
         pubkey: String,
     },
     Signed {
         event_id: String,
     },
-    /// `nmp::WriteStatus::AwaitingRoute` mirror: routing has not produced a
-    /// single relay yet, and `detail` says what it is waiting for. Retained,
-    /// NOT terminal, and replayed verbatim on receipt reattachment, so a
-    /// route parked for a month is still visible with its reason. Nothing
-    /// expires it; explicit cancellation is the one way out.
-    ///
-    /// An app maps this (and `Routed { complete: false }`) to "determining
-    /// destinations".
-    AwaitingRoute {
-        detail: String,
+    /// The signer answered and said no. Terminal for the whole write.
+    Refused {
+        reason: String,
     },
-    /// `nmp::WriteStatus::Routed` mirror. `relays` is what resolution has
-    /// named SO FAR; `complete` says whether it can ever grow again.
-    ///
-    /// The two are separate axes from delivery: `complete: true` with
-    /// nothing delivered is "sending 0 of n", and `complete: false` with
-    /// some relays already acked is an ordinary state while routing is
-    /// still open. Only `complete: true` plus every relay terminal means
-    /// "sent".
-    Routed {
-        relays: Vec<String>,
-        complete: bool,
+}
+
+/// `nmp::RelayState` mirror: what is true at ONE relay.
+///
+/// `Published`, `Rejected`, `AuthFailed` and `GaveUp` are terminal for that
+/// relay; `Waiting` and `Sent` are not.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiRelayState {
+    Waiting {
+        waiting: FfiRelayWaiting,
     },
-    AwaitingRelay {
-        relay: String,
+    /// Transport proved socket write + flush. Not an ack, and not terminal.
+    Sent {
+        attempt: u64,
+        written_at: u64,
     },
-    AwaitingAuth {
-        relay: String,
+    Published,
+    /// The relay authenticated the identity and refused THIS EVENT. The
+    /// repair is to the event.
+    Rejected {
+        reason: String,
     },
-    AuthDenied {
-        relay: String,
+    /// The write could not be authenticated HERE. Deliberately NOT folded
+    /// into `Rejected`: `source` keeps an app's own decision not to
+    /// authenticate from being reported to a user as a relay refusing them.
+    AuthFailed {
         pubkey: String,
         source: FfiAuthDenialSource,
         reason: String,
     },
-    RetryEligible {
-        relay: String,
+    /// The attempt ceiling was reached at this relay. Terminal HERE and
+    /// nowhere else: three relays published and one given up on is a success
+    /// with a footnote, not a failed write.
+    GaveUp,
+}
+
+/// `nmp::RelayWaiting` mirror: why a relay lane is not attempting right now.
+/// Every arm is a fact about the lane; none of them is a deadline.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiRelayWaiting {
+    /// Offline time consumes no attempt ordinal, so being offline can never
+    /// spend the give-up ceiling.
+    NotConnected,
+    NeedsAuth,
+    /// The last attempt failed in a way that permits another one, and
+    /// `cause`/`detail` say WHY — "we will try again" and "we will try again
+    /// because the relay rate-limited us" are different messages and only the
+    /// second one can be acted on.
+    BackingOff {
         attempt: u64,
         eligible_at: u64,
         cause: FfiRetryCause,
         detail: Option<String>,
     },
-    HandoffAmbiguous {
-        relay: String,
-        attempt: u64,
-        observed_at: u64,
+    /// The lane is owned and nonterminal, but a durable fact about it could
+    /// not be committed — the local disk is refusing writes. No wire EVENT
+    /// was emitted.
+    ///
+    /// Also LATCHED onto the queue entry
+    /// ([`FfiPublishQueueEntry::persistence_fault`]) and never cleared by a
+    /// later ack: an operator must not lose the only signal that the disk is
+    /// failing because a relay succeeded afterwards.
+    PersistenceStalled {
+        detail: String,
     },
-    Sent {
-        relay: String,
-        attempt: u64,
-        written_at: u64,
-    },
-    Acked {
-        relay: String,
-    },
-    Rejected {
-        relay: String,
-        reason: String,
-    },
-    GaveUp {
-        relay: String,
-    },
-    PersistenceBlocked {
-        relay: String,
-    },
-    RoutePersistenceBlocked {
-        relay: String,
-    },
-    OutcomeUnknown {
-        relay: String,
-    },
-    ReplaceableConflict {
+}
+
+/// `nmp::WriteOutcome` mirror: the whole-write terminal. Exactly one of these
+/// ends every receipt stream.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiWriteOutcome {
+    /// The destination set is CLOSED and every relay in it is terminal. What
+    /// happened at each is the per-relay facts; this says only that no more
+    /// are coming.
+    Settled,
+    /// Routing finished — knowledge is exhausted — and named zero relays.
+    /// Terminal: there is nowhere to publish. Distinct from a route still
+    /// resolving, which parks forever.
+    NoDestination,
+    /// The write ended without going anywhere.
+    NotSent { reason: FfiNotSentReason },
+    /// The store answered the acceptance instruction with a semantic no. The
+    /// write is in custody as a permanently-failed entry: one row, payload
+    /// intact, readable and removable through the queue door.
+    Refused { reason: FfiRefuseReason },
+}
+
+/// `nmp::NotSentReason` mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiNotSentReason {
+    Cancelled,
+    /// A newer accepted write won the same replaceable coordinate before this
+    /// one started any wire attempt. Not a failure — for an app renewing
+    /// presence it is the steady state.
+    Superseded,
+}
+
+/// `nmp_store::RefuseReason` mirror: why the acceptance door said no.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiRefuseReason {
+    AlreadyExpired,
+    Tombstoned,
+    ReplaceableBaseOnRegularEvent,
+    /// A whole-value replacement lost its compare-and-swap.
+    ///
+    /// BOTH ids are kept, and that is what makes the failure recoverable
+    /// without the user: an app fetches `actual`, reapplies the change and
+    /// resubmits silently. Reduced to a string it could only tell them to
+    /// redo it.
+    ReplaceableBaseChanged {
         expected: Option<String>,
         actual: Option<String>,
     },
-    Failed {
+}
+
+/// `nmp::PublishQueueEntry` mirror: one write in the queue, as the app reads
+/// it back (#1039).
+///
+/// Enumerating the queue answers "what have I got outstanding, and what went
+/// wrong with it" without having held a receipt stream open since acceptance.
+/// It is INSPECTION: nothing here blocks and nothing waits for settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiPublishQueueEntry {
+    pub receipt_id: u64,
+    /// The frozen event id, 64-char hex — the write's identity from
+    /// acceptance onward, unchanged by signing.
+    pub event_id: String,
+    /// The identity frozen at acceptance, 64-char hex. Never re-resolved.
+    pub pubkey: String,
+    pub accepted_at: u64,
+    pub signing: FfiSigningState,
+    pub relays: Vec<String>,
+    pub route_complete: bool,
+    pub relay_states: Vec<FfiQueueRelayState>,
+    /// `None` while the write is still in progress.
+    pub outcome: Option<FfiWriteOutcome>,
+    /// LATCHED. Set the first time local persistence refused a durable fact
+    /// for this write, and never cleared by a later success.
+    pub persistence_fault: Option<String>,
+}
+
+/// One `(relay, state)` pair on a [`FfiPublishQueueEntry`]. A record rather
+/// than a map because UniFFI dictionaries key only on primitives and the
+/// relay URL is the caller-meaningful half.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiQueueRelayState {
+    pub relay: String,
+    pub state: FfiRelayState,
+}
+
+/// Typed refusal from the queue-entry removal door (#1039).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiRemoveQueueEntryError {
+    UnknownReceipt {
+        receipt_id: u64,
+    },
+    /// The write still owns open delivery work. Cancel it first; removal is
+    /// for entries nothing is going to move.
+    StillActive {
+        receipt_id: u64,
+    },
+    PersistenceFailed {
+        receipt_id: u64,
         reason: String,
     },
+    EngineClosed,
 }
+
+impl std::fmt::Display for FfiRemoveQueueEntryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownReceipt { receipt_id } => write!(f, "unknown receipt {receipt_id}"),
+            Self::StillActive { receipt_id } => write!(
+                f,
+                "receipt {receipt_id} still owns open delivery work; cancel it first"
+            ),
+            Self::PersistenceFailed { receipt_id, reason } => write!(
+                f,
+                "could not remove queue entry for receipt {receipt_id}: {reason}"
+            ),
+            Self::EngineClosed => write!(f, "engine already shut down"),
+        }
+    }
+}
+
+impl std::error::Error for FfiRemoveQueueEntryError {}
 
 /// Typed refusal from explicit pre-signature write cancellation. The current
 /// receipt fact survives intact when cancellation is no longer legal.
@@ -1076,12 +1213,28 @@ pub enum FfiCancelWriteOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiCancelWriteError {
-    UnknownReceipt { receipt_id: u64 },
-    AlreadySigned { receipt_id: u64, event_id: String },
-    AlreadyCompensated { receipt_id: u64 },
-    AlreadySuperseded { receipt_id: u64 },
-    AlreadyAbandoned { receipt_id: u64 },
-    PersistenceFailed { receipt_id: u64, reason: String },
+    UnknownReceipt {
+        receipt_id: u64,
+    },
+    AlreadySigned {
+        receipt_id: u64,
+        event_id: String,
+    },
+    AlreadyCompensated {
+        receipt_id: u64,
+    },
+    AlreadySuperseded {
+        receipt_id: u64,
+    },
+    /// The write was refused at acceptance and is already a permanently
+    /// failed queue entry. There is nothing to cancel; remove it instead.
+    AlreadyRefused {
+        receipt_id: u64,
+    },
+    PersistenceFailed {
+        receipt_id: u64,
+        reason: String,
+    },
     EngineClosed,
 }
 
@@ -1099,8 +1252,8 @@ impl std::fmt::Display for FfiCancelWriteError {
             Self::AlreadySuperseded { receipt_id } => {
                 write!(f, "receipt {receipt_id} was superseded by a newer write")
             }
-            Self::AlreadyAbandoned { receipt_id } => {
-                write!(f, "receipt {receipt_id} was abandoned after restart")
+            Self::AlreadyRefused { receipt_id } => {
+                write!(f, "receipt {receipt_id} was refused at acceptance")
             }
             Self::PersistenceFailed { receipt_id, reason } => write!(
                 f,
@@ -1115,7 +1268,7 @@ impl std::error::Error for FfiCancelWriteError {}
 
 /// Result of looking up a stable retained receipt id. The `Attached` variant
 /// carries the pull-based [`crate::facade::NmpReceiptStream`] that traverses
-/// durable `WriteStatus` facts in finite pages and streams onward (#680).
+/// durable `WriteFact` facts in finite pages and streams onward (#680).
 #[derive(uniffi::Enum)]
 pub enum FfiReceiptReattachment {
     Attached {

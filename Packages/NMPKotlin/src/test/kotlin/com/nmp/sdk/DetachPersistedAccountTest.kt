@@ -191,12 +191,16 @@ class DetachPersistedAccountTest {
                             content = "cached before detach",
                             createdAt = 1_723_456_999uL,
                         ),
-                        durability = Durability.Durable,
                         routing = WriteRouting.Auto,
                     ),
                 )
-                val accepted = receipt.status.first { it == WriteStatus.Accepted }
-                assertEquals(WriteStatus.Accepted, accepted)
+                // Acceptance is `publish` returning -- no stream item says it.
+                // What proves the write was taken into custody before the
+                // detach is the queue entry it now owns.
+                assertEquals(
+                    listOf(receipt.id),
+                    seed.publishQueue().map { it.receiptId },
+                )
             }
 
             NMPEngine(config, store).use { restored ->

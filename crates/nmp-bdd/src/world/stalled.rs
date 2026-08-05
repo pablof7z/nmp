@@ -9,7 +9,7 @@
 //! thing every other observable in this world reaches through a receipt.
 
 use nmp::mechanism::core::{DiagnosticsSnapshot, StalledWrite};
-use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_router::RelayUrl;
 
 use super::budgets::EVENTUALLY;
@@ -54,8 +54,14 @@ impl NmpWorld {
     pub async fn publish_and_await_signature(&mut self, text: &str) {
         self.publish_note(text).await;
         let signed = self.receipt_eventually(|seen| {
-            seen.iter()
-                .any(|status| matches!(status, nmp::mechanism::delivery::WriteStatus::Signed(_)))
+            seen.iter().any(|status| {
+                matches!(
+                    status,
+                    nmp::mechanism::publish_queue::WriteFact::Signing(
+                        nmp::mechanism::publish_queue::SigningState::Signed { .. }
+                    )
+                )
+            })
         });
         assert!(
             signed,
@@ -72,19 +78,13 @@ impl NmpWorld {
             .expect("nmp-bdd: publishing a note needs a logged-in account");
         let _ = self.person(&me);
         self.snapshot_relay_contacts();
-        let rx = self
-            .handle()
-            .publish(WriteIntent {
-                payload: WritePayload::Event(
-                    EventBuilder::new(nostr::Kind::TextNote).content(text),
-                ),
-                durability: Durability::Durable,
-                routing: WriteRouting::Explicit(self.told_route.clone()),
-                identity: Identity::Active,
-                correlation: None,
-            })
-            .expect("BDD receipt correlation namespace must be available");
-        self.receipts.push(ReceiptState::new(rx));
+        let result = self.handle().publish(WriteIntent {
+            payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
+            routing: WriteRouting::Explicit(self.told_route.clone()),
+            identity: Identity::Active,
+            correlation: None,
+        });
+        self.receipts.push(ReceiptState::from_publish(result));
     }
 
     /// `When I read diagnostics` -- bounded-wait until the snapshot has
@@ -183,7 +183,7 @@ impl NmpWorld {
     /// construction.
     pub fn receipt_statuses_after_settling(
         &mut self,
-    ) -> Vec<nmp::mechanism::delivery::WriteStatus> {
+    ) -> Vec<nmp::mechanism::publish_queue::WriteFact> {
         let _ = self.receipt_never(|_| false);
         self.receipt_statuses()
     }

@@ -145,11 +145,9 @@ final class FilterBuilderTests: XCTestCase {
                 content: "hello from NMP",
                 createdAt: 1_700_000_000
             ),
-            durability: .durable,
             routing: .auto
         )
         let ffi = intent.toFfi()
-        XCTAssertEqual(ffi.durability, .durable)
         XCTAssertEqual(ffi.routing, .auto)
         guard case .event(let builder) = ffi.payload else {
             return XCTFail("expected a builder payload")
@@ -173,7 +171,6 @@ final class FilterBuilderTests: XCTestCase {
                 content: "presigned",
                 sig: String(repeating: "d", count: 128)
             ),
-            durability: .durable,
             routing: .auto
         )
         let ffi = intent.toFfi()
@@ -198,7 +195,6 @@ final class FilterBuilderTests: XCTestCase {
                 content: "as the named identity",
                 createdAt: 1_700_000_000
             ),
-            durability: .durable,
             routing: .auto,
             identity: .explicit(pubkey: named)
         )
@@ -216,7 +212,6 @@ final class FilterBuilderTests: XCTestCase {
                 content: "active-account default",
                 createdAt: 1_700_000_000
             ),
-            durability: .durable,
             routing: .auto
         )
         XCTAssertEqual(intent.identity, .active)
@@ -234,7 +229,6 @@ final class FilterBuilderTests: XCTestCase {
                         createdAt: 42
                     )
                 ),
-                durability: .atMostOnce,
                 routing: .auto,
                 identity: .explicit(pubkey: String(repeating: "a", count: 64)),
                 correlation: "correlation-42"
@@ -249,7 +243,6 @@ final class FilterBuilderTests: XCTestCase {
                 createdAt: 42
             )
         )
-        XCTAssertEqual(composed.durability, .atMostOnce)
         XCTAssertEqual(composed.routing, .auto)
         XCTAssertEqual(composed.identity, .explicit(pubkey: String(repeating: "a", count: 64)))
         XCTAssertEqual(composed.correlation, "correlation-42")
@@ -265,7 +258,6 @@ final class FilterBuilderTests: XCTestCase {
                     content: "signed",
                     sig: String(repeating: "e", count: 128)
                 ),
-                durability: .ephemeral,
                 routing: .auto,
                 identity: .active,
                 correlation: nil
@@ -283,12 +275,9 @@ final class FilterBuilderTests: XCTestCase {
                 sig: String(repeating: "e", count: 128)
             )
         )
-        XCTAssertEqual(signed.durability, .ephemeral)
         XCTAssertEqual(signed.routing, .auto)
         XCTAssertEqual(signed.identity, .active)
         XCTAssertNil(signed.correlation)
-
-        XCTAssertEqual(Durability(FfiDurability.durable), .durable)
     }
 
     /// #972: a Swift app can name the exact relays a write goes to -- the
@@ -298,7 +287,6 @@ final class FilterBuilderTests: XCTestCase {
         let typed = ["wss://user-typed-relay.example", "wss://second.example"]
         let intent = WriteIntent(
             payload: .event(kind: 1, content: "for the archive", createdAt: 42),
-            durability: .durable,
             routing: .explicit(relays: typed)
         )
         XCTAssertEqual(intent.toFfi().routing, .explicit(relays: typed))
@@ -309,8 +297,7 @@ final class FilterBuilderTests: XCTestCase {
                     builder: FfiEventBuilder(
                         kind: 1, tags: [], content: "for the archive", createdAt: 42)
                 ),
-                durability: .durable,
-                routing: .explicit(relays: typed),
+                    routing: .explicit(relays: typed),
                 identity: .active,
                 correlation: nil
             )

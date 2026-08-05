@@ -692,7 +692,7 @@ pub enum RedbStoreOpenError {
     /// before a `RedbStore` is exposed and before a single byte is mutated.
     /// Nothing was migrated, adopted, aliased, drained, or reset. The caller
     /// must discard and recreate the store to continue. Relay-backed cache
-    /// rows can be reacquired; durable delivery state cannot, so accepted but
+    /// rows can be reacquired; publish queue state cannot, so accepted but
     /// unpublished writes and their receipts, correlation tokens, route
     /// revisions, and attempt evidence are permanently lost
     /// (`docs/internals/conventions/schema-epoch-discard.md`).
@@ -811,7 +811,7 @@ impl std::fmt::Display for RedbStoreOpenError {
                     "persistent store {} is schema epoch {found}, not the one supported epoch {expected}; \
                      it was not migrated, adopted, drained, or reset; discard and recreate this \
                      store to continue; NMP can reacquire the relay-backed read cache, but the \
-                     durable delivery state (accepted but unpublished writes, receipts, correlation \
+                     publish queue state (accepted but unpublished writes, receipts, correlation \
                      tokens, route revisions, and attempt evidence) will be permanently lost",
                     path.display()
                 ),
@@ -820,7 +820,7 @@ impl std::fmt::Display for RedbStoreOpenError {
                     "persistent store {} predates the schema marker and is not the one supported \
                      epoch {expected}; it was not migrated, adopted, drained, or reset; discard and \
                      recreate this store to continue; NMP can reacquire the relay-backed read cache, \
-                     but the durable delivery state (accepted but unpublished writes, receipts, \
+                     but the publish queue state (accepted but unpublished writes, receipts, \
                      correlation tokens, route revisions, and attempt evidence) will be permanently \
                      lost",
                     path.display()

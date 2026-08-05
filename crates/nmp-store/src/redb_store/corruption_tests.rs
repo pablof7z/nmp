@@ -29,10 +29,7 @@ use tempfile::TempDir;
 
 use super::postings::Family;
 use super::*;
-use crate::{
-    sentinel_signature, AcceptWrite, DurabilityOutcome, IntentSigState, PersistenceFault,
-    WriteDurability,
-};
+use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, IntentSigState, PersistenceFault};
 
 const RELAY: &str = "wss://corruption-proof.example";
 
@@ -75,7 +72,6 @@ fn accept_of(frozen: Event) -> AcceptWrite {
         monotonic_stamp: false,
         expected_pubkey,
         signing_identity_ref: "local".to_owned(),
-        durability: WriteDurability::Durable,
         routing: "auto".to_owned(),
         sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(1_000),
@@ -254,19 +250,24 @@ fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
             )
             .expect("record two routed relays");
         store
-            .bootstrap_delivery_lanes(intent)
+            .bootstrap_publish_queue_lanes(intent)
             .expect("bootstrap initial lanes");
         intent
     };
 
-    let storage_key = first_fixed_key(&fixture, DELIVERY_LANES);
-    rewrite_fixed_row(&fixture, DELIVERY_LANES, &storage_key, b"NMPL-truncated");
-    let before = fixed_table_digest(&fixture, DELIVERY_LANES);
+    let storage_key = first_fixed_key(&fixture, PUBLISH_QUEUE_LANES);
+    rewrite_fixed_row(
+        &fixture,
+        PUBLISH_QUEUE_LANES,
+        &storage_key,
+        b"NMPL-truncated",
+    );
+    let before = fixed_table_digest(&fixture, PUBLISH_QUEUE_LANES);
 
     for reopen in 1..=2 {
         let mut store = fixture.open();
-        let error = assert_typed_refusal("bootstrap_delivery_lanes", || {
-            store.bootstrap_delivery_lanes(intent)
+        let error = assert_typed_refusal("bootstrap_publish_queue_lanes", || {
+            store.bootstrap_publish_queue_lanes(intent)
         });
         assert!(
             error.message().contains("lane"),
@@ -274,7 +275,7 @@ fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
         );
         drop(store);
         assert_eq!(
-            fixed_table_digest(&fixture, DELIVERY_LANES),
+            fixed_table_digest(&fixture, PUBLISH_QUEUE_LANES),
             before,
             "reopen {reopen}: Absent must mean no valid lane was committed"
         );
@@ -283,7 +284,7 @@ fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
 
 /// The highest-value single conversion in #790: boot-time journal replay.
 #[test]
-fn recover_delivery_reports_a_corrupt_intent_row() {
+fn recover_publish_queue_reports_a_corrupt_intent_row() {
     let fixture = Fixture::new();
     let keys = keys();
     let signed = note(&keys, "corrupt-intent", 1_000);
@@ -293,11 +294,11 @@ fn recover_delivery_reports_a_corrupt_intent_row() {
             .accept_write(accept_of(frozen_from(&signed)))
             .expect("accept_write");
     }
-    let key = first_fixed_key(&fixture, DELIVERY_INTENTS);
-    rewrite_fixed_row(&fixture, DELIVERY_INTENTS, &key, b"NMPI-truncated");
+    let key = first_fixed_key(&fixture, PUBLISH_QUEUE_INTENTS);
+    rewrite_fixed_row(&fixture, PUBLISH_QUEUE_INTENTS, &key, b"NMPI-truncated");
 
     let store = fixture.open();
-    let error = assert_typed_refusal("recover_delivery", || store.recover_delivery());
+    let error = assert_typed_refusal("recover_publish_queue", || store.recover_publish_queue());
     assert!(
         error.message().contains("intent"),
         "the error must name the row it failed on: {error}"
@@ -307,7 +308,7 @@ fn recover_delivery_reports_a_corrupt_intent_row() {
 /// The journal row itself decodes; the frozen event it carries does not.
 /// Distinct from the row-level failure above and separately reachable.
 #[test]
-fn recover_delivery_reports_a_corrupt_frozen_event() {
+fn recover_publish_queue_reports_a_corrupt_frozen_event() {
     let fixture = Fixture::new();
     let keys = keys();
     let signed = note(&keys, "corrupt-frozen", 1_000);
@@ -317,15 +318,15 @@ fn recover_delivery_reports_a_corrupt_frozen_event() {
             .accept_write(accept_of(frozen_from(&signed)))
             .expect("accept_write");
     }
-    let key = first_fixed_key(&fixture, DELIVERY_INTENTS);
-    let intact = fixed_table_digest(&fixture, DELIVERY_INTENTS);
+    let key = first_fixed_key(&fixture, PUBLISH_QUEUE_INTENTS);
+    let intact = fixed_table_digest(&fixture, PUBLISH_QUEUE_INTENTS);
     let mut record = intact[0].1.clone();
     // Intent envelope (8) + receipt id (8) + event byte length (4).
     record[20] ^= 0xff;
-    rewrite_fixed_row(&fixture, DELIVERY_INTENTS, &key, &record);
+    rewrite_fixed_row(&fixture, PUBLISH_QUEUE_INTENTS, &key, &record);
 
     let store = fixture.open();
-    let error = assert_typed_refusal("recover_delivery", || store.recover_delivery());
+    let error = assert_typed_refusal("recover_publish_queue", || store.recover_publish_queue());
     assert!(
         error.message().contains("intent"),
         "the error must name the frozen event: {error}"
@@ -335,11 +336,13 @@ fn recover_delivery_reports_a_corrupt_frozen_event() {
 /// An empty journal and an unreadable journal are different facts, and the
 /// engine's boot path branches on exactly this distinction.
 #[test]
-fn an_empty_delivery_store_stays_distinguishable_from_an_unreadable_one() {
+fn an_empty_publish_queue_store_stays_distinguishable_from_an_unreadable_one() {
     let fixture = Fixture::new();
     let store = fixture.open();
     assert_eq!(
-        store.recover_delivery().expect("healthy recover_delivery"),
+        store
+            .recover_publish_queue()
+            .expect("healthy recover_publish_queue"),
         Vec::new()
     );
 }
@@ -347,7 +350,7 @@ fn an_empty_delivery_store_stays_distinguishable_from_an_unreadable_one() {
 /// The displaced predecessor snapshot is a separate binary value with its
 /// own decoder; corrupting it must not be reported as "nothing displaced".
 #[test]
-fn recover_delivery_reports_a_corrupt_displaced_snapshot() {
+fn recover_publish_queue_reports_a_corrupt_displaced_snapshot() {
     let fixture = Fixture::new();
     let keys = keys();
     let first = EventBuilder::new(Kind::Metadata, "first")
@@ -372,7 +375,7 @@ fn recover_delivery_reports_a_corrupt_displaced_snapshot() {
         let db = fixture.raw();
         let read_txn = db.begin_read().expect("raw begin_read");
         let open = read_txn
-            .open_table(DELIVERY_DISPLACED)
+            .open_table(PUBLISH_QUEUE_DISPLACED)
             .expect("raw open displaced");
         let (key, _value) = open
             .first()
@@ -385,7 +388,7 @@ fn recover_delivery_reports_a_corrupt_displaced_snapshot() {
         let write_txn = db.begin_write().expect("raw begin_write");
         {
             let mut open = write_txn
-                .open_table(DELIVERY_DISPLACED)
+                .open_table(PUBLISH_QUEUE_DISPLACED)
                 .expect("raw open displaced");
             open.insert(&displaced_key, b"NMPC-truncated".as_slice())
                 .expect("raw insert");
@@ -394,7 +397,7 @@ fn recover_delivery_reports_a_corrupt_displaced_snapshot() {
     }
 
     let store = fixture.open();
-    let error = assert_typed_refusal("recover_delivery", || store.recover_delivery());
+    let error = assert_typed_refusal("recover_publish_queue", || store.recover_publish_queue());
     assert!(
         error.message().contains("displaced event"),
         "the error must name the displaced snapshot: {error}"
@@ -417,8 +420,8 @@ fn reattach_receipt_reports_a_corrupt_receipt_row() {
             .journaled_receipt_id()
             .expect("accepted write journals a receipt")
     };
-    let key = first_fixed_key(&fixture, DELIVERY_RECEIPTS);
-    rewrite_fixed_row(&fixture, DELIVERY_RECEIPTS, &key, b"NMPR-truncated");
+    let key = first_fixed_key(&fixture, PUBLISH_QUEUE_RECEIPTS);
+    rewrite_fixed_row(&fixture, PUBLISH_QUEUE_RECEIPTS, &key, b"NMPR-truncated");
 
     let store = fixture.open();
     assert_typed_refusal("reattach_receipt", || store.reattach_receipt(receipt_id));
@@ -452,9 +455,14 @@ fn promote_reports_a_corrupt_kind5_claim_record() {
             .journaled_intent_id()
             .expect("accepted deletion journals an intent")
     };
-    let key = first_fixed_key(&fixture, DELIVERY_KIND5_CLAIMS);
-    rewrite_fixed_row(&fixture, DELIVERY_KIND5_CLAIMS, &key, b"NMPK-truncated");
-    let before = fixed_table_digest(&fixture, DELIVERY_INTENTS);
+    let key = first_fixed_key(&fixture, PUBLISH_QUEUE_KIND5_CLAIMS);
+    rewrite_fixed_row(
+        &fixture,
+        PUBLISH_QUEUE_KIND5_CLAIMS,
+        &key,
+        b"NMPK-truncated",
+    );
+    let before = fixed_table_digest(&fixture, PUBLISH_QUEUE_INTENTS);
 
     {
         let mut store = fixture.open();
@@ -463,7 +471,7 @@ fn promote_reports_a_corrupt_kind5_claim_record() {
         });
     }
     assert_eq!(
-        fixed_table_digest(&fixture, DELIVERY_INTENTS),
+        fixed_table_digest(&fixture, PUBLISH_QUEUE_INTENTS),
         before,
         "a refused promotion commits none of its own journal transition"
     );
@@ -488,8 +496,13 @@ fn accept_reports_a_corrupt_suppression_claimant_set() {
             .accept_write(accept_of(frozen_from(&deletion)))
             .expect("accept deletion");
     }
-    let key = first_fixed_key(&fixture, DELIVERY_SUPPRESS_BY_ID);
-    rewrite_fixed_row(&fixture, DELIVERY_SUPPRESS_BY_ID, &key, b"NMPS-truncated");
+    let key = first_fixed_key(&fixture, PUBLISH_QUEUE_SUPPRESS_BY_ID);
+    rewrite_fixed_row(
+        &fixture,
+        PUBLISH_QUEUE_SUPPRESS_BY_ID,
+        &key,
+        b"NMPS-truncated",
+    );
 
     let mut store = fixture.open();
     let second = EventBuilder::new(Kind::EventDeletion, "")
@@ -957,8 +970,8 @@ fn a_healthy_store_answers_every_hardened_door() {
         events.len()
     );
     assert!(store
-        .recover_delivery()
-        .expect("recover_delivery")
+        .recover_publish_queue()
+        .expect("recover_publish_queue")
         .is_empty());
     assert!(
         store

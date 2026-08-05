@@ -27,7 +27,7 @@
 
 use nostr::Tag;
 
-use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_router::RelayUrl;
 
 use nmp_test_support::relays::ScriptedRelay;
@@ -375,7 +375,6 @@ impl NmpWorld {
         }
         self.publish_intent(WriteIntent {
             payload: WritePayload::Event(builder),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,

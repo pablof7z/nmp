@@ -3,20 +3,23 @@
 //! reducer/store and opening the database again.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 use nmp::mechanism::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::{
+    NotSentReason, RelayState, RelayWaiting, SigningState, WriteFact, WriteOutcome,
+};
 use nmp_grammar::{
-    AccessContext, Durability, EventBuilder as NmpEventBuilder, Identity, RelaySessionKey,
-    WriteIntent, WritePayload, WriteRouting,
+    AccessContext, EventBuilder as NmpEventBuilder, Identity, RelaySessionKey, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, DeliveryAttemptOutcome, DeliveryTerminalOutcome, EventStore,
-    IntentSigState, RedbStore, SigState, WriteDurability,
+    sentinel_signature, AcceptWrite, EventStore, IntentSigState, PublishQueueAttemptOutcome,
+    PublishQueueTerminalOutcome, RedbStore, SigState,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{
@@ -24,7 +27,7 @@ use nostr::{
 };
 use redb::{Database, ReadableTable, TableDefinition};
 
-fn corrupt_first_delivery_row<const N: usize>(
+fn corrupt_first_publish_queue_row<const N: usize>(
     path: &std::path::Path,
     table_name: &'static str,
     prefix: &[u8],
@@ -42,7 +45,7 @@ fn corrupt_first_delivery_row<const N: usize>(
                 (*key.value(), value.value().to_vec())
             })
             .find(|(key, _)| key.as_slice().starts_with(prefix))
-            .expect("matching durable-delivery row");
+            .expect("matching publish-queue row");
         assert!(value.len() >= 5, "versioned delivery envelope");
         value[4] = 200;
         table.insert(&key, value.as_slice()).unwrap();
@@ -50,7 +53,7 @@ fn corrupt_first_delivery_row<const N: usize>(
     tx.commit().unwrap();
 }
 
-fn insert_corrupt_delivery_row<const N: usize>(
+fn insert_corrupt_publish_queue_row<const N: usize>(
     path: &std::path::Path,
     table_name: &'static str,
     key: &[u8; N],
@@ -71,7 +74,7 @@ fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::EmitReceipt(id, WriteStatus::Accepted) => Some(*id),
+            Effect::WriteAccepted(id) => Some(*id),
             _ => None,
         })
         .expect("accepted receipt")
@@ -205,7 +208,6 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         authenticate(&mut core, handle, &relay_session, &keys);
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event.clone()),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -243,7 +245,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     assert!(
         !recovery
             .iter()
-            .any(|effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Accepted))),
+            .any(|effect| matches!(effect, Effect::WriteAccepted(_))),
         "boot recovery must not accept the write a second time"
     );
 
@@ -256,7 +258,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         !first
             .facts
             .iter()
-            .any(|s| matches!(s, WriteStatus::Sent { relay: r, .. } if r == &relay)),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. } } if r == &relay)),
         "a recovered Started attempt predates transport Written and cannot replay as Sent"
     );
     let relay_handle = RelayHandle {
@@ -301,7 +303,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(receipt, WriteStatus::Acked(acked_relay))
+        Effect::EmitReceipt(receipt, WriteFact::Relay { relay: acked_relay, state: RelayState::Published })
             if *receipt == id && acked_relay == &relay
     )));
     drop(core);
@@ -318,82 +320,24 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             .map(|attempt| (attempt.ordinal, &attempt.outcome))
             .collect::<Vec<_>>(),
         vec![
-            (1, &DeliveryAttemptOutcome::Started),
-            (2, &DeliveryAttemptOutcome::Acked)
+            (1, &PublishQueueAttemptOutcome::Started),
+            (2, &PublishQueueAttemptOutcome::Acked)
         ],
         "restart preserves the interrupted ordinal and ACKs a new retry ordinal"
     );
     let original_lane = store
-        .recover_delivery_lanes(intent)
+        .recover_publish_queue_lanes(intent)
         .unwrap()
         .into_iter()
         .find(|lane| lane.key.relay == relay)
         .unwrap();
     assert_eq!(
         original_lane.state,
-        nmp_store::DeliveryLaneState::Terminal {
+        nmp_store::PublishQueueLaneState::Terminal {
             ordinal: 2,
-            outcome: DeliveryTerminalOutcome::Acked,
+            outcome: PublishQueueTerminalOutcome::Acked,
         }
     );
-}
-
-#[test]
-fn at_most_once_started_attempt_becomes_outcome_unknown_and_is_never_resent() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("amo.redb");
-    let keys = Keys::generate();
-    let relay = RelayUrl::parse("wss://amo.example").unwrap();
-    let event = signed(&keys, "once", 101);
-    let session = signer_session(&relay, event.pubkey);
-    let intent_id = {
-        let store = RedbStore::open(&path).unwrap();
-        let mut core = EngineCore::new_with_fixture_routing_facts(
-            store,
-            directory(keys.public_key(), relay.clone()),
-            10,
-        );
-        let handle = RelayHandle {
-            slot: 0,
-            generation: 1,
-        };
-        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
-        authenticate(&mut core, handle, &session, &keys);
-        let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::Signed(event),
-            durability: Durability::AtMostOnce,
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: None,
-        }));
-        let id = receipt_id(&effects);
-        // Resolve the stable receipt to its intent after the reducer drops.
-        drop(core);
-        RedbStore::open(&path)
-            .unwrap()
-            .reattach_receipt(id.0)
-            .unwrap()
-            .unwrap()
-            .intent_id
-            .unwrap()
-    };
-
-    let store = RedbStore::open(&path).unwrap();
-    let mut core = EngineCore::new_with_fixture_routing_facts(
-        store,
-        directory(keys.public_key(), relay.clone()),
-        10,
-    );
-    let recovery = core.recover_on_boot();
-    assert!(!recovery
-        .iter()
-        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-    drop(core);
-
-    let store = RedbStore::open(&path).unwrap();
-    let attempts = store.recover_attempts(intent_id).unwrap();
-    assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].outcome, DeliveryAttemptOutcome::OutcomeUnknown);
 }
 
 #[test]
@@ -427,7 +371,6 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -450,10 +393,13 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
     assert_eq!(
         reattached.facts,
         vec![
-            WriteStatus::Accepted,
-            WriteStatus::AwaitingCapability {
+            WriteFact::Signing(SigningState::AwaitingSigner {
                 pubkey: keys.public_key()
-            }
+            }),
+            WriteFact::Destinations {
+                relays: BTreeSet::new(),
+                complete: false
+            },
         ]
     );
     assert!(!core
@@ -515,7 +461,6 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
         core.handle(EngineMsg::SetActivePubkey(Some(active.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(override_keys.public_key()),
             correlation: None,
@@ -543,10 +488,13 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
     assert_eq!(
         reattached.facts,
         vec![
-            WriteStatus::Accepted,
-            WriteStatus::AwaitingCapability {
+            WriteFact::Signing(SigningState::AwaitingSigner {
                 pubkey: override_keys.public_key()
-            }
+            }),
+            WriteFact::Destinations {
+                relays: BTreeSet::new(),
+                complete: false
+            },
         ],
         "the parked pubkey must be the frozen override B, never the active account A"
     );
@@ -582,16 +530,25 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::Signed(event_id))
+            Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::Signed { event_id }))
                 if *rid == id && *event_id == frozen_id
         )),
         "completion must promote the original receipt to Signed as the override identity"
     );
     let replay = core.reattach_receipt(id).facts;
-    assert_eq!(replay.first(), Some(&WriteStatus::Signed(frozen_id)));
-    assert!(replay
-        .iter()
-        .any(|status| matches!(status, WriteStatus::AwaitingRelay { .. })));
+    assert_eq!(
+        replay.first(),
+        Some(&WriteFact::Signing(SigningState::Signed {
+            event_id: frozen_id
+        }))
+    );
+    assert!(replay.iter().any(|status| matches!(
+        status,
+        WriteFact::Relay {
+            state: RelayState::Waiting(RelayWaiting::NotConnected),
+            ..
+        }
+    )));
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     let rows = store.query(&nostr::Filter::new().id(frozen_id)).unwrap();
@@ -633,7 +590,6 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         let publish = |core: &mut EngineCore<RedbStore>| {
             core.handle(EngineMsg::Publish(WriteIntent {
                 payload: WritePayload::Signed(event.clone()),
-                durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity: Identity::Active,
                 correlation: None,
@@ -718,7 +674,6 @@ fn assert_persisted_routing_fails_closed_without_dropping(
                 monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
-                durability: WriteDurability::Durable,
                 routing,
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(104u64),
@@ -785,7 +740,7 @@ fn assert_persisted_routing_fails_closed_without_dropping(
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
@@ -829,7 +784,6 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
                 monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
-                durability: WriteDurability::Durable,
                 routing: "auto".to_string(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(777),
@@ -848,7 +802,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     let recovery = core.recover_on_boot();
     assert!(recovery.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteStatus::Failed(reason))
+        Effect::EmitReceipt(id, WriteFact::Signing(SigningState::Refused { reason }))
             if *id == receipt && reason.contains("kind:22242") && reason.contains("quarantined")
     )));
     assert!(!recovery.iter().any(|effect| matches!(
@@ -876,18 +830,23 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     ));
     assert!(!stale_ok.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteStatus::Acked(_))
-            | Effect::PublishEvent(..)
+        Effect::EmitReceipt(
+            _,
+            WriteFact::Relay {
+                relay: _,
+                state: RelayState::Published
+            }
+        ) | Effect::PublishEvent(..)
             | Effect::RequestSign(..)
     )));
 
     let (cancelled, cancellation) = core.cancel_write(receipt);
     assert_eq!(
         cancelled,
-        Ok(nmp::mechanism::delivery::CancelWriteOutcome::Cancelled)
+        Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert!(cancellation.iter().any(
-        |effect| matches!(effect, Effect::EmitReceipt(id, WriteStatus::Cancelled) if *id == receipt)
+        |effect| matches!(effect, Effect::EmitReceipt(id, WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled))) if *id == receipt)
     ));
     assert!(!cancellation.iter().any(|effect| matches!(
         effect,
@@ -900,7 +859,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     assert!(store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .is_empty());
     let mut reopened =
@@ -908,16 +867,21 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     assert!(reopened.recover_on_boot().is_empty());
     let replay = reopened.reattach_receipt(receipt);
     assert!(replay.is_attached());
-    assert_eq!(replay.facts, vec![WriteStatus::Cancelled]);
+    assert_eq!(
+        replay.facts,
+        vec![WriteFact::Outcome(WriteOutcome::NotSent(
+            NotSentReason::Cancelled
+        ))]
+    );
 }
 
 #[test]
-fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen() {
+fn signed_receipt_replays_signed_and_refuses_cancellation_after_reopen() {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("signed-ephemeral.redb");
+    let path = tmp.path().join("signed-replay.redb");
     let keys = Keys::generate();
-    let relay = RelayUrl::parse("wss://signed-ephemeral.example").unwrap();
-    let event = signed(&keys, "signed ephemeral", 778);
+    let relay = RelayUrl::parse("wss://signed-replay.example").unwrap();
+    let event = signed(&keys, "already signed", 778);
     let receipt = {
         let store = RedbStore::open(&path).unwrap();
         let mut core = EngineCore::new_with_fixture_routing_facts(
@@ -928,42 +892,47 @@ fn signed_ephemeral_receipt_replays_signed_and_refuses_cancellation_after_reopen
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event.clone()),
-            durability: Durability::Ephemeral,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
         }));
         assert!(effects.iter().any(
-            |effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Signed(id)) if *id == event.id)
+            |effect| matches!(effect, Effect::EmitReceipt(_, WriteFact::Signing(SigningState::Signed { event_id: id })) if *id == event.id)
         ));
         receipt_id(&effects)
     };
 
     let store = RedbStore::open(&path).unwrap();
-    assert!(store
-        .recover_delivery()
-        .expect("recover delivery")
-        .is_empty());
     let mut reopened =
         EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
-    assert!(reopened.recover_on_boot().is_empty());
+    reopened.recover_on_boot();
     let replay = reopened.reattach_receipt(receipt);
     assert!(replay.is_attached());
-    assert_eq!(replay.facts, vec![WriteStatus::Signed(event.id)]);
+    assert!(
+        replay
+            .facts
+            .contains(&WriteFact::Signing(SigningState::Signed {
+                event_id: event.id
+            })),
+        "the signature is durable, so a restart replays it: {:?}",
+        replay.facts
+    );
 
     let (refused, effects) = reopened.cancel_write(receipt);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::delivery::CancelWriteError::AlreadySigned {
+        Err(nmp::mechanism::publish_queue::CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         }) if receipt_id == receipt && event_id == event.id
     ));
     assert!(effects.is_empty());
-    assert_eq!(
-        reopened.reattach_receipt(receipt).facts,
-        vec![WriteStatus::Signed(event.id)]
-    );
+    assert!(reopened
+        .reattach_receipt(receipt)
+        .facts
+        .contains(&WriteFact::Signing(SigningState::Signed {
+            event_id: event.id
+        })));
 }
 
 #[test]
@@ -989,7 +958,6 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
         authenticate(&mut core, handle, &session, &keys);
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -1007,7 +975,11 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             receipt_id,
         )
     };
-    corrupt_first_delivery_row::<20>(&path, "delivery_attempts_v1", &intent_id.0.to_be_bytes());
+    corrupt_first_publish_queue_row::<20>(
+        &path,
+        "publish_queue_attempts",
+        &intent_id.0.to_be_bytes(),
+    );
 
     let store = RedbStore::open(&path).unwrap();
     let mut core =
@@ -1019,7 +991,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
@@ -1040,7 +1012,6 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
             content: ("terminal retained").into(),
             created_at: Some(Timestamp::from(500)),
         }),
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -1050,7 +1021,12 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
 
     let replay = core.reattach_receipt(receipt);
     assert_eq!(replay.outcome, ReattachOutcome::Attached);
-    assert_eq!(replay.facts, vec![WriteStatus::Cancelled]);
+    assert_eq!(
+        replay.facts,
+        vec![WriteFact::Outcome(WriteOutcome::NotSent(
+            NotSentReason::Cancelled
+        ))]
+    );
 }
 
 #[test]
@@ -1074,7 +1050,6 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
                 content: ("corrupt receipt").into(),
                 created_at: Some(Timestamp::from(501)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -1091,7 +1066,11 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         (intent_id, receipt_id)
     };
 
-    corrupt_first_delivery_row::<8>(&path, "delivery_receipts_v1", &receipt_id.0.to_be_bytes());
+    corrupt_first_publish_queue_row::<8>(
+        &path,
+        "publish_queue_receipts",
+        &receipt_id.0.to_be_bytes(),
+    );
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, 10);
@@ -1103,10 +1082,10 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     let (refused, effects) = core.cancel_write(receipt_id);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::delivery::CancelWriteError::PersistenceFailed {
+        Err(nmp::mechanism::publish_queue::CancelWriteError::PersistenceFailed {
             receipt_id: failed_id,
             reason,
-        }) if failed_id == receipt_id && reason.contains("decode durable delivery receipt")
+        }) if failed_id == receipt_id && reason.contains("decode publish queue receipt")
     ));
     assert!(
         effects.is_empty(),
@@ -1116,7 +1095,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     drop(core);
     let store = RedbStore::open(&path).unwrap();
     let recovered = store
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .into_iter()
         .find(|intent| intent.intent_id == intent_id)
@@ -1151,7 +1130,6 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
         let mut core = EngineCore::new(store, 10);
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay_b.clone(), relay_a.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1188,7 +1166,7 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
     assert!(
         !recovery
             .iter()
-            .any(|effect| matches!(effect, Effect::EmitReceipt(_, WriteStatus::Accepted))),
+            .any(|effect| matches!(effect, Effect::WriteAccepted(_))),
         "boot recovery must not accept the bootstrap a second time"
     );
     assert!(core.reattach_receipt(id).is_attached());
@@ -1205,7 +1183,6 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
         let mut core = EngineCore::new(store, 10);
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Signed(event),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -1225,7 +1202,12 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     let mut route_key = [0_u8; 16];
     route_key[..8].copy_from_slice(&intent_id.0.to_be_bytes());
     route_key[8..].copy_from_slice(&1u64.to_be_bytes());
-    insert_corrupt_delivery_row::<16>(&path, "delivery_route_revisions_v1", &route_key, b"NMDV");
+    insert_corrupt_publish_queue_row::<16>(
+        &path,
+        "publish_queue_route_revisions",
+        &route_key,
+        b"NMDV",
+    );
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, 10);
@@ -1236,7 +1218,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     drop(core);
     assert!(RedbStore::open(&path)
         .unwrap()
-        .recover_delivery()
+        .recover_publish_queue()
         .expect("recover delivery")
         .iter()
         .any(|intent| intent.intent_id == intent_id));
@@ -1245,7 +1227,7 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
 /// #790 boot falsifier: an unreadable durable journal degrades explicitly
 /// instead of panicking the host or silently booting as "nothing open".
 ///
-/// Before #790 `recover_delivery` returned a bare `Vec` and `.expect()`ed the
+/// Before #790 `recover_publish_queue` returned a bare `Vec` and `.expect()`ed the
 /// row decode, so this exact file aborted the process inside
 /// `recover_on_boot` — the one moment an embedding app is least able to
 /// survive it. The contract now: exactly one #122 degradation effect, and
@@ -1277,7 +1259,6 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
                 monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "local".to_string(),
-                durability: WriteDurability::Durable,
                 routing: "auto".to_string(),
                 sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(991),
@@ -1288,11 +1269,11 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
 
     // Corrupt the one journal row through a raw handle; no store door can
     // write these bytes, which is exactly why this class needs a falsifier.
-    corrupt_first_delivery_row::<8>(&path, "delivery_intents_v1", &[]);
+    corrupt_first_publish_queue_row::<8>(&path, "publish_queue_intents", &[]);
 
     let store = RedbStore::open(&path).unwrap();
     assert!(
-        store.recover_delivery().is_err(),
+        store.recover_publish_queue().is_err(),
         "an undecodable journal row is an error, never an empty recovery"
     );
     let mut core = EngineCore::new_with_fixture_routing_facts(
@@ -1315,7 +1296,7 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
         "boot degrades exactly once: {effects:?}"
     );
     assert!(
-        degradations[0].contains("decode durable delivery intent"),
+        degradations[0].contains("decode publish queue intent"),
         "the degradation names the unreadable row: {}",
         degradations[0]
     );

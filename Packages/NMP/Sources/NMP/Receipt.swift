@@ -5,7 +5,7 @@
 
 import NMPFFI
 
-/// The ordered `WriteStatus` facts a single `publish` call's write reaches
+/// The ordered `WriteFact` facts a single `publish` call's write reaches
 /// (ledger #9 -- enqueue is not converged), pulled from its durable receipt
 /// handle (#680). Live delivery is finite: a paused consumer that falls
 /// behind receives `NMPError.factStreamLagged` and can reattach the named
@@ -17,7 +17,7 @@ import NMPFFI
 /// handle is single-consumer, so a second concurrent iterator surfaces
 /// `NMPError.concurrentNext` rather than hanging.
 public struct ReceiptStatus: AsyncSequence, Sendable {
-    public typealias Element = WriteStatus
+    public typealias Element = WriteFact
 
     private let handle: NmpReceiptStream
     private let iteratorGate = NMPPullIteratorGate()
@@ -28,15 +28,15 @@ public struct ReceiptStatus: AsyncSequence, Sendable {
 
     public func makeAsyncIterator() -> Iterator {
         let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { status in
-            WriteStatus(status)
+            WriteFact(status)
         }
         return Iterator(core: core)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        let core: NMPPullIteratorCore<NmpReceiptStream, WriteStatus>
+        let core: NMPPullIteratorCore<NmpReceiptStream, WriteFact>
 
-        public mutating func next() async throws -> WriteStatus? {
+        public mutating func next() async throws -> WriteFact? {
             try await core.next()
         }
     }
@@ -78,7 +78,9 @@ public enum NMPWriteCancellationError: Error, Sendable, Equatable {
     case alreadySigned(receiptId: UInt64, eventId: String)
     case alreadyCompensated(receiptId: UInt64)
     case alreadySuperseded(receiptId: UInt64)
-    case alreadyAbandoned(receiptId: UInt64)
+    /// The write was refused at acceptance and is already a permanently
+    /// failed queue entry. There is nothing to cancel; remove it instead.
+    case alreadyRefused(receiptId: UInt64)
     case persistenceFailed(receiptId: UInt64, reason: String)
     case engineClosed
 
@@ -92,8 +94,31 @@ public enum NMPWriteCancellationError: Error, Sendable, Equatable {
             self = .alreadyCompensated(receiptId: receiptId)
         case .AlreadySuperseded(let receiptId):
             self = .alreadySuperseded(receiptId: receiptId)
-        case .AlreadyAbandoned(let receiptId):
-            self = .alreadyAbandoned(receiptId: receiptId)
+        case .AlreadyRefused(let receiptId):
+            self = .alreadyRefused(receiptId: receiptId)
+        case .PersistenceFailed(let receiptId, let reason):
+            self = .persistenceFailed(receiptId: receiptId, reason: reason)
+        case .EngineClosed:
+            self = .engineClosed
+        }
+    }
+}
+
+/// Typed refusals from the queue-entry removal door.
+public enum NMPQueueEntryRemovalError: Error, Sendable, Equatable {
+    case unknownReceipt(receiptId: UInt64)
+    /// The write still owns open delivery work. Cancel it first; removal is
+    /// for entries nothing is going to move.
+    case stillActive(receiptId: UInt64)
+    case persistenceFailed(receiptId: UInt64, reason: String)
+    case engineClosed
+
+    init(_ ffi: FfiRemoveQueueEntryError) {
+        switch ffi {
+        case .UnknownReceipt(let receiptId):
+            self = .unknownReceipt(receiptId: receiptId)
+        case .StillActive(let receiptId):
+            self = .stillActive(receiptId: receiptId)
         case .PersistenceFailed(let receiptId, let reason):
             self = .persistenceFailed(receiptId: receiptId, reason: reason)
         case .EngineClosed:
@@ -103,6 +128,33 @@ public enum NMPWriteCancellationError: Error, Sendable, Equatable {
 }
 
 extension NMPEngine {
+    /// Read your own publish queue back.
+    ///
+    /// Answers "what have I got outstanding, and what went wrong with it"
+    /// without having held a receipt stream open since acceptance. This is
+    /// INSPECTION: it never blocks and never waits for settlement.
+    public func publishQueue() throws -> [PublishQueueEntry] {
+        do {
+            return try ffi.publishQueue().map(PublishQueueEntry.init)
+        } catch let error as FfiRemoveQueueEntryError {
+            throw NMPQueueEntryRemovalError(error)
+        }
+    }
+
+    /// Forget one queue entry.
+    ///
+    /// A real TERMINATION path, not housekeeping: a write parked forever on a
+    /// signer that never attached, and a permanently-failed refused entry,
+    /// end no other way. A write that still owns open delivery work is
+    /// refused -- cancel that one instead.
+    public func removePublishQueueEntry(receiptId: UInt64) throws {
+        do {
+            try ffi.removePublishQueueEntry(receiptId: receiptId)
+        } catch let error as FfiRemoveQueueEntryError {
+            throw NMPQueueEntryRemovalError(error)
+        }
+    }
+
     /// Cancel an accepted unsigned write. Returns the durable terminal fact;
     /// repeated cancellation returns `.cancelled` idempotently.
     public func cancel(receiptId: UInt64) throws -> WriteCancellationOutcome {
@@ -128,7 +180,7 @@ extension NMPEngine {
 
     /// Attach a fresh pull stream to retained receipt facts (#680): the
     /// `.attached` result carries a new `NmpReceiptStream` that transparently
-    /// traverses the durable `WriteStatus` history in finite pages and then
+    /// traverses the durable `WriteFact` history in finite pages and then
     /// streams onward. Corrupt or disappearing durable evidence is reported
     /// distinctly and never treated as absence.
     public func reattachReceipt(id: UInt64) throws -> ReceiptReattachment {

@@ -41,7 +41,7 @@
 
 use nmp::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, CoverageInterval, Demand,
-    Derived, DiagnosticsSnapshot, Durability, EventBuilder, Filter, FilterCoverageEntry, Identity,
+    Derived, DiagnosticsSnapshot, EventBuilder, Filter, FilterCoverageEntry, Identity,
     IdentityField, IndexedTagName, Kind, Lane, LiveQuery, ObservationEvidence, PublicKey,
     RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, WriteIntent, WritePayload, WriteRouting,
 };
@@ -102,7 +102,6 @@ pub fn build_event_intent(content: &str) -> WriteIntent {
         payload: WritePayload::Event(
             EventBuilder::new(Kind::Custom(CALLER_CONTENT_KIND)).content(content),
         ),
-        durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -118,7 +117,6 @@ pub fn build_event_intent_as(identity: PublicKey, content: &str) -> WriteIntent 
         payload: WritePayload::Event(
             EventBuilder::new(Kind::Custom(CALLER_CONTENT_KIND)).content(content),
         ),
-        durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(identity),
         correlation: None,
@@ -137,7 +135,6 @@ pub fn build_dated_event_intent(created_at: Timestamp, tag: Tag, content: &str) 
                 .tag(tag)
                 .created_at(created_at),
         ),
-        durability: Durability::Ephemeral,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
@@ -328,10 +325,20 @@ mod tests {
             .expect("engine is open");
         drop(subscription); // explicit early withdraw, exercised via Drop
 
+        // `Identity::Active` names an account, so the intent below cannot
+        // resolve until one is active -- and an instruction that cannot
+        // resolve is a refusal, not a parked hope. Activating is itself part
+        // of the `nmp`-alone surface this test exists to prove.
+        engine
+            .set_active_account(Some(account.public_key()))
+            .expect("engine is open");
+
         let receipts = engine
             .publish(build_event_intent("hello from an nmp-only consumer"))
             .expect("engine is open");
         drop(receipts);
+
+        engine.set_active_account(None).expect("engine is open");
 
         let diagnostics = engine.observe_diagnostics().expect("engine is open");
         if let Some(snapshot) = diagnostics.recv() {

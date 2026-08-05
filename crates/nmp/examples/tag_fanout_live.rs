@@ -93,6 +93,7 @@ fn main() {
         tor_reachable: false,
         max_relays: 4,
         max_auth_capabilities: 4,
+        max_publish_attempts: nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS,
     })
     .expect("engine");
 

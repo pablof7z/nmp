@@ -1,7 +1,7 @@
 //! Source-shape falsifiers for the post-commit truth boundary (#909).
 //!
 //! This parses Rust syntax rather than grepping statement order. A restored
-//! `commit; recover_delivery_lanes(..)` shape fails even though the fallible
+//! `commit; recover_publish_queue_lanes(..)` shape fails even though the fallible
 //! work is hidden behind a function call.
 
 use std::collections::BTreeSet;
@@ -14,7 +14,7 @@ const PRODUCTION_TRANSACTION_FILES: &[&str] = &[
     "commit.rs",
     "ingest_txn.rs",
     "event_ops.rs",
-    "delivery_ops.rs",
+    "publish_queue_ops.rs",
     "write_ops.rs",
     "store.rs",
 ];

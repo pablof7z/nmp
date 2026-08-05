@@ -1,14 +1,14 @@
 use super::commit::commit_prepared;
-use super::delivery::is_suppressed_in_txn;
 use super::ingest::insert_with_tables;
 use super::ingest_txn::GovernedWrite;
 use super::mutation::remove_row_in_txn;
+use super::publish_queue::is_suppressed_in_txn;
 use super::query::{expiration_key_upper_bound, plan_ordered_query};
 use super::schema::{
     persist_err, EventKey, COVERAGE, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS,
     EXPIRATION_INDEX, RELAYS,
 };
-use super::schema::{DELIVERY_SUPPRESS_BY_ADDR, DELIVERY_SUPPRESS_BY_ID};
+use super::schema::{PUBLISH_QUEUE_SUPPRESS_BY_ADDR, PUBLISH_QUEUE_SUPPRESS_BY_ID};
 #[cfg(test)]
 use super::store::RedbCrashPoint;
 use super::store::RedbStore;
@@ -129,11 +129,11 @@ pub(super) fn query(
             .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let mut relay_cache = HashMap::new();
-        let delivery_suppress_by_id = read_txn
-            .open_table(DELIVERY_SUPPRESS_BY_ID)
+        let publish_queue_suppress_by_id = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
-        let delivery_suppress_by_addr = read_txn
-            .open_table(DELIVERY_SUPPRESS_BY_ADDR)
+        let publish_queue_suppress_by_addr = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)
             .map_err(persist_err)?;
         let prepared_filter = PreparedFilter::new(filter);
         let mut out = Vec::new();
@@ -171,8 +171,8 @@ pub(super) fn query(
                 &mut relay_cache,
             )?;
             if !is_suppressed_in_txn(
-                &delivery_suppress_by_id,
-                &delivery_suppress_by_addr,
+                &publish_queue_suppress_by_id,
+                &publish_queue_suppress_by_addr,
                 &se.event,
             )? {
                 out.push(se);
@@ -600,8 +600,8 @@ pub(super) fn gc(
                     })
                 )
                 && !is_suppressed_in_txn(
-                    &txn.delivery_suppress_by_id,
-                    &txn.delivery_suppress_by_addr,
+                    &txn.publish_queue_suppress_by_id,
+                    &txn.publish_queue_suppress_by_addr,
                     &event,
                 )?
                 && !claims.is_claimed(&event)

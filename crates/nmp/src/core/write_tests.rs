@@ -7,23 +7,8 @@ mod receipt_allocator_tests {
     use super::*;
 
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{MemoryStore, RedbStore};
+    use nmp_store::{MemoryStore, RedbStore, RefuseReason};
     use nostr::{Keys, Kind};
-
-    fn rejected_intent(created_at: u64) -> WriteIntent {
-        WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::TextNote,
-                tags: (vec![]).into_iter().collect(),
-                content: ("no active account").into(),
-                created_at: Some(Timestamp::from(created_at)),
-            }),
-            durability: Durability::Durable,
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: None,
-        }
-    }
 
     fn frozen_note(author: PublicKey) -> SignedEvent {
         let created_at = Timestamp::from(1_700_000_000);
@@ -42,7 +27,7 @@ mod receipt_allocator_tests {
     }
 
     #[test]
-    fn stale_replaceable_edit_surfaces_a_typed_conflict_before_acceptance() {
+    fn stale_replaceable_edit_is_refused_into_custody_keeping_both_event_ids() {
         use nmp_store::RelayObserved;
         use nostr::EventBuilder;
 
@@ -82,61 +67,47 @@ mod receipt_allocator_tests {
                 },
                 expected_base: Some(base.id),
             },
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
         }));
 
-        let expected = WriteStatus::ReplaceableConflict {
-            expected: Some(base.id),
-            actual: Some(concurrent.id),
-        };
-        assert!(effects
+        // CUSTODY, not a refused call: the store was working and said no,
+        // so the write becomes a permanently-failed queue entry the app can
+        // read back. Both event ids survive verbatim -- that pair is what
+        // lets an app fetch `actual`, reapply the change and resubmit
+        // without ever troubling the user.
+        let receipt = effects
             .iter()
-            .any(|effect| matches!(effect, Effect::EmitReceipt(_, status) if *status == expected)));
-        assert!(core.pending.is_empty());
-        assert!(core
-            .resolver
-            .store()
-            .recover_delivery()
-            .expect("recover delivery")
-            .is_empty());
-    }
-
-    #[test]
-    fn last_upper_half_id_is_issued_once_then_exhaustion_is_stable_and_typed() {
-        const FIRST_UNACCEPTED_ID: u64 = 1u64 << 63;
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
-        core.set_next_unaccepted_receipt_for_test(Some(FIRST_UNACCEPTED_ID));
-
-        let last = core.handle(EngineMsg::Publish(rejected_intent(1)));
-        assert!(last.iter().any(|effect| {
-            matches!(
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(id) => Some(*id),
+                _ => None,
+            })
+            .expect("a store-refused write is still taken into custody");
+        let expected = WriteFact::Outcome(WriteOutcome::Refused(
+            RefuseReason::ReplaceableBaseChanged {
+                expected: Some(base.id),
+                actual: Some(concurrent.id),
+            },
+        ));
+        assert!(
+            effects.iter().any(|effect| matches!(
                 effect,
-                Effect::EmitReceipt(ReceiptId(id), WriteStatus::Failed(_))
-                    if *id == FIRST_UNACCEPTED_ID
-            )
-        }));
-        for created_at in [2, 3] {
-            let exhausted = core.handle(EngineMsg::Publish(rejected_intent(created_at)));
-            assert!(matches!(
-                exhausted.as_slice(),
-                [Effect::PublishFailed(
-                    PublishError::ReceiptCorrelationIdExhausted
-                )]
-            ));
-            assert!(!exhausted
+                Effect::EmitReceipt(id, status) if *id == receipt && *status == expected
+            )),
+            "the refusal must name BOTH event ids: {effects:?}"
+        );
+        assert!(
+            !effects
                 .iter()
-                .any(|effect| matches!(effect, Effect::EmitReceipt(..))));
-        }
-
-        assert_eq!(FIRST_UNACCEPTED_ID - 1, u64::MAX >> 1);
+                .any(|effect| matches!(effect, Effect::PublishFailed(_))),
+            "a stale base is never a refused call: {effects:?}"
+        );
         assert!(core.pending.is_empty());
         assert!(core
             .resolver
             .store()
-            .recover_delivery()
+            .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
     }
@@ -177,7 +148,6 @@ mod receipt_allocator_tests {
                 content: ("correlation boundary").into(),
                 created_at: Some(Timestamp::from(93u64)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -191,7 +161,7 @@ mod receipt_allocator_tests {
                 _ => None,
             })
             .expect("accepted unsigned intent requests signing");
-        let intent = core.pending[&receipt].intent_id.unwrap();
+        let intent = core.pending[&receipt].intent_id;
         core.set_next_attempt_correlation_for_test(None);
 
         let effects = core.handle(EngineMsg::SignerCompleted(
@@ -260,11 +230,37 @@ mod receipt_allocator_tests {
     }
 
     #[test]
-    fn every_zero_destination_author_state_remains_a_provider_need() {
+    fn a_zero_destination_answer_separates_still_looking_from_finished_looking() {
+        // The whole of #1236, as a type rather than a string. `complete` is a
+        // statement about KNOWLEDGE EXHAUSTION, never about delivery, and a
+        // zero-destination answer is where that earns its keep: an app must
+        // show "determining destinations" for one and "nowhere to publish"
+        // for the other, and collapsing them makes both unactionable.
         let author = Keys::generate().public_key();
         let event = frozen_note(author);
-        let cases = [
-            ("Unknown", "Unknown", FixtureRoutingFacts::new()),
+
+        // Still looking: nobody has finished the lookup, so nothing has been
+        // learned yet and NOTHING may expire this.
+        let core = EngineCore::new_with_fixture_routing_facts(
+            MemoryStore::new(),
+            FixtureRoutingFacts::new(),
+            10,
+        );
+        let unknown = core.resolve_routes(&WriteRouting::Auto, &event);
+        assert!(
+            unknown.relays.is_empty() && !unknown.complete,
+            "an unsettled author must park, not terminate: {unknown:?}"
+        );
+        assert_eq!(
+            unknown.author_route_needs,
+            BTreeSet::from([author]),
+            "a parked write keeps its contributor declared, because a later positive replacement is the only unpark signal"
+        );
+
+        // Finished looking, twice over. A settled-but-empty list and a
+        // settled absence are both answers, and an answer that names nobody
+        // means there is nowhere to publish.
+        for (label, detail_label, facts) in [
             (
                 "Present empty",
                 "Present outbound",
@@ -275,27 +271,24 @@ mod receipt_allocator_tests {
                 "Absent",
                 FixtureRoutingFacts::new().with_author_absent(author),
             ),
-        ];
-
-        for (label, detail_label, facts) in cases {
+        ] {
             let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10);
             let answer = core.resolve_routes(&WriteRouting::Auto, &event);
 
             assert!(
-                answer.relays.is_empty() && !answer.complete,
-                "{label} with no operator route must park: {answer:?}"
+                answer.relays.is_empty() && answer.complete,
+                "{label} with no operator route is knowledge EXHAUSTED, so the write has nowhere to go rather than something to wait for: {answer:?}"
             );
-            assert_eq!(
-                answer.author_route_needs,
-                BTreeSet::from([author]),
-                "{label} remains a provider need because a later positive replacement is the only unpark signal"
+            assert!(
+                answer.author_route_needs.is_empty(),
+                "{label} has nothing left to look up, so it must not hold a provider open on a question already answered: {answer:?}"
             );
             assert!(
                 answer
                     .detail
                     .as_deref()
                     .is_some_and(|detail| detail.contains(detail_label)),
-                "the receipt must distinguish {label} truthfully: {answer:?}"
+                "the answer must still distinguish {label} truthfully: {answer:?}"
             );
         }
     }
@@ -360,7 +353,6 @@ mod receipt_allocator_tests {
                     content: ("recover my route need").into(),
                     created_at: Some(Timestamp::from(100u64)),
                 }),
-                durability: Durability::Durable,
                 routing: WriteRouting::Auto,
                 identity: Identity::Active,
                 correlation: None,
@@ -399,6 +391,166 @@ mod receipt_allocator_tests {
             replayed,
             vec![BTreeSet::from([keys.public_key()])],
             "boot must publish the exact stateless route-need set rebuilt from durable intents"
+        );
+    }
+}
+
+/// The receipt-replay cursor must keep the two persistence stalls apart.
+///
+/// One relay can stall on BOTH its append-only route revision and its attempt
+/// log. The app-facing shape is deliberately one `PersistenceStalled { detail }`
+/// (#1237: the difference is a recovery detail, not an app decision), but the
+/// replay cursor still has to dedup them SEPARATELY — keying on the relay
+/// alone silently swallows whichever arrives second, and a durable receipt
+/// that loses a fact under paging is the exact class of loss it exists to
+/// prevent.
+#[cfg(test)]
+mod persistence_stall_replay_tests {
+    use super::*;
+    use nmp_router::FixtureRoutingFacts;
+    use nmp_store::MemoryStore;
+    use nostr::{Keys, RelayUrl};
+
+    #[test]
+    fn one_relay_stalled_on_both_route_and_attempt_replays_both_facts() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://stalled.example").unwrap();
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            MemoryStore::new(),
+            FixtureRoutingFacts::new(),
+            4,
+        );
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: nostr::Kind::TextNote,
+                tags: Vec::new(),
+                content: "stalled on both".to_string(),
+                created_at: Some(Timestamp::from(1_000u64)),
+            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let id = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(id) => Some(*id),
+                _ => None,
+            })
+            .expect("publish takes custody and answers with the receipt id");
+
+        // The same relay failed to commit BOTH durable facts.
+        let pending = core.pending.get_mut(&id).expect("the write is pending");
+        pending.unstarted_relays.insert(relay.clone());
+        pending.route_blocked_relays.insert(relay.clone());
+
+        // Page one fact at a time, which is what makes a collapsed dedup key
+        // observable: the second stall is skipped as "already delivered".
+        let mut cursor = None;
+        let mut stalls = Vec::new();
+        for _ in 0..8 {
+            let page = core.reattach_receipt_page(id, cursor.clone(), 1);
+            if page.facts.is_empty() {
+                break;
+            }
+            for fact in &page.facts {
+                if let WriteFact::Relay {
+                    state: RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }),
+                    ..
+                } = fact
+                {
+                    stalls.push(detail.clone());
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        assert!(
+            stalls.iter().any(|d| d == ATTEMPT_STALL_DETAIL),
+            "the attempt-log stall was lost under paged reattachment: {stalls:?}"
+        );
+        assert!(
+            stalls.iter().any(|d| d == ROUTE_STALL_DETAIL),
+            "the route-revision stall was lost under paged reattachment; keying the replay \
+             cursor on the relay alone swallows whichever stall arrives second: {stalls:?}"
+        );
+    }
+
+    /// The latch mosaico's `persistence_blockage_remains_visible_after_later_ack`
+    /// specifies: a fault observed once stays readable on the entry even after
+    /// a relay succeeds afterwards. An operator must not lose the only signal
+    /// that the local disk is failing because something later went right.
+    #[test]
+    fn a_persistence_fault_survives_a_later_success_on_the_same_write() {
+        let keys = Keys::generate();
+        let relay = RelayUrl::parse("wss://latched.example").unwrap();
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            MemoryStore::new(),
+            FixtureRoutingFacts::new(),
+            4,
+        );
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: nostr::Kind::TextNote,
+                tags: Vec::new(),
+                content: "latched".to_string(),
+                created_at: Some(Timestamp::from(2_000u64)),
+            }),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let id = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(id) => Some(*id),
+                _ => None,
+            })
+            .expect("publish takes custody and answers with the receipt id");
+
+        let mut effects = Vec::new();
+        core.emit_write_fact(
+            id,
+            WriteFact::Relay {
+                relay: relay.clone(),
+                state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                    detail: ATTEMPT_STALL_DETAIL.to_string(),
+                }),
+            },
+            &mut effects,
+        );
+        assert_eq!(
+            core.pending
+                .get(&id)
+                .and_then(|pending| pending.persistence_fault.clone())
+                .as_deref(),
+            Some(ATTEMPT_STALL_DETAIL),
+            "the fault must be readable on the entry, not only observable in the stream"
+        );
+
+        // A later success at the same relay.
+        core.emit_write_fact(
+            id,
+            WriteFact::Relay {
+                relay,
+                state: RelayState::Published,
+            },
+            &mut effects,
+        );
+        assert_eq!(
+            core.pending
+                .get(&id)
+                .and_then(|pending| pending.persistence_fault.clone())
+                .as_deref(),
+            Some(ATTEMPT_STALL_DETAIL),
+            "a later ack overwrote the persistence fault; an operator loses the only signal \
+             that the local disk is failing"
         );
     }
 }

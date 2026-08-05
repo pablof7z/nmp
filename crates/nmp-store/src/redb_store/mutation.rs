@@ -1,13 +1,15 @@
 use super::canonical::stored_event_to_record;
-use super::delivery::{
+use super::ingest_txn::{
+    GovernedIngestTxn, GovernedPublishQueueMap, GovernedStringMap, RedbIngestTxn,
+};
+use super::publish_queue::{
     add_addr_claimant_in_txn, add_claimant_in_txn, is_suppressed_in_txn, SuppressClaimRecord,
 };
-use super::delivery_codec::{
+use super::publish_queue_codec::{
     codec_error, decode_addr_claimants, decode_claimants, decode_claims, decode_displaced,
     decode_intent, decode_receipt, encode_addr_claimants, encode_claimants, encode_intent,
     encode_receipt, id_claim_key, intent_key, receipt_key,
 };
-use super::ingest_txn::{GovernedDeliveryMap, GovernedIngestTxn, GovernedStringMap, RedbIngestTxn};
 use super::query::{expiration_key, AddrTombstoneRecord};
 use super::schema::{id_tombstone_key, persist_err, EventKey};
 use super::{
@@ -210,22 +212,22 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
 /// `MemoryStore::fan_out_signed` exactly. Returns every intent THIS call
 /// actually transitioned (an already-`Signed` owner is left untouched and
 /// excluded).
-fn update_delivery_receipt<T: GovernedIngestTxn>(
+fn update_publish_queue_receipt<T: GovernedIngestTxn>(
     txn: &mut T,
     receipt_id: u64,
     state: ReceiptState,
 ) -> Result<(), PersistenceError> {
     let key = receipt_key(receipt_id);
     let encoded = txn
-        .delivery_get(GovernedDeliveryMap::Receipts, &key)?
+        .publish_queue_get(GovernedPublishQueueMap::Receipts, &key)?
         .ok_or_else(|| {
             PersistenceError::invariant(format!("missing delivery receipt {receipt_id}"))
         })?;
     let mut record = decode_receipt(&encoded)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
     record.state = state;
-    txn.delivery_put(
-        GovernedDeliveryMap::Receipts,
+    txn.publish_queue_put(
+        GovernedPublishQueueMap::Receipts,
         &key,
         &encode_receipt(&record),
     )
@@ -236,19 +238,19 @@ fn remove_claimant<T: GovernedIngestTxn>(
     key: &[u8; 64],
     intent_id: IntentId,
 ) -> Result<(), PersistenceError> {
-    let map = GovernedDeliveryMap::SuppressById;
-    let Some(encoded) = txn.delivery_get(map, key)? else {
+    let map = GovernedPublishQueueMap::SuppressById;
+    let Some(encoded) = txn.publish_queue_get(map, key)? else {
         return Ok(());
     };
     let mut claimants =
         decode_claimants(&encoded).map_err(|error| codec_error("claimants", error))?;
     claimants.retain(|id| *id != intent_id.0);
     if claimants.is_empty() {
-        txn.delivery_remove(map, key)?;
+        txn.publish_queue_remove(map, key)?;
     } else {
         let encoded =
             encode_claimants(&claimants).map_err(|error| codec_error("claimants", error))?;
-        txn.delivery_put(map, key, &encoded)?;
+        txn.publish_queue_put(map, key, &encoded)?;
     }
     Ok(())
 }
@@ -258,19 +260,19 @@ fn remove_addr_claimant<T: GovernedIngestTxn>(
     key: &[u8],
     intent_id: IntentId,
 ) -> Result<(), PersistenceError> {
-    let map = GovernedDeliveryMap::SuppressByAddr;
-    let Some(encoded) = txn.delivery_get(map, key)? else {
+    let map = GovernedPublishQueueMap::SuppressByAddr;
+    let Some(encoded) = txn.publish_queue_get(map, key)? else {
         return Ok(());
     };
     let mut claimants =
         decode_addr_claimants(&encoded).map_err(|error| codec_error("address claimants", error))?;
     claimants.retain(|claimant| claimant.intent_id != intent_id.0);
     if claimants.is_empty() {
-        txn.delivery_remove(map, key)?;
+        txn.publish_queue_remove(map, key)?;
     } else {
         let encoded = encode_addr_claimants(&claimants)
             .map_err(|error| codec_error("address claimants", error))?;
-        txn.delivery_put(map, key, &encoded)?;
+        txn.publish_queue_put(map, key, &encoded)?;
     }
     Ok(())
 }
@@ -285,7 +287,7 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
     for owner_id in owners {
         let owner_key = intent_key(*owner_id);
         txn.displaced_remove(&owner_key)?;
-        let owner_intent = txn.delivery_get(GovernedDeliveryMap::Intents, &owner_key)?;
+        let owner_intent = txn.publish_queue_get(GovernedPublishQueueMap::Intents, &owner_key)?;
         if let Some(owner_intent) = owner_intent {
             let mut owner_record = decode_intent(&owner_intent)
                 .map_err(|error| codec_error(&format!("intent {}", owner_id.0), error))?;
@@ -294,13 +296,18 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
                 owner_record.frozen = canonical_event.clone();
                 let encoded_owner =
                     encode_intent(&owner_record).map_err(|error| codec_error("intent", error))?;
-                txn.delivery_put(GovernedDeliveryMap::Intents, &owner_key, &encoded_owner)?;
-                update_delivery_receipt(txn, owner_record.receipt_id, ReceiptState::Signed)?;
+                txn.publish_queue_put(
+                    GovernedPublishQueueMap::Intents,
+                    &owner_key,
+                    &encoded_owner,
+                )?;
+                update_publish_queue_receipt(txn, owner_record.receipt_id, ReceiptState::Signed)?;
                 transitioned.push(*owner_id);
             }
         }
         if is_deletion {
-            let claims = txn.delivery_remove(GovernedDeliveryMap::Kind5Claims, &owner_key)?;
+            let claims =
+                txn.publish_queue_remove(GovernedPublishQueueMap::Kind5Claims, &owner_key)?;
             if let Some(claims) = claims {
                 let claims = decode_claims(&claims).map_err(|error| {
                     codec_error(
@@ -348,7 +355,7 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
 /// names). Returns the rows that ACTUALLY became newly hidden as a result
 /// of THIS call — a true visibility delta (issue #61 P1 correction),
 /// computed from before/after suppression state and deduped by event id
-/// — and the exact claims staged (for `DELIVERY_KIND5_CLAIMS`). Mirrors
+/// — and the exact claims staged (for `PUBLISH_QUEUE_KIND5_CLAIMS`). Mirrors
 /// `MemoryStore::process_kind5_deletions_provisional` exactly.
 pub(super) fn process_kind5_deletions_provisional_in_txn(
     txn: &mut RedbIngestTxn<'_, '_>,
@@ -395,8 +402,8 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
         let visible = match txn.canonical.load_by_id(id)? {
             None => false,
             Some((_key, se)) => !is_suppressed_in_txn(
-                &txn.delivery_suppress_by_id,
-                &txn.delivery_suppress_by_addr,
+                &txn.publish_queue_suppress_by_id,
+                &txn.publish_queue_suppress_by_addr,
                 &se.event,
             )?,
         };
@@ -406,7 +413,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
     let mut claims = Vec::new();
     for target_id in target_ids {
         let key = id_claim_key(&target_id, &deleting.pubkey);
-        add_claimant_in_txn(&mut txn.delivery_suppress_by_id, &key, intent_id)?;
+        add_claimant_in_txn(&mut txn.publish_queue_suppress_by_id, &key, intent_id)?;
         claims.push(SuppressClaimRecord::Id {
             target: target_id,
             claiming_author: deleting.pubkey,
@@ -424,7 +431,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
         };
         let key_bytes = key.to_redb_key().into_bytes();
         add_addr_claimant_in_txn(
-            &mut txn.delivery_suppress_by_addr,
+            &mut txn.publish_queue_suppress_by_addr,
             &key_bytes,
             intent_id,
             deleting.created_at,
@@ -443,8 +450,8 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
         }
         if let Some((_key, se)) = txn.canonical.load_by_id(&id)? {
             if is_suppressed_in_txn(
-                &txn.delivery_suppress_by_id,
-                &txn.delivery_suppress_by_addr,
+                &txn.publish_queue_suppress_by_id,
+                &txn.publish_queue_suppress_by_addr,
                 &se.event,
             )? {
                 hidden.push(se);
@@ -455,7 +462,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
     Ok((hidden, claims))
 }
 
-/// Scan `DELIVERY_DISPLACED` for the row (if any) whose stashed event's id is
+/// Scan `PUBLISH_QUEUE_DISPLACED` for the row (if any) whose stashed event's id is
 /// `frozen_id` AND whose OWN local provenance's owner SET contains
 /// `intent_id` — used by `promote_signed`/`compensate_write` for an intent
 /// that is not currently the live row at its own id: it may instead be
@@ -472,15 +479,15 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
 /// single id (issue #2, team-lead decision): a `Duplicate` accepted
 /// BEFORE its predecessor was superseded is a CO-OWNER of the SAME stash
 /// slot, not a slot of its own — see `LocalOrigin`'s doc. Returns the
-/// OWNING stash's `DELIVERY_DISPLACED` key, if found — at most one, by
+/// OWNING stash's `PUBLISH_QUEUE_DISPLACED` key, if found — at most one, by
 /// construction (a `StoredEvent` is only ever the CURRENT displaced stash
 /// of the one intent that most recently superseded it).
 pub(super) fn find_displaced_key_by_event_id_in_txn(
-    delivery_displaced: &redb::Table<'_, &'static [u8; 8], &'static [u8]>,
+    publish_queue_displaced: &redb::Table<'_, &'static [u8; 8], &'static [u8]>,
     frozen_id: EventId,
     intent_id: IntentId,
 ) -> Result<Option<[u8; 8]>, PersistenceError> {
-    for entry in delivery_displaced.iter().map_err(persist_err)? {
+    for entry in publish_queue_displaced.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
         let record = stored_event_to_record(
             &decode_displaced(value.value())
@@ -513,10 +520,10 @@ pub(super) fn find_displaced_key_by_event_id_in_txn(
 /// SPECIFIC intent already owns), this is used for a BRAND NEW intent that
 /// owns nothing yet, so it must match on event id alone.
 pub(super) fn find_any_displaced_key_by_event_id_in_txn(
-    delivery_displaced: &redb::Table<'_, &'static [u8; 8], &'static [u8]>,
+    publish_queue_displaced: &redb::Table<'_, &'static [u8; 8], &'static [u8]>,
     frozen_id: EventId,
 ) -> Result<Option<[u8; 8]>, PersistenceError> {
-    for entry in delivery_displaced.iter().map_err(persist_err)? {
+    for entry in publish_queue_displaced.iter().map_err(persist_err)? {
         let (key, value) = entry.map_err(persist_err)?;
         let record = stored_event_to_record(
             &decode_displaced(value.value())

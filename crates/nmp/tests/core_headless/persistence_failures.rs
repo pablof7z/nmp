@@ -57,15 +57,6 @@ impl EventStore for FailIngestStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write_with_state(intent_id, reason)
     }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
-    }
     fn insert(
         &mut self,
         event: nostr::Event,
@@ -140,13 +131,13 @@ impl EventStore for FailIngestStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
-        self.inner.recover_delivery()
+    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
+        self.inner.recover_publish_queue()
     }
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
+    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
@@ -156,28 +147,22 @@ impl EventStore for FailIngestStore {
         &mut self,
         intent_id: nmp_store::IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<DeliveryRouteRevision, PersistenceError> {
+    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
         self.inner.record_route_revision(intent_id, relays)
     }
     fn recover_route_revisions(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
     fn recover_attempts(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
-    fn accept_ephemeral(
-        &mut self,
-        frozen_id: nostr::EventId,
-        expected_pubkey: nostr::PublicKey,
-    ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
-    }
+    delegate_publish_queue_door!(inner);
 }
 
 /// Door-level falsifier (issue #122): the `insert` ingest door surfaces a
@@ -890,30 +875,30 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
 // full-scan behavior whenever the index cannot be proven complete. The
 // falsifiers below exercise both the narrow path and the degraded fallback.
 
-/// Instrumented double for finding E5: counts `recover_delivery_lanes` calls
+/// Instrumented double for finding E5: counts `recover_publish_queue_lanes` calls
 /// through a caller-shared counter (so a test can inspect it after the
 /// store has been moved into `EngineCore`), and can be configured to fail
-/// `bootstrap_delivery_lanes` exactly once to exercise the degraded-mode
+/// `bootstrap_publish_queue_lanes` exactly once to exercise the degraded-mode
 /// safety valve.
 struct WakeLaneProbeStore {
     inner: MemoryStore,
-    recover_delivery_lanes_calls: Rc<Cell<u64>>,
+    recover_publish_queue_lanes_calls: Rc<Cell<u64>>,
     fail_next_bootstrap: bool,
 }
 
 impl WakeLaneProbeStore {
-    fn new(recover_delivery_lanes_calls: Rc<Cell<u64>>) -> Self {
+    fn new(recover_publish_queue_lanes_calls: Rc<Cell<u64>>) -> Self {
         Self {
             inner: MemoryStore::new(),
-            recover_delivery_lanes_calls,
+            recover_publish_queue_lanes_calls,
             fail_next_bootstrap: false,
         }
     }
 
-    fn with_failing_bootstrap(recover_delivery_lanes_calls: Rc<Cell<u64>>) -> Self {
+    fn with_failing_bootstrap(recover_publish_queue_lanes_calls: Rc<Cell<u64>>) -> Self {
         Self {
             inner: MemoryStore::new(),
-            recover_delivery_lanes_calls,
+            recover_publish_queue_lanes_calls,
             fail_next_bootstrap: true,
         }
     }
@@ -926,15 +911,6 @@ impl EventStore for WakeLaneProbeStore {
         reason: CompensationReason,
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write_with_state(intent_id, reason)
-    }
-    fn cancel_ephemeral_receipt(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<CancelEphemeralOutcome, PersistenceError> {
-        self.inner.cancel_ephemeral_receipt(receipt_id)
-    }
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        self.inner.mark_ephemeral_signed(receipt_id)
     }
     fn insert(
         &mut self,
@@ -987,13 +963,13 @@ impl EventStore for WakeLaneProbeStore {
     ) -> Result<CompensateOutcome, PersistenceError> {
         self.inner.compensate_write(intent_id)
     }
-    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
-        self.inner.recover_delivery()
+    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
+        self.inner.recover_publish_queue()
     }
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
+    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
         self.inner.reattach_receipt(receipt_id)
     }
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
@@ -1003,128 +979,128 @@ impl EventStore for WakeLaneProbeStore {
         &mut self,
         intent_id: nmp_store::IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<DeliveryRouteRevision, PersistenceError> {
+    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
         self.inner.record_route_revision(intent_id, relays)
     }
     fn recover_route_revisions(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
         self.inner.recover_route_revisions(intent_id)
     }
     fn recover_attempts(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
+    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
-    fn bootstrap_delivery_lanes(
+    fn bootstrap_publish_queue_lanes(
         &mut self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<nmp_store::DeliveryLane>, PersistenceError> {
+    ) -> Result<Vec<nmp_store::PublishQueueLane>, PersistenceError> {
         if self.fail_next_bootstrap {
             self.fail_next_bootstrap = false;
             return Err(PersistenceError::invariant(
                 "injected bootstrap failure".to_string(),
             ));
         }
-        self.inner.bootstrap_delivery_lanes(intent_id)
+        self.inner.bootstrap_publish_queue_lanes(intent_id)
     }
-    fn recover_delivery_lanes(
+    fn recover_publish_queue_lanes(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<nmp_store::DeliveryLane>, PersistenceError> {
-        self.recover_delivery_lanes_calls
-            .set(self.recover_delivery_lanes_calls.get() + 1);
-        self.inner.recover_delivery_lanes(intent_id)
+    ) -> Result<Vec<nmp_store::PublishQueueLane>, PersistenceError> {
+        self.recover_publish_queue_lanes_calls
+            .set(self.recover_publish_queue_lanes_calls.get() + 1);
+        self.inner.recover_publish_queue_lanes(intent_id)
     }
-    fn due_delivery_deadlines(
+    fn due_publish_queue_deadlines(
         &self,
         now: Timestamp,
         limit: usize,
-    ) -> Result<Vec<nmp_store::DeliveryDeadline>, PersistenceError> {
-        self.inner.due_delivery_deadlines(now, limit)
+    ) -> Result<Vec<nmp_store::PublishQueueDeadline>, PersistenceError> {
+        self.inner.due_publish_queue_deadlines(now, limit)
     }
-    fn next_delivery_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_delivery_deadline()
+    fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        self.inner.next_publish_queue_deadline()
     }
     fn set_lane_waiting(
         &mut self,
-        key: &nmp_store::DeliveryLaneKey,
+        key: &nmp_store::PublishQueueLaneKey,
         revision: u64,
         auth: bool,
-    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
+    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
         self.inner.set_lane_waiting(key, revision, auth)
     }
     fn set_lane_eligible(
         &mut self,
-        key: &nmp_store::DeliveryLaneKey,
+        key: &nmp_store::PublishQueueLaneKey,
         revision: u64,
         since: Timestamp,
-    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
+    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
         self.inner.set_lane_eligible(key, revision, since)
     }
     fn set_lane_transient(
         &mut self,
-        key: &nmp_store::DeliveryLaneKey,
+        key: &nmp_store::PublishQueueLaneKey,
         revision: u64,
         ordinal: u64,
         eligible_at: Timestamp,
-        cause: nmp_store::DeliveryTransientCause,
+        cause: nmp_store::PublishQueueTransientCause,
         raw_reason: Option<String>,
-    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
+    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
         self.inner
             .set_lane_transient(key, revision, ordinal, eligible_at, cause, raw_reason)
     }
     fn suspend_lane_attempt(
         &mut self,
-        key: &nmp_store::DeliveryLaneKey,
+        key: &nmp_store::PublishQueueLaneKey,
         revision: u64,
         ordinal: u64,
         at: Timestamp,
-        cause: nmp_store::DeliveryTransientCause,
+        cause: nmp_store::PublishQueueTransientCause,
         raw_reason: Option<String>,
         auth: bool,
-    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
+    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
         self.inner
             .suspend_lane_attempt(key, revision, ordinal, at, cause, raw_reason, auth)
     }
     fn start_lane_attempt(
         &mut self,
-        key: &nmp_store::DeliveryLaneKey,
+        key: &nmp_store::PublishQueueLaneKey,
         revision: u64,
         event: nostr::Event,
         started_at: Timestamp,
-    ) -> Result<(DeliveryAttempt, nmp_store::DeliveryLane), PersistenceError> {
+    ) -> Result<(PublishQueueAttempt, nmp_store::PublishQueueLane), PersistenceError> {
         self.inner
             .start_lane_attempt(key, revision, event, started_at)
     }
     fn record_lane_handoff(
         &mut self,
-        key: &nmp_store::DeliveryLaneKey,
+        key: &nmp_store::PublishQueueLaneKey,
         revision: u64,
         ordinal: u64,
-        detail: nmp_store::DeliveryAttemptHandoff,
-        next: nmp_store::DeliveryPostHandoffState,
-    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
+        detail: nmp_store::PublishQueueAttemptHandoff,
+        next: nmp_store::PublishQueuePostHandoffState,
+    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
         self.inner
             .record_lane_handoff(key, revision, ordinal, detail, next)
     }
     fn finish_lane_attempt(
         &mut self,
-        key: &nmp_store::DeliveryLaneKey,
+        key: &nmp_store::PublishQueueLaneKey,
         revision: u64,
         ordinal: u64,
-        outcome: DeliveryAttemptOutcome,
+        outcome: PublishQueueAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<nmp_store::DeliveryLane, PersistenceError> {
+    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
         self.inner
             .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
     }
     fn recover_attempt_details(
         &self,
         intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<nmp_store::DeliveryAttemptDetails>, PersistenceError> {
+    ) -> Result<Vec<nmp_store::PublishQueueAttemptDetails>, PersistenceError> {
         self.inner.recover_attempt_details(intent_id)
     }
     fn close_terminal_intent(
@@ -1133,17 +1109,11 @@ impl EventStore for WakeLaneProbeStore {
     ) -> Result<nmp_store::CloseIntentOutcome, PersistenceError> {
         self.inner.close_terminal_intent(intent_id)
     }
-    fn accept_ephemeral(
-        &mut self,
-        frozen_id: nostr::EventId,
-        expected_pubkey: nostr::PublicKey,
-    ) -> Result<u64, PersistenceError> {
-        self.inner.accept_ephemeral(frozen_id, expected_pubkey)
-    }
+    delegate_publish_queue_door!(inner);
 }
 
 /// Falsifier (epic #507 finding E5): a single relay-connected event for
-/// relay X must trigger `recover_delivery_lanes` only for X's own intent on
+/// relay X must trigger `recover_publish_queue_lanes` only for X's own intent on
 /// the wake path, not for every outstanding durable write. Composition of
 /// the expected count: `schedule_ready`'s own `O(pending)` accounting is
 /// UNCHANGED (deliberately -- see `recover_all_lanes`'s doc comment) and
@@ -1168,7 +1138,6 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     for (i, relay) in relays.iter().enumerate() {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(100 + i as u64, &format!("falsifier {i}"))),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1180,7 +1149,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
 
     // Reset the counter right before the event under test -- everything
     // above (N acceptances, each running its own `schedule_ready`) already
-    // produced its own, unrelated `recover_delivery_lanes` traffic.
+    // produced its own, unrelated `recover_publish_queue_lanes` traffic.
     let woken = relays[0].clone();
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {
@@ -1226,7 +1195,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
 /// range-scan or decode the durable lane table after signing/bootstrap has
 /// already established the exact lane state.
 #[test]
-fn unchanged_worker_demand_reads_zero_delivery_lanes() {
+fn unchanged_worker_demand_reads_zero_publish_queue_lanes() {
     const N: usize = 3;
     let author = Keys::generate();
     let relays: Vec<RelayUrl> = (0..N)
@@ -1240,7 +1209,6 @@ fn unchanged_worker_demand_reads_zero_delivery_lanes() {
     for (i, relay) in relays.iter().enumerate() {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(300 + i as u64, &format!("worker projection {i}"))),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1312,7 +1280,6 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     // writes contribute nothing" from "this core computes nothing at all".
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(400, "parked control")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![routed_relay.clone()]),
         identity: Identity::Active,
         correlation: None,
@@ -1332,7 +1299,6 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     for i in 0..PARKED {
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(500 + i as u64, &format!("parked {i}"))),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![parked_relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1383,7 +1349,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
         calls.get(),
         0,
         "{PARKED} parked intents plus ten unchanged dispatch passes must cost \
-         zero recover_delivery_lanes calls"
+         zero recover_publish_queue_lanes calls"
     );
 }
 
@@ -1395,7 +1361,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
 /// can be retired later; a false negative strands a durable obligation
 /// forever.
 ///
-/// `bootstrap_delivery_lanes` is both the create-if-missing mutation and the
+/// `bootstrap_publish_queue_lanes` is both the create-if-missing mutation and the
 /// one complete read that establishes the projection, so even a provably
 /// `Absent` outcome (the injected fault here) does not prove that OLDER lanes
 /// were absent.
@@ -1415,7 +1381,6 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(600, "unproven lane creation")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(relays.to_vec()),
         identity: Identity::Active,
         correlation: None,
@@ -1429,7 +1394,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
     // delivery owner publishes every receipt fact as an effect, so the whole
     // accept-and-sign sequence is the exact status stream a receipt observer
     // would have seen.
-    let statuses: Vec<WriteStatus> = receipt_statuses(&accepted)
+    let statuses: Vec<WriteFact> = receipt_statuses(&accepted)
         .into_iter()
         .chain(receipt_statuses(&signed_effects))
         .collect();
@@ -1437,7 +1402,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
         assert!(
             statuses
                 .iter()
-                .any(|status| status == &WriteStatus::PersistenceBlocked(relay.clone())),
+                .any(|status| status == &attempt_stalled(relay)),
             "the fixture must actually take the failed-creation path for {relay}: {statuses:?}"
         );
     }
@@ -1487,7 +1452,6 @@ fn relay_worker_projection_redb_benchmark() {
                 10_000 + i as u64,
                 &format!("worker benchmark {i}"),
             )),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
             correlation: None,
@@ -1526,12 +1490,12 @@ fn relay_worker_projection_redb_benchmark() {
 }
 
 /// Degraded-mode safety valve (epic #507 finding E5): when
-/// `bootstrap_delivery_lanes` fails for one intent, the reverse index can no
+/// `bootstrap_publish_queue_lanes` fails for one intent, the reverse index can no
 /// longer be proven a superset of live lanes, so `wake_relay_lanes` must
 /// fall back to the full `recover_all_lanes` scan rather than trust a
 /// possibly-incomplete index. Proven two ways: an unrelated intent's lane
 /// still correctly wakes and publishes (no missed wakeup), and the wake
-/// event's `recover_delivery_lanes` call count matches the FULL-scan
+/// event's `recover_publish_queue_lanes` call count matches the FULL-scan
 /// composition rather than the narrower indexed one.
 #[test]
 fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
@@ -1545,11 +1509,10 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     );
     activate(&mut core, &author);
 
-    // Intent #1: its `bootstrap_delivery_lanes` call is the injected failure
+    // Intent #1: its `bootstrap_publish_queue_lanes` call is the injected failure
     // -- the reducer must degrade rather than pretend it has no lanes.
     let accepted1 = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(200, "degraded 1")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
         correlation: None,
@@ -1558,12 +1521,12 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     let signed1 = u1.sign_with_keys(&author).unwrap();
     let signed_effects1 = core.handle(EngineMsg::SignerCompleted(id1, gen1, Ok(signed1)));
     assert!(
-        signed_effects1.iter().any(|e| matches!(
-            e,
-            Effect::EmitReceipt(rid, WriteStatus::PersistenceBlocked(r))
-                if *rid == id1 && r == &relay
-        )),
-        "the injected bootstrap failure must surface as PersistenceBlocked, got {signed_effects1:?}"
+        signed_effects1
+            .iter()
+            .any(|e| matches!(e, Effect::EmitReceipt(rid, fact)
+                if *rid == id1 && fact == &attempt_stalled(&relay))),
+        "the injected bootstrap failure must surface as a persistence stall, got \
+         {signed_effects1:?}"
     );
 
     // Intent #2: an ordinary write to the SAME relay accepted right after --
@@ -1571,7 +1534,6 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     // the index DOES learn its lane.
     let accepted2 = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(201, "degraded 2")),
-        durability: Durability::Durable,
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
         correlation: None,
@@ -1582,7 +1544,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     assert!(
         signed_effects2.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::AwaitingRelay { relay: r })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, state: RelayState::Waiting(RelayWaiting::NotConnected) })
                 if *rid == id2 && r == &relay
         )),
         "the second write must bootstrap normally and land in WaitingConnection, \
@@ -1695,7 +1657,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         effects_a.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::RetryEligible { relay, attempt: 1, .. })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
                 if *rid == receipt_a && relay == &relay_a
         )),
         "receipt_for_intent must resolve intent_a's due AckTimeout back to \
@@ -1705,7 +1667,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         !effects_a.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::RetryEligible { relay, .. })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { .. }) })
                 if relay == &relay_b || *rid == receipt_b
         )),
         "relay_b's deadline is not yet due -- it must not fire early, got {effects_a:?}"
@@ -1715,7 +1677,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         effects_b.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::RetryEligible { relay, attempt: 1, .. })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
                 if *rid == receipt_b && relay == &relay_b
         )),
         "receipt_for_intent must resolve intent_b's due AckTimeout back to \
@@ -1782,7 +1744,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteStatus::RetryEligible { relay, attempt: 1, .. })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
                 if *rid == receipt2 && relay == &relay2
         )),
         "an earlier, unrelated pending removal (write #1's close) must not \

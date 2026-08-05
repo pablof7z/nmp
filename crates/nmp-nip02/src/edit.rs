@@ -1,4 +1,4 @@
-use nmp::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nostr::{Event, EventId, Kind, PublicKey, Tag};
 
 /// The requested relationship after a NIP-02 edit.
@@ -91,7 +91,6 @@ pub fn compose_follow_change(
             },
             expected_base: Some(base.id),
         },
-        durability: Durability::Durable,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,

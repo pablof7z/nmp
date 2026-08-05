@@ -163,8 +163,8 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         tags: List<List<String>> = emptyList(),
         content: String = "",
         createdAt: ULong? = null,
-    ): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(
+    ): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(
             nmpRethrowing {
                 ffi.publish(
                     engine.ffi,
@@ -177,8 +177,8 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
     /** Publish an ALREADY-SIGNED event into the group. The `h` it already
      * carries is validated, never appended or repaired -- see
      * [validateContext]'s doc for the exact refusals. */
-    fun publishSigned(engine: NMPEngine, event: NMPSignedEvent): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(
+    fun publishSigned(engine: NMPEngine, event: NMPSignedEvent): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(
             nmpRethrowing { ffi.publishSigned(engine.ffi, event.toFfiSignedEvent()) },
         )
 
@@ -187,14 +187,14 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         engine: NMPEngine,
         authorPubkeyHex: String,
         inviteCode: String? = null,
-    ): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(
+    ): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(
             nmpRethrowing { ffi.joinRequest(engine.ffi, authorPubkeyHex, inviteCode) },
         )
 
     /** kind:9022 -- leave. */
-    fun leaveRequest(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(nmpRethrowing { ffi.leaveRequest(engine.ffi, authorPubkeyHex) })
+    fun leaveRequest(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(nmpRethrowing { ffi.leaveRequest(engine.ffi, authorPubkeyHex) })
 
     /** kind:9000 -- add a member, optionally with a role. */
     fun addUser(
@@ -202,14 +202,14 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         authorPubkeyHex: String,
         pubkeyHex: String,
         role: String? = null,
-    ): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(
+    ): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(
             nmpRethrowing { ffi.addUser(engine.ffi, authorPubkeyHex, pubkeyHex, role) },
         )
 
     /** kind:9001 -- remove a member. */
-    fun removeUser(engine: NMPEngine, authorPubkeyHex: String, pubkeyHex: String): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(
+    fun removeUser(engine: NMPEngine, authorPubkeyHex: String, pubkeyHex: String): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(
             nmpRethrowing { ffi.removeUser(engine.ffi, authorPubkeyHex, pubkeyHex) },
         )
 
@@ -220,28 +220,28 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         authorPubkeyHex: String,
         name: String? = null,
         about: String? = null,
-    ): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(
+    ): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(
             nmpRethrowing { ffi.editMetadata(engine.ffi, authorPubkeyHex, name, about) },
         )
 
     /** kind:9005 -- delete one group-hosted event. */
-    fun deleteEvent(engine: NMPEngine, authorPubkeyHex: String, eventId: String): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(
+    fun deleteEvent(engine: NMPEngine, authorPubkeyHex: String, eventId: String): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(
             nmpRethrowing { ffi.deleteEvent(engine.ffi, authorPubkeyHex, eventId) },
         )
 
     /** kind:9007 -- create the group at its hosts. */
-    fun createGroup(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(nmpRethrowing { ffi.createGroup(engine.ffi, authorPubkeyHex) })
+    fun createGroup(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(nmpRethrowing { ffi.createGroup(engine.ffi, authorPubkeyHex) })
 
     /** kind:9008 -- delete the group from its hosts. */
-    fun deleteGroup(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(nmpRethrowing { ffi.deleteGroup(engine.ffi, authorPubkeyHex) })
+    fun deleteGroup(engine: NMPEngine, authorPubkeyHex: String): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(nmpRethrowing { ffi.deleteGroup(engine.ffi, authorPubkeyHex) })
 
     /** kind:9009 -- mint an invite code redeemable by [joinRequest]. */
-    fun createInvite(engine: NMPEngine, authorPubkeyHex: String, code: String): NMPGroupWriteStatus =
-        NMPGroupWriteStatus.from(
+    fun createInvite(engine: NMPEngine, authorPubkeyHex: String, code: String): NMPGroupWriteFacts =
+        NMPGroupWriteFacts.from(
             nmpRethrowing { ffi.createInvite(engine.ffi, authorPubkeyHex, code) },
         )
 }
@@ -334,7 +334,7 @@ class NMPGroupIds private constructor(internal val ffi: FfiGroupIds) {
 private fun NMPSignedEvent.toFfiSignedEvent(): FfiSignedEvent =
     FfiSignedEvent(id, pubkey, createdAt, kind, tags, content, signature)
 
-/** The ordered [WriteStatus] facts one group write's write reaches, pulled
+/** The ordered [WriteFact] facts one group write's write reaches, pulled
  * from its untracked receipt handle (#1033). UNLIKE [Receipt] this carries
  * NO receipt id: every [NMPGroup] write reaches the engine's untracked
  * publish door (never `publish_tracked`), because the store-issued
@@ -342,19 +342,19 @@ private fun NMPSignedEvent.toFfiSignedEvent(): FfiSignedEvent =
  * reason to surface. The [status] `Flow` is a cold pull loop over `next()`
  * -- FIFO write facts, no folding and no conflation. Collection-scope
  * teardown withdraws the live stream via `handle.cancel()`. */
-class NMPGroupWriteStatus private constructor(val status: Flow<WriteStatus>) {
+class NMPGroupWriteFacts private constructor(val status: Flow<WriteFact>) {
     companion object {
-        internal fun from(stream: NmpGroupReceiptStream): NMPGroupWriteStatus =
-            NMPGroupWriteStatus(groupWriteStatusFlow(stream))
+        internal fun from(stream: NmpGroupReceiptStream): NMPGroupWriteFacts =
+            NMPGroupWriteFacts(groupWriteStatusFlow(stream))
     }
 }
 
-private fun groupWriteStatusFlow(stream: NmpGroupReceiptStream): Flow<WriteStatus> =
+private fun groupWriteStatusFlow(stream: NmpGroupReceiptStream): Flow<WriteFact> =
     flow {
         try {
             while (true) {
                 val status = nmpRethrowingAsync { stream.next() } ?: break
-                emit(WriteStatus.from(status))
+                emit(WriteFact.from(status))
             }
         } finally {
             stream.cancel()

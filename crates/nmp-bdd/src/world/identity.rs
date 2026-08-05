@@ -20,12 +20,12 @@ use std::time::{Duration, Instant};
 
 use nostr::PublicKey;
 
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
 use nmp::mechanism::runtime::ReceiptReattachment;
-use nmp_grammar::{Durability, EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use super::budgets::{EVENTUALLY, NEVER};
-use super::observe::ReceiptState;
+use super::observe::{is_failure_fact, ReceiptState};
 use super::NmpWorld;
 
 impl NmpWorld {
@@ -202,22 +202,30 @@ impl NmpWorld {
     /// naming no identity` / `... naming identity "<hex>"`.
     pub async fn publish_composed_event(&mut self, kind: u16, text: &str, identity: Identity) {
         self.ensure_started().await;
-        let stream = self
-            .handle()
-            .publish_tracked(WriteIntent {
-                payload: WritePayload::Event(
-                    EventBuilder::new(nostr::Kind::Custom(kind)).content(text),
-                ),
-                durability: Durability::Durable,
-                routing: WriteRouting::Auto,
-                identity,
-                correlation: None,
-            })
-            .expect("BDD receipt correlation namespace must be available");
+        let result = self.handle().publish_tracked(WriteIntent {
+            payload: WritePayload::Event(
+                EventBuilder::new(nostr::Kind::Custom(kind)).content(text),
+            ),
+            routing: WriteRouting::Auto,
+            identity,
+            correlation: None,
+        });
         self.last_publish_was_auto = true;
         self.last_publish_label = self.label_of(identity);
-        self.last_receipt_id = Some(stream.id);
-        let state = ReceiptState::new(stream.statuses);
+        // A refused publish took nothing into custody, so there is no receipt
+        // id for a later step to reattach by -- that is what the refusal
+        // MEANS, and remembering a stale one from an earlier publish would
+        // let a reattach step pass against the wrong write.
+        let state = match result {
+            Ok(stream) => {
+                self.last_receipt_id = Some(stream.id);
+                ReceiptState::new(stream.statuses)
+            }
+            Err(error) => {
+                self.last_receipt_id = None;
+                ReceiptState::refused(error)
+            }
+        };
         self.receipts_by_text.insert(text.to_string(), state);
         self.last_receipt_text = Some(text.to_string());
     }
@@ -283,7 +291,7 @@ impl NmpWorld {
         &mut self,
         text: Option<&str>,
         window: Duration,
-        pred: impl Fn(&[WriteStatus]) -> bool,
+        pred: impl Fn(&[WriteFact]) -> bool,
     ) -> bool {
         let receipt = self.identity_receipt_mut(text);
         receipt.eventually_within(window, pred)
@@ -320,7 +328,7 @@ impl NmpWorld {
 
     /// Every status the write under discussion has reported so far, for
     /// assertion messages.
-    pub fn identity_receipt_statuses(&mut self, text: Option<&str>) -> Vec<WriteStatus> {
+    pub fn identity_receipt_statuses(&mut self, text: Option<&str>) -> Vec<WriteFact> {
         let receipt = self.identity_receipt_mut(text);
         receipt.eventually_within(Duration::from_millis(0), |_| true);
         receipt.seen.clone()
@@ -338,67 +346,84 @@ impl NmpWorld {
         self.identity_receipt_eventually(text, EVENTUALLY, |seen| !seen.is_empty())
     }
 
-    /// `Then the write reports accepted`.
+    /// `Then the write reports accepted` -- `publish()` returning `Ok` IS
+    /// acceptance, so there is no fact to wait for. The write is durably
+    /// recorded and whatever becomes of it is recorded with it.
     pub fn write_reported_accepted(&mut self, text: Option<&str>) -> bool {
-        self.identity_receipt_eventually(text, EVENTUALLY, |seen| {
-            seen.iter().any(|s| matches!(s, WriteStatus::Accepted))
-        })
+        self.identity_receipt_mut(text).refusal.is_none()
     }
 
-    /// `Then it never reports accepted` -- costs its full window, since
-    /// there is no early exit from "this did not happen".
+    /// `Then it never reports accepted` -- the door refused to take it, so
+    /// no custody was ever established.
     pub fn write_never_reported_accepted(&mut self, text: Option<&str>) -> bool {
-        !self.identity_receipt_eventually(text, NEVER, |seen| {
-            seen.iter().any(|s| matches!(s, WriteStatus::Accepted))
-        })
+        self.identity_receipt_mut(text).refusal.is_some()
     }
 
-    /// `Then the write is refused ...` -- `Failed` FIRST and alone, so no
-    /// acceptance ever preceded it.
+    /// `Then the write is refused ...` -- the refusal is `publish()` itself
+    /// answering `Err`, which is what makes "before acceptance" structural
+    /// rather than an ordering claim about a stream: an instruction that
+    /// cannot resolve never becomes a queue entry at all.
     pub fn write_refused_before_acceptance(&mut self, text: Option<&str>) -> bool {
-        self.identity_receipt_eventually(text, EVENTUALLY, |seen| {
-            matches!(seen.first(), Some(WriteStatus::Failed(_)))
-        })
+        self.identity_receipt_mut(text).refusal.is_some()
+    }
+
+    /// What the door said when it refused, for the steps that assert WHICH
+    /// instruction could not resolve.
+    pub fn write_refusal_reason(&mut self, text: Option<&str>) -> Option<String> {
+        self.identity_receipt_mut(text)
+            .refusal
+            .as_ref()
+            .map(ToString::to_string)
     }
 
     /// `Then the write is reported cancelled`.
     pub fn write_reported_cancelled(&mut self, text: Option<&str>) -> bool {
         self.identity_receipt_eventually(text, EVENTUALLY, |seen| {
-            seen.iter().any(|s| matches!(s, WriteStatus::Cancelled))
+            seen.iter().any(|s| {
+                matches!(
+                    s,
+                    WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled))
+                )
+            })
         })
     }
 
     /// `Then the receipt reports it awaiting a signer for "<hex>"` -- the
-    /// park, named. The pubkey on the status is the whole point: an app
+    /// park, named. The pubkey on the fact is the whole point: an app
     /// renders "waiting for your podcast signer" from it rather than
     /// inferring a stall from the absence of anything else.
     pub fn write_awaiting_signer_for(&mut self, label: &str, text: Option<&str>) -> bool {
         let pubkey = self.person(label).public_key();
         self.identity_receipt_eventually(text, EVENTUALLY, move |seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::AwaitingCapability { pubkey: p } if *p == pubkey))
+            seen.iter().any(|s| {
+                matches!(s, WriteFact::Signing(SigningState::AwaitingSigner { pubkey: p }) if *p == pubkey)
+            })
         })
     }
 
-    /// `Then the write is never refused`.
+    /// `Then the write is never refused` -- neither at the door nor in the
+    /// queue afterwards.
     pub fn write_never_refused(&mut self, text: Option<&str>) -> bool {
-        !self.identity_receipt_eventually(text, NEVER, |seen| {
-            seen.iter().any(|s| matches!(s, WriteStatus::Failed(_)))
-        })
+        if self.identity_receipt_mut(text).refusal.is_some() {
+            return false;
+        }
+        !self.identity_receipt_eventually(text, NEVER, |seen| seen.iter().any(is_failure_fact))
     }
 
     /// `Then nothing is signed` -- after a cancel, no signature is ever
     /// produced, however late a capability turns up.
     pub fn nothing_was_signed(&mut self, text: Option<&str>) -> bool {
         !self.identity_receipt_eventually(text, NEVER, |seen| {
-            seen.iter().any(|s| matches!(s, WriteStatus::Signed(_)))
+            seen.iter()
+                .any(|s| matches!(s, WriteFact::Signing(SigningState::Signed { .. })))
         })
     }
 
     /// `Then the write is signed by that signer`.
     pub fn write_was_signed(&mut self, text: Option<&str>) -> bool {
         self.identity_receipt_eventually(text, EVENTUALLY, |seen| {
-            seen.iter().any(|s| matches!(s, WriteStatus::Signed(_)))
+            seen.iter()
+                .any(|s| matches!(s, WriteFact::Signing(SigningState::Signed { .. })))
         })
     }
 
@@ -447,13 +472,11 @@ impl NmpWorld {
     }
 
     /// `Then no journal row was written and no write id was allocated` --
-    /// acceptance IS the journal write, so a receipt that never accepted
-    /// never wrote one, and the pre-acceptance correlation id it carried is
-    /// not a durable write id.
+    /// acceptance IS the journal write, so a publish the door refused never
+    /// wrote one and never received a receipt id to allocate a write id
+    /// against.
     pub fn nothing_was_journaled(&mut self, text: Option<&str>) -> bool {
-        self.identity_receipt_statuses(text)
-            .iter()
-            .all(|s| !matches!(s, WriteStatus::Accepted))
+        self.identity_receipt_mut(text).refusal.is_some()
     }
 
     /// The label of whoever is active right now, for a restart step that

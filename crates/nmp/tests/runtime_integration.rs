@@ -24,7 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{ObservationFact, RelayAdmissionPolicy, RowDelta};
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::{RelayState, SigningState, WriteFact};
 use nmp::mechanism::runtime::{
     EngineThread, FifoReceiver, FifoTryRecvError, ReceiptReattachment, RowsReceiver,
 };
@@ -33,14 +33,12 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, Selector, SourceAuthority,
 };
-use nmp_grammar::{
-    CorrelationToken, Durability, Identity, WriteIntent, WritePayload, WriteRouting,
-};
+use nmp_grammar::{CorrelationToken, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, MemoryStore,
-    RedbStore, RedbStoreResetError, RelayObserved, WriteDurability,
+    RedbStore, RedbStoreResetError, RelayObserved,
 };
 use nmp_test_support::{
     relays::{AdvertisedLimits, RelayConfig, ScriptedRelay},
@@ -58,7 +56,7 @@ use nostr_relay_builder::prelude::{
     Tag as RelayTag, Timestamp as RelayTimestamp,
 };
 
-fn expect_attached(result: ReceiptReattachment) -> FifoReceiver<WriteStatus> {
+fn expect_attached(result: ReceiptReattachment) -> FifoReceiver<WriteFact> {
     match result {
         ReceiptReattachment::Attached { statuses, .. } => statuses,
         ReceiptReattachment::NotFound => panic!("known receipt was not found"),
@@ -328,9 +326,9 @@ fn drain_relay_request_evidence(rx: &RowsReceiver) -> Vec<(u64, u64, bool, Concr
 
 /// Same shape as [`wait_for_rows`], for the receipt-status stream.
 fn wait_for_status(
-    rx: &FifoReceiver<WriteStatus>,
+    rx: &FifoReceiver<WriteFact>,
     timeout: Duration,
-    pred: impl Fn(&WriteStatus) -> bool,
+    pred: impl Fn(&WriteFact) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -456,7 +454,6 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     let receipt_rx = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&contact_list)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -466,7 +463,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     assert!(
         wait_for_status(&receipt_rx, Duration::from_secs(10), |s| matches!(
             s,
-            WriteStatus::Acked(r) if r == &url
+            WriteFact::Relay { relay: r, state: RelayState::Published } if r == &url
         )),
         "a durable publish to the seeded relay must reach Acked"
     );
@@ -1343,12 +1340,14 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "cancel_write",
         "observe_diagnostics",
         "publish",
+        "publish_queue_entries",
         "publish_tracked",
         "reattach_by_correlation",
         "reattach_receipt",
         "reattach_receipt_from",
         "relay_information",
         "remove_auth_policy",
+        "remove_publish_queue_entry",
         "remove_signer",
         "request_rows",
         "set_active_account",
@@ -1415,7 +1414,6 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
                 content: ("tracked").into(),
                 created_at: Some(Timestamp::now()),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -1425,12 +1423,11 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         tracked.id.0 < (1u64 << 63),
         "accepted ids use store namespace"
     );
-    assert_eq!(tracked.statuses.recv().unwrap(), WriteStatus::Accepted);
     assert_eq!(
         tracked.statuses.recv().unwrap(),
-        WriteStatus::AwaitingCapability {
+        WriteFact::Signing(SigningState::AwaitingSigner {
             pubkey: keys.public_key()
-        }
+        })
     );
     assert_eq!(
         tracked.statuses.try_recv(),
@@ -1442,23 +1439,15 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     let second = expect_attached(handle.reattach_receipt(tracked.id));
     assert_eq!(
         first.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::Accepted
-    );
-    assert_eq!(
-        first.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::AwaitingCapability {
+        WriteFact::Signing(SigningState::AwaitingSigner {
             pubkey: keys.public_key()
-        }
+        })
     );
     assert_eq!(
         second.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::Accepted
-    );
-    assert_eq!(
-        second.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::AwaitingCapability {
+        WriteFact::Signing(SigningState::AwaitingSigner {
             pubkey: keys.public_key()
-        }
+        })
     );
     handle
         .add_signer(local_signer(&keys))
@@ -1466,12 +1455,18 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     assert!(wait_for_status(
         &first,
         Duration::from_secs(2),
-        |status| matches!(status, WriteStatus::Signed(_))
+        |status| matches!(
+            status,
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
+        )
     ));
     assert!(wait_for_status(
         &second,
         Duration::from_secs(2),
-        |status| matches!(status, WriteStatus::Signed(_))
+        |status| matches!(
+            status,
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
+        )
     ));
     assert!(matches!(
         handle.reattach_receipt(nmp::mechanism::core::ReceiptId(999_999)),
@@ -1507,18 +1502,16 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
                 content: ("original correlation body").into(),
                 created_at: Some(Timestamp::from(100)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: Some(correlation.clone()),
         })
         .expect("original receipt");
-    assert_eq!(original.statuses.recv().unwrap(), WriteStatus::Accepted);
     assert_eq!(
         original.statuses.recv().unwrap(),
-        WriteStatus::AwaitingCapability {
+        WriteFact::Signing(SigningState::AwaitingSigner {
             pubkey: keys.public_key()
-        }
+        })
     );
 
     let retry = handle
@@ -1529,19 +1522,17 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
                 content: ("different retry body must not be accepted").into(),
                 created_at: Some(Timestamp::from(101)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: Some(correlation),
         })
         .expect("correlation retry");
     assert_eq!(retry.id, original.id);
-    assert_eq!(retry.statuses.recv().unwrap(), WriteStatus::Accepted);
     assert_eq!(
         retry.statuses.recv().unwrap(),
-        WriteStatus::AwaitingCapability {
+        WriteFact::Signing(SigningState::AwaitingSigner {
             pubkey: keys.public_key()
-        }
+        })
     );
     assert_eq!(
         original.statuses.try_recv(),
@@ -1555,12 +1546,18 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
     assert!(wait_for_status(
         &original.statuses,
         Duration::from_secs(2),
-        |status| matches!(status, WriteStatus::Signed(_))
+        |status| matches!(
+            status,
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
+        )
     ));
     assert!(wait_for_status(
         &retry.statuses,
         Duration::from_secs(2),
-        |status| matches!(status, WriteStatus::Signed(_))
+        |status| matches!(
+            status,
+            WriteFact::Signing(SigningState::Signed { event_id: _ })
+        )
     ));
 
     handle.shutdown();
@@ -1603,7 +1600,6 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
                 monotonic_stamp: false,
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
-                durability: WriteDurability::Durable,
                 routing: "auto".into(),
                 sig_state: IntentSigState::AwaitingSigner,
                 accepted_at: Timestamp::now(),
@@ -1626,13 +1622,9 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
     let statuses = expect_attached(handle.reattach_receipt(receipt));
     assert_eq!(
         statuses.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::Accepted
-    );
-    assert_eq!(
-        statuses.recv_timeout(Duration::from_secs(1)).unwrap(),
-        WriteStatus::AwaitingCapability {
+        WriteFact::Signing(SigningState::AwaitingSigner {
             pubkey: keys.public_key()
-        }
+        })
     );
     handle
         .add_signer(local_signer(&keys))
@@ -1640,7 +1632,7 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
     assert!(wait_for_status(
         &statuses,
         Duration::from_secs(2),
-        |status| matches!(status, WriteStatus::Signed(event_id) if *event_id == id)
+        |status| matches!(status, WriteFact::Signing(SigningState::Signed { event_id }) if *event_id == id)
     ));
     handle.shutdown();
     thread.join();

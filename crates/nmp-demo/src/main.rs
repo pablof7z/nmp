@@ -31,9 +31,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, Demand, Derived, DiagnosticsSnapshot, Durability, Engine, EngineConfig, EventBuilder,
-    Filter, Frame, Identity, IdentityField, Kind, LiveQuery, PublicKey, RowDelta, Selector,
-    Timestamp, WriteIntent, WritePayload, WriteRouting,
+    Binding, Demand, Derived, DiagnosticsSnapshot, Engine, EngineConfig, EventBuilder, Filter,
+    Frame, Identity, IdentityField, Kind, LiveQuery, PublicKey, RowDelta, Selector, Timestamp,
+    WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::Keys;
 
@@ -166,9 +166,9 @@ fn main() {
     // pointing at different accounts -- but browsing a target you hold no
     // key for is still legal: if `--nsec`'s own pubkey differs from
     // `target`, the registry simply has no signer registered under
-    // `target`, so any publish attempted while viewing it terminates
-    // `WriteStatus::Failed` (no active signer) rather than silently signing
-    // under the wrong key.
+    // `target`, so any publish attempted while viewing it parks on
+    // `SigningState::AwaitingSigner` rather than silently signing under the
+    // wrong key.
     engine
         .set_active_account(Some(target))
         .expect("engine is open just after construction");
@@ -238,7 +238,6 @@ fn main() {
                     payload: WritePayload::Event(
                         EventBuilder::new(Kind::TextNote).content(content),
                     ),
-                    durability: Durability::Durable,
                     routing: WriteRouting::Auto,
                     identity: Identity::Active,
                     correlation: None,

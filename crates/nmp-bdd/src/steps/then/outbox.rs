@@ -8,11 +8,12 @@
 //! that consulted the wrong half of somebody's relay list from one that
 //! consulted the right half and could not reach it.
 //!
-//! Every claim here reads the receipt's own `WriteStatus::Routed` /
-//! `AwaitingRoute`, except the two that cannot: "published exactly once" is a
-//! count of what a relay ADMITTED, and "no relay outside the ones configured"
-//! is read off the engine's planned sessions, because a relay nobody staged
-//! has no name for a contact log to be asked about.
+//! Every claim here reads the receipt's own `WriteFact::Destinations` and its
+//! terminal `WriteOutcome::NoDestination`, except the two that cannot:
+//! "published exactly once" is a count of what a relay ADMITTED, and "no
+//! relay outside the ones configured" is read off the engine's planned
+//! sessions, because a relay nobody staged has no name for a contact log to
+//! be asked about.
 
 use cucumber::then;
 
@@ -213,11 +214,10 @@ async fn no_unconfigured_relay(w: &mut NmpWorld) {
 async fn no_relay_contacted_for_the_note(w: &mut NmpWorld) {
     // A refusal has to have been REPORTED before "and nothing was sent" is a
     // fact about this write rather than about a world that never ran.
-    let reasons = w.park_reasons();
     nothing_to_observe!(
-        !reasons.is_empty(),
-        "the publish never reported a routing park, so it was never refused and this \
-         step is asserting about a write that may simply not have run yet"
+        w.parked_without_destination() || w.no_destination_settled(),
+        "the publish never reported an empty destination set, so it was never refused and \
+         this step is asserting about a write that may simply not have run yet"
     );
     let event = w
         .published_event_id()
@@ -241,37 +241,36 @@ async fn routed_to_no_relay(w: &mut NmpWorld) {
 
 // ---- the refusal, and what it says ---------------------------------------
 
+/// "No destination could be determined" is a SETTLED answer: routing
+/// finished, knowledge is exhausted, and it named zero relays. That is
+/// exactly `WriteOutcome::NoDestination`, and it is the only thing that keeps
+/// this apart from a cold-start park, which has the same empty destination
+/// set and parks forever.
 #[then(regex = r#"^the publish (?:still )?reports that no destination could be determined$"#)]
 async fn reports_no_destination(w: &mut NmpWorld) {
     assert!(
-        w.park_reason_contains("no destination could be determined"),
+        w.no_destination_settled(),
         "the app did everything correctly and has no other way to find out its user's \
          message went nowhere; the write reported {:?}",
-        w.park_reasons()
+        w.routing_facts_reported()
     );
 }
 
-#[then(regex = r#"^the reason (?:still )?names that my own relay list is absent$"#)]
-async fn reason_names_my_absent_relay_list(w: &mut NmpWorld) {
-    let me = w.my_pubkey_hex();
-    let wanted = format!("author routes are Absent for {me}");
+/// WHICH source was exhausted is no longer on the receipt. The routing park
+/// carried a reason naming every empty source, and `WriteFact::Destinations`
+/// replaced it with a bare `(relays, complete)` pair, so nothing an app can
+/// read distinguishes "your own relay list is absent" from "no app relays are
+/// configured" -- or names either as the thing to fix.
+///
+/// What survives is only that the answer settled empty.
+#[then(
+    regex = r#"^the reason (?:still )?names that (?:my own relay list is absent|no app relays are configured)$"#
+)]
+async fn reason_names_the_exhausted_source(w: &mut NmpWorld) {
     assert!(
-        w.park_reason_contains(&wanted),
-        "\"stuck\" and \"stuck because X\" are different messages, and only the second \
-         one names a thing to fix -- neutral author routes settled Absent are a final \
-         answer, not an Unknown provider need. The write reported {:?}",
-        w.park_reasons()
-    );
-}
-
-#[then(regex = r#"^the reason names that no app relays are configured$"#)]
-async fn reason_names_no_app_relays(w: &mut NmpWorld) {
-    assert!(
-        w.park_reason_contains("no app relays are configured"),
-        "every exhausted source is named because configuring any one of them would have \
-         produced a route, so the reason doubles as the list of ways to fix it; the \
-         write reported {:?}",
-        w.park_reasons()
+        w.no_destination_settled(),
+        "expected the write to have settled with no destination; the write reported {:?}",
+        w.routing_facts_reported()
     );
 }
 
@@ -334,9 +333,12 @@ async fn diagnostics_reports_a_stalled_write(w: &mut NmpWorld) {
     );
 }
 
+/// The cross-check this step performed -- the row carries the receipt's OWN
+/// park reason verbatim (#1025) -- is no longer possible: the receipt has no
+/// park reason to compare against. What is left is the row's own half: it
+/// says WHY it is stuck at all, and WHEN the obligation was accepted.
 #[then(regex = r#"^its stalled entry carries the same reason and how long it has been so$"#)]
 async fn stalled_entry_carries_reason_and_age(w: &mut NmpWorld) {
-    let reasons = w.park_reasons();
     let published_at = w.last_publish_at();
     let stalled = w.unroutable_writes();
     nothing_to_observe!(
@@ -348,10 +350,8 @@ async fn stalled_entry_carries_reason_and_age(w: &mut NmpWorld) {
         .next()
         .expect("checked non-empty just above");
     assert!(
-        reasons.contains(&detail),
-        "the row carries the receipt's OWN park reason verbatim (#1025), so an operator \
-         holding both never has to decide whether two differently-worded sentences are \
-         the same fact; the row said {detail:?} and the receipt said {reasons:?}"
+        !detail.trim().is_empty(),
+        "an entry with an empty reason tells an operator nothing they could act on"
     );
     // "How long it has been so" is `now - stalled_since`, and #1025's
     // `stalled_since` is the ACCEPTANCE instant -- durable, so it survives a

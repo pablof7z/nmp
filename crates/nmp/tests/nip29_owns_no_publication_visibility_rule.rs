@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 /// without. Each entry is a thing NIP-29 code would have to TOUCH in order to
 /// decide, for itself, whether a published event may be seen.
 ///
-/// Deliberately NOT banned: `WriteStatus`, `FifoReceiver`, `LiveQuery`,
+/// Deliberately NOT banned: `WriteFact`, `FifoReceiver`, `LiveQuery`,
 /// `CacheMode`. Handing back the engine's ordinary receipt stream, and
 /// stamping `CacheMode::Strict` for per-relay authority (#1173), are NIP-29
 /// USING the general doors -- the opposite of special-casing them. Only

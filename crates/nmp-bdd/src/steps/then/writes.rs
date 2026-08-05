@@ -18,29 +18,50 @@
 //!   with it.
 //!
 //! Delivery is read off the RECEIPT rather than a harness-side mailbox
-//! throughout: `WriteStatus::Acked(url)` is the relay itself confirming it
+//! throughout: `RelayState::Published` is the relay itself confirming it
 //! took the event, which is the only delivery fact an app ever gets.
 
 use cucumber::then;
 
-use nmp::mechanism::delivery::WriteStatus;
+use nmp::mechanism::publish_queue::{
+    NotSentReason, RelayState, RelayWaiting, WriteFact, WriteOutcome,
+};
 use nostr::JsonUtil;
 
 use crate::world::{NmpWorld, ME};
 
-// ---- the receipt's own status stream -------------------------------------
+// ---- the receipt's own fact stream ---------------------------------------
 
-#[then(regex = r#"^the receipt first reports only accepted -- never sent$"#)]
-async fn receipt_first_accepted(w: &mut NmpWorld) {
-    nothing_to_observe!(
-        w.receipt_eventually(|seen| !seen.is_empty()),
-        "the receipt reported no status at all, so it has no FIRST status to be wrong"
-    );
-    let first_is_accepted =
-        w.receipt_eventually(|seen| matches!(seen.first(), Some(WriteStatus::Accepted)));
+/// Acceptance is `publish()` returning `Ok` and produces no fact at all, so
+/// what the scenario asks is about the CALL: it came back with an id, and it
+/// came back without blocking on delivery. Settlement is inspected, never
+/// awaited.
+///
+/// The id is the load-bearing half. A door that answered `()` would leave an
+/// app nothing to correlate the fact stream against, and nothing to reattach
+/// by after a restart.
+#[then(regex = r#"^publishing returned a receipt id without waiting for anything$"#)]
+async fn publishing_returned_a_receipt_id(w: &mut NmpWorld) {
     assert!(
-        first_is_accepted,
-        "expected the receipt's FIRST status to be Accepted, never a converged Sent"
+        w.publish_was_accepted(),
+        "expected the publish door to take the write; it refused with {:?}",
+        w.publish_refusal()
+    );
+    assert!(
+        w.last_receipt_id().is_some(),
+        "acceptance answers with the id every later fact correlates to, never a bare Ok"
+    );
+    assert!(
+        !matches!(
+            w.receipt_statuses().first(),
+            Some(WriteFact::Relay {
+                state: RelayState::Sent { .. } | RelayState::Published,
+                ..
+            })
+        ),
+        "the call must return before any delivery is attempted, never on a converged \
+         Sent; saw {:?}",
+        w.receipt_statuses()
     );
 }
 
@@ -48,8 +69,9 @@ async fn receipt_first_accepted(w: &mut NmpWorld) {
 async fn receipt_acked_by(w: &mut NmpWorld, relay_name: String) {
     let relay_url = w.relay_url(&relay_name);
     let acked = w.receipt_eventually(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::Acked(url) if *url == relay_url))
+        seen.iter().any(|s| {
+            matches!(s, WriteFact::Relay { relay, state: RelayState::Published } if *relay == relay_url)
+        })
     });
     assert!(
         acked,
@@ -61,8 +83,9 @@ async fn receipt_acked_by(w: &mut NmpWorld, relay_name: String) {
 async fn receipt_rejected_by(w: &mut NmpWorld, relay_name: String) {
     let relay_url = w.relay_url(&relay_name);
     let rejected = w.receipt_eventually(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::Rejected(url, _) if *url == relay_url))
+        seen.iter().any(|s| {
+            matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if *relay == relay_url)
+        })
     });
     assert!(
         rejected,
@@ -77,8 +100,9 @@ async fn receipt_rejected_by(w: &mut NmpWorld, relay_name: String) {
 async fn receipt_reports_relay_rejected(w: &mut NmpWorld, relay_name: String) {
     let relay_url = w.relay_url(&relay_name);
     let rejected = w.receipt_eventually(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::Rejected(url, _) if *url == relay_url))
+        seen.iter().any(|s| {
+            matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if *relay == relay_url)
+        })
     });
     assert!(
         rejected,
@@ -93,16 +117,23 @@ async fn receipt_reports_relay_rejected(w: &mut NmpWorld, relay_name: String) {
 #[then(regex = r#"^the reason is the relay's own words "([^"]+)"$"#)]
 async fn reason_is_the_relays_own_words(w: &mut NmpWorld, message: String) {
     nothing_to_observe!(
-        w.receipt_eventually(|seen| seen
-            .iter()
-            .any(|s| matches!(s, WriteStatus::Rejected(_, _)))),
+        w.receipt_eventually(|seen| seen.iter().any(|s| matches!(
+            s,
+            WriteFact::Relay {
+                state: RelayState::Rejected { .. },
+                ..
+            }
+        ))),
         "no destination refused this write at all, so there are no words to have been kept"
     );
     let statuses = w.receipt_statuses();
     let said: Vec<&String> = statuses
         .iter()
         .filter_map(|s| match s {
-            WriteStatus::Rejected(_, reason) => Some(reason),
+            WriteFact::Relay {
+                state: RelayState::Rejected { reason },
+                ..
+            } => Some(reason),
             _ => None,
         })
         .collect();
@@ -168,9 +199,15 @@ fn receipt_ordinal(name: &str) -> usize {
 async fn numbered_receipt_waiting(w: &mut NmpWorld, ordinal: String, relay_name: String) {
     let relay_url = w.relay_url(&relay_name);
     let waiting = w.receipt_eventually_at(receipt_ordinal(&ordinal), |seen| {
-        seen.iter().any(
-            |status| matches!(status, WriteStatus::AwaitingRelay { relay } if *relay == relay_url),
-        )
+        seen.iter().any(|status| {
+            matches!(
+                status,
+                WriteFact::Relay {
+                    relay,
+                    state: RelayState::Waiting(RelayWaiting::NotConnected),
+                } if *relay == relay_url
+            )
+        })
     });
     assert!(
         waiting,
@@ -181,8 +218,12 @@ async fn numbered_receipt_waiting(w: &mut NmpWorld, ordinal: String, relay_name:
 #[then(regex = r#"^the (first|second) receipt reports superseded by the newer replaceable write$"#)]
 async fn numbered_receipt_superseded(w: &mut NmpWorld, ordinal: String) {
     let superseded = w.receipt_eventually_at(receipt_ordinal(&ordinal), |seen| {
-        seen.iter()
-            .any(|status| matches!(status, WriteStatus::Superseded))
+        seen.iter().any(|status| {
+            matches!(
+                status,
+                WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Superseded))
+            )
+        })
     });
     assert!(
         superseded,
@@ -194,8 +235,9 @@ async fn numbered_receipt_superseded(w: &mut NmpWorld, ordinal: String) {
 async fn numbered_receipt_acked(w: &mut NmpWorld, ordinal: String, relay_name: String) {
     let relay_url = w.relay_url(&relay_name);
     let acked = w.receipt_eventually_at(receipt_ordinal(&ordinal), |seen| {
-        seen.iter()
-            .any(|status| matches!(status, WriteStatus::Acked(relay) if *relay == relay_url))
+        seen.iter().any(|status| {
+            matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == relay_url)
+        })
     });
     assert!(
         acked,
@@ -206,7 +248,7 @@ async fn numbered_receipt_acked(w: &mut NmpWorld, ordinal: String, relay_name: S
 // ---- routing: the two words ---------------------------------------------
 //
 // "Delivered to <relay>" is read off the RECEIPT, not off a harness-side
-// mailbox: `WriteStatus::Acked(url)` is the relay itself confirming it took
+// mailbox: `RelayState::Published` is the relay itself confirming it took
 // the event, which is the only delivery fact an app ever gets.
 
 /// `Then the note is delivered to "a"` / `... to "a" and "b"`, and the
@@ -231,8 +273,9 @@ async fn delivered_to(w: &mut NmpWorld, targets: String) {
     for name in names {
         let url = w.relay_url(&name);
         let acked = w.receipt_eventually(|seen| {
-            seen.iter()
-                .any(|s| matches!(s, WriteStatus::Acked(u) if *u == url))
+            seen.iter().any(|s| {
+                matches!(s, WriteFact::Relay { relay, state: RelayState::Published } if *relay == url)
+            })
         });
         assert!(
             acked,
@@ -309,7 +352,7 @@ async fn exactly_one_receipt(w: &mut NmpWorld) {
 async fn receipt_reports_one_destination(w: &mut NmpWorld) {
     let routed_once = w.receipt_eventually(|seen| {
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.len() == 1))
+            .any(|s| matches!(s, WriteFact::Destinations { relays, .. } if relays.len() == 1))
     });
     assert!(
         routed_once,
@@ -320,38 +363,32 @@ async fn receipt_reports_one_destination(w: &mut NmpWorld) {
 
 // ---- the empty route ----------------------------------------------------
 
+/// "Before anything is accepted" is now structural rather than an ordering
+/// claim about a stream: an instruction that cannot resolve makes `publish()`
+/// answer `Err`, so no custody, no receipt id and no queue entry ever exist.
 #[then(regex = r#"^the publish is refused before anything is accepted$"#)]
 async fn refused_before_acceptance(w: &mut NmpWorld) {
-    nothing_to_observe!(
-        w.receipt_eventually(|seen| !seen.is_empty()),
-        "the publish reported no status at all, so it was neither refused nor accepted"
-    );
-    let statuses = w.receipt_statuses();
     assert!(
-        matches!(statuses.first(), Some(WriteStatus::Failed(_))),
-        "expected Failed to be the FIRST and only status, never Accepted; saw {statuses:?}"
-    );
-    assert!(
-        !statuses.iter().any(|s| matches!(s, WriteStatus::Accepted)),
-        "a refused publish must never report Accepted; saw {statuses:?}"
+        w.publish_refusal().is_some(),
+        "expected the publish door itself to refuse, never to take custody; the receipt \
+         reported {:?}",
+        w.receipt_statuses()
     );
 }
 
 #[then(regex = r#"^no receipt is created$"#)]
 async fn no_receipt_is_created(w: &mut NmpWorld) {
-    let statuses = w.receipt_statuses();
     assert!(
-        !statuses.iter().any(|s| matches!(s, WriteStatus::Accepted)),
-        "a refused publish allocates no durable receipt; saw {statuses:?}"
+        w.publish_refusal().is_some(),
+        "a refused publish allocates no durable receipt; the door answered Ok"
     );
 }
 
 #[then(regex = r#"^nothing is written to the journal$"#)]
 async fn nothing_written_to_journal(w: &mut NmpWorld) {
-    let statuses = w.receipt_statuses();
     assert!(
-        !statuses.iter().any(|s| matches!(s, WriteStatus::Accepted)),
-        "acceptance IS the journal write, and it must not have happened; saw {statuses:?}"
+        w.publish_refusal().is_some(),
+        "acceptance IS the journal write, and it must not have happened; the door answered Ok"
     );
 }
 
@@ -368,7 +405,7 @@ async fn no_relay_is_contacted(w: &mut NmpWorld) {
     );
 }
 
-/// Read off the signer itself, not off the receipt: `WriteStatus::Signed`
+/// Read off the signer itself, not off the receipt: `SigningState::Signed`
 /// is a lifecycle beat the engine emits for an already-signed payload too,
 /// so it says nothing about whether a signer was asked.
 #[then(regex = r#"^no signer was asked for anything$"#)]
@@ -388,8 +425,9 @@ async fn no_signer_was_asked(w: &mut NmpWorld) {
 async fn received_with_signature_untouched(w: &mut NmpWorld, name: String, person: String) {
     let url = w.relay_url(&name);
     let acked = w.receipt_eventually(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::Acked(u) if *u == url))
+        seen.iter().any(|s| {
+            matches!(s, WriteFact::Relay { relay, state: RelayState::Published } if *relay == url)
+        })
     });
     assert!(acked, "expected {name:?} to accept the republished event");
 

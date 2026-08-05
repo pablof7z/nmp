@@ -18,8 +18,9 @@ import uniffi.nmp_ffi.FfiException
  * `WriteIntent.Signed` event that fails `nostr::Event::verify` is no longer
  * rejected synchronously here (#52 Unit B: the guarantee moved to
  * `nmp-engine`'s acceptance boundary so it holds for every entry point, not
- * only this one). It surfaces on the `publish` `Flow<WriteStatus>` instead,
- * as `WriteStatus.Failed`, the first and only status delivered.
+ * only this one). Because that instruction can never resolve, it surfaces as
+ * [NMPError.PublishRefused] from `publish` itself rather than as a fact on a
+ * receipt stream nothing will ever add to.
  * Receipt-correlation exhaustion is synchronous because no truthful
  * `Receipt` or status flow can be created without an identity.
  *
@@ -43,8 +44,16 @@ sealed class NMPError(message: String) : Exception(message) {
     data class SignerRejected(val reason: String) : NMPError("signer rejected request: $reason")
     data class InvalidSignerOutput(val reason: String) :
         NMPError("signer returned invalid output: $reason")
-    object ReceiptCorrelationIdExhausted :
-        NMPError("receipt correlation id namespace exhausted")
+    /** `publish` refused the call outright: either NMP could not write
+     * anything down, or the instruction could not resolve (no active account,
+     * a signature that does not verify, an explicit identity contradicting a
+     * signed payload's author, a reserved kind, an empty explicit route).
+     * Nothing durable exists and there is no queue entry to inspect.
+     *
+     * Everything else takes CUSTODY and fails in the queue where you can see
+     * it -- including a stale replaceable base, which succeeds here and
+     * arrives as [WriteOutcome.Refused]. */
+    data class PublishRefused(val reason: String) : NMPError(reason)
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     /** #489: the configured `storePath` names a persistent store already owned
      * by this or another process. No second database owner and no partial
@@ -268,7 +277,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.AuthCapabilityInstanceExhausted -> AuthCapabilityInstanceExhausted
                 is FfiException.NoActiveSigner -> NoActiveSigner
                 is FfiException.InvalidSignRequest -> InvalidSignRequest(ffi.reason)
-                is FfiException.ReceiptCorrelationIdExhausted -> ReceiptCorrelationIdExhausted
+                is FfiException.PublishRefused -> PublishRefused(ffi.reason)
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.StoreAlreadyOpen -> StoreAlreadyOpen(ffi.path)
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)

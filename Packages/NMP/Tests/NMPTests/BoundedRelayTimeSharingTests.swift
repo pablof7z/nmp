@@ -6,12 +6,16 @@ import XCTest
 final class BoundedRelayTimeSharingTests: XCTestCase {
     /// Issue #598's original public-API reproduction, promoted into NMP's
     /// host Swift XCTest gate: one operator-provided app relay serves live reads
-    /// and is also an honest Auto destination. A durable write must advance
-    /// beyond `.awaitingRelay`, reach the relay exactly once, consume its
+    /// and is also an honest Auto destination. A write must advance beyond
+    /// `RelayWaiting.notConnected`, reach the relay exactly once, consume its
     /// `OK`, and feed the relay echo back into the still-live canonical
-    /// query. No author route is learned implicitly by native core.
+    /// query. No author route is learned implicitly by native core -- which is
+    /// exactly why this write must NOT claim settlement: reading the author's
+    /// own kind:10002 through a query teaches routing nothing, so the
+    /// destination set stays honestly open (`complete == false`) even with the
+    /// app relay already published to.
     @MainActor
-    func testDurableAutoRoutedWriteProgressesPastAwaitingRelay() async throws {
+    func testAutoRoutedWriteProgressesPastAWaitingRelayLaneWithoutClaimingSettlement() async throws {
         let relay = try ControlledRelayHarness()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("nmp-598-swift-host-\(UUID().uuidString)", isDirectory: true)
@@ -104,7 +108,6 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                     tags: [],
                     content: "NMP issue 598 Swift host qualification"
                 ),
-                durability: .durable,
                 routing: .auto,
                 identity: .explicit(pubkey: account.publicKey)
             )
@@ -115,13 +118,13 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         }
         let completedStatuses = await waitForStatuses(receiptProbe, timeoutSeconds: 15) { statuses in
             statuses.contains { status in
-                if case .acked(let relayURL) = status {
+                if case .relay(let relayURL, .published) = status {
                     return isSameRelay(relayURL, relay.relayURL)
                 }
                 return false
             }
         }
-        let statuses: [WriteStatus]
+        let statuses: [WriteFact]
         if let completedStatuses {
             statuses = completedStatuses
         } else {
@@ -131,20 +134,22 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         await receiptTask.value
 
         let statusSummary = statuses.map { String(describing: $0) }.joined(separator: ", ")
-        XCTAssertTrue(statuses.contains(.accepted), statusSummary)
         let eventID = try XCTUnwrap(
             statuses.compactMap { status -> String? in
-                if case .signed(let eventID) = status {
+                if case .signing(.signed(let eventID)) = status {
                     return eventID
                 }
                 return nil
             }.first,
             statusSummary
         )
+        // The app relay is a destination, and the set is still OPEN: the
+        // author's own outbound routes were never taught to the router, so
+        // resolution has not exhausted its knowledge.
         XCTAssertTrue(
             statuses.contains { status in
-                if case .routed(let relays, _) = status {
-                    return relays.contains { isSameRelay($0, relay.relayURL) }
+                if case .destinations(let relays, let complete) = status {
+                    return !complete && relays.contains { isSameRelay($0, relay.relayURL) }
                 }
                 return false
             },
@@ -152,7 +157,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         )
         XCTAssertTrue(
             statuses.contains { status in
-                if case .sent(let relayURL, _, _) = status {
+                if case .relay(let relayURL, .sent) = status {
                     return isSameRelay(relayURL, relay.relayURL)
                 }
                 return false
@@ -161,9 +166,19 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         )
         XCTAssertTrue(
             statuses.contains { status in
-                if case .acked(let relayURL) = status {
+                if case .relay(let relayURL, .published) = status {
                     return isSameRelay(relayURL, relay.relayURL)
                 }
+                return false
+            },
+            statusSummary
+        )
+        // Settlement is a claim that NO MORE destinations are coming. Nothing
+        // here has earned it, and publishing to one relay must never be
+        // mistaken for it.
+        XCTAssertFalse(
+            statuses.contains { status in
+                if case .outcome = status { return true }
                 return false
             },
             statusSummary
@@ -215,7 +230,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         XCTAssertEqual(queryWaiters, 0)
 
         let receiptProbe = ReceiptProbe()
-        let missingStatuses: [WriteStatus]? = await boundedWait(timeout: .milliseconds(50)) {
+        let missingStatuses: [WriteFact]? = await boundedWait(timeout: .milliseconds(50)) {
             await receiptProbe.next { _ in false }
         }
         XCTAssertNil(missingStatuses)
@@ -248,8 +263,8 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
     private func waitForStatuses(
         _ probe: ReceiptProbe,
         timeoutSeconds: UInt64,
-        matching predicate: @escaping @Sendable ([WriteStatus]) -> Bool
-    ) async -> [WriteStatus]? {
+        matching predicate: @escaping @Sendable ([WriteFact]) -> Bool
+    ) async -> [WriteFact]? {
         await boundedWait(timeout: .seconds(Int64(timeoutSeconds))) {
             await probe.next(matching: predicate)
         }
@@ -384,11 +399,11 @@ private actor QueryProbe {
 
 private actor ReceiptProbe {
     private struct Waiter {
-        let predicate: @Sendable ([WriteStatus]) -> Bool
-        let continuation: CheckedContinuation<[WriteStatus]?, Never>
+        let predicate: @Sendable ([WriteFact]) -> Bool
+        let continuation: CheckedContinuation<[WriteFact]?, Never>
     }
 
-    private var statuses: [WriteStatus] = []
+    private var statuses: [WriteFact] = []
     private var failureMessage: String?
     private var waiters: [UUID: Waiter] = [:]
 
@@ -413,8 +428,8 @@ private actor ReceiptProbe {
     }
 
     func next(
-        matching predicate: @escaping @Sendable ([WriteStatus]) -> Bool
-    ) async -> [WriteStatus]? {
+        matching predicate: @escaping @Sendable ([WriteFact]) -> Bool
+    ) async -> [WriteFact]? {
         if predicate(statuses) {
             return statuses
         }
@@ -440,7 +455,7 @@ private actor ReceiptProbe {
         }
     }
 
-    func snapshot() -> [WriteStatus] {
+    func snapshot() -> [WriteFact] {
         statuses
     }
 

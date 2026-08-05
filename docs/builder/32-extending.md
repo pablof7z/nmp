@@ -104,7 +104,7 @@ No module may:
 - maintain a second optimistic row path.
 
 Core validates the final body/context, pins the signer, accepts the canonical
-row, signs once, and routes through durable delivery.
+row, signs once, and routes through publish queue.
 
 ## Keep failure ownership separate
 

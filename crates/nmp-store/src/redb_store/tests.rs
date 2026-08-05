@@ -57,7 +57,7 @@ fn assert_refuses_without_mutation(path: &std::path::Path, what: &str) {
 /// before choosing the deliberate discard. Calling this file a cache would
 /// hide the accepted-but-unpublished obligations that recreation destroys.
 #[test]
-fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_delivery_loss() {
+fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_publish_queue_loss() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unsupported-schema-cost.redb");
     drop(RedbStore::open(&path).unwrap());
@@ -93,7 +93,7 @@ fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_delivery_l
     for required in [
         "discard and recreate this store to continue",
         "NMP can reacquire the relay-backed read cache",
-        "durable delivery state",
+        "publish queue state",
         "accepted but unpublished writes",
         "receipts",
         "correlation tokens",
@@ -277,29 +277,36 @@ fn healthy_current_schema_reopen_starts_no_application_write_transaction() {
 }
 
 #[test]
-fn pending_ephemeral_count_gates_one_recovery_write_then_returns_to_fast_reopen() {
+fn a_refused_receipt_needs_no_recovery_write_on_reopen() {
+    // Deleting the ephemeral mode deleted the only reason `open()` ever
+    // wrote on the reopen path. A refused entry is TERMINAL AT BIRTH, so
+    // there is no crash-abandoned state to reconcile and a reopen stays a
+    // pure read.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ephemeral-recovery.redb");
+    let path = dir.path().join("refused-reopen.redb");
     let keys = nostr::Keys::generate();
     let frozen_id = EventId::from_byte_array([7; 32]);
 
     let mut store = RedbStore::open(&path).unwrap();
     let receipt_id = store
-        .accept_ephemeral(frozen_id, keys.public_key())
+        .accept_refused(
+            frozen_id,
+            keys.public_key(),
+            crate::RefuseReason::Tombstoned,
+        )
         .unwrap();
     drop(store);
 
     let recovered = RedbStore::open(&path).unwrap();
-    assert_eq!(recovered.open_write_transactions(), 1);
+    assert_eq!(recovered.open_write_transactions(), 0);
     let receipt = recovered
         .reattach_receipt(receipt_id)
         .unwrap()
-        .expect("retained ephemeral receipt");
-    assert_eq!(receipt.state, ReceiptState::Abandoned);
-    drop(recovered);
-
-    let healthy = RedbStore::open(&path).unwrap();
-    assert_eq!(healthy.open_write_transactions(), 0);
+        .expect("retained refused receipt");
+    assert_eq!(
+        receipt.state,
+        ReceiptState::Refused(crate::RefuseReason::Tombstoned)
+    );
 }
 
 #[test]
@@ -370,7 +377,6 @@ fn accepted_signed(
             monotonic_stamp: false,
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "range-proof".into(),
-            durability: WriteDurability::Durable,
             routing: "range-proof".into(),
             sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(created_at),
@@ -389,7 +395,7 @@ fn accepted_signed(
 /// Relay URLs deliberately share textual prefixes, and intent 1 coexists
 /// with prefix-adversarial ids 10/100.
 #[test]
-fn delivery_ranges_visit_only_target_intent_and_exact_relay_rows() {
+fn publish_queue_ranges_visit_only_target_intent_and_exact_relay_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("delivery-ranges.redb");
     let mut store = RedbStore::open(&path).expect("open redb store");
@@ -405,7 +411,7 @@ fn delivery_ranges_visit_only_target_intent_and_exact_relay_rows() {
     store
         .record_route_revision(target, BTreeSet::from([short.clone()]))
         .unwrap();
-    let lanes = store.bootstrap_delivery_lanes(target).unwrap();
+    let lanes = store.bootstrap_publish_queue_lanes(target).unwrap();
     let short_lane = lanes
         .iter()
         .find(|lane| lane.key.relay == short)
@@ -436,7 +442,7 @@ fn delivery_ranges_visit_only_target_intent_and_exact_relay_rows() {
             &short_lane.key,
             short_lane.revision,
             1,
-            DeliveryAttemptOutcome::GaveUp,
+            PublishQueueAttemptOutcome::GaveUp,
             Timestamp::from(1_003u64),
         )
         .unwrap();
@@ -463,7 +469,10 @@ fn delivery_ranges_visit_only_target_intent_and_exact_relay_rows() {
         store
             .record_route_revision(intent, BTreeSet::from([relay.clone()]))
             .unwrap();
-        let noise_lane = store.bootstrap_delivery_lanes(intent).unwrap().remove(0);
+        let noise_lane = store
+            .bootstrap_publish_queue_lanes(intent)
+            .unwrap()
+            .remove(0);
         let noise_lane = store
             .set_lane_eligible(
                 &noise_lane.key,
@@ -481,12 +490,12 @@ fn delivery_ranges_visit_only_target_intent_and_exact_relay_rows() {
             .unwrap();
     }
 
-    store.reset_delivery_range_rows();
+    store.reset_publish_queue_range_rows();
     let attempts = store.recover_attempts(target).unwrap();
     let revisions = store.recover_route_revisions(target).unwrap();
     assert_eq!(attempts.len(), 2);
     assert_eq!(revisions.len(), 2);
-    assert_eq!(store.delivery_range_rows(), (2, 2));
+    assert_eq!(store.publish_queue_range_rows(), (2, 2));
 }
 
 /// The durable-key falsifier for this fix: `coverage_row_key` must
@@ -1219,7 +1228,6 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
             monotonic_stamp: false,
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "integrity".into(),
-            durability: WriteDurability::Durable,
             routing: "integrity".into(),
             sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(80u64),
@@ -1461,10 +1469,10 @@ fn query_newest_ids_preserves_provisional_suppression() {
             )
             .unwrap();
     }
-    let claim_key = delivery_codec::id_claim_key(&hidden.id, &hidden.pubkey);
+    let claim_key = publish_queue_codec::id_claim_key(&hidden.id, &hidden.pubkey);
     let write_txn = store.db.begin_write().unwrap();
     {
-        let mut claims = write_txn.open_table(DELIVERY_SUPPRESS_BY_ID).unwrap();
+        let mut claims = write_txn.open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID).unwrap();
         add_claimant_in_txn(&mut claims, &claim_key, IntentId(1)).unwrap();
     }
     write_txn.commit().unwrap();

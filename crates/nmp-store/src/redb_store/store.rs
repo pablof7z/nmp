@@ -1,27 +1,26 @@
 use super::canonical::{fold_seen_at, observation_key, observation_range, observation_relay_key};
 use super::commit::commit_prepared;
-use super::delivery::{
-    is_suppressed_in_txn, reconcile_ephemeral_receipts_in_txn, replace_lane_in_txn,
-};
-use super::delivery_codec::{
-    codec_error, decode_meta_u64, decode_relay, encode_meta_u64, relay_key, DeliveryRelayId,
-    DELIVERY_CODEC_VERSION, DELIVERY_CODEC_VERSION_KEY, PENDING_EPHEMERAL_RECEIPTS_KEY,
-};
 use super::postings::Family;
 use super::postings_store::{scan_packed, PackedScan};
+use super::publish_queue::{is_suppressed_in_txn, replace_lane_in_txn};
+use super::publish_queue_codec::{
+    codec_error, decode_meta_u64, decode_relay, encode_meta_u64, relay_key, PublishQueueRelayId,
+    PUBLISH_QUEUE_CODEC_VERSION, PUBLISH_QUEUE_CODEC_VERSION_KEY,
+};
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
     persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, COVERAGE,
-    DELIVERY_ATTEMPTS, DELIVERY_ATTEMPT_DETAILS, DELIVERY_CORRELATIONS, DELIVERY_DEADLINES,
-    DELIVERY_DEADLINES_BY_INTENT, DELIVERY_DISPLACED, DELIVERY_INTENTS, DELIVERY_KIND5_CLAIMS,
-    DELIVERY_LANES, DELIVERY_META, DELIVERY_RECEIPTS, DELIVERY_RELAYS, DELIVERY_RELAY_IDS,
-    DELIVERY_ROUTE_REVISIONS, DELIVERY_SUPPRESS_BY_ADDR, DELIVERY_SUPPRESS_BY_ID, EVENTS,
-    EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META, EXPIRATION_INDEX,
+    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META, EXPIRATION_INDEX,
     INDEX_CARDINALITY, INDEX_CARDINALITY_META, INDEX_CARDINALITY_SAMPLE_KEY,
     INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION, INDEX_CARDINALITY_VERSION_KEY,
     POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN,
-    POSTINGS_RUN_META, POSTINGS_SEGMENTS, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META,
-    RELAY_REFS, SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
+    POSTINGS_RUN_META, POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
+    PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
+    PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS,
+    PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
+    PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS_BY_ADDR,
+    PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
+    SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -31,8 +30,8 @@ use super::AtomicU8;
 use super::Ordering;
 use super::{
     acquire_for_open, binary_event, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
-    DeliveryLane, DeliveryLaneKey, DeliveryLaneState, EventCursor, EventId, Filter, HashMap, Path,
-    PersistenceError, PreparedFilter, Provenance, RedbStoreOpenError, RelayUrl,
+    EventCursor, EventId, Filter, HashMap, Path, PersistenceError, PreparedFilter, Provenance,
+    PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, RedbStoreOpenError, RelayUrl,
     RequiredLockedFileBackend, StoreOwnership, StoredEvent, StoredEventView, Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTableMetadata, TableHandle};
@@ -71,11 +70,11 @@ pub struct RedbStore {
     // token, so no process can open or reset the target until this database
     // handle has finished closing.
     pub(super) _ownership: StoreOwnership,
-    /// Lazy process-local projection of the durable delivery relay dictionary.
+    /// Lazy process-local projection of the publish queue relay dictionary.
     /// Dictionary allocation remains transaction-authoritative; this cache
     /// only prevents reparsing a canonical URL for every row that references
     /// the same four-byte surrogate.
-    delivery_relays: Mutex<DeliveryRelayCache>,
+    publish_queue_relays: Mutex<PublishQueueRelayCache>,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -106,9 +105,9 @@ pub struct RedbStore {
 }
 
 #[derive(Default)]
-struct DeliveryRelayCache {
-    by_id: HashMap<DeliveryRelayId, RelayUrl>,
-    by_url: HashMap<RelayUrl, DeliveryRelayId>,
+struct PublishQueueRelayCache {
+    by_id: HashMap<PublishQueueRelayId, RelayUrl>,
+    by_url: HashMap<RelayUrl, PublishQueueRelayId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,12 +188,12 @@ impl Drop for RedbStore {
 }
 
 impl RedbStore {
-    pub(super) fn delivery_relay_id(
+    pub(super) fn publish_queue_relay_id(
         &self,
         relay: &RelayUrl,
-    ) -> Result<DeliveryRelayId, PersistenceError> {
+    ) -> Result<PublishQueueRelayId, PersistenceError> {
         if let Some(id) = self
-            .delivery_relays
+            .publish_queue_relays
             .lock()
             .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
             .by_url
@@ -204,8 +203,10 @@ impl RedbStore {
             return Ok(id);
         }
         let read = self.db.begin_read().map_err(persist_err)?;
-        let relay_ids = read.open_table(DELIVERY_RELAY_IDS).map_err(persist_err)?;
-        let relays = read.open_table(DELIVERY_RELAYS).map_err(persist_err)?;
+        let relay_ids = read
+            .open_table(PUBLISH_QUEUE_RELAY_IDS)
+            .map_err(persist_err)?;
+        let relays = read.open_table(PUBLISH_QUEUE_RELAYS).map_err(persist_err)?;
         let raw = relay_ids
             .get(relay.as_str().as_bytes())
             .map_err(persist_err)?
@@ -227,13 +228,16 @@ impl RedbStore {
                 "delivery relay dictionary directions disagree",
             ));
         }
-        self.cache_delivery_relay(id, relay.clone())?;
+        self.cache_publish_queue_relay(id, relay.clone())?;
         Ok(id)
     }
 
-    pub(super) fn delivery_relay(&self, id: DeliveryRelayId) -> Result<RelayUrl, PersistenceError> {
+    pub(super) fn publish_queue_relay(
+        &self,
+        id: PublishQueueRelayId,
+    ) -> Result<RelayUrl, PersistenceError> {
         if let Some(relay) = self
-            .delivery_relays
+            .publish_queue_relays
             .lock()
             .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
             .by_id
@@ -243,8 +247,10 @@ impl RedbStore {
             return Ok(relay);
         }
         let read = self.db.begin_read().map_err(persist_err)?;
-        let relays = read.open_table(DELIVERY_RELAYS).map_err(persist_err)?;
-        let relay_ids = read.open_table(DELIVERY_RELAY_IDS).map_err(persist_err)?;
+        let relays = read.open_table(PUBLISH_QUEUE_RELAYS).map_err(persist_err)?;
+        let relay_ids = read
+            .open_table(PUBLISH_QUEUE_RELAY_IDS)
+            .map_err(persist_err)?;
         let key = relay_key(id);
         let encoded = relays
             .get(&key)
@@ -268,17 +274,17 @@ impl RedbStore {
                 "delivery relay dictionary directions disagree",
             ));
         }
-        self.cache_delivery_relay(id, relay.clone())?;
+        self.cache_publish_queue_relay(id, relay.clone())?;
         Ok(relay)
     }
 
-    pub(super) fn cache_delivery_relay(
+    pub(super) fn cache_publish_queue_relay(
         &self,
-        id: DeliveryRelayId,
+        id: PublishQueueRelayId,
         relay: RelayUrl,
     ) -> Result<(), PersistenceError> {
         let mut cache = self
-            .delivery_relays
+            .publish_queue_relays
             .lock()
             .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?;
         if cache
@@ -301,19 +307,21 @@ impl RedbStore {
 
     pub(super) fn persist_lane_state(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
-        state: DeliveryLaneState,
-    ) -> Result<DeliveryLane, PersistenceError> {
-        let relay_id = self.delivery_relay_id(&key.relay)?;
+        state: PublishQueueLaneState,
+    ) -> Result<PublishQueueLane, PersistenceError> {
+        let relay_id = self.publish_queue_relay_id(&key.relay)?;
         let write_txn = self.db.begin_write().map_err(persist_err)?;
         let lane = {
-            let mut lanes = write_txn.open_table(DELIVERY_LANES).map_err(persist_err)?;
+            let mut lanes = write_txn
+                .open_table(PUBLISH_QUEUE_LANES)
+                .map_err(persist_err)?;
             let mut deadlines = write_txn
-                .open_table(DELIVERY_DEADLINES)
+                .open_table(PUBLISH_QUEUE_DEADLINES)
                 .map_err(persist_err)?;
             let mut deadlines_by_intent = write_txn
-                .open_table(DELIVERY_DEADLINES_BY_INTENT)
+                .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
                 .map_err(persist_err)?;
             replace_lane_in_txn(
                 &mut lanes,
@@ -350,7 +358,7 @@ impl RedbStore {
     /// adoption, alias, drain, or destructive-reset path. Continuing requires
     /// deliberate discard and recreation: relay-backed cache rows can be
     /// reacquired, but accepted unpublished writes and the rest of their
-    /// durable delivery evidence are permanently lost
+    /// publish queue evidence are permanently lost
     /// (`docs/internals/conventions/schema-epoch-discard.md`).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(path, BenchmarkDurability::Immediate, |path| {
@@ -456,7 +464,7 @@ impl RedbStore {
 
         let mut _open_write_transactions = 0;
         if has_schema_marker {
-            let pending_ephemeral = {
+            {
                 let read_txn = db.begin_read()?;
                 let schema_meta = read_txn.open_table(SCHEMA_META)?;
                 let version = schema_meta
@@ -497,64 +505,27 @@ impl RedbStore {
                     )
                     .into());
                 }
-                let delivery_meta = read_txn.open_table(DELIVERY_META)?;
-                let codec_version = delivery_meta
-                    .get(DELIVERY_CODEC_VERSION_KEY)?
+                let publish_queue_meta = read_txn.open_table(PUBLISH_QUEUE_META)?;
+                let codec_version = publish_queue_meta
+                    .get(PUBLISH_QUEUE_CODEC_VERSION_KEY)?
                     .map(|guard| decode_meta_u64(guard.value(), "delivery codec version"))
                     .transpose()
                     .map_err(|error| {
                         redb::Error::Corrupted(format!(
-                            "invalid durable-delivery codec marker: {error}"
+                            "invalid publish-queue codec marker: {error}"
                         ))
                     })?;
-                if codec_version != Some(DELIVERY_CODEC_VERSION) {
+                if codec_version != Some(PUBLISH_QUEUE_CODEC_VERSION) {
                     return Err(redb::Error::Corrupted(format!(
-                        "current schema has durable-delivery codec {codec_version:?}, expected {DELIVERY_CODEC_VERSION}"
+                        "current schema has publish-queue codec {codec_version:?}, expected {PUBLISH_QUEUE_CODEC_VERSION}"
                     ))
                     .into());
                 }
-                let pending_ephemeral = delivery_meta
-                    .get(PENDING_EPHEMERAL_RECEIPTS_KEY)?
-                    .map(|guard| decode_meta_u64(guard.value(), "pending ephemeral receipt count"))
-                    .transpose()
-                    .map_err(|err| {
-                        redb::Error::Corrupted(format!(
-                            "invalid pending ephemeral receipt count: {err}"
-                        ))
-                    })?
-                    .unwrap_or(0);
-                pending_ephemeral
             };
-            // The one remaining write on the reopen path is CURRENT-epoch
-            // crash recovery (crash-abandoned ephemeral receipts), not schema
-            // work: it reconciles rows this exact schema wrote and is bounded
-            // by a count this exact schema maintains.
-            if pending_ephemeral > 0 {
-                let write_txn = db.begin_write()?;
-                {
-                    let mut delivery_receipts = write_txn.open_table(DELIVERY_RECEIPTS)?;
-                    let reconciled = reconcile_ephemeral_receipts_in_txn(&mut delivery_receipts)
-                        .map_err(|error| redb::Error::Corrupted(error.message().to_owned()))?
-                        as u64;
-                    if reconciled != pending_ephemeral {
-                        return Err(redb::Error::Corrupted(format!(
-                            "pending ephemeral receipt count is {pending_ephemeral}, found {reconciled} recoverable rows"
-                        ))
-                        .into());
-                    }
-                    let mut delivery_meta = write_txn.open_table(DELIVERY_META)?;
-                    delivery_meta.insert(
-                        PENDING_EPHEMERAL_RECEIPTS_KEY,
-                        encode_meta_u64(0).as_slice(),
-                    )?;
-                }
-                write_txn.commit()?;
-                _open_write_transactions += 1;
-            }
         } else {
             // A nonempty database without the exact current marker is never
             // treated as fresh and is never mutated: initializing over it
-            // would combine unversioned durable-delivery/coverage/tombstone
+            // would combine unversioned publish-queue/coverage/tombstone
             // facts with an empty canonical epoch.
             if table_count != 0 {
                 return Err(unsupported_schema(ownership.target(), None));
@@ -591,26 +562,26 @@ impl RedbStore {
                     write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
                 cardinality_sample_meta
                     .insert(INDEX_CARDINALITY_SAMPLE_KEY, sample_key.as_slice())?;
-                write_txn.open_table(DELIVERY_INTENTS)?;
-                write_txn.open_table(DELIVERY_DISPLACED)?;
-                write_txn.open_table(DELIVERY_ATTEMPTS)?;
-                write_txn.open_table(DELIVERY_ROUTE_REVISIONS)?;
-                write_txn.open_table(DELIVERY_LANES)?;
-                write_txn.open_table(DELIVERY_DEADLINES)?;
-                write_txn.open_table(DELIVERY_DEADLINES_BY_INTENT)?;
-                write_txn.open_table(DELIVERY_ATTEMPT_DETAILS)?;
-                let mut delivery_meta = write_txn.open_table(DELIVERY_META)?;
-                delivery_meta.insert(
-                    DELIVERY_CODEC_VERSION_KEY,
-                    encode_meta_u64(DELIVERY_CODEC_VERSION).as_slice(),
+                write_txn.open_table(PUBLISH_QUEUE_INTENTS)?;
+                write_txn.open_table(PUBLISH_QUEUE_DISPLACED)?;
+                write_txn.open_table(PUBLISH_QUEUE_ATTEMPTS)?;
+                write_txn.open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)?;
+                write_txn.open_table(PUBLISH_QUEUE_LANES)?;
+                write_txn.open_table(PUBLISH_QUEUE_DEADLINES)?;
+                write_txn.open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)?;
+                write_txn.open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)?;
+                let mut publish_queue_meta = write_txn.open_table(PUBLISH_QUEUE_META)?;
+                publish_queue_meta.insert(
+                    PUBLISH_QUEUE_CODEC_VERSION_KEY,
+                    encode_meta_u64(PUBLISH_QUEUE_CODEC_VERSION).as_slice(),
                 )?;
-                write_txn.open_table(DELIVERY_KIND5_CLAIMS)?;
-                write_txn.open_table(DELIVERY_SUPPRESS_BY_ID)?;
-                write_txn.open_table(DELIVERY_SUPPRESS_BY_ADDR)?;
-                write_txn.open_table(DELIVERY_RECEIPTS)?;
-                write_txn.open_table(DELIVERY_CORRELATIONS)?;
-                write_txn.open_table(DELIVERY_RELAYS)?;
-                write_txn.open_table(DELIVERY_RELAY_IDS)?;
+                write_txn.open_table(PUBLISH_QUEUE_KIND5_CLAIMS)?;
+                write_txn.open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)?;
+                write_txn.open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)?;
+                write_txn.open_table(PUBLISH_QUEUE_RECEIPTS)?;
+                write_txn.open_table(PUBLISH_QUEUE_CORRELATIONS)?;
+                write_txn.open_table(PUBLISH_QUEUE_RELAYS)?;
+                write_txn.open_table(PUBLISH_QUEUE_RELAY_IDS)?;
                 let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
                 schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
             }
@@ -620,7 +591,7 @@ impl RedbStore {
         Ok(Self {
             db,
             _ownership: ownership,
-            delivery_relays: Mutex::new(DeliveryRelayCache::default()),
+            publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]
@@ -676,13 +647,13 @@ impl RedbStore {
     }
 
     #[cfg(test)]
-    pub(super) fn reset_delivery_range_rows(&self) {
+    pub(super) fn reset_publish_queue_range_rows(&self) {
         self.attempt_range_rows.store(0, Ordering::Relaxed);
         self.route_revision_range_rows.store(0, Ordering::Relaxed);
     }
 
     #[cfg(test)]
-    pub(super) fn delivery_range_rows(&self) -> (u64, u64) {
+    pub(super) fn publish_queue_range_rows(&self) -> (u64, u64) {
         (
             self.attempt_range_rows.load(Ordering::Relaxed),
             self.route_revision_range_rows.load(Ordering::Relaxed),
@@ -829,14 +800,18 @@ impl RedbStore {
     ) -> Result<Vec<EventId>, PersistenceError> {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
-        let delivery_suppress_by_id = read_txn
-            .open_table(DELIVERY_SUPPRESS_BY_ID)
+        let publish_queue_suppress_by_id = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
-        let delivery_suppress_by_addr = read_txn
-            .open_table(DELIVERY_SUPPRESS_BY_ADDR)
+        let publish_queue_suppress_by_addr = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)
             .map_err(persist_err)?;
-        let suppression_possible = !delivery_suppress_by_id.is_empty().map_err(persist_err)?
-            || !delivery_suppress_by_addr.is_empty().map_err(persist_err)?;
+        let suppression_possible = !publish_queue_suppress_by_id
+            .is_empty()
+            .map_err(persist_err)?
+            || !publish_queue_suppress_by_addr
+                .is_empty()
+                .map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
         let prepared_filter = PreparedFilter::new(filter);
@@ -881,8 +856,8 @@ impl RedbStore {
                     ))
                 })?;
                 if is_suppressed_in_txn(
-                    &delivery_suppress_by_id,
-                    &delivery_suppress_by_addr,
+                    &publish_queue_suppress_by_id,
+                    &publish_queue_suppress_by_addr,
                     &event,
                 )? {
                     return Ok(None);
@@ -925,11 +900,11 @@ impl RedbStore {
             .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let relay_keys = read_txn.open_table(RELAY_KEYS).map_err(persist_err)?;
-        let delivery_suppress_by_id = read_txn
-            .open_table(DELIVERY_SUPPRESS_BY_ID)
+        let publish_queue_suppress_by_id = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
-        let delivery_suppress_by_addr = read_txn
-            .open_table(DELIVERY_SUPPRESS_BY_ADDR)
+        let publish_queue_suppress_by_addr = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)
             .map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
@@ -1002,8 +977,8 @@ impl RedbStore {
                 &mut relay_cache,
             )?;
             if is_suppressed_in_txn(
-                &delivery_suppress_by_id,
-                &delivery_suppress_by_addr,
+                &publish_queue_suppress_by_id,
+                &publish_queue_suppress_by_addr,
                 &stored.event,
             )? {
                 return Ok(None);

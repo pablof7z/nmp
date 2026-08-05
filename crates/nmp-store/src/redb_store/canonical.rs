@@ -41,7 +41,7 @@ pub(super) fn record_to_stored_event(record: &StoredEventRecord) -> StoredEvent 
     }
 }
 
-/// Encode `se` as a self-contained portable `DELIVERY_DISPLACED` snapshot.
+/// Encode `se` as a self-contained portable `PUBLISH_QUEUE_DISPLACED` snapshot.
 pub(super) fn encode_stored_event(se: &StoredEvent) -> Vec<u8> {
     binary_event::encode(se).expect("redb: encode portable stored event")
 }

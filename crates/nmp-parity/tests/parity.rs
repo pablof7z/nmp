@@ -11,12 +11,13 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AcquisitionEvidence, AuthDenialSource, AuthPhase, Binding, CancelWriteOutcome,
-    CorrelationToken, DiagnosticsSnapshot, Durability, Engine, EngineConfig, FifoReceiver,
-    FifoRecvTimeoutError, Filter, Identity, Lane, LiveQuery, ReceiptId, ReceiptReattachment,
-    RetryCause, Row, RowDelta, ShortfallFact, SourceStatus, StalledWriteStage, Subscription,
-    Timestamp, UnsignedEvent, WriteIntent, WritePayload, WriteRouting, WriteStatus,
+    CorrelationToken, DiagnosticsSnapshot, Engine, EngineConfig, EngineError, FifoReceiver,
+    FifoRecvTimeoutError, Filter, Identity, Lane, LiveQuery, NotSentReason, ReceiptId,
+    ReceiptReattachment, RefuseReason, RelayState, RelayWaiting, RetryCause, Row, RowDelta,
+    ShortfallFact, SigningState, SourceStatus, StalledWriteStage, Subscription, Timestamp,
+    UnsignedEvent, WriteFact, WriteIntent, WriteOutcome, WritePayload, WriteRouting,
 };
-use nmp_ffi::convert::{write_status_to_ffi, WriteStatusRef};
+use nmp_ffi::convert::{write_status_to_ffi, FfiError, WriteStatusRef};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 // #680: observers/callbacks are gone; the facade exposes pull-based async
 // stream objects whose `next()` we bridge into the existing mpsc drains via a
@@ -31,9 +32,10 @@ use nmp_ffi::nip02::{
 use nmp_ffi::nip22::{FfiCommentParent, FfiCommentRoot};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
-    FfiDiagnosticsSnapshot, FfiDurability, FfiFilter, FfiIdentity, FfiReceiptReattachment,
-    FfiRetryCause, FfiRowDelta, FfiShortfallFact, FfiSourceStatus, FfiStalledWriteStage,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting, FfiWriteStatus,
+    FfiDiagnosticsSnapshot, FfiFilter, FfiIdentity, FfiNotSentReason, FfiReceiptReattachment,
+    FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause, FfiRowDelta, FfiShortfallFact,
+    FfiSigningState, FfiSourceStatus, FfiStalledWriteStage, FfiWriteFact, FfiWriteIntent,
+    FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 use nmp_nip02::{
     observe_following, set_following, FollowAction, FollowActionStatus, FollowAvailability,
@@ -46,7 +48,9 @@ const SOURCE_ANCHOR_KIND: u16 = 9_997;
 const QUERY_KIND: u16 = 9_998;
 const WRITE_KIND: u16 = 9_999;
 const REATTACH_LIVE_KIND: u16 = 9_996;
-const REATTACH_TERMINAL_KIND: u16 = 9_995;
+// Replaceable (NIP-01 10000..20000): the terminal-reattach scenario
+// reaches its terminal through supersession at one coordinate.
+const REATTACH_TERMINAL_KIND: u16 = 10_009;
 const QUERY_CREATED_AT: u64 = 1_700_000_100;
 const WRITE_CREATED_AT: u64 = 1_700_000_200;
 const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -135,8 +139,6 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
         "the address root revision and direct parent identity must remain closed"
     );
 
-    assert!(matches!(direct.durability, Durability::Durable));
-    assert_eq!(ffi.durability, FfiDurability::Durable);
     assert!(matches!(direct.routing, WriteRouting::Auto));
     assert_eq!(ffi.routing, FfiWriteRouting::Auto);
     assert_eq!(direct.identity, Identity::Active);
@@ -152,75 +154,179 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
 fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
     let relay = nostr::RelayUrl::parse("wss://receipt-parity.example").unwrap();
     let pubkey = nostr::Keys::generate().public_key();
+    let expected_id = nostr::EventId::from_slice(&[0x5a; 32]).unwrap();
+    let actual_id = nostr::EventId::from_slice(&[0x6b; 32]).unwrap();
     let cases = [
         (
-            WriteStatus::AwaitingRelay {
+            WriteFact::Relay {
                 relay: relay.clone(),
+                state: RelayState::Waiting(RelayWaiting::NotConnected),
             },
-            FfiWriteStatus::AwaitingRelay {
+            FfiWriteFact::Relay {
                 relay: relay.to_string(),
+                state: FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::NotConnected,
+                },
             },
         ),
         (
-            WriteStatus::AwaitingAuth {
+            WriteFact::Relay {
                 relay: relay.clone(),
+                state: RelayState::Waiting(RelayWaiting::NeedsAuth),
             },
-            FfiWriteStatus::AwaitingAuth {
+            FfiWriteFact::Relay {
                 relay: relay.to_string(),
+                state: FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::NeedsAuth,
+                },
             },
         ),
         (
-            WriteStatus::AuthDenied {
+            WriteFact::Relay {
                 relay: relay.clone(),
-                pubkey,
-                source: AuthDenialSource::Policy,
-                reason: "account not permitted".into(),
+                state: RelayState::AuthFailed {
+                    pubkey,
+                    source: AuthDenialSource::Policy,
+                    reason: "account not permitted".into(),
+                },
             },
-            FfiWriteStatus::AuthDenied {
+            FfiWriteFact::Relay {
                 relay: relay.to_string(),
-                pubkey: pubkey.to_hex(),
-                source: FfiAuthDenialSource::Policy,
-                reason: "account not permitted".into(),
+                state: FfiRelayState::AuthFailed {
+                    pubkey: pubkey.to_hex(),
+                    source: FfiAuthDenialSource::Policy,
+                    reason: "account not permitted".into(),
+                },
             },
         ),
         (
-            WriteStatus::RetryEligible {
+            WriteFact::Relay {
                 relay: relay.clone(),
-                attempt: 7,
-                eligible_at: Timestamp::from(123),
-                cause: RetryCause::RelayRateLimited,
-                detail: Some("rate-limited: slow down".into()),
+                state: RelayState::Waiting(RelayWaiting::BackingOff {
+                    attempt: 7,
+                    eligible_at: Timestamp::from(123),
+                    cause: RetryCause::RelayRateLimited,
+                    detail: Some("rate-limited: slow down".into()),
+                }),
             },
-            FfiWriteStatus::RetryEligible {
+            FfiWriteFact::Relay {
                 relay: relay.to_string(),
-                attempt: 7,
-                eligible_at: 123,
-                cause: FfiRetryCause::RelayRateLimited,
-                detail: Some("rate-limited: slow down".into()),
+                state: FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::BackingOff {
+                        attempt: 7,
+                        eligible_at: 123,
+                        cause: FfiRetryCause::RelayRateLimited,
+                        detail: Some("rate-limited: slow down".into()),
+                    },
+                },
             },
         ),
         (
-            WriteStatus::HandoffAmbiguous {
+            WriteFact::Relay {
                 relay: relay.clone(),
-                attempt: 8,
-                observed_at: Timestamp::from(124),
+                state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                    detail: "attempt log stalled".into(),
+                }),
             },
-            FfiWriteStatus::HandoffAmbiguous {
+            FfiWriteFact::Relay {
                 relay: relay.to_string(),
-                attempt: 8,
-                observed_at: 124,
+                state: FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::PersistenceStalled {
+                        detail: "attempt log stalled".into(),
+                    },
+                },
             },
         ),
         (
-            WriteStatus::Sent {
+            WriteFact::Relay {
                 relay: relay.clone(),
-                attempt: 9,
-                written_at: Timestamp::from(125),
+                state: RelayState::Sent {
+                    attempt: 9,
+                    written_at: Timestamp::from(125),
+                },
             },
-            FfiWriteStatus::Sent {
+            FfiWriteFact::Relay {
                 relay: relay.to_string(),
-                attempt: 9,
-                written_at: 125,
+                state: FfiRelayState::Sent {
+                    attempt: 9,
+                    written_at: 125,
+                },
+            },
+        ),
+        (
+            WriteFact::Relay {
+                relay: relay.clone(),
+                state: RelayState::GaveUp,
+            },
+            FfiWriteFact::Relay {
+                relay: relay.to_string(),
+                state: FfiRelayState::GaveUp,
+            },
+        ),
+        (
+            WriteFact::Signing(SigningState::AwaitingSigner { pubkey }),
+            FfiWriteFact::Signing {
+                state: FfiSigningState::AwaitingSigner {
+                    pubkey: pubkey.to_hex(),
+                },
+            },
+        ),
+        (
+            WriteFact::Signing(SigningState::Refused {
+                reason: "signer said no".into(),
+            }),
+            FfiWriteFact::Signing {
+                state: FfiSigningState::Refused {
+                    reason: "signer said no".into(),
+                },
+            },
+        ),
+        (
+            WriteFact::Destinations {
+                relays: [relay.clone()].into_iter().collect(),
+                complete: true,
+            },
+            FfiWriteFact::Destinations {
+                relays: vec![relay.to_string()],
+                complete: true,
+            },
+        ),
+        (
+            WriteFact::Outcome(WriteOutcome::Settled),
+            FfiWriteFact::Outcome {
+                outcome: FfiWriteOutcome::Settled,
+            },
+        ),
+        (
+            WriteFact::Outcome(WriteOutcome::NoDestination),
+            FfiWriteFact::Outcome {
+                outcome: FfiWriteOutcome::NoDestination,
+            },
+        ),
+        (
+            WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Superseded)),
+            FfiWriteFact::Outcome {
+                outcome: FfiWriteOutcome::NotSent {
+                    reason: FfiNotSentReason::Superseded,
+                },
+            },
+        ),
+        // #1039: both event ids survive the boundary whole. Reduced to a
+        // string this failure could only tell a user to redo the edit.
+        (
+            WriteFact::Outcome(WriteOutcome::Refused(
+                RefuseReason::ReplaceableBaseChanged {
+                    expected: Some(expected_id),
+                    actual: Some(actual_id),
+                },
+            )),
+            FfiWriteFact::Outcome {
+                outcome: FfiWriteOutcome::Refused {
+                    reason: FfiRefuseReason::ReplaceableBaseChanged {
+                        expected: Some(expected_id.to_hex()),
+                        actual: Some(actual_id.to_hex()),
+                    },
+                },
             },
         ),
     ];
@@ -261,40 +367,49 @@ struct NormEvidence {
     shortfall: Vec<String>,
 }
 
+/// The `nmp::WriteFact` vocabulary flattened into one comparable value, with
+/// every payload kept. The arms mirror the three axes the fact enum
+/// separates — whole-write signing, one relay, and the whole-write terminal —
+/// so a boundary that folded two of them together could not pass this oracle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NormStatus {
-    Accepted,
-    Cancelled,
-    /// Terminal like `Cancelled`, and like it carries nothing: a retired
-    /// obligation's whole content is that a newer write at the same NIP-01
-    /// address took its place. Both surfaces must therefore agree on the
-    /// bare tag with no payload to compare.
-    Superseded,
     /// #47 Unit B: carries the parked pubkey (hex) so the direct/FFI
     /// parity proof covers the payload, not just the variant tag.
-    AwaitingCapability(String),
+    AwaitingSigner(String),
     Signed(String),
-    /// The routing park's reason, carried whole so the parity proof covers
-    /// the detail an app renders, not just the variant tag.
-    AwaitingRoute(String),
+    SigningRefused(String),
     /// Both routing axes: the relays named so far AND whether resolution can
     /// still grow. `complete` is payload, not a tag, so a boundary that
     /// dropped it would pass a tag-only oracle.
-    Routed(Vec<String>, bool),
-    AwaitingRelay(String),
-    AwaitingAuth(String),
-    AuthDenied(String, String, String, String),
-    RetryEligible(String, u64, u64, String, Option<String>),
-    HandoffAmbiguous(String, u64, u64),
+    Destinations(Vec<String>, bool),
+    WaitingNotConnected(String),
+    WaitingNeedsAuth(String),
+    BackingOff(String, u64, u64, String, Option<String>),
+    PersistenceStalled(String, String),
     Sent(String),
-    Acked(String),
+    Published(String),
     Rejected(String, String),
+    AuthFailed(String, String, String, String),
     GaveUp(String),
-    PersistenceBlocked(String),
-    RoutePersistenceBlocked(String),
-    OutcomeUnknown(String),
-    ReplaceableConflict(Option<String>, Option<String>),
-    Failed(String),
+    /// The destination set is closed and every relay in it is terminal.
+    Settled,
+    NoDestination,
+    /// Terminal, and like `Settled` it carries nothing beyond WHICH not-sent
+    /// reason it was: a retired obligation's whole content is that a newer
+    /// write at the same NIP-01 address took its place.
+    NotSent(&'static str),
+    Refused(NormRefuseReason),
+}
+
+/// `nmp_store::RefuseReason` flattened. `ReplaceableBaseChanged` keeps BOTH
+/// ids: that pair is what makes the failure recoverable without troubling a
+/// user, so a boundary that dropped either half must fail here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NormRefuseReason {
+    AlreadyExpired,
+    Tombstoned,
+    ReplaceableBaseOnRegularEvent,
+    ReplaceableBaseChanged(Option<String>, Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -338,7 +453,12 @@ struct ScenarioOutcome {
 
 #[derive(Debug, PartialEq, Eq)]
 struct TamperedOutcome {
-    receipts: Vec<NormStatus>,
+    /// #1237: a signature that does not verify is an instruction that cannot
+    /// resolve, so `publish` refuses the CALL. There is no receipt and no
+    /// queue entry — what both surfaces must agree on is the refusal itself,
+    /// verbatim, and that the queue stayed empty.
+    refusal: String,
+    queue_len: usize,
     relay_contact_count: u64,
 }
 
@@ -420,7 +540,7 @@ fn bridge_diagnostics(
     rx
 }
 
-fn bridge_receipts(stream: &Arc<NmpReceiptStream>) -> mpsc::Receiver<FfiWriteStatus> {
+fn bridge_receipts(stream: &Arc<NmpReceiptStream>) -> mpsc::Receiver<FfiWriteFact> {
     let (tx, rx) = mpsc::channel();
     let stream = Arc::clone(stream);
     tokio::spawn(async move {
@@ -660,96 +780,112 @@ fn ffi_retry_cause_name(cause: FfiRetryCause) -> &'static str {
     }
 }
 
-fn normalize_direct_status(status: WriteStatus, relay: &str) -> NormStatus {
-    match status {
-        WriteStatus::Accepted => NormStatus::Accepted,
-        WriteStatus::Cancelled => NormStatus::Cancelled,
-        WriteStatus::Superseded => NormStatus::Superseded,
-        WriteStatus::AwaitingCapability { pubkey } => {
-            NormStatus::AwaitingCapability(pubkey.to_hex())
+fn normalize_direct_refuse_reason(reason: RefuseReason) -> NormRefuseReason {
+    match reason {
+        RefuseReason::AlreadyExpired => NormRefuseReason::AlreadyExpired,
+        RefuseReason::Tombstoned => NormRefuseReason::Tombstoned,
+        RefuseReason::ReplaceableBaseOnRegularEvent => {
+            NormRefuseReason::ReplaceableBaseOnRegularEvent
         }
-        WriteStatus::Signed(id) => NormStatus::Signed(id.to_hex()),
-        WriteStatus::AwaitingRoute { detail } => NormStatus::AwaitingRoute(detail),
-        WriteStatus::Routed { relays, complete } => NormStatus::Routed(
+        RefuseReason::ReplaceableBaseChanged { expected, actual } => {
+            NormRefuseReason::ReplaceableBaseChanged(
+                expected.map(|id| id.to_hex()),
+                actual.map(|id| id.to_hex()),
+            )
+        }
+    }
+}
+
+fn normalize_ffi_refuse_reason(reason: FfiRefuseReason) -> NormRefuseReason {
+    match reason {
+        FfiRefuseReason::AlreadyExpired => NormRefuseReason::AlreadyExpired,
+        FfiRefuseReason::Tombstoned => NormRefuseReason::Tombstoned,
+        FfiRefuseReason::ReplaceableBaseOnRegularEvent => {
+            NormRefuseReason::ReplaceableBaseOnRegularEvent
+        }
+        FfiRefuseReason::ReplaceableBaseChanged { expected, actual } => {
+            NormRefuseReason::ReplaceableBaseChanged(expected, actual)
+        }
+    }
+}
+
+fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
+    match status {
+        WriteFact::Signing(SigningState::AwaitingSigner { pubkey }) => {
+            NormStatus::AwaitingSigner(pubkey.to_hex())
+        }
+        WriteFact::Signing(SigningState::Signed { event_id }) => {
+            NormStatus::Signed(event_id.to_hex())
+        }
+        WriteFact::Signing(SigningState::Refused { reason }) => NormStatus::SigningRefused(reason),
+        WriteFact::Destinations { relays, complete } => NormStatus::Destinations(
             relays
                 .iter()
                 .map(|url| normalize_url(url.as_str(), relay))
                 .collect(),
             complete,
         ),
-        WriteStatus::AwaitingRelay { relay: url } => {
-            NormStatus::AwaitingRelay(normalize_url(url.as_str(), relay))
+        WriteFact::Relay { relay: url, state } => {
+            let url = normalize_url(url.as_str(), relay);
+            match state {
+                RelayState::Waiting(RelayWaiting::NotConnected) => {
+                    NormStatus::WaitingNotConnected(url)
+                }
+                RelayState::Waiting(RelayWaiting::NeedsAuth) => NormStatus::WaitingNeedsAuth(url),
+                RelayState::Waiting(RelayWaiting::BackingOff {
+                    attempt,
+                    eligible_at,
+                    cause,
+                    detail,
+                }) => NormStatus::BackingOff(
+                    url,
+                    attempt,
+                    eligible_at.as_secs(),
+                    retry_cause_name(cause).into(),
+                    detail,
+                ),
+                RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }) => {
+                    NormStatus::PersistenceStalled(url, detail)
+                }
+                RelayState::Sent { .. } => NormStatus::Sent(url),
+                RelayState::Published => NormStatus::Published(url),
+                RelayState::Rejected { reason } => NormStatus::Rejected(url, reason),
+                RelayState::AuthFailed {
+                    pubkey,
+                    source,
+                    reason,
+                } => NormStatus::AuthFailed(
+                    url,
+                    pubkey.to_hex(),
+                    auth_denial_source_name(source).into(),
+                    reason,
+                ),
+                RelayState::GaveUp => NormStatus::GaveUp(url),
+            }
         }
-        WriteStatus::AwaitingAuth { relay: url } => {
-            NormStatus::AwaitingAuth(normalize_url(url.as_str(), relay))
+        WriteFact::Outcome(WriteOutcome::Settled) => NormStatus::Settled,
+        WriteFact::Outcome(WriteOutcome::NoDestination) => NormStatus::NoDestination,
+        WriteFact::Outcome(WriteOutcome::NotSent(reason)) => {
+            NormStatus::NotSent(not_sent_reason_name(reason))
         }
-        WriteStatus::AuthDenied {
-            relay: url,
-            pubkey,
-            source,
-            reason,
-        } => NormStatus::AuthDenied(
-            normalize_url(url.as_str(), relay),
-            pubkey.to_hex(),
-            auth_denial_source_name(source).into(),
-            reason,
-        ),
-        WriteStatus::RetryEligible {
-            relay: url,
-            attempt,
-            eligible_at,
-            cause,
-            detail,
-        } => NormStatus::RetryEligible(
-            normalize_url(url.as_str(), relay),
-            attempt,
-            eligible_at.as_secs(),
-            retry_cause_name(cause).into(),
-            detail,
-        ),
-        WriteStatus::HandoffAmbiguous {
-            relay: url,
-            attempt,
-            observed_at,
-        } => NormStatus::HandoffAmbiguous(
-            normalize_url(url.as_str(), relay),
-            attempt,
-            observed_at.as_secs(),
-        ),
-        WriteStatus::Sent { relay: url, .. } => {
-            NormStatus::Sent(normalize_url(url.as_str(), relay))
+        WriteFact::Outcome(WriteOutcome::Refused(reason)) => {
+            NormStatus::Refused(normalize_direct_refuse_reason(reason))
         }
-        WriteStatus::Acked(url) => NormStatus::Acked(normalize_url(url.as_str(), relay)),
-        WriteStatus::Rejected(url, reason) => {
-            NormStatus::Rejected(normalize_url(url.as_str(), relay), reason)
-        }
-        WriteStatus::GaveUp(url) => NormStatus::GaveUp(normalize_url(url.as_str(), relay)),
-        WriteStatus::PersistenceBlocked(url) => {
-            NormStatus::PersistenceBlocked(normalize_url(url.as_str(), relay))
-        }
-        WriteStatus::RoutePersistenceBlocked(url) => {
-            NormStatus::RoutePersistenceBlocked(normalize_url(url.as_str(), relay))
-        }
-        WriteStatus::OutcomeUnknown(url) => {
-            NormStatus::OutcomeUnknown(normalize_url(url.as_str(), relay))
-        }
-        WriteStatus::ReplaceableConflict { expected, actual } => NormStatus::ReplaceableConflict(
-            expected.map(|id| id.to_hex()),
-            actual.map(|id| id.to_hex()),
-        ),
-        WriteStatus::Failed(reason) => NormStatus::Failed(reason),
     }
 }
 
-fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
+fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
     match status {
-        FfiWriteStatus::Accepted => NormStatus::Accepted,
-        FfiWriteStatus::Cancelled => NormStatus::Cancelled,
-        FfiWriteStatus::Superseded => NormStatus::Superseded,
-        FfiWriteStatus::AwaitingCapability { pubkey } => NormStatus::AwaitingCapability(pubkey),
-        FfiWriteStatus::Signed { event_id } => NormStatus::Signed(event_id),
-        FfiWriteStatus::AwaitingRoute { detail } => NormStatus::AwaitingRoute(detail),
-        FfiWriteStatus::Routed {
+        FfiWriteFact::Signing {
+            state: FfiSigningState::AwaitingSigner { pubkey },
+        } => NormStatus::AwaitingSigner(pubkey),
+        FfiWriteFact::Signing {
+            state: FfiSigningState::Signed { event_id },
+        } => NormStatus::Signed(event_id),
+        FfiWriteFact::Signing {
+            state: FfiSigningState::Refused { reason },
+        } => NormStatus::SigningRefused(reason),
+        FfiWriteFact::Destinations {
             mut relays,
             complete,
         } => {
@@ -757,63 +893,102 @@ fn normalize_ffi_status(status: FfiWriteStatus, relay: &str) -> NormStatus {
                 *url = normalize_url(url, relay);
             }
             relays.sort();
-            NormStatus::Routed(relays, complete)
+            NormStatus::Destinations(relays, complete)
         }
-        FfiWriteStatus::AwaitingRelay { relay: url } => {
-            NormStatus::AwaitingRelay(normalize_url(&url, relay))
+        FfiWriteFact::Relay { relay: url, state } => {
+            let url = normalize_url(&url, relay);
+            match state {
+                FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::NotConnected,
+                } => NormStatus::WaitingNotConnected(url),
+                FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::NeedsAuth,
+                } => NormStatus::WaitingNeedsAuth(url),
+                FfiRelayState::Waiting {
+                    waiting:
+                        FfiRelayWaiting::BackingOff {
+                            attempt,
+                            eligible_at,
+                            cause,
+                            detail,
+                        },
+                } => NormStatus::BackingOff(
+                    url,
+                    attempt,
+                    eligible_at,
+                    ffi_retry_cause_name(cause).into(),
+                    detail,
+                ),
+                FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::PersistenceStalled { detail },
+                } => NormStatus::PersistenceStalled(url, detail),
+                FfiRelayState::Sent { .. } => NormStatus::Sent(url),
+                FfiRelayState::Published => NormStatus::Published(url),
+                FfiRelayState::Rejected { reason } => NormStatus::Rejected(url, reason),
+                FfiRelayState::AuthFailed {
+                    pubkey,
+                    source,
+                    reason,
+                } => NormStatus::AuthFailed(
+                    url,
+                    pubkey,
+                    ffi_auth_denial_source_name(source).into(),
+                    reason,
+                ),
+                FfiRelayState::GaveUp => NormStatus::GaveUp(url),
+            }
         }
-        FfiWriteStatus::AwaitingAuth { relay: url } => {
-            NormStatus::AwaitingAuth(normalize_url(&url, relay))
-        }
-        FfiWriteStatus::AuthDenied {
-            relay: url,
-            pubkey,
-            source,
-            reason,
-        } => NormStatus::AuthDenied(
-            normalize_url(&url, relay),
-            pubkey,
-            ffi_auth_denial_source_name(source).into(),
-            reason,
-        ),
-        FfiWriteStatus::RetryEligible {
-            relay: url,
-            attempt,
-            eligible_at,
-            cause,
-            detail,
-        } => NormStatus::RetryEligible(
-            normalize_url(&url, relay),
-            attempt,
-            eligible_at,
-            ffi_retry_cause_name(cause).into(),
-            detail,
-        ),
-        FfiWriteStatus::HandoffAmbiguous {
-            relay: url,
-            attempt,
-            observed_at,
-        } => NormStatus::HandoffAmbiguous(normalize_url(&url, relay), attempt, observed_at),
-        FfiWriteStatus::Sent { relay: url, .. } => NormStatus::Sent(normalize_url(&url, relay)),
-        FfiWriteStatus::Acked { relay: url } => NormStatus::Acked(normalize_url(&url, relay)),
-        FfiWriteStatus::Rejected { relay: url, reason } => {
-            NormStatus::Rejected(normalize_url(&url, relay), reason)
-        }
-        FfiWriteStatus::GaveUp { relay: url } => NormStatus::GaveUp(normalize_url(&url, relay)),
-        FfiWriteStatus::PersistenceBlocked { relay: url } => {
-            NormStatus::PersistenceBlocked(normalize_url(&url, relay))
-        }
-        FfiWriteStatus::RoutePersistenceBlocked { relay: url } => {
-            NormStatus::RoutePersistenceBlocked(normalize_url(&url, relay))
-        }
-        FfiWriteStatus::OutcomeUnknown { relay: url } => {
-            NormStatus::OutcomeUnknown(normalize_url(&url, relay))
-        }
-        FfiWriteStatus::ReplaceableConflict { expected, actual } => {
-            NormStatus::ReplaceableConflict(expected, actual)
-        }
-        FfiWriteStatus::Failed { reason } => NormStatus::Failed(reason),
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::Settled,
+        } => NormStatus::Settled,
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::NoDestination,
+        } => NormStatus::NoDestination,
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::NotSent { reason },
+        } => NormStatus::NotSent(ffi_not_sent_reason_name(reason)),
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::Refused { reason },
+        } => NormStatus::Refused(normalize_ffi_refuse_reason(reason)),
     }
+}
+
+fn not_sent_reason_name(reason: NotSentReason) -> &'static str {
+    match reason {
+        NotSentReason::Cancelled => "cancelled",
+        NotSentReason::Superseded => "superseded",
+    }
+}
+
+fn ffi_not_sent_reason_name(reason: FfiNotSentReason) -> &'static str {
+    match reason {
+        FfiNotSentReason::Cancelled => "cancelled",
+        FfiNotSentReason::Superseded => "superseded",
+    }
+}
+
+/// Whether this fact ends the WHOLE write. `WriteOutcome` is the only thing
+/// that does — a relay terminal closes one lane, never the write.
+fn is_whole_write_terminal(status: &NormStatus) -> bool {
+    matches!(
+        status,
+        NormStatus::Settled
+            | NormStatus::NoDestination
+            | NormStatus::NotSent(_)
+            | NormStatus::Refused(_)
+            | NormStatus::SigningRefused(_)
+    )
+}
+
+/// Whether this fact ends ONE relay lane.
+fn is_relay_terminal(status: &NormStatus) -> bool {
+    matches!(
+        status,
+        NormStatus::Published(_)
+            | NormStatus::Rejected(_, _)
+            | NormStatus::AuthFailed(_, _, _, _)
+            | NormStatus::GaveUp(_)
+    )
 }
 
 fn normalize_direct_diagnostics(snapshot: DiagnosticsSnapshot, relay: &str) -> NormDiagnostics {
@@ -1236,21 +1411,37 @@ fn expected_limited_evidence() -> Vec<NormEvidence> {
     }]
 }
 
-fn collect_direct_receipts(rx: FifoReceiver<WriteStatus>, relay: &str) -> Vec<NormStatus> {
+/// How far a receipt collector reads.
+///
+/// #1237 gave the write vocabulary a whole-write terminal
+/// (`WriteOutcome`), and a write whose destination set CLOSES now ends on
+/// it. A write whose destination set never closes — every feature-off `Auto`
+/// scenario in this crate, where no optional provider can settle the
+/// author's route fact — has no such terminal, so those collectors still
+/// stop at the relay lane's own terminal. Stating which one is expected
+/// keeps both cases exact instead of trading a hang for a tolerance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadUntil {
+    /// The destination set closes, so `WriteOutcome` must arrive.
+    WholeWriteTerminal,
+    /// Routing stays open forever; the lane terminal is all there is.
+    RelayTerminal,
+}
+
+fn collect_direct_receipts(
+    rx: FifoReceiver<WriteFact>,
+    relay: &str,
+    until: ReadUntil,
+) -> Vec<NormStatus> {
     let mut statuses = Vec::new();
     let deadline = Instant::now() + WAIT;
     loop {
         let status = recv_before(&rx, deadline, "direct receipt");
         let normalized = normalize_direct_status(status, relay);
-        let terminal = matches!(
-            normalized,
-            NormStatus::Acked(_)
-                | NormStatus::Rejected(_, _)
-                | NormStatus::GaveUp(_)
-                | NormStatus::Failed(_)
-        );
+        let done = is_whole_write_terminal(&normalized)
+            || (until == ReadUntil::RelayTerminal && is_relay_terminal(&normalized));
         statuses.push(normalized);
-        if terminal {
+        if done {
             return statuses;
         }
     }
@@ -1261,7 +1452,7 @@ fn collect_direct_receipts(rx: FifoReceiver<WriteStatus>, relay: &str) -> Vec<No
 /// at the first `AwaitingAuth` beat instead. Borrows the receiver so the
 /// caller can afterwards prove NO further status arrives.
 fn collect_direct_receipts_until_awaiting_auth(
-    rx: &FifoReceiver<WriteStatus>,
+    rx: &FifoReceiver<WriteFact>,
     relay: &str,
 ) -> Vec<NormStatus> {
     let mut statuses = Vec::new();
@@ -1276,7 +1467,7 @@ fn collect_direct_receipts_until_awaiting_auth(
         let sent = statuses
             .iter()
             .any(|status| matches!(status, NormStatus::Sent(_)));
-        let parked = sent && matches!(normalized, NormStatus::AwaitingAuth(_));
+        let parked = sent && matches!(normalized, NormStatus::WaitingNeedsAuth(_));
         statuses.push(normalized);
         if parked {
             return statuses;
@@ -1285,7 +1476,7 @@ fn collect_direct_receipts_until_awaiting_auth(
 }
 
 fn collect_ffi_receipts_until_awaiting_auth(
-    rx: &mpsc::Receiver<FfiWriteStatus>,
+    rx: &mpsc::Receiver<FfiWriteFact>,
     relay: &str,
 ) -> Vec<NormStatus> {
     let mut statuses = Vec::new();
@@ -1296,7 +1487,7 @@ fn collect_ffi_receipts_until_awaiting_auth(
         let sent = statuses
             .iter()
             .any(|status| matches!(status, NormStatus::Sent(_)));
-        let parked = sent && matches!(normalized, NormStatus::AwaitingAuth(_));
+        let parked = sent && matches!(normalized, NormStatus::WaitingNeedsAuth(_));
         statuses.push(normalized);
         if parked {
             return statuses;
@@ -1328,22 +1519,29 @@ fn expected_send_preamble(keys: &Keys, route_complete: bool) -> Vec<NormStatus> 
     .expect("expected receipt fixture must sign cleanly");
     let relay = "<loopback-relay>".to_string();
     vec![
-        NormStatus::Accepted,
+        // #1237: acceptance is `publish` returning `Ok`, so no fact reports
+        // it. The first thing the stream can say is that the write is signed.
         NormStatus::Signed(event.id.to_hex()),
         // These feature-off Auto scenarios get an executable destination
         // from operator app policy while the author's neutral route fact
         // remains Unknown. Delivery may finish; routing truthfully stays
         // open because no optional provider is assembled in this crate.
-        NormStatus::Routed(vec![relay.clone()], route_complete),
-        NormStatus::AwaitingRelay(relay.clone()),
-        NormStatus::AwaitingAuth(relay.clone()),
+        NormStatus::Destinations(vec![relay.clone()], route_complete),
+        NormStatus::WaitingNotConnected(relay.clone()),
+        NormStatus::WaitingNeedsAuth(relay.clone()),
         NormStatus::Sent(relay),
     ]
 }
 
+/// Every fact a successful write exposes. When the destination set CLOSES
+/// (`route_complete`), the write also reaches its whole-write terminal:
+/// `Settled` follows the last relay terminal and nothing may follow it.
 fn expected_success_receipts(keys: &Keys, route_complete: bool) -> Vec<NormStatus> {
     let mut receipts = expected_send_preamble(keys, route_complete);
-    receipts.push(NormStatus::Acked("<loopback-relay>".to_string()));
+    receipts.push(NormStatus::Published("<loopback-relay>".to_string()));
+    if route_complete {
+        receipts.push(NormStatus::Settled);
+    }
     receipts
 }
 
@@ -1353,7 +1551,7 @@ fn expected_success_receipts(keys: &Keys, route_complete: bool) -> Vec<NormStatu
 /// beat and the lane stays parked — no retry, no terminal status.
 fn expected_auth_parked_receipts(keys: &Keys) -> Vec<NormStatus> {
     let mut receipts = expected_send_preamble(keys, false);
-    receipts.push(NormStatus::AwaitingAuth("<loopback-relay>".to_string()));
+    receipts.push(NormStatus::WaitingNeedsAuth("<loopback-relay>".to_string()));
     receipts
 }
 
@@ -1461,66 +1659,92 @@ fn normalize_ffi_follow_snapshot(snapshot: FfiFollowSnapshot) -> NormFollowSnaps
     }
 }
 
-fn direct_follow_receipt_name(status: &WriteStatus) -> &'static str {
+fn direct_follow_receipt_name(status: &WriteFact) -> &'static str {
     match status {
-        WriteStatus::Accepted => "accepted",
-        WriteStatus::Cancelled => "cancelled",
-        // A follow list is kind:3 — replaceable — so a second `set_following`
-        // while the first is still unsent retires the first at the same
-        // `(pubkey, kind)` address. Both surfaces must name that terminal
-        // with the same word, and both must stop reading the stream on it.
-        WriteStatus::Superseded => "superseded",
-        WriteStatus::AwaitingCapability { .. } => "awaiting_capability",
-        WriteStatus::Signed(_) => "signed",
-        WriteStatus::AwaitingRoute { .. } => "awaiting_route",
+        WriteFact::Signing(SigningState::AwaitingSigner { .. }) => "awaiting_signer",
+        WriteFact::Signing(SigningState::Signed { .. }) => "signed",
+        WriteFact::Signing(SigningState::Refused { .. }) => "signing_refused",
         // `complete` is the routing AXIS's own terminal, and it is the only
         // thing that distinguishes "still discovering destinations" from
         // "this answer can never change again" (`resolution-lifecycle.md`
         // §7.2.1). Collapsing both into one word would let a retirement that
         // never happens compare equal to one that did.
-        WriteStatus::Routed { complete: true, .. } => "routed_complete",
-        WriteStatus::Routed { .. } => "routed",
-        WriteStatus::AwaitingRelay { .. } => "awaiting_relay",
-        WriteStatus::AwaitingAuth { .. } => "awaiting_auth",
-        WriteStatus::AuthDenied { .. } => "auth_denied",
-        WriteStatus::RetryEligible { .. } => "retry_eligible",
-        WriteStatus::HandoffAmbiguous { .. } => "handoff_ambiguous",
-        WriteStatus::Sent { .. } => "sent",
-        WriteStatus::Acked(_) => "acked",
-        WriteStatus::Rejected(_, _) => "rejected",
-        WriteStatus::GaveUp(_) => "gave_up",
-        WriteStatus::PersistenceBlocked(_) => "persistence_blocked",
-        WriteStatus::RoutePersistenceBlocked(_) => "route_persistence_blocked",
-        WriteStatus::OutcomeUnknown(_) => "outcome_unknown",
-        WriteStatus::ReplaceableConflict { .. } => "replaceable_conflict",
-        WriteStatus::Failed(_) => "failed",
+        WriteFact::Destinations { complete: true, .. } => "routed_complete",
+        WriteFact::Destinations { .. } => "routed",
+        WriteFact::Relay { state, .. } => direct_relay_state_name(state),
+        WriteFact::Outcome(WriteOutcome::Settled) => "settled",
+        WriteFact::Outcome(WriteOutcome::NoDestination) => "no_destination",
+        // A follow list is kind:3 — replaceable — so a second `set_following`
+        // while the first is still unsent retires the first at the same
+        // `(pubkey, kind)` address. Both surfaces must name that terminal
+        // with the same word, and both must stop reading the stream on it.
+        WriteFact::Outcome(WriteOutcome::NotSent(reason)) => not_sent_reason_name(*reason),
+        WriteFact::Outcome(WriteOutcome::Refused(_)) => "refused",
     }
 }
 
-fn ffi_follow_receipt_name(status: &FfiWriteStatus) -> &'static str {
+fn direct_relay_state_name(state: &RelayState) -> &'static str {
+    match state {
+        RelayState::Waiting(RelayWaiting::NotConnected) => "awaiting_relay",
+        RelayState::Waiting(RelayWaiting::NeedsAuth) => "awaiting_auth",
+        RelayState::Waiting(RelayWaiting::BackingOff { .. }) => "backing_off",
+        RelayState::Waiting(RelayWaiting::PersistenceStalled { .. }) => "persistence_stalled",
+        RelayState::Sent { .. } => "sent",
+        RelayState::Published => "published",
+        RelayState::Rejected { .. } => "rejected",
+        RelayState::AuthFailed { .. } => "auth_failed",
+        RelayState::GaveUp => "gave_up",
+    }
+}
+
+fn ffi_follow_receipt_name(status: &FfiWriteFact) -> &'static str {
     match status {
-        FfiWriteStatus::Accepted => "accepted",
-        FfiWriteStatus::Cancelled => "cancelled",
-        FfiWriteStatus::Superseded => "superseded",
-        FfiWriteStatus::AwaitingCapability { .. } => "awaiting_capability",
-        FfiWriteStatus::Signed { .. } => "signed",
-        FfiWriteStatus::AwaitingRoute { .. } => "awaiting_route",
-        FfiWriteStatus::Routed { complete: true, .. } => "routed_complete",
-        FfiWriteStatus::Routed { .. } => "routed",
-        FfiWriteStatus::AwaitingRelay { .. } => "awaiting_relay",
-        FfiWriteStatus::AwaitingAuth { .. } => "awaiting_auth",
-        FfiWriteStatus::AuthDenied { .. } => "auth_denied",
-        FfiWriteStatus::RetryEligible { .. } => "retry_eligible",
-        FfiWriteStatus::HandoffAmbiguous { .. } => "handoff_ambiguous",
-        FfiWriteStatus::Sent { .. } => "sent",
-        FfiWriteStatus::Acked { .. } => "acked",
-        FfiWriteStatus::Rejected { .. } => "rejected",
-        FfiWriteStatus::GaveUp { .. } => "gave_up",
-        FfiWriteStatus::PersistenceBlocked { .. } => "persistence_blocked",
-        FfiWriteStatus::RoutePersistenceBlocked { .. } => "route_persistence_blocked",
-        FfiWriteStatus::OutcomeUnknown { .. } => "outcome_unknown",
-        FfiWriteStatus::ReplaceableConflict { .. } => "replaceable_conflict",
-        FfiWriteStatus::Failed { .. } => "failed",
+        FfiWriteFact::Signing {
+            state: FfiSigningState::AwaitingSigner { .. },
+        } => "awaiting_signer",
+        FfiWriteFact::Signing {
+            state: FfiSigningState::Signed { .. },
+        } => "signed",
+        FfiWriteFact::Signing {
+            state: FfiSigningState::Refused { .. },
+        } => "signing_refused",
+        FfiWriteFact::Destinations { complete: true, .. } => "routed_complete",
+        FfiWriteFact::Destinations { .. } => "routed",
+        FfiWriteFact::Relay { state, .. } => ffi_relay_state_name(state),
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::Settled,
+        } => "settled",
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::NoDestination,
+        } => "no_destination",
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::NotSent { reason },
+        } => ffi_not_sent_reason_name(*reason),
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::Refused { .. },
+        } => "refused",
+    }
+}
+
+fn ffi_relay_state_name(state: &FfiRelayState) -> &'static str {
+    match state {
+        FfiRelayState::Waiting {
+            waiting: FfiRelayWaiting::NotConnected,
+        } => "awaiting_relay",
+        FfiRelayState::Waiting {
+            waiting: FfiRelayWaiting::NeedsAuth,
+        } => "awaiting_auth",
+        FfiRelayState::Waiting {
+            waiting: FfiRelayWaiting::BackingOff { .. },
+        } => "backing_off",
+        FfiRelayState::Waiting {
+            waiting: FfiRelayWaiting::PersistenceStalled { .. },
+        } => "persistence_stalled",
+        FfiRelayState::Sent { .. } => "sent",
+        FfiRelayState::Published => "published",
+        FfiRelayState::Rejected { .. } => "rejected",
+        FfiRelayState::AuthFailed { .. } => "auth_failed",
+        FfiRelayState::GaveUp => "gave_up",
     }
 }
 
@@ -1548,7 +1772,16 @@ fn stalled_axes(seen: &[NormFollowActionStatus]) -> String {
         matches!(
             s,
             NormFollowActionStatus::Receipt(
-                "acked" | "rejected" | "gave_up" | "replaceable_conflict" | "superseded" | "failed"
+                "published"
+                    | "rejected"
+                    | "auth_failed"
+                    | "gave_up"
+                    | "settled"
+                    | "no_destination"
+                    | "cancelled"
+                    | "superseded"
+                    | "refused"
+                    | "signing_refused"
             )
         )
     }) {
@@ -1563,9 +1796,7 @@ fn stalled_axes(seen: &[NormFollowActionStatus]) -> String {
 fn delivery_axis(seen: &[NormFollowActionStatus]) -> Vec<&'static str> {
     seen.iter()
         .filter_map(|status| match status {
-            NormFollowActionStatus::Receipt("routed" | "routed_complete" | "awaiting_route") => {
-                None
-            }
+            NormFollowActionStatus::Receipt("routed" | "routed_complete") => None,
             NormFollowActionStatus::Receipt(name) => Some(*name),
             _ => None,
         })
@@ -1577,9 +1808,7 @@ fn delivery_axis(seen: &[NormFollowActionStatus]) -> Vec<&'static str> {
 fn routing_axis(seen: &[NormFollowActionStatus]) -> Vec<&'static str> {
     seen.iter()
         .filter_map(|status| match status {
-            NormFollowActionStatus::Receipt(
-                name @ ("routed" | "routed_complete" | "awaiting_route"),
-            ) => Some(*name),
+            NormFollowActionStatus::Receipt(name @ ("routed" | "routed_complete")) => Some(*name),
             _ => None,
         })
         .collect()
@@ -1606,7 +1835,7 @@ fn canonical_axes(seen: Vec<NormFollowActionStatus>) -> Vec<NormFollowActionStat
     let (routing, rest): (Vec<_>, Vec<_>) = seen.into_iter().partition(|status| {
         matches!(
             status,
-            NormFollowActionStatus::Receipt("routed" | "routed_complete" | "awaiting_route")
+            NormFollowActionStatus::Receipt("routed" | "routed_complete")
         )
     });
     rest.into_iter().chain(routing).collect()
@@ -1650,12 +1879,16 @@ fn collect_direct_follow_action(action: FollowAction) -> Vec<NormFollowActionSta
             NormFollowActionStatus::NoChange(_)
                 | NormFollowActionStatus::Failed(_)
                 | NormFollowActionStatus::Receipt(
-                    "acked"
+                    "published"
                         | "rejected"
+                        | "auth_failed"
                         | "gave_up"
-                        | "replaceable_conflict"
+                        | "settled"
+                        | "no_destination"
+                        | "cancelled"
                         | "superseded"
-                        | "failed"
+                        | "refused"
+                        | "signing_refused"
                 )
         );
         result.push(normalized);
@@ -1698,12 +1931,16 @@ fn collect_ffi_follow_action(
             NormFollowActionStatus::NoChange(_)
                 | NormFollowActionStatus::Failed(_)
                 | NormFollowActionStatus::Receipt(
-                    "acked"
+                    "published"
                         | "rejected"
+                        | "auth_failed"
                         | "gave_up"
-                        | "replaceable_conflict"
+                        | "settled"
+                        | "no_destination"
+                        | "cancelled"
                         | "superseded"
-                        | "failed"
+                        | "refused"
+                        | "signing_refused"
                 )
         );
         result.push(normalized);
@@ -2090,13 +2327,12 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let receipt_rx = engine
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
         })
         .expect("direct publish must enqueue");
-    let receipts = collect_direct_receipts(receipt_rx, &relay_url);
+    let receipts = collect_direct_receipts(receipt_rx, &relay_url, ReadUntil::RelayTerminal);
     assert_eq!(
         receipts,
         expected_success_receipts(keys, false),
@@ -2117,21 +2353,20 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     }
 }
 
-fn collect_ffi_receipts(rx: &mpsc::Receiver<FfiWriteStatus>, relay: &str) -> Vec<NormStatus> {
+fn collect_ffi_receipts(
+    rx: &mpsc::Receiver<FfiWriteFact>,
+    relay: &str,
+    until: ReadUntil,
+) -> Vec<NormStatus> {
     let mut statuses = Vec::new();
     let deadline = Instant::now() + WAIT;
     loop {
         let status = recv_before(rx, deadline, "FFI receipt");
         let normalized = normalize_ffi_status(status, relay);
-        let terminal = matches!(
-            normalized,
-            NormStatus::Acked(_)
-                | NormStatus::Rejected(_, _)
-                | NormStatus::GaveUp(_)
-                | NormStatus::Failed(_)
-        );
+        let done = is_whole_write_terminal(&normalized)
+            || (until == ReadUntil::RelayTerminal && is_relay_terminal(&normalized));
         statuses.push(normalized);
-        if terminal {
+        if done {
             return statuses;
         }
     }
@@ -2212,14 +2447,13 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
                     created_at: Some(WRITE_CREATED_AT),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
         })
         .expect("FFI publish must enqueue");
     let receipt_rx = bridge_receipts(&receipt);
-    let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
+    let receipts = collect_ffi_receipts(&receipt_rx, &relay_url, ReadUntil::RelayTerminal);
     assert_eq!(
         receipts,
         expected_success_receipts(keys, false),
@@ -2285,7 +2519,6 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     let receipt_rx = engine
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
@@ -2348,7 +2581,6 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
                     created_at: Some(WRITE_CREATED_AT),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
@@ -2413,13 +2645,12 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
     let receipt_rx = engine
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(override_pubkey),
             correlation: None,
         })
         .expect("direct override publish must enqueue");
-    let receipts = collect_direct_receipts(receipt_rx, &relay_url);
+    let receipts = collect_direct_receipts(receipt_rx, &relay_url, ReadUntil::RelayTerminal);
 
     anchor_cancel.cancel();
     engine.shutdown();
@@ -2471,7 +2702,6 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
                     created_at: Some(WRITE_CREATED_AT),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Explicit {
                 pubkey: override_pubkey,
@@ -2480,7 +2710,7 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
         })
         .expect("FFI override publish must enqueue");
     let receipt_rx = bridge_receipts(&receipt);
-    let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
+    let receipts = collect_ffi_receipts(&receipt_rx, &relay_url, ReadUntil::RelayTerminal);
 
     anchor_handle.cancel();
     engine.shutdown();
@@ -2501,33 +2731,26 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
         .sign_with_keys(keys)
         .expect("tampered fixture must first sign cleanly");
     event.content = "tampered".to_string();
-    let rx = engine
-        .publish(WriteIntent {
-            payload: WritePayload::Signed(event),
-            durability: Durability::Durable,
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: None,
-        })
-        .expect("well-formed tampered input is accepted by the direct call boundary");
-    let first = rx
-        .recv_timeout(WAIT)
-        .expect("tampered direct publish must fail on the receipt stream");
-    let receipts = vec![normalize_direct_status(first, &relay_url)];
-    assert!(
-        matches!(receipts.as_slice(), [NormStatus::Failed(_)]),
-        "tampered direct publish must be Failed-first: {receipts:?}"
-    );
-    assert_eq!(
-        rx.recv_timeout(WAIT),
-        Err(FifoRecvTimeoutError::Closed),
-        "tampered direct publish must close after Failed; Timeout would leave later facts possible"
-    );
+    let refusal = match engine.publish(WriteIntent {
+        payload: WritePayload::Signed(event),
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+        correlation: None,
+    }) {
+        Ok(_) => panic!("a tampered Signed payload must refuse the direct call itself"),
+        Err(EngineError::PublishRefused { reason }) => reason,
+        Err(other) => panic!("expected EngineError::PublishRefused, got {other:?}"),
+    };
+    let queue_len = engine
+        .publish_queue()
+        .expect("the direct engine is open")
+        .len();
     engine.shutdown();
     let relay_contact_count = relay.contact_count();
     relay.shutdown();
     TamperedOutcome {
-        receipts,
+        refusal,
+        queue_len,
         relay_contact_count,
     }
 }
@@ -2546,42 +2769,34 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
         .custom_created_at(Timestamp::from(WRITE_CREATED_AT))
         .sign_with_keys(keys)
         .expect("tampered fixture must first sign cleanly");
-    let receipt = engine
-        .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Signed {
-                id: event.id.to_hex(),
-                pubkey: event.pubkey.to_hex(),
-                created_at: event.created_at.as_secs(),
-                kind: event.kind.as_u16(),
-                tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
-                content: "tampered".to_string(),
-                sig: event.sig.to_string(),
-            },
-            durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::Auto,
-            identity: FfiIdentity::Active,
-            correlation: None,
-        })
-        .expect("well-formed tampered input must parse at the FFI call boundary");
-    let receipt_rx = bridge_receipts(&receipt);
-    let first = receipt_rx
-        .recv_timeout(WAIT)
-        .expect("tampered FFI publish must fail on the receipt stream");
-    let receipts = vec![normalize_ffi_status(first, &relay_url)];
-    assert!(
-        matches!(receipts.as_slice(), [NormStatus::Failed(_)]),
-        "tampered FFI publish must be Failed-first: {receipts:?}"
-    );
-    assert_eq!(
-        receipt_rx.recv_timeout(WAIT),
-        Err(RecvTimeoutError::Disconnected),
-        "tampered FFI publish must close after Failed; Timeout would leave later facts possible"
-    );
+    let refusal = match engine.publish(FfiWriteIntent {
+        payload: FfiWritePayload::Signed {
+            id: event.id.to_hex(),
+            pubkey: event.pubkey.to_hex(),
+            created_at: event.created_at.as_secs(),
+            kind: event.kind.as_u16(),
+            tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
+            content: "tampered".to_string(),
+            sig: event.sig.to_string(),
+        },
+        routing: FfiWriteRouting::Auto,
+        identity: FfiIdentity::Active,
+        correlation: None,
+    }) {
+        Ok(_) => panic!("a tampered Signed payload must refuse the FFI call itself"),
+        Err(FfiError::PublishRefused { reason }) => reason,
+        Err(other) => panic!("expected FfiError::PublishRefused, got {other:?}"),
+    };
+    let queue_len = engine
+        .publish_queue()
+        .expect("the FFI engine is open")
+        .len();
     engine.shutdown();
     let relay_contact_count = relay.contact_count();
     relay.shutdown();
     TamperedOutcome {
-        receipts,
+        refusal,
+        queue_len,
         relay_contact_count,
     }
 }
@@ -2592,12 +2807,12 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
 // harness exists to enforce (module doc). The two scenarios below drive
 // `reattach_receipt` through BOTH entry points and assert identical
 // outcomes AND identical replayed fact sequences: one for a LIVE retained
-// receipt (`Attached`, replaying `Accepted`+`AwaitingCapability`), one for
-// a genuinely TERMINAL retained receipt reached via a real ephemeral
-// abandon-on-restart (`Attached`, replaying the terminal `Failed` fact).
-// Neither needs a relay at all -- `Accepted`/`AwaitingCapability`/ephemeral
-// abandonment are purely local acceptance/persistence facts, independent
-// of wire delivery.
+// receipt (`Attached`, replaying `Signing(AwaitingSigner)`), one for a
+// genuinely TERMINAL retained receipt reached by supersession at one
+// replaceable coordinate (`Attached`, replaying the terminal
+// `Outcome(NotSent(Superseded))`). Neither needs a relay at all -- the
+// signer park and the supersession are purely local acceptance/persistence
+// facts, independent of wire delivery.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NormReattach {
@@ -2635,13 +2850,13 @@ struct ReattachProof {
 }
 
 /// LIVE half: publish a durable Unsigned intent authored by an account that
-/// is ACTIVE but has no registered signer (so it settles into a genuinely
-/// retained `Accepted`+`AwaitingCapability` steady state, never resolving
+/// is ACTIVE but has no registered signer (so it parks in a genuinely
+/// retained `Signing(AwaitingSigner)` steady state, never resolving
 /// further), then reattach with a second, independent observer and prove it
 /// replays the identical fact sequence the original saw.
 async fn run_direct_reattach_live() -> ReattachProof {
     // Must match `run_ffi_reattach_live`'s identity: since #47 Unit B the
-    // replayed `AwaitingCapability` carries the frozen author pubkey, so the
+    // replayed `AwaitingSigner` carries the frozen author pubkey, so the
     // direct-vs-FFI `ReattachProof` equality now compares that hex payload.
     // A per-run `Keys::generate()` would make the two halves disagree by
     // construction; a shared fixed key makes the payload-parity real.
@@ -2661,27 +2876,24 @@ async fn run_direct_reattach_live() -> ReattachProof {
     let tracked = engine
         .publish_tracked(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
         })
         .expect("direct publish must enqueue");
 
+    // #1237: acceptance is `publish_tracked` returning `Ok`, not a fact. The
+    // park is the whole retained prefix.
     let deadline = Instant::now() + WAIT;
-    assert_eq!(
-        recv_before(&tracked.statuses, deadline, "direct original Accepted"),
-        WriteStatus::Accepted
-    );
     assert_eq!(
         recv_before(
             &tracked.statuses,
             deadline,
-            "direct original AwaitingCapability"
+            "direct original AwaitingSigner"
         ),
-        WriteStatus::AwaitingCapability {
+        WriteFact::Signing(SigningState::AwaitingSigner {
             pubkey: keys.public_key()
-        }
+        })
     );
 
     let outcome = engine
@@ -2691,16 +2903,10 @@ async fn run_direct_reattach_live() -> ReattachProof {
     let replay = match outcome {
         ReceiptReattachment::Attached { statuses: rx, .. } => {
             let deadline = Instant::now() + WAIT;
-            vec![
-                normalize_direct_status(
-                    recv_before(&rx, deadline, "direct replay Accepted"),
-                    "n/a",
-                ),
-                normalize_direct_status(
-                    recv_before(&rx, deadline, "direct replay AwaitingCapability"),
-                    "n/a",
-                ),
-            ]
+            vec![normalize_direct_status(
+                recv_before(&rx, deadline, "direct replay AwaitingSigner"),
+                "n/a",
+            )]
         }
         _ => panic!("expected Attached for a live retained receipt, got {norm_outcome:?}"),
     };
@@ -2721,7 +2927,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
 
 async fn run_ffi_reattach_live() -> ReattachProof {
     // Shared fixed identity with `run_direct_reattach_live` -- see the note
-    // there: the reattach `AwaitingCapability` payload is now the frozen
+    // there: the reattach `AwaitingSigner` payload is now the frozen
     // author pubkey, and the direct-vs-FFI proof compares it.
     let keys = fixed_keys();
     let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
@@ -2739,7 +2945,6 @@ async fn run_ffi_reattach_live() -> ReattachProof {
                     created_at: Some(WRITE_CREATED_AT),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
@@ -2750,15 +2955,11 @@ async fn run_ffi_reattach_live() -> ReattachProof {
 
     let deadline = Instant::now() + WAIT;
     assert_eq!(
-        normalize_ffi_status(recv_before(&rx, deadline, "FFI original Accepted"), "n/a"),
-        NormStatus::Accepted
-    );
-    assert_eq!(
         normalize_ffi_status(
-            recv_before(&rx, deadline, "FFI original AwaitingCapability"),
+            recv_before(&rx, deadline, "FFI original AwaitingSigner"),
             "n/a"
         ),
-        NormStatus::AwaitingCapability(keys.public_key().to_hex())
+        NormStatus::AwaitingSigner(keys.public_key().to_hex())
     );
 
     let outcome = engine
@@ -2769,16 +2970,10 @@ async fn run_ffi_reattach_live() -> ReattachProof {
         FfiReceiptReattachment::Attached { stream } => {
             let replay_rx = bridge_receipts(&stream);
             let deadline = Instant::now() + WAIT;
-            vec![
-                normalize_ffi_status(
-                    recv_before(&replay_rx, deadline, "FFI replay Accepted"),
-                    "n/a",
-                ),
-                normalize_ffi_status(
-                    recv_before(&replay_rx, deadline, "FFI replay AwaitingCapability"),
-                    "n/a",
-                ),
-            ]
+            vec![normalize_ffi_status(
+                recv_before(&replay_rx, deadline, "FFI replay AwaitingSigner"),
+                "n/a",
+            )]
         }
         FfiReceiptReattachment::NotFound => {
             panic!("expected Attached for a live retained receipt, got NotFound")
@@ -2840,7 +3035,6 @@ fn run_direct_correlation() -> CorrelationProof {
                 content: ("correlation-first").into(),
                 created_at: Some(Timestamp::from(WRITE_CREATED_AT)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: token(),
@@ -2857,7 +3051,6 @@ fn run_direct_correlation() -> CorrelationProof {
                 content: ("correlation-second-different-body").into(),
                 created_at: Some(Timestamp::from(WRITE_CREATED_AT + 1)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: token(),
@@ -2900,7 +3093,6 @@ fn run_ffi_correlation() -> CorrelationProof {
                 created_at: Some(created_at),
             },
         },
-        durability: FfiDurability::Durable,
         routing: FfiWriteRouting::Auto,
         identity: FfiIdentity::Active,
         correlation: Some(CORRELATION_TOKEN.to_string()),
@@ -2979,27 +3171,20 @@ fn run_direct_cancellation() -> CancellationProof {
                 content: ("cancel-parity").into(),
                 created_at: Some(Timestamp::from(WRITE_CREATED_AT)),
             }),
-            durability: Durability::Durable,
             routing: WriteRouting::Auto,
             identity: Identity::Active,
             correlation: None,
         })
         .expect("direct publish must enqueue");
     let deadline = Instant::now() + WAIT;
-    let mut observed = vec![
-        normalize_direct_status(
-            recv_before(&tracked.statuses, deadline, "direct cancellation Accepted"),
-            "n/a",
+    let mut observed = vec![normalize_direct_status(
+        recv_before(
+            &tracked.statuses,
+            deadline,
+            "direct cancellation AwaitingSigner",
         ),
-        normalize_direct_status(
-            recv_before(
-                &tracked.statuses,
-                deadline,
-                "direct cancellation AwaitingCapability",
-            ),
-            "n/a",
-        ),
-    ];
+        "n/a",
+    )];
     let returned_cancelled = engine
         .cancel(tracked.id)
         .expect("direct cancellation must commit")
@@ -3040,7 +3225,6 @@ async fn run_ffi_cancellation() -> CancellationProof {
                     created_at: Some(WRITE_CREATED_AT),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
             correlation: None,
@@ -3049,16 +3233,10 @@ async fn run_ffi_cancellation() -> CancellationProof {
     let receipt_id = receipt.id();
     let rx = bridge_receipts(&receipt);
     let deadline = Instant::now() + WAIT;
-    let mut observed = vec![
-        normalize_ffi_status(
-            recv_before(&rx, deadline, "FFI cancellation Accepted"),
-            "n/a",
-        ),
-        normalize_ffi_status(
-            recv_before(&rx, deadline, "FFI cancellation AwaitingCapability"),
-            "n/a",
-        ),
-    ];
+    let mut observed = vec![normalize_ffi_status(
+        recv_before(&rx, deadline, "FFI cancellation AwaitingSigner"),
+        "n/a",
+    )];
     let returned_cancelled = engine
         .cancel(receipt_id)
         .expect("FFI cancellation must commit")
@@ -3079,16 +3257,48 @@ async fn run_ffi_cancellation() -> CancellationProof {
     }
 }
 
-/// TERMINAL half: publish an EPHEMERAL intent authored by an active account
-/// with no registered signer, so it durably persists as a receipt-only
-/// (`intent_id: None`) row still `Accepted` at shutdown time. Reopening the
-/// SAME `store_path` runs `RedbStore::open`'s own boot-time reconciliation
-/// (`reconcile_ephemeral_receipts_in_txn`), which abandons any such row --
-/// a real, publicly-reachable "terminal retained receipt" independent of the
-/// explicit cancellation path exercised above.
+/// Drain a reattached replay through the write's whole-write terminal.
+fn drain_direct_replay(rx: &FifoReceiver<WriteFact>, label: &str) -> Vec<NormStatus> {
+    let deadline = Instant::now() + WAIT;
+    let mut replay = Vec::new();
+    loop {
+        let normalized = normalize_direct_status(recv_before(rx, deadline, label), "n/a");
+        let done = is_whole_write_terminal(&normalized);
+        replay.push(normalized);
+        if done {
+            return replay;
+        }
+    }
+}
+
+fn drain_ffi_replay(rx: &mpsc::Receiver<FfiWriteFact>, label: &str) -> Vec<NormStatus> {
+    let deadline = Instant::now() + WAIT;
+    let mut replay = Vec::new();
+    loop {
+        let normalized = normalize_ffi_status(recv_before(rx, deadline, label), "n/a");
+        let done = is_whole_write_terminal(&normalized);
+        replay.push(normalized);
+        if done {
+            return replay;
+        }
+    }
+}
+
+/// TERMINAL half: reach a genuinely terminal retained receipt WITHOUT the
+/// explicit cancellation path exercised above, and prove it survives a
+/// restart.
+///
+/// #1237 deleted `Durability::Ephemeral` and with it the boot-time
+/// abandon-on-restart reconciliation this scenario used to ride. The
+/// property it protects — "a terminal retained receipt reattaches to
+/// `Attached` and replays its terminal from disk, identically on both
+/// surfaces" — now rides supersession: two writes to the same NIP-01
+/// replaceable coordinate, neither signed (no signer is ever registered),
+/// so the newer one retires the older before any wire attempt and the older
+/// receipt's stream ends on `NotSent(Superseded)`.
 async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     let keys = Keys::generate();
-    let receipt_id = {
+    let superseded_id = {
         let engine = Engine::new(EngineConfig {
             store_path: Some(path.to_string_lossy().into_owned()),
             ..EngineConfig::default()
@@ -3097,33 +3307,37 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
         engine
             .set_active_account(Some(keys.public_key()))
             .expect("direct account must activate");
-        let unsigned = UnsignedEvent::new(
-            keys.public_key(),
-            Timestamp::from(WRITE_CREATED_AT),
-            Kind::Custom(REATTACH_TERMINAL_KIND),
-            vec![],
-            "reattach-terminal",
-        );
-        let tracked = engine
-            .publish_tracked(WriteIntent {
-                payload: WritePayload::Event(body_of(&unsigned)),
-                durability: Durability::Ephemeral,
-                routing: WriteRouting::Auto,
-                identity: Identity::Active,
-                correlation: None,
-            })
-            .expect("direct ephemeral publish must enqueue");
+        let write = |content: &str, created_at: u64| WriteIntent {
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::Custom(REATTACH_TERMINAL_KIND),
+                tags: (vec![]).into_iter().collect(),
+                content: content.into(),
+                created_at: Some(Timestamp::from(created_at)),
+            }),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        };
+        let first = engine
+            .publish_tracked(write("reattach-terminal-first", WRITE_CREATED_AT))
+            .expect("direct publish must enqueue");
         let deadline = Instant::now() + WAIT;
         assert_eq!(
-            recv_before(
-                &tracked.statuses,
-                deadline,
-                "direct terminal-setup Accepted"
-            ),
-            WriteStatus::Accepted
+            recv_before(&first.statuses, deadline, "direct terminal-setup park"),
+            WriteFact::Signing(SigningState::AwaitingSigner {
+                pubkey: keys.public_key()
+            })
+        );
+        engine
+            .publish_tracked(write("reattach-terminal-second", WRITE_CREATED_AT + 1))
+            .expect("the newer write at the same replaceable coordinate must enqueue");
+        assert_eq!(
+            drain_direct_replay(&first.statuses, "direct terminal-setup supersession"),
+            vec![NormStatus::NotSent("superseded")],
+            "the older write must retire on the newer one, before any wire attempt"
         );
         engine.shutdown();
-        tracked.id
+        first.id
     };
 
     let engine = Engine::new(EngineConfig {
@@ -3132,18 +3346,14 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     })
     .expect("direct engine must reopen over the same store");
     let outcome = engine
-        .reattach_receipt(receipt_id)
+        .reattach_receipt(superseded_id)
         .expect("direct reattach call must succeed while the engine is open");
     let norm_outcome = direct_reattach_outcome(&outcome);
     let replay = match outcome {
         ReceiptReattachment::Attached { statuses: rx, .. } => {
-            let deadline = Instant::now() + WAIT;
-            vec![normalize_direct_status(
-                recv_before(&rx, deadline, "direct terminal replay"),
-                "n/a",
-            )]
+            drain_direct_replay(&rx, "direct terminal replay")
         }
-        _ => panic!("expected Attached for an abandoned terminal receipt, got {norm_outcome:?}"),
+        _ => panic!("expected Attached for a superseded terminal receipt, got {norm_outcome:?}"),
     };
     let unknown_id_outcome = direct_reattach_outcome(
         &engine
@@ -3160,7 +3370,7 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
 
 async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     let keys = Keys::generate();
-    let receipt_id = {
+    let superseded_id = {
         let engine = NmpEngine::new(NmpEngineConfig {
             store_path: Some(path.to_string_lossy().into_owned()),
             ..NmpEngineConfig::default()
@@ -3169,31 +3379,36 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
         engine
             .set_active_account(Some(keys.public_key().to_hex()))
             .expect("FFI account must activate");
-        let receipt = engine
-            .publish(FfiWriteIntent {
-                payload: FfiWritePayload::Event {
-                    builder: nmp_ffi::types::FfiEventBuilder {
-                        kind: REATTACH_TERMINAL_KIND,
-                        tags: vec![],
-                        content: "reattach-terminal".to_string(),
-                        created_at: Some(WRITE_CREATED_AT),
-                    },
+        let write = |content: &str, created_at: u64| FfiWriteIntent {
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: REATTACH_TERMINAL_KIND,
+                    tags: vec![],
+                    content: content.to_string(),
+                    created_at: Some(created_at),
                 },
-                durability: FfiDurability::Ephemeral,
-                routing: FfiWriteRouting::Auto,
-                identity: FfiIdentity::Active,
-                correlation: None,
-            })
-            .expect("FFI ephemeral publish must enqueue");
-        let receipt_id = receipt.id();
-        let rx = bridge_receipts(&receipt);
+            },
+            routing: FfiWriteRouting::Auto,
+            identity: FfiIdentity::Active,
+            correlation: None,
+        };
+        let first = engine
+            .publish(write("reattach-terminal-first", WRITE_CREATED_AT))
+            .expect("FFI publish must enqueue");
+        let receipt_id = first.id();
+        let rx = bridge_receipts(&first);
         let deadline = Instant::now() + WAIT;
         assert_eq!(
-            normalize_ffi_status(
-                recv_before(&rx, deadline, "FFI terminal-setup Accepted"),
-                "n/a"
-            ),
-            NormStatus::Accepted
+            normalize_ffi_status(recv_before(&rx, deadline, "FFI terminal-setup park"), "n/a"),
+            NormStatus::AwaitingSigner(keys.public_key().to_hex())
+        );
+        engine
+            .publish(write("reattach-terminal-second", WRITE_CREATED_AT + 1))
+            .expect("the newer write at the same replaceable coordinate must enqueue");
+        assert_eq!(
+            drain_ffi_replay(&rx, "FFI terminal-setup supersession"),
+            vec![NormStatus::NotSent("superseded")],
+            "the older write must retire on the newer one, before any wire attempt"
         );
         engine.shutdown();
         receipt_id
@@ -3205,23 +3420,18 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     })
     .expect("FFI engine must reopen over the same store");
     let outcome = engine
-        .reattach_receipt(receipt_id)
+        .reattach_receipt(superseded_id)
         .expect("FFI reattach call must succeed while the engine is open");
     let norm_outcome = ffi_reattach_outcome(&outcome);
     let replay = match outcome {
         FfiReceiptReattachment::Attached { stream } => {
-            let replay_rx = bridge_receipts(&stream);
-            let deadline = Instant::now() + WAIT;
-            vec![normalize_ffi_status(
-                recv_before(&replay_rx, deadline, "FFI terminal replay"),
-                "n/a",
-            )]
+            drain_ffi_replay(&bridge_receipts(&stream), "FFI terminal replay")
         }
         FfiReceiptReattachment::NotFound => {
-            panic!("expected Attached for an abandoned terminal receipt, got NotFound")
+            panic!("expected Attached for a superseded terminal receipt, got NotFound")
         }
         FfiReceiptReattachment::RetainedButUnreadable => {
-            panic!("expected Attached for an abandoned terminal receipt, got RetainedButUnreadable")
+            panic!("expected Attached for a superseded terminal receipt, got RetainedButUnreadable")
         }
     };
     let unknown_id_outcome = ffi_reattach_outcome(
@@ -3263,9 +3473,8 @@ async fn direct_and_ffi_cancellation_return_and_observe_the_same_terminal_fact()
     assert_eq!(
         direct.observed,
         vec![
-            NormStatus::Accepted,
-            NormStatus::AwaitingCapability(fixed_keys().public_key().to_hex()),
-            NormStatus::Cancelled,
+            NormStatus::AwaitingSigner(fixed_keys().public_key().to_hex()),
+            NormStatus::NotSent("cancelled"),
         ]
     );
 }
@@ -3279,14 +3488,13 @@ async fn direct_and_ffi_reattach_are_semantically_identical_for_a_terminal_retai
     assert_eq!(
         direct, ffi,
         "direct and FFI reattach must expose identical outcomes and identical replayed terminal \
-         facts for an ephemeral receipt abandoned on restart"
+         facts for a superseded receipt read back after restart"
     );
     assert_eq!(direct.outcome, NormReattach::Attached);
     assert_eq!(
         direct.replay,
-        vec![NormStatus::Failed(
-            "ephemeral write abandoned after restart".to_string()
-        )]
+        vec![NormStatus::NotSent("superseded")],
+        "a terminal retained receipt replays its whole-write terminal from disk"
     );
 }
 
@@ -3311,6 +3519,15 @@ async fn direct_and_ffi_facades_are_semantically_identical_over_real_loopback() 
     assert_eq!(
         direct_tampered.relay_contact_count, 0,
         "tampered Signed input must fail before any REQ/EVENT reaches the relay"
+    );
+    assert_eq!(
+        direct_tampered.queue_len, 0,
+        "a refused call takes no custody, so no queue entry may exist to inspect"
+    );
+    assert!(
+        direct_tampered.refusal.contains("signature"),
+        "the refusal must name the unverifiable signature: {:?}",
+        direct_tampered.refusal
     );
 }
 
@@ -3399,7 +3616,7 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
         ]
     );
     // #8 U2: `FollowActionStatus::Receipt` forwards every underlying
-    // `WriteStatus` fact verbatim, so both durable kind:3 writes carry the
+    // `WriteFact` fact verbatim, so both durable kind:3 writes carry the
     // deterministic cold-Nip42-session `awaiting_relay` beat between
     // `routed` and `sent` (see `expected_send_preamble`) — the unfollow too,
     // because worker reconciliation closed the write session when the
@@ -3413,12 +3630,13 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
         assert_eq!(
             delivery_axis(seen),
             vec![
-                "accepted",
+                // #1237: acceptance is `set_following` having enqueued the
+                // write, not a fact on its stream.
                 "signed",
                 "awaiting_relay",
                 "awaiting_auth",
                 "sent",
-                "acked"
+                "published"
             ],
             "{label}: the delivery axis is fully ordered on its own: {seen:?}"
         );
@@ -3489,13 +3707,12 @@ async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<No
     let receipt_rx = engine
         .publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
-            durability: Durability::Durable,
             routing: WriteRouting::Explicit(vec![relay.url.clone()]),
             identity: Identity::Active,
             correlation: None,
         })
         .expect("direct explicit publish must enqueue");
-    let receipts = collect_direct_receipts(receipt_rx, &relay_url);
+    let receipts = collect_direct_receipts(receipt_rx, &relay_url, ReadUntil::WholeWriteTerminal);
     engine.shutdown();
     receipts
 }
@@ -3528,7 +3745,6 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
                     created_at: Some(WRITE_CREATED_AT),
                 },
             },
-            durability: FfiDurability::Durable,
             routing: FfiWriteRouting::Explicit {
                 relays: vec![relay_url.clone()],
             },
@@ -3537,7 +3753,7 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
         })
         .expect("FFI explicit publish must enqueue");
     let receipt_rx = bridge_receipts(&receipt);
-    let receipts = collect_ffi_receipts(&receipt_rx, &relay_url);
+    let receipts = collect_ffi_receipts(&receipt_rx, &relay_url, ReadUntil::WholeWriteTerminal);
     engine.shutdown();
     receipts
 }
@@ -3570,8 +3786,9 @@ async fn direct_and_ffi_publish_to_one_explicitly_named_relay_identically() {
 }
 
 /// #972 falsifier: `Explicit` with no relays is refused before anything is
-/// accepted, on BOTH surfaces, and never degrades into `Auto`. The only
-/// status is `Failed`, with no `Accepted` ahead of it.
+/// accepted, on BOTH surfaces, and never degrades into `Auto`. #1237 makes
+/// that refusal the CALL's own answer: an instruction that cannot resolve is
+/// a refusal, not a parked hope, so no receipt and no queue entry exist.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
     let keys = fixed_keys();
@@ -3584,21 +3801,25 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
     engine
         .set_active_account(Some(pubkey))
         .expect("direct account must activate");
-    let direct_rx = engine
-        .publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::Custom(WRITE_KIND),
-                tags: (vec![]).into_iter().collect(),
-                content: ("nowhere").into(),
-                created_at: Some(Timestamp::from(WRITE_CREATED_AT)),
-            }),
-            durability: Durability::Durable,
-            routing: WriteRouting::Explicit(vec![]),
-            identity: Identity::Active,
-            correlation: None,
-        })
-        .expect("the refusal arrives on the receipt stream, not as a construction error");
-    let direct = collect_direct_receipts(direct_rx, "<unused>");
+    let direct = match engine.publish(WriteIntent {
+        payload: WritePayload::Event(nmp_grammar::EventBuilder {
+            kind: Kind::Custom(WRITE_KIND),
+            tags: (vec![]).into_iter().collect(),
+            content: ("nowhere").into(),
+            created_at: Some(Timestamp::from(WRITE_CREATED_AT)),
+        }),
+        routing: WriteRouting::Explicit(vec![]),
+        identity: Identity::Active,
+        correlation: None,
+    }) {
+        Ok(_) => panic!("an empty explicit route must refuse the direct call itself"),
+        Err(EngineError::PublishRefused { reason }) => reason,
+        Err(other) => panic!("expected EngineError::PublishRefused, got {other:?}"),
+    };
+    let direct_queue_len = engine
+        .publish_queue()
+        .expect("the direct engine is open")
+        .len();
     engine.shutdown();
 
     let ffi_engine = NmpEngine::new(NmpEngineConfig {
@@ -3615,33 +3836,37 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
     ffi_engine
         .set_active_account(Some(ffi_pubkey.clone()))
         .expect("FFI account must activate");
-    let receipt = ffi_engine
-        .publish(FfiWriteIntent {
-            payload: FfiWritePayload::Event {
-                builder: nmp_ffi::types::FfiEventBuilder {
-                    kind: WRITE_KIND,
-                    tags: vec![],
-                    content: "nowhere".to_string(),
-                    created_at: Some(WRITE_CREATED_AT),
-                },
+    let ffi = match ffi_engine.publish(FfiWriteIntent {
+        payload: FfiWritePayload::Event {
+            builder: nmp_ffi::types::FfiEventBuilder {
+                kind: WRITE_KIND,
+                tags: vec![],
+                content: "nowhere".to_string(),
+                created_at: Some(WRITE_CREATED_AT),
             },
-            durability: FfiDurability::Durable,
-            routing: FfiWriteRouting::Explicit { relays: vec![] },
-            identity: FfiIdentity::Active,
-            correlation: None,
-        })
-        .expect("the refusal arrives on the receipt stream, not as a typed FfiError");
-    let ffi = collect_ffi_receipts(&bridge_receipts(&receipt), "<unused>");
+        },
+        routing: FfiWriteRouting::Explicit { relays: vec![] },
+        identity: FfiIdentity::Active,
+        correlation: None,
+    }) {
+        Ok(_) => panic!("an empty explicit route must refuse the FFI call itself"),
+        Err(FfiError::PublishRefused { reason }) => reason,
+        Err(other) => panic!("expected FfiError::PublishRefused, got {other:?}"),
+    };
+    let ffi_queue_len = ffi_engine
+        .publish_queue()
+        .expect("the FFI engine is open")
+        .len();
     ffi_engine.shutdown();
 
     assert_eq!(
         direct, ffi,
-        "both surfaces must refuse an empty explicit route the same way"
+        "both surfaces must refuse an empty explicit route with the identical typed refusal"
     );
-    assert_eq!(direct.len(), 1, "exactly one status: {direct:?}");
-    assert!(
-        matches!(direct.first(), Some(NormStatus::Failed(_))),
-        "Failed must be the first and only status -- never Accepted: {direct:?}"
+    assert_eq!(
+        (direct_queue_len, ffi_queue_len),
+        (0, 0),
+        "the refusal takes NO custody on either surface -- there is nothing to inspect or remove"
     );
 }
 

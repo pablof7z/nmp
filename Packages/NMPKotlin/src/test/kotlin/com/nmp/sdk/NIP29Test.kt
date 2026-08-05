@@ -173,11 +173,11 @@ class NIP29Test {
         }
     }
 
-    /** The group write status stream delivers ordinary `WriteStatus` facts,
-     * with no receipt id anywhere in its shape (#1033: group writes reach
-     * the engine's untracked publish door). */
+    /** The group write fact stream delivers ordinary [WriteFact]s, with no
+     * receipt id anywhere in its shape (#1033: group writes reach the
+     * engine's untracked publish door). */
     @Test
-    fun groupWriteStatusStreamsOrdinaryWriteStatusFacts() =
+    fun groupWriteFactStreamDeliversOrdinaryWriteFacts() =
         runBlocking {
             NMPEngine(NMPConfig()).use { engine ->
                 val scope = NMPRelayScope.on(listOf(host(1)))
@@ -186,8 +186,14 @@ class NIP29Test {
 
                 val status = group.publish(engine, authorHex, kind = 9u, content = "hi")
                 val first = status.status.first()
-                check(first is WriteStatus.Accepted || first is WriteStatus.AwaitingCapability) {
-                    "expected an early write-status fact, got $first"
+                // The composed author has no registered signer, so the first
+                // fact is the park itself -- acceptance is the publish call
+                // returning, never a stream item.
+                check(
+                    first is WriteFact.Signing &&
+                        first.state == SigningState.AwaitingSigner(authorHex),
+                ) {
+                    "expected the write to park awaiting a signer, got $first"
                 }
             }
         }

@@ -11,7 +11,7 @@ async fn routing_is_explicit_over(w: &mut NmpWorld, relay: String) {
     let url = w.relay_url(&relay);
     let routed = w.receipt_eventually(|seen| {
         seen.iter().any(
-            |s| matches!(s, WriteStatus::Routed { relays, .. } if relays.len() == 1 && relays.contains(&url)),
+            |s| matches!(s, WriteFact::Destinations { relays, .. } if relays.len() == 1 && relays.contains(&url)),
         )
     });
     assert!(
@@ -31,7 +31,7 @@ async fn group_minted_the_routing(w: &mut NmpWorld) {
     let url = w.relay_url(&host);
     let routed = w.receipt_eventually(|seen| {
         seen.iter()
-            .any(|s| matches!(s, WriteStatus::Routed { relays, .. } if relays.contains(&url)))
+            .any(|s| matches!(s, WriteFact::Destinations { relays, .. } if relays.contains(&url)))
     });
     assert!(
         routed,
@@ -79,7 +79,7 @@ pub(super) async fn not_rerouted(w: &mut NmpWorld) {
         .receipt_statuses()
         .iter()
         .filter_map(|s| match s {
-            WriteStatus::Routed { relays, .. } => Some(relays.clone()),
+            WriteFact::Destinations { relays, .. } => Some(relays.clone()),
             _ => None,
         })
         .flatten()
@@ -121,11 +121,16 @@ async fn no_relay_list_consulted(w: &mut NmpWorld) {
 #[then(regex = r#"^the write was not reported as unroutable$"#)]
 async fn not_reported_unroutable(w: &mut NmpWorld) {
     let statuses = w.receipt_statuses();
-    let failed: Vec<&String> = statuses
+    let failed: Vec<&WriteFact> = statuses
         .iter()
-        .filter_map(|s| match s {
-            WriteStatus::Failed(reason) => Some(reason),
-            _ => None,
+        .filter(|s| {
+            matches!(
+                s,
+                WriteFact::Destinations {
+                    relays,
+                    complete: true
+                } if relays.is_empty()
+            ) || matches!(s, WriteFact::Outcome(WriteOutcome::NoDestination))
         })
         .collect();
     assert!(
@@ -159,7 +164,7 @@ async fn receipt_acked_by(w: &mut NmpWorld, relay: String) {
     assert!(
         w.receipt_eventually(|seen| seen
             .iter()
-            .any(|s| matches!(s, WriteStatus::Acked(u) if *u == url))),
+            .any(|s| matches!(s, WriteFact::Relay { relay, state: RelayState::Published } if *relay == url))),
         "expected the receipt to report acked by {relay:?}; saw {:?}",
         w.receipt_statuses()
     );
@@ -171,7 +176,7 @@ async fn receipt_rejected_by(w: &mut NmpWorld, relay: String) {
     assert!(
         w.receipt_eventually(|seen| seen
             .iter()
-            .any(|s| matches!(s, WriteStatus::Rejected(u, _) if *u == url))),
+            .any(|s| matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if *relay == url))),
         "expected the receipt to report rejected by {relay:?}; saw {:?}",
         w.receipt_statuses()
     );
@@ -194,37 +199,19 @@ async fn receipt_names_only(w: &mut NmpWorld, relay: String) {
     );
 }
 
-/// Every relay a receipt status names. Written as an explicit match rather
-/// than a `Debug` string scan so a new `WriteStatus` variant carrying a relay
+/// Every relay a receipt fact names. Written as an explicit match rather
+/// than a `Debug` string scan so a new `WriteFact` variant carrying a relay
 /// cannot slip past this assertion silently.
-fn named_relays(status: &WriteStatus) -> Vec<nostr::RelayUrl> {
+fn named_relays(status: &WriteFact) -> Vec<nostr::RelayUrl> {
     match status {
-        WriteStatus::Routed { relays, .. } => relays.iter().cloned().collect(),
-        WriteStatus::AwaitingRelay { relay }
-        | WriteStatus::AwaitingAuth { relay }
-        | WriteStatus::AuthDenied { relay, .. }
-        | WriteStatus::RetryEligible { relay, .. }
-        | WriteStatus::HandoffAmbiguous { relay, .. }
-        | WriteStatus::Sent { relay, .. }
-        | WriteStatus::Acked(relay)
-        | WriteStatus::Rejected(relay, _)
-        | WriteStatus::GaveUp(relay)
-        | WriteStatus::PersistenceBlocked(relay)
-        | WriteStatus::RoutePersistenceBlocked(relay)
-        | WriteStatus::OutcomeUnknown(relay) => vec![relay.clone()],
-        WriteStatus::Accepted
-        | WriteStatus::Cancelled
-        // A retired obligation names no relay: supersession happens at
-        // acceptance, before any route is resolved, and is precisely the
-        // case where nothing was ever sent anywhere.
-        | WriteStatus::Superseded
-        | WriteStatus::AwaitingCapability { .. }
-        // A routing park names an AUTHOR it is waiting on, never a relay:
-        // the whole point of the state is that no destination exists yet.
-        | WriteStatus::AwaitingRoute { .. }
-        | WriteStatus::Signed(_)
-        | WriteStatus::ReplaceableConflict { .. }
-        | WriteStatus::Failed(_) => Vec::new(),
+        WriteFact::Destinations { relays, .. } => relays.iter().cloned().collect(),
+        WriteFact::Relay { relay, .. } => vec![relay.clone()],
+        // Signing is a fact about the WHOLE write -- one signature, one
+        // author, one answer -- and names no destination.
+        WriteFact::Signing(_)
+        // Neither does a terminal: a superseded obligation never resolved a
+        // route, and the others are statements about the write as a whole.
+        | WriteFact::Outcome(_) => Vec::new(),
     }
 }
 
@@ -248,13 +235,23 @@ async fn receipt_carries_message(w: &mut NmpWorld, expected: String) {
 
 fn rejection_messages(w: &mut NmpWorld) -> Vec<String> {
     w.receipt_eventually(|seen| {
-        seen.iter()
-            .any(|s| matches!(s, WriteStatus::Rejected(_, _)))
+        seen.iter().any(|s| {
+            matches!(
+                s,
+                WriteFact::Relay {
+                    state: RelayState::Rejected { .. },
+                    ..
+                }
+            )
+        })
     });
     w.receipt_statuses()
         .iter()
         .filter_map(|s| match s {
-            WriteStatus::Rejected(_, message) => Some(message.clone()),
+            WriteFact::Relay {
+                state: RelayState::Rejected { reason },
+                ..
+            } => Some(reason.clone()),
             _ => None,
         })
         .collect()
@@ -264,9 +261,13 @@ fn rejection_messages(w: &mut NmpWorld) -> Vec<String> {
 async fn removal_never_accepted(w: &mut NmpWorld) {
     settled(w).await;
     assert!(
-        !w.receipt_statuses()
-            .iter()
-            .any(|s| matches!(s, WriteStatus::Acked(_))),
+        !w.receipt_statuses().iter().any(|s| matches!(
+            s,
+            WriteFact::Relay {
+                state: RelayState::Published,
+                ..
+            }
+        )),
         "a refused moderation action must never report a host ack; saw {:?}",
         w.receipt_statuses()
     );
@@ -279,9 +280,13 @@ async fn failure_is_a_host_rejection(w: &mut NmpWorld) {
         w.receipt_statuses()
     };
     assert!(
-        statuses
-            .iter()
-            .any(|s| matches!(s, WriteStatus::Rejected(_, _))),
+        statuses.iter().any(|s| matches!(
+            s,
+            WriteFact::Relay {
+                state: RelayState::Rejected { .. },
+                ..
+            }
+        )),
         "expected a per-relay Rejected, saw {statuses:?}"
     );
 }
@@ -293,11 +298,15 @@ async fn failure_is_not_a_routing_failure(w: &mut NmpWorld) {
 
 #[then(regex = r#"^NMP made no claim of its own about my permissions in the group$"#)]
 async fn no_permission_claim_of_its_own(w: &mut NmpWorld) {
+    // A rejection carries the HOST's own words and is therefore not a claim
+    // of NMP's; a signer refusal and a store refusal are NMP's own answers,
+    // and neither may stand in for a membership verdict.
     let invented: Vec<String> = w
         .receipt_statuses()
         .iter()
         .filter_map(|s| match s {
-            WriteStatus::Failed(reason) => Some(reason.clone()),
+            WriteFact::Signing(SigningState::Refused { reason }) => Some(reason.clone()),
+            WriteFact::Outcome(WriteOutcome::Refused(reason)) => Some(format!("{reason:?}")),
             _ => None,
         })
         .collect();

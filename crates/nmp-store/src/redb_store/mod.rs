@@ -56,14 +56,14 @@ use crate::persistent_store_lifetime::{
 use crate::AuthDenialSource;
 use crate::{
     AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome, CompensateOutcome,
-    CoverageInterval, CoverageKey, DeliveryAttempt, DeliveryAttemptDetails, DeliveryAttemptHandoff,
-    DeliveryAttemptOutcome, DeliveryAttemptTransient, DeliveryDeadline, DeliveryDeadlineKind,
-    DeliveryInFlightPhase, DeliveryIntent, DeliveryLane, DeliveryLaneKey, DeliveryLaneState,
-    DeliveryPostHandoffState, DeliveryReceipt, DeliveryRouteRevision, DeliveryTerminalOutcome,
-    DeliveryTransientCause, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
-    IntentId, IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance,
+    CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet,
+    InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome,
+    Provenance, PublishQueueAttempt, PublishQueueAttemptDetails, PublishQueueAttemptHandoff,
+    PublishQueueAttemptOutcome, PublishQueueAttemptTransient, PublishQueueDeadline,
+    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueIntent, PublishQueueLane,
+    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
+    PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
-    WriteDurability,
 };
 
 #[cfg(feature = "bench-instrumentation")]
@@ -107,10 +107,10 @@ pub use store_bench::{
 mod schema;
 #[cfg(test)]
 use schema::*;
-mod delivery;
-mod delivery_codec;
+mod publish_queue;
+mod publish_queue_codec;
 #[cfg(test)]
-use delivery::*;
+use publish_queue::*;
 mod canonical;
 #[cfg(test)]
 use canonical::*;
@@ -128,9 +128,9 @@ pub(crate) use store::with_required_database_init_test_hook;
 #[cfg(test)]
 use store::RedbCrashPoint;
 pub use store::RedbStore;
-mod delivery_ops;
 mod event_ops;
 mod ingest;
+mod publish_queue_ops;
 mod write_ops;
 
 impl EventStore for RedbStore {
@@ -267,108 +267,110 @@ impl EventStore for RedbStore {
         write_ops::compensate_write_with_state(self, intent_id, reason)
     }
 
-    fn cancel_ephemeral_receipt(
+    fn enumerate_publish_queue_receipts(
+        &self,
+    ) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
+        publish_queue_ops::enumerate_publish_queue_receipts(self)
+    }
+
+    fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,
-    ) -> Result<crate::CancelEphemeralOutcome, PersistenceError> {
-        write_ops::cancel_ephemeral_receipt(self, receipt_id)
+    ) -> Result<crate::RemoveQueueEntryOutcome, PersistenceError> {
+        publish_queue_ops::remove_publish_queue_entry(self, receipt_id)
     }
 
-    fn mark_ephemeral_signed(&mut self, receipt_id: u64) -> Result<bool, PersistenceError> {
-        write_ops::mark_ephemeral_signed(self, receipt_id)
-    }
-
-    fn recover_delivery(&self) -> Result<Vec<DeliveryIntent>, PersistenceError> {
-        delivery_ops::recover_delivery(self)
+    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
+        publish_queue_ops::recover_publish_queue(self)
     }
 
     fn reattach_receipt(
         &self,
         receipt_id: u64,
-    ) -> Result<Option<DeliveryReceipt>, PersistenceError> {
-        delivery_ops::reattach_receipt(self, receipt_id)
+    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
+        publish_queue_ops::reattach_receipt(self, receipt_id)
     }
 
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
-        delivery_ops::lookup_correlation(self, token)
+        publish_queue_ops::lookup_correlation(self, token)
     }
 
     fn record_route_revision(
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
-    ) -> Result<DeliveryRouteRevision, PersistenceError> {
-        delivery_ops::record_route_revision(self, intent_id, relays)
+    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
+        publish_queue_ops::record_route_revision(self, intent_id, relays)
     }
 
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryRouteRevision>, PersistenceError> {
-        delivery_ops::recover_route_revisions(self, intent_id)
+    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
+        publish_queue_ops::recover_route_revisions(self, intent_id)
     }
 
     fn recover_attempts(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryAttempt>, PersistenceError> {
-        delivery_ops::recover_attempts(self, intent_id)
+    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
+        publish_queue_ops::recover_attempts(self, intent_id)
     }
 
-    fn bootstrap_delivery_lanes(
+    fn bootstrap_publish_queue_lanes(
         &mut self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
-        delivery_ops::bootstrap_delivery_lanes(self, intent_id)
+    ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
+        publish_queue_ops::bootstrap_publish_queue_lanes(self, intent_id)
     }
 
-    fn recover_delivery_lanes(
+    fn recover_publish_queue_lanes(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryLane>, PersistenceError> {
-        delivery_ops::recover_delivery_lanes(self, intent_id)
+    ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
+        publish_queue_ops::recover_publish_queue_lanes(self, intent_id)
     }
 
-    fn due_delivery_deadlines(
+    fn due_publish_queue_deadlines(
         &self,
         now: Timestamp,
         limit: usize,
-    ) -> Result<Vec<DeliveryDeadline>, PersistenceError> {
-        delivery_ops::due_delivery_deadlines(self, now, limit)
+    ) -> Result<Vec<PublishQueueDeadline>, PersistenceError> {
+        publish_queue_ops::due_publish_queue_deadlines(self, now, limit)
     }
 
-    fn next_delivery_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        delivery_ops::next_delivery_deadline(self)
+    fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        publish_queue_ops::next_publish_queue_deadline(self)
     }
 
     fn set_lane_waiting(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
         auth: bool,
-    ) -> Result<DeliveryLane, PersistenceError> {
-        delivery_ops::set_lane_waiting(self, key, expected_revision, auth)
+    ) -> Result<PublishQueueLane, PersistenceError> {
+        publish_queue_ops::set_lane_waiting(self, key, expected_revision, auth)
     }
 
     fn set_lane_eligible(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
         since: Timestamp,
-    ) -> Result<DeliveryLane, PersistenceError> {
-        delivery_ops::set_lane_eligible(self, key, expected_revision, since)
+    ) -> Result<PublishQueueLane, PersistenceError> {
+        publish_queue_ops::set_lane_eligible(self, key, expected_revision, since)
     }
 
     fn set_lane_transient(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
         ordinal: u64,
         eligible_at: Timestamp,
-        cause: DeliveryTransientCause,
+        cause: PublishQueueTransientCause,
         raw_reason: Option<String>,
-    ) -> Result<DeliveryLane, PersistenceError> {
-        delivery_ops::set_lane_transient(
+    ) -> Result<PublishQueueLane, PersistenceError> {
+        publish_queue_ops::set_lane_transient(
             self,
             key,
             expected_revision,
@@ -381,15 +383,15 @@ impl EventStore for RedbStore {
 
     fn suspend_lane_attempt(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
         ordinal: u64,
         at: Timestamp,
-        cause: DeliveryTransientCause,
+        cause: PublishQueueTransientCause,
         raw_reason: Option<String>,
         auth: bool,
-    ) -> Result<DeliveryLane, PersistenceError> {
-        delivery_ops::suspend_lane_attempt(
+    ) -> Result<PublishQueueLane, PersistenceError> {
+        publish_queue_ops::suspend_lane_attempt(
             self,
             key,
             expected_revision,
@@ -403,34 +405,34 @@ impl EventStore for RedbStore {
 
     fn start_lane_attempt(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
         event: Event,
         started_at: Timestamp,
-    ) -> Result<(DeliveryAttempt, DeliveryLane), PersistenceError> {
-        delivery_ops::start_lane_attempt(self, key, expected_revision, event, started_at)
+    ) -> Result<(PublishQueueAttempt, PublishQueueLane), PersistenceError> {
+        publish_queue_ops::start_lane_attempt(self, key, expected_revision, event, started_at)
     }
 
     fn record_lane_handoff(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
         ordinal: u64,
-        detail: DeliveryAttemptHandoff,
-        next: DeliveryPostHandoffState,
-    ) -> Result<DeliveryLane, PersistenceError> {
-        delivery_ops::record_lane_handoff(self, key, expected_revision, ordinal, detail, next)
+        detail: PublishQueueAttemptHandoff,
+        next: PublishQueuePostHandoffState,
+    ) -> Result<PublishQueueLane, PersistenceError> {
+        publish_queue_ops::record_lane_handoff(self, key, expected_revision, ordinal, detail, next)
     }
 
     fn finish_lane_attempt(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
         ordinal: u64,
-        outcome: DeliveryAttemptOutcome,
+        outcome: PublishQueueAttemptOutcome,
         finished_at: Timestamp,
-    ) -> Result<DeliveryLane, PersistenceError> {
-        delivery_ops::finish_lane_attempt(
+    ) -> Result<PublishQueueLane, PersistenceError> {
+        publish_queue_ops::finish_lane_attempt(
             self,
             key,
             expected_revision,
@@ -442,33 +444,41 @@ impl EventStore for RedbStore {
 
     fn deny_lane_auth(
         &mut self,
-        key: &DeliveryLaneKey,
+        key: &PublishQueueLaneKey,
         expected_revision: u64,
         denial: AuthDenial,
-    ) -> Result<DeliveryLane, PersistenceError> {
-        delivery_ops::deny_lane_auth(self, key, expected_revision, denial)
+    ) -> Result<PublishQueueLane, PersistenceError> {
+        publish_queue_ops::deny_lane_auth(self, key, expected_revision, denial)
     }
 
     fn recover_attempt_details(
         &self,
         intent_id: IntentId,
-    ) -> Result<Vec<DeliveryAttemptDetails>, PersistenceError> {
-        delivery_ops::recover_attempt_details(self, intent_id)
+    ) -> Result<Vec<PublishQueueAttemptDetails>, PersistenceError> {
+        publish_queue_ops::recover_attempt_details(self, intent_id)
     }
 
     fn close_terminal_intent(
         &mut self,
         intent_id: IntentId,
     ) -> Result<CloseIntentOutcome, PersistenceError> {
-        delivery_ops::close_terminal_intent(self, intent_id)
+        publish_queue_ops::close_terminal_intent(self, intent_id)
     }
 
-    fn accept_ephemeral(
+    fn close_unroutable_intent(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CloseIntentOutcome, PersistenceError> {
+        publish_queue_ops::close_unroutable_intent(self, intent_id)
+    }
+
+    fn accept_refused(
         &mut self,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        reason: crate::RefuseReason,
     ) -> Result<u64, PersistenceError> {
-        delivery_ops::accept_ephemeral(self, frozen_id, expected_pubkey)
+        publish_queue_ops::accept_refused(self, frozen_id, expected_pubkey, reason)
     }
 }
 

@@ -13,7 +13,7 @@
 //! - [`Engine::observe`] -- a live query (and an optional [`Window`]) in, a
 //!   [`Subscription`] streaming [`Frame`]s out.
 //! - [`Engine::publish`] -- a [`WriteIntent`] in, a receipt stream of
-//!   [`WriteStatus`] out (drained by blocking `recv` or, over the FFI/SDK, an
+//!   [`WriteFact`] out (drained by blocking `recv` or, over the FFI/SDK, an
 //!   awaited pull handle).
 //!
 //! Plus identity, signer, and NIP-42 AUTH-policy lifecycle
@@ -89,7 +89,6 @@ mod subscription;
 // `nmp_engine::core::…`. Making them `pub` (even `#[doc(hidden)]`) would
 // instead dump the whole mechanism into `docs/surface/nmp-facade.txt`.
 mod core;
-mod delivery;
 #[cfg(feature = "bench-instrumentation")]
 mod ingest_attribution;
 /// Test-only durable-store double. It lives outside `core` on purpose: it is
@@ -97,6 +96,7 @@ mod ingest_attribution;
 #[cfg(test)]
 mod lane_fault_store;
 mod negentropy;
+mod publish_queue;
 mod relay_information_service;
 mod runtime;
 
@@ -129,8 +129,8 @@ pub mod mechanism {
     pub mod negentropy {
         pub use crate::negentropy::*;
     }
-    pub mod delivery {
-        pub use crate::delivery::*;
+    pub mod publish_queue {
+        pub use crate::publish_queue::*;
     }
     pub mod relay_information_service {
         pub use crate::relay_information_service::*;
@@ -163,7 +163,7 @@ pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
     AuthPolicyRequest, AuthPolicyResolveError, AuthPolicyResult,
 };
-pub use config::EngineConfig;
+pub use config::{EngineConfig, DEFAULT_MAX_PUBLISH_ATTEMPTS};
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
     RelayDiagnosticsSnapshot, StalledWrite, StalledWriteStage, StalledWriteTotals,
@@ -236,7 +236,7 @@ pub use nmp_grammar::{
 pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 
 // The write plane a `WriteIntent` is built from, and its receipt stream.
-// `Durability`/`WriteIntent`/`WritePayload`/`WriteRouting` moved to
+// `WriteIntent`/`WritePayload`/`WriteRouting` moved to
 // `nmp-grammar` (#115 Fable ruling, Fork 3) -- a protocol module composing
 // a `WriteIntent` must not gain an engine dependency to do so.
 // `WriteRouting` is the whole routing vocabulary and both of its words are
@@ -247,7 +247,10 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // relay: [user input]" and a crate routing to a group host say the same
 // thing the same way.
 pub use crate::core::ReceiptId;
-pub use crate::delivery::{AuthDenialSource, RetryCause, WriteStatus};
+pub use crate::publish_queue::{
+    AuthDenialSource, NotSentReason, PublishQueueEntry, RefuseReason, RelayState, RelayWaiting,
+    RemoveQueueEntryError, RetryCause, SigningState, WriteFact, WriteOutcome,
+};
 pub use crate::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
     SignerRegistration,
@@ -273,8 +276,8 @@ pub use crate::runtime::{fifo_channel, FifoSender};
 // app sees exactly one `EventBuilder` and never writes a disambiguating
 // path. `core` aliases the upstream import where it needs it.
 pub use nmp_grammar::{
-    CorrelationToken, CorrelationTokenError, Durability, EventBuilder, Identity, WriteIntent,
-    WritePayload, WriteRouting,
+    CorrelationToken, CorrelationTokenError, EventBuilder, Identity, WriteIntent, WritePayload,
+    WriteRouting,
 };
 
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every

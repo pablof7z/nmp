@@ -65,7 +65,7 @@ Socket reconnect and publication retry are separate mechanisms:
 |---|---|
 | Reconnect a socket | transport |
 | Correlate one remote signer operation | signer provider |
-| Retry one `(intent, relay)` publication lane | durable delivery |
+| Retry one `(intent, relay)` publication lane | publish queue |
 | Wake eligible work and cap concurrency | engine deadline scheduler |
 
 The transport must not hide a durable EVENT buffer below delivery. For every

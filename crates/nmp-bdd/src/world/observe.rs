@@ -19,10 +19,10 @@ use std::time::{Duration, Instant};
 use nostr::EventId;
 
 use nmp::mechanism::core::{
-    AcquisitionEvidence, DiagnosticsSnapshot, Row, RowDelta, ShortfallFact,
+    AcquisitionEvidence, DiagnosticsSnapshot, PublishError, Row, RowDelta, ShortfallFact,
 };
-use nmp::mechanism::delivery::WriteStatus;
-use nmp::mechanism::runtime::{DiagnosticsHandle, QueryHandle, RowsReceiver};
+use nmp::mechanism::publish_queue::{SigningState, WriteFact, WriteOutcome};
+use nmp::mechanism::runtime::{fifo_channel, DiagnosticsHandle, QueryHandle, RowsReceiver};
 
 use super::acquisition::branch_shortfall;
 use super::budgets::{EVENTUALLY, NEVER};
@@ -154,20 +154,77 @@ impl FeedState {
     }
 }
 
+/// Does this fact END the write badly -- the write is over and it did not
+/// publish?
+///
+/// Cancellation and supersession are deliberately excluded: the app asked for
+/// the first, and the second is the steady state of an app renewing a
+/// replaceable coordinate ("not a failure" -- `WriteOutcome::NotSent`'s own
+/// doc). What is left is the signer saying no, the store saying no, and
+/// routing finishing with nowhere to publish.
+pub(super) fn is_failure_fact(fact: &WriteFact) -> bool {
+    matches!(
+        fact,
+        WriteFact::Signing(SigningState::Refused { .. })
+            | WriteFact::Outcome(WriteOutcome::Refused(_))
+            | WriteFact::Outcome(WriteOutcome::NoDestination)
+    )
+}
+
+/// Does this fact end the write at all? Exactly one `Outcome` closes every
+/// receipt stream, which is what lets a bounded read stop on a FACT rather
+/// than on the stream going quiet.
+pub(super) fn is_outcome_fact(fact: &WriteFact) -> bool {
+    matches!(fact, WriteFact::Outcome(_))
+}
+
 /// The receipt stream for the most recent `publish` (the starter catalog
 /// only ever names "the receipt", singular -- one implicit publish in
 /// flight per scenario).
 pub(super) struct ReceiptState {
-    pub(super) rx: nmp::mechanism::runtime::FifoReceiver<WriteStatus>,
-    pub(super) seen: Vec<WriteStatus>,
+    pub(super) rx: nmp::mechanism::runtime::FifoReceiver<WriteFact>,
+    pub(super) seen: Vec<WriteFact>,
+    /// `Some` when `publish()` itself refused. Custody is what `Ok` means, so
+    /// a refusal is not a fact ON a stream -- there is no stream, no receipt
+    /// id and no queue entry. Keeping it here rather than on the world is
+    /// what lets the identity plane's by-text lookup answer "was THIS write
+    /// refused?" the same way it answers everything else.
+    pub(super) refusal: Option<PublishError>,
 }
 
 impl ReceiptState {
-    /// A fresh accumulator over one publish's status stream.
-    pub(super) fn new(rx: nmp::mechanism::runtime::FifoReceiver<WriteStatus>) -> Self {
+    /// A fresh accumulator over one publish's fact stream.
+    pub(super) fn new(rx: nmp::mechanism::runtime::FifoReceiver<WriteFact>) -> Self {
         Self {
             rx,
             seen: Vec::new(),
+            refusal: None,
+        }
+    }
+
+    /// A publish the door refused. The channel is created already closed (the
+    /// sender is dropped immediately), so every bounded read over it returns
+    /// at once instead of spending a window waiting for facts that cannot
+    /// exist.
+    pub(super) fn refused(error: PublishError) -> Self {
+        let (_closed, rx) = fifo_channel();
+        Self {
+            rx,
+            seen: Vec::new(),
+            refusal: Some(error),
+        }
+    }
+
+    /// The one place a `publish()` answer becomes an observation. Every
+    /// publishing step in this world goes through here, so "the door refused
+    /// it" is recorded the same way wherever it happens rather than
+    /// `expect`ed away at one call site and handled at another.
+    pub(super) fn from_publish(
+        result: Result<nmp::mechanism::runtime::FifoReceiver<WriteFact>, PublishError>,
+    ) -> Self {
+        match result {
+            Ok(rx) => Self::new(rx),
+            Err(error) => Self::refused(error),
         }
     }
 
@@ -177,7 +234,7 @@ impl ReceiptState {
         }
     }
 
-    fn eventually(&mut self, timeout: Duration, pred: impl Fn(&[WriteStatus]) -> bool) -> bool {
+    fn eventually(&mut self, timeout: Duration, pred: impl Fn(&[WriteFact]) -> bool) -> bool {
         self.drain_available();
         if pred(&self.seen) {
             return true;
@@ -208,7 +265,7 @@ impl ReceiptState {
     pub(super) fn eventually_within(
         &mut self,
         timeout: Duration,
-        pred: impl Fn(&[WriteStatus]) -> bool,
+        pred: impl Fn(&[WriteFact]) -> bool,
     ) -> bool {
         self.drain_available();
         if pred(&self.seen) {
@@ -342,7 +399,7 @@ impl NmpWorld {
         })
     }
 
-    pub fn receipt_eventually(&mut self, pred: impl Fn(&[WriteStatus]) -> bool) -> bool {
+    pub fn receipt_eventually(&mut self, pred: impl Fn(&[WriteFact]) -> bool) -> bool {
         let receipt = self
             .receipts
             .last_mut()
@@ -356,7 +413,7 @@ impl NmpWorld {
     pub fn receipt_eventually_at(
         &mut self,
         ordinal: usize,
-        pred: impl Fn(&[WriteStatus]) -> bool,
+        pred: impl Fn(&[WriteFact]) -> bool,
     ) -> bool {
         let receipt = self
             .receipts
@@ -368,7 +425,7 @@ impl NmpWorld {
     /// The negative form: true iff `pred` NEVER becomes true within the
     /// window. Costs its full budget by construction -- there is no early
     /// exit from "this did not happen".
-    pub fn receipt_never(&mut self, pred: impl Fn(&[WriteStatus]) -> bool) -> bool {
+    pub fn receipt_never(&mut self, pred: impl Fn(&[WriteFact]) -> bool) -> bool {
         let receipt = self
             .receipts
             .last_mut()
@@ -378,7 +435,7 @@ impl NmpWorld {
 
     /// The same, for a publish named by ORDER -- what a scenario that
     /// published twice and compares the two answers has to read.
-    pub fn receipt_statuses_at(&mut self, ordinal: usize) -> Vec<WriteStatus> {
+    pub fn receipt_statuses_at(&mut self, ordinal: usize) -> Vec<WriteFact> {
         let Some(receipt) = self.receipts.get_mut(ordinal) else {
             return Vec::new();
         };
@@ -390,7 +447,7 @@ impl NmpWorld {
     /// far side of a process boundary that is the only stream that exists,
     /// and reading the dead one would report what the previous process
     /// happened to have said.
-    pub fn restarted_receipt_eventually(&mut self, pred: impl Fn(&[WriteStatus]) -> bool) -> bool {
+    pub fn restarted_receipt_eventually(&mut self, pred: impl Fn(&[WriteFact]) -> bool) -> bool {
         let receipt = self
             .restarted_receipt
             .as_mut()
@@ -399,7 +456,7 @@ impl NmpWorld {
     }
 
     /// Everything the reattached stream has replayed so far.
-    pub fn restarted_receipt_statuses(&mut self) -> Vec<WriteStatus> {
+    pub fn restarted_receipt_statuses(&mut self) -> Vec<WriteFact> {
         let Some(receipt) = self.restarted_receipt.as_mut() else {
             return Vec::new();
         };
@@ -410,7 +467,7 @@ impl NmpWorld {
     /// Everything the last publish's receipt has reported so far -- for
     /// assertion MESSAGES and for order-sensitive checks ("Failed was
     /// first"), never as a substitute for a bounded wait.
-    pub fn receipt_statuses(&mut self) -> Vec<WriteStatus> {
+    pub fn receipt_statuses(&mut self) -> Vec<WriteFact> {
         let Some(receipt) = self.receipts.last_mut() else {
             return Vec::new();
         };
@@ -423,6 +480,40 @@ impl NmpWorld {
     /// published a second time.
     pub fn receipt_count(&self) -> usize {
         self.receipts.len()
+    }
+
+    /// Was the last publish TAKEN? `publish()` returning `Ok` is acceptance:
+    /// the write is durably recorded and whatever becomes of it is recorded
+    /// with it. There is no acceptance fact on the stream to wait for, so
+    /// this is an immediate read rather than a bounded one.
+    pub fn publish_was_accepted(&self) -> bool {
+        self.receipts
+            .last()
+            .is_some_and(|receipt| receipt.refusal.is_none())
+    }
+
+    /// The id the publish door answered with, which is what every later fact
+    /// correlates to and the only handle a restarted app has. `None` when the
+    /// door refused: nothing was taken, so nothing was identified.
+    pub fn last_receipt_id(&self) -> Option<nmp::mechanism::core::ReceiptId> {
+        self.last_receipt_id
+    }
+
+    /// Why the door refused to take the last publish, if it did. The two
+    /// refusal classes are the whole of what `publish()` says no to; anything
+    /// else took custody and fails in the queue where the app can see it.
+    pub fn publish_refusal(&self) -> Option<String> {
+        self.receipts
+            .last()
+            .and_then(|receipt| receipt.refusal.as_ref())
+            .map(ToString::to_string)
+    }
+
+    /// Bounded wait for the last publish to END. Exactly one `Outcome` closes
+    /// every receipt stream, so a scenario that used to wait for the stream
+    /// to go quiet now waits for this.
+    pub fn receipt_settled(&mut self) -> bool {
+        self.receipt_eventually(|seen| seen.iter().any(is_outcome_fact))
     }
 
     /// True when the last publish carried `WriteRouting::Auto` -- i.e. the

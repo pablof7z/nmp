@@ -64,6 +64,13 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
         .add_account(TEST_SECRET_KEY_HEX.to_string())
         .expect("test key parses");
     let author = account.public_key();
+    // #1237: `Identity::Active` with no active account is now an instruction
+    // that cannot resolve, so `publish` refuses the call outright. This
+    // falsifier is about composition, not about that refusal — activate the
+    // account so the receipt stream this test holds actually exists.
+    engine
+        .set_active_account(Some(author.clone()))
+        .expect("active account activates");
 
     // 64 simultaneous live row observations — the old design refused at 13.
     let mut rows = Vec::new();
@@ -91,7 +98,6 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
                     created_at: Some(0),
                 },
             },
-            durability: nmp_ffi::types::FfiDurability::Durable,
             routing: nmp_ffi::types::FfiWriteRouting::Auto,
             identity: nmp_ffi::types::FfiIdentity::Active,
             correlation: None,
