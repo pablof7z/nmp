@@ -3821,56 +3821,6 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiListing",
-    module_path: "nmp_ffi",
-    remote: false,
-    discr_type: None,
-    variants: [
-        Variant {
-            name: "Named",
-            discr: None,
-            fields: [
-                Field {
-                    name: "entries",
-                    type_: Sequence {
-                        inner_type: Record {
-                            module_path: "nmp_ffi",
-                            name: "FfiListedSubject",
-                        },
-                    },
-                    default: None,
-                    docstring: None,
-                },
-            ],
-            docstring: Some(
-                "At least one host's own signed record names this subject, with the\nhosts that named it and the role each of them wrote. Two hosts\ndisagreeing about a role produce two entries, never one invented\nwinner.",
-            ),
-        },
-        Variant {
-            name: "Absent",
-            discr: None,
-            fields: [],
-            docstring: Some(
-                "Every host in the scope has ESTABLISHED this record and none names the\nsubject. Rests on settlement, never on a timer.",
-            ),
-        },
-        Variant {
-            name: "Unestablished",
-            discr: None,
-            fields: [],
-            docstring: Some(
-                "Not every host has established this record yet, or the observation\nnever asked for it. Absence is not evidence here, and an app that\nrenders this as \"not a member\" is rendering a guess.",
-            ),
-        },
-    ],
-    shape: Enum,
-    non_exhaustive: false,
-    docstring: Some(
-        "What a group's hosts currently PROVE about one subject's place in one of\nNIP-29's relay-signed lists (`nmp::nip29::Listing` mirror, #1234).\n\nThe distinction this carries across the boundary: a moderation receipt\nproves a host accepted a kind:9000/9001 REQUEST. Only the relay's own\n39001/39002 proves the list changed, and only this says so.",
-    ),
-}
-
-enum Enum {
     name: "FfiNip73",
     module_path: "nmp_ffi",
     remote: false,
@@ -6772,19 +6722,6 @@ record Record {
                 "The records the answering hosts do not agree on.",
             ),
         },
-        Field {
-            name: "selected",
-            type_: Sequence {
-                inner_type: Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiGroupRecord",
-                },
-            },
-            default: None,
-            docstring: Some(
-                "The records this observation ASKED for.\n\nCarried because settlement alone cannot tell \"every host reconciled and\npublished no member list\" apart from \"no member list was ever\nrequested\" -- [`FfiListing::Absent`] would be a lie in the second case.\n[`member_listing`] and [`admin_listing`] consult it first (#1234).",
-            ),
-        },
     ],
     docstring: Some(
         "One group, as the hosts in the scope currently describe it\n(`nmp::nip29::GroupSnapshot` mirror). A complete self-contained value,\nnever a patch on a previous one.",
@@ -8302,85 +8239,6 @@ function Function {
 }
 
 function Function {
-    name: "admin_listing",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [
-        Argument {
-            name: "snapshot",
-            type_: Record {
-                module_path: "nmp_ffi",
-                name: "FfiGroupSnapshot",
-            },
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "subject",
-            type_: String,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-    ],
-    return_type: Some(
-        Enum {
-            module_path: "nmp_ffi",
-            name: "FfiListing",
-        },
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_admin_listing",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "snapshot",
-                type_: RustBuffer(
-                    Some(
-                        ExternalFfiMetadata {
-                            name: "FfiGroupSnapshot",
-                            module_path: "nmp_ffi",
-                        },
-                    ),
-                ),
-            },
-            FfiArgument {
-                name: "subject",
-                type_: RustBuffer(
-                    None,
-                ),
-            },
-        ],
-        return_type: Some(
-            RustBuffer(
-                Some(
-                    ExternalFfiMetadata {
-                        name: "FfiListing",
-                        module_path: "nmp_ffi",
-                    },
-                ),
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "The kind:39001 half (`nmp::nip29::GroupSnapshot::admin_listing` mirror).",
-    ),
-    throws: Some(
-        Enum {
-            module_path: "nmp_ffi",
-            name: "FfiError",
-        },
-    ),
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_admin_listing",
-    checksum: Some(
-        15013,
-    ),
-}
-
-function Function {
     name: "any_of",
     module_path: "nmp_ffi",
     is_async: false,
@@ -9354,85 +9212,6 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_member_list_includes",
     checksum: Some(
         62262,
-    ),
-}
-
-function Function {
-    name: "member_listing",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [
-        Argument {
-            name: "snapshot",
-            type_: Record {
-                module_path: "nmp_ffi",
-                name: "FfiGroupSnapshot",
-            },
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-        Argument {
-            name: "subject",
-            type_: String,
-            by_ref: false,
-            optional: false,
-            default: None,
-        },
-    ],
-    return_type: Some(
-        Enum {
-            module_path: "nmp_ffi",
-            name: "FfiListing",
-        },
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_member_listing",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "snapshot",
-                type_: RustBuffer(
-                    Some(
-                        ExternalFfiMetadata {
-                            name: "FfiGroupSnapshot",
-                            module_path: "nmp_ffi",
-                        },
-                    ),
-                ),
-            },
-            FfiArgument {
-                name: "subject",
-                type_: RustBuffer(
-                    None,
-                ),
-            },
-        ],
-        return_type: Some(
-            RustBuffer(
-                Some(
-                    ExternalFfiMetadata {
-                        name: "FfiListing",
-                        module_path: "nmp_ffi",
-                    },
-                ),
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "What `snapshot`'s hosts prove about `subject`'s place in their kind:39002\nmember lists (`nmp::nip29::GroupSnapshot::member_listing` mirror, #1234).\n\nA free function rather than a method because [`FfiGroupSnapshot`] is a\nplain UniFFI RECORD -- there is no Rust value on the far side to hang a\nmethod on. It is the same idiom [`member_list_includes`] and [`any_of`]\nalready use in this module.\n\nThe rule itself is not restated here: `nmp::nip29::Listing::of` is its one\nimplementation, and this function only supplies the two facts it reads.\n`subject` is 64-char HEX, the module-wide `parse_pubkey` rule, and it is\ncompared against the hex already on each entry -- so nothing is decoded\nand re-encoded to answer a question about identity.",
-    ),
-    throws: Some(
-        Enum {
-            module_path: "nmp_ffi",
-            name: "FfiError",
-        },
-    ),
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_member_listing",
-    checksum: Some(
-        10981,
     ),
 }
 
