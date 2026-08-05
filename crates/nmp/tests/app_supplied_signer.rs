@@ -39,7 +39,9 @@ async fn sign_one_from_the_mailbox(mailbox: &nmp::SignerMailbox, keys: &Keys) {
         SignerOp::Ready(result) => result.expect("a local key always signs"),
         SignerOp::Pending(pending) => pending.recv().expect("a local key always signs"),
     };
-    request.resolve(signed).expect("the engine is still waiting");
+    request
+        .resolve(signed)
+        .expect("the engine is still waiting");
 }
 
 /// The headline. A key whose signer lives entirely in the app produces a real

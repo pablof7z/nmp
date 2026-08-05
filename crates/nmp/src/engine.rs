@@ -27,12 +27,12 @@ use std::sync::Mutex;
 
 use crate::core::ReceiptId;
 use crate::publish_queue::{PublishQueueEntry, RemoveQueueEntryError, WriteFact};
-use crate::signer_mailbox::SignerMailbox;
 use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
     SignEventOperation, SignerRegistration,
 };
+use crate::signer_mailbox::SignerMailbox;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::WriteIntent;
 use nmp_store::{MemoryStore, RedbStore, RedbStoreOpenError, RedbStoreResetError};
@@ -835,9 +835,9 @@ impl Engine {
         &self,
         public_key: nostr::PublicKey,
     ) -> Result<(SignerRegistration, SignerMailbox), EngineError> {
-        let (signer, mailbox) = crate::signer_mailbox::mailbox_signer(
-            crate::SignerPublicKey::new(public_key.to_bytes()),
-        );
+        let (signer, mailbox) = crate::signer_mailbox::mailbox_signer(crate::SignerPublicKey::new(
+            public_key.to_bytes(),
+        ));
         let registration = self.with_handle(|handle| {
             handle
                 .add_signer(signer)

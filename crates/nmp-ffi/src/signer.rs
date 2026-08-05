@@ -299,7 +299,7 @@ fn decode_hex_into(text: &str, out: &mut [u8]) -> bool {
     if bytes.len() != out.len() * 2 {
         return false;
     }
-    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+    for (slot, pair) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
         match (hex_nibble(pair[0]), hex_nibble(pair[1])) {
             (Some(high), Some(low)) => *slot = (high << 4) | low,
             _ => return false,
@@ -345,11 +345,7 @@ mod tests {
             pubkey: signed.pubkey.to_hex(),
             created_at: signed.created_at.as_secs(),
             kind: signed.kind.as_u16(),
-            tags: signed
-                .tags
-                .iter()
-                .map(|tag| tag.clone().to_vec())
-                .collect(),
+            tags: signed.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
             content: signed.content.clone(),
             sig: signed.sig.to_string(),
         }
@@ -389,14 +385,20 @@ mod tests {
             .expect("the mailbox is open")
             .expect("the engine asked this signer for something");
         let unsigned = request.unsigned_event();
-        assert_eq!(unsigned.pubkey, pubkey, "the author is frozen in the request");
+        assert_eq!(
+            unsigned.pubkey, pubkey,
+            "the author is frozen in the request"
+        );
         assert_eq!(unsigned.content, "signed by the app");
 
         request
             .resolve(app_side_signature(&unsigned, &keys))
             .expect("the engine is still waiting for this");
 
-        let signed = handle.signed().await.expect("the app's signature is accepted");
+        let signed = handle
+            .signed()
+            .await
+            .expect("the app's signature is accepted");
         assert_eq!(signed.pubkey, pubkey);
         assert_eq!(signed.content, "signed by the app");
     }
@@ -435,8 +437,13 @@ mod tests {
         );
 
         // The request is still live, so the app can correct itself.
-        request.resolve(good).expect("the corrected answer is taken");
-        let signed = handle.signed().await.expect("the corrected answer is accepted");
+        request
+            .resolve(good)
+            .expect("the corrected answer is taken");
+        let signed = handle
+            .signed()
+            .await
+            .expect("the corrected answer is accepted");
         assert_eq!(signed.content, "retry after a bad answer");
     }
 

@@ -316,7 +316,11 @@ impl NmpEngine {
     ) -> Result<Arc<NmpSignerMailbox>, FfiError> {
         let parsed = parse_pubkey(&public_key)?;
         let (registration, mailbox) = self.engine.add_signer_mailbox(parsed)?;
-        Ok(NmpSignerMailbox::new(mailbox, registration, parsed.to_hex()))
+        Ok(NmpSignerMailbox::new(
+            mailbox,
+            registration,
+            parsed.to_hex(),
+        ))
     }
 
     /// Detach only the signer installation proven by `mailbox`. Repeated or

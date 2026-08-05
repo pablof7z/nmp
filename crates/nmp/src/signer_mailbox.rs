@@ -309,7 +309,10 @@ mod tests {
         // Settling that one returns its slot, so the signer accepts again.
         first.reject(SignerError::Unavailable).ok();
         assert!(
-            matches!(signer.sign(unsigned(key, "after draining")), SignerOp::Pending(_)),
+            matches!(
+                signer.sign(unsigned(key, "after draining")),
+                SignerOp::Pending(_)
+            ),
             "settling a request must return its slot to the bound"
         );
     }
@@ -389,7 +392,11 @@ mod tests {
         let operation = signer.sign(unsigned(key, "after close"));
         assert_eq!(operation.recv_async().await, Err(SignerError::Unavailable));
         assert!(
-            mailbox.next().await.expect("close is not an error").is_none(),
+            mailbox
+                .next()
+                .await
+                .expect("close is not an error")
+                .is_none(),
             "a closed, drained mailbox ends its stream"
         );
     }
