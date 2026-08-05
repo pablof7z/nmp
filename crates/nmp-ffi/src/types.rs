@@ -1126,6 +1126,10 @@ pub enum FfiNotSentReason {
     /// one started any wire attempt. Not a failure — for an app renewing
     /// presence it is the steady state.
     Superseded,
+    /// The app removed the queue entry while nothing was moving the write
+    /// (#1269). Distinct from `Cancelled` in what survives: a cancelled
+    /// receipt stays reattachable, a removed one no longer exists.
+    Removed,
 }
 
 /// `nmp_store::RefuseReason` mirror: why the acceptance door said no.
@@ -1187,8 +1191,11 @@ pub enum FfiRemoveQueueEntryError {
     UnknownReceipt {
         receipt_id: u64,
     },
-    /// The write still owns open delivery work. Cancel it first; removal is
-    /// for entries nothing is going to move.
+    /// Something is MOVING this write: a signer HAS its request and the
+    /// answer is already on its way (`FfiSigningState::InFlight`), or it is
+    /// signed and its relay lanes are live. Cancel it first; removal is for
+    /// entries nothing is going to move — which a write parked on a signer
+    /// nobody has is, so that one is removable (#1269).
     StillActive {
         receipt_id: u64,
     },

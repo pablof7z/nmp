@@ -719,12 +719,22 @@ impl Engine {
             .map_err(|_| RemoveQueueEntryError::EngineClosed)?
     }
 
-    /// Forget one queue entry (#1039).
+    /// Forget one queue entry, releasing whatever obligation it still holds
+    /// (#1039, #1269).
     ///
     /// A real TERMINATION path: a write parked forever on a signer that
     /// never attached, and a permanently-failed refused entry, end no other
-    /// way. A write that still owns open delivery work is refused — cancel
-    /// that one instead.
+    /// way.
+    ///
+    /// What makes an entry removable is a fact about what is in motion, not
+    /// how long it has waited. A signer holding the request (its answer is
+    /// already on the way) and a signed write with live relay lanes (a relay
+    /// may still ack) are refused as
+    /// [`RemoveQueueEntryError::StillActive`]. A write parked on a signer
+    /// nobody has is neither, so it goes — and removing it RELEASES the
+    /// obligation: the optimistic row the write promised the app's own live
+    /// query is compensated in the same step, and any live receipt stream is
+    /// told [`NotSentReason::Removed`] rather than simply going quiet.
     ///
     /// This does NOT close #46. Retained receipts and correlation tokens
     /// still regrow without bound; enumerating them is what makes the growth

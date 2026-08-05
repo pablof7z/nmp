@@ -551,8 +551,11 @@ impl NmpEngine {
             .map_err(remove_queue_entry_error_to_ffi)
     }
 
-    /// Forget one queue entry (#1039). The only way a write parked forever
-    /// on a missing signer, or a permanently-failed refused entry, ever ends.
+    /// Forget one queue entry, releasing whatever obligation it still holds
+    /// (#1039, #1269). The only way a write parked forever on a missing
+    /// signer, or a permanently-failed refused entry, ever ends. A write
+    /// something is still MOVING — a signer holding its request, or live
+    /// relay lanes — is refused instead.
     pub fn remove_publish_queue_entry(
         &self,
         receipt_id: u64,

@@ -628,6 +628,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::EngineError
 impl core::panic::unwind_safe::UnwindSafe for nmp::EngineError
 pub enum nmp::NotSentReason
 pub nmp::NotSentReason::Cancelled
+pub nmp::NotSentReason::Removed
 pub nmp::NotSentReason::Superseded
 impl core::clone::Clone for nmp::NotSentReason
 pub fn nmp::NotSentReason::clone(&self) -> nmp::NotSentReason
