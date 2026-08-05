@@ -109,6 +109,17 @@ Feature: Pointing at something is one door, and it fills what the library knows
       And it carries no "q" row, no group context row, and no timeline evidence
       And a native app composes it through NMP rather than hand-building the row
 
+    # nmp:id=WRITES-TAGGING-009
+    # nmp:status=built
+    # nmp:evidence=rust:nmp-ffi::a_native_top_level_chat_is_kind_9_and_carries_no_rows
+    # nmp:evidence=swift:NMP::testChatIsKindNineAndCarriesNoRows
+    # nmp:evidence=kotlin:NMPKotlin::chatIsKindNineAndCarriesNoRows
+    # nmp:falsifier=Stop projecting the top-level chat composer across the FFI; an app sending an ordinary message states kind 9 itself again, which is the half of the schema the reply verb alone never reached and which no app-side test can catch, because a kind the app chose is a kind the app agrees with.
+    Scenario: A message that is not a reply still never makes an app name a kind
+      When a chat app sends an ordinary message rather than a reply
+      Then it composes the draft through NMP and names no kind of its own
+      And the draft carries no group context row, no content, and no timestamp
+
   Rule: A reference written into content cannot disagree with its row
 
     # nmp:id=WRITES-TAGGING-007
@@ -120,6 +131,19 @@ Feature: Pointing at something is one door, and it fills what the library knows
       When an app writes a message naming a person and an event inline
       Then the rendered content carries their bech32 forms and the event's quote row is emitted
       And the rows a composer stated for its own reasons are untouched
+
+    # nmp:id=WRITES-TAGGING-010
+    # nmp:status=built
+    # nmp:evidence=rust:nmp-ffi::naming_a_person_writes_the_token_and_the_p_row_together
+    # nmp:evidence=rust:nmp-ffi::quoting_an_event_renders_it_and_emits_its_q_row_from_the_same_part
+    # nmp:evidence=swift:NMP::testNamingAPersonWritesTheTokenAndThePRowTogether
+    # nmp:evidence=kotlin:NMPKotlin::namingAPersonWritesTheTokenAndThePRowTogether
+    # nmp:falsifier=Let a native caller hand over a finished content string and its rows separately; an app that lets somebody @-mention a person appends ["p", hex] by hand again and nothing catches it disagreeing with the token in the body, because from the app's side nothing is missing.
+    Scenario: A native app names a person and their row comes with it
+      Given a native app composing a message with somebody named inline
+      When it states the message as its pieces rather than as a finished string
+      Then the rendered content carries their bech32 form and their "p" row is emitted
+      And a malformed key refuses before any content or row exists
 
   Rule: A repost points at an entity, not at a position in a conversation
 

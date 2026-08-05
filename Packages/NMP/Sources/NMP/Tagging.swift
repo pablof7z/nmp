@@ -26,20 +26,95 @@ extension WritePayload {
             kind: ffi.kind, tags: ffi.tags, content: ffi.content, createdAt: ffi.createdAt)
     }
 
-    /// This payload's content, restated. A composed draft is content-free
-    /// until the app says what it says, so `withContent(_:)` is how a draft
-    /// from one of these doors becomes a message.
-    public func withContent(_ content: String) -> WritePayload {
+    /// State what this draft SAYS, and emit the rows its inline references
+    /// need, from one call.
+    ///
+    /// A composed draft is content-free until the app says what it says, so
+    /// this is how a draft from one of these doors becomes a message. It takes
+    /// the message in PIECES rather than as a finished string because a piece
+    /// naming a person or an event produces both halves of that reference —
+    /// the `nostr:npub1…`/`nostr:nevent1…` a reader sees and the `p`/`q` row
+    /// that resolves it — so the two cannot be written apart. Writing them
+    /// apart is what #964 found still living in Swift: an app that let
+    /// somebody @-mention a person appended `["p", hex]` by hand and hoped it
+    /// matched the token it had put in the content, and nothing could catch a
+    /// disagreement, because from the app's side nothing is missing.
+    ///
+    /// The rows land after whatever the composer already stated for its own
+    /// reasons — a chat reply's `e` and `p` rows survive intact.
+    ///
+    /// A pre-signed payload is returned unchanged: its content is frozen in
+    /// bytes that were already signed over, so changing it would invalidate
+    /// the signature rather than edit the message.
+    public func withContent(_ content: [ContentPart]) throws -> WritePayload {
         switch self {
-        case .event(let kind, let tags, _, let createdAt):
-            return .event(kind: kind, tags: tags, content: content, createdAt: createdAt)
+        case .event(let kind, let tags, let stated, let createdAt):
+            return WritePayload(
+                try nmpRethrowing {
+                    try NMPFFI.withContent(
+                        draft: FfiEventBuilder(
+                            kind: kind, tags: tags, content: stated, createdAt: createdAt),
+                        content: content.map { $0.toFfi() })
+                })
         case .signed:
-            // A signed event's content is frozen in bytes that were already
-            // signed over; changing it would invalidate the signature rather
-            // than edit the message.
             return self
         }
     }
+}
+
+/// One piece of a message body.
+///
+/// Bech32 appears in what a reader SEES and nowhere else — that is the user
+/// boundary (`docs/internals/conventions/bech32-boundary.md`). Every input
+/// here is the decoded form: `pubkey` is 64-char hex like every other key in
+/// this package, and a quote names the `Row` the app is already holding. The
+/// `nostr:npub1…`/`nostr:nevent1…` token is produced from those, which is
+/// exactly the pairing this type exists to keep honest.
+public enum ContentPart: Sendable, Hashable {
+    /// Literal text, rendered verbatim and emitting no rows. A `nostr:` URI
+    /// typed into this case is just characters: nothing parses it, so it
+    /// emits nothing. Name the person or the event instead.
+    case text(String)
+    /// Somebody named inline. Renders `nostr:npub1…` and emits their `p` row.
+    ///
+    /// `relay` is where a reader should look for them, when the app knows —
+    /// a person's relay is an outbox fact (NIP-65) no schema owner can reach,
+    /// so `nil` leaves the slot honestly empty rather than guessing. Stating
+    /// one reaches both halves: the rendering becomes `nostr:nprofile1…`
+    /// carrying that relay, and the `p` row's hint cell carries the same
+    /// value.
+    case person(pubkey: String, relay: String?)
+    /// An event named inline. Renders `nostr:nevent1…` and emits its NIP-18
+    /// `q` row, hinted from the row's own verified sources.
+    ///
+    /// It is a QUOTE and never a thread reply: NIP-18's `q` exists precisely
+    /// so *"quote reposts are not pulled and included as replies in threads"*.
+    /// Replying is `chatReply(to:)`/`replyTo(_:)`, which point with `e`.
+    case quote(Row)
+
+    func toFfi() -> FfiContentPart {
+        switch self {
+        case .text(let text): return .text(text: text)
+        case .person(let pubkey, let relay): return .person(pubkey: pubkey, relay: relay)
+        case .quote(let target): return .quote(target: target.toFfi())
+        }
+    }
+}
+
+/// Compose a top-level NIP-C7 kind:9 chat.
+///
+/// The other half of what `chatReply(to:)` closed: an app that replies no
+/// longer states a kind, but an app sending an ordinary message still stated
+/// `kind: 9` itself, because the composer for THAT never crossed the FFI
+/// (#964).
+///
+/// It composes SCHEMA ONLY, exactly as `chatReply(to:)` does — no `h` row, no
+/// notification policy, no routing, and no content. What the message says
+/// comes from `withContent(_:)`, which is also what emits the rows an inline
+/// mention or quote needs. A group's `h` row and its relay set come from
+/// `NMPGroup.publish(engine:authorPubkeyHex:payload:)`.
+public func chat() -> WritePayload {
+    WritePayload(NMPFFI.chat())
 }
 
 /// Compose the ordinary reply to `target`.
