@@ -97,60 +97,43 @@ async fn no_destinations_yet(w: &mut NmpWorld) {
 
 // ---- what the park says --------------------------------------------------
 
-/// The park itself, which is now the whole of what the receipt says about
-/// one: an OPEN destination picture -- resolution has not finished, so the
-/// answer can still change and nothing expires the write.
+/// The park AND its reason: an open destination picture that names at least
+/// one author whose routes it is still waiting on.
 ///
-/// The routing park no longer carries a REASON. `WriteFact::Destinations`
-/// replaced `AwaitingRoute { detail }`, and it has no detail field, so
-/// "stuck" and "stuck because X" are no longer distinguishable from a
-/// receipt: this step can only prove the park exists, never that it says
-/// anything an app could render or a person could act on.
+/// The reason is the whole point of this step, and it is deliberately a
+/// stronger claim than `the receipt reports it is still determining
+/// destinations` -- which asserts only `complete: false`. A park that named
+/// nobody would satisfy that sentence and fail this one. Before #1236 it
+/// could not: the reason was computed in the engine and never left it, so
+/// this step could prove the park existed and nothing else, which is a step
+/// that cannot fail for the reason it exists.
 #[then(
     regex = r#"^the receipt says (?:why it is still determining destinations|why it cannot settle)$"#
 )]
 async fn park_carries_a_reason(w: &mut NmpWorld) {
-    let reasoned = w.receipt_eventually(|seen| {
-        seen.iter().any(|s| {
-            matches!(
-                s,
-                WriteFact::Destinations {
-                    complete: false,
-                    ..
-                }
-            )
-        })
-    });
+    let reasoned = w.park_names_an_author();
     assert!(
         reasoned,
-        "expected the receipt to report an open destination picture; saw {:?}",
-        w.receipt_statuses()
+        "a park that says only THAT it is stuck is not actionable: the open destination \
+         picture must name the authors whose routes it is waiting on; saw {:?}",
+        w.routing_facts_reported()
     );
 }
 
-/// WHOSE relay list is missing is no longer on the receipt: the park is an
-/// empty destination set with `complete: false`, and it names nobody. What
-/// survives is that the write is parked with nothing resolved.
-#[then(regex = r#"^the receipt says it has no relay list for me yet$"#)]
-async fn park_names_my_relay_list(w: &mut NmpWorld) {
-    assert!(
-        w.parked_without_destination(),
-        "expected the receipt to report the write parked with no destination resolved; \
-         saw {:?}",
-        w.receipt_statuses()
-    );
-}
-
-/// Parked-on-a-NAMED-author is no longer expressible: the park carries no
-/// reason and no pubkey. What survives is that resolution has not finished,
-/// which is the half this step already accepted.
+/// Parked on a NAMED author: the person the scenario staged as unlooked-up
+/// is the person the receipt says it is waiting for.
+///
+/// Asserting only that resolution is incomplete would re-prove the preceding
+/// `routing for the note is not complete` step and pass no matter whose
+/// lookup was outstanding.
 #[then(regex = r#"^the note stays parked awaiting (\S+)'s relay list$"#)]
 async fn parked_awaiting_person(w: &mut NmpWorld, person: String) {
-    let incomplete = latest_completeness(w) == Some(false);
+    let awaited = w.person(&person).public_key();
     assert!(
-        incomplete,
-        "expected the write to still be waiting on {person}; saw {:?}",
-        w.receipt_statuses()
+        w.park_awaits(awaited),
+        "expected the receipt's park to name {person} as the route it is waiting on; \
+         saw {:?}",
+        w.routing_facts_reported()
     );
 }
 

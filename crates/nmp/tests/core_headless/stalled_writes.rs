@@ -75,11 +75,15 @@ fn an_unroutable_write_parks_on_an_open_empty_destination_set_and_is_listed() {
                 receipt,
                 WriteFact::Destinations {
                     relays,
-                    complete: false
+                    complete: false,
+                    awaiting_author_routes,
                 }
-            ) if *receipt == id && relays.is_empty()
+            ) if *receipt == id
+                && relays.is_empty()
+                && awaiting_author_routes == &BTreeSet::from([author.public_key()])
         )),
-        "a write with nothing to route to parks on an empty, still-open destination set: {effects:?}"
+        "a write with nothing to route to parks on an empty, still-open destination set that \
+         names the EXACT author whose routes it waits on: {effects:?}"
     );
     assert!(
         !effects.iter().any(|effect| matches!(

@@ -267,8 +267,8 @@ instrumentation path this rule was found on.
 
 | receipt state | app shows |
 |---|---|
-| `AwaitingRoute` (§8), or `Routed { complete: false }` | "determining destinations" (with whatever is already known) |
-| `Routed { complete: true }`, lanes live | "sending (n of m)" |
+| `Destinations { complete: false }` (§8) | "determining destinations" — with whatever is already known, and with the authors in `awaiting_author_routes` as the reason it is still open |
+| `Destinations { complete: true }`, lanes live | "sending (n of m)" |
 | every lane terminal, receipt closed | "sent" (or the per-relay failure detail) |
 
 ## 8. The defect this design fixes — BUILT (and wrong)
@@ -292,9 +292,10 @@ accidental, and it is the tell that the terminal arm is wrong.)
 
 Under this design that arm is unrepresentable. "No relays known" is not an
 error — it is an `Auto` with unknowns, which is the *normal initial state* of
-the queue rewriter. The intent parks as `AwaitingRoute { detail }` (a
-retained, replayed-on-reattach receipt state — the routing sibling of
-`AwaitingCapability`'s durable park, `crates/nmp/src/delivery/mod.rs:72`),
+the queue rewriter. The intent parks as an open destination picture
+(`WriteFact::Destinations { complete: false }`, retained and replayed on
+reattach — the routing sibling of `SigningState::AwaitingSigner`'s durable
+park, and like it, naming the keys it waits for rather than describing them),
 its needs are declared (`knowledge-and-settlement.md` §6), and moments 3/4
 re-resolve it when knowledge arrives. Failure remains possible — an `Explicit`
 to an unreachable relay still fails per-lane, and a permanently unsatisfiable

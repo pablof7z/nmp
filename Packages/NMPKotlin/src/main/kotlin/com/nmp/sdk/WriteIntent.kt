@@ -483,8 +483,24 @@ sealed class WriteFact {
      *
      * `complete == false` with an empty set is a write still learning where
      * it goes; it parks indefinitely and NOTHING expires it. `complete ==
-     * true` with an empty set is [WriteOutcome.NoDestination]. */
-    data class Destinations(val relays: List<String>, val complete: Boolean) : WriteFact()
+     * true` with an empty set is [WriteOutcome.NoDestination].
+     *
+     * [awaitingAuthorRoutes] is WHY resolution is still open, as 64-char hex
+     * public keys rather than as a sentence: every author whose routes this
+     * write is still waiting on, in sorted key order. A later positive route
+     * fact for any one of them is the only thing that can move the picture,
+     * so the set is both the reason to show and the list of repairs.
+     * Non-empty implies `complete == false`; a settled resolution names
+     * nobody. The converse does NOT hold: an open picture naming nobody is a
+     * write whose routing has not run at all because it is not signed yet,
+     * and [Signing] is the fact that says what it IS held on. Never a
+     * rendered message -- a park you can only print is a park you cannot act
+     * on. */
+    data class Destinations(
+        val relays: List<String>,
+        val complete: Boolean,
+        val awaitingAuthorRoutes: List<String>,
+    ) : WriteFact()
 
     data class Outcome(val outcome: WriteOutcome) : WriteFact()
 
@@ -493,7 +509,8 @@ sealed class WriteFact {
             when (ffi) {
                 is FfiWriteFact.Signing -> Signing(SigningState.from(ffi.state))
                 is FfiWriteFact.Relay -> Relay(ffi.relay, RelayState.from(ffi.state))
-                is FfiWriteFact.Destinations -> Destinations(ffi.relays, ffi.complete)
+                is FfiWriteFact.Destinations ->
+                    Destinations(ffi.relays, ffi.complete, ffi.awaitingAuthorRoutes)
                 is FfiWriteFact.Outcome -> Outcome(WriteOutcome.from(ffi.outcome))
             }
     }
