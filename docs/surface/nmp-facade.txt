@@ -359,6 +359,24 @@ impl core::marker::Unpin for nmp::nip29::GroupSnapshot
 impl core::marker::UnsafeUnpin for nmp::nip29::GroupSnapshot
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::GroupSnapshot
 impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::GroupSnapshot
+pub struct nmp::nip29::Groups
+impl nmp::nip29::Groups
+pub fn nmp::nip29::Groups::publish(&self, &nmp::Engine, nostr::key::public_key::PublicKey, nmp_grammar::write::EventBuilder) -> core::result::Result<nmp::ReceiptStream, nmp::nip29::GroupPublishError>
+impl core::clone::Clone for nmp::nip29::Groups
+pub fn nmp::nip29::Groups::clone(&self) -> nmp::nip29::Groups
+impl core::cmp::Eq for nmp::nip29::Groups
+impl core::cmp::PartialEq for nmp::nip29::Groups
+pub fn nmp::nip29::Groups::eq(&self, &nmp::nip29::Groups) -> bool
+impl core::fmt::Debug for nmp::nip29::Groups
+pub fn nmp::nip29::Groups::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::nip29::Groups
+impl core::marker::Freeze for nmp::nip29::Groups
+impl core::marker::Send for nmp::nip29::Groups
+impl core::marker::Sync for nmp::nip29::Groups
+impl core::marker::Unpin for nmp::nip29::Groups
+impl core::marker::UnsafeUnpin for nmp::nip29::Groups
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::nip29::Groups
+impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::Groups
 pub struct nmp::nip29::HostRecords
 pub nmp::nip29::HostRecords::admins: core::option::Option<nmp_nip29::records::ListedRecord>
 pub nmp::nip29::HostRecords::availability: nmp::nip29::GroupAvailability
@@ -382,6 +400,7 @@ impl core::panic::unwind_safe::UnwindSafe for nmp::nip29::HostRecords
 pub struct nmp::nip29::RelayScope
 impl nmp::nip29::RelayScope
 pub fn nmp::nip29::RelayScope::group(&self, impl core::convert::Into<alloc::string::String>) -> nmp::nip29::Group
+pub fn nmp::nip29::RelayScope::groups(&self, impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::Into<alloc::string::String>>) -> core::result::Result<nmp::nip29::Groups, nmp_nip29::context::GroupContextError>
 pub fn nmp::nip29::RelayScope::observe(&self, &nmp::Engine, impl core::convert::Into<nmp::nip29::GroupPredicate>, impl core::iter::traits::collect::IntoIterator<Item = nmp_nip29::records::GroupRecord>, core::option::Option<usize>) -> core::result::Result<nmp::nip29::GroupObservation, nmp::nip29::GroupObserveError>
 impl core::clone::Clone for nmp::nip29::RelayScope
 pub fn nmp::nip29::RelayScope::clone(&self) -> nmp::nip29::RelayScope

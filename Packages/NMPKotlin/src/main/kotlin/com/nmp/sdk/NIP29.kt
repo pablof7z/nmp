@@ -47,6 +47,7 @@ import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiGroup
 import uniffi.nmp_ffi.FfiGroupIds
+import uniffi.nmp_ffi.FfiGroups
 import uniffi.nmp_ffi.FfiGroupMetadataEdit
 import uniffi.nmp_ffi.FfiJoinAccess
 import uniffi.nmp_ffi.FfiReadAccess
@@ -72,6 +73,18 @@ import uniffi.nmp_ffi.memberListIncludes as ffiMemberListIncludes
 class NMPRelayScope private constructor(internal val ffi: FfiRelayScope) {
     /** Narrow to one group id, keeping the same hosts. Contacts nothing. */
     fun group(groupId: String): NMPGroup = NMPGroup(ffi.group(groupId))
+
+    /** Narrow to the SEVERAL groups one write belongs to, keeping the same
+     * hosts (#1281).
+     *
+     * The write-only sibling of [group], for the one event shape a single
+     * group id cannot express: a kind:30315 session status is addressable at
+     * `(author, d=status)` and carries one `h` per room the session occupies,
+     * so publishing it once per room would make each copy replace the last.
+     * An empty set throws `NMPError.EmptyGroupSet` -- an event with no `h`
+     * row is not in a group at all. */
+    fun groups(groupIds: List<String>): NMPGroups =
+        NMPGroups(nmpRethrowing { ffi.groups(groupIds) })
 
     /** Watch the relay-signed records of every group matching [predicate].
      * One complete branch per host; each emitted element is the complete set
@@ -277,6 +290,43 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
     fun createInvite(engine: NMPEngine, authorPubkeyHex: String, code: String): Receipt =
         receiptFrom(
             nmpRethrowing { ffi.createInvite(engine.ffi, authorPubkeyHex, code) },
+        )
+}
+
+/** The groups one write belongs to (`nmp::nip29::Groups`/`FfiGroups` mirror,
+ * #1281), obtained from [NMPRelayScope.groups].
+ *
+ * A WRITE CONTEXT and nothing else. There is no read door, no records
+ * observation and no named operation on it, because each of those is
+ * per-group by definition -- a roster is one group's, and every 9000-9022
+ * moderation action names one group. A write is the one thing that is
+ * genuinely plural.
+ *
+ * ONE method. NMP appends the `h` rows, NMP signs, NMP publishes. There is
+ * deliberately no pre-signed spelling, no way to obtain a draft to sign
+ * yourself, and no mint-without-publish door -- an app that wants NMP to sign
+ * without publishing uses `NMPEngine.signEvent`. */
+class NMPGroups internal constructor(internal val ffi: FfiGroups) {
+    /** Publish one event into every retained group, through the ONE publish
+     * door. One `h` row per retained id is appended before signing, the route
+     * is the scope's own hosts, and the app names neither a relay nor an `h`
+     * row. */
+    fun publish(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        kind: UShort,
+        tags: List<List<String>> = emptyList(),
+        content: String = "",
+        createdAt: ULong? = null,
+    ): Receipt =
+        receiptFrom(
+            nmpRethrowing {
+                ffi.publish(
+                    engine.ffi,
+                    authorPubkeyHex,
+                    FfiEventBuilder(kind, tags, content, createdAt),
+                )
+            },
         )
 }
 

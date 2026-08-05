@@ -71,6 +71,19 @@ public final class NMPRelayScope: @unchecked Sendable {
         NMPGroup(ffi.group(groupId: groupID))
     }
 
+    /// Narrow to the SEVERAL groups one write belongs to, keeping the same
+    /// hosts (#1281).
+    ///
+    /// The write-only sibling of `group(_:)`, for the one event shape a
+    /// single group id cannot express: a kind:30315 session status is
+    /// addressable at `(author, d=status)` and carries one `h` per room the
+    /// session occupies, so publishing it once per room would make each copy
+    /// replace the last. An empty set throws `NMPError.emptyGroupSet` -- an
+    /// event with no `h` row is not in a group at all.
+    public func groups(_ groupIDs: [String]) throws -> NMPGroups {
+        try NMPGroups(nmpRethrowing { try ffi.groups(groupIds: groupIDs) })
+    }
+
     /// Watch the relay-signed records of every group matching `predicate`.
     /// One complete branch per host; each delivered element is the complete
     /// set of `NMPGroupSnapshot`s for the groups currently matching. The app
@@ -327,6 +340,49 @@ public final class NMPGroup: @unchecked Sendable {
     ) throws -> Receipt {
         let receipts = try nmpRethrowing {
             try ffi.createInvite(engine: engine.concreteFfiEngine, author: authorPubkeyHex, code: code)
+        }
+        return Receipt(handle: receipts)
+    }
+}
+
+/// The groups one write belongs to (`nmp::nip29::Groups`/`FfiGroups`
+/// mirror, #1281), obtained from `NMPRelayScope.groups(_:)`.
+///
+/// A WRITE CONTEXT and nothing else. There is no read door, no records
+/// observation and no named operation on it, because each of those is
+/// per-group by definition -- a roster is one group's, and every 9000-9022
+/// moderation action names one group. A write is the one thing that is
+/// genuinely plural.
+///
+/// ONE method. NMP appends the `h` rows, NMP signs, NMP publishes. There is
+/// deliberately no pre-signed spelling, no way to obtain a draft to sign
+/// yourself, and no mint-without-publish door -- an app that wants NMP to
+/// sign without publishing uses `NMPEngine.signEvent(...)`.
+public final class NMPGroups: @unchecked Sendable {
+    let ffi: FfiGroups
+
+    init(_ ffi: FfiGroups) {
+        self.ffi = ffi
+    }
+
+    /// Publish one event into every retained group, through the ONE publish
+    /// door. One `h` row per retained id is appended before signing, the
+    /// route is the scope's own hosts, and the app names neither a relay nor
+    /// an `h` row.
+    public func publish(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        kind: UInt16,
+        tags: [[String]] = [],
+        content: String = "",
+        createdAt: UInt64? = nil
+    ) throws -> Receipt {
+        let receipts = try nmpRethrowing {
+            try ffi.publish(
+                engine: engine.concreteFfiEngine,
+                author: authorPubkeyHex,
+                builder: FfiEventBuilder(kind: kind, tags: tags, content: content, createdAt: createdAt)
+            )
         }
         return Receipt(handle: receipts)
     }
