@@ -19,11 +19,23 @@ Feature: An app can be the signer, not just hand over a key
 
   So this is the second door. It takes no secret and no callback -- only the
   public key the app can sign for -- and hands back a stream of signature
-  requests to drain. That shape is not an implementation detail. NMP must not
-  invoke app code, because a signer is exactly the capability whose honest
-  answer time is "as long as a person takes to look at a confirmation screen",
-  and a capability NMP calls into is one that can hold NMP there. Inverting it
-  means an app that is slow, or wedged, or gone, delays only its own signing.
+  requests to drain. That shape is not an implementation detail, and the
+  reason is not that a person is slow: NMP's capabilities already return
+  ready-or-pending, which absorbs human time without holding anything, and the
+  AUTH policy does exactly that today. The reason is that NMP must not invoke
+  app code at all. The one callback still on this surface is invoked with the
+  capability's own mutex held, on a task of the shared runtime, so app code
+  that blocks or reenters there freezes work that has nothing to do with it --
+  and making that same "NMP calls you" shape safe across the FFI boundary cost
+  a five-state hand-written linearization the mailbox needs none of. Inverting
+  it means an app that is slow, or wedged, or gone, delays only its own
+  signing.
+
+  An app whose drain goes away is the ordinary case, not the pathological one.
+  A screen closes, a scope is cancelled, an engine generation is replaced --
+  the loop ends and the app is still the signer. So a departing drain must
+  never take the signer down with it, and must never leave the mailbox
+  unreadable either. Both are ways to silently stop being able to sign.
 
   What the app cannot do through this door is choose. The key is frozen into
   every request by the write that asked for it, and NMP verifies the returned
@@ -134,6 +146,35 @@ Feature: An app can be the signer, not just hand over a key
     When the app answers with a malformed signature
     Then the app is told the answer could not be parsed
     And the request can still be answered correctly
+
+  # ---- the drain comes and goes; the signer does not ----------------------
+
+  # nmp:id=IDENTITY-APP-SIGNER-011
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::unparking_ends_the_await_and_leaves_the_signer_working
+  # nmp:evidence=rust:nmp-ffi::ffi_unparking_a_drain_frees_the_mailbox_without_closing_it
+  # nmp:evidence=swift:NMP::testCancellingADrainEndsItAndLeavesTheSignerWorking
+  # nmp:evidence=kotlin:NMPKotlin::cancellingACollectionEndsItAndLeavesTheSignerWorking
+  # nmp:falsifier=End the drain by closing the mailbox, the way every other pull handle's teardown does; the first time a screen goes away the app silently stops being a signer and every later write for that key parks forever with nothing to attach.
+  Scenario: A drain that goes away does not take the signer with it
+    Given the app is waiting for the next request
+    When the app's drain is torn down
+    Then that wait ends
+    And the signer is still registered
+    And a replacement drain receives the next request
+
+  # nmp:id=IDENTITY-APP-SIGNER-012
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::unparking_before_the_await_ends_that_await_and_only_it
+  # nmp:evidence=rust:nmp::a_request_that_races_an_unpark_is_retained
+  # nmp:evidence=swift:NMP::testCancellingBeforeTheAwaitStillEndsTheDrain
+  # nmp:evidence=kotlin:NMPKotlin::unparkEndsOneAwaitAndNotTheMailbox
+  # nmp:falsifier=Wake only a reader that is already parked; a drain loop torn down between two requests enters its next wait after the teardown has already run, and waits forever on a mailbox nobody will wake.
+  Scenario: A drain torn down before it waits still ends
+    Given the app's drain is torn down before it waits again
+    When the app waits for the next request
+    Then that wait ends immediately
+    And a request that arrived meanwhile is still waiting for the next drain
 
   # ---- it is an ordinary registration -------------------------------------
 

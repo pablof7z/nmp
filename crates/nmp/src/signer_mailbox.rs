@@ -8,15 +8,37 @@
 //! register no signer at all, so the only identity NMP could hold for it was
 //! a local secret key NMP itself owns.
 //!
-//! The door is not a callback. #783's required contract is that NMP never
-//! invokes app code: a signer legitimately takes as long as a person takes to
-//! tap "approve" on a hardware device, and a capability NMP calls into is a
-//! capability that can freeze the caller. So registration installs an
-//! engine-owned bounded mailbox instead. [`MailboxSigner::sign`] enqueues one
-//! immutable [`SignatureRequest`] and returns immediately; the app drains the
-//! mailbox on its own executor and settles each request through a take-once
-//! completion. If the app never drains, only that signer's own queued work
-//! waits — NMP creates no thread and runs no foreign code.
+//! The door is not a callback, and the reason is not human latency. A
+//! ready-or-pending capability already absorbs a person's thinking time
+//! without holding anything: [`AuthPolicy`](crate::AuthPolicy) is the
+//! human-prompt capability on this surface and its contract says so outright —
+//! *"`evaluate` must return a ready-or-pending operation without blocking …
+//! Prompt UX remains app-owned — resolve the pending sender whenever the user
+//! answers, from any thread."* `SigningCapability::sign` has the identical
+//! shape, so "the person takes ten seconds" would not have justified anything.
+//!
+//! The three reasons that do:
+//!
+//! 1. #783 mandates the inversion outright. Its falsifier 1 requires that no
+//!    supported foreign capability is invoked by NMP and names
+//!    `callback.evaluate` first, `capability.sign` second. The AUTH callback
+//!    is the violation #783 exists to remove, not the precedent to copy.
+//! 2. The harm is concrete and live on master:
+//!    `crate::runtime::auth`'s policy task calls `policy.lock()…evaluate(…)`,
+//!    which runs foreign code **while holding the capability mutex**, inside a
+//!    task on the shared runtime. Foreign code that blocks or reenters there
+//!    freezes work that has nothing to do with it.
+//! 3. Making "NMP calls you, ready-or-pending" *safe across FFI* cost 752
+//!    lines and a five-state Condvar linearization
+//!    (`Evaluating/Pending/Resolving/Completed/Cancelled`) in
+//!    `crates/nmp-ffi/src/auth.rs`. A mailbox needs none of it.
+//!
+//! So registration installs an engine-owned bounded mailbox instead.
+//! [`MailboxSigner::sign`] enqueues one immutable [`SignatureRequest`] and
+//! returns immediately; the app drains the mailbox on its own executor and
+//! settles each request through a take-once completion. If the app never
+//! drains, only that signer's own queued work waits — NMP creates no thread
+//! and runs no foreign code.
 //!
 //! Saturation is a refusal, not a broken mailbox. `MailboxSigner` counts its
 //! own outstanding requests and answers the one past the bound with
@@ -90,11 +112,12 @@ impl std::error::Error for SignatureSettleError {}
 /// that shut its signer down mid-request should say.
 pub struct SignatureRequest {
     unsigned: SignerUnsignedEvent,
-    completion: PendingSignerSender<SignerSignedEvent>,
+    /// The one completion slot, taken by whichever of `settle` and `Drop`
+    /// reaches it first. Holding it IS "not yet answered", so there is no
+    /// lifecycle flag to read inside `Drop` and no state where a flag and a
+    /// live sender could disagree (Bool-Lifecycle Gate).
+    completion: Option<PendingSignerSender<SignerSignedEvent>>,
     slots: OutstandingSlots,
-    /// Cleared by `settle`, so `Drop` can tell an answered request from an
-    /// abandoned one without a separate bool.
-    settled: bool,
 }
 
 impl SignatureRequest {
@@ -121,13 +144,17 @@ impl SignatureRequest {
         self.settle(Err(reason))
     }
 
-    fn settle(
+    /// Spend the completion slot and release the outstanding-request slot,
+    /// both exactly once. `None` means it was already spent, which only
+    /// `Drop` after a settle can see — `resolve` and `reject` consume the
+    /// request, so neither can reach this twice.
+    fn spend(
         &mut self,
         outcome: Result<SignerSignedEvent, SignerError>,
-    ) -> Result<(), SignatureSettleError> {
-        self.settled = true;
+    ) -> Option<Result<(), SignatureSettleError>> {
+        let completion = self.completion.take()?;
         self.slots.fetch_sub(1, Ordering::AcqRel);
-        match self.completion.resolve(outcome) {
+        Some(match completion.resolve(outcome) {
             Ok(()) => Ok(()),
             // The one completion door was spent before this answer arrived —
             // by cancellation, or by the engine-side waiter disappearing. The
@@ -136,19 +163,24 @@ impl SignatureRequest {
             | Err(PendingSignerResolveError::AlreadyResolved(_)) => {
                 Err(SignatureSettleError::NoLongerAwaited)
             }
-        }
+        })
+    }
+
+    fn settle(
+        &mut self,
+        outcome: Result<SignerSignedEvent, SignerError>,
+    ) -> Result<(), SignatureSettleError> {
+        self.spend(outcome)
+            .expect("resolve and reject each consume the request, so the slot is still held")
     }
 }
 
 impl Drop for SignatureRequest {
     fn drop(&mut self) {
-        if self.settled {
-            return;
-        }
-        // An abandoned request must not hold its slot forever, and must not
-        // leave the write waiting on an answer that will never come.
-        self.slots.fetch_sub(1, Ordering::AcqRel);
-        let _ = self.completion.resolve(Err(SignerError::Unavailable));
+        // Taking the slot is both the test and the action: a settled request
+        // has none left, and an abandoned one must not hold its slot forever
+        // or leave the write waiting on an answer that will never come.
+        let _ = self.spend(Err(SignerError::Unavailable));
     }
 }
 
@@ -194,11 +226,35 @@ impl SignerMailbox {
     }
 
     /// Stop accepting requests and wake a parked [`next`](Self::next) to
-    /// `None`. Idempotent. Spelled `cancel` to match every other pull handle
-    /// on this surface, and because `close` is already taken by the object
-    /// lifecycle UniFFI generates for the FFI projection.
+    /// `None`. **Destructive**: this signer stops answering, so every later
+    /// write for its key parks on an unavailable signer. Idempotent. Spelled
+    /// `cancel` to match every other pull handle on this surface, and because
+    /// `close` is already taken by the object lifecycle UniFFI generates for
+    /// the FFI projection.
     pub fn cancel(&self) {
         self.requests.close();
+    }
+
+    /// End one [`next`](Self::next) to `None` **without** closing the mailbox.
+    /// A parked reader ends now; with none parked the next one ends instead,
+    /// so one call ends one await whichever side of the park it lands on.
+    ///
+    /// This is what a drain task that is going away wants, and
+    /// [`cancel`](Self::cancel) is not: a query handle's cancel ends one
+    /// stream, but this mailbox IS the app's signer, so closing it on an
+    /// ordinary task cancellation would silently park every later write for
+    /// that key. After an unpark the registration, the backlog and the
+    /// capability are untouched, and a fresh `next()` — from a replacement
+    /// task, on a new engine generation — parks again as normal.
+    ///
+    /// Rust callers rarely need it: dropping a `next()` future already ends
+    /// the await. It exists because a foreign await cannot always be dropped.
+    /// UniFFI's generated Swift parks on `withUnsafeContinuation`, which task
+    /// cancellation does not resume, so the Rust future is never freed and
+    /// keeps the mailbox's single-reader claim forever; without this door the
+    /// mailbox is not merely stuck but permanently unreadable.
+    pub fn unpark(&self) {
+        self.requests.unpark();
     }
 }
 
@@ -234,9 +290,8 @@ impl SigningCapability for MailboxSigner {
         let (completion, operation) = SignerOp::pending_channel();
         let request = SignatureRequest {
             unsigned,
-            completion,
+            completion: Some(completion),
             slots: Arc::clone(&self.slots),
-            settled: false,
         };
         // `send` returns false only for a closed/gone consumer. Dropping the
         // request then releases the slot and resolves the operation as
@@ -398,6 +453,143 @@ mod tests {
                 .expect("close is not an error")
                 .is_none(),
             "a closed, drained mailbox ends its stream"
+        );
+    }
+
+    /// Answering and then dropping is one answer and one released slot, not
+    /// two. With the completion held in an `Option` this is structural — the
+    /// slot is gone after the settle — rather than something a `Drop`-read
+    /// flag has to remember (Bool-Lifecycle Gate).
+    #[tokio::test]
+    async fn a_settled_request_that_is_then_dropped_answers_and_releases_once() {
+        let key = fixture_key();
+        let (signer, mailbox) = mailbox_signer(key);
+
+        let operation = signer.sign(unsigned(key, "answered then dropped"));
+        let request = mailbox.next().await.unwrap().unwrap();
+        request
+            .reject(SignerError::Rejected("no".to_string()))
+            .expect("the engine is still awaiting this one");
+
+        assert_eq!(
+            operation.recv_async().await,
+            Err(SignerError::Rejected("no".to_string())),
+            "the settle is the answer; the drop that follows must not overwrite it"
+        );
+        assert_eq!(
+            signer.slots.load(Ordering::Acquire),
+            0,
+            "settle-then-drop must release exactly one slot"
+        );
+
+        // A double release would show up as a wrapped subtraction, and the
+        // bound would be unusable rather than merely off by one.
+        for _ in 0..OUTSTANDING_REQUEST_BOUND {
+            assert!(matches!(
+                signer.sign(unsigned(key, "refill")),
+                SignerOp::Pending(_)
+            ));
+        }
+        assert!(matches!(
+            signer.sign(unsigned(key, "past the bound")),
+            SignerOp::Ready(Err(SignerError::Unavailable))
+        ));
+    }
+
+    /// The non-destructive exit a cancelled drain task needs. Unparking must
+    /// end the parked `next()` and change nothing else: `cancel` would close
+    /// the mailbox and park every later write for this key, which is not what
+    /// an app whose view went away meant.
+    #[tokio::test]
+    async fn unparking_ends_the_await_and_leaves_the_signer_working() {
+        let key = fixture_key();
+        let (signer, mailbox) = mailbox_signer(key);
+        let mailbox = Arc::new(mailbox);
+
+        let parked = tokio::spawn({
+            let mailbox = Arc::clone(&mailbox);
+            async move { mailbox.next().await }
+        });
+        tokio::task::yield_now().await;
+        mailbox.unpark();
+        assert!(
+            parked
+                .await
+                .unwrap()
+                .expect("an unpark is not a concurrent-next error")
+                .is_none(),
+            "the parked drain ends"
+        );
+
+        // The signer is still a signer: a new drain gets the next request and
+        // can still answer it.
+        let operation = signer.sign(unsigned(key, "after the unpark"));
+        let request = mailbox
+            .next()
+            .await
+            .expect("the mailbox outlives the drain that walked away")
+            .expect("and still delivers");
+        assert_eq!(request.unsigned_event().content(), "after the unpark");
+        request.reject(SignerError::Unavailable).ok();
+        assert_eq!(operation.recv_async().await, Err(SignerError::Unavailable));
+    }
+
+    /// The ordering a Swift drain actually hits: the task is already
+    /// cancelled when the loop comes round, so the cancellation handler runs
+    /// BEFORE the await it belongs to. One unpark must still end exactly that
+    /// await — and exactly one, leaving the mailbox live.
+    #[tokio::test]
+    async fn unparking_before_the_await_ends_that_await_and_only_it() {
+        let key = fixture_key();
+        let (signer, mailbox) = mailbox_signer(key);
+
+        mailbox.unpark();
+        assert!(
+            mailbox.next().await.unwrap().is_none(),
+            "the await the cancellation handler ran ahead of must still end"
+        );
+
+        let operation = signer.sign(unsigned(key, "the arm was spent"));
+        let request = mailbox
+            .next()
+            .await
+            .unwrap()
+            .expect("one unpark ends one await, not the mailbox");
+        request
+            .reject(SignerError::Rejected("seen".to_string()))
+            .ok();
+        assert_eq!(
+            operation.recv_async().await,
+            Err(SignerError::Rejected("seen".to_string()))
+        );
+    }
+
+    /// A request that arrives in the window between the unpark and the woken
+    /// poll stays queued for the next drainer rather than being handed to the
+    /// consumer that is leaving (which would drop it and park the write).
+    #[tokio::test]
+    async fn a_request_that_races_an_unpark_is_retained() {
+        let key = fixture_key();
+        let (signer, mailbox) = mailbox_signer(key);
+        let mailbox = Arc::new(mailbox);
+
+        let parked = tokio::spawn({
+            let mailbox = Arc::clone(&mailbox);
+            async move { mailbox.next().await }
+        });
+        tokio::task::yield_now().await;
+        mailbox.unpark();
+        let operation = signer.sign(unsigned(key, "raced the unpark"));
+        assert!(parked.await.unwrap().unwrap().is_none());
+
+        let request = mailbox.next().await.unwrap().expect("still queued");
+        assert_eq!(request.unsigned_event().content(), "raced the unpark");
+        request
+            .reject(SignerError::Rejected("seen".to_string()))
+            .ok();
+        assert_eq!(
+            operation.recv_async().await,
+            Err(SignerError::Rejected("seen".to_string()))
         );
     }
 
