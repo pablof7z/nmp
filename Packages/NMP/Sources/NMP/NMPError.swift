@@ -146,15 +146,22 @@ public enum NMPError: Error, Sendable, Equatable {
     /// #1033: a read selection handed to `NMPGroup.read` already declared a
     /// `since`/`until`/`limit` timeline bound the group door itself owns.
     case groupCallerSuppliedTimeline
-    /// #1033: `NMPGroup.validateContext`/`publishSigned` was given an event
-    /// carrying no `h` tag naming any group at all.
-    case groupContextMissing(expected: String)
-    /// #1033: an already-signed event's `h` tag names a different group
-    /// than the one it was handed to.
-    case groupContextMismatched(found: String, expected: String)
-    /// #1033: an already-signed event carried more than one distinct `h`
-    /// tag, so which group it belongs to is ambiguous.
-    case groupContextAmbiguous(expected: String)
+    /// #1281: `NMPRelayScope.groups(_:)` was given no group id at all. An
+    /// event with no `h` row is not in a group, so there is nothing to
+    /// contextualize and no honest route to mint.
+    case emptyGroupSet
+    /// #1033/#1281: `NMPGroup.validateContext`/`publishSigned` was given an
+    /// event carrying no `h` tag naming any group at all. `expected` is the
+    /// whole set the door was asked for -- one id for an `NMPGroup`, several
+    /// for an `NMPGroups`.
+    case groupContextMissing(expected: [String])
+    /// #1033/#1281: an already-signed event's `h` tags name a different SET
+    /// of groups than the one it was handed to -- too few, too many, or the
+    /// wrong ones.
+    case groupContextMismatched(found: [String], expected: [String])
+    /// #1281: an already-signed event names the right groups but repeats one
+    /// of them in a second `h` row, which is not a row the door would mint.
+    case groupContextRepeated(repeated: [String])
     /// #1245: a group content read named one of NIP-29's own relay-signed
     /// group records. Those identify themselves a different way, so an
     /// `h`-scoped read of them can only ever match nothing -- read them
@@ -233,11 +240,12 @@ public enum NMPError: Error, Sendable, Equatable {
         case .GroupCallerSuppliedContextConstraint:
             self = .groupCallerSuppliedContextConstraint
         case .GroupCallerSuppliedTimeline: self = .groupCallerSuppliedTimeline
+        case .EmptyGroupSet: self = .emptyGroupSet
         case .GroupContextMissing(let expected): self = .groupContextMissing(expected: expected)
         case .GroupContextMismatched(let found, let expected):
             self = .groupContextMismatched(found: found, expected: expected)
-        case .GroupContextAmbiguous(let expected):
-            self = .groupContextAmbiguous(expected: expected)
+        case .GroupContextRepeated(let repeated):
+            self = .groupContextRepeated(repeated: repeated)
         case .GroupRecordsNotContextScoped(let kinds):
             self = .groupRecordsNotContextScoped(kinds: kinds)
         case .GroupNoRecordSelected:
@@ -352,12 +360,14 @@ extension NMPError: LocalizedError {
             "A group read selection must not already constrain #h; the group's retained id is the sole source of that row"
         case .groupCallerSuppliedTimeline:
             "A group read selection must not already declare since/until/limit; the group door owns that bound"
+        case .emptyGroupSet:
+            "A group write must name at least one group; an event with no h row is not in a group at all"
         case .groupContextMissing(let expected):
-            "Event carries no h tag; expected group \(expected.debugDescription)"
+            "Event carries no h tag; expected groups \(expected)"
         case .groupContextMismatched(let found, let expected):
-            "Event's h tag \(found.debugDescription) does not match expected group \(expected.debugDescription)"
-        case .groupContextAmbiguous(let expected):
-            "Event carries more than one distinct h tag; expected exactly group \(expected.debugDescription)"
+            "Event's h tags name groups \(found), expected groups \(expected)"
+        case .groupContextRepeated(let repeated):
+            "Event names groups \(repeated) in more than one h row"
         case .groupRecordsNotContextScoped(let kinds):
             "Kinds \(kinds) are NIP-29's own relay-signed group records: they key themselves by d, never by h, so no such event could ever match a group content read; observe the group's records instead"
         case .groupNoRecordSelected:

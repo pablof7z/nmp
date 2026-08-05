@@ -136,6 +136,33 @@ class NIP29Test {
         }
     }
 
+    /** #1281: a several-group write reaches the one publish door and comes
+     * back with the ordinary store-issued receipt id. */
+    @Test
+    fun aSeveralGroupWriteReachesTheOnePublishDoor() {
+        NMPEngine(NMPConfig()).use { engine ->
+            val rooms =
+                NMPRelayScope.on(listOf(host(1), host(2)))
+                    .groups(listOf("darkroom", "photographers"))
+            val receipt =
+                rooms.publish(
+                    engine,
+                    randomPubkeyHex(),
+                    kind = 30315u,
+                    tags = listOf(listOf("d", "status")),
+                )
+            assert(receipt.id > 0uL) { "a group write is a tracked write" }
+        }
+    }
+
+    /** #1281: naming no group at all forms no write context. */
+    @Test
+    fun aWriteContextOverNoGroupIsNeverFormed() {
+        val scope = NMPRelayScope.on(listOf(host(1)))
+        val error = assertThrows(NMPError.EmptyGroupSet::class.java) { scope.groups(emptyList()) }
+        assertEquals(NMPError.EmptyGroupSet, error)
+    }
+
     /** A caller-supplied `h` tag never reaches the door: the refusal is
      * synchronous and typed, before any receipt stream exists. */
     @Test
