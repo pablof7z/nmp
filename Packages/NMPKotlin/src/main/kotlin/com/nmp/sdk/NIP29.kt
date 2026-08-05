@@ -439,36 +439,6 @@ private fun NMPSignedEvent.toFfiSignedEvent(): FfiSignedEvent =
 // handles, exactly like `Following.kt` does for NIP-02.
 // ===========================================================================
 
-/** What a group's hosts currently PROVE about one subject's place in one of
- * NIP-29's relay-signed lists ([uniffi.nmp_ffi.FfiListing] mirror, #1234).
- *
- * Three cases because NIP-29 admits three. Collapsing the last two is the
- * mistake: an app that renders [Unestablished] as "not a member" shows a
- * false negative every time a relay is still reconciling. */
-sealed class NMPListing {
-    /** At least one host's own signed record names this subject, with the
-     * hosts that named it and the role each of them wrote. */
-    data class Named(val entries: List<NMPListedSubject>) : NMPListing()
-
-    /** Every host in the scope has ESTABLISHED this record and none names the
-     * subject. Rests on settlement, never on a timer. */
-    data object Absent : NMPListing()
-
-    /** Not every host has established this record yet, or the observation
-     * never asked for it. Absence is not evidence here. */
-    data object Unestablished : NMPListing()
-
-    companion object {
-        internal fun from(ffi: uniffi.nmp_ffi.FfiListing): NMPListing =
-            when (ffi) {
-                is uniffi.nmp_ffi.FfiListing.Named ->
-                    Named(ffi.entries.map { NMPListedSubject.from(it) })
-                is uniffi.nmp_ffi.FfiListing.Absent -> Absent
-                is uniffi.nmp_ffi.FfiListing.Unestablished -> Unestablished
-            }
-    }
-}
-
 /** Which of NIP-29's three relay-signed group records you are asking for
  * (`FfiGroupRecord` mirror). */
 enum class NMPGroupRecord {
@@ -622,14 +592,6 @@ data class NMPGroupSnapshot(
     val perHost: List<NMPHostRecords>,
     /** The records the answering hosts do not agree on. */
     val disagreements: Set<NMPGroupRecord>,
-    /** The records this observation ASKED for. Settlement alone cannot tell a
-     * settled empty list apart from a list nobody requested, and [NMPListing.Absent]
-     * would be a lie in the second case (#1234). */
-    val selected: Set<NMPGroupRecord>,
-    /** Retained verbatim so [memberListing]/[adminListing] ask Rust the
-     * question instead of re-deriving the answer here. The same record this
-     * value was built from. */
-    private val ffi: FfiGroupSnapshot,
 ) {
     /** Exactly what [host] signed, or null if it has published none of the
      * selected records for this group that we have seen. */
@@ -638,20 +600,6 @@ data class NMPGroupSnapshot(
     /** Whether the hosts disagree about [record], so a UI can decide whether
      * a dig-in affordance is worth offering. */
     fun differs(record: NMPGroupRecord): Boolean = disagreements.contains(record)
-
-    /** What these hosts PROVE about [subjectPubkeyHex]'s place in their
-     * kind:39002 member lists (#1234).
-     *
-     * This is the answer a moderation receipt cannot give: an acked kind:9000
-     * says a host took the request, and only this says the list reflects it.
-     * [subjectPubkeyHex] is 64-char hex; a malformed one throws rather than
-     * reading as a settled absence. */
-    fun memberListing(subjectPubkeyHex: String): NMPListing =
-        NMPListing.from(nmpRethrowing { uniffi.nmp_ffi.memberListing(ffi, subjectPubkeyHex) })
-
-    /** The kind:39001 half. Same rule as [memberListing]. */
-    fun adminListing(subjectPubkeyHex: String): NMPListing =
-        NMPListing.from(nmpRethrowing { uniffi.nmp_ffi.adminListing(ffi, subjectPubkeyHex) })
 
     companion object {
         fun from(ffi: FfiGroupSnapshot): NMPGroupSnapshot =
@@ -663,8 +611,6 @@ data class NMPGroupSnapshot(
                 availability = NMPGroupAvailability.from(ffi.availability),
                 perHost = ffi.perHost.map { NMPHostRecords.from(it) },
                 disagreements = ffi.disagreements.map { NMPGroupRecord.from(it) }.toSet(),
-                selected = ffi.selected.map { NMPGroupRecord.from(it) }.toSet(),
-                ffi = ffi,
             )
     }
 }

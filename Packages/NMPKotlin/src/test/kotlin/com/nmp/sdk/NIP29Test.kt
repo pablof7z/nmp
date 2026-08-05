@@ -9,10 +9,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
-import uniffi.nmp_ffi.FfiGroupAvailability
-import uniffi.nmp_ffi.FfiGroupRecord
-import uniffi.nmp_ffi.FfiGroupSnapshot
-import uniffi.nmp_ffi.FfiListedSubject
 import kotlin.random.Random
 
 class NIP29Test {
@@ -139,86 +135,6 @@ class NIP29Test {
             group.createInvite(engine, authorHex, "code")
         }
     }
-
-    /** #1234 in Kotlin: the negative rests on SETTLEMENT, so the same row set
-     * answers differently while one relay is still acquiring -- the
-     * distinction a moderation receipt structurally cannot make. */
-    @Test
-    fun absenceIsClaimedOnlyOnceEveryHostHasSettled() {
-        val subject = randomPubkeyHex()
-        listOf(
-            FfiGroupAvailability.ACQUIRING,
-            FfiGroupAvailability.CACHED_ONLY,
-            FfiGroupAvailability.SOURCE_UNAVAILABLE,
-        ).forEach { unsettled ->
-            assertEquals(
-                NMPListing.Unestablished,
-                snapshot(availability = unsettled).memberListing(subject),
-                "$unsettled is not evidence of absence",
-            )
-        }
-        assertEquals(
-            NMPListing.Absent,
-            snapshot(availability = FfiGroupAvailability.READY).memberListing(subject),
-        )
-    }
-
-    /** The hole settlement alone cannot see: a READY observation that never
-     * asked for the member list proves nothing about it. */
-    @Test
-    fun aRecordTheObservationNeverAskedForIsNeverAbsent() {
-        val subject = randomPubkeyHex()
-        val metadataOnly =
-            snapshot(
-                availability = FfiGroupAvailability.READY,
-                selected = listOf(FfiGroupRecord.METADATA),
-            )
-        assertEquals(NMPListing.Unestablished, metadataOnly.memberListing(subject))
-        assertEquals(NMPListing.Unestablished, metadataOnly.adminListing(subject))
-    }
-
-    /** Inclusion is evidence whatever the availability, role and attribution
-     * intact. */
-    @Test
-    fun inclusionIsEvidenceBeforeAnythingSettles() {
-        val subject = randomPubkeyHex()
-        val listing =
-            snapshot(
-                members = listOf(FfiListedSubject(subject, "moderator", listOf(host(1)))),
-                availability = FfiGroupAvailability.ACQUIRING,
-            )
-                .memberListing(subject)
-        check(listing is NMPListing.Named) { "inclusion is evidence, got $listing" }
-        assertEquals(1, listing.entries.size)
-        assertEquals("moderator", listing.entries[0].role)
-        assertEquals(listOf(host(1)), listing.entries[0].hosts)
-    }
-
-    /** A malformed subject throws rather than reading as a settled absence. */
-    @Test
-    fun aMalformedSubjectThrowsRatherThanReadingAsAbsent() {
-        assertThrows(NMPError.InvalidPublicKey::class.java) {
-            snapshot(availability = FfiGroupAvailability.READY).memberListing("not-a-pubkey")
-        }
-    }
-
-    private fun snapshot(
-        members: List<FfiListedSubject> = emptyList(),
-        availability: FfiGroupAvailability = FfiGroupAvailability.ACQUIRING,
-        selected: List<FfiGroupRecord> = listOf(FfiGroupRecord.MEMBERS),
-    ): NMPGroupSnapshot =
-        NMPGroupSnapshot.from(
-            FfiGroupSnapshot(
-                id = "photographers",
-                metadata = null,
-                admins = emptyList(),
-                members = members,
-                availability = availability,
-                perHost = emptyList(),
-                disagreements = emptyList(),
-                selected = selected,
-            ),
-        )
 
     /** A caller-supplied `h` tag never reaches the door: the refusal is
      * synchronous and typed, before any receipt stream exists. */

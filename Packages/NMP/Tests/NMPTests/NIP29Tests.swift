@@ -2,7 +2,6 @@
 
 import XCTest
 @testable import NMP
-import NMPFFI
 
 final class NIP29Tests: XCTestCase {
     private func host(_ n: Int) -> String {
@@ -169,77 +168,6 @@ final class NIP29Tests: XCTestCase {
             engine: engine, authorPubkeyHex: randomPubkeyHex(), kind: 9, content: "hi"
         )
         XCTAssertGreaterThan(receipt.id, 0)
-    }
-
-    /// #1234 in Swift: the negative rests on SETTLEMENT, so the same row set
-    /// answers differently while one relay is still acquiring. This is the
-    /// distinction a moderation receipt structurally cannot make.
-    func testAbsenceIsClaimedOnlyOnceEveryHostHasSettled() throws {
-        let subject = randomPubkeyHex()
-        for unsettled in [
-            FfiGroupAvailability.acquiring, .cachedOnly, .sourceUnavailable,
-        ] {
-            let snapshot = NMPGroupSnapshot(
-                ffiSnapshot(members: [], availability: unsettled, selected: [.members]))
-            XCTAssertEqual(
-                try snapshot.memberListing(subject), .unestablished,
-                "\(unsettled) is not evidence of absence")
-        }
-        let settled = NMPGroupSnapshot(
-            ffiSnapshot(members: [], availability: .ready, selected: [.members]))
-        XCTAssertEqual(try settled.memberListing(subject), .absent)
-    }
-
-    /// The hole settlement alone cannot see: a `.ready` observation that never
-    /// asked for the member list proves nothing about it, so `selected` must
-    /// cross the boundary too.
-    func testARecordTheObservationNeverAskedForIsNeverAbsent() throws {
-        let subject = randomPubkeyHex()
-        let metadataOnly = NMPGroupSnapshot(
-            ffiSnapshot(members: [], availability: .ready, selected: [.metadata]))
-        XCTAssertEqual(try metadataOnly.memberListing(subject), .unestablished)
-        XCTAssertEqual(
-            try metadataOnly.adminListing(subject), .unestablished,
-            "the two lists settle independently and neither answers for the other")
-    }
-
-    /// Inclusion is evidence whatever the availability, and the role each host
-    /// wrote crosses intact.
-    func testInclusionIsEvidenceBeforeAnythingSettles() throws {
-        let subject = randomPubkeyHex()
-        let snapshot = NMPGroupSnapshot(
-            ffiSnapshot(
-                members: [
-                    FfiListedSubject(pubkey: subject, role: "moderator", hosts: [host(1)])
-                ],
-                availability: .acquiring, selected: [.members]))
-        guard case let .named(entries) = try snapshot.memberListing(subject) else {
-            return XCTFail("inclusion is evidence whatever the availability")
-        }
-        XCTAssertEqual(entries.count, 1)
-        XCTAssertEqual(entries[0].role, "moderator")
-        XCTAssertEqual(entries[0].hosts, [host(1)])
-    }
-
-    /// A malformed subject throws rather than reading as a settled absence.
-    func testAMalformedSubjectThrowsRatherThanReadingAsAbsent() {
-        let snapshot = NMPGroupSnapshot(
-            ffiSnapshot(members: [], availability: .ready, selected: [.members]))
-        XCTAssertThrowsError(try snapshot.memberListing("not-a-pubkey")) { error in
-            guard case NMPError.invalidPublicKey = error else {
-                return XCTFail("expected .invalidPublicKey, got \(error)")
-            }
-        }
-    }
-
-    private func ffiSnapshot(
-        members: [FfiListedSubject],
-        availability: FfiGroupAvailability,
-        selected: [FfiGroupRecord]
-    ) -> FfiGroupSnapshot {
-        FfiGroupSnapshot(
-            id: "photographers", metadata: nil, admins: [], members: members,
-            availability: availability, perHost: [], disagreements: [], selected: selected)
     }
 
     /// A caller-supplied `h` tag never reaches the door: the refusal is
