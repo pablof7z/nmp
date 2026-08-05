@@ -310,14 +310,23 @@ impl FfiGroup {
         Ok(NmpReceiptStream::new(receipts))
     }
 
-    /// kind:9007 -- create the group at its hosts.
+    /// kind:9007 -- create the group at its hosts, optionally as a SUBGROUP
+    /// of one that already exists there (#1301).
+    ///
+    /// `parent` is the parent's group id -- a relay-scoped string, never an
+    /// `naddr`. `None` creates a root group and composes no row at all. The
+    /// relationship rides on the create and not on an edit; see
+    /// `nmp::nip29::Group::create_group` for why.
     pub fn create_group(
         &self,
         engine: Arc<NmpEngine>,
         author: String,
+        parent: Option<String>,
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
-        let receipts = self.inner.create_group(&engine.engine, author)?;
+        let receipts = self
+            .inner
+            .create_group(&engine.engine, author, parent.as_deref())?;
         Ok(NmpReceiptStream::new(receipts))
     }
 
@@ -1129,7 +1138,7 @@ mod tests {
             ),
             (
                 "create_group",
-                group.create_group(engine.clone(), author.clone()),
+                group.create_group(engine.clone(), author.clone(), None),
             ),
             (
                 "delete_group",
@@ -1214,6 +1223,28 @@ mod tests {
                 vec!["public".to_string()],
                 vec!["closed".to_string()],
             ]
+        );
+    }
+
+    /// #1301 across the boundary: an app declares a subgroup's parent on the
+    /// kind:9007 CREATE, and a root group states its rootness by carrying no
+    /// row at all.
+    #[test]
+    fn the_create_door_composes_the_parent_row_and_omits_it_for_a_root() {
+        let rows = |parent: Option<String>| {
+            nmp::nip29::create_group(parent.as_deref())
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect::<Vec<Vec<String>>>()
+        };
+        assert_eq!(
+            rows(Some("darkroom".to_string())),
+            vec![vec!["parent".to_string(), "darkroom".to_string()]]
+        );
+        assert!(
+            rows(None).is_empty(),
+            "a root group carries no parent row -- never an empty one"
         );
     }
 

@@ -310,13 +310,22 @@ public final class NMPGroup: @unchecked Sendable {
         return Receipt(handle: receipts)
     }
 
-    /// kind:9007 -- create the group at its hosts.
+    /// kind:9007 -- create the group at its hosts, optionally as a SUBGROUP of
+    /// one that already exists there (#1301).
+    ///
+    /// `parent` is the parent's group id -- the same relay-scoped string
+    /// `NMPRelayScope.group(id:)` takes, never an `naddr`. `nil` creates a
+    /// root group and composes no row at all. The relationship rides on the
+    /// create and not on an edit: NIP-29's `Subgroups` section puts parenting
+    /// on kind:9002, and the only relay that implements subgroups reads
+    /// `parent` on the kind:9007 create and ignores it on a kind:9002.
     public func createGroup(
         engine: NMPEngine,
-        authorPubkeyHex: String
+        authorPubkeyHex: String,
+        parent: String? = nil
     ) throws -> Receipt {
         let receipts = try nmpRethrowing {
-            try ffi.createGroup(engine: engine.concreteFfiEngine, author: authorPubkeyHex)
+            try ffi.createGroup(engine: engine.concreteFfiEngine, author: authorPubkeyHex, parent: parent)
         }
         return Receipt(handle: receipts)
     }
