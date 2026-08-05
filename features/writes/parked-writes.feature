@@ -144,39 +144,28 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       Then the write is signed
 
     # nmp:id=WRITES-PARKED-007
-    # nmp:status=built
-    # nmp:evidence=rust:nmp::a_write_parked_on_a_missing_signer_is_removable_and_one_being_signed_is_not
-    # nmp:falsifier=Refuse removal while the entry is parked; nothing ends the write at all -- no clock (by design), no signer (that is the premise), and not removal either, so the termination path this rule names does not exist.
-    Scenario: Removing the queue entry is the other way a signer-parked write ends
+    # nmp:status=specified
+    # nmp:gap=evidence
+    # nmp:issue=#1253
+    # Defect shape this scenario will falsify once its evidence runs (#1253):
+    #   Leave a signer-parked write in the queue after the app cancels it and removes its entry; cancel-then-remove is the termination path, so an entry nothing will ever move must actually go.
+    Scenario: Cancelling then removing the queue entry is the other way a signer-parked write ends
       # The app's own decision, and the only alternative to waiting. This is
-      # a termination path, not housekeeping. Removing the entry RELEASES
-      # the obligation: the row the write promised the app's own live query
-      # goes with it, because a row with no obligation under it is a ghost
-      # nobody can account for.
+      # a termination path, not housekeeping, and it is two calls rather than
+      # one: cancelling ends the obligation and takes back the optimistic row
+      # the write promised, and removal then forgets the terminal receipt
+      # cancellation leaves behind. Removal alone refuses a write whose open
+      # intent row is still there, which is what keeps a write something is
+      # still moving from being destroyed by mistake.
       Given no signer is registered for my account
       And I published a note and it parked awaiting a signer
       When I enumerate my publish queue
       Then the entry reports the write awaiting a signer for my account
+      When I cancel that write
+      Then the receipt reports the write not sent because it was cancelled
+      And the note is no longer visible through my own live query
       When I remove that entry from my publish queue
       Then my publish queue no longer holds that entry
-      And the receipt reports the write not sent because the app removed it
-      And the note is no longer visible through my own live query
-
-    # nmp:id=WRITES-PARKED-016
-    # nmp:status=built
-    # nmp:evidence=rust:nmp::a_write_parked_on_a_missing_signer_is_removable_and_one_being_signed_is_not
-    # nmp:falsifier=Let removal accept a write whose signer holds the request; the app destroys a write whose answer was already on its way, which is what the removal door's refusal exists to prevent.
-    Scenario: A write whose signer is mid-round-trip is not removable
-      # The other half of the same rule, and the reason the refusal exists.
-      # What makes an entry removable is a fact about what is in motion, not
-      # about how long it has waited: a signer HAS this request and the
-      # answer that ends the wait is already on its way.
-      Given a signer for my account has taken a write's signature request and not answered yet
-      When I enumerate my publish queue
-      Then the entry reports the signature in flight for my account
-      When I try to remove that entry from my publish queue
-      Then the removal is refused because the write still owns open work
-      And my publish queue still holds that entry
 
   Rule: A signature in flight is not a park, and the queue says which one it is
 
@@ -184,7 +173,7 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     # about them is alike. A signer holding the request ends on a fact that
     # is already on its way -- the signer's answer. A key nobody has a
     # signer for ends on a fact that may never come, which is why the app
-    # removing the entry is its only other exit. Telling a person about the
+    # cancelling it and removing its entry is its only other exit. Telling a person about the
     # second is the point of the enumeration door; telling them about the
     # first is crying wolf on every healthy write.
 

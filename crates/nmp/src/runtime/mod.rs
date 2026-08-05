@@ -4840,26 +4840,11 @@ fn engine_loop<S>(
                 }));
             }
             Cmd::RemovePublishQueueEntry { id, reply } => {
-                let (result, effects) = core.remove_publish_queue_entry(id);
-                let removed = result.is_ok();
-                let _ = reply.send(result);
-                // The outcome fact goes out FIRST and the mailbox is torn
-                // down after it: a stream told nothing at all cannot tell a
-                // removed entry from a dropped subscription.
-                dispatch_core_effects(
-                    &mut core,
-                    effects,
-                    &pool,
-                    &mut row_channels,
-                    &mut history_channels,
-                    &mut diag_channels,
-                    &registry,
-                    dispatch_runtime,
-                );
-                if removed {
-                    registry.cancel_pending_write(id);
+                let result = core.remove_publish_queue_entry(id);
+                if result.is_ok() {
                     receipt_deliveries.borrow_mut().forget(id);
                 }
+                let _ = reply.send(result);
             }
             Cmd::CancelWrite { id, reply } => {
                 let (result, effects) = core.cancel_write(id);
@@ -6739,11 +6724,12 @@ impl Handle {
             .map_err(|_| RemoveQueueEntryError::EngineClosed)?
     }
 
-    /// Forget one queue entry, releasing whatever obligation it still holds
-    /// (#1039, #1269). The only way a write parked forever on a missing
-    /// signer, or a permanently-failed refused entry, ever ends. A write
-    /// something is still MOVING — a signer holding its request, or live
-    /// relay lanes — is refused instead.
+    /// Forget one queue entry (#1039). How a write parked forever on a
+    /// missing signer, or a permanently-failed refused entry, ever ends —
+    /// the parked one through [`Self::cancel_write`] first, which ends the
+    /// obligation and compensates the optimistic row, leaving the terminal
+    /// receipt this door then forgets. An entry whose obligation is still
+    /// open is refused.
     pub fn remove_publish_queue_entry(&self, id: ReceiptId) -> Result<(), RemoveQueueEntryError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox

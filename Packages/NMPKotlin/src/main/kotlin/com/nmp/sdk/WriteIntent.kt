@@ -388,11 +388,6 @@ enum class NotSentReason {
      * one started any wire attempt. Not a failure -- for an app renewing
      * presence it is the steady state. */
     Superseded,
-
-    /** The app removed the queue entry while nothing was moving the write
-     * (#1269). Distinct from [Cancelled] in what survives: a cancelled
-     * receipt stays reattachable, a removed one no longer exists. */
-    Removed,
     ;
 
     companion object {
@@ -400,7 +395,6 @@ enum class NotSentReason {
             when (ffi) {
                 FfiNotSentReason.CANCELLED -> Cancelled
                 FfiNotSentReason.SUPERSEDED -> Superseded
-                FfiNotSentReason.REMOVED -> Removed
             }
     }
 }
