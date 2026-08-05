@@ -168,8 +168,13 @@ async fn edit_metadata_name_only(w: &mut NmpWorld, name: String) {
 
 async fn edit_metadata(w: &mut NmpWorld, name: Option<String>, about: Option<String>) {
     let author = w.me_pubkey();
+    let edit = nmp::nip29::GroupMetadataEdit {
+        name,
+        about,
+        ..nmp::nip29::GroupMetadataEdit::default()
+    };
     w.group_operation(None, GroupCall::default(), move |group, engine| {
-        group.edit_metadata(engine, author, name.as_deref(), about.as_deref())
+        group.edit_metadata(engine, author, edit.clone())
     })
     .await;
 }

@@ -234,8 +234,10 @@ async fn every_group_operation_reaches_the_one_publish_door() {
             group.edit_metadata(
                 engine.clone(),
                 author.clone(),
-                Some("Photographers".to_string()),
-                None,
+                nmp_ffi::nip29::FfiGroupMetadataEdit {
+                    name: Some("Photographers".to_string()),
+                    ..nmp_ffi::nip29::FfiGroupMetadataEdit::default()
+                },
             ),
         ),
         (
