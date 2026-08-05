@@ -990,27 +990,6 @@ impl core::marker::Unpin for nmp::SignEventError
 impl core::marker::UnsafeUnpin for nmp::SignEventError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignEventError
 impl core::panic::unwind_safe::UnwindSafe for nmp::SignEventError
-pub enum nmp::SignatureSettleError
-pub nmp::SignatureSettleError::NoLongerAwaited
-impl core::clone::Clone for nmp::SignatureSettleError
-pub fn nmp::SignatureSettleError::clone(&self) -> nmp::SignatureSettleError
-impl core::cmp::Eq for nmp::SignatureSettleError
-impl core::cmp::PartialEq for nmp::SignatureSettleError
-pub fn nmp::SignatureSettleError::eq(&self, &nmp::SignatureSettleError) -> bool
-impl core::error::Error for nmp::SignatureSettleError
-impl core::fmt::Debug for nmp::SignatureSettleError
-pub fn nmp::SignatureSettleError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for nmp::SignatureSettleError
-pub fn nmp::SignatureSettleError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for nmp::SignatureSettleError
-impl core::marker::StructuralPartialEq for nmp::SignatureSettleError
-impl core::marker::Freeze for nmp::SignatureSettleError
-impl core::marker::Send for nmp::SignatureSettleError
-impl core::marker::Sync for nmp::SignatureSettleError
-impl core::marker::Unpin for nmp::SignatureSettleError
-impl core::marker::UnsafeUnpin for nmp::SignatureSettleError
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignatureSettleError
-impl core::panic::unwind_safe::UnwindSafe for nmp::SignatureSettleError
 pub enum nmp::SigningState
 pub nmp::SigningState::AwaitingSigner
 pub nmp::SigningState::AwaitingSigner::pubkey: nostr::key::public_key::PublicKey
@@ -1347,7 +1326,6 @@ pub fn nmp::Engine::active_account(&self) -> core::result::Result<core::option::
 pub fn nmp::Engine::add_account(&self, &str) -> core::result::Result<nmp::AccountRegistration, nmp::EngineError>
 pub fn nmp::Engine::add_auth_policy<P>(&self, nostr::key::public_key::PublicKey, P) -> core::result::Result<nmp::AuthPolicyRegistration, nmp::EngineError> where P: nmp::AuthPolicy + 'static
 pub fn nmp::Engine::add_signer<Sig>(&self, Sig) -> core::result::Result<nmp::SignerRegistration, nmp::EngineError> where Sig: nmp_signer::capability::SigningCapability + core::marker::Send + 'static
-pub fn nmp::Engine::add_signer_mailbox(&self, nostr::key::public_key::PublicKey) -> core::result::Result<(nmp::SignerRegistration, nmp::SignerMailbox), nmp::EngineError>
 pub fn nmp::Engine::cancel(&self, nmp::ReceiptId) -> core::result::Result<nmp::CancelWriteOutcome, nmp::CancelWriteError>
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
 pub fn nmp::Engine::observe(&self, nmp_grammar::live_query::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
@@ -1428,17 +1406,6 @@ impl core::marker::Unpin for nmp::Frame
 impl core::marker::UnsafeUnpin for nmp::Frame
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::Frame
 impl core::panic::unwind_safe::UnwindSafe for nmp::Frame
-pub struct nmp::MailboxSigner
-impl nmp_signer::capability::SigningCapability for nmp::MailboxSigner
-pub fn nmp::MailboxSigner::public_key(&self) -> core::option::Option<nmp_signer::value::SignerPublicKey>
-pub fn nmp::MailboxSigner::sign(&self, nmp_signer::value::SignerUnsignedEvent) -> nmp_signer::op::SignerOp<nmp_signer::value::SignerSignedEvent>
-impl core::marker::Freeze for nmp::MailboxSigner
-impl core::marker::Send for nmp::MailboxSigner
-impl core::marker::Sync for nmp::MailboxSigner
-impl core::marker::Unpin for nmp::MailboxSigner
-impl core::marker::UnsafeUnpin for nmp::MailboxSigner
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::MailboxSigner
-impl core::panic::unwind_safe::UnwindSafe for nmp::MailboxSigner
 pub struct nmp::ObservationCancel
 impl nmp::ObservationCancel
 pub fn nmp::ObservationCancel::cancel(&self)
@@ -1717,34 +1684,6 @@ impl core::marker::Unpin for nmp::SignEventRequest
 impl core::marker::UnsafeUnpin for nmp::SignEventRequest
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignEventRequest
 impl core::panic::unwind_safe::UnwindSafe for nmp::SignEventRequest
-pub struct nmp::SignatureRequest
-impl nmp::SignatureRequest
-pub fn nmp::SignatureRequest::reject(self, nmp_signer::op::SignerError) -> core::result::Result<(), nmp::SignatureSettleError>
-pub fn nmp::SignatureRequest::resolve(self, nmp_signer::value::SignerSignedEvent) -> core::result::Result<(), nmp::SignatureSettleError>
-pub fn nmp::SignatureRequest::unsigned_event(&self) -> &nmp_signer::value::SignerUnsignedEvent
-impl core::fmt::Debug for nmp::SignatureRequest
-pub fn nmp::SignatureRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::ops::drop::Drop for nmp::SignatureRequest
-pub fn nmp::SignatureRequest::drop(&mut self)
-impl core::marker::Freeze for nmp::SignatureRequest
-impl core::marker::Send for nmp::SignatureRequest
-impl core::marker::Sync for nmp::SignatureRequest
-impl core::marker::Unpin for nmp::SignatureRequest
-impl core::marker::UnsafeUnpin for nmp::SignatureRequest
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignatureRequest
-impl core::panic::unwind_safe::UnwindSafe for nmp::SignatureRequest
-pub struct nmp::SignerMailbox
-impl nmp::SignerMailbox
-pub fn nmp::SignerMailbox::cancel(&self)
-pub async fn nmp::SignerMailbox::next(&self) -> core::result::Result<core::option::Option<nmp::SignatureRequest>, nmp::runtime::diagnostics_channel::ConcurrentNext>
-pub fn nmp::SignerMailbox::unpark(&self)
-impl !core::marker::Freeze for nmp::SignerMailbox
-impl core::marker::Send for nmp::SignerMailbox
-impl core::marker::Sync for nmp::SignerMailbox
-impl core::marker::Unpin for nmp::SignerMailbox
-impl core::marker::UnsafeUnpin for nmp::SignerMailbox
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignerMailbox
-impl core::panic::unwind_safe::UnwindSafe for nmp::SignerMailbox
 pub struct nmp::SignerRegistration
 impl nmp::SignerRegistration
 pub fn nmp::SignerRegistration::public_key(&self) -> nostr::key::public_key::PublicKey
