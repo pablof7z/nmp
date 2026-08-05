@@ -16,7 +16,6 @@
 //! correlation, take-once, signing, routing, receipt, or retry machinery.
 
 pub use nmp_nip22::{
-    comment_intent, comment_thread_demand, compose_comment_reply, compose_top_level_comment,
-    decode_comment, CommentDecodeError, CommentParent, CommentRoot, DecodedComment, Nip73,
-    Nip73Error, COMMENT_KIND,
+    comment_intent, comment_thread_demand, compose_comment, decode_comment, CommentDecodeError,
+    CommentParent, CommentRoot, DecodedComment, Nip73, Nip73Error, COMMENT_KIND,
 };

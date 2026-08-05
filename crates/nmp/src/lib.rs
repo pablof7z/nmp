@@ -280,6 +280,16 @@ pub use nmp_grammar::{
     WriteRouting,
 };
 
+// #1243: the one tagging door. `reply_to` is the general reply verb, `text!`
+// writes content whose inline references and rows come from one statement,
+// and `Modifiers` is the additive per-relationship vocabulary. `RootScope` is
+// the neutral seam a protocol crate implements so an external content id can
+// be a reply target without `nmp-grammar` ever naming a NIP.
+pub use nmp_grammar::{
+    entity_rows, reply_to, text, At, InterpolatedContent, Mention, Modifiers, Pointer, RootScope,
+    TagOptions, TagRows, Tagged, ThreadPosition, COMMENT_KIND, TEXT_NOTE_KIND,
+};
+
 // Read outputs `Subscription`/`DiagnosticsSubscription` deliver -- every
 // field type `DiagnosticsSnapshot` names must be reachable from here too,
 // or an app cannot even print what it read. The diagnostics snapshot family
