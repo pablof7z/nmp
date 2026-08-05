@@ -304,16 +304,16 @@ pub enum FfiError {
     /// [`Self::EmptyRelayScope`] makes on the relay axis.
     EmptyGroupSet,
     /// #1033/#1281 (`nmp::nip29::GroupContextError::MissingContext` mirror).
-    /// A pre-signed event handed to `FfiGroup::publish_signed`/
-    /// `FfiGroup::validate_context` carries no `h` row at all. `expected` is
+    /// A signed event handed to `FfiGroup::validate_context` carries no `h`
+    /// row at all. `expected` is
     /// the whole set the door was asked for, in canonical order -- one id
     /// for an `FfiGroup`, several for an `FfiGroups`.
     GroupContextMissing {
         expected: Vec<String>,
     },
     /// #1033/#1281 (`nmp::nip29::GroupContextError::MismatchedContext`
-    /// mirror). A pre-signed event names a different SET of groups than the
-    /// one publishing or validating it -- too few, too many, or the wrong
+    /// mirror). A signed event names a different SET of groups than the
+    /// one validating it -- too few, too many, or the wrong
     /// ones. An event carrying a second `h` row beside the right one reports
     /// both in `found`.
     GroupContextMismatched {

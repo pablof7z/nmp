@@ -150,8 +150,8 @@ public enum NMPError: Error, Sendable, Equatable {
     /// event with no `h` row is not in a group, so there is nothing to
     /// contextualize and no honest route to mint.
     case emptyGroupSet
-    /// #1033/#1281: `NMPGroup.validateContext`/`publishSigned` was given an
-    /// event carrying no `h` tag naming any group at all. `expected` is the
+    /// #1033/#1281: `NMPGroup.validateContext` was given an event carrying
+    /// no `h` tag naming any group at all. `expected` is the
     /// whole set the door was asked for -- one id for an `NMPGroup`, several
     /// for an `NMPGroups`.
     case groupContextMissing(expected: [String])
