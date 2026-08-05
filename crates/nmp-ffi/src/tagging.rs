@@ -21,8 +21,11 @@
 //! holding, sources included — and never a relationship, a marker, a relay
 //! hint or an author. Those are what the door fills.
 
-use crate::convert::{signed_event_from_ffi, FfiError};
-use crate::types::{FfiEventBuilder, FfiRow};
+use crate::convert::{
+    event_builder_from_ffi, parse_pubkey, parse_relay_url, signed_event_from_ffi, FfiError,
+};
+use crate::types::{FfiContentPart, FfiEventBuilder, FfiRow};
+use nmp::{At, InterpolatedContent, Mention};
 
 /// Rebuild the canonical row an app read from NMP. `sources` is the verified
 /// provenance the hint slot is filled from, and it survives the round trip
@@ -63,6 +66,73 @@ pub fn reply_to(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
     Ok(builder_to_ffi(nmp::reply_to(&row_from_ffi(target)?)))
 }
 
+/// Compose a top-level NIP-C7 kind:9 chat.
+///
+/// The other half of what #1243 opened and #964 named: `chat_reply` closed
+/// the reply case, so an app that replies no longer states a kind -- but an
+/// app sending an ordinary message still stated `kind: 9` itself, because the
+/// composer for THAT never crossed this boundary.
+///
+/// It composes SCHEMA ONLY, exactly as `chat_reply` does: no `h` row, no
+/// notification policy, no routing, and no content. What the message says
+/// comes from [`with_content`], which is also what emits the rows an inline
+/// mention or quote needs.
+#[uniffi::export]
+pub fn chat() -> FfiEventBuilder {
+    builder_to_ffi(nmp_nipc7::chat())
+}
+
+/// State what a composed draft SAYS, and emit the rows its inline references
+/// need, from one call.
+///
+/// This is the second thing #964 named still living in Swift. An app that
+/// lets somebody @-mention a person wrote `["p", hex]` by hand and hoped it
+/// matched the `nostr:npub…` token it had separately put in the content;
+/// nothing could catch a disagreement, because from the app's side nothing is
+/// missing. Here the token and the row come out of the same
+/// [`FfiContentPart`], so they cannot be written apart.
+///
+/// The rows are APPENDED after whatever the composer already stated for its
+/// own reasons, never reordered and never deduplicated against them -- a
+/// chat reply's `e` and `p` rows survive intact and the mention rows follow.
+#[uniffi::export]
+pub fn with_content(
+    draft: FfiEventBuilder,
+    content: Vec<FfiContentPart>,
+) -> Result<FfiEventBuilder, FfiError> {
+    let builder = event_builder_from_ffi(draft)?;
+    let mut interpolated = InterpolatedContent::default();
+    for part in content {
+        match part {
+            FfiContentPart::Text { text } => interpolated.text.push_str(&text),
+            FfiContentPart::Person { pubkey, relay } => {
+                let pubkey = parse_pubkey(&pubkey)?;
+                match relay {
+                    Some(relay) => {
+                        interpolate(&At(pubkey, parse_relay_url(&relay)?), &mut interpolated)
+                    }
+                    None => interpolate(&pubkey, &mut interpolated),
+                }
+            }
+            FfiContentPart::Quote { target } => {
+                let row = row_from_ffi(target)?;
+                match row.sources.iter().next() {
+                    Some(relay) => interpolate(&At(&row.event, relay.clone()), &mut interpolated),
+                    None => interpolate(&row.event, &mut interpolated),
+                }
+            }
+        }
+    }
+    Ok(builder_to_ffi(builder.content(interpolated)))
+}
+
+/// Render one mention and collect the rows it requires, in the one place
+/// both halves are produced -- which is the whole reason this door exists.
+fn interpolate(mention: &dyn Mention, into: &mut InterpolatedContent) {
+    into.text.push_str(&mention.render());
+    into.rows.extend(mention.rows());
+}
+
 /// Compose a NIP-C7 kind:9 chat reply to `target`.
 ///
 /// C7 offers its own verb rather than an arm in the general dispatcher
@@ -96,6 +166,7 @@ pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 mod tests {
     use super::*;
     use crate::convert::row_to_ffi_row;
+    use crate::types::FfiContentPart;
 
     fn row(kind: u16, tags: Vec<Vec<String>>, sources: &[&str]) -> FfiRow {
         let keys = nostr::Keys::generate();
@@ -200,5 +271,155 @@ mod tests {
         let built = repost(picture).expect("a repost composes");
         assert_eq!(built.kind, 16);
         assert!(built.tags.iter().any(|row| row[0] == "k" && row[1] == "20"));
+    }
+
+    /// #964's remaining half: a message that is not a reply. Before this the
+    /// C7 composer for a TOP-LEVEL chat never crossed the boundary, so an app
+    /// stated `kind: 9` itself for every ordinary message it sent.
+    #[test]
+    fn a_native_top_level_chat_is_kind_9_and_carries_no_rows() {
+        let built = chat();
+        assert_eq!(built.kind, 9);
+        assert!(built.tags.is_empty(), "a chat states no policy rows");
+        assert_eq!(built.content, "");
+        assert_eq!(
+            built.created_at, None,
+            "a schema-only composer invents no timestamp"
+        );
+    }
+
+    /// The whole point of the door: the `nostr:npub…` a reader sees and the
+    /// `p` row that notifies the person come out of ONE call, so an app can no
+    /// longer write `["p", hex]` by hand and hope it matches the token it put
+    /// in the content.
+    #[test]
+    fn naming_a_person_writes_the_token_and_the_p_row_together() {
+        let alice = nostr::Keys::generate().public_key();
+        let built = with_content(
+            chat(),
+            vec![
+                FfiContentPart::Text {
+                    text: "hey ".into(),
+                },
+                FfiContentPart::Person {
+                    pubkey: alice.to_hex(),
+                    relay: None,
+                },
+                FfiContentPart::Text {
+                    text: ", look".into(),
+                },
+            ],
+        )
+        .expect("a named person composes");
+
+        assert!(
+            built.content.starts_with("hey nostr:npub1"),
+            "bech32 is rendered at the user boundary: {}",
+            built.content
+        );
+        assert!(built.content.ends_with(", look"));
+        assert_eq!(built.tags, vec![vec!["p".to_string(), alice.to_hex()]]);
+    }
+
+    /// A stated relay reaches BOTH halves, because both come from the same
+    /// part: the rendered pointer becomes an `nprofile` carrying the relay and
+    /// the `p` row's hint cell is filled with the same value.
+    #[test]
+    fn a_stated_relay_reaches_the_rendered_pointer_and_the_row_together() {
+        let alice = nostr::Keys::generate().public_key();
+        let built = with_content(
+            chat(),
+            vec![FfiContentPart::Person {
+                pubkey: alice.to_hex(),
+                relay: Some("wss://relay.example".into()),
+            }],
+        )
+        .expect("a named person composes");
+
+        assert!(built.content.starts_with("nostr:nprofile1"));
+        assert_eq!(
+            built.tags,
+            vec![vec![
+                "p".to_string(),
+                alice.to_hex(),
+                "wss://relay.example".to_string()
+            ]]
+        );
+    }
+
+    /// An event named inline is a QUOTE, never a thread reply, and its hint
+    /// comes from where NMP actually saw it -- the row's own verified sources,
+    /// exactly as `chat_reply` fills the same cell.
+    #[test]
+    fn quoting_an_event_renders_it_and_emits_its_q_row_from_the_same_part() {
+        let quoted = row(9, vec![], &["wss://chat.example.com"]);
+        let quoted_id = quoted.id.clone();
+        let quoted_author = quoted.pubkey.clone();
+        let built = with_content(
+            chat(),
+            vec![
+                FfiContentPart::Text {
+                    text: "look: ".into(),
+                },
+                FfiContentPart::Quote { target: quoted },
+            ],
+        )
+        .expect("a quote composes");
+
+        assert!(
+            built.content.starts_with("look: nostr:nevent1"),
+            "{}",
+            built.content
+        );
+        assert_eq!(
+            built.tags,
+            vec![vec![
+                "q".to_string(),
+                quoted_id,
+                "wss://chat.example.com".to_string(),
+                quoted_author
+            ]],
+            "an event named inline is a QUOTE, never a thread reply"
+        );
+    }
+
+    /// Interpolated rows land AFTER whatever the composer stated for its own
+    /// reasons and never disturb them -- the same guarantee the Rust door
+    /// makes, held across the boundary.
+    #[test]
+    fn interpolated_rows_never_disturb_the_rows_a_composer_stated() {
+        let parent = row(9, vec![], &["wss://chat.example.com"]);
+        let alice = nostr::Keys::generate().public_key();
+        let draft = chat_reply(parent).expect("a chat reply composes");
+        let stated = draft.tags.clone();
+        let built = with_content(
+            draft,
+            vec![FfiContentPart::Person {
+                pubkey: alice.to_hex(),
+                relay: None,
+            }],
+        )
+        .expect("a named person composes");
+
+        assert_eq!(built.tags[..stated.len()], stated[..]);
+        assert_eq!(
+            built.tags.last().unwrap(),
+            &vec!["p".to_string(), alice.to_hex()]
+        );
+    }
+
+    /// A malformed key is a typed synchronous refusal, and nothing partial
+    /// escapes: no content, no rows.
+    #[test]
+    fn a_malformed_named_key_refuses_rather_than_composing_half_a_message() {
+        let err = with_content(
+            chat(),
+            vec![FfiContentPart::Person {
+                pubkey: "not-a-key".into(),
+                relay: None,
+            }],
+        )
+        .expect_err("a malformed key refuses");
+        assert!(matches!(err, FfiError::InvalidPublicKey { .. }), "{err:?}");
     }
 }
