@@ -280,7 +280,11 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
     assert_eq!(
         retry_statuses,
         vec![
-            WriteFact::Signing(SigningState::AwaitingSigner {
+            // Setting the active account above re-armed the recovered
+            // obligation, so a sign request is outstanding for it. #1261:
+            // that is not the same fact as "no signer answers for this
+            // key", and the replay reports the one that is true.
+            WriteFact::Signing(SigningState::InFlight {
                 pubkey: keys.public_key()
             }),
             WriteFact::Destinations {

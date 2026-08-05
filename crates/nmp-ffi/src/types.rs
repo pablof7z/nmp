@@ -1007,7 +1007,21 @@ pub enum FfiSigningState {
     /// **No clock ever ends this.** A device whose signer is simply not
     /// plugged in yet is not a device whose write failed; removing the queue
     /// entry is the only other exit.
+    ///
+    /// This is the state a person has to be told about, and
+    /// [`FfiSigningState::InFlight`] is the one it must never be confused
+    /// with.
     AwaitingSigner {
+        pubkey: String,
+    },
+    /// A signer for `pubkey` (64-char hex) HAS the request and has not
+    /// answered yet — the ordinary state of every healthy write between
+    /// acceptance and signature promotion.
+    ///
+    /// Transient and normal: it ends when the signer answers (`Signed` or
+    /// `Refused`), or falls back to `AwaitingSigner` if that signer becomes
+    /// unavailable. Nothing here is a reason to trouble a user (#1261).
+    InFlight {
         pubkey: String,
     },
     Signed {
