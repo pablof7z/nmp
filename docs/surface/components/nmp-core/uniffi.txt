@@ -3060,18 +3060,28 @@ enum Enum {
             ),
         },
         Variant {
+            name: "EmptyGroupSet",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "#1281 (`nmp::nip29::GroupContextError::NoGroupNamed` mirror).\n`FfiRelayScope::groups` was called with no group id at all. An event\nwith no `h` row is not in a group, so there is nothing to\ncontextualize and no honest route to mint -- the same refusal shape\n[`Self::EmptyRelayScope`] makes on the relay axis.",
+            ),
+        },
+        Variant {
             name: "GroupContextMissing",
             discr: None,
             fields: [
                 Field {
                     name: "expected",
-                    type_: String,
+                    type_: Sequence {
+                        inner_type: String,
+                    },
                     default: None,
                     docstring: None,
                 },
             ],
             docstring: Some(
-                "#1033 (`nmp::nip29::GroupContextError::MissingContext` mirror). A\nsigned event handed to `FfiGroup::validate_context` carries no `h` row\nat all.",
+                "#1033/#1281 (`nmp::nip29::GroupContextError::MissingContext` mirror).\nA pre-signed event handed to `FfiGroup::publish_signed`/\n`FfiGroup::validate_context` carries no `h` row at all. `expected` is\nthe whole set the door was asked for, in canonical order -- one id\nfor an `FfiGroup`, several for an `FfiGroups`.",
             ),
         },
         Variant {
@@ -3080,34 +3090,40 @@ enum Enum {
             fields: [
                 Field {
                     name: "found",
-                    type_: String,
+                    type_: Sequence {
+                        inner_type: String,
+                    },
                     default: None,
                     docstring: None,
                 },
                 Field {
                     name: "expected",
-                    type_: String,
+                    type_: Sequence {
+                        inner_type: String,
+                    },
                     default: None,
                     docstring: None,
                 },
             ],
             docstring: Some(
-                "#1033 (`nmp::nip29::GroupContextError::MismatchedContext` mirror). A\nsigned event names a different group than the one validating it.",
+                "#1033/#1281 (`nmp::nip29::GroupContextError::MismatchedContext`\nmirror). A pre-signed event names a different SET of groups than the\none publishing or validating it -- too few, too many, or the wrong\nones. An event carrying a second `h` row beside the right one reports\nboth in `found`.",
             ),
         },
         Variant {
-            name: "GroupContextAmbiguous",
+            name: "GroupContextRepeated",
             discr: None,
             fields: [
                 Field {
-                    name: "expected",
-                    type_: String,
+                    name: "repeated",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
                     default: None,
                     docstring: None,
                 },
             ],
             docstring: Some(
-                "#1033 (`nmp::nip29::GroupContextError::AmbiguousContext` mirror). A\npre-signed event carries more than one `h` row, so which group it\nclaims to be in has no single answer.",
+                "#1281 (`nmp::nip29::GroupContextError::RepeatedContext` mirror). A\npre-signed event names the right groups but repeats one of them in a\nsecond `h` row, which is not a row the door would ever mint.",
             ),
         },
         Variant {
@@ -12452,6 +12468,156 @@ object Object {
 }
 
 object Object {
+    name: "FfiGroups",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "publish",
+            object_name: "FfiGroups",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "engine",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "NmpEngine",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "author",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "builder",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiEventBuilder",
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "NmpReceiptStream",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffigroups_publish",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiGroups",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "engine",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "author",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "builder",
+                        type_: RustBuffer(
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiEventBuilder",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "NmpReceiptStream",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Publish one event into every retained group, through the ONE publish\ndoor (`nmp::nip29::Groups::publish` mirror).\n\nThe whole door: one `h` row per retained id appended before signing,\nthe route minted from the scope's own hosts, an exact frozen author.\nThe app names neither a relay nor an `h` row and never holds a write\nintent -- NMP contextualizes, signs and publishes.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroups_publish",
+            checksum: Some(
+                24043,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffigroups",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiGroups",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiGroups",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffigroups",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiGroups",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "The groups one write belongs to (`nmp::nip29::Groups` mirror, #1281),\nbuilt with [`FfiRelayScope::groups`].\n\nA WRITE CONTEXT and nothing else. There is no read door, no records\nobservation and no named operation on it, because each of those is\nper-group by definition -- a roster is one group's, and every 9000-9022\nmoderation action names one group. A write is the one thing that is\ngenuinely plural.\n\nONE method. NMP appends the `h` rows, NMP signs, NMP publishes. There is\ndeliberately no pre-signed spelling, no way to obtain a draft to sign\nyourself, and no mint-without-publish door -- an app that wants NMP to\nsign without publishing uses `NmpEngine::sign_event`.\n\nOpaque for the same reason [`FfiGroup`] is: it yields back neither its\nhosts nor its ids, so no layer handed one can reconstruct the authority\nand route something elsewhere under it.",
+    ),
+}
+
+object Object {
     name: "FfiRelayScope",
     imp: Struct,
     module_path: "nmp_ffi",
@@ -12568,6 +12734,70 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffirelayscope_group",
             checksum: Some(
                 18720,
+            ),
+        },
+        Method {
+            name: "groups",
+            object_name: "FfiRelayScope",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "group_ids",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiGroups",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffirelayscope_groups",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiRelayScope",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "group_ids",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiGroups",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Narrow to the SEVERAL groups one write belongs to, keeping the same\nhosts (`nmp::nip29::RelayScope::groups` mirror, #1281).\n\nThe write-only sibling of [`Self::group`], for the one event shape a\nsingle group id cannot express: a kind:30315 session status is\naddressable at `(author, d=status)` and carries one `h` per room the\nsession occupies, so publishing it once per room would make each copy\nreplace the last. An empty set is [`FfiError::EmptyGroupSet`] -- an\nevent with no `h` row is not in a group at all.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffirelayscope_groups",
+            checksum: Some(
+                53127,
             ),
         },
         Method {

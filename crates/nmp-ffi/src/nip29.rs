@@ -97,6 +97,21 @@ impl FfiRelayScope {
         })
     }
 
+    /// Narrow to the SEVERAL groups one write belongs to, keeping the same
+    /// hosts (`nmp::nip29::RelayScope::groups` mirror, #1281).
+    ///
+    /// The write-only sibling of [`Self::group`], for the one event shape a
+    /// single group id cannot express: a kind:30315 session status is
+    /// addressable at `(author, d=status)` and carries one `h` per room the
+    /// session occupies, so publishing it once per room would make each copy
+    /// replace the last. An empty set is [`FfiError::EmptyGroupSet`] -- an
+    /// event with no `h` row is not in a group at all.
+    pub fn groups(&self, group_ids: Vec<String>) -> Result<Arc<FfiGroups>, FfiError> {
+        Ok(Arc::new(FfiGroups {
+            inner: self.inner.groups(group_ids)?,
+        }))
+    }
+
     /// Watch the relay-signed records of every group matching `predicate`
     /// (`nmp::nip29::RelayScope::observe` mirror). One complete branch per
     /// host, folded into ONE ordinary engine subscription; each delivery is
@@ -327,6 +342,50 @@ impl FfiGroup {
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
         let receipts = self.inner.create_invite(&engine.engine, author, &code)?;
+        Ok(NmpReceiptStream::new(receipts))
+    }
+}
+
+/// The groups one write belongs to (`nmp::nip29::Groups` mirror, #1281),
+/// built with [`FfiRelayScope::groups`].
+///
+/// A WRITE CONTEXT and nothing else. There is no read door, no records
+/// observation and no named operation on it, because each of those is
+/// per-group by definition -- a roster is one group's, and every 9000-9022
+/// moderation action names one group. A write is the one thing that is
+/// genuinely plural.
+///
+/// ONE method. NMP appends the `h` rows, NMP signs, NMP publishes. There is
+/// deliberately no pre-signed spelling, no way to obtain a draft to sign
+/// yourself, and no mint-without-publish door -- an app that wants NMP to
+/// sign without publishing uses `NmpEngine::sign_event`.
+///
+/// Opaque for the same reason [`FfiGroup`] is: it yields back neither its
+/// hosts nor its ids, so no layer handed one can reconstruct the authority
+/// and route something elsewhere under it.
+#[derive(Debug, uniffi::Object)]
+pub struct FfiGroups {
+    inner: nip29::Groups,
+}
+
+#[uniffi::export]
+impl FfiGroups {
+    /// Publish one event into every retained group, through the ONE publish
+    /// door (`nmp::nip29::Groups::publish` mirror).
+    ///
+    /// The whole door: one `h` row per retained id appended before signing,
+    /// the route minted from the scope's own hosts, an exact frozen author.
+    /// The app names neither a relay nor an `h` row and never holds a write
+    /// intent -- NMP contextualizes, signs and publishes.
+    pub fn publish(
+        &self,
+        engine: Arc<NmpEngine>,
+        author: String,
+        builder: FfiEventBuilder,
+    ) -> Result<Arc<NmpReceiptStream>, FfiError> {
+        let author = parse_pubkey(&author)?;
+        let builder = event_builder_from_ffi(builder)?;
+        let receipts = self.inner.publish(&engine.engine, author, builder)?;
         Ok(NmpReceiptStream::new(receipts))
     }
 }
@@ -1090,6 +1149,43 @@ mod tests {
         }
     }
 
+    /// #1281 across the boundary: a several-group write reaches the one
+    /// publish door with the app naming neither a relay nor an `h` row, and
+    /// comes back with the ordinary receipt stream.
+    #[test]
+    fn a_several_group_write_crosses_the_boundary_and_reaches_the_one_publish_door() {
+        let engine =
+            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
+        let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
+        let rooms = scope
+            .groups(vec!["darkroom".to_string(), "photographers".to_string()])
+            .expect("a nonempty group set");
+        let receipts = rooms
+            .publish(
+                engine,
+                nostr::Keys::generate().public_key().to_hex(),
+                FfiEventBuilder {
+                    kind: 30315,
+                    tags: vec![vec!["d".to_string(), "status".to_string()]],
+                    content: String::new(),
+                    created_at: None,
+                },
+            )
+            .expect("the publish door accepts a several-group write");
+        assert!(receipts.id() > 0, "a group write is a tracked write");
+    }
+
+    /// #1281's refusal at the boundary: naming no group forms no write
+    /// context at all.
+    #[test]
+    fn a_write_context_over_no_group_is_never_formed_across_the_boundary() {
+        let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
+        match scope.groups(Vec::new()) {
+            Err(FfiError::EmptyGroupSet) => {}
+            other => panic!("expected EmptyGroupSet, got {other:?}"),
+        }
+    }
+
     /// #1282 across the boundary: the picture row and both marker rows reach
     /// the wire, so an app that wants a closed group no longer hand-writes
     /// `["closed"]` itself.
@@ -1170,7 +1266,7 @@ mod tests {
             .expect("a well-formed draft signs");
         match group.validate_context(to_ffi_signed(&bare)) {
             Err(FfiError::GroupContextMissing { expected }) => {
-                assert_eq!(expected, "photographers");
+                assert_eq!(expected, vec!["photographers".to_string()]);
             }
             other => panic!("expected GroupContextMissing, got {other:?}"),
         }
