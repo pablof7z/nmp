@@ -4000,6 +4000,14 @@ enum Enum {
                 "A newer accepted write won the same replaceable coordinate before this\none started any wire attempt. Not a failure — for an app renewing\npresence it is the steady state.",
             ),
         },
+        Variant {
+            name: "Removed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The app removed the queue entry while nothing was moving the write\n(#1269). Distinct from `Cancelled` in what survives: a cancelled\nreceipt stays reattachable, a removed one no longer exists.",
+            ),
+        },
     ],
     shape: Enum,
     non_exhaustive: false,
@@ -4467,7 +4475,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "The write still owns open delivery work. Cancel it first; removal is\nfor entries nothing is going to move.",
+                "Something is MOVING this write: a signer HAS its request and the\nanswer is already on its way (`FfiSigningState::InFlight`), or it is\nsigned and its relay lanes are live. Cancel it first; removal is for\nentries nothing is going to move — which a write parked on a signer\nnobody has is, so that one is removable (#1269).",
             ),
         },
         Variant {
@@ -14505,7 +14513,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Forget one queue entry (#1039). The only way a write parked forever\non a missing signer, or a permanently-failed refused entry, ever ends.",
+                "Forget one queue entry, releasing whatever obligation it still holds\n(#1039, #1269). The only way a write parked forever on a missing\nsigner, or a permanently-failed refused entry, ever ends. A write\nsomething is still MOVING — a signer holding its request, or live\nrelay lanes — is refused instead.",
             ),
             throws: Some(
                 Enum {
@@ -14516,7 +14524,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_publish_queue_entry",
             checksum: Some(
-                20706,
+                43281,
             ),
         },
         Method {

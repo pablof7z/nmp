@@ -7,7 +7,10 @@
 //! on a signer that never attached, and a permanently-failed refused entry,
 //! end ONLY by the app removing them — so removal is a termination path, not
 //! housekeeping. A write that still owns open delivery work is refused with
-//! `StillActive`; the app cancels that instead.
+//! `StillActive`; the app cancels that instead. A write parked on a signer
+//! nobody has owns no such work — nothing is in motion and nothing ever will
+//! be until a signer for that key attaches — so it is removable, and #1269
+//! is where that stopped being theoretical.
 
 use std::time::Duration;
 
@@ -190,6 +193,96 @@ async fn removing_an_entry_with_open_delivery_work_is_still_active() {
             .iter()
             .any(|entry| entry.receipt_id == receipt_id),
         "the refused removal changed nothing -- the entry is still enumerable"
+    );
+
+    engine.shutdown();
+}
+
+/// #1269: the entry a person most needs to remove is the one parked on a
+/// signer nobody has, and it must be removable HERE too — an app reaches
+/// this door through the FFI boundary, not through the reducer.
+///
+/// The removal is a real release, not a forgotten bookkeeping row: the
+/// receipt stream is told what happened rather than simply going quiet,
+/// which is the one thing that distinguishes a removed entry from a dropped
+/// subscription.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_parked_on_a_signer_nobody_has_is_removable_across_the_boundary() {
+    let parked_keys = nostr::Keys::generate();
+    let parked_pubkey = parked_keys.public_key();
+    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine builds");
+
+    // No account is registered for this key, so no signer will ever answer
+    // for it. Publish takes custody anyway: a missing signer is a fact about
+    // the world, never a reason to refuse at the door.
+    let receipt = engine
+        .publish(FfiWriteIntent {
+            payload: FfiWritePayload::Event {
+                builder: nmp_ffi::types::FfiEventBuilder {
+                    kind: 1,
+                    tags: vec![],
+                    content: "nobody can sign this".to_string(),
+                    created_at: Some(1_000),
+                },
+            },
+            routing: FfiWriteRouting::Auto,
+            identity: FfiIdentity::Explicit {
+                pubkey: parked_pubkey.to_hex(),
+            },
+            correlation: None,
+        })
+        .expect("publish takes custody");
+    let receipt_id = receipt.id();
+
+    let mut parked = false;
+    while !parked {
+        let fact = tokio::time::timeout(Duration::from_secs(5), receipt.next())
+            .await
+            .expect("a fact arrives within the lifecycle bound")
+            .expect("receipt next() is not a misuse")
+            .expect("the write does not end before it parks");
+        parked = matches!(
+            fact,
+            FfiWriteFact::Signing {
+                state: FfiSigningState::AwaitingSigner { .. },
+            }
+        );
+    }
+
+    assert!(
+        engine
+            .publish_queue()
+            .expect("engine is open")
+            .iter()
+            .any(|entry| entry.receipt_id == receipt_id),
+        "the parked write is in custody and enumerable"
+    );
+    engine.remove_publish_queue_entry(receipt_id).expect(
+        "a write parked on a signer nobody has is removable: no clock ends it \
+                 and no signer exists, so this is its only termination path",
+    );
+    assert!(
+        engine
+            .publish_queue()
+            .expect("engine is open")
+            .iter()
+            .all(|entry| entry.receipt_id != receipt_id),
+        "removal is a real termination path: the entry is gone"
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), receipt.next())
+        .await
+        .expect("the removal fact arrives within the lifecycle bound")
+        .expect("receipt next() is not a misuse")
+        .expect("the stream carries the outcome before it ends");
+    assert_eq!(
+        outcome,
+        FfiWriteFact::Outcome {
+            outcome: nmp_ffi::types::FfiWriteOutcome::NotSent {
+                reason: nmp_ffi::types::FfiNotSentReason::Removed,
+            },
+        },
+        "the stream ends on a fact naming what the app did"
     );
 
     engine.shutdown();

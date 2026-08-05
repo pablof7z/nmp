@@ -12,6 +12,12 @@ final class EvidenceMappingTests: XCTestCase {
             WriteFact(.outcome(outcome: .notSent(reason: .superseded))),
             .outcome(.notSent(.superseded))
         )
+        // #1269: the app removed a parked entry. Folded onto `.cancelled` an
+        // app would go looking for a retained receipt that no longer exists.
+        XCTAssertEqual(
+            WriteFact(.outcome(outcome: .notSent(reason: .removed))),
+            .outcome(.notSent(.removed))
+        )
         XCTAssertEqual(
             NMPWriteCancellationError(.UnknownReceipt(receiptId: 42)),
             .unknownReceipt(receiptId: 42)
