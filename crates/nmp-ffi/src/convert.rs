@@ -1565,6 +1565,9 @@ fn signing_state_to_ffi(state: &GSigningState) -> FfiSigningState {
         GSigningState::AwaitingSigner { pubkey } => FfiSigningState::AwaitingSigner {
             pubkey: pubkey.to_hex(),
         },
+        GSigningState::InFlight { pubkey } => FfiSigningState::InFlight {
+            pubkey: pubkey.to_hex(),
+        },
         GSigningState::Signed { event_id } => FfiSigningState::Signed {
             event_id: event_id.to_hex(),
         },
@@ -1943,6 +1946,17 @@ mod write_fact_tests {
                 GWriteStatus::Signing(GSigningState::AwaitingSigner { pubkey }),
                 FfiWriteFact::Signing {
                     state: FfiSigningState::AwaitingSigner {
+                        pubkey: pubkey.to_hex(),
+                    },
+                },
+            ),
+            (
+                // #1261: a signature in flight must not arrive on the far
+                // side of the boundary as a write parked on a key nobody
+                // has a signer for.
+                GWriteStatus::Signing(GSigningState::InFlight { pubkey }),
+                FfiWriteFact::Signing {
+                    state: FfiSigningState::InFlight {
                         pubkey: pubkey.to_hex(),
                     },
                 },
