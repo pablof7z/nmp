@@ -232,6 +232,43 @@ public final class NMPGroup: @unchecked Sendable {
         return Receipt(handle: receipts)
     }
 
+    /// Publish a draft composed by the tagging door (#1243) into the group.
+    ///
+    /// The `h` row and the group's relay set stay this door's, exactly as for
+    /// the field-by-field overload above: a composer owns the SCHEMA and the
+    /// group owns the CONTEXT, and neither reaches into the other. What this
+    /// adds is that a `chatReply(to:)` no longer has to be taken apart into
+    /// kind/tags/content just to be published where it belongs.
+    public func publish(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        payload: WritePayload
+    ) throws -> Receipt {
+        guard case .event(let kind, let tags, let content, let createdAt) = payload else {
+            // A pre-signed event carries its own `h` already and is validated
+            // rather than contextualized -- that is `publishSigned(_:)`.
+            throw NMPError.groupCallerSuppliedContext
+        }
+        return try publish(
+            engine: engine, authorPubkeyHex: authorPubkeyHex, kind: kind, tags: tags,
+            content: content, createdAt: createdAt)
+    }
+
+    /// `intent(authorPubkeyHex:kind:...)` over a draft the tagging door
+    /// composed (#1242 + #1243): mint the group's own intent from a composed
+    /// payload and publish nothing.
+    public func intent(
+        authorPubkeyHex: String,
+        payload: WritePayload
+    ) throws -> WriteIntent {
+        guard case .event(let kind, let tags, let content, let createdAt) = payload else {
+            throw NMPError.groupCallerSuppliedContext
+        }
+        return try intent(
+            authorPubkeyHex: authorPubkeyHex, kind: kind, tags: tags, content: content,
+            createdAt: createdAt)
+    }
+
     /// `signedIntent(_:)` handed straight to the one publish door.
     public func publishSigned(
         engine: NMPEngine,

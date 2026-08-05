@@ -175,22 +175,16 @@ pub fn describe_evidence(evidence: &AcquisitionEvidence) -> String {
 /// neither needs an `nmp-nip22` line of its own. What comes back is an
 /// ordinary [`WriteIntent`] (#907), published through the same
 /// `Engine::publish` lifecycle as any other write. Uses an external NIP-73
-/// target so no NIP-01 core kind is baked into this proof. The vocabulary is
+/// content id so no NIP-01 core kind is baked into this proof. The vocabulary is
 /// engine-free and still reads no ambient clock or active account -- it no
 /// longer needs an author or an event time to say so, because the engine
 /// resolves both at acceptance.
 pub fn build_comment_intent(
     guid: &str,
     content: &str,
-) -> Result<WriteIntent, nmp::nip22::Nip73TargetError> {
-    let root =
-        nmp::nip22::CommentRoot::External(nmp::nip22::Nip73Target::podcast_episode_guid(guid)?);
-    Ok(nmp::nip22::comment_intent(
-        &root,
-        nmp::nip22::CommentParent::Root,
-        content.to_string(),
-        None,
-    ))
+) -> Result<WriteIntent, nmp::nip22::Nip73Error> {
+    let root = nmp::nip22::CommentRoot::External(nmp::nip22::Nip73::podcast_episode(guid)?);
+    Ok(nmp::nip22::comment_intent(&root, content.to_string(), None))
 }
 
 /// Names and reads the observation-scoped execution envelope from an

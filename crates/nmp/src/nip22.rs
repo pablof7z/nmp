@@ -4,7 +4,7 @@
 //! `nmp-nip22` owns comment validation, exact composition, and strict decode.
 //! This module re-exports that vocabulary so the ONE supported product surface
 //! owns it for every consumer: a direct-Rust app and `nmp-ffi` resolve the same
-//! `CommentRoot`/`CommentParent`/`Nip73Target` values and the same
+//! `CommentRoot`/`CommentParent`/`Nip73` values and the same
 //! [`comment_intent`] write operation, instead of each binding the mechanism
 //! crate independently and having to keep two owners aligned by convention.
 //!
@@ -16,7 +16,6 @@
 //! correlation, take-once, signing, routing, receipt, or retry machinery.
 
 pub use nmp_nip22::{
-    comment_intent, comment_thread_demand, compose_comment_reply, compose_top_level_comment,
-    decode_comment, CommentDecodeError, CommentParent, CommentRoot, DecodedComment, Nip73Target,
-    Nip73TargetError, COMMENT_KIND,
+    comment_intent, comment_thread_demand, compose_comment, decode_comment, CommentDecodeError,
+    CommentParent, CommentRoot, DecodedComment, Nip73, Nip73Error, COMMENT_KIND,
 };

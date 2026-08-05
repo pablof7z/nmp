@@ -19,7 +19,7 @@ class NIP22Test {
      * never a parent-only lowercase `#i` shortcut. */
     @Test
     fun commentThreadDemandScopesKind1111ByUppercaseITag() {
-        val root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-1"))
+        val root = CommentRoot.External(Nip73.PodcastEpisode("guid-1"))
         val demand = commentThreadDemand(root)
         assertEquals(listOf(1111u.toUShort()), demand.selection.kinds)
     }
@@ -47,7 +47,7 @@ class NIP22Test {
                 sources = emptyList(),
             )
         val decoded = decodeComment(row)
-        assertEquals(CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-1")), decoded.root)
+        assertEquals(CommentRoot.External(Nip73.PodcastEpisode("guid-1")), decoded.root)
         assertEquals(CommentParent.Root, decoded.parent)
         assertEquals("nice episode", decoded.content)
     }
@@ -181,8 +181,7 @@ class NIP22Test {
                 val token = "kotlin-nip22-offline-signer-token"
                 val intent =
                     commentIntent(
-                        root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-offline")),
-                        parent = CommentParent.Root,
+                        target = CommentTarget.Root(CommentRoot.External(Nip73.PodcastEpisode("guid-offline"))),
                         content = "great show",
                         correlation = token,
                     )
@@ -225,8 +224,7 @@ class NIP22Test {
     fun composedCommentPinsTheExactTagRows() {
         val intent =
             commentIntent(
-                root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("golden-guid-572")),
-                parent = CommentParent.Root,
+                target = CommentTarget.Root(CommentRoot.External(Nip73.PodcastEpisode("golden-guid-572"))),
                 content = "golden fixture content",
             )
         val payload = intent.payload as WritePayload.Event
@@ -261,14 +259,13 @@ class NIP22Test {
             NMPEngine(NMPConfig()).use { engine ->
                 engine.setActiveAccount(author)
 
-                val root = CommentRoot.External(Nip73Target.PodcastEpisodeGuid("guid-query-path"))
+                val root = CommentRoot.External(Nip73.PodcastEpisode("guid-query-path"))
                 val demand = commentThreadDemand(root)
                 val rowFlow = engine.observe(demand)
 
                 val intent =
                     commentIntent(
-                        root = root,
-                        parent = CommentParent.Root,
+                        target = CommentTarget.Root(root),
                         content = "visible through the ordinary query path",
                     )
                 val receipt = engine.publish(intent)

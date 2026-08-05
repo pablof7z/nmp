@@ -46,12 +46,12 @@ pub fn comment_thread_demand(root: &CommentRoot) -> Demand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::Nip73Target;
     use nmp_grammar::SourceAuthority;
+    use nmp_nip73::Nip73;
 
     #[test]
     fn comment_thread_demand_scopes_kind_1111_by_uppercase_i_tag() {
-        let root = CommentRoot::External(Nip73Target::podcast_episode_guid("guid-1").unwrap());
+        let root = CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap());
         let demand = comment_thread_demand(&root);
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([1111u16])));
         let i = IndexedTagName::new('I').unwrap();
@@ -72,10 +72,10 @@ mod tests {
     #[test]
     fn distinct_roots_yield_distinct_demands() {
         let a = comment_thread_demand(&CommentRoot::External(
-            Nip73Target::podcast_episode_guid("guid-a").unwrap(),
+            Nip73::podcast_episode("guid-a").unwrap(),
         ));
         let b = comment_thread_demand(&CommentRoot::External(
-            Nip73Target::podcast_episode_guid("guid-b").unwrap(),
+            Nip73::podcast_episode("guid-b").unwrap(),
         ));
         assert_ne!(a.selection, b.selection);
     }
@@ -84,7 +84,7 @@ mod tests {
     /// selection since this filter names no `authors` binding.
     #[test]
     fn demand_defaults_to_public_source() {
-        let root = CommentRoot::External(Nip73Target::podcast_episode_guid("guid-1").unwrap());
+        let root = CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap());
         let demand = comment_thread_demand(&root);
         assert_eq!(demand.source, SourceAuthority::Public);
     }
