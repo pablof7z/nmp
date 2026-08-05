@@ -410,7 +410,6 @@ public final class NMPGroup: @unchecked Sendable {
     }
 }
 
-<<<<<<< HEAD
 /// The groups one write belongs to (`nmp::nip29::Groups`/`FfiGroups`
 /// mirror, #1281), obtained from `NMPRelayScope.groups(_:)`.
 ///
@@ -452,8 +451,8 @@ public final class NMPGroups: @unchecked Sendable {
         }
         return Receipt(handle: receipts)
     }
+}
 
-=======
 /// Who may READ a group's messages (`nmp::nip29::ReadAccess` mirror, #1282).
 ///
 /// NIP-29 spells the restricted state `["private"]`; the reference relay's
@@ -529,7 +528,6 @@ public struct NMPGroupMetadataEdit: Sendable, Hashable {
             name: name, about: about, picture: picture,
             readAccess: readAccess?.toFfi(), joinAccess: joinAccess?.toFfi())
     }
->>>>>>> origin/master
 }
 
 /// Which groups an observation covers (`nmp::nip29::GroupPredicate`/

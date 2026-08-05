@@ -53,13 +53,10 @@ import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiGroup
 import uniffi.nmp_ffi.FfiGroupIds
-<<<<<<< HEAD
 import uniffi.nmp_ffi.FfiGroups
-=======
 import uniffi.nmp_ffi.FfiGroupMetadataEdit
 import uniffi.nmp_ffi.FfiJoinAccess
 import uniffi.nmp_ffi.FfiReadAccess
->>>>>>> origin/master
 import uniffi.nmp_ffi.FfiGroupPredicate
 import uniffi.nmp_ffi.FfiRelayScope
 import uniffi.nmp_ffi.FfiSignedEvent
@@ -349,7 +346,6 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
         )
 }
 
-<<<<<<< HEAD
 /** The groups one write belongs to (`nmp::nip29::Groups`/`FfiGroups` mirror,
  * #1281), obtained from [NMPRelayScope.groups].
  *
@@ -385,8 +381,8 @@ class NMPGroups internal constructor(internal val ffi: FfiGroups) {
                 )
             },
         )
+}
 
-=======
 /** Who may READ a group's messages (`nmp::nip29::ReadAccess` mirror, #1282).
  *
  * NIP-29 spells the restricted state `["private"]`; the reference relay's
@@ -447,7 +443,6 @@ data class NMPGroupMetadataEdit(
 ) {
     internal fun toFfi(): FfiGroupMetadataEdit =
         FfiGroupMetadataEdit(name, about, picture, readAccess?.toFfi(), joinAccess?.toFfi())
->>>>>>> origin/master
 }
 
 /** Which groups an observation covers (`nmp::nip29::GroupPredicate`/
