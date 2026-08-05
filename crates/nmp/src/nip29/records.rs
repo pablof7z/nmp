@@ -65,7 +65,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use nostr::{Event, EventId, RelayUrl};
+use nostr::{Event, EventId, PublicKey, RelayUrl};
 
 use nmp_nip29::{
     group_metadata_at, join_key_of, listed_record_at, GroupMetadata, GroupRecord, ListedRecord,
@@ -190,6 +190,65 @@ pub struct HostRecords {
     pub availability: GroupAvailability,
 }
 
+/// What a group's hosts currently PROVE about one subject's place in one of
+/// NIP-29's relay-signed lists (#1234).
+///
+/// The distinction this exists to make: a moderation receipt proves the host
+/// accepted a kind:9000/9001 REQUEST. It never proves the list changed --
+/// the list is the relay's own 39001/39002 and only its arrival proves
+/// anything. So the honest question "did the grant take" is answered here,
+/// off a delivered snapshot, and nowhere else.
+///
+/// Three answers because NIP-29 admits exactly three, and collapsing the last
+/// two is the mistake: an app that treats "not named yet" as "not a member"
+/// shows a user a false negative every time a relay is still reconciling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Listing {
+    /// At least one host's own signed record names this subject. Each entry
+    /// carries the hosts that named it and the role each of them wrote, so
+    /// two hosts disagreeing about a role produce two entries rather than one
+    /// invented winner.
+    Named(Vec<ListedSubject>),
+    /// Every host in the scope has ESTABLISHED this record and none of them
+    /// names the subject.
+    ///
+    /// The strongest negative NIP-29 permits, and it rests on settlement
+    /// rather than on a timer: `Ready` means every source in every host's
+    /// plan reconciled and is live, which is a fact about knowledge, not a
+    /// guess about elapsed time. Nothing here waits, sleeps, or retries.
+    Absent,
+    /// Not every host has established this record yet, or the observation
+    /// never asked for it. Absence is not evidence of anything here, and an
+    /// app that renders this as "not a member" is rendering a guess.
+    Unestablished,
+}
+
+impl Listing {
+    /// The ONE statement of the rule, over the only two facts it reads.
+    ///
+    /// Split out so the answer has exactly one implementation across every
+    /// surface: [`GroupSnapshot::member_listing`] calls it, and so does the
+    /// FFI boundary's own projection, which holds a copied-out record rather
+    /// than a `GroupSnapshot` and would otherwise have to restate it. A
+    /// second restatement is precisely the reconstruction #1234 counted eight
+    /// times in one consumer.
+    ///
+    /// `settled` is the whole of the negative's justification: this record was
+    /// ASKED for and every host in the scope has established it. Both halves
+    /// are load-bearing -- a host still acquiring makes absence meaningless,
+    /// and a record nobody requested makes it a lie.
+    #[must_use]
+    pub fn of(named: Vec<ListedSubject>, settled: bool) -> Self {
+        if !named.is_empty() {
+            Self::Named(named)
+        } else if settled {
+            Self::Absent
+        } else {
+            Self::Unestablished
+        }
+    }
+}
+
 /// One group, as the hosts in the scope currently describe it.
 ///
 /// A complete self-contained value: it is never a patch on a previous one, so
@@ -217,6 +276,14 @@ pub struct GroupSnapshot {
     /// The records the answering hosts do not agree on. Computed while the
     /// union is built, at no extra pass.
     pub disagreements: BTreeSet<GroupRecord>,
+    /// The records this observation ASKED for.
+    ///
+    /// Carried because settlement alone cannot tell "every host is reconciled
+    /// and published no member list" apart from "no member list was ever
+    /// requested". [`Listing::Absent`] would be a lie in the second case, so
+    /// [`Self::member_listing`] and [`Self::admin_listing`] consult this
+    /// first (#1234).
+    pub selected: BTreeSet<GroupRecord>,
 }
 
 impl GroupSnapshot {
@@ -237,6 +304,42 @@ impl GroupSnapshot {
     pub fn differs(&self, record: GroupRecord) -> bool {
         self.disagreements.contains(&record)
     }
+
+    /// What the hosts prove about `subject`'s place in their kind:39002
+    /// member lists (#1234).
+    ///
+    /// This is the answer a moderation receipt cannot give. An `Acked`
+    /// kind:9000 says a host took the request; only this says the list
+    /// reflects it.
+    #[must_use]
+    pub fn member_listing(&self, subject: PublicKey) -> Listing {
+        self.listing(GroupRecord::Members, &self.members, subject)
+    }
+
+    /// What the hosts prove about `subject`'s place in their kind:39001
+    /// admin lists (#1234). Same rule as [`Self::member_listing`].
+    #[must_use]
+    pub fn admin_listing(&self, subject: PublicKey) -> Listing {
+        self.listing(GroupRecord::Admins, &self.admins, subject)
+    }
+
+    /// The one implementation both listings share.
+    ///
+    /// Inclusion is read off the UNION, because inclusion in any host's own
+    /// record is evidence (this module's own rule). The negative is read off
+    /// the hoisted whole-scope [`GroupAvailability`], because absence is only
+    /// evidence once EVERY host has settled -- one relay still acquiring is
+    /// exactly the state that makes a negative unsafe.
+    fn listing(&self, record: GroupRecord, union: &[ListedSubject], subject: PublicKey) -> Listing {
+        Listing::of(
+            union
+                .iter()
+                .filter(|listed| listed.pubkey == subject)
+                .cloned()
+                .collect(),
+            self.selected.contains(&record) && self.availability == GroupAvailability::Ready,
+        )
+    }
 }
 
 /// A live projection of NIP-29's relay-signed group records over one ordinary
@@ -249,6 +352,10 @@ pub struct GroupObservation {
     subscription: AsyncSubscription,
     hosts: BTreeSet<RelayUrl>,
     seed_ids: BTreeSet<String>,
+    /// The records this observation asked for, carried onto every snapshot it
+    /// projects so a negative listing cannot be claimed for a record nobody
+    /// requested (#1234).
+    selected: BTreeSet<GroupRecord>,
     accumulator: std::sync::Mutex<Accumulator>,
 }
 
@@ -272,6 +379,7 @@ impl GroupObservation {
                 Ok(Some(project(
                     &self.hosts,
                     &self.seed_ids,
+                    &self.selected,
                     &accumulator,
                     &frame.evidence,
                 )))
@@ -305,7 +413,13 @@ impl GroupObservation {
             .accumulator
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        project(&self.hosts, &self.seed_ids, &accumulator, &[])
+        project(
+            &self.hosts,
+            &self.seed_ids,
+            &self.selected,
+            &accumulator,
+            &[],
+        )
     }
 
     /// Withdraw the observation now (idempotent; `Drop` does the same).
@@ -339,6 +453,7 @@ pub(super) fn observe(
     engine: &Engine,
     hosts: BTreeSet<RelayUrl>,
     seed_ids: BTreeSet<String>,
+    selected: BTreeSet<GroupRecord>,
     branches: Vec<nmp_grammar::Demand>,
 ) -> Result<GroupObservation, GroupObserveError> {
     let query = super::read::one_live_query(branches)?;
@@ -347,6 +462,7 @@ pub(super) fn observe(
         subscription,
         hosts,
         seed_ids,
+        selected,
         accumulator: std::sync::Mutex::new(Accumulator::default()),
     })
 }
@@ -443,6 +559,7 @@ fn availability_at(host: &RelayUrl, evidence: &[AcquisitionEvidence]) -> GroupAv
 fn project(
     hosts: &BTreeSet<RelayUrl>,
     seed_ids: &BTreeSet<String>,
+    selected: &BTreeSet<GroupRecord>,
     accumulator: &Accumulator,
     evidence: &[AcquisitionEvidence],
 ) -> Vec<GroupSnapshot> {
@@ -558,6 +675,7 @@ fn project(
                 availability,
                 per_host,
                 disagreements,
+                selected: selected.clone(),
             }
         })
         .collect()
@@ -651,4 +769,159 @@ fn newer(
     held_id: EventId,
 ) -> bool {
     (candidate_as_of, candidate_id) > (held_as_of, held_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::Keys;
+
+    fn host(n: u16) -> RelayUrl {
+        RelayUrl::parse(&format!("wss://host-{n}.example.com")).expect("a well-formed host")
+    }
+
+    fn listed(pubkey: PublicKey, role: Option<&str>, hosts: &[RelayUrl]) -> ListedSubject {
+        ListedSubject {
+            pubkey,
+            role: role.map(str::to_string),
+            hosts: hosts.iter().cloned().collect(),
+        }
+    }
+
+    /// A snapshot with the two axes a listing reads -- the union and the
+    /// whole-scope availability -- and nothing else that could influence it.
+    fn snapshot(
+        members: Vec<ListedSubject>,
+        availability: GroupAvailability,
+        selected: &[GroupRecord],
+    ) -> GroupSnapshot {
+        GroupSnapshot {
+            id: "photographers".to_string(),
+            metadata: None,
+            admins: Vec::new(),
+            members,
+            availability,
+            per_host: BTreeMap::new(),
+            disagreements: BTreeSet::new(),
+            selected: selected.iter().copied().collect(),
+        }
+    }
+
+    /// #1234's whole point: the negative rests on SETTLEMENT, and it is only
+    /// available once every host has settled. The identical row set answers
+    /// differently while one relay is still acquiring, which is exactly the
+    /// distinction an app cannot make from a moderation receipt.
+    #[test]
+    fn absence_is_claimed_only_once_every_host_has_settled() {
+        let subject = Keys::generate().public_key();
+        for unsettled in [
+            GroupAvailability::Acquiring,
+            GroupAvailability::CachedOnly,
+            GroupAvailability::SourceUnavailable,
+        ] {
+            assert_eq!(
+                snapshot(Vec::new(), unsettled, &[GroupRecord::Members]).member_listing(subject),
+                Listing::Unestablished,
+                "{unsettled:?} is not evidence of absence, and rendering it as one is a false \
+                 negative every time a relay is still reconciling"
+            );
+        }
+        assert_eq!(
+            snapshot(Vec::new(), GroupAvailability::Ready, &[GroupRecord::Members])
+                .member_listing(subject),
+            Listing::Absent,
+            "every host reconciled and none named the subject: the strongest negative NIP-29 admits"
+        );
+    }
+
+    /// Inclusion is evidence at ANY availability -- a relay that signed a
+    /// record naming the subject said so, whatever another relay is doing.
+    #[test]
+    fn inclusion_is_evidence_before_anything_has_settled() {
+        let subject = Keys::generate().public_key();
+        let listing = snapshot(
+            vec![listed(subject, Some("moderator"), &[host(1)])],
+            GroupAvailability::Acquiring,
+            &[GroupRecord::Members],
+        )
+        .member_listing(subject);
+        match listing {
+            Listing::Named(named) => {
+                assert_eq!(named.len(), 1);
+                assert_eq!(named[0].role.as_deref(), Some("moderator"));
+                assert_eq!(named[0].hosts, BTreeSet::from([host(1)]));
+            }
+            other => panic!("inclusion is evidence whatever the availability, got {other:?}"),
+        }
+    }
+
+    /// Two hosts that wrote different roles for one subject produce TWO
+    /// entries, never one invented winner -- the same rule the union itself
+    /// follows, carried into the answer an app renders.
+    #[test]
+    fn two_hosts_disagreeing_about_a_role_are_both_reported() {
+        let subject = Keys::generate().public_key();
+        let listing = snapshot(
+            vec![
+                listed(subject, Some("moderator"), &[host(1)]),
+                listed(subject, None, &[host(2)]),
+            ],
+            GroupAvailability::Ready,
+            &[GroupRecord::Members],
+        )
+        .member_listing(subject);
+        match listing {
+            Listing::Named(named) => assert_eq!(
+                named.len(),
+                2,
+                "a role two hosts disagree about must surface as two attributed entries"
+            ),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    /// The hole settlement alone cannot see: an observation that never asked
+    /// for the member list is `Ready` with no members, which is not the same
+    /// fact as a settled empty list. Claiming `Absent` there would be a lie.
+    #[test]
+    fn a_record_the_observation_never_asked_for_is_never_reported_absent() {
+        let subject = Keys::generate().public_key();
+        assert_eq!(
+            snapshot(
+                Vec::new(),
+                GroupAvailability::Ready,
+                &[GroupRecord::Metadata]
+            )
+            .member_listing(subject),
+            Listing::Unestablished,
+            "no member list was ever requested; a settled metadata read proves nothing about it"
+        );
+        assert_eq!(
+            snapshot(
+                Vec::new(),
+                GroupAvailability::Ready,
+                &[GroupRecord::Members]
+            )
+            .admin_listing(subject),
+            Listing::Unestablished,
+            "the two lists settle independently and neither answers for the other"
+        );
+    }
+
+    /// A subject nobody named is absent; the door does not confuse "this
+    /// list has entries" with "this list has THIS entry".
+    #[test]
+    fn a_populated_list_that_omits_the_subject_is_a_settled_absence() {
+        let listed_pk = Keys::generate().public_key();
+        let stranger = Keys::generate().public_key();
+        assert_eq!(
+            snapshot(
+                vec![listed(listed_pk, None, &[host(1)])],
+                GroupAvailability::Ready,
+                &[GroupRecord::Members],
+            )
+            .member_listing(stranger),
+            Listing::Absent
+        );
+    }
 }
