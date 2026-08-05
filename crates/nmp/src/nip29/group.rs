@@ -182,7 +182,7 @@ impl Group {
     /// Ask whether an already-signed event belongs to this group, without
     /// building a write out of it.
     pub fn validate_context(&self, event: &Event) -> Result<(), GroupContextError> {
-        nmp_nip29::validate_context(&self.id, event)
+        nmp_nip29::validate_context(&BTreeSet::from([self.id.clone()]), event)
     }
 
     /// Publish an unsigned draft into the group, as `author`. The group's
@@ -211,7 +211,7 @@ impl Group {
         author: PublicKey,
         builder: EventBuilder,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        let contextualized = nmp_nip29::contextualize(&self.id, builder)?;
+        let contextualized = nmp_nip29::contextualize(&BTreeSet::from([self.id.clone()]), builder)?;
         let intent = self.mint(
             WritePayload::Event(contextualized),
             Identity::Explicit(author),

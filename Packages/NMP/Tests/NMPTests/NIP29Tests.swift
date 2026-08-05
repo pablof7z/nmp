@@ -170,6 +170,27 @@ final class NIP29Tests: XCTestCase {
         XCTAssertGreaterThan(receipt.id, 0)
     }
 
+    /// #1281: a several-group write reaches the one publish door and comes
+    /// back with the ordinary store-issued receipt id.
+    func testASeveralGroupWriteReachesTheOnePublishDoor() throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        let rooms = try NMPRelayScope.on([host(1), host(2)]).groups(["darkroom", "photographers"])
+        let receipt = try rooms.publish(
+            engine: engine, authorPubkeyHex: randomPubkeyHex(), kind: 30315,
+            tags: [["d", "status"]])
+        XCTAssertGreaterThan(receipt.id, 0)
+    }
+
+    /// #1281: naming no group at all forms no write context.
+    func testAWriteContextOverNoGroupIsNeverFormed() throws {
+        let scope = try NMPRelayScope.on([host(1)])
+        XCTAssertThrowsError(try scope.groups([])) { error in
+            guard case NMPError.emptyGroupSet = error else {
+                return XCTFail("expected .emptyGroupSet, got \(error)")
+            }
+        }
+    }
+
     /// A caller-supplied `h` tag never reaches the door: the refusal is
     /// synchronous and typed, before any receipt stream exists.
     func testACallerSuppliedContextNeverReachesTheDoor() throws {
