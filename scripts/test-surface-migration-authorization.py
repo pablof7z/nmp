@@ -62,6 +62,50 @@ SCRATCH_REMOVAL_ATTEMPTS = 5
 SCRATCH_REMOVAL_BACKOFF_SECONDS = 0.05
 
 
+# The identity that authorizes a protected governance migration, declared here
+# a second time so that changing the program's copy alone turns this suite red.
+#
+# Every other property the program asserts is downstream of these four. A wrong
+# owner id or login means somebody else's approval satisfies the gate; a renamed
+# context means a status published under a different name is read as the owner's
+# signature; a wrong repository means a pull request, issue and status in some
+# other repository are accepted as this one's. None of them are repository
+# taste — each is an external fact:
+#
+#   repository   the repository whose protected paths this program guards
+#   owner_login  the account that owns it
+#   owner_id     that account's immutable numeric GitHub user id; a login can be
+#                renamed and the freed name re-registered, an id cannot
+#   context      the exact commit-status context the owner publishes under, and
+#                the only name a status is ever looked up by
+#
+# A second declaration is the only pin available in-repo, so it has to be a
+# declaration the program cannot reach: nothing below imports these values from
+# AuthorizationPolicy, and the fixtures built from them are handed to the real
+# PRODUCTION_POLICY.
+PINNED_AUTHORIZING_IDENTITY: dict[str, Any] = {
+    "repository": "pablof7z/nmp",
+    "context": "nmp/surface-governance-migration",
+    "owner_login": "pablof7z",
+    "owner_id": 779813,
+}
+
+# The remaining policy fields say *which files* are guarded, never *who* may
+# authorize a change to them, so they are pinned by inventory tests rather than
+# by identity falsifiers.
+PINNED_INVENTORY_FIELDS = frozenset({"protected_paths", "protected_prefixes"})
+
+# Fixed synthetic inputs for the byte-stable description below. Real object ids
+# would move every run and pin nothing.
+GOLDEN_BASE = "1" * 40
+GOLDEN_HEAD = "2" * 40
+GOLDEN_PATH = ".github/workflows/ci.yml"
+GOLDEN_DESCRIPTION = (
+    "nmp-governance-v2:"
+    "0dcf32c32ca977631dec091110c69205507c530435074c72a477d8630f34d64d"
+)
+
+
 def remove_scratch_tree(root: Path) -> None:
     """Remove a fixture scratch tree without ever raising.
 
@@ -159,10 +203,7 @@ class MigrationAuthorizationTests(unittest.TestCase):
         self.head = self.git("rev-parse", "HEAD")
 
         self.policy = authorization.AuthorizationPolicy(
-            repository="pablof7z/nmp",
-            context="nmp/surface-governance-migration",
-            owner_login="pablof7z",
-            owner_id=779813,
+            **PINNED_AUTHORIZING_IDENTITY,
             protected_paths=(
                 self.workflow,
                 self.verifier,
@@ -274,8 +315,8 @@ class MigrationAuthorizationTests(unittest.TestCase):
         issue_number: int | None = None,
         context: str | None = None,
         state: str = "success",
-        login: str = "pablof7z",
-        owner_id: int = 779813,
+        login: str = PINNED_AUTHORIZING_IDENTITY["owner_login"],
+        owner_id: int = PINNED_AUTHORIZING_IDENTITY["owner_id"],
         identifier: int = 10,
         created_at: str = "2026-07-30T23:59:00Z",
         target_url: str | None = None,
@@ -353,6 +394,61 @@ class MigrationAuthorizationTests(unittest.TestCase):
         )
         return snapshot, description, pull_request, issue, [status]
 
+    def pinned_identity_records(
+        self,
+        policy: Any,
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        """A complete, correct migration authorization by the pinned identity.
+
+        Every record is addressed to PINNED_AUTHORIZING_IDENTITY and never to
+        `policy`, so it describes the identity that is supposed to authorize
+        rather than the one the program currently believes in. The description is
+        the one `policy` itself computes, so the tuple binding is always
+        satisfied and the identity comparison is the only thing left to decide
+        the verdict.
+        """
+        repository = PINNED_AUTHORIZING_IDENTITY["repository"]
+        pr_url = f"https://github.com/{repository}/pull/{self.pr_number}"
+        issue_url = f"https://github.com/{repository}/issues/{self.issue_number}"
+        description = authorization.authorization_description(
+            policy,
+            root=self.root,
+            base=self.base,
+            head=self.head,
+            pr_number=self.pr_number,
+            issue_number=self.issue_number,
+            snapshot=self.snapshot,
+        )
+        pull_request = {
+            "number": self.pr_number,
+            "state": "open",
+            "merged": False,
+            "html_url": pr_url,
+            "base": {"sha": self.base, "repo": {"full_name": repository}},
+            "head": {"sha": self.head, "repo": {"full_name": repository}},
+        }
+        issue = {
+            "number": self.issue_number,
+            "state": "open",
+            "html_url": issue_url,
+            "repository_url": f"https://api.github.com/repos/{repository}",
+        }
+        status = {
+            "id": 10,
+            "created_at": "2026-07-30T23:59:00Z",
+            "sha": self.head,
+            "state": "success",
+            "context": PINNED_AUTHORIZING_IDENTITY["context"],
+            "description": description,
+            "target_url": issue_url,
+            "creator": {
+                "login": PINNED_AUTHORIZING_IDENTITY["owner_login"],
+                "id": PINNED_AUTHORIZING_IDENTITY["owner_id"],
+                "type": "User",
+            },
+        }
+        return pr_url, description, pull_request, issue, [status]
+
     def test_fixture_repository_is_sealed_against_ambient_git_configuration(
         self,
     ) -> None:
@@ -411,6 +507,138 @@ class MigrationAuthorizationTests(unittest.TestCase):
             self.assertIn(path, policy.protected_paths)
         self.assertIn("tools/behavior-traceability/", policy.protected_prefixes)
         authorization.require_well_formed_policy(policy)
+
+    def test_every_policy_field_is_classified_as_identity_or_inventory(self) -> None:
+        """The rule that keeps the falsifiers below complete.
+
+        A field added to AuthorizationPolicy is invisible to a suite that only
+        knows the fields it was written against, so the classification is
+        asserted rather than assumed. An unclassified field fails here. Pinning
+        it as identity puts it straight into
+        test_every_pinned_identity_field_decides_the_verdict, which iterates this
+        mapping; the one manual step left is to address it in the fixture that
+        pinned_identity_records builds.
+        """
+        self.assertEqual(
+            {
+                field.name
+                for field in dataclasses.fields(authorization.AuthorizationPolicy)
+            },
+            set(PINNED_AUTHORIZING_IDENTITY) | PINNED_INVENTORY_FIELDS,
+            "AuthorizationPolicy gained or lost a field. Decide which it is: "
+            "an identity field goes in PINNED_AUTHORIZING_IDENTITY with its "
+            "external value, an inventory field goes in PINNED_INVENTORY_FIELDS "
+            "and is pinned by the protected-path tests instead.",
+        )
+
+    def test_production_policy_authorizes_only_the_pinned_identity(self) -> None:
+        """Falsifier for every identity constant in PRODUCTION_POLICY.
+
+        The fixture is a real migration authorized by the pinned identity, run
+        through the real verification path against the real PRODUCTION_POLICY. If
+        the program's owner id, owner login, status context or repository is
+        changed, this authorization stops being accepted and this test fails.
+        """
+        self.assertTrue(
+            authorization.protected_paths_changed(
+                authorization.PRODUCTION_POLICY,
+                self.snapshot.entries,
+            ),
+            "fixture no longer changes a path PRODUCTION_POLICY protects",
+        )
+        pr_url, description, pull_request, issue, statuses = (
+            self.pinned_identity_records(authorization.PRODUCTION_POLICY)
+        )
+        self.assertEqual(
+            authorization.verify_authorization(
+                authorization.PRODUCTION_POLICY,
+                root=self.root,
+                base=self.base,
+                head=self.head,
+                pr_number=self.pr_number,
+                pr_url=pr_url,
+                pull_request_record=pull_request,
+                issue_record=issue,
+                status_records=statuses,
+                snapshot=self.snapshot,
+            ),
+            (description, issue["html_url"]),
+        )
+
+    def test_every_pinned_identity_field_decides_the_verdict(self) -> None:
+        """The companion that stops the test above from passing vacuously.
+
+        Accepting the pinned identity only proves something if each field of it
+        is actually compared. One field at a time is moved to a neighbouring
+        value that is still a well-formed policy, and the same authorization
+        must then be refused.
+        """
+        for field, pinned in sorted(PINNED_AUTHORIZING_IDENTITY.items()):
+            with self.subTest(field=field):
+                neighbour = (
+                    pinned + 1 if isinstance(pinned, int) else f"{pinned}-neighbour"
+                )
+                self.assertNotEqual(neighbour, pinned)
+                policy = dataclasses.replace(
+                    authorization.PRODUCTION_POLICY,
+                    **{field: neighbour},
+                )
+                authorization.require_well_formed_policy(policy)
+                pr_url, _, pull_request, issue, statuses = (
+                    self.pinned_identity_records(policy)
+                )
+                with self.assertRaises(authorization.AuthorizationError):
+                    authorization.verify_authorization(
+                        policy,
+                        root=self.root,
+                        base=self.base,
+                        head=self.head,
+                        pr_number=self.pr_number,
+                        pr_url=pr_url,
+                        pull_request_record=pull_request,
+                        issue_record=issue,
+                        status_records=statuses,
+                        snapshot=self.snapshot,
+                    )
+
+    def test_authorization_description_is_byte_stable(self) -> None:
+        """Pins the two constants that are not identity but are equally silent.
+
+        The domain separator and the digest prefix decide what a published status
+        has to say, and changing either invalidates every status the owner has
+        already created. That direction is fail-closed rather than fail-open, so
+        it is not an identity hole — but nothing else notices it, and a
+        migration of the wire format should be a deliberate edit here rather
+        than a silent one over there. The inputs are synthetic and fixed so the
+        digest is a constant; recompute it only when the format is meant to
+        change.
+        """
+        snapshot = authorization.DiffSnapshot(
+            merge_base=GOLDEN_BASE,
+            entries=(
+                authorization.DiffEntry(
+                    status="M",
+                    path=GOLDEN_PATH,
+                    old_mode="100644",
+                    new_mode="100644",
+                    old_oid="3" * 40,
+                    new_oid="4" * 40,
+                ),
+            ),
+        )
+        self.assertIn(GOLDEN_PATH, authorization.PRODUCTION_POLICY.protected_paths)
+        self.assertEqual(
+            authorization.authorization_description(
+                authorization.PRODUCTION_POLICY,
+                root=self.root,
+                base=GOLDEN_BASE,
+                head=GOLDEN_HEAD,
+                pr_number=1200,
+                issue_number=1074,
+                snapshot=snapshot,
+            ),
+            GOLDEN_DESCRIPTION,
+        )
 
     def test_exact_owner_authorization_passes_on_repeat_reruns(self) -> None:
         expected = (
