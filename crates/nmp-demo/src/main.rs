@@ -242,7 +242,8 @@ fn main() {
                     identity: Identity::Active,
                     correlation: None,
                 })
-                .expect("engine is open just after construction"),
+                .expect("engine is open just after construction")
+                .statuses,
         );
     }
 

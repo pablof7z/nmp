@@ -870,7 +870,7 @@ enum Cmd {
     },
     /// #591: reattach by caller correlation token instead of a `ReceiptId`
     /// -- the door a client uses after a crash that happened before it
-    /// could durably record the id `publish_tracked` returned.
+    /// could durably record the id `publish` returned.
     ReattachByCorrelation {
         token: String,
         sender: FifoSender<WriteFact>,
@@ -1884,7 +1884,7 @@ mod receipt_delivery_lifecycle_tests {
     fn parked_write(handle: &Handle, keys: &Keys) -> ReceiptStream {
         handle.set_active_account(Some(keys.public_key()));
         handle
-            .publish_tracked(WriteIntent {
+            .publish(WriteIntent {
                 payload: WritePayload::Event(nmp_grammar::EventBuilder {
                     kind: Kind::TextNote,
                     tags: (vec![]).into_iter().collect(),
@@ -6581,22 +6581,18 @@ impl Handle {
         let _ = self.inbox.send(Cmd::Engine(EngineMsg::SetActivePubkey(pk)));
     }
 
-    /// Enqueue a write. Fire-and-forget: the returned `Receiver` streams
-    /// every `WriteFact` this intent ever reaches (ledger #9 — enqueue is
-    /// not converged; the FIRST value is never a terminal for a durable/
-    /// at-most-once intent. `Ephemeral` also yields receipt facts, but owns
-    /// no publish queue obligation or query-visible pending row. If no
-    /// pre-acceptance correlation id remains, this returns a typed error and
-    /// creates no receipt stream.
-    pub fn publish(&self, intent: WriteIntent) -> Result<FifoReceiver<WriteFact>, PublishError> {
-        self.publish_tracked(intent).map(|receipt| receipt.statuses)
-    }
-
-    /// Enqueue a write and expose its stable receipt id. This synchronous
-    /// round trip waits only for the local crash-atomic acceptance door,
-    /// never for signing, routing, network I/O, or ACKs. Correlation-id
-    /// exhaustion is returned before any stream or identity is fabricated.
-    pub fn publish_tracked(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
+    /// Enqueue a write. The returned [`ReceiptStream`] carries the stable
+    /// store-issued receipt id AND streams every `WriteFact` this intent
+    /// ever reaches (ledger #9 — enqueue is not converged; the FIRST value
+    /// is never a terminal for a durable/at-most-once intent).
+    /// `Ephemeral` also yields receipt facts, but owns no publish queue
+    /// obligation or query-visible pending row.
+    ///
+    /// This synchronous round trip waits only for the local crash-atomic
+    /// acceptance door, never for signing, routing, network I/O, or ACKs.
+    /// If no pre-acceptance correlation id remains, this returns a typed
+    /// error before any stream or identity is fabricated.
+    pub fn publish(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
         let (tx, rx) = fifo_channel();
         let registration = ReceiptDeliveryRegistration::new();
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -6668,7 +6664,7 @@ impl Handle {
     }
 
     /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably record the `ReceiptId` `publish_tracked` returned --
+    /// could durably record the `ReceiptId` `publish` returned --
     /// looked up by the caller's own correlation token instead. Otherwise
     /// identical to [`Self::reattach_receipt`] (same replay/attach
     /// behavior, same `ReceiptReattachment` outcome vocabulary) -- the

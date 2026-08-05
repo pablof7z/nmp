@@ -88,7 +88,7 @@ async fn an_app_declared_loopback_relay_is_reached_with_an_empty_allowlist() {
         .expect("a local signer registers");
 
     let tracked = engine
-        .publish_tracked(WriteIntent {
+        .publish(WriteIntent {
             payload: note("reaching the relay this app declared"),
             routing: WriteRouting::Auto,
             identity: Identity::Active,

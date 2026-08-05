@@ -154,9 +154,7 @@ impl Groups {
             WritePayload::Event(contextualized),
             Identity::Explicit(author),
         );
-        engine
-            .publish_tracked(intent)
-            .map_err(GroupPublishError::Engine)
+        engine.publish(intent).map_err(GroupPublishError::Engine)
     }
 
     /// The one shape a group write has. `Explicit(every host)` comes from the

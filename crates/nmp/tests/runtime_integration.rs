@@ -458,7 +458,8 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             identity: Identity::Active,
             correlation: None,
         })
-        .expect("receipt id allocation");
+        .expect("receipt id allocation")
+        .statuses;
 
     assert!(
         wait_for_status(&receipt_rx, Duration::from_secs(10), |s| matches!(
@@ -1301,7 +1302,7 @@ fn boot_catches_up_past_due_expiry() {
 
 /// Structural grep-guard (M3 plan §5 test 14, widened by M4/M5 and #3 U4):
 /// `Handle`'s public surface is the original verbs plus diagnostics and the
-/// the stable-receipt operations (`publish_tracked`/`reattach_receipt` plus
+/// the stable-receipt operations (`publish`/`reattach_receipt` plus
 /// cursor-based `reattach_receipt_from` for finite replay pages) and the
 /// governed sign-only operation's blocking/completion doors -- no `relays:`
 /// parameter, no open-REQ method anywhere on it
@@ -1341,7 +1342,6 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "observe_diagnostics",
         "publish",
         "publish_queue_entries",
-        "publish_tracked",
         "reattach_by_correlation",
         "reattach_receipt",
         "reattach_receipt_from",
@@ -1407,7 +1407,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
     .expect("test engine thread construction");
     handle.set_active_account(Some(keys.public_key()));
     let tracked = handle
-        .publish_tracked(WriteIntent {
+        .publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
                 kind: Kind::TextNote,
                 tags: (vec![]).into_iter().collect(),
@@ -1495,7 +1495,7 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
     handle.set_active_account(Some(keys.public_key()));
 
     let original = handle
-        .publish_tracked(WriteIntent {
+        .publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
                 kind: Kind::TextNote,
                 tags: (vec![]).into_iter().collect(),
@@ -1515,7 +1515,7 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
     );
 
     let retry = handle
-        .publish_tracked(WriteIntent {
+        .publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
                 kind: Kind::TextNote,
                 tags: (vec![]).into_iter().collect(),

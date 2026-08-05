@@ -469,7 +469,7 @@ impl NmpEngine {
     /// same shape: a typed `FfiError` and no receipt id.
     pub fn publish(&self, intent: FfiWriteIntent) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let write_intent = write_intent_from_ffi(intent)?;
-        let receipt = self.engine.publish_tracked(write_intent)?;
+        let receipt = self.engine.publish(write_intent)?;
         Ok(NmpReceiptStream::new(receipt))
     }
 
@@ -2450,7 +2450,7 @@ mod tests {
             );
             let receipt = engine
                 .engine
-                .publish_tracked(nmp::WriteIntent {
+                .publish(nmp::WriteIntent {
                     payload: nmp::WritePayload::Event(nmp::EventBuilder {
                         kind: unsigned.kind,
                         tags: unsigned.tags.iter().cloned().collect(),

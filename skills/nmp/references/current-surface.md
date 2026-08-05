@@ -22,7 +22,7 @@ Mechanism crates and generated `NMPFFI`/`uniffi.nmp_ffi` bindings are implementa
 | Explicit `Demand` source/cache | yes | `observe(NMPDemand)` | `observe(NMPDemand)` |
 | Derived inner descriptor | full `Demand` | full `NMPDemand` | full `NMPDemand` |
 | Query rows + scoped acquisition evidence | yes | yes | yes |
-| Publish and stream receipt facts | `publish`, `publish_tracked` | `publish` returns `Receipt` | `publish` returns `Receipt` |
+| Publish and stream receipt facts | `publish` returns `ReceiptStream` | `publish` returns `Receipt` | `publish` returns `Receipt` |
 | Durable receipt reattachment | `reattach_receipt` | `reattachReceipt` | `reattachReceipt` |
 | Persistent store reset | `reset_persistent_store` | `resetPersistentStore` | `resetPersistentStore` |
 | Account add/activate/read | yes | yes | yes |
