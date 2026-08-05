@@ -552,9 +552,12 @@ fn accepted_explicit_route_ignores_later_directory_fact_across_restart() {
                 receipt,
                 WriteFact::Destinations {
                     relays,
-                    complete: true
+                    complete: true,
+                    awaiting_author_routes,
                 }
-            ) if *receipt == id && relays == &BTreeSet::from([chosen.clone()])
+            ) if *receipt == id
+                && relays == &BTreeSet::from([chosen.clone()])
+                && awaiting_author_routes.is_empty()
         )));
         id
     };

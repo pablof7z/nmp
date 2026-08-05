@@ -128,7 +128,8 @@ async fn not_reported_unroutable(w: &mut NmpWorld) {
                 s,
                 WriteFact::Destinations {
                     relays,
-                    complete: true
+                    complete: true,
+                    ..
                 } if relays.is_empty()
             ) || matches!(s, WriteFact::Outcome(WriteOutcome::NoDestination))
         })

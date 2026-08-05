@@ -152,9 +152,14 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
             WriteFact::Signing(SigningState::AwaitingSigner {
                 pubkey: keys.public_key()
             }),
+            // The park names nobody, and that is the truthful answer: this
+            // write is held on its SIGNER, so no route lookup is outstanding
+            // for it to be waiting on. The reason it is stuck is the signing
+            // fact above it, not a route.
             WriteFact::Destinations {
                 relays: BTreeSet::new(),
-                complete: false
+                complete: false,
+                awaiting_author_routes: BTreeSet::new(),
             },
         ]
     );
@@ -287,9 +292,14 @@ fn double_submit_same_token_across_a_restart_mints_no_second_obligation() {
             WriteFact::Signing(SigningState::InFlight {
                 pubkey: keys.public_key()
             }),
+            // The park names nobody, and that is the truthful answer: this
+            // write is held on its SIGNER, so no route lookup is outstanding
+            // for it to be waiting on. The reason it is stuck is the signing
+            // fact above it, not a route.
             WriteFact::Destinations {
                 relays: BTreeSet::new(),
-                complete: false
+                complete: false,
+                awaiting_author_routes: BTreeSet::new(),
             },
         ],
         "the retry's sink must see the ORIGINAL obligation's replayed facts, \

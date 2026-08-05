@@ -148,8 +148,13 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         // resolution has not exhausted its knowledge.
         XCTAssertTrue(
             statuses.contains { status in
-                if case .destinations(let relays, let complete) = status {
-                    return !complete && relays.contains { isSameRelay($0, relay.relayURL) }
+                if case .destinations(let relays, let complete, let awaiting) = status {
+                    // The park's reason crosses too: routing stays open
+                    // because this author's own routes were never taught to
+                    // the router, and the fact names that author.
+                    return !complete
+                        && relays.contains { isSameRelay($0, relay.relayURL) }
+                        && awaiting == [account.publicKey]
                 }
                 return false
             },

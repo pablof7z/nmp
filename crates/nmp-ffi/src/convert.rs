@@ -1685,9 +1685,22 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteFact {
             relay: relay.to_string(),
             state: relay_state_to_ffi(state),
         },
-        GWriteStatus::Destinations { relays, complete } => FfiWriteFact::Destinations {
+        GWriteStatus::Destinations {
+            relays,
+            complete,
+            awaiting_author_routes,
+        } => FfiWriteFact::Destinations {
             relays: relays.iter().map(RelayUrl::to_string).collect(),
             complete: *complete,
+            // Hex, never bech32: an `npub` exists to be shown to a person or
+            // pasted by one, and this crosses to an app that will decide what
+            // to do with the key (`conventions/bech32-boundary.md`). The
+            // BTreeSet's key order survives into the vector, so two reads of
+            // the same park compare equal.
+            awaiting_author_routes: awaiting_author_routes
+                .iter()
+                .map(PublicKey::to_hex)
+                .collect(),
         },
         GWriteStatus::Outcome(outcome) => FfiWriteFact::Outcome {
             outcome: write_outcome_to_ffi(outcome),
@@ -1942,6 +1955,7 @@ mod write_fact_tests {
         let relay = RelayUrl::parse("wss://status.example").unwrap();
         let event_id = EventId::from_hex(&"00".repeat(32)).unwrap();
         let pubkey = nostr::Keys::generate().public_key();
+        let awaited = nostr::Keys::generate().public_key();
         let cases = vec![
             (
                 GWriteStatus::Signing(GSigningState::AwaitingSigner { pubkey }),
@@ -1984,20 +1998,24 @@ mod write_fact_tests {
                 GWriteStatus::Destinations {
                     relays: BTreeSet::from([relay.clone()]),
                     complete: false,
+                    awaiting_author_routes: BTreeSet::from([awaited]),
                 },
                 FfiWriteFact::Destinations {
                     relays: vec![relay.to_string()],
                     complete: false,
+                    awaiting_author_routes: vec![awaited.to_hex()],
                 },
             ),
             (
                 GWriteStatus::Destinations {
                     relays: BTreeSet::new(),
                     complete: true,
+                    awaiting_author_routes: BTreeSet::new(),
                 },
                 FfiWriteFact::Destinations {
                     relays: Vec::new(),
                     complete: true,
+                    awaiting_author_routes: Vec::new(),
                 },
             ),
             (
