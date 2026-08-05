@@ -285,7 +285,11 @@ grep -qF 'pub fn chat_reply(' crates/nmp-nipc7/src/lib.rs ||
 grep -qF 'chat_reply_points_with_e_and_never_q_or_h_or_previous_rows' \
   crates/nmp-nipc7/src/lib.rs ||
   fail "C7 e-reply falsifier is missing"
-retired_c7=$(grep -RInE 'compose_chat_reply|composeChatReply|ChatReply\b|reply_uses_q_and_no_e_p_h_or_previous_rows' \
+# Bounded with explicit character classes rather than `\b`, which BSD grep
+# does not honour in ERE: the surviving verb IS spelled `chatReply` in Swift
+# and Kotlin, and an unbounded pattern flags it as its own tombstone.
+retired_c7=$(grep -RInE \
+  'compose_chat_reply|composeChatReply|(^|[^A-Za-z0-9_])ChatReply([^A-Za-z0-9_]|$)|reply_uses_q_and_no_e_p_h_or_previous_rows' \
   crates/ Packages/ skills/ tools/ || true)
 if [[ -n $retired_c7 ]]; then
   printf '%s\n' "$retired_c7"

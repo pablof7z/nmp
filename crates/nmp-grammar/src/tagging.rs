@@ -942,6 +942,29 @@ mod tests {
                 "a direct reply to the root names no separate parent"
             );
         }
+
+        // Case 3 is load-bearing and this is where it earns its keep. With
+        // `e` rows but NO `"root"` marker, the `"reply"`-marked row names the
+        // ROOT -- it is the only row on the event that claims a thread
+        // position at all, and the unmarked sibling is a plain mention. Read
+        // as NIP-10 positional instead (first is root), the mention becomes
+        // the thread and every reply below this one is filed under the wrong
+        // conversation: amethyst#629 from the reading side.
+        let mention = id(9);
+        let no_root_marker = signed(
+            1,
+            vec![
+                Tag::parse(["e", &mention.to_hex()]).unwrap(),
+                Tag::parse(["e", &root.to_hex(), "", "reply"]).unwrap(),
+            ],
+        );
+        let position = ThreadPosition::read(&no_root_marker);
+        assert_eq!(
+            position.root.as_ref().and_then(|r| r.event_id),
+            Some(root),
+            "the reply-marked row names the root when nothing is marked root"
+        );
+        assert_eq!(position.parent, None);
     }
 
     /// An event with no `e` rows IS the root, certainly -- and a reply to it
