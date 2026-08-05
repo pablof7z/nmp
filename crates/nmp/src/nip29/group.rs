@@ -63,6 +63,7 @@ use crate::error::EngineError;
 use crate::runtime::ReceiptStream;
 use crate::LiveQuery;
 use nmp_nip29::GroupContextError;
+use nmp_nip29::GroupMetadataEdit;
 use nmp_nip29::GroupRecord;
 
 /// Why a group publication never reached the publish door, or what the door
@@ -322,16 +323,21 @@ impl Group {
         self.publish(engine, author, nmp_nip29::remove_user(pubkey))
     }
 
-    /// kind:9002 -- set the group's display fields. An omitted field emits no
-    /// tag at all, so it is left untouched rather than cleared.
+    /// kind:9002 -- state part of the group's metadata (#1282).
+    ///
+    /// Composes NIP-29's own 9002 rows and invents none: `name`, `about` and
+    /// `picture`, plus the `public`/`private` and `open`/`closed` markers that
+    /// decide who may read the group and whether join requests are honoured.
+    /// An omitted field emits no tag at all, so it is left untouched rather
+    /// than cleared -- see [`GroupMetadataEdit`] for the rows deliberately not
+    /// composed, and why.
     pub fn edit_metadata(
         &self,
         engine: &Engine,
         author: PublicKey,
-        name: Option<&str>,
-        about: Option<&str>,
+        edit: GroupMetadataEdit,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::edit_metadata(name, about))
+        self.publish(engine, author, nmp_nip29::edit_metadata(edit))
     }
 
     /// kind:9005 -- delete one group-hosted event.
@@ -789,7 +795,14 @@ mod tests {
             ("remove_user", group.remove_user(&engine, me, subject)),
             (
                 "edit_metadata",
-                group.edit_metadata(&engine, me, Some("Photographers"), None),
+                group.edit_metadata(
+                    &engine,
+                    me,
+                    GroupMetadataEdit {
+                        name: Some("Photographers".to_string()),
+                        ..GroupMetadataEdit::default()
+                    },
+                ),
             ),
             (
                 "delete_event",

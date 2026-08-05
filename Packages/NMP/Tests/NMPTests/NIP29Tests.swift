@@ -144,7 +144,9 @@ final class NIP29Tests: XCTestCase {
             try group.removeUser(engine: engine, authorPubkeyHex: authorHex, pubkeyHex: subjectHex)
         )
         XCTAssertNoThrow(
-            try group.editMetadata(engine: engine, authorPubkeyHex: authorHex, name: "Photographers")
+            try group.editMetadata(
+                engine: engine, authorPubkeyHex: authorHex,
+                edit: NMPGroupMetadataEdit(name: "Photographers"))
         )
         XCTAssertNoThrow(
             try group.deleteEvent(engine: engine, authorPubkeyHex: authorHex, eventID: String(repeating: "09", count: 32))

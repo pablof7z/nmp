@@ -128,7 +128,7 @@ class NIP29Test {
             group.leaveRequest(engine, authorHex)
             group.addUser(engine, authorHex, subjectHex)
             group.removeUser(engine, authorHex, subjectHex)
-            group.editMetadata(engine, authorHex, name = "Photographers")
+            group.editMetadata(engine, authorHex, NMPGroupMetadataEdit(name = "Photographers"))
             group.deleteEvent(engine, authorHex, "09".repeat(32))
             group.createGroup(engine, authorHex)
             group.deleteGroup(engine, authorHex)
