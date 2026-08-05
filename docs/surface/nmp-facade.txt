@@ -1080,6 +1080,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::WindowLoad
 impl core::panic::unwind_safe::UnwindSafe for nmp::WindowLoad
 pub enum nmp::WriteFact
 pub nmp::WriteFact::Destinations
+pub nmp::WriteFact::Destinations::awaiting_author_routes: alloc::collections::btree::set::BTreeSet<nostr::key::public_key::PublicKey>
 pub nmp::WriteFact::Destinations::complete: bool
 pub nmp::WriteFact::Destinations::relays: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
 pub nmp::WriteFact::Outcome(nmp::WriteOutcome)
