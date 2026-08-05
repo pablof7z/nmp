@@ -645,6 +645,49 @@ pub struct FfiEventBuilder {
     pub created_at: Option<u64>,
 }
 
+/// One piece of a message body (`nmp_grammar::text!`'s arguments, as a native
+/// caller states them). [`crate::tagging::with_content`] renders the pieces
+/// into one string AND emits the rows that make each inline reference
+/// resolvable, so the two cannot be written apart.
+///
+/// Rust spells this as a variadic macro over a format string, which no FFI
+/// boundary has. A list of parts is the projection, and it is strictly
+/// stronger: a `{}` placeholder can outnumber its arguments and a token here
+/// cannot, because the part IS the argument.
+///
+/// **Bech32 appears in the rendered content and nowhere else** -- that is the
+/// user boundary (`docs/internals/conventions/bech32-boundary.md`). Every
+/// input here is the decoded form: [`Person::pubkey`](Self::Person) is 64-char
+/// hex like every other key at this boundary, and [`Quote`](Self::Quote) names
+/// the row the app is already holding. The `nostr:npub1…` / `nostr:nevent1…`
+/// a reader sees is produced from those, which is exactly the pairing this
+/// type exists to keep honest.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiContentPart {
+    /// Literal text, rendered verbatim and emitting no rows. A `nostr:` URI
+    /// typed into this arm is just characters: it emits nothing, because
+    /// nothing here parses it. Name the person or the event instead.
+    Text { text: String },
+    /// Somebody named inline. Renders `nostr:npub1…` and emits their `p` row.
+    ///
+    /// `relay` is where a reader should look for them, WHEN THE APP KNOWS --
+    /// a person's relay is an outbox fact (NIP-65) no schema crate can reach,
+    /// so this slot is left honestly empty rather than guessed. Stating one
+    /// reaches both halves: the rendering becomes `nostr:nprofile1…` carrying
+    /// that relay and the `p` row's hint cell carries the same value.
+    Person {
+        pubkey: String,
+        relay: Option<String>,
+    },
+    /// An event named inline. Renders `nostr:nevent1…` and emits its NIP-18
+    /// `q` row, hinted from the row's own verified sources.
+    ///
+    /// It is a QUOTE and never a thread reply: NIP-18's `q` exists precisely
+    /// so *"quote reposts are not pulled and included as replies in threads"*.
+    /// Replying is `chat_reply`/`reply_to`, which point with `e`.
+    Quote { target: FfiRow },
+}
+
 /// The event payload of a write intent (`nmp::WritePayload` mirror). VISION
 /// P: signing and publishing are ORTHOGONAL stages -- `Event` describes an
 /// event the engine stamps, freezes and signs internally ("the key lives in
