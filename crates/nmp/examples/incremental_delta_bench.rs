@@ -15,7 +15,6 @@ use nmp::mechanism::core::ObservationId;
 use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IndexedTagName};
-use nmp_router::FixtureRoutingFacts;
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 
