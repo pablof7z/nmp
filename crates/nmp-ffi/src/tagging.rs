@@ -24,7 +24,7 @@
 use crate::convert::{
     event_builder_from_ffi, parse_pubkey, parse_relay_url, signed_event_from_ffi, FfiError,
 };
-use crate::types::{FfiContentPart, FfiEventBuilder, FfiRow};
+use crate::types::{FfiContentPart, FfiEventBuilder, FfiReaction, FfiRow};
 use nmp::{At, InterpolatedContent, Mention};
 
 /// Rebuild the canonical row an app read from NMP. `sources` is the verified
@@ -160,6 +160,34 @@ pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
     let row = row_from_ffi(target)?;
     let hint = row.sources.iter().next().cloned();
     Ok(builder_to_ffi(nmp_nip18::repost(&row.event, hint)))
+}
+
+/// Compose a NIP-25 reaction to `target`.
+///
+/// #155's own report: NMP had no reaction door at all, so both consuming apps
+/// hand-wrote `kind: 7` with their own `["e", …]` and `["p", …]` rows. What
+/// that spelling loses is not the kind — it is everything the one tagging
+/// door fills: the relay hint, the author slot, the `k` row, and the fact that
+/// a reaction to a REPLY must name the reply rather than its thread root.
+///
+/// It composes SCHEMA ONLY. `reaction` is what the reaction says and never a
+/// raw content string, because NIP-25 assigns `+`, `-` and the empty string
+/// fixed meanings and a caller writing content by hand can mean one of them by
+/// accident.
+#[uniffi::export]
+pub fn react_to(target: FfiRow, reaction: FfiReaction) -> Result<FfiEventBuilder, FfiError> {
+    let reaction = match reaction {
+        FfiReaction::Like => nmp_nip25::Reaction::Like,
+        FfiReaction::Dislike => nmp_nip25::Reaction::Dislike,
+        FfiReaction::Emoji { emoji } => {
+            nmp_nip25::Reaction::emoji(emoji).map_err(|error| FfiError::InvalidReaction {
+                reason: error.to_string(),
+            })?
+        }
+    };
+    let row = row_from_ffi(target)?;
+    let hint = row.sources.iter().next().cloned();
+    Ok(builder_to_ffi(nmp_nip25::react(&row.event, hint, reaction)))
 }
 
 #[cfg(test)]
@@ -421,5 +449,93 @@ mod tests {
         )
         .expect_err("a malformed key refuses");
         assert!(matches!(err, FfiError::InvalidPublicKey { .. }), "{err:?}");
+    }
+
+    /// #155's own report, closed at the boundary it named: a native app
+    /// composes a reaction through NMP instead of hand-writing `kind: 7` with
+    /// its own `e` and `p` rows, and the door fills the hint, the author slot
+    /// and the `k` row an app-written pair never carried.
+    #[test]
+    fn a_native_reaction_is_kind_7_and_carries_what_the_one_door_fills() {
+        let target = row(1, vec![], &["wss://relay.example"]);
+        let target_id = target.id.clone();
+        let target_author = target.pubkey.clone();
+        let built = react_to(target, FfiReaction::Like).expect("a reaction composes");
+
+        assert_eq!(built.kind, 7);
+        assert_eq!(built.content, "+");
+        let e_row = built
+            .tags
+            .iter()
+            .find(|row| row[0] == "e")
+            .expect("a reaction points with e");
+        assert_eq!(e_row[1], target_id);
+        assert_eq!(e_row[2], "wss://relay.example");
+        assert_eq!(e_row[3], target_author);
+        assert!(built
+            .tags
+            .iter()
+            .any(|row| row[0] == "p" && row[1] == target_author));
+        assert!(built.tags.iter().any(|row| row[0] == "k" && row[1] == "1"));
+    }
+
+    /// The three readings NIP-25 defines, across the boundary. A caller never
+    /// writes the content bytes, so it cannot spell "like" by accident.
+    #[test]
+    fn the_native_reaction_vocabulary_is_nip25s_three_readings() {
+        let content = |reaction| {
+            react_to(row(1, vec![], &[]), reaction)
+                .expect("a reaction composes")
+                .content
+        };
+        assert_eq!(content(FfiReaction::Like), "+");
+        assert_eq!(content(FfiReaction::Dislike), "-");
+        assert_eq!(
+            content(FfiReaction::Emoji {
+                emoji: "🔥".into()
+            }),
+            "🔥"
+        );
+    }
+
+    /// NIP-25: *"There MUST be always an `e` tag set to the `id` of the event
+    /// that is being reacted to."* Reacting to a reply names the REPLY, so a
+    /// client tallying by the first `e` cannot credit the thread root with a
+    /// reaction nobody gave it.
+    #[test]
+    fn a_native_reaction_to_a_reply_names_the_reply_and_never_its_root() {
+        let root_id = nostr::EventId::from_slice(&[6; 32]).unwrap().to_hex();
+        let reply = row(
+            1,
+            vec![vec![
+                "e".into(),
+                root_id.clone(),
+                String::new(),
+                "root".into(),
+            ]],
+            &[],
+        );
+        let reply_id = reply.id.clone();
+        let built = react_to(reply, FfiReaction::Like).expect("a reaction composes");
+        let e_rows: Vec<&Vec<String>> = built.tags.iter().filter(|row| row[0] == "e").collect();
+        assert_eq!(e_rows.len(), 1, "exactly one e row: {e_rows:?}");
+        assert_eq!(e_rows[0][1], reply_id);
+    }
+
+    /// Both refusals reach the boundary as typed synchronous errors: an empty
+    /// emoji is NIP-25's spelling of a LIKE, and a NIP-30 `:shortcode:` needs
+    /// a companion `emoji` row this door does not write.
+    #[test]
+    fn an_emoji_that_would_say_something_else_refuses_before_a_builder_exists() {
+        for emoji in ["", ":soapbox:"] {
+            let err = react_to(
+                row(1, vec![], &[]),
+                FfiReaction::Emoji {
+                    emoji: emoji.into(),
+                },
+            )
+            .expect_err("a reaction that would say something else refuses");
+            assert!(matches!(err, FfiError::InvalidReaction { .. }), "{err:?}");
+        }
     }
 }

@@ -277,6 +277,15 @@ pub enum FfiError {
     InvalidNip73 {
         reason: String,
     },
+    /// #155: an `FfiReaction::Emoji` failed `nmp_nip25::Reaction::emoji`'s
+    /// validation. Two states reach here, both of which would otherwise
+    /// publish a reaction whose content says something the caller did not:
+    /// the empty string, which NIP-25 reads as `+` and therefore as a LIKE,
+    /// and a NIP-30 `:shortcode:`, which needs a companion `emoji` row this
+    /// door does not write and would reach every reader as literal colons.
+    InvalidReaction {
+        reason: String,
+    },
     /// #1033 `FfiRelayScope::on` was called with no host at all
     /// (`nmp::nip29::RelayScopeError::EmptyRelaySet` mirror). A group must
     /// be hosted somewhere -- there is nothing to read from, nothing to
@@ -658,6 +667,7 @@ impl std::fmt::Display for FfiError {
                 write!(f, "invalid correlation token {got:?}: {reason}")
             }
             Self::InvalidNip73 { reason } => write!(f, "invalid NIP-73 external content id: {reason}"),
+            Self::InvalidReaction { reason } => write!(f, "invalid reaction: {reason}"),
             Self::EmptyRelayScope => {
                 write!(f, "a NIP-29 relay scope must name at least one host relay")
             }

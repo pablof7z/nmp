@@ -155,6 +155,70 @@ final class TaggingTests: XCTestCase {
         XCTAssertEqual(tags, [["q", quoted.id, "wss://chat.example.com", quoted.pubkey]])
     }
 
+    /// #155's own report, closed at the boundary it named: a native app
+    /// composes a reaction through NMP instead of hand-writing `kind: 7` with
+    /// its own `e` and `p` rows, and the door fills the hint, the author slot
+    /// and the `k` row an app-written pair never carried.
+    func testReactionIsKindSevenAndCarriesWhatTheOneDoorFills() throws {
+        let target = row(kind: 1, sources: ["wss://relay.example"])
+        guard case .event(let kind, let tags, let content, _) = try react(to: target, with: .like)
+        else {
+            return XCTFail("a reaction composes an ordinary builder payload")
+        }
+        XCTAssertEqual(kind, 7)
+        XCTAssertEqual(content, "+")
+
+        guard let eRow = tags.first(where: { $0[0] == "e" }) else {
+            return XCTFail("a reaction points with e")
+        }
+        XCTAssertEqual(eRow[1], target.id)
+        XCTAssertEqual(eRow[2], "wss://relay.example")
+        XCTAssertEqual(eRow[3], target.pubkey)
+        XCTAssertTrue(tags.contains { $0[0] == "p" && $0[1] == target.pubkey })
+        XCTAssertTrue(tags.contains { $0[0] == "k" && $0[1] == "1" })
+    }
+
+    /// The three readings NIP-25 defines. An app never writes the content
+    /// bytes, so it cannot spell "like" by accident.
+    func testTheReactionVocabularyIsNip25sThreeReadings() throws {
+        func content(_ reaction: Reaction) throws -> String {
+            guard case .event(_, _, let content, _) = try react(to: row(kind: 1), with: reaction)
+            else { return "<not a builder payload>" }
+            return content
+        }
+        XCTAssertEqual(try content(.like), "+")
+        XCTAssertEqual(try content(.dislike), "-")
+        XCTAssertEqual(try content(.emoji("🔥")), "🔥")
+    }
+
+    /// NIP-25 says there MUST always be an `e` tag set to the id of the event
+    /// being reacted to, so reacting to a reply names the REPLY -- a client
+    /// tallying by the first `e` cannot credit the thread root with a reaction
+    /// nobody gave it.
+    func testReactingToAReplyNamesTheReplyAndNeverItsRoot() throws {
+        let rootID = String(repeating: "f", count: 64)
+        let reply = row(kind: 1, tags: [["e", rootID, "", "root"]])
+        guard case .event(_, let tags, _, _) = try react(to: reply, with: .like) else {
+            return XCTFail("a reaction composes an ordinary builder payload")
+        }
+        let eRows = tags.filter { $0[0] == "e" }
+        XCTAssertEqual(eRows.count, 1)
+        XCTAssertEqual(eRows[0][1], reply.id)
+    }
+
+    /// Both refusals are typed and synchronous: an empty emoji is NIP-25's
+    /// spelling of a LIKE, and a NIP-30 `:shortcode:` needs a companion `emoji`
+    /// row this door does not write.
+    func testAnEmojiThatWouldSaySomethingElseRefuses() throws {
+        for emoji in ["", ":soapbox:"] {
+            XCTAssertThrowsError(try react(to: row(kind: 1), with: .emoji(emoji))) {
+                guard case NMPError.invalidReaction = $0 else {
+                    return XCTFail("expected a typed reaction refusal, got \($0)")
+                }
+            }
+        }
+    }
+
     /// A malformed key is a typed refusal; nothing partial escapes.
     func testAMalformedNamedKeyRefuses() throws {
         XCTAssertThrowsError(try chat().withContent([.person(pubkey: "not-a-key", relay: nil)])) {

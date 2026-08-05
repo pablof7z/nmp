@@ -18,9 +18,11 @@ package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiContentPart
 import uniffi.nmp_ffi.FfiEventBuilder
+import uniffi.nmp_ffi.FfiReaction
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.chat as ffiChat
 import uniffi.nmp_ffi.chatReply as ffiChatReply
+import uniffi.nmp_ffi.reactTo as ffiReactTo
 import uniffi.nmp_ffi.replyTo as ffiReplyTo
 import uniffi.nmp_ffi.repost as ffiRepost
 import uniffi.nmp_ffi.withContent as ffiWithContent
@@ -160,3 +162,53 @@ fun chatReply(target: Row): WritePayload =
  * reposted. A caller never picks a kind.
  */
 fun repost(target: Row): WritePayload = nmpRethrowing { ffiRepost(target.toFfi()) }.toPayload()
+
+/**
+ * What a NIP-25 reaction says.
+ *
+ * Not a string, because NIP-25 assigns fixed meanings to fixed bytes: content
+ * of `+` *or the empty string* MUST be read as a like, and `-` MUST be read as
+ * a dislike. An app writing content by hand can therefore spell "like" three
+ * ways, and can spell it by accident when an emoji picker returns nothing.
+ * These are the spec's own three readings and there is no fourth.
+ */
+sealed interface Reaction {
+    /** Rendered `+`. */
+    data object Like : Reaction
+
+    /** Rendered `-`. */
+    data object Dislike : Reaction
+
+    /**
+     * An emoji, which NIP-25 says SHOULD NOT be read as a like or a dislike.
+     *
+     * Validated by [react]: the empty string throws, because NIP-25 reads it
+     * as a like, and a NIP-30 `:shortcode:` throws, because it needs a
+     * companion `emoji` row this door does not write and would otherwise reach
+     * every reader as literal colons.
+     */
+    data class Emoji(val emoji: String) : Reaction
+}
+
+internal fun Reaction.toFfi(): FfiReaction =
+    when (this) {
+        is Reaction.Like -> FfiReaction.Like
+        is Reaction.Dislike -> FfiReaction.Dislike
+        is Reaction.Emoji -> FfiReaction.Emoji(emoji)
+    }
+
+/**
+ * Compose a NIP-25 reaction to [target].
+ *
+ * NMP had no reaction door at all, so both consuming apps hand-wrote `kind: 7`
+ * with their own `["e", ...]` and `["p", ...]` rows (#155). What that spelling
+ * loses is not the kind -- it is everything this door fills: the relay hint NMP
+ * actually observed, the author slot, the `k` row naming what was reacted to,
+ * and the fact that a reaction to a REPLY must name the reply rather than its
+ * thread root, so a client tallying by the first `e` cannot credit the root
+ * with a reaction nobody gave it.
+ *
+ * It composes SCHEMA ONLY -- no routing, no identity, no `h` row.
+ */
+fun react(target: Row, reaction: Reaction): WritePayload =
+    nmpRethrowing { ffiReactTo(target.toFfi(), reaction.toFfi()) }.toPayload()

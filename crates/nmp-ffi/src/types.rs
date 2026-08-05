@@ -688,6 +688,31 @@ pub enum FfiContentPart {
     Quote { target: FfiRow },
 }
 
+/// What a NIP-25 reaction SAYS (`nmp_nip25::Reaction` mirror, #155).
+///
+/// Not a string, because NIP-25 assigns fixed meanings to fixed bytes: *"A
+/// reaction with `content` set to `+` or an empty string MUST be interpreted
+/// as a 'like' or 'upvote'. A reaction with `content` set to `-` MUST be
+/// interpreted as a 'dislike' or 'downvote'."* A caller passing content by
+/// hand can therefore spell "like" three ways, and can spell it by accident
+/// with an empty picker result. These are the spec's own three readings and
+/// there is no fourth.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiReaction {
+    /// Rendered `+`.
+    Like,
+    /// Rendered `-`.
+    Dislike,
+    /// An emoji, which NIP-25 says *"SHOULD NOT be interpreted as a 'like' or
+    /// 'dislike'"*. Validated on the way in: the empty string is refused
+    /// because NIP-25 reads it as `+`, and a NIP-30 `:shortcode:` is refused
+    /// because it needs a companion `emoji` row this door does not write.
+    /// Both arrive as a typed synchronous
+    /// [`crate::convert::FfiError::InvalidReaction`] before any builder
+    /// exists.
+    Emoji { emoji: String },
+}
+
 /// The event payload of a write intent (`nmp::WritePayload` mirror). VISION
 /// P: signing and publishing are ORTHOGONAL stages -- `Event` describes an
 /// event the engine stamps, freezes and signs internally ("the key lives in
