@@ -210,20 +210,32 @@ sealed class NMPError(message: String) : Exception(message) {
                 "owns that bound",
         )
 
-    /** #1033: `NMPGroup.validateContext` was given an event carrying no `h`
-     * tag naming any group at all. */
-    data class GroupContextMissing(val expected: String) :
-        NMPError("event carries no h tag; expected group $expected")
+    /** #1281: `NMPRelayScope.groups` was given no group id at all. An event
+     * with no `h` row is not in a group, so there is nothing to
+     * contextualize and no honest route to mint. */
+    object EmptyGroupSet :
+        NMPError(
+            "a group write must name at least one group; an event with no h row is not in a " +
+                "group at all",
+        )
 
-    /** #1033: an already-signed event's `h` tag names a different group than
-     * the one it was handed to. */
-    data class GroupContextMismatched(val found: String, val expected: String) :
-        NMPError("event's h tag $found does not match expected group $expected")
+    /** #1033/#1281: `NMPGroup.validateContext` was given an
+     * event carrying no `h` tag naming any group at all. `expected` is the
+     * whole set the door was asked for -- one id for an [NMPGroup], several
+     * for an [NMPGroups]. */
+    data class GroupContextMissing(val expected: List<String>) :
+        NMPError("event carries no h tag; expected groups $expected")
 
-    /** #1033: an already-signed event carried more than one distinct `h`
-     * tag, so which group it belongs to is ambiguous. */
-    data class GroupContextAmbiguous(val expected: String) :
-        NMPError("event carries more than one distinct h tag; expected exactly group $expected")
+    /** #1033/#1281: an already-signed event's `h` tags name a different SET
+     * of groups than the one it was handed to -- too few, too many, or the
+     * wrong ones. */
+    data class GroupContextMismatched(val found: List<String>, val expected: List<String>) :
+        NMPError("event's h tags name groups $found, expected groups $expected")
+
+    /** #1281: an already-signed event names the right groups but repeats one
+     * of them in a second `h` row, which is not a row the door would mint. */
+    data class GroupContextRepeated(val repeated: List<String>) :
+        NMPError("event names groups $repeated in more than one h row")
 
     /** #1245: a group content read named one of NIP-29's own relay-signed
      * group records. Those identify themselves a different way, so an
@@ -319,7 +331,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.GroupContextMissing -> GroupContextMissing(ffi.expected)
                 is FfiException.GroupContextMismatched ->
                     GroupContextMismatched(ffi.found, ffi.expected)
-                is FfiException.GroupContextAmbiguous -> GroupContextAmbiguous(ffi.expected)
+                is FfiException.GroupContextRepeated -> GroupContextRepeated(ffi.repeated)
+                is FfiException.EmptyGroupSet -> EmptyGroupSet
                 is FfiException.GroupRecordsNotContextScoped ->
                     GroupRecordsNotContextScoped(ffi.kinds)
                 is FfiException.GroupNoRecordSelected -> GroupNoRecordSelected
