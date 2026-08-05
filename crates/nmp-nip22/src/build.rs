@@ -146,7 +146,7 @@ pub fn compose_comment_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::Nip73Target;
+    use nmp_nip73::Nip73;
     use nostr::{EventId, Keys};
 
     fn author() -> PublicKey {
@@ -162,7 +162,7 @@ mod tests {
     }
 
     fn podcast_root() -> CommentRoot {
-        CommentRoot::External(Nip73Target::podcast_episode_guid("guid-123").unwrap())
+        CommentRoot::External(Nip73::podcast_episode("guid-123").unwrap())
     }
 
     /// #572's exact required tag shape: top-level parent equal to the root

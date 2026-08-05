@@ -1,4 +1,4 @@
-// Typed NIP-22 comments over NIP-73 external targets (#572/#822). Demand,
+// Typed NIP-22 comments over NIP-73 external content ids (#572/#822/#1258). Demand,
 // decode, and composition are pure protocol-owned functions. Composition
 // returns NMP's ordinary WriteIntent; publication remains exclusively on
 // NMPEngine.publish. Mirrors NIP22.swift.
@@ -9,29 +9,38 @@ import uniffi.nmp_ffi.FfiCommentDecodeException
 import uniffi.nmp_ffi.FfiCommentParent
 import uniffi.nmp_ffi.FfiCommentRoot
 import uniffi.nmp_ffi.FfiDecodedComment
-import uniffi.nmp_ffi.FfiNip73Target
+import uniffi.nmp_ffi.FfiNip73
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.commentIntent as ffiCommentIntent
 import uniffi.nmp_ffi.commentThreadDemand as ffiCommentThreadDemand
 import uniffi.nmp_ffi.decodeComment as ffiDecodeComment
 
-/** A validated NIP-73 external-content target (`FfiNip73Target` mirror). */
-sealed class Nip73Target {
-    data class PodcastEpisodeGuid(val guid: String) : Nip73Target()
+/** A validated NIP-73 external content id (`FfiNip73` mirror).
+ *
+ * [Url] states the page a caller means; Rust normalises it (NIP-73's table:
+ * "URL, normalized, no fragment"), so a value read back from a decoded
+ * comment carries the canonical spelling rather than the one that was sent.
+ * Normalising here as well would be a second owner of one rule. */
+sealed class Nip73 {
+    data class PodcastEpisode(val guid: String) : Nip73()
 
-    data class General(val value: String, val kind: String) : Nip73Target()
+    data class Url(val url: String) : Nip73()
 
-    internal fun toFfi(): FfiNip73Target =
+    data class General(val value: String, val kind: String) : Nip73()
+
+    internal fun toFfi(): FfiNip73 =
         when (this) {
-            is PodcastEpisodeGuid -> FfiNip73Target.PodcastEpisodeGuid(guid)
-            is General -> FfiNip73Target.General(value, kind)
+            is PodcastEpisode -> FfiNip73.PodcastEpisode(guid)
+            is Url -> FfiNip73.Url(url)
+            is General -> FfiNip73.General(value, kind)
         }
 
     companion object {
-        internal fun from(ffi: FfiNip73Target): Nip73Target =
+        internal fun from(ffi: FfiNip73): Nip73 =
             when (ffi) {
-                is FfiNip73Target.PodcastEpisodeGuid -> PodcastEpisodeGuid(ffi.guid)
-                is FfiNip73Target.General -> General(ffi.value, ffi.kind)
+                is FfiNip73.PodcastEpisode -> PodcastEpisode(ffi.guid)
+                is FfiNip73.Url -> Url(ffi.url)
+                is FfiNip73.General -> General(ffi.value, ffi.kind)
             }
     }
 }
@@ -53,7 +62,7 @@ sealed class CommentRoot {
         val eventId: String? = null,
     ) : CommentRoot()
 
-    data class External(val target: Nip73Target) : CommentRoot()
+    data class External(val target: Nip73) : CommentRoot()
 
     internal fun toFfi(): FfiCommentRoot =
         when (this) {
@@ -68,7 +77,7 @@ sealed class CommentRoot {
                 is FfiCommentRoot.Event -> Event(ffi.eventId, ffi.kind, ffi.authorPubkey)
                 is FfiCommentRoot.Address ->
                     Address(ffi.authorPubkey, ffi.kind, ffi.identifier, ffi.eventId)
-                is FfiCommentRoot.External -> External(Nip73Target.from(ffi.target))
+                is FfiCommentRoot.External -> External(Nip73.from(ffi.target))
             }
     }
 }

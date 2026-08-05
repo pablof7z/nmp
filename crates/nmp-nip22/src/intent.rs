@@ -39,11 +39,11 @@ pub fn comment_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::Nip73Target;
+    use nmp_nip73::Nip73;
     use nostr::EventId;
 
     fn podcast_root() -> CommentRoot {
-        CommentRoot::External(Nip73Target::podcast_episode_guid("guid-1").unwrap())
+        CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap())
     }
 
     #[test]

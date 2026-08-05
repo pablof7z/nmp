@@ -162,10 +162,11 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidCorrelationToken(val got: String, val reason: String) :
         NMPError("invalid correlation token $got: $reason")
 
-    /** #572: an `Nip73Target` failed its constructor validation (an empty
-     * `I`/`K` cell). */
-    data class InvalidNip73Target(val reason: String) :
-        NMPError("invalid NIP-73 target: $reason")
+    /** #572/#1258: an `Nip73` failed its constructor validation (an empty
+     * `I`/`K` cell, or a `Url` that is not an absolute URL and therefore
+     * cannot be normalised). */
+    data class InvalidNip73(val reason: String) :
+        NMPError("invalid NIP-73 external content id: $reason")
 
     /** #973: a composer returned a compare-and-swap replaceable edit, which
      * has no wire form on purpose -- a replaceable precondition crosses this
@@ -308,7 +309,7 @@ sealed class NMPError(message: String) : Exception(message) {
                     RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
                 is FfiException.InvalidCorrelationToken ->
                     InvalidCorrelationToken(ffi.got, ffi.reason)
-                is FfiException.InvalidNip73Target -> InvalidNip73Target(ffi.reason)
+                is FfiException.InvalidNip73 -> InvalidNip73(ffi.reason)
                 is FfiException.ReplaceableEditHasNoWireForm -> ReplaceableEditHasNoWireForm
                 is FfiException.EmptyRelayScope -> EmptyRelayScope
                 is FfiException.GroupCallerSuppliedContext -> GroupCallerSuppliedContext

@@ -271,9 +271,10 @@ pub enum FfiError {
         got: String,
         reason: String,
     },
-    /// #572: an `FfiNip73Target` failed `nmp_nip22::Nip73Target`'s
-    /// constructor validation (an empty `I`/`K` cell).
-    InvalidNip73Target {
+    /// #572/#1258: an `FfiNip73` failed `nmp_nip73::Nip73`'s constructor
+    /// validation (an empty `I`/`K` cell, or a `Url` that is not an
+    /// absolute URL and therefore cannot be normalised).
+    InvalidNip73 {
         reason: String,
     },
     /// #1033 `FfiRelayScope::on` was called with no host at all
@@ -638,7 +639,7 @@ impl std::fmt::Display for FfiError {
             Self::InvalidCorrelationToken { got, reason } => {
                 write!(f, "invalid correlation token {got:?}: {reason}")
             }
-            Self::InvalidNip73Target { reason } => write!(f, "invalid NIP-73 target: {reason}"),
+            Self::InvalidNip73 { reason } => write!(f, "invalid NIP-73 external content id: {reason}"),
             Self::EmptyRelayScope => {
                 write!(f, "a NIP-29 relay scope must name at least one host relay")
             }

@@ -1,25 +1,33 @@
-// Typed NIP-22 comments over NIP-73 external targets (#572/#822). Demand,
+// Typed NIP-22 comments over NIP-73 external content ids (#572/#822/#1258). Demand,
 // decode, and composition are pure protocol-owned functions. Composition
 // returns NMP's ordinary `WriteIntent`; publication remains exclusively on
 // `NMPEngine.publish`.
 
 import NMPFFI
 
-/// A validated NIP-73 external-content target (`FfiNip73Target` mirror).
-public enum Nip73Target: Sendable, Hashable {
-    case podcastEpisodeGuid(guid: String)
+/// A validated NIP-73 external content id (`FfiNip73` mirror).
+///
+/// `.url` states the page a caller means; Rust normalises it (NIP-73's
+/// table: "URL, normalized, no fragment"), so a value read back from a
+/// decoded comment carries the canonical spelling rather than the one that
+/// was sent. Normalising here as well would be a second owner of one rule.
+public enum Nip73: Sendable, Hashable {
+    case podcastEpisode(guid: String)
+    case url(url: String)
     case general(value: String, kind: String)
 
-    func toFfi() -> FfiNip73Target {
+    func toFfi() -> FfiNip73 {
         switch self {
-        case .podcastEpisodeGuid(let guid): return .podcastEpisodeGuid(guid: guid)
+        case .podcastEpisode(let guid): return .podcastEpisode(guid: guid)
+        case .url(let url): return .url(url: url)
         case .general(let value, let kind): return .general(value: value, kind: kind)
         }
     }
 
-    init(_ ffi: FfiNip73Target) {
+    init(_ ffi: FfiNip73) {
         switch ffi {
-        case .podcastEpisodeGuid(let guid): self = .podcastEpisodeGuid(guid: guid)
+        case .podcastEpisode(let guid): self = .podcastEpisode(guid: guid)
+        case .url(let url): self = .url(url: url)
         case .general(let value, let kind): self = .general(value: value, kind: kind)
         }
     }
@@ -35,7 +43,7 @@ public enum CommentRoot: Sendable, Hashable {
     /// addressable, also include an `e`/`E` tag referencing its id"). `nil`
     /// remains a fully legal root.
     case address(authorPubkey: String, kind: UInt16, identifier: String, eventID: String?)
-    case external(target: Nip73Target)
+    case external(target: Nip73)
 
     func toFfi() -> FfiCommentRoot {
         switch self {
@@ -59,7 +67,7 @@ public enum CommentRoot: Sendable, Hashable {
                 authorPubkey: authorPubkey, kind: kind, identifier: identifier, eventID: eventId
             )
         case .external(let target):
-            self = .external(target: Nip73Target(target))
+            self = .external(target: Nip73(target))
         }
     }
 }

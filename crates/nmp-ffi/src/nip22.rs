@@ -13,11 +13,18 @@ use crate::convert::{
 };
 use crate::types::{FfiDemand, FfiRow, FfiWriteIntent};
 
-/// A validated NIP-73 external-content target (`nmp::nip22::Nip73Target`
-/// mirror).
+/// A validated NIP-73 external content id (`nmp::nip22::Nip73` mirror).
+///
+/// `Url` carries the CALLER'S spelling on the way in and the CANONICAL one
+/// on the way out: `nmp::nip22::Nip73::url` normalises it (NIP-73's table:
+/// *"URL, normalized, no fragment"*), so a native caller who sends
+/// `HTTPS://Example.COM/p#x` and then reads the id back sees
+/// `https://example.com/p`. Normalising on this side of the boundary too
+/// would be a second owner of one rule.
 #[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
-pub enum FfiNip73Target {
-    PodcastEpisodeGuid { guid: String },
+pub enum FfiNip73 {
+    PodcastEpisode { guid: String },
+    Url { url: String },
     General { value: String, kind: String },
 }
 
@@ -40,7 +47,7 @@ pub enum FfiCommentRoot {
         event_id: Option<String>,
     },
     External {
-        target: FfiNip73Target,
+        target: FfiNip73,
     },
 }
 
@@ -145,28 +152,26 @@ impl From<nmp::nip22::CommentDecodeError> for FfiCommentDecodeError {
     }
 }
 
-fn target_from_ffi(target: FfiNip73Target) -> Result<nmp::nip22::Nip73Target, FfiError> {
+fn target_from_ffi(target: FfiNip73) -> Result<nmp::nip22::Nip73, FfiError> {
+    let invalid = |err: nmp::nip22::Nip73Error| FfiError::InvalidNip73 {
+        reason: err.to_string(),
+    };
     match target {
-        FfiNip73Target::PodcastEpisodeGuid { guid } => {
-            nmp::nip22::Nip73Target::podcast_episode_guid(&guid).map_err(|err| {
-                FfiError::InvalidNip73Target {
-                    reason: err.to_string(),
-                }
-            })
+        FfiNip73::PodcastEpisode { guid } => {
+            nmp::nip22::Nip73::podcast_episode(&guid).map_err(invalid)
         }
-        FfiNip73Target::General { value, kind } => nmp::nip22::Nip73Target::general(&value, &kind)
-            .map_err(|err| FfiError::InvalidNip73Target {
-                reason: err.to_string(),
-            }),
+        FfiNip73::Url { url } => nmp::nip22::Nip73::url(&url).map_err(invalid),
+        FfiNip73::General { value, kind } => {
+            nmp::nip22::Nip73::general(&value, &kind).map_err(invalid)
+        }
     }
 }
 
-fn target_to_ffi(target: &nmp::nip22::Nip73Target) -> FfiNip73Target {
+fn target_to_ffi(target: &nmp::nip22::Nip73) -> FfiNip73 {
     match target {
-        nmp::nip22::Nip73Target::PodcastEpisodeGuid(guid) => {
-            FfiNip73Target::PodcastEpisodeGuid { guid: guid.clone() }
-        }
-        nmp::nip22::Nip73Target::General { value, kind } => FfiNip73Target::General {
+        nmp::nip22::Nip73::PodcastEpisode(guid) => FfiNip73::PodcastEpisode { guid: guid.clone() },
+        nmp::nip22::Nip73::Url(url) => FfiNip73::Url { url: url.clone() },
+        nmp::nip22::Nip73::General { value, kind } => FfiNip73::General {
             value: value.clone(),
             kind: kind.clone(),
         },
@@ -357,7 +362,7 @@ mod tests {
 
     fn podcast_root() -> FfiCommentRoot {
         FfiCommentRoot::External {
-            target: FfiNip73Target::PodcastEpisodeGuid {
+            target: FfiNip73::PodcastEpisode {
                 guid: "guid-1".to_string(),
             },
         }
