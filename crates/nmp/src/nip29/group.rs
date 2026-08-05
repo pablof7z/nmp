@@ -606,7 +606,10 @@ mod tests {
     fn the_mint_door_hands_back_a_fully_decided_intent_and_publishes_nothing() {
         let me = author();
         let intent = group([host(1), host(2)])
-            .intent(me, EventBuilder::new(Kind::from(9u16)).content("first light"))
+            .intent(
+                me,
+                EventBuilder::new(Kind::from(9u16)).content("first light"),
+            )
             .expect("a plain draft contextualizes");
 
         assert_eq!(
@@ -626,7 +629,11 @@ mod tests {
                     .iter()
                     .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
                     .collect();
-                assert_eq!(context.len(), 1, "exactly one context row, appended by the door");
+                assert_eq!(
+                    context.len(),
+                    1,
+                    "exactly one context row, appended by the door"
+                );
                 assert_eq!(context[0].as_slice()[1], GROUP);
             }
             _ => panic!("an unsigned draft must mint an Event payload"),
@@ -716,7 +723,10 @@ mod tests {
         let engine = engine();
         let token = "group-write-0001";
         let mut intent = group([host(1)])
-            .intent(author(), EventBuilder::new(Kind::from(9u16)).content("first light"))
+            .intent(
+                author(),
+                EventBuilder::new(Kind::from(9u16)).content("first light"),
+            )
             .expect("a plain draft contextualizes");
         intent.correlation = Some(
             nmp_grammar::CorrelationToken::try_from(token).expect("a short token is well-formed"),

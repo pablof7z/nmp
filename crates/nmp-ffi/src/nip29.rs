@@ -1090,7 +1090,10 @@ mod tests {
                 pubkey: author.clone()
             }
         );
-        assert_eq!(intent.correlation, None, "the token is the caller's to mint");
+        assert_eq!(
+            intent.correlation, None,
+            "the token is the caller's to mint"
+        );
         match &intent.payload {
             crate::types::FfiWritePayload::Event { builder } => {
                 assert_eq!(

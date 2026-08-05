@@ -2468,11 +2468,7 @@ pub(crate) fn write_intent_to_ffi(intent: GWriteIntent) -> FfiWriteIntent {
                 pubkey: event.pubkey.to_hex(),
                 created_at: event.created_at.as_secs(),
                 kind: event.kind.as_u16(),
-                tags: event
-                    .tags
-                    .iter()
-                    .map(|tag| tag.clone().to_vec())
-                    .collect(),
+                tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
                 content: event.content.clone(),
                 sig: event.sig.to_string(),
             },
