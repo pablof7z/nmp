@@ -1690,6 +1690,7 @@ fn write_outcome_to_ffi(outcome: &GWriteOutcome) -> FfiWriteOutcome {
             reason: match reason {
                 GNotSentReason::Cancelled => FfiNotSentReason::Cancelled,
                 GNotSentReason::Superseded => FfiNotSentReason::Superseded,
+                GNotSentReason::Removed => FfiNotSentReason::Removed,
             },
         },
         GWriteOutcome::Refused(reason) => FfiWriteOutcome::Refused {
@@ -2182,6 +2183,14 @@ mod write_fact_tests {
                 FfiWriteFact::Outcome {
                     outcome: FfiWriteOutcome::NotSent {
                         reason: FfiNotSentReason::Superseded,
+                    },
+                },
+            ),
+            (
+                GWriteStatus::Outcome(GWriteOutcome::NotSent(GNotSentReason::Removed)),
+                FfiWriteFact::Outcome {
+                    outcome: FfiWriteOutcome::NotSent {
+                        reason: FfiNotSentReason::Removed,
                     },
                 },
             ),

@@ -50,6 +50,27 @@
 //! inline doors return the ordinary [`ReceiptStream`] -- store-issued
 //! [`ReceiptId`](crate::ReceiptId) included -- for the same reason: a group
 //! write is a tracked write and always was.
+//!
+//! # A receipt proves the REQUEST was accepted, never that the group changed
+//!
+//! Every named 900x operation here is a client-signed request to a relay that
+//! decides for itself. The receipt says what the hosts said about that
+//! request: `Acked` means a host took the event, and nothing more. Whether
+//! the group's own state moved is a separate, relay-signed fact -- the
+//! 39000/39001/39002 records -- and it arrives on its own schedule or not at
+//! all.
+//!
+//! That is true of ALL of them, not of a subset: 9007 and 9002 are answered
+//! by a 39000, 9000/9001 by a 39001/39002, 9021/9022 by a 39002. Only an
+//! ordinary content write like a kind:9 chat message is one-phase, and it has
+//! no named verb here precisely because NIP-29 does not own its schema.
+//!
+//! So the receipt is never the place to look for "did it take". Watch the
+//! records ([`Group::observe`]) and ask the snapshot:
+//! [`GroupSnapshot::member_listing`](super::GroupSnapshot::member_listing)
+//! and [`admin_listing`](super::GroupSnapshot::admin_listing) answer it in
+//! the three ways NIP-29 admits, including the one a receipt structurally
+//! cannot express -- settled absence (#1234).
 
 use std::collections::BTreeSet;
 
@@ -189,6 +210,7 @@ impl Group {
             engine,
             self.hosts.clone(),
             BTreeSet::from([self.id.clone()]),
+            records,
             branches,
         )
     }

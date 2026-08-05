@@ -42,6 +42,14 @@ class EvidenceMappingTest {
                 FfiWriteFact.Outcome(FfiWriteOutcome.NotSent(FfiNotSentReason.SUPERSEDED)),
             ),
         )
+        // #1269: the app removed a parked entry. Folded onto `Cancelled` an
+        // app would go looking for a retained receipt that no longer exists.
+        assertEquals(
+            WriteFact.Outcome(WriteOutcome.NotSent(NotSentReason.Removed)),
+            WriteFact.from(
+                FfiWriteFact.Outcome(FfiWriteOutcome.NotSent(FfiNotSentReason.REMOVED)),
+            ),
+        )
         assertEquals(
             NMPWriteCancellationError.UnknownReceipt(42uL),
             NMPWriteCancellationError.from(FfiCancelWriteException.UnknownReceipt(42uL)),
