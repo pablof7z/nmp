@@ -21,6 +21,11 @@
 //! tag shape ("zero or more `e` or `a` tags") does not pin down what a typed
 //! signature should look like without inventing one, so it is left for
 //! whoever needs it to decide with a concrete falsifier in hand.
+//!
+//! Subgroups (NIP-29's `Subgroups` section, merged as nostr-protocol/nips#2319
+//! on 2026-07-16) are stated on [`create_group`] and nowhere else. That
+//! function documents the live probe behind the choice, including the one
+//! place NIP-29's prose and its only implementation disagree.
 
 use nmp_grammar::EventBuilder;
 use nostr::{Kind, PublicKey, Tag};
@@ -156,6 +161,12 @@ impl JoinAccess {
 /// composing them would emit rows that take no effect and read as though they
 /// had. Each is a one-line addition the day a consumer needs it and a
 /// falsifier exists for what a relay does with it.
+///
+/// `parent` is absent for that last reason specifically, and #1301 establishes
+/// it by probe rather than by inference: NIP-29's `Subgroups` section puts
+/// parenting on kind:9002, and the only relay that implements subgroups reads
+/// `parent` on kind:9007 and ignores it on kind:9002. It is therefore stated
+/// on [`create_group`], which documents the probe.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupMetadataEdit {
     /// The `name` row -- the group's display name.
@@ -216,9 +227,62 @@ pub fn delete_event(event_id: nostr::EventId) -> EventBuilder {
     EventBuilder::new(Kind::from(DELETE_EVENT)).tag(Tag::event(event_id))
 }
 
-/// kind:9007 -- create-group: bring a new group into existence at the host.
-pub fn create_group() -> EventBuilder {
-    EventBuilder::new(Kind::from(CREATE_GROUP))
+/// kind:9007 -- create-group: bring a new group into existence at the host,
+/// optionally as a SUBGROUP of one that already exists there (#1301).
+///
+/// `parent` is the parent's group id -- NIP-29's own `d` value, a relay-scoped
+/// string, never an `naddr` and never a key. `Some(id)` composes
+/// `["parent", "<id>"]`; `None` composes no row at all, never an empty one,
+/// and NIP-29 says exactly that means a root group: *"A group without a
+/// `parent` tag is a root group."*
+///
+/// # Why the row rides on kind:9007 and not on kind:9002
+///
+/// Subgroups are NIP-29 proper, not a proposal: nostr-protocol/nips#2319
+/// merged on 2026-07-16 and NIP-29 now carries a `Subgroups` section defining
+/// `parent` and `child`. So the row NAME below is the protocol's own and
+/// invents nothing.
+///
+/// Which KIND carries it is a different question, and there the spec and the
+/// only implementation disagree. NIP-29's prose says *"Parenting and promotion
+/// to root are triggered by a `kind:9002` (`edit-metadata`) event ... with the
+/// desired `parent` value"* and never mentions kind:9007. The relay both
+/// consumer applications actually use does the exact opposite. Probed live
+/// against `wss://nip29.f7z.io` on 2026-08-05:
+///
+/// * A kind:9007 carrying `["parent", "<id>"]` is HONOURED -- the new group's
+///   relay-authored kind:39000 comes back carrying `["parent", "<id>"]` and
+///   the parent's own kind:39000 gains `["child", "<new-id>"]`. It is also
+///   VALIDATED there: a parent that does not exist is refused with
+///   `restricted: parent group '<id>' doesn't exist`, and a signer who is not
+///   a parent admin with `restricted: must be an admin of the parent group`.
+/// * A kind:9002 carrying `["parent", "<other>"]` beside a `name` row is
+///   accepted and the `parent` row is IGNORED -- the name changes and the
+///   group stays under its original parent. A kind:9002 carrying `parent`
+///   ALONE is refused outright with `invalid moderation action: missing
+///   metadata tags`, which is the reference relay's own error for a 9002 in
+///   which it recognised no field: relay29's `moderation_actions.go` reads
+///   `name`, `picture`, `about`, `public`/`private` and `open`/`closed`, and
+///   contains no `parent` or `child` code at all.
+///
+/// So [`GroupMetadataEdit`] deliberately has no `parent` field. Composing one
+/// would emit a row that takes no effect while reading as though it had --
+/// the same reason `banner` and `livekit` are left out of the 9002 edit
+/// (#1287) -- except worse here, because an app would believe it had moved a
+/// group under a new parent when it had not. On the one relay that implements
+/// subgroups a group's parent cannot be restated after creation at all, which
+/// is what makes it identity rather than metadata.
+///
+/// This divergence is recorded rather than absorbed: if a relay ever honours
+/// `parent` on a 9002, the field is a one-line addition to
+/// [`GroupMetadataEdit`] the day a falsifier exists for it.
+pub fn create_group(parent: Option<&str>) -> EventBuilder {
+    let mut builder = EventBuilder::new(Kind::from(CREATE_GROUP));
+    if let Some(parent) = parent {
+        builder =
+            builder.tag(Tag::parse(["parent", parent]).expect("a two-value row is well-formed"));
+    }
+    builder
 }
 
 /// kind:9008 -- delete-group: remove a group from the host entirely.
@@ -455,9 +519,64 @@ mod tests {
     }
 
     #[test]
-    fn create_group_is_kind_9007_with_no_tags() {
-        assert_eq!(kind_of(create_group()), Kind::from(CREATE_GROUP));
-        assert!(rows(create_group()).is_empty());
+    fn create_group_at_the_root_is_kind_9007_with_no_tag_at_all() {
+        assert_eq!(kind_of(create_group(None)), Kind::from(CREATE_GROUP));
+        assert!(
+            rows(create_group(None)).is_empty(),
+            "a root group states no parent, and states it by carrying no row -- never an empty one"
+        );
+    }
+
+    /// The row rides on the kind:9007 CREATE because that is the one place a
+    /// relay implementing subgroups reads it. See [`create_group`] for the
+    /// probe that establishes this, and for why kind:9002 gets no such field.
+    #[test]
+    fn create_group_under_a_parent_carries_the_parent_row_on_the_create() {
+        assert_eq!(
+            kind_of(create_group(Some("darkroom"))),
+            Kind::from(CREATE_GROUP)
+        );
+        assert_eq!(
+            rows(create_group(Some("darkroom"))),
+            vec![vec!["parent".to_string(), "darkroom".to_string()]]
+        );
+    }
+
+    /// A parent is a group id -- NIP-29's own `d` value, a relay-scoped
+    /// string. It is never an `naddr` and never a key, so there is nothing to
+    /// decode and nothing this composer may re-spell: whatever the app names,
+    /// the row carries verbatim.
+    #[test]
+    fn the_parent_row_carries_the_group_id_verbatim() {
+        assert_eq!(
+            rows(create_group(Some("Photographers/Darkroom 2"))),
+            vec![vec![
+                "parent".to_string(),
+                "Photographers/Darkroom 2".to_string()
+            ]]
+        );
+    }
+
+    /// The 9002 edit door must NOT grow a parent field. The reference relay's
+    /// 9002 parser reads none, so composing one would emit a row that takes
+    /// no effect while reading as though it had -- and an app would believe it
+    /// had re-parented a group when it had not.
+    #[test]
+    fn a_metadata_edit_never_composes_a_parent_row() {
+        let rows = rows(edit_metadata(GroupMetadataEdit {
+            name: Some("Darkroom".to_string()),
+            about: Some("film only".to_string()),
+            picture: Some("https://cdn.example/p.png".to_string()),
+            read_access: Some(ReadAccess::Public),
+            join_access: Some(JoinAccess::Closed),
+        }));
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.first().map(String::as_str) == Some("parent")),
+            "parenting is stated on the kind:9007 create; a 9002 that carried the row would be \
+             ignored by the only relay implementing subgroups"
+        );
     }
 
     #[test]
