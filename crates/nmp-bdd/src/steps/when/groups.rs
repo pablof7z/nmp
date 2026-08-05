@@ -68,24 +68,6 @@ async fn publish_staged_draft(w: &mut NmpWorld) {
     .await;
 }
 
-#[when(regex = r#"^I publish that signed event through the group$"#)]
-async fn publish_staged_signed(w: &mut NmpWorld) {
-    publish_signed(w, None).await;
-}
-
-#[when(regex = r#"^I publish that signed event through the group "([^"]+)"$"#)]
-async fn publish_staged_signed_named(w: &mut NmpWorld, group_id: String) {
-    publish_signed(w, Some(&group_id)).await;
-}
-
-async fn publish_signed(w: &mut NmpWorld, group_id: Option<&str>) {
-    let event = w.signed_event();
-    w.group_operation(group_id, GroupCall::default(), move |group, engine| {
-        group.publish_signed(engine, event)
-    })
-    .await;
-}
-
 /// Constructing the identity and stopping. The engine is started first on
 /// purpose: an unstarted world contacts nothing for reasons that have nothing
 /// to do with the group.

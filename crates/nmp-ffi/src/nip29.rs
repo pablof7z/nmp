@@ -52,13 +52,10 @@ use nostr::RelayUrl;
 
 use crate::convert::{
     event_builder_from_ffi, filter_from_ffi, group_ids_binding_from_ffi, live_query_to_ffi,
-    parse_event_id, parse_pubkey, signed_event_from_ffi, subjects_binding_from_ffi,
-    write_intent_to_ffi, FfiError,
+    parse_event_id, parse_pubkey, signed_event_from_ffi, subjects_binding_from_ffi, FfiError,
 };
 use crate::facade::{NmpEngine, NmpReceiptStream};
-use crate::types::{
-    FfiBinding, FfiEventBuilder, FfiFilter, FfiLiveQuery, FfiSignedEvent, FfiWriteIntent,
-};
+use crate::types::{FfiBinding, FfiEventBuilder, FfiFilter, FfiLiveQuery, FfiSignedEvent};
 
 fn parse_host(host: String) -> Result<RelayUrl, FfiError> {
     RelayUrl::parse(&host).map_err(|_| FfiError::InvalidRelayUrl { got: host })
@@ -186,51 +183,18 @@ impl FfiGroup {
         Ok(())
     }
 
-    /// Mint the group-contextualized write intent for an unsigned draft and
-    /// publish NOTHING (`nmp::nip29::Group::intent` mirror, #1242).
+    /// Publish an unsigned draft into the group, as `author`
+    /// (`nmp::nip29::Group::publish` mirror) -- the group's ONE write door
+    /// (#1292).
     ///
-    /// The whole product of the write door: the `h` row is appended before
-    /// signing, the route is the scope's own hosts, and `author` is frozen as
-    /// an exact decoded pubkey rather than the active-account selector (#878).
-    /// Hand the result to `NmpEngine::publish` -- the SAME door every other
-    /// write takes -- when the app's own write path is ready for it.
-    ///
-    /// `correlation` on the returned intent is `None`, and filling it in is
-    /// how a group write becomes recoverable after a crash (#1244): an app
-    /// that persisted its own token before writing sets it here and finds the
-    /// write again with `NmpEngine::reattachByCorrelation`.
-    pub fn intent(
-        &self,
-        author: String,
-        builder: FfiEventBuilder,
-    ) -> Result<FfiWriteIntent, FfiError> {
-        let author = parse_pubkey(&author)?;
-        let builder = event_builder_from_ffi(builder)?;
-        Ok(write_intent_to_ffi(self.inner.intent(author, builder)?))
-    }
-
-    /// Mint the group-contextualized write intent for an ALREADY-SIGNED
-    /// event, and publish nothing (`nmp::nip29::Group::signed_intent`
-    /// mirror, #1242). The `h` it already carries is validated, never
-    /// appended or repaired -- see [`Self::validate_context`]'s doc for the
-    /// exact refusals, which now fire HERE, before any intent exists.
-    pub fn signed_intent(&self, event: FfiSignedEvent) -> Result<FfiWriteIntent, FfiError> {
-        let event = signed_event_from_ffi(
-            event.id,
-            event.pubkey,
-            event.created_at,
-            event.kind,
-            event.tags,
-            event.content,
-            event.sig,
-        )?;
-        Ok(write_intent_to_ffi(self.inner.signed_intent(event)?))
-    }
-
-    /// [`Self::intent`] handed straight to the one publish door
-    /// (`nmp::nip29::Group::publish` mirror) -- the inline spelling, for an
-    /// app with no separate submit stage. Returns the ORDINARY
+    /// The `h` row is appended before signing, the route is the scope's own
+    /// hosts, and `author` is frozen as an exact decoded pubkey rather than
+    /// the active-account selector (#878). Returns the ORDINARY
     /// [`NmpReceiptStream`], store-issued receipt id included.
+    ///
+    /// An app that needs a signed event WITHOUT publishing it asks the engine
+    /// for exactly that: `NmpEngine::signEvent` creates no write intent,
+    /// receipt or publication and hands back the signed event.
     pub fn publish(
         &self,
         engine: Arc<NmpEngine>,
@@ -240,26 +204,6 @@ impl FfiGroup {
         let author = parse_pubkey(&author)?;
         let builder = event_builder_from_ffi(builder)?;
         let receipts = self.inner.publish(&engine.engine, author, builder)?;
-        Ok(NmpReceiptStream::new(receipts))
-    }
-
-    /// [`Self::signed_intent`] handed straight to the one publish door
-    /// (`nmp::nip29::Group::publish_signed` mirror).
-    pub fn publish_signed(
-        &self,
-        engine: Arc<NmpEngine>,
-        event: FfiSignedEvent,
-    ) -> Result<Arc<NmpReceiptStream>, FfiError> {
-        let event = signed_event_from_ffi(
-            event.id,
-            event.pubkey,
-            event.created_at,
-            event.kind,
-            event.tags,
-            event.content,
-            event.sig,
-        )?;
-        let receipts = self.inner.publish_signed(&engine.engine, event)?;
         Ok(NmpReceiptStream::new(receipts))
     }
 
@@ -1374,99 +1318,6 @@ mod tests {
                 outcome.is_ok(),
                 "{name} must reach the one publish door like every other group write"
             );
-        }
-    }
-
-    /// #1242 at the boundary: the mint door hands back the ordinary
-    /// [`FfiWriteIntent`] with every group decision already made, publishes
-    /// nothing, and the app's own crash-safe token then rides that intent
-    /// through the ONE general publish door -- which is what makes a group
-    /// write reattachable (#1244).
-    #[test]
-    fn the_mint_door_projects_an_intent_the_general_publish_door_takes() {
-        let engine =
-            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
-        let author = nostr::Keys::generate().public_key().to_hex();
-        let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
-        let group = scope.group("photographers".to_string());
-
-        let mut intent = group
-            .intent(
-                author.clone(),
-                FfiEventBuilder {
-                    kind: 9,
-                    tags: vec![],
-                    content: "first light".to_string(),
-                    created_at: None,
-                },
-            )
-            .expect("a plain draft contextualizes");
-
-        assert_eq!(
-            intent.routing,
-            crate::types::FfiWriteRouting::Explicit {
-                relays: vec![host(1), host(2)]
-            },
-            "the route is minted by the group, never spelled by the app"
-        );
-        assert_eq!(
-            intent.identity,
-            crate::types::FfiIdentity::Explicit {
-                pubkey: author.clone()
-            }
-        );
-        assert_eq!(
-            intent.correlation, None,
-            "the token is the caller's to mint"
-        );
-        match &intent.payload {
-            crate::types::FfiWritePayload::Event { builder } => {
-                assert_eq!(
-                    builder
-                        .tags
-                        .iter()
-                        .filter(|row| row.first().map(String::as_str) == Some("h"))
-                        .collect::<Vec<_>>(),
-                    vec![&vec!["h".to_string(), "photographers".to_string()]],
-                    "exactly one context row, appended by the door"
-                );
-            }
-            other => panic!("an unsigned draft must mint an Event payload, got {other:?}"),
-        }
-
-        intent.correlation = Some("group-write-0001".to_string());
-        let receipt = engine
-            .publish(intent)
-            .expect("the one publish door takes a group-minted intent");
-        let reattached = engine
-            .reattach_by_correlation("group-write-0001".to_string())
-            .expect("the token lookup door answers");
-        assert_eq!(
-            reattached.receipt_id,
-            Some(receipt.id()),
-            "the app's own token must recover the very receipt the group write was accepted as"
-        );
-        engine.shutdown();
-    }
-
-    /// The signed mint door refuses every ill-scoped event at the boundary,
-    /// INCLUDING an event claiming two groups -- the asymmetric hole a real
-    /// consumer had left open in its own hand-rolled check.
-    #[test]
-    fn the_signed_mint_door_refuses_an_event_claiming_two_groups() {
-        let keys = nostr::Keys::generate();
-        let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
-        let group = scope.group("photographers".to_string());
-        let ambiguous = nostr::EventBuilder::new(nostr::Kind::from(9u16), "content")
-            .tag(nostr::Tag::parse(["h", "photographers"]).unwrap())
-            .tag(nostr::Tag::parse(["h", "darkroom"]).unwrap())
-            .sign_with_keys(&keys)
-            .expect("a well-formed draft signs");
-        match group.signed_intent(to_ffi_signed(&ambiguous)) {
-            Err(FfiError::GroupContextAmbiguous { expected }) => {
-                assert_eq!(expected, "photographers");
-            }
-            other => panic!("expected GroupContextAmbiguous, got {other:?}"),
         }
     }
 

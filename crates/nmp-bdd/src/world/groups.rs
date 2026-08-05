@@ -40,8 +40,7 @@ use nostr::{Event, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent
 use nmp::nip29::{self, Group, GroupContextError, GroupPublishError};
 use nmp::Engine;
 use nmp::ReceiptStream;
-use nmp_grammar::LiveQuery;
-use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
+use nmp_grammar::Filter;
 
 use super::budgets::EVENTUALLY;
 use super::observe::{FeedState, ReceiptState};
@@ -299,28 +298,6 @@ impl NmpWorld {
             .last()
             .cloned()
             .expect("nmp-bdd: no filter was staged")
-    }
-
-    /// `Given I am observing a live query for exactly that id` -- the
-    /// pre-signed path's point: the id is known BEFORE publication, so an
-    /// observation can be armed on it.
-    pub async fn observe_exact_id(&mut self, id: EventId, group_id: Option<&str>) {
-        self.ensure_started().await;
-        let host = self.relay_url(&self.group_host_name(group_id));
-        let demand = Demand::new(
-            Filter {
-                ids: Some(Binding::Literal(BTreeSet::from([id.to_hex()]))),
-                ..Filter::default()
-            },
-            SourceAuthority::Pinned(BTreeSet::from([host])),
-            AccessContext::Public,
-        )
-        .expect("nmp-bdd: a pinned id demand is constructible");
-        let (handle, rx) = self
-            .handle()
-            .subscribe(LiveQuery::single(demand))
-            .expect("nmp-bdd: id subscription construction");
-        self.feed = Some(FeedState::new(handle, rx));
     }
 
     // ---- writes: the one publish door, through the group ----------------
