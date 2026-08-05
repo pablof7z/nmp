@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use nmp::nip29::{
     self, Group, GroupAvailability, GroupIds, GroupMetadata, GroupObservation, GroupPredicate,
-    GroupRecord, GroupSnapshot, ListedRecord, ListedSubject, Listing, RelayScope,
+    GroupRecord, GroupSnapshot, ListedRecord, ListedSubject, RelayScope,
 };
 use nostr::RelayUrl;
 
@@ -611,98 +611,6 @@ pub struct FfiGroupSnapshot {
     pub per_host: Vec<FfiHostRecords>,
     /// The records the answering hosts do not agree on.
     pub disagreements: Vec<FfiGroupRecord>,
-    /// The records this observation ASKED for.
-    ///
-    /// Carried because settlement alone cannot tell "every host reconciled and
-    /// published no member list" apart from "no member list was ever
-    /// requested" -- [`FfiListing::Absent`] would be a lie in the second case.
-    /// [`member_listing`] and [`admin_listing`] consult it first (#1234).
-    pub selected: Vec<FfiGroupRecord>,
-}
-
-/// What a group's hosts currently PROVE about one subject's place in one of
-/// NIP-29's relay-signed lists (`nmp::nip29::Listing` mirror, #1234).
-///
-/// The distinction this carries across the boundary: a moderation receipt
-/// proves a host accepted a kind:9000/9001 REQUEST. Only the relay's own
-/// 39001/39002 proves the list changed, and only this says so.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
-pub enum FfiListing {
-    /// At least one host's own signed record names this subject, with the
-    /// hosts that named it and the role each of them wrote. Two hosts
-    /// disagreeing about a role produce two entries, never one invented
-    /// winner.
-    Named { entries: Vec<FfiListedSubject> },
-    /// Every host in the scope has ESTABLISHED this record and none names the
-    /// subject. Rests on settlement, never on a timer.
-    Absent,
-    /// Not every host has established this record yet, or the observation
-    /// never asked for it. Absence is not evidence here, and an app that
-    /// renders this as "not a member" is rendering a guess.
-    Unestablished,
-}
-
-/// What `snapshot`'s hosts prove about `subject`'s place in their kind:39002
-/// member lists (`nmp::nip29::GroupSnapshot::member_listing` mirror, #1234).
-///
-/// A free function rather than a method because [`FfiGroupSnapshot`] is a
-/// plain UniFFI RECORD -- there is no Rust value on the far side to hang a
-/// method on. It is the same idiom [`member_list_includes`] and [`any_of`]
-/// already use in this module.
-///
-/// The rule itself is not restated here: `nmp::nip29::Listing::of` is its one
-/// implementation, and this function only supplies the two facts it reads.
-/// `subject` is 64-char HEX, the module-wide `parse_pubkey` rule, and it is
-/// compared against the hex already on each entry -- so nothing is decoded
-/// and re-encoded to answer a question about identity.
-#[uniffi::export]
-pub fn member_listing(snapshot: FfiGroupSnapshot, subject: String) -> Result<FfiListing, FfiError> {
-    listing_over(
-        &snapshot,
-        FfiGroupRecord::Members,
-        &snapshot.members,
-        subject,
-    )
-}
-
-/// The kind:39001 half (`nmp::nip29::GroupSnapshot::admin_listing` mirror).
-#[uniffi::export]
-pub fn admin_listing(snapshot: FfiGroupSnapshot, subject: String) -> Result<FfiListing, FfiError> {
-    listing_over(&snapshot, FfiGroupRecord::Admins, &snapshot.admins, subject)
-}
-
-fn listing_over(
-    snapshot: &FfiGroupSnapshot,
-    record: FfiGroupRecord,
-    union: &[FfiListedSubject],
-    subject: String,
-) -> Result<FfiListing, FfiError> {
-    // Validated, then compared as hex: an unparseable pubkey is a typed
-    // refusal rather than a silent no-match that would read as `Absent`.
-    let subject = parse_pubkey(&subject)?.to_hex();
-    let named: Vec<FfiListedSubject> = union
-        .iter()
-        .filter(|listed| listed.pubkey == subject)
-        .cloned()
-        .collect();
-    // The `settled` half is one expression because `availability` is already
-    // documented as the minimum over EVERY host in the scope.
-    if !named.is_empty() {
-        return Ok(FfiListing::Named { entries: named });
-    }
-    // The `settled` half is one expression because `availability` is already
-    // the minimum over EVERY host in the scope. The DECISION it feeds is not
-    // restated here: an empty union is handed to `Listing::of`, the one
-    // implementation of the rule, and only its answer is projected.
-    let settled =
-        snapshot.selected.contains(&record) && snapshot.availability == FfiGroupAvailability::Ready;
-    Ok(
-        if matches!(Listing::of(Vec::new(), settled), Listing::Absent) {
-            FfiListing::Absent
-        } else {
-            FfiListing::Unestablished
-        },
-    )
 }
 
 /// Pull-based group-records observation handle (`nmp::nip29::GroupObservation`
@@ -803,12 +711,6 @@ pub(crate) fn snapshot_to_ffi(snapshot: &GroupSnapshot) -> FfiGroupSnapshot {
             .collect(),
         disagreements: snapshot
             .disagreements
-            .iter()
-            .copied()
-            .map(FfiGroupRecord::from)
-            .collect(),
-        selected: snapshot
-            .selected
             .iter()
             .copied()
             .map(FfiGroupRecord::from)
@@ -1031,7 +933,6 @@ mod tests {
                 },
             )]),
             disagreements: BTreeSet::from([GroupRecord::Metadata]),
-            selected: BTreeSet::from([GroupRecord::Metadata, GroupRecord::Admins]),
         };
 
         let projected = snapshot_to_ffi(&snapshot);
@@ -1059,138 +960,6 @@ mod tests {
         assert_eq!(projected.per_host.len(), 1);
         assert_eq!(projected.per_host[0].host, host(1));
         assert_eq!(projected.disagreements, vec![FfiGroupRecord::Metadata]);
-    }
-
-    /// #1234 at the boundary: the negative rests on SETTLEMENT, and the same
-    /// row set answers differently while one relay is still acquiring. This
-    /// is the distinction a moderation receipt structurally cannot make.
-    #[test]
-    fn absence_crosses_the_boundary_only_once_every_host_has_settled() {
-        let subject = nostr::Keys::generate().public_key().to_hex();
-        for unsettled in [
-            FfiGroupAvailability::Acquiring,
-            FfiGroupAvailability::CachedOnly,
-            FfiGroupAvailability::SourceUnavailable,
-        ] {
-            assert_eq!(
-                member_listing(
-                    ffi_snapshot(Vec::new(), unsettled, vec![FfiGroupRecord::Members]),
-                    subject.clone()
-                )
-                .expect("a well-formed pubkey"),
-                FfiListing::Unestablished,
-                "{unsettled:?} is not evidence of absence"
-            );
-        }
-        assert_eq!(
-            member_listing(
-                ffi_snapshot(
-                    Vec::new(),
-                    FfiGroupAvailability::Ready,
-                    vec![FfiGroupRecord::Members]
-                ),
-                subject
-            )
-            .expect("a well-formed pubkey"),
-            FfiListing::Absent
-        );
-    }
-
-    /// The hole settlement alone cannot see, carried across the boundary: an
-    /// observation that never asked for the member list is `Ready` with no
-    /// members, and claiming `Absent` there would be a lie. This is why
-    /// `selected` must cross too.
-    #[test]
-    fn a_record_the_observation_never_asked_for_never_crosses_as_absent() {
-        let subject = nostr::Keys::generate().public_key().to_hex();
-        assert_eq!(
-            member_listing(
-                ffi_snapshot(
-                    Vec::new(),
-                    FfiGroupAvailability::Ready,
-                    vec![FfiGroupRecord::Metadata]
-                ),
-                subject.clone()
-            )
-            .expect("a well-formed pubkey"),
-            FfiListing::Unestablished,
-            "no member list was ever requested; a settled metadata read proves nothing about it"
-        );
-        assert_eq!(
-            admin_listing(
-                ffi_snapshot(
-                    Vec::new(),
-                    FfiGroupAvailability::Ready,
-                    vec![FfiGroupRecord::Members]
-                ),
-                subject
-            )
-            .expect("a well-formed pubkey"),
-            FfiListing::Unestablished,
-            "the two lists settle independently and neither answers for the other"
-        );
-    }
-
-    /// Inclusion is evidence whatever the availability, and the role and
-    /// attribution each host wrote cross intact.
-    #[test]
-    fn inclusion_crosses_with_its_role_and_hosts_before_anything_settles() {
-        let subject = nostr::Keys::generate().public_key().to_hex();
-        let listing = member_listing(
-            ffi_snapshot(
-                vec![FfiListedSubject {
-                    pubkey: subject.clone(),
-                    role: Some("moderator".to_string()),
-                    hosts: vec![host(1)],
-                }],
-                FfiGroupAvailability::Acquiring,
-                vec![FfiGroupRecord::Members],
-            ),
-            subject,
-        )
-        .expect("a well-formed pubkey");
-        match listing {
-            FfiListing::Named { entries } => {
-                assert_eq!(entries.len(), 1);
-                assert_eq!(entries[0].role.as_deref(), Some("moderator"));
-                assert_eq!(entries[0].hosts, vec![host(1)]);
-            }
-            other => panic!("inclusion is evidence whatever the availability, got {other:?}"),
-        }
-    }
-
-    /// A malformed subject is a typed refusal, never a silent no-match that
-    /// would read to the app as a settled absence.
-    #[test]
-    fn a_malformed_subject_is_refused_rather_than_read_as_absent() {
-        match member_listing(
-            ffi_snapshot(
-                Vec::new(),
-                FfiGroupAvailability::Ready,
-                vec![FfiGroupRecord::Members],
-            ),
-            "not-a-pubkey".to_string(),
-        ) {
-            Err(FfiError::InvalidPublicKey { got }) => assert_eq!(got, "not-a-pubkey"),
-            other => panic!("expected InvalidPublicKey, got {other:?}"),
-        }
-    }
-
-    fn ffi_snapshot(
-        members: Vec<FfiListedSubject>,
-        availability: FfiGroupAvailability,
-        selected: Vec<FfiGroupRecord>,
-    ) -> FfiGroupSnapshot {
-        FfiGroupSnapshot {
-            id: "photographers".to_string(),
-            metadata: None,
-            admins: Vec::new(),
-            members,
-            availability,
-            per_host: Vec::new(),
-            disagreements: Vec::new(),
-            selected,
-        }
     }
 
     /// A literal `subjects` binding is validated as a pubkey, the same rule
