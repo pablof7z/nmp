@@ -1,4 +1,4 @@
-use super::canonical::{fold_seen_at, observation_key, observation_range, observation_relay_key};
+use super::canonical::{decode_observed_at, fold_seen_at};
 use super::commit::commit_prepared;
 use super::postings::Family;
 use super::postings_store::{scan_packed, PackedScan};
@@ -9,18 +9,16 @@ use super::publish_queue_codec::{
 };
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
-    persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX, ADDR_TOMBSTONES, COVERAGE,
-    EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META, EXPIRATION_INDEX,
-    INDEX_CARDINALITY, INDEX_CARDINALITY_META, INDEX_CARDINALITY_SAMPLE_KEY,
-    INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION, INDEX_CARDINALITY_VERSION_KEY,
-    POSTINGS_DEAD_KEYS, POSTINGS_DICTIONARIES, POSTINGS_META, POSTINGS_READY, POSTINGS_RUN_BY_MIN,
-    POSTINGS_RUN_META, POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
+    decode_relay_row, event_local_key, event_row_key, observation_bounds, observation_key,
+    observation_relay_key, persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX,
+    COVERAGE, EVENTS, EVENT_IDS, EXPIRATION_INDEX, POSTINGS_CATALOG, POSTINGS_READY,
+    POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
     PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS,
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
     PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS_BY_ADDR,
-    PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
-    SCHEMA_META, SCHEMA_VERSION, SCHEMA_VERSION_KEY, TOMBSTONES,
+    PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_IDS, SCHEMA_VERSION,
+    SCHEMA_VERSION_KEY, STORE_META, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -457,7 +455,7 @@ impl RedbStore {
             let mut has_schema_marker = false;
             for table in read_txn.list_tables()? {
                 table_count += 1;
-                has_schema_marker |= table.name() == SCHEMA_META.name();
+                has_schema_marker |= table.name() == STORE_META.name();
             }
             (table_count, has_schema_marker)
         };
@@ -466,8 +464,8 @@ impl RedbStore {
         if has_schema_marker {
             {
                 let read_txn = db.begin_read()?;
-                let schema_meta = read_txn.open_table(SCHEMA_META)?;
-                let version = schema_meta
+                let store_meta = read_txn.open_table(STORE_META)?;
+                let version = store_meta
                     .get(SCHEMA_VERSION_KEY)?
                     .map(|guard| guard.value());
                 // Exactly one accepted epoch. Anything else — older, newer, or
@@ -476,34 +474,6 @@ impl RedbStore {
                 // upgraded, adopted, or reset underneath them.
                 if version != Some(SCHEMA_VERSION) {
                     return Err(unsupported_schema(ownership.target(), version));
-                }
-                let cardinality_meta = read_txn.open_table(INDEX_CARDINALITY_META)?;
-                // Inside the current epoch these rows are an invariant, not a
-                // compatibility question: the create path writes both in the
-                // same transaction as the schema marker. A marker that says
-                // "current" while they disagree is corruption of the current
-                // epoch, and must stay typed as corruption so it is never
-                // mistaken for an old epoch or silently rebuilt.
-                if cardinality_meta
-                    .get(INDEX_CARDINALITY_VERSION_KEY)?
-                    .map(|guard| guard.value())
-                    != Some(INDEX_CARDINALITY_VERSION)
-                {
-                    return Err(redb::Error::Corrupted(
-                        "current schema is missing its index-cardinality epoch".to_owned(),
-                    )
-                    .into());
-                }
-                let cardinality_sample_meta = read_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
-                if cardinality_sample_meta
-                    .get(INDEX_CARDINALITY_SAMPLE_KEY)?
-                    .map(|value| value.value().len())
-                    != Some(32)
-                {
-                    return Err(redb::Error::Corrupted(
-                        "current schema is missing its cardinality sample key".to_owned(),
-                    )
-                    .into());
                 }
                 let publish_queue_meta = read_txn.open_table(PUBLISH_QUEUE_META)?;
                 let codec_version = publish_queue_meta
@@ -534,34 +504,14 @@ impl RedbStore {
             {
                 write_txn.open_table(EVENTS)?;
                 write_txn.open_table(EVENT_IDS)?;
-                write_txn.open_table(EVENT_LOCAL)?;
-                write_txn.open_table(EVENT_STORE_META)?;
-                write_txn.open_table(EVENT_OBSERVATIONS)?;
                 write_txn.open_table(RELAYS)?;
-                write_txn.open_table(RELAY_KEYS)?;
-                write_txn.open_table(RELAY_REFS)?;
-                write_txn.open_table(RELAY_META)?;
+                write_txn.open_table(RELAY_IDS)?;
                 write_txn.open_table(ADDR_INDEX)?;
                 write_txn.open_table(COVERAGE)?;
                 write_txn.open_table(TOMBSTONES)?;
-                write_txn.open_table(ADDR_TOMBSTONES)?;
                 write_txn.open_table(EXPIRATION_INDEX)?;
                 write_txn.open_table(POSTINGS_SEGMENTS)?;
-                write_txn.open_table(POSTINGS_DICTIONARIES)?;
-                write_txn.open_table(POSTINGS_RUN_META)?;
-                write_txn.open_table(POSTINGS_RUN_BY_MIN)?;
-                write_txn.open_table(POSTINGS_DEAD_KEYS)?;
-                let mut postings_meta = write_txn.open_table(POSTINGS_META)?;
-                postings_meta.insert(POSTINGS_READY, 1)?;
-                write_txn.open_table(INDEX_CARDINALITY)?;
-                let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META)?;
-                cardinality_meta
-                    .insert(INDEX_CARDINALITY_VERSION_KEY, INDEX_CARDINALITY_VERSION)?;
-                let sample_key = nostr::SecretKey::generate().to_secret_bytes();
-                let mut cardinality_sample_meta =
-                    write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META)?;
-                cardinality_sample_meta
-                    .insert(INDEX_CARDINALITY_SAMPLE_KEY, sample_key.as_slice())?;
+                write_txn.open_table(POSTINGS_CATALOG)?;
                 write_txn.open_table(PUBLISH_QUEUE_INTENTS)?;
                 write_txn.open_table(PUBLISH_QUEUE_DISPLACED)?;
                 write_txn.open_table(PUBLISH_QUEUE_ATTEMPTS)?;
@@ -582,8 +532,9 @@ impl RedbStore {
                 write_txn.open_table(PUBLISH_QUEUE_CORRELATIONS)?;
                 write_txn.open_table(PUBLISH_QUEUE_RELAYS)?;
                 write_txn.open_table(PUBLISH_QUEUE_RELAY_IDS)?;
-                let mut schema_meta = write_txn.open_table(SCHEMA_META)?;
-                schema_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
+                let mut store_meta = write_txn.open_table(STORE_META)?;
+                store_meta.insert(POSTINGS_READY, 1)?;
+                store_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
             }
             write_txn.commit()?;
             _open_write_transactions += 1;
@@ -718,8 +669,8 @@ impl RedbStore {
         &self,
         event_key: EventKey,
         local_bytes: Option<&[u8]>,
-        observations: &redb::ReadOnlyTable<&'static [u8; 12], u64>,
-        relays: &redb::ReadOnlyTable<RelayKey, &'static str>,
+        events: &redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
+        relays: &redb::ReadOnlyTable<RelayKey, &'static [u8]>,
         relay_cache: &mut HashMap<RelayKey, RelayUrl>,
     ) -> Result<Provenance, PersistenceError> {
         let local = local_bytes
@@ -731,10 +682,10 @@ impl RedbStore {
                 })
             })
             .transpose()?;
-        let (lower, upper) = observation_range(event_key);
+        let (lower, upper) = observation_bounds(event_key);
         let mut seen = BTreeMap::new();
-        for entry in observations
-            .range::<&[u8; 12]>(&lower..=&upper)
+        for entry in events
+            .range(lower.as_slice()..=upper.as_slice())
             .map_err(persist_err)?
         {
             let (encoded_key, at) = entry.map_err(persist_err)?;
@@ -742,13 +693,13 @@ impl RedbStore {
             let relay = if let Some(relay) = relay_cache.get(&relay_key) {
                 relay.clone()
             } else {
-                let encoded_relay =
-                    relays.get(relay_key).map_err(persist_err)?.ok_or_else(|| {
-                        PersistenceError::invariant(format!(
-                            "observation points at missing relay {relay_key}"
-                        ))
-                    })?;
-                let relay = RelayUrl::parse(encoded_relay.value()).map_err(|error| {
+                let row = relays.get(relay_key).map_err(persist_err)?.ok_or_else(|| {
+                    PersistenceError::invariant(format!(
+                        "observation points at missing relay {relay_key}"
+                    ))
+                })?;
+                let (_refs, url) = decode_relay_row(relay_key, row.value())?;
+                let relay = RelayUrl::parse(url).map_err(|error| {
                     PersistenceError::invariant(format!(
                         "decode interned relay URL {relay_key}: {error}"
                     ))
@@ -756,7 +707,8 @@ impl RedbStore {
                 relay_cache.insert(relay_key, relay.clone());
                 relay
             };
-            fold_seen_at(&mut seen, relay, Timestamp::from(at.value()));
+            let at = decode_observed_at(event_key, relay_key, at.value())?;
+            fold_seen_at(&mut seen, relay, Timestamp::from(at));
         }
         Ok(Provenance { seen, local })
     }
@@ -766,8 +718,8 @@ impl RedbStore {
         event_key: EventKey,
         view: StoredEventView<'_>,
         local_bytes: Option<&[u8]>,
-        observations: &redb::ReadOnlyTable<&'static [u8; 12], u64>,
-        relays: &redb::ReadOnlyTable<RelayKey, &'static str>,
+        events: &redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
+        relays: &redb::ReadOnlyTable<RelayKey, &'static [u8]>,
         relay_cache: &mut HashMap<RelayKey, RelayUrl>,
     ) -> Result<StoredEvent, PersistenceError> {
         #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -781,7 +733,7 @@ impl RedbStore {
             provenance: self.read_provenance(
                 event_key,
                 local_bytes,
-                observations,
+                events,
                 relays,
                 relay_cache,
             )?,
@@ -834,7 +786,10 @@ impl RedbStore {
             }
             #[cfg(any(test, feature = "bench-instrumentation"))]
             self.query_event_values.fetch_add(1, Ordering::Relaxed);
-            let Some(value) = events.get(event_key).map_err(persist_err)? else {
+            let Some(value) = events
+                .get(event_row_key(event_key).as_slice())
+                .map_err(persist_err)?
+            else {
                 return Err(PersistenceError::invariant(format!(
                     "ordered index points at missing canonical event {event_key}"
                 )));
@@ -894,12 +849,8 @@ impl RedbStore {
         pinned: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
-        let local = read_txn.open_table(EVENT_LOCAL).map_err(persist_err)?;
-        let observations = read_txn
-            .open_table(EVENT_OBSERVATIONS)
-            .map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
-        let relay_keys = read_txn.open_table(RELAY_KEYS).map_err(persist_err)?;
+        let relay_ids = read_txn.open_table(RELAY_IDS).map_err(persist_err)?;
         let publish_queue_suppress_by_id = read_txn
             .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
             .map_err(persist_err)?;
@@ -912,7 +863,7 @@ impl RedbStore {
         let pinned_relay_keys = if let Some(pinned) = pinned {
             let mut keys = BTreeSet::new();
             for relay in pinned {
-                if let Some(key) = relay_keys.get(relay.as_str()).map_err(persist_err)? {
+                if let Some(key) = relay_ids.get(relay.as_str()).map_err(persist_err)? {
                     keys.insert(key.value());
                 }
             }
@@ -929,7 +880,7 @@ impl RedbStore {
             // to skip decoding rows that will be dropped. Both halves of
             // that one rule are asked in cost order — first "did a pinned
             // relay carry it", then, only when nothing pinned did, "is this
-            // row OURS" (an `EVENT_LOCAL` entry exists iff
+            // row OURS" (an [`EVENT_COL_LOCAL`] row exists iff
             // `Provenance.local` is `Some`). A row this node accepted itself
             // is never another host's row, whoever has carried it since.
             let mut local_value = None;
@@ -937,13 +888,15 @@ impl RedbStore {
                 let mut carried_by_pinned = false;
                 for relay_key in pinned {
                     let key = observation_key(event_key, *relay_key);
-                    if observations.get(&key).map_err(persist_err)?.is_some() {
+                    if events.get(key.as_slice()).map_err(persist_err)?.is_some() {
                         carried_by_pinned = true;
                         break;
                     }
                 }
                 if !carried_by_pinned {
-                    local_value = local.get(event_key).map_err(persist_err)?;
+                    local_value = events
+                        .get(event_local_key(event_key).as_slice())
+                        .map_err(persist_err)?;
                     if local_value.is_none() {
                         return Ok(None);
                     }
@@ -951,7 +904,10 @@ impl RedbStore {
             }
             #[cfg(any(test, feature = "bench-instrumentation"))]
             self.query_event_values.fetch_add(1, Ordering::Relaxed);
-            let Some(value) = events.get(event_key).map_err(persist_err)? else {
+            let Some(value) = events
+                .get(event_row_key(event_key).as_slice())
+                .map_err(persist_err)?
+            else {
                 return Err(PersistenceError::invariant(format!(
                     "ordered index points at missing canonical event {event_key}"
                 )));
@@ -966,13 +922,15 @@ impl RedbStore {
             }
             let local_value = match local_value {
                 Some(already_read) => Some(already_read),
-                None => local.get(event_key).map_err(persist_err)?,
+                None => events
+                    .get(event_local_key(event_key).as_slice())
+                    .map_err(persist_err)?,
             };
             let stored = self.decode_row(
                 event_key,
                 view,
                 local_value.as_ref().map(|value| value.value()),
-                &observations,
+                &events,
                 &relays,
                 &mut relay_cache,
             )?;

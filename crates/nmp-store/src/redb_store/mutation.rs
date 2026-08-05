@@ -1,7 +1,5 @@
 use super::canonical::stored_event_to_record;
-use super::ingest_txn::{
-    GovernedIngestTxn, GovernedPublishQueueMap, GovernedStringMap, RedbIngestTxn,
-};
+use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap, RedbIngestTxn};
 use super::publish_queue::{
     add_addr_claimant_in_txn, add_claimant_in_txn, is_suppressed_in_txn, SuppressClaimRecord,
 };
@@ -11,7 +9,7 @@ use super::publish_queue_codec::{
     encode_receipt, id_claim_key, intent_key, receipt_key,
 };
 use super::query::{expiration_key, AddrTombstoneRecord};
-use super::schema::{id_tombstone_key, persist_err, EventKey};
+use super::schema::{addr_tombstone_key, id_tombstone_key, persist_err, EventKey};
 use super::{
     address_key_for, address_key_for_coordinate, candidate_wins, BTreeSet, Event, EventId, HashMap,
     HashSet, IntentId, IntentSigState, Kind, LocalOrigin, PersistenceError, ReceiptState,
@@ -43,18 +41,13 @@ pub(super) fn tombstone_refuses<T: GovernedIngestTxn>(
     event: &Event,
 ) -> Result<bool, PersistenceError> {
     let key = id_tombstone_key(&event.id, &event.pubkey);
-    if txn
-        .string_get(GovernedStringMap::Tombstones, key.as_str())?
-        .is_some()
-    {
+    if txn.tombstone_get(&key)?.is_some() {
         return Ok(true);
     }
     if let Some(key) = address_key_for(event) {
         let key_str = key.to_redb_key();
-        if let Some(encoded) =
-            txn.string_get(GovernedStringMap::AddrTombstones, key_str.as_str())?
-        {
-            let rec: AddrTombstoneRecord = serde_json::from_str(&encoded).map_err(|error| {
+        if let Some(encoded) = txn.tombstone_get(&addr_tombstone_key(&key_str))? {
+            let rec: AddrTombstoneRecord = serde_json::from_slice(&encoded).map_err(|error| {
                 PersistenceError::invariant(format!("decode address tombstone {key_str}: {error}"))
             })?;
             if event.created_at.as_secs() <= rec.ceiling {
@@ -133,11 +126,7 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
         // existing claim on this same id (composite key -- see
         // `TOMBSTONES`'s doc): each claiming author gets its own row.
         let key = id_tombstone_key(&target_id, &deleting.pubkey);
-        txn.string_put(
-            GovernedStringMap::Tombstones,
-            key.as_str(),
-            deleting_id_hex.as_str(),
-        )?;
+        txn.tombstone_put(&key, deleting.id.as_bytes())?;
     }
 
     let coords: Vec<_> = deleting.tags.coordinates().cloned().collect();
@@ -153,10 +142,11 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
         };
         let key_str = key.to_redb_key();
 
+        let tombstone_key = addr_tombstone_key(&key_str);
         let existing_ceiling = txn
-            .string_get(GovernedStringMap::AddrTombstones, key_str.as_str())?
+            .tombstone_get(&tombstone_key)?
             .map(|encoded| {
-                serde_json::from_str::<AddrTombstoneRecord>(&encoded)
+                serde_json::from_slice::<AddrTombstoneRecord>(&encoded)
                     .map(|rec| rec.ceiling)
                     .map_err(|error| {
                         PersistenceError::invariant(format!(
@@ -172,12 +162,8 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
                 deleting_event_id: deleting_id_hex.clone(),
                 deleting_author: deleting_author_hex.clone(),
             };
-            let encoded = serde_json::to_string(&record).expect("redb: encode addr tombstone");
-            txn.string_put(
-                GovernedStringMap::AddrTombstones,
-                key_str.as_str(),
-                encoded.as_str(),
-            )?;
+            let encoded = serde_json::to_vec(&record).expect("redb: encode addr tombstone");
+            txn.tombstone_put(&tombstone_key, &encoded)?;
         }
 
         let current_key = txn.address_get(key_str.as_str())?;

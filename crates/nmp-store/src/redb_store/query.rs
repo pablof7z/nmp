@@ -1,28 +1,29 @@
-use super::canonical::CanonicalWriteTables;
 #[cfg(test)]
-use super::canonical::{observation_event_key, observation_relay_key};
-#[cfg(feature = "bench-instrumentation")]
+use super::canonical::observation_event_key;
+#[cfg(any(test, feature = "bench-instrumentation"))]
 use super::schema::EventKey;
-use super::schema::{persist_err, INDEX_CARDINALITY};
 #[cfg(test)]
 use super::schema::{
-    RelayKey, ADDR_INDEX, EVENTS, EVENT_IDS, EVENT_LOCAL, EVENT_OBSERVATIONS, EVENT_STORE_META,
-    EXPIRATION_INDEX, INDEX_CARDINALITY_META, INDEX_CARDINALITY_SAMPLE_KEY,
-    INDEX_CARDINALITY_SAMPLE_META, INDEX_CARDINALITY_VERSION, INDEX_CARDINALITY_VERSION_KEY,
-    NEXT_EVENT_KEY, NEXT_RELAY_KEY, RELAYS, RELAY_KEYS, RELAY_META, RELAY_REFS,
+    decode_relay_row, observation_relay_key, RelayKey, ADDR_INDEX, EVENTS, EVENT_COL_LOCAL,
+    EVENT_COL_OBSERVATION, EVENT_COL_ROW, EVENT_IDS, EXPIRATION_INDEX, NEXT_EVENT_KEY,
+    NEXT_RELAY_KEY, RELAYS, RELAY_IDS, STORE_META,
 };
+#[cfg(test)]
+use super::BTreeSet;
+#[cfg(feature = "bench-instrumentation")]
+use super::Event;
 #[cfg(test)]
 use super::{address_key_for, binary_event, Database, RelayUrl};
 use super::{
-    decode_hex_32, BTreeSet, Deserialize, Event, EventId, Filter, IndexedMatch, Kind,
-    PersistenceError, PublicKey, Serialize, SingleLetterTag, Timestamp,
+    decode_hex_32, Deserialize, EventId, Filter, IndexedMatch, Kind, PublicKey, Serialize,
+    SingleLetterTag, Timestamp,
 };
 #[cfg(test)]
 use super::{BTreeMap, StoredEventView};
 #[cfg(test)]
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
-/// The `addr_tombstones` table's JSON value.
+/// The address column of the `tombstones` table's JSON value.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct AddrTombstoneRecord {
     pub(super) ceiling: u64,
@@ -106,29 +107,27 @@ pub(super) fn by_author_kind_key(event: &Event) -> [u8; 74] {
     ordered_fixed_key(&prefix, event.created_at, &event.id)
 }
 
+/// Comparison-only cardinality-key builders, retained for the benchmark
+/// variants that measure the durable-statistics physical shape (see
+/// [`super::schema::INDEX_CARDINALITY`]). Nothing in [`crate::RedbStore`]
+/// maintains or reads them.
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const CARDINALITY_GLOBAL: u8 = 0;
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const CARDINALITY_AUTHOR: u8 = 1;
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const CARDINALITY_KIND: u8 = 2;
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const CARDINALITY_TAG: u8 = 4;
+#[cfg(feature = "bench-instrumentation")]
 pub(super) const CARDINALITY_SAMPLE_MASK: u8 = 0x0f;
 
 #[cfg(feature = "bench-instrumentation")]
-static BENCH_EXACT_CARDINALITY: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(feature = "bench-instrumentation")]
-pub fn set_bench_exact_cardinality(enabled: bool) {
-    BENCH_EXACT_CARDINALITY.store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
 pub(super) fn event_is_cardinality_sample(sample_key: &[u8; 32], id: &EventId) -> bool {
-    #[cfg(feature = "bench-instrumentation")]
-    if BENCH_EXACT_CARDINALITY.load(std::sync::atomic::Ordering::Relaxed) {
-        return true;
-    }
     blake3::keyed_hash(sample_key, id.as_bytes()).as_bytes()[0] & CARDINALITY_SAMPLE_MASK == 0
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn cardinality_key(namespace: u8, prefix: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + prefix.len());
     key.push(namespace);
@@ -136,18 +135,22 @@ pub(super) fn cardinality_key(namespace: u8, prefix: &[u8]) -> Vec<u8> {
     key
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn global_cardinality_key() -> Vec<u8> {
     cardinality_key(CARDINALITY_GLOBAL, &[])
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn author_cardinality_key(author: &PublicKey) -> Vec<u8> {
     cardinality_key(CARDINALITY_AUTHOR, author.as_bytes())
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn kind_cardinality_key(kind: Kind) -> Vec<u8> {
     cardinality_key(CARDINALITY_KIND, &kind.as_u16().to_be_bytes())
 }
 
+#[cfg(feature = "bench-instrumentation")]
 pub(super) fn tag_cardinality_key(tag: SingleLetterTag, value: &str) -> Vec<u8> {
     cardinality_key(CARDINALITY_TAG, &tag_index_prefix(tag, value))
 }
@@ -182,91 +185,54 @@ pub(super) fn tag_index_key(
 }
 
 #[cfg(test)]
-pub(super) fn add_event_cardinalities(
-    counts: &mut BTreeMap<Vec<u8>, u64>,
-    sample_key: &[u8; 32],
-    event: &Event,
-) {
-    if !event_is_cardinality_sample(sample_key, &event.id) {
-        return;
-    }
-    let mut increment = |key: Vec<u8>| {
-        let count = counts.entry(key).or_default();
-        *count = count.checked_add(1).expect("event cardinality fits in u64");
-    };
-    increment(global_cardinality_key());
-    increment(author_cardinality_key(&event.pubkey));
-    increment(kind_cardinality_key(event.kind));
-    let mut tags = BTreeSet::new();
-    for tag in event.tags.iter() {
-        let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
-            continue;
-        };
-        tags.insert(tag_cardinality_key(single_letter, value));
-    }
-    for key in tags {
-        increment(key);
-    }
-}
-
-#[cfg(test)]
 pub(super) fn assert_canonical_integrity(db: &Database) {
     let read_txn = db.begin_read().expect("begin canonical integrity audit");
     let events = read_txn.open_table(EVENTS).expect("audit events");
     let event_ids = read_txn.open_table(EVENT_IDS).expect("audit event ids");
-    let local = read_txn
-        .open_table(EVENT_LOCAL)
-        .expect("audit event local metadata");
     let store_meta = read_txn
-        .open_table(EVENT_STORE_META)
+        .open_table(STORE_META)
         .expect("audit event store meta");
-    let observations = read_txn
-        .open_table(EVENT_OBSERVATIONS)
-        .expect("audit event observations");
     let relays = read_txn.open_table(RELAYS).expect("audit relays");
-    let relay_keys = read_txn.open_table(RELAY_KEYS).expect("audit relay keys");
-    let relay_refs = read_txn.open_table(RELAY_REFS).expect("audit relay refs");
-    let relay_meta = read_txn.open_table(RELAY_META).expect("audit relay meta");
-    let cardinality = read_txn
-        .open_table(INDEX_CARDINALITY)
-        .expect("audit index cardinality");
-    let cardinality_meta = read_txn
-        .open_table(INDEX_CARDINALITY_META)
-        .expect("audit index cardinality meta");
-    assert_eq!(
-        cardinality_meta
-            .get(INDEX_CARDINALITY_VERSION_KEY)
-            .expect("audit cardinality version")
-            .expect("cardinality version exists")
-            .value(),
-        INDEX_CARDINALITY_VERSION
-    );
-    let cardinality_sample_meta = read_txn
-        .open_table(INDEX_CARDINALITY_SAMPLE_META)
-        .expect("audit cardinality sample meta");
-    let cardinality_sample_key: [u8; 32] = cardinality_sample_meta
-        .get(INDEX_CARDINALITY_SAMPLE_KEY)
-        .expect("audit cardinality sample key")
-        .expect("cardinality sample key exists")
-        .value()
-        .try_into()
-        .expect("cardinality sample key is 32 bytes");
+    let relay_ids = read_txn.open_table(RELAY_IDS).expect("audit relay ids");
 
+    // One pass over the folded event key space, split back into its three
+    // columns. Nothing else may live in this tree: an unknown column byte is
+    // a durable row the schema does not define.
     let mut canonical = BTreeMap::new();
+    let mut local_rows = BTreeMap::new();
+    let mut observation_rows = Vec::new();
     for entry in events.iter().expect("iterate audit events") {
         let (key, bytes) = entry.expect("read audit event");
         let key = key.value();
-        let view = StoredEventView::parse(bytes.value()).expect("audit event binary value");
-        let event = view.materialize_event().expect("audit materialized event");
-        assert_eq!(
-            event_ids
-                .get(event.id.as_bytes())
-                .expect("audit id lookup")
-                .expect("every event has a raw-id mapping")
-                .value(),
-            key
-        );
-        assert!(canonical.insert(key, event).is_none());
+        let event_key =
+            EventKey::from_be_bytes(key[..8].try_into().expect("canonical key leads with a key"));
+        match key[8] {
+            EVENT_COL_ROW => {
+                assert_eq!(key.len(), 9, "an event row key carries no suffix");
+                let view = StoredEventView::parse(bytes.value()).expect("audit event binary value");
+                let event = view.materialize_event().expect("audit materialized event");
+                assert_eq!(
+                    event_ids
+                        .get(event.id.as_bytes())
+                        .expect("audit id lookup")
+                        .expect("every event has a raw-id mapping")
+                        .value(),
+                    event_key
+                );
+                assert!(canonical.insert(event_key, event).is_none());
+            }
+            EVENT_COL_LOCAL => {
+                assert_eq!(key.len(), 9, "a local sidecar key carries no suffix");
+                assert!(local_rows
+                    .insert(event_key, bytes.value().to_vec())
+                    .is_none());
+            }
+            EVENT_COL_OBSERVATION => {
+                assert_eq!(key.len(), 13, "an observation key names one relay");
+                observation_rows.push(key.to_vec());
+            }
+            other => panic!("unknown canonical event column {other}"),
+        }
     }
 
     assert_eq!(
@@ -282,10 +248,9 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         assert_eq!(raw_id.value(), event.id.as_bytes());
     }
 
-    for entry in local.iter().expect("iterate audit local metadata") {
-        let (event_key, value) = entry.expect("read audit local metadata");
-        assert!(canonical.contains_key(&event_key.value()));
-        binary_event::decode_local(value.value()).expect("audit local metadata sidecar");
+    for (event_key, value) in &local_rows {
+        assert!(canonical.contains_key(event_key));
+        binary_event::decode_local(value).expect("audit local metadata sidecar");
     }
 
     if let Some(max_key) = canonical.keys().next_back() {
@@ -298,10 +263,7 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
     }
 
     let mut expected_relay_refs = BTreeMap::<RelayKey, u64>::new();
-    for entry in observations.iter().expect("iterate audit observations") {
-        let (encoded_key, _at) = entry.expect("read audit observation");
-        let encoded_key = encoded_key.value();
-        assert_eq!(encoded_key.len(), 12);
+    for encoded_key in &observation_rows {
         let event_key = observation_event_key(encoded_key);
         let relay_key = observation_relay_key(encoded_key);
         assert!(
@@ -319,59 +281,49 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         expected_relay_refs.len() as u64
     );
     assert_eq!(
-        relay_keys.len().expect("count audit relay keys"),
-        expected_relay_refs.len() as u64
-    );
-    assert_eq!(
-        relay_refs.len().expect("count audit relay refs"),
+        relay_ids.len().expect("count audit relay ids"),
         expected_relay_refs.len() as u64
     );
     for entry in relays.iter().expect("iterate audit relays") {
-        let (relay_key, encoded_url) = entry.expect("read audit relay");
+        let (relay_key, row) = entry.expect("read audit relay");
         let relay_key = relay_key.value();
-        RelayUrl::parse(encoded_url.value()).expect("interned relay is canonical");
+        let (refs, url) = decode_relay_row(relay_key, row.value()).expect("audit relay row");
+        RelayUrl::parse(url).expect("interned relay is canonical");
         assert_eq!(
-            relay_keys
-                .get(encoded_url.value())
+            relay_ids
+                .get(url)
                 .expect("audit reverse relay lookup")
                 .expect("relay has reverse key")
                 .value(),
             relay_key
         );
-        assert_eq!(
-            relay_refs
-                .get(relay_key)
-                .expect("audit relay ref lookup")
-                .expect("relay has refcount")
-                .value(),
-            expected_relay_refs[&relay_key]
-        );
+        assert_eq!(refs, expected_relay_refs[&relay_key]);
     }
-    for entry in relay_keys.iter().expect("iterate audit reverse relays") {
+    for entry in relay_ids.iter().expect("iterate audit reverse relays") {
         let (encoded_url, relay_key) = entry.expect("read audit reverse relay");
-        assert_eq!(
-            relays
-                .get(relay_key.value())
-                .expect("audit forward relay lookup")
-                .expect("reverse relay has forward row")
-                .value(),
-            encoded_url.value()
-        );
+        let relay_key = relay_key.value();
+        let row = relays
+            .get(relay_key)
+            .expect("audit forward relay lookup")
+            .expect("reverse relay has forward row");
+        let (_refs, url) = decode_relay_row(relay_key, row.value()).expect("audit relay row");
+        assert_eq!(url, encoded_url.value());
     }
     if let Some(max_key) = expected_relay_refs.keys().next_back() {
-        let next = relay_meta
+        let next = store_meta
             .get(NEXT_RELAY_KEY)
             .expect("audit next relay key")
             .expect("nonempty relay dictionary has next key")
             .value();
-        assert!(next > *max_key, "relay allocator must not reuse keys");
+        assert!(
+            next > u64::from(*max_key),
+            "relay allocator must not reuse keys"
+        );
     }
 
     let mut expected_address = BTreeSet::new();
     let mut expected_expiration = BTreeSet::new();
-    let mut expected_cardinality = BTreeMap::new();
     for (&event_key, event) in &canonical {
-        add_event_cardinalities(&mut expected_cardinality, &cardinality_sample_key, event);
         if let Some(address) = address_key_for(event) {
             expected_address.insert((address.to_redb_key(), event_key));
         }
@@ -380,15 +332,6 @@ pub(super) fn assert_canonical_integrity(db: &Database) {
         }
     }
     super::postings_store::assert_packed_integrity(&read_txn, &canonical);
-    let actual_cardinality = cardinality
-        .iter()
-        .expect("iterate audit cardinality")
-        .map(|entry| {
-            let (key, count) = entry.expect("read audit cardinality");
-            (key.value().to_vec(), count.value())
-        })
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(actual_cardinality, expected_cardinality);
 
     let address = read_txn
         .open_table(ADDR_INDEX)
@@ -445,92 +388,76 @@ impl OrderedIndex {
     }
 }
 
+/// One candidate ordered scan: which physical index family to walk, and the
+/// prefixes within it that cover the filter.
 #[derive(Debug)]
 pub(super) struct OrderedPlan {
     pub(super) index: OrderedIndex,
     pub(super) prefixes: Vec<Vec<u8>>,
-    pub(super) estimated_rows: u64,
 }
 
-pub(super) fn cardinality_of(
-    table: &redb::ReadOnlyTable<&[u8], u64>,
-    key: &[u8],
-) -> Result<u64, PersistenceError> {
-    Ok(table
-        .get(key)
-        .map_err(persist_err)?
-        .map(|guard| guard.value())
-        .unwrap_or(0))
-}
-
-pub(super) fn sum_cardinalities<'a>(
-    table: &redb::ReadOnlyTable<&[u8], u64>,
-    keys: impl IntoIterator<Item = &'a [u8]>,
-) -> Result<u64, PersistenceError> {
-    let mut total = 0u64;
-    for key in keys {
-        total = total.saturating_add(cardinality_of(table, key)?);
-    }
-    Ok(total)
-}
-
-pub(super) fn plan_ordered_query(
-    read_txn: &redb::ReadTransaction,
-    filter: &Filter,
-) -> Result<OrderedPlan, PersistenceError> {
-    let cardinality = read_txn
-        .open_table(INDEX_CARDINALITY)
-        .map_err(persist_err)?;
-    let global_key = global_cardinality_key();
-    let mut plans = vec![OrderedPlan {
-        index: OrderedIndex::Global,
-        prefixes: vec![Vec::new()],
-        estimated_rows: cardinality_of(&cardinality, &global_key)?,
-    }];
-
-    let authors = filter.authors.as_ref().filter(|values| !values.is_empty());
-    let kinds = filter.kinds.as_ref().filter(|values| !values.is_empty());
-    if let Some(authors) = authors {
-        let prefixes: Vec<_> = authors.iter().map(by_author_prefix).collect();
-        let keys: Vec<_> = authors.iter().map(author_cardinality_key).collect();
+/// Every ordered index that can answer `filter` completely, most selective
+/// first by [`OrderedIndex::tie_rank`].
+///
+/// This is the whole planner input. `Global` is always present and always
+/// last, so the list is never empty. Every entry returns the SAME rows: the
+/// post-index residual mask is derived from the chosen index
+/// ([`OrderedIndex::matched`] feeding
+/// `StoredEventView::matches_prepared_filter_after_index`), so whichever
+/// candidate is walked, the predicates the index did not enforce are still
+/// applied. Index choice is therefore a cost decision only — a worse choice
+/// is slower, never wrong. `plan_choice_cannot_change_query_results` in
+/// `tests.rs` is the falsifier for that claim.
+pub(super) fn candidate_ordered_plans(filter: &Filter) -> Vec<OrderedPlan> {
+    let mut plans = Vec::new();
+    if let Some(authors) = filter.authors.as_ref().filter(|values| !values.is_empty()) {
         plans.push(OrderedPlan {
             index: OrderedIndex::Author,
-            prefixes,
-            estimated_rows: sum_cardinalities(&cardinality, keys.iter().map(Vec::as_slice))?,
-        });
-    }
-    if let Some(kinds) = kinds {
-        let prefixes: Vec<_> = kinds.iter().map(|kind| by_kind_prefix(*kind)).collect();
-        let keys: Vec<_> = kinds
-            .iter()
-            .map(|kind| kind_cardinality_key(*kind))
-            .collect();
-        plans.push(OrderedPlan {
-            index: OrderedIndex::Kind,
-            prefixes,
-            estimated_rows: sum_cardinalities(&cardinality, keys.iter().map(Vec::as_slice))?,
+            prefixes: authors.iter().map(by_author_prefix).collect(),
         });
     }
     for (tag, values) in &filter.generic_tags {
-        let prefixes: Vec<_> = values
-            .iter()
-            .map(|value| tag_index_prefix(*tag, value))
-            .collect();
-        let keys: Vec<_> = values
-            .iter()
-            .map(|value| tag_cardinality_key(*tag, value))
-            .collect();
+        if values.is_empty() {
+            continue;
+        }
         plans.push(OrderedPlan {
             index: OrderedIndex::Tag(*tag),
-            prefixes,
-            estimated_rows: sum_cardinalities(&cardinality, keys.iter().map(Vec::as_slice))?,
+            prefixes: values
+                .iter()
+                .map(|value| tag_index_prefix(*tag, value))
+                .collect(),
         });
     }
+    if let Some(kinds) = filter.kinds.as_ref().filter(|values| !values.is_empty()) {
+        plans.push(OrderedPlan {
+            index: OrderedIndex::Kind,
+            prefixes: kinds.iter().map(|kind| by_kind_prefix(*kind)).collect(),
+        });
+    }
+    plans.push(OrderedPlan {
+        index: OrderedIndex::Global,
+        prefixes: vec![Vec::new()],
+    });
+    plans.sort_by_key(|plan| plan.index.tie_rank());
+    plans
+}
 
-    Ok(plans
+/// Choose the ordered index to scan for `filter`.
+///
+/// Fixed priority — Author > Tag > Kind > Global — the same choice
+/// `MemoryStore::plan_ordered_query` makes ("simple and obviously correct
+/// beats optimal here"). NMP kept a durable sampled row-count table to rank
+/// these instead, and deleted it (#1248): the estimate could not affect
+/// correctness, 1/16 sampling quantized every bucket under ~16 rows to zero
+/// so this same fixed priority already decided exactly the selective queries
+/// the estimate existed to serve, and the query-authoritative structure —
+/// packed postings segment headers — already carries an EXACT per-prefix
+/// `posting_count`. A smarter planner belongs there, not in durable bytes.
+pub(super) fn plan_ordered_query(filter: &Filter) -> OrderedPlan {
+    candidate_ordered_plans(filter)
         .into_iter()
-        .min_by_key(|plan| (plan.estimated_rows, plan.index.tie_rank()))
-        .expect("global ordered query plan always exists"))
+        .next()
+        .expect("the global ordered plan is always a candidate")
 }
 
 #[cfg(feature = "bench-instrumentation")]
@@ -545,56 +472,6 @@ pub(super) fn insert_tag_index_rows(
         };
         let key = tag_index_key(single_letter, value, event.created_at, &event.id);
         by_tag.insert(key.as_slice(), event_key)?;
-    }
-    Ok(())
-}
-
-pub(super) fn insert_query_cardinalities(
-    canonical: &mut CanonicalWriteTables<'_>,
-    event: &Event,
-) -> Result<(), PersistenceError> {
-    #[cfg(feature = "bench-instrumentation")]
-    let started = std::time::Instant::now();
-    if event_is_cardinality_sample(&canonical.cardinality_sample_key, &event.id) {
-        canonical.adjust_cardinality(global_cardinality_key(), 1)?;
-        canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), 1)?;
-        canonical.adjust_cardinality(kind_cardinality_key(event.kind), 1)?;
-        let mut tags = BTreeSet::new();
-        for tag in event.tags.iter() {
-            let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())
-            else {
-                continue;
-            };
-            tags.insert(tag_cardinality_key(single_letter, value));
-        }
-        for key in tags {
-            canonical.adjust_cardinality(key, 1)?;
-        }
-    }
-    #[cfg(feature = "bench-instrumentation")]
-    crate::ingest_attribution::index_insert(started.elapsed());
-    Ok(())
-}
-
-pub(super) fn remove_query_cardinalities(
-    canonical: &mut CanonicalWriteTables<'_>,
-    event: &Event,
-) -> Result<(), PersistenceError> {
-    if event_is_cardinality_sample(&canonical.cardinality_sample_key, &event.id) {
-        canonical.adjust_cardinality(global_cardinality_key(), -1)?;
-        canonical.adjust_cardinality(author_cardinality_key(&event.pubkey), -1)?;
-        canonical.adjust_cardinality(kind_cardinality_key(event.kind), -1)?;
-        let mut tags = BTreeSet::new();
-        for tag in event.tags.iter() {
-            let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content())
-            else {
-                continue;
-            };
-            tags.insert(tag_cardinality_key(single_letter, value));
-        }
-        for key in tags {
-            canonical.adjust_cardinality(key, -1)?;
-        }
     }
     Ok(())
 }

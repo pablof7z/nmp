@@ -1,4 +1,15 @@
+use super::publish_queue_codec::PUBLISH_QUEUE_CODEC_VERSION_KEY;
 use super::*;
+
+/// The refcount half of one `relays` row, for falsifiers that assert
+/// reference counting rather than URL interning.
+fn relay_refs_of(db: &Database, relay_key: RelayKey) -> Option<u64> {
+    let read_txn = db.begin_read().expect("read relay row");
+    let relays = read_txn.open_table(RELAYS).expect("open relays");
+    let row = relays.get(relay_key).expect("get relay row")?;
+    let (refs, _url) = decode_relay_row(relay_key, row.value()).expect("decode relay row");
+    Some(refs)
+}
 
 /// #867: NMP defines ONE current Redb schema epoch and carries no
 /// persistent-schema compatibility obligation. Anything that is not exactly
@@ -28,8 +39,8 @@ fn durable_facts(path: &std::path::Path) -> BTreeMap<String, u64> {
             .expect("count fixture rows");
         facts.insert(name, len);
     }
-    if let Ok(schema_meta) = read_txn.open_table(SCHEMA_META) {
-        if let Some(version) = schema_meta.get(SCHEMA_VERSION_KEY).expect("read marker") {
+    if let Ok(store_meta) = read_txn.open_table(STORE_META) {
+        if let Some(version) = store_meta.get(SCHEMA_VERSION_KEY).expect("read marker") {
             facts.insert("::schema-marker".to_owned(), version.value());
         }
     }
@@ -65,8 +76,8 @@ fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_publish_qu
     let db = Database::create(&path).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
-        schema_meta
+        let mut store_meta = write_txn.open_table(STORE_META).unwrap();
+        store_meta
             .insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION + 1)
             .unwrap();
     }
@@ -183,8 +194,8 @@ fn superseded_schema_markers_refuse_at_open_without_mutating_durable_facts() {
         let db = Database::create(&path).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
-            let mut schema_meta = write_txn.open_table(SCHEMA_META).unwrap();
-            schema_meta.insert(SCHEMA_VERSION_KEY, superseded).unwrap();
+            let mut store_meta = write_txn.open_table(STORE_META).unwrap();
+            store_meta.insert(SCHEMA_VERSION_KEY, superseded).unwrap();
         }
         write_txn.commit().unwrap();
         drop(db);
@@ -205,9 +216,9 @@ fn corrupt_current_schema_rows_fail_as_corruption_not_as_an_old_epoch() {
     let db = Database::create(&path).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut sample_meta = write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
-        sample_meta
-            .insert(INDEX_CARDINALITY_SAMPLE_KEY, [0u8; 8].as_slice())
+        let mut publish_queue_meta = write_txn.open_table(PUBLISH_QUEUE_META).unwrap();
+        publish_queue_meta
+            .insert(PUBLISH_QUEUE_CODEC_VERSION_KEY, [0u8; 3].as_slice())
             .unwrap();
     }
     write_txn.commit().unwrap();
@@ -218,19 +229,19 @@ fn corrupt_current_schema_rows_fail_as_corruption_not_as_an_old_epoch() {
             RedbStore::open(&path),
             Err(RedbStoreOpenError::Database(redb::Error::Corrupted(_)))
         ),
-        "a truncated cardinality sample key is current-epoch corruption"
+        "a truncated publish-queue codec marker is current-epoch corruption"
     );
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("corrupt-current-cardinality.redb");
+    let path = dir.path().join("corrupt-current-codec.redb");
     drop(RedbStore::open(&path).unwrap());
 
     let db = Database::create(&path).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut cardinality_meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
-        cardinality_meta
-            .remove(INDEX_CARDINALITY_VERSION_KEY)
+        let mut publish_queue_meta = write_txn.open_table(PUBLISH_QUEUE_META).unwrap();
+        publish_queue_meta
+            .remove(PUBLISH_QUEUE_CODEC_VERSION_KEY)
             .unwrap();
     }
     write_txn.commit().unwrap();
@@ -241,7 +252,7 @@ fn corrupt_current_schema_rows_fail_as_corruption_not_as_an_old_epoch() {
             RedbStore::open(&path),
             Err(RedbStoreOpenError::Database(redb::Error::Corrupted(_)))
         ),
-        "a missing cardinality epoch is current-epoch corruption, never an old epoch"
+        "a missing publish-queue codec marker is current-epoch corruption, never an old epoch"
     );
 }
 
@@ -265,13 +276,9 @@ fn healthy_current_schema_reopen_starts_no_application_write_transaction() {
         "a healthy schema-marker reopen must remain read-only"
     );
     let read_txn = reopened.db.begin_read().unwrap();
-    let schema_meta = read_txn.open_table(SCHEMA_META).unwrap();
+    let store_meta = read_txn.open_table(STORE_META).unwrap();
     assert_eq!(
-        schema_meta
-            .get(SCHEMA_VERSION_KEY)
-            .unwrap()
-            .unwrap()
-            .value(),
+        store_meta.get(SCHEMA_VERSION_KEY).unwrap().unwrap().value(),
         SCHEMA_VERSION
     );
 }
@@ -324,7 +331,7 @@ fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
             assert_eq!(canonical.allocate_relay_key().unwrap(), expected);
         }
         assert!(canonical.store_meta.get(NEXT_EVENT_KEY).unwrap().is_none());
-        assert!(canonical.relay_meta.get(NEXT_RELAY_KEY).unwrap().is_none());
+        assert!(canonical.store_meta.get(NEXT_RELAY_KEY).unwrap().is_none());
 
         canonical.flush_pending().unwrap();
         assert_eq!(
@@ -338,7 +345,7 @@ fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
         );
         assert_eq!(
             canonical
-                .relay_meta
+                .store_meta
                 .get(NEXT_RELAY_KEY)
                 .unwrap()
                 .unwrap()
@@ -609,20 +616,19 @@ fn raw_canonical_row(store: &RedbStore, id: EventId) -> (EventKey, Vec<u8>, Opti
     let read_txn = store.db.begin_read().unwrap();
     let event_ids = read_txn.open_table(EVENT_IDS).unwrap();
     let events = read_txn.open_table(EVENTS).unwrap();
-    let local = read_txn.open_table(EVENT_LOCAL).unwrap();
     let event_key = event_ids
         .get(id.as_bytes())
         .unwrap()
         .expect("raw id mapping")
         .value();
     let event_bytes = events
-        .get(event_key)
+        .get(event_row_key(event_key).as_slice())
         .unwrap()
         .expect("raw event row")
         .value()
         .to_vec();
-    let local_bytes = local
-        .get(event_key)
+    let local_bytes = events
+        .get(event_local_key(event_key).as_slice())
         .unwrap()
         .map(|value| value.value().to_vec());
     (event_key, event_bytes, local_bytes)
@@ -630,14 +636,19 @@ fn raw_canonical_row(store: &RedbStore, id: EventId) -> (EventKey, Vec<u8>, Opti
 
 fn raw_observation_rows(store: &RedbStore, event_key: EventKey) -> Vec<(Vec<u8>, u64)> {
     let read_txn = store.db.begin_read().unwrap();
-    let observations = read_txn.open_table(EVENT_OBSERVATIONS).unwrap();
-    let (lower, upper) = observation_range(event_key);
-    observations
-        .range::<&[u8; 12]>(&lower..=&upper)
+    let events = read_txn.open_table(EVENTS).unwrap();
+    let (lower, upper) = observation_bounds(event_key);
+    events
+        .range(lower.as_slice()..=upper.as_slice())
         .unwrap()
         .map(|entry| {
             let (key, at) = entry.unwrap();
-            (key.value().to_vec(), at.value())
+            let key = key.value().to_vec();
+            let relay_key = observation_relay_key(&key);
+            (
+                key,
+                decode_observed_at(event_key, relay_key, at.value()).unwrap(),
+            )
         })
         .collect()
 }
@@ -782,41 +793,36 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
 
     let first_relay_key = {
         let read_txn = store.db.begin_read().unwrap();
-        let relay_keys = read_txn.open_table(RELAY_KEYS).unwrap();
-        let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
-        let relay_key = relay_keys.get(relay.as_str()).unwrap().unwrap().value();
-        assert_eq!(relay_refs.get(relay_key).unwrap().unwrap().value(), 2);
+        let relay_ids = read_txn.open_table(RELAY_IDS).unwrap();
+        let relay_key = relay_ids.get(relay.as_str()).unwrap().unwrap().value();
+        drop(read_txn);
+        assert_eq!(relay_refs_of(&store.db, relay_key), Some(2));
         relay_key
     };
     assert_canonical_integrity(&store.db);
 
     store.remove(first.id, RetractReason::Deleted).unwrap();
-    {
-        let read_txn = store.db.begin_read().unwrap();
-        let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
-        assert_eq!(relay_refs.get(first_relay_key).unwrap().unwrap().value(), 1);
-    }
+    assert_eq!(relay_refs_of(&store.db, first_relay_key), Some(1));
     assert_canonical_integrity(&store.db);
 
     store.remove(second.id, RetractReason::Deleted).unwrap();
     {
         let read_txn = store.db.begin_read().unwrap();
         assert!(read_txn
-            .open_table(RELAY_KEYS)
+            .open_table(RELAY_IDS)
             .unwrap()
             .get(relay.as_str())
             .unwrap()
             .is_none());
         assert_eq!(read_txn.open_table(RELAYS).unwrap().len().unwrap(), 0);
-        assert_eq!(read_txn.open_table(RELAY_REFS).unwrap().len().unwrap(), 0);
-        assert_eq!(
-            read_txn
-                .open_table(EVENT_OBSERVATIONS)
-                .unwrap()
-                .len()
-                .unwrap(),
-            0
-        );
+        // Every remaining canonical key is a note row or a local sidecar:
+        // the observation column is empty.
+        assert!(read_txn
+            .open_table(EVENTS)
+            .unwrap()
+            .iter()
+            .unwrap()
+            .all(|entry| entry.unwrap().0.value()[8] != EVENT_COL_OBSERVATION));
     }
     assert_canonical_integrity(&store.db);
 
@@ -829,7 +835,7 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
         .unwrap();
     let read_txn = store.db.begin_read().unwrap();
     let new_relay_key = read_txn
-        .open_table(RELAY_KEYS)
+        .open_table(RELAY_IDS)
         .unwrap()
         .get(relay.as_str())
         .unwrap()
@@ -883,24 +889,29 @@ fn canonical_relay_aliases_fold_to_latest_timestamp_on_read_and_mutation() {
         let event_ids = write_txn.open_table(EVENT_IDS).unwrap();
         let event_key = event_ids.get(event.id.as_bytes()).unwrap().unwrap().value();
         let mut relays = write_txn.open_table(RELAYS).unwrap();
-        let mut relay_keys = write_txn.open_table(RELAY_KEYS).unwrap();
-        let canonical_key = relay_keys
+        let mut relay_ids = write_txn.open_table(RELAY_IDS).unwrap();
+        let canonical_key = relay_ids
             .get(canonical_relay.as_str())
             .unwrap()
             .unwrap()
             .value();
         let alias_key = canonical_key + 1;
-        let mut relay_refs = write_txn.open_table(RELAY_REFS).unwrap();
-        let mut relay_meta = write_txn.open_table(RELAY_META).unwrap();
-        let mut observations = write_txn.open_table(EVENT_OBSERVATIONS).unwrap();
+        let mut store_meta = write_txn.open_table(STORE_META).unwrap();
+        let mut events = write_txn.open_table(EVENTS).unwrap();
 
-        relays.insert(alias_key, STORED_ALIAS).unwrap();
-        relay_keys.insert(STORED_ALIAS, alias_key).unwrap();
-        relay_refs.insert(alias_key, 1).unwrap();
-        observations
-            .insert(&observation_key(event_key, alias_key), 20)
+        relays
+            .insert(alias_key, encode_relay_row(1, STORED_ALIAS).as_slice())
             .unwrap();
-        relay_meta.insert(NEXT_RELAY_KEY, alias_key + 1).unwrap();
+        relay_ids.insert(STORED_ALIAS, alias_key).unwrap();
+        events
+            .insert(
+                observation_key(event_key, alias_key).as_slice(),
+                20u64.to_be_bytes().as_slice(),
+            )
+            .unwrap();
+        store_meta
+            .insert(NEXT_RELAY_KEY, u64::from(alias_key + 1))
+            .unwrap();
     }
     write_txn.commit().unwrap();
     drop(db);
@@ -953,27 +964,18 @@ fn batch_relay_refcounts_flush_once_per_distinct_relay() {
         }
         assert_eq!(canonical.relay_ref_counts.len(), 1);
         assert_eq!(canonical.relay_ref_counts[&relay_key], 1_114);
+        let durable_refs = |canonical: &CanonicalWriteTables<'_>| {
+            let row = canonical.relays.get(relay_key).unwrap().unwrap();
+            decode_relay_row(relay_key, row.value()).unwrap().0
+        };
         assert_eq!(
-            canonical
-                .relay_refs
-                .get(relay_key)
-                .unwrap()
-                .unwrap()
-                .value(),
+            durable_refs(&canonical),
             0,
             "the durable hot row stays untouched until the batch flush"
         );
         canonical.flush_pending().unwrap();
         assert!(canonical.relay_ref_counts.is_empty());
-        assert_eq!(
-            canonical
-                .relay_refs
-                .get(relay_key)
-                .unwrap()
-                .unwrap()
-                .value(),
-            1_114
-        );
+        assert_eq!(durable_refs(&canonical), 1_114);
     }
     // This is a white-box write-coalescing proof, not a valid canonical
     // store state, so abort rather than committing the synthetic count.
@@ -1016,19 +1018,11 @@ fn batch_net_zero_observation_reclaims_new_relay_dictionary_row() {
     assert_canonical_integrity(&store.db);
 
     let read_txn = store.db.begin_read().unwrap();
-    let relay_keys = read_txn.open_table(RELAY_KEYS).unwrap();
-    assert!(relay_keys.get(old_relay.as_str()).unwrap().is_none());
-    let winner_key = relay_keys.get(new_relay.as_str()).unwrap().unwrap().value();
-    assert_eq!(
-        read_txn
-            .open_table(RELAY_REFS)
-            .unwrap()
-            .get(winner_key)
-            .unwrap()
-            .unwrap()
-            .value(),
-        1
-    );
+    let relay_ids = read_txn.open_table(RELAY_IDS).unwrap();
+    assert!(relay_ids.get(old_relay.as_str()).unwrap().is_none());
+    let winner_key = relay_ids.get(new_relay.as_str()).unwrap().unwrap().value();
+    drop(read_txn);
+    assert_eq!(relay_refs_of(&store.db, winner_key), Some(1));
 }
 
 #[test]
@@ -1074,18 +1068,12 @@ fn later_same_relay_updates_only_one_timestamp_value() {
     assert_eq!(before[0].1, 10);
     assert_eq!(after[0].1, 20);
     let read_txn = store.db.begin_read().unwrap();
-    let relay_refs = read_txn.open_table(RELAY_REFS).unwrap();
-    assert_eq!(
-        relay_refs
-            .iter()
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .1
-            .value(),
-        1
-    );
+    let relays = read_txn.open_table(RELAYS).unwrap();
+    let (relay_key, row) = {
+        let entry = relays.iter().unwrap().next().unwrap().unwrap();
+        (entry.0.value(), entry.1.value().to_vec())
+    };
+    assert_eq!(decode_relay_row(relay_key, &row).unwrap().0, 1);
 }
 
 #[test]
@@ -1791,7 +1779,7 @@ fn packed_postings_use_inclusive_equal_time_ranges_and_id_ascending_ties() {
 
     for (filter, expected_index) in filters {
         let read_txn = store.db.begin_read().unwrap();
-        let plan = plan_ordered_query(&read_txn, &filter).unwrap();
+        let plan = plan_ordered_query(&filter);
         assert_eq!(plan.index, expected_index);
         drop(read_txn);
 
@@ -1804,25 +1792,34 @@ fn packed_postings_use_inclusive_equal_time_ranges_and_id_ascending_ties() {
     }
 }
 
+/// Choosing a different ordered index cannot change which rows a query
+/// returns — only how fast it gets to them.
+///
+/// This is the behavioural claim NMP relies on after deleting the durable
+/// `index_cardinality` estimate (#1248): the planner now picks by fixed
+/// priority instead of by a sampled row count, so the *plan* changed and the
+/// *results* must not have. It holds structurally because the post-index
+/// residual mask is derived from the chosen index
+/// (`plan.index.matched()` feeding `matches_prepared_filter_after_index`),
+/// never from any estimate — so every predicate the walked index did not
+/// enforce is still applied afterwards.
+///
+/// The fixture is deliberately adversarial for the mask: a 100-row `#h`
+/// bucket, a 5-row `#p` subset inside it, and one event carrying the rare
+/// `#p` with the WRONG `#h`. Scanning by `#p` must still reject that event
+/// on `#h`, and scanning by `#h` must still reject the 95 events without
+/// `#p`.
 #[test]
-fn cardinality_planner_selects_smallest_real_tag_bucket_for_complete_query() {
+fn plan_choice_cannot_change_query_results() {
     use nostr::{Alphabet, EventBuilder, Tag};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut store = RedbStore::open(dir.path().join("cardinality-plan.redb")).unwrap();
-    let write_txn = store.db.begin_write().unwrap();
-    {
-        let mut sample_meta = write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
-        sample_meta
-            .insert(INDEX_CARDINALITY_SAMPLE_KEY, [0x42; 32].as_slice())
-            .unwrap();
-    }
-    write_txn.commit().unwrap();
+    let mut store = RedbStore::open(dir.path().join("plan-independence.redb")).unwrap();
     let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&[1; 32]).unwrap());
     let member = nostr::Keys::new(nostr::SecretKey::from_slice(&[2; 32]).unwrap())
         .public_key()
         .to_hex();
-    let relay = RelayUrl::parse("wss://cardinality.example").unwrap();
+    let relay = RelayUrl::parse("wss://plan-independence.example").unwrap();
     let h = SingleLetterTag::lowercase(Alphabet::H);
     let p = SingleLetterTag::lowercase(Alphabet::P);
 
@@ -1844,7 +1841,7 @@ fn cardinality_planner_selects_smallest_real_tag_bucket_for_complete_query() {
             .unwrap();
     }
     // Same rare #p but the wrong #h: proves the chosen-tag matched mask
-    // skips only #p, not every tag predicate.
+    // skips only the chosen tag, not every tag predicate.
     let wrong_room = EventBuilder::new(Kind::from(9u16), "wrong-room")
         .tags([
             Tag::parse(["h", "other-room"]).unwrap(),
@@ -1864,41 +1861,70 @@ fn cardinality_planner_selects_smallest_real_tag_bucket_for_complete_query() {
         .kind(Kind::from(9u16))
         .custom_tag(h, "busy-room")
         .custom_tag(p, member);
-    let read_txn = store.db.begin_read().unwrap();
-    let plan = plan_ordered_query(&read_txn, &filter).unwrap();
-    assert_eq!(plan.index, OrderedIndex::Tag(p));
-    assert!(
-        plan.estimated_rows <= 6,
-        "sampled physical count cannot exceed the real bucket"
-    );
-    drop(read_txn);
 
-    store.reset_query_work();
-    let rows = store.query(&filter).unwrap();
-    assert_eq!(rows.len(), 5);
-    assert_eq!(store.query_work(), (6, 6, 5));
+    // Fixed priority: tags outrank kinds, and `#h` sorts before `#p`.
+    assert_eq!(plan_ordered_query(&filter).index, OrderedIndex::Tag(h));
+
+    let candidates = candidate_ordered_plans(&filter);
+    assert_eq!(
+        candidates.iter().map(|plan| plan.index).collect::<Vec<_>>(),
+        vec![
+            OrderedIndex::Tag(h),
+            OrderedIndex::Tag(p),
+            OrderedIndex::Kind,
+            OrderedIndex::Global,
+        ],
+        "every index that can answer this filter is a candidate"
+    );
+
+    let read_txn = store.db.begin_read().unwrap();
+    for plan in &candidates {
+        let complete: BTreeSet<_> = store
+            .query_ordered(&read_txn, plan, &filter, None, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect();
+        assert_eq!(
+            complete.len(),
+            5,
+            "{:?} changed the complete result",
+            plan.index
+        );
+        let bounded: Vec<_> = store
+            .query_ordered(&read_txn, plan, &filter, None, Some(3), None)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect();
+        let projected = store
+            .query_ordered_ids(&read_txn, plan, &filter, 3)
+            .unwrap();
+        assert_eq!(bounded, projected, "{:?} projected differently", plan.index);
+        if plan.index == candidates[0].index {
+            continue;
+        }
+        let first_complete: BTreeSet<_> = store
+            .query_ordered(&read_txn, &candidates[0], &filter, None, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect();
+        let first_bounded: Vec<_> = store
+            .query_ordered(&read_txn, &candidates[0], &filter, None, Some(3), None)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.event.id)
+            .collect();
+        assert_eq!(complete, first_complete, "{:?} changed results", plan.index);
+        assert_eq!(bounded, first_bounded, "{:?} changed order", plan.index);
+    }
+    drop(read_txn);
     assert_canonical_integrity(&store.db);
 }
 
 #[test]
-fn cardinality_sampling_is_keyed_stable_and_near_one_sixteenth() {
-    let sample_key = [0x42; 32];
-    let sampled = (0..65_536u64)
-        .filter(|value| {
-            let mut id = [0u8; 32];
-            id[24..].copy_from_slice(&value.to_be_bytes());
-            event_is_cardinality_sample(&sample_key, &EventId::from_byte_array(id))
-        })
-        .count();
-    assert_eq!(sampled, 4_053);
-    assert!(!event_is_cardinality_sample(
-        &[0x43; 32],
-        &EventId::from_byte_array([0; 32])
-    ));
-}
-
-#[test]
-fn cardinality_planner_uses_one_dimension_for_author_kind_products() {
+fn ordered_plan_uses_one_dimension_for_author_kind_products() {
     let dir = tempfile::tempdir().unwrap();
     let store = RedbStore::open(dir.path().join("bounded-composite-plan.redb")).unwrap();
     let authors: BTreeSet<_> = (0..65)
@@ -1906,10 +1932,10 @@ fn cardinality_planner_uses_one_dimension_for_author_kind_products() {
         .collect();
     let kinds: BTreeSet<_> = (0..65u16).map(Kind::from).collect();
     let filter = Filter::new().authors(authors).kinds(kinds);
-    let read_txn = store.db.begin_read().unwrap();
-    let plan = plan_ordered_query(&read_txn, &filter).unwrap();
+    let plan = plan_ordered_query(&filter);
     assert_eq!(plan.index, OrderedIndex::Author);
     assert_eq!(plan.prefixes.len(), 65);
+    drop(store);
 }
 
 #[test]
@@ -1965,76 +1991,6 @@ fn empty_filter_sets_and_reversed_windows_match_nostr_semantics() {
     assert!(store.query_newest(&reversed, 10).unwrap().is_empty());
 }
 
-/// #867: the cardinality sidecar is written in the SAME transaction as the
-/// schema marker, so a current-epoch store cannot legitimately be missing it.
-/// A damaged sidecar is corruption of the current epoch — it is neither
-/// rebuilt in place (that would be an adoption path) nor relabelled as an old
-/// schema.
-#[test]
-fn damaged_cardinality_sidecar_is_current_epoch_corruption_not_a_rebuild() {
-    use nostr::EventBuilder;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("damaged-cardinality-sidecar.redb");
-    let keys = nostr::Keys::generate();
-    let relay = RelayUrl::parse("wss://cardinality.example").unwrap();
-    let mut store = RedbStore::open(&path).unwrap();
-    for i in 0..7u64 {
-        let event = EventBuilder::new(Kind::TextNote, format!("row-{i}"))
-            .custom_created_at(Timestamp::from(i + 1))
-            .sign_with_keys(&keys)
-            .unwrap();
-        store
-            .insert(
-                event,
-                RelayObserved::new(relay.clone(), Timestamp::from(i + 1)),
-            )
-            .unwrap();
-    }
-    drop(store);
-
-    let db = Database::create(&path).unwrap();
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut meta = write_txn.open_table(INDEX_CARDINALITY_META).unwrap();
-        meta.remove(INDEX_CARDINALITY_VERSION_KEY).unwrap();
-    }
-    write_txn.commit().unwrap();
-    drop(db);
-
-    assert!(
-        matches!(
-            RedbStore::open(&path),
-            Err(RedbStoreOpenError::Database(redb::Error::Corrupted(_)))
-        ),
-        "a missing cardinality epoch is corruption, never a rebuild or an old epoch"
-    );
-}
-
-#[test]
-fn malformed_cardinality_sample_key_fails_open() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("malformed-cardinality-sample-key.redb");
-    drop(RedbStore::open(&path).unwrap());
-
-    let db = Database::create(&path).unwrap();
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut sample_meta = write_txn.open_table(INDEX_CARDINALITY_SAMPLE_META).unwrap();
-        sample_meta
-            .insert(INDEX_CARDINALITY_SAMPLE_KEY, [1u8, 2].as_slice())
-            .unwrap();
-    }
-    write_txn.commit().unwrap();
-    drop(db);
-
-    assert!(matches!(
-        RedbStore::open(&path),
-        Err(RedbStoreOpenError::Database(redb::Error::Corrupted(message)))
-            if message == "current schema is missing its cardinality sample key"
-    ));
-}
-
 #[test]
 fn multi_value_tag_merge_deduplicates_one_event_without_candidate_set() {
     use nostr::{Alphabet, EventBuilder, Tag};
@@ -2071,7 +2027,7 @@ fn multi_value_tag_merge_deduplicates_one_event_without_candidate_set() {
 }
 
 #[test]
-fn cardinality_planner_is_differentially_equivalent_over_mixed_filters() {
+fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
     use nostr::{Alphabet, EventBuilder, Tag};
 
     fn next(state: &mut u64) -> u64 {
@@ -2209,6 +2165,51 @@ fn cardinality_planner_is_differentially_equivalent_over_mixed_filters() {
             memory.query_newest_ids(&filter, limit).unwrap(),
             "projected bounded round {round}"
         );
+
+        // Same filter, every ordered index that could answer it. The planner
+        // picks one; this asserts the other choices would have returned the
+        // same rows in the same order, which is why deleting the durable
+        // `index_cardinality` estimate could not change any answer (#1248).
+        let plannable = filter.ids.as_ref().is_none_or(BTreeSet::is_empty)
+            && !filter.generic_tags.values().any(BTreeSet::is_empty)
+            && !filter
+                .since
+                .zip(filter.until)
+                .is_some_and(|(since, until)| since > until);
+        if plannable {
+            let read_txn = redb.db.begin_read().unwrap();
+            for plan in candidate_ordered_plans(&filter) {
+                let complete: BTreeSet<_> = redb
+                    .query_ordered(&read_txn, &plan, &filter, None, None, None)
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.event.id)
+                    .collect();
+                assert_eq!(
+                    complete, memory_complete,
+                    "round {round} complete under {:?}",
+                    plan.index
+                );
+                let bounded: Vec<_> = redb
+                    .query_ordered(&read_txn, &plan, &filter, None, Some(limit), None)
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.event.id)
+                    .collect();
+                assert_eq!(
+                    bounded, memory_newest,
+                    "round {round} bounded under {:?}",
+                    plan.index
+                );
+                assert_eq!(
+                    redb.query_ordered_ids(&read_txn, &plan, &filter, limit)
+                        .unwrap(),
+                    memory_newest,
+                    "round {round} projected under {:?}",
+                    plan.index
+                );
+            }
+        }
     }
     assert_canonical_integrity(&redb.db);
 }
