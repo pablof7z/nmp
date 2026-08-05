@@ -532,17 +532,6 @@ impl NmpWorld {
             .expect("nmp-bdd: the engine must be started (ensure_started) before use")
     }
 
-    /// The active account's public key, decoded — the exact type a park's
-    /// reason names it with. Bech32 is outward decoration and never appears
-    /// here (`docs/internals/conventions/bech32-boundary.md`).
-    pub fn my_pubkey(&mut self) -> nostr::PublicKey {
-        let me = self
-            .active_person
-            .clone()
-            .expect("nmp-bdd: 'me' needs a logged-in account");
-        self.person(&me).public_key()
-    }
-
     /// Every relay named as `person`'s INBOX -- what an outbox fan-out would
     /// reach them at, and therefore exactly the set a "nothing was contacted
     /// on their behalf" assertion has to look at.
