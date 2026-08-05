@@ -100,8 +100,8 @@ Feature: Pointing at something is one door, and it fills what the library knows
     # nmp:id=WRITES-TAGGING-006
     # nmp:status=built
     # nmp:evidence=rust:nmp-nipc7::chat_reply_points_with_e_and_never_q_or_h_or_previous_rows
-    # nmp:evidence=swift:NMP::TaggingTests.testChatReplyIsKindNineAndPointsWithE
-    # nmp:evidence=kotlin:NMPKotlin::TaggingTest.chatReplyIsKindNineAndPointsWithE
+    # nmp:evidence=swift:NMP::testChatReplyIsKindNineAndPointsWithE
+    # nmp:evidence=kotlin:NMPKotlin::chatReplyIsKindNineAndPointsWithE
     # nmp:falsifier=Route kind:9 replies through the general reply verb, or restore the "q" reply row; a group chat reply becomes a kind 1111 no NIP-29 client will ever fetch, or points with the marker that keeps it out of its own thread.
     Scenario: A group chat reply stays kind 9 and points with "e"
       When a chat app replies to a message in a group
