@@ -1567,6 +1567,9 @@ impl<S: EventStore> EngineCore<S> {
         if let Some(status) = Self::retained_receipt_fact(&receipt) {
             replay.push((ReceiptReplayFactKey::ReceiptStatus, status));
         }
+        // A reattaching app is told which of the two unsigned states this
+        // obligation is in, exactly as the queue projection reports it
+        // (#1261): a signer holding the request is not a signer nobody has.
         if receipt.state == ReceiptState::Accepted
             && self
                 .pending
@@ -1575,9 +1578,10 @@ impl<S: EventStore> EngineCore<S> {
         {
             replay.push((
                 ReceiptReplayFactKey::AwaitingCapability,
-                WriteFact::Signing(SigningState::AwaitingSigner {
-                    pubkey: receipt.expected_pubkey,
-                }),
+                WriteFact::Signing(Self::signing_park(
+                    receipt.expected_pubkey,
+                    self.pending.get(&id),
+                )),
             ));
         }
         // The routing park is retained and replayed the same way the signer
@@ -2363,6 +2367,13 @@ impl<S: EventStore> EngineCore<S> {
             {
                 pending.sign_request_in_flight = true;
                 pending.sign_generation += 1;
+                // The park ENDED, and an app told nothing keeps showing the
+                // alarm the park raised (#1261). A park nobody can see end
+                // is as misleading as one nobody can see start.
+                effects.push(Effect::EmitReceipt(
+                    *id,
+                    WriteFact::Signing(SigningState::InFlight { pubkey: pk }),
+                ));
                 effects.push(Effect::RequestSign(
                     *id,
                     pending.sign_generation,
@@ -2401,6 +2412,23 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Which unsigned state a still-unsigned obligation is in.
+    ///
+    /// One signature, one author, one answer — but two ways of not having it
+    /// yet, and they are opposite advice to an app (#1261).
+    /// [`SigningState::InFlight`] is a signer holding the request right now:
+    /// transient, normal, and ended by the signer answering.
+    /// [`SigningState::AwaitingSigner`] is nobody answering for that key at
+    /// all: no clock ends it, so the app removing the entry is its only
+    /// other exit. An obligation with no live row left is not waiting on any
+    /// signer.
+    fn signing_park(pubkey: PublicKey, pending: Option<&PendingWrite>) -> SigningState {
+        match pending {
+            Some(pending) if pending.sign_request_in_flight => SigningState::InFlight { pubkey },
+            _ => SigningState::AwaitingSigner { pubkey },
+        }
+    }
+
     /// Enumerate the app's own publish queue (#1039).
     ///
     /// Every retained receipt, in receipt-id order, with what NMP knows
@@ -2429,9 +2457,13 @@ impl<S: EventStore> EngineCore<S> {
                 ReceiptState::Compensated => SigningState::Refused {
                     reason: "write compensated".to_string(),
                 },
-                _ => SigningState::AwaitingSigner {
-                    pubkey: receipt.expected_pubkey,
-                },
+                // "A signer has this request" and "no signer answers for
+                // this key" are different facts and an app acts differently
+                // on each (#1261). The obligation itself knows which: an
+                // outstanding sign request is exactly what
+                // `sign_request_in_flight` tracks, and it is cleared the
+                // moment the signer answers or reports itself unavailable.
+                _ => Self::signing_park(receipt.expected_pubkey, pending),
             };
             let outcome = match receipt.state {
                 ReceiptState::Cancelled => Some(WriteOutcome::NotSent(NotSentReason::Cancelled)),

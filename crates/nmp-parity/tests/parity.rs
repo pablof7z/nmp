@@ -298,6 +298,16 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
             },
         ),
         (
+            // #1261: the two unsigned states are different facts, and the
+            // boundary must not fold either onto the other.
+            WriteFact::Signing(SigningState::InFlight { pubkey }),
+            FfiWriteFact::Signing {
+                state: FfiSigningState::InFlight {
+                    pubkey: pubkey.to_hex(),
+                },
+            },
+        ),
+        (
             WriteFact::Signing(SigningState::Refused {
                 reason: "signer said no".into(),
             }),
@@ -402,6 +412,10 @@ enum NormStatus {
     /// #47 Unit B: carries the parked pubkey (hex) so the direct/FFI
     /// parity proof covers the payload, not just the variant tag.
     AwaitingSigner(String),
+    /// #1261: a signer HAS the request. Carried separately from
+    /// `AwaitingSigner` because a boundary that folded the two would tell an
+    /// app every healthy write is parked on a key nobody has.
+    SigningInFlight(String),
     Signed(String),
     SigningRefused(String),
     /// Both routing axes: the relays named so far AND whether resolution can
@@ -840,6 +854,9 @@ fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
         WriteFact::Signing(SigningState::AwaitingSigner { pubkey }) => {
             NormStatus::AwaitingSigner(pubkey.to_hex())
         }
+        WriteFact::Signing(SigningState::InFlight { pubkey }) => {
+            NormStatus::SigningInFlight(pubkey.to_hex())
+        }
         WriteFact::Signing(SigningState::Signed { event_id }) => {
             NormStatus::Signed(event_id.to_hex())
         }
@@ -905,6 +922,9 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
         FfiWriteFact::Signing {
             state: FfiSigningState::AwaitingSigner { pubkey },
         } => NormStatus::AwaitingSigner(pubkey),
+        FfiWriteFact::Signing {
+            state: FfiSigningState::InFlight { pubkey },
+        } => NormStatus::SigningInFlight(pubkey),
         FfiWriteFact::Signing {
             state: FfiSigningState::Signed { event_id },
         } => NormStatus::Signed(event_id),
@@ -1688,6 +1708,7 @@ fn normalize_ffi_follow_snapshot(snapshot: FfiFollowSnapshot) -> NormFollowSnaps
 fn direct_follow_receipt_name(status: &WriteFact) -> &'static str {
     match status {
         WriteFact::Signing(SigningState::AwaitingSigner { .. }) => "awaiting_signer",
+        WriteFact::Signing(SigningState::InFlight { .. }) => "signing_in_flight",
         WriteFact::Signing(SigningState::Signed { .. }) => "signed",
         WriteFact::Signing(SigningState::Refused { .. }) => "signing_refused",
         // `complete` is the routing AXIS's own terminal, and it is the only
@@ -1728,6 +1749,9 @@ fn ffi_follow_receipt_name(status: &FfiWriteFact) -> &'static str {
         FfiWriteFact::Signing {
             state: FfiSigningState::AwaitingSigner { .. },
         } => "awaiting_signer",
+        FfiWriteFact::Signing {
+            state: FfiSigningState::InFlight { .. },
+        } => "signing_in_flight",
         FfiWriteFact::Signing {
             state: FfiSigningState::Signed { .. },
         } => "signed",
