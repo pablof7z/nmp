@@ -3791,6 +3791,36 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiJoinAccess",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Open",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`[\"open\"]` -- join requests are honoured.",
+            ),
+        },
+        Variant {
+            name: "Closed",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`[\"closed\"]` -- join requests are ignored.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Whether JOIN REQUESTS are honoured (`nmp::nip29::JoinAccess` mirror,\n#1282). Independent of [`FfiReadAccess`]: a group can be publicly readable\nand still closed to new members.",
+    ),
+}
+
+enum Enum {
     name: "FfiListing",
     module_path: "nmp_ffi",
     remote: false,
@@ -4063,6 +4093,36 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "`nmp::NotSentReason` mirror.",
+    ),
+}
+
+enum Enum {
+    name: "FfiReadAccess",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Public",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`[\"public\"]` -- anyone may read the group's messages.",
+            ),
+        },
+        Variant {
+            name: "Private",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "`[\"private\"]` -- only members may read the group's messages.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "Who may READ a group's messages (`nmp::nip29::ReadAccess` mirror, #1282).\n\nNIP-29 spells the restricted state `[\"private\"]` on kind:39000 and\nkind:9002; the reference relay's 9002 parser spells the permissive one\n`[\"public\"]`, which is the only way an edit can say \"turn it back off\".",
     ),
 }
 
@@ -6623,6 +6683,83 @@ record Record {
     ],
     docstring: Some(
         "One relay-signed kind:39000 record (`nmp::nip29::GroupMetadata` mirror).\nThe three rows NIP-29 names are typed; `tags` carries the record's\ncomplete row list verbatim, so a row NIP-29 core does not define (a\n`parent`, say) needs no hand-parser on the native side.",
+    ),
+}
+
+record Record {
+    name: "FfiGroupMetadataEdit",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "name",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "The `name` row -- the group's display name.",
+            ),
+        },
+        Field {
+            name: "about",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "The `about` row -- the group's description.",
+            ),
+        },
+        Field {
+            name: "picture",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "The `picture` row. The tag NAME is NIP-29's; which URL goes in it is\nentirely the app's product policy.",
+            ),
+        },
+        Field {
+            name: "read_access",
+            type_: Optional {
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiReadAccess",
+                },
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "Who may read the group's messages.",
+            ),
+        },
+        Field {
+            name: "join_access",
+            type_: Optional {
+                inner_type: Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiJoinAccess",
+                },
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "Whether join requests are honoured.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "What one kind:9002 edit says about a group\n(`nmp::nip29::GroupMetadataEdit` mirror, #1282).\n\nEvery field is optional: `None` leaves that row out of the draft\nentirely, so it is not touched and never cleared. That is why the two\nmarkers are two-valued enums rather than booleans -- \"make it public\" and\n\"do not decide\" are different statements, and one boolean cannot make\nboth.\n\nA record rather than an opaque object, unlike [`FfiGroup`]: there is\nnothing retained here and nothing to keep out of a caller's reach. It is\nan argument, and every field is meant to be spelled by the app.",
     ),
 }
 
@@ -11584,18 +11721,10 @@ object Object {
                     default: None,
                 },
                 Argument {
-                    name: "name",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "about",
-                    type_: Optional {
-                        inner_type: String,
+                    name: "edit",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiGroupMetadataEdit",
                     },
                     by_ref: false,
                     optional: false,
@@ -11632,15 +11761,14 @@ object Object {
                         ),
                     },
                     FfiArgument {
-                        name: "name",
+                        name: "edit",
                         type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                    FfiArgument {
-                        name: "about",
-                        type_: RustBuffer(
-                            None,
+                            Some(
+                                ExternalFfiMetadata {
+                                    name: "FfiGroupMetadataEdit",
+                                    module_path: "nmp_ffi",
+                                },
+                            ),
                         ),
                     },
                 ],
@@ -11653,7 +11781,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "kind:9002 -- set the group's display fields. An omitted field emits\nno tag at all, so it is left untouched rather than cleared.",
+                "kind:9002 -- state part of the group's metadata\n(`nmp::nip29::Group::edit_metadata` mirror, #1282).\n\nComposes NIP-29's own 9002 rows and invents none: `name`, `about` and\n`picture`, plus the `public`/`private` and `open`/`closed` markers\nthat decide who may read the group and whether join requests are\nhonoured. An omitted field emits no tag, so it is left untouched\nrather than cleared.",
             ),
             throws: Some(
                 Enum {
@@ -11664,7 +11792,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_edit_metadata",
             checksum: Some(
-                34654,
+                33871,
             ),
         },
         Method {

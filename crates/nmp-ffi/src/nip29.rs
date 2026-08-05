@@ -44,8 +44,9 @@
 use std::sync::Arc;
 
 use nmp::nip29::{
-    self, Group, GroupAvailability, GroupIds, GroupMetadata, GroupObservation, GroupPredicate,
-    GroupRecord, GroupSnapshot, ListedRecord, ListedSubject, Listing, RelayScope,
+    self, Group, GroupAvailability, GroupIds, GroupMetadata, GroupMetadataEdit, GroupObservation,
+    GroupPredicate, GroupRecord, GroupSnapshot, JoinAccess, ListedRecord, ListedSubject, Listing,
+    ReadAccess, RelayScope,
 };
 use nostr::RelayUrl;
 
@@ -316,19 +317,24 @@ impl FfiGroup {
         Ok(NmpReceiptStream::new(receipts))
     }
 
-    /// kind:9002 -- set the group's display fields. An omitted field emits
-    /// no tag at all, so it is left untouched rather than cleared.
+    /// kind:9002 -- state part of the group's metadata
+    /// (`nmp::nip29::Group::edit_metadata` mirror, #1282).
+    ///
+    /// Composes NIP-29's own 9002 rows and invents none: `name`, `about` and
+    /// `picture`, plus the `public`/`private` and `open`/`closed` markers
+    /// that decide who may read the group and whether join requests are
+    /// honoured. An omitted field emits no tag, so it is left untouched
+    /// rather than cleared.
     pub fn edit_metadata(
         &self,
         engine: Arc<NmpEngine>,
         author: String,
-        name: Option<String>,
-        about: Option<String>,
+        edit: FfiGroupMetadataEdit,
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
-        let receipts =
-            self.inner
-                .edit_metadata(&engine.engine, author, name.as_deref(), about.as_deref())?;
+        let receipts = self
+            .inner
+            .edit_metadata(&engine.engine, author, edit.into())?;
         Ok(NmpReceiptStream::new(receipts))
     }
 
@@ -378,6 +384,92 @@ impl FfiGroup {
         let author = parse_pubkey(&author)?;
         let receipts = self.inner.create_invite(&engine.engine, author, &code)?;
         Ok(NmpReceiptStream::new(receipts))
+    }
+}
+
+/// Who may READ a group's messages (`nmp::nip29::ReadAccess` mirror, #1282).
+///
+/// NIP-29 spells the restricted state `["private"]` on kind:39000 and
+/// kind:9002; the reference relay's 9002 parser spells the permissive one
+/// `["public"]`, which is the only way an edit can say "turn it back off".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiReadAccess {
+    /// `["public"]` -- anyone may read the group's messages.
+    Public,
+    /// `["private"]` -- only members may read the group's messages.
+    Private,
+}
+
+impl From<FfiReadAccess> for ReadAccess {
+    fn from(value: FfiReadAccess) -> Self {
+        match value {
+            FfiReadAccess::Public => Self::Public,
+            FfiReadAccess::Private => Self::Private,
+        }
+    }
+}
+
+/// Whether JOIN REQUESTS are honoured (`nmp::nip29::JoinAccess` mirror,
+/// #1282). Independent of [`FfiReadAccess`]: a group can be publicly readable
+/// and still closed to new members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiJoinAccess {
+    /// `["open"]` -- join requests are honoured.
+    Open,
+    /// `["closed"]` -- join requests are ignored.
+    Closed,
+}
+
+impl From<FfiJoinAccess> for JoinAccess {
+    fn from(value: FfiJoinAccess) -> Self {
+        match value {
+            FfiJoinAccess::Open => Self::Open,
+            FfiJoinAccess::Closed => Self::Closed,
+        }
+    }
+}
+
+/// What one kind:9002 edit says about a group
+/// (`nmp::nip29::GroupMetadataEdit` mirror, #1282).
+///
+/// Every field is optional: `None` leaves that row out of the draft
+/// entirely, so it is not touched and never cleared. That is why the two
+/// markers are two-valued enums rather than booleans -- "make it public" and
+/// "do not decide" are different statements, and one boolean cannot make
+/// both.
+///
+/// A record rather than an opaque object, unlike [`FfiGroup`]: there is
+/// nothing retained here and nothing to keep out of a caller's reach. It is
+/// an argument, and every field is meant to be spelled by the app.
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGroupMetadataEdit {
+    /// The `name` row -- the group's display name.
+    #[uniffi(default = None)]
+    pub name: Option<String>,
+    /// The `about` row -- the group's description.
+    #[uniffi(default = None)]
+    pub about: Option<String>,
+    /// The `picture` row. The tag NAME is NIP-29's; which URL goes in it is
+    /// entirely the app's product policy.
+    #[uniffi(default = None)]
+    pub picture: Option<String>,
+    /// Who may read the group's messages.
+    #[uniffi(default = None)]
+    pub read_access: Option<FfiReadAccess>,
+    /// Whether join requests are honoured.
+    #[uniffi(default = None)]
+    pub join_access: Option<FfiJoinAccess>,
+}
+
+impl From<FfiGroupMetadataEdit> for GroupMetadataEdit {
+    fn from(edit: FfiGroupMetadataEdit) -> Self {
+        Self {
+            name: edit.name,
+            about: edit.about,
+            picture: edit.picture,
+            read_access: edit.read_access.map(ReadAccess::from),
+            join_access: edit.join_access.map(JoinAccess::from),
+        }
     }
 }
 
@@ -1253,8 +1345,10 @@ mod tests {
                 group.edit_metadata(
                     engine.clone(),
                     author.clone(),
-                    Some("Photographers".to_string()),
-                    None,
+                    FfiGroupMetadataEdit {
+                        name: Some("Photographers".to_string()),
+                        ..FfiGroupMetadataEdit::default()
+                    },
                 ),
             ),
             (
@@ -1374,6 +1468,37 @@ mod tests {
             }
             other => panic!("expected GroupContextAmbiguous, got {other:?}"),
         }
+    }
+
+    /// #1282 across the boundary: the picture row and both marker rows reach
+    /// the wire, so an app that wants a closed group no longer hand-writes
+    /// `["closed"]` itself.
+    #[test]
+    fn the_metadata_edit_door_composes_the_picture_and_marker_rows() {
+        let edit: GroupMetadataEdit = FfiGroupMetadataEdit {
+            name: Some("Workspace".to_string()),
+            picture: Some("https://cdn.example/w.png".to_string()),
+            read_access: Some(FfiReadAccess::Public),
+            join_access: Some(FfiJoinAccess::Closed),
+            ..FfiGroupMetadataEdit::default()
+        }
+        .into();
+        assert_eq!(
+            nmp::nip29::edit_metadata(edit)
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect::<Vec<Vec<String>>>(),
+            vec![
+                vec!["name".to_string(), "Workspace".to_string()],
+                vec![
+                    "picture".to_string(),
+                    "https://cdn.example/w.png".to_string()
+                ],
+                vec!["public".to_string()],
+                vec!["closed".to_string()],
+            ]
+        );
     }
 
     /// A caller-supplied `h` tag never reaches the door: the refusal is
