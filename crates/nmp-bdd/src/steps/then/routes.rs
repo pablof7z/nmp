@@ -120,19 +120,6 @@ async fn park_carries_a_reason(w: &mut NmpWorld) {
     );
 }
 
-/// The same claim, narrowed to ME: the write is parked because MY OWN relay
-/// list has not arrived, so the park's waiting set contains my key.
-#[then(regex = r#"^the receipt says it has no relay list for me yet$"#)]
-async fn park_names_my_relay_list(w: &mut NmpWorld) {
-    let me = w.my_pubkey();
-    assert!(
-        w.park_awaits(me),
-        "the park must name MY key as the route it is waiting on, not merely be open; \
-         saw {:?}",
-        w.routing_facts_reported()
-    );
-}
-
 /// Parked on a NAMED author: the person the scenario staged as unlooked-up
 /// is the person the receipt says it is waiting for.
 ///
