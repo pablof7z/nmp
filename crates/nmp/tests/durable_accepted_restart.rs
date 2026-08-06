@@ -74,7 +74,7 @@ fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::WriteAccepted(id) => Some(*id),
+            Effect::WriteAccepted(id, _) => Some(*id),
             _ => None,
         })
         .expect("accepted receipt")
@@ -245,7 +245,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     assert!(
         !recovery
             .iter()
-            .any(|effect| matches!(effect, Effect::WriteAccepted(_))),
+            .any(|effect| matches!(effect, Effect::WriteAccepted(..))),
         "boot recovery must not accept the write a second time"
     );
 
@@ -1171,7 +1171,7 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
     assert!(
         !recovery
             .iter()
-            .any(|effect| matches!(effect, Effect::WriteAccepted(_))),
+            .any(|effect| matches!(effect, Effect::WriteAccepted(..))),
         "boot recovery must not accept the bootstrap a second time"
     );
     assert!(core.reattach_receipt(id).is_attached());

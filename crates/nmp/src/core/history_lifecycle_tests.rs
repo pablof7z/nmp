@@ -540,7 +540,7 @@ mod history_mutation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::WriteAccepted(id) => Some(*id),
+                Effect::WriteAccepted(id, _) => Some(*id),
                 _ => None,
             })
             .expect("replaceable local acceptance emits a receipt");

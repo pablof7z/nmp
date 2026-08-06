@@ -158,7 +158,7 @@ fn published_receipt(effects: &[Effect]) -> ReceiptId {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::WriteAccepted(id) => Some(*id),
+            Effect::WriteAccepted(id, _) => Some(*id),
             _ => None,
         })
         .expect("durable write was accepted")

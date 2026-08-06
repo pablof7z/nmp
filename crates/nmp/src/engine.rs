@@ -649,9 +649,13 @@ impl Engine {
     ///
     /// The receipt carries the stable store-issued
     /// [`ReceiptId`](crate::ReceiptId) that process-later reattachment
-    /// needs, so acceptance never hands back less than the whole receipt.
-    /// Pre-acceptance correlation-id exhaustion returns a typed error
-    /// without creating a receipt at all.
+    /// needs, AND the event id acceptance froze
+    /// ([`ReceiptStream::event_id`]) — the write's identity from acceptance
+    /// onward, post-restamp in every case, and the same value
+    /// [`Self::publish_queue`] later reports for that receipt. One
+    /// transaction decided both, so acceptance never hands back less than the
+    /// whole receipt (#1314). Pre-acceptance correlation-id exhaustion
+    /// returns a typed error without creating a receipt at all.
     ///
     /// Identity (#47): with [`Identity::Active`] — the default — a builder
     /// payload signs as the CURRENT active account, and fails closed
@@ -708,6 +712,12 @@ impl Engine {
     /// INSPECTION, never waiting. Nothing here blocks on settlement, and a
     /// locally accepted write is already visible through the app's own live
     /// query long before it appears here as settled.
+    ///
+    /// Enumerating everything is the actual question being asked here, which
+    /// is why the answer is the whole retained set. It is NOT the route to
+    /// one write's frozen event id: acceptance already answered that
+    /// ([`ReceiptStream::event_id`]), and asking here instead spends the size
+    /// of a set nothing bounds yet (#46) on one write (#1314).
     pub fn publish_queue(&self) -> Result<Vec<PublishQueueEntry>, RemoveQueueEntryError> {
         self.with_handle(|handle| handle.publish_queue_entries())
             .map_err(|_| RemoveQueueEntryError::EngineClosed)?

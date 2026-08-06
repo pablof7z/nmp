@@ -1462,6 +1462,7 @@ impl core::marker::UnsafeUnpin for nmp::ReceiptId
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::ReceiptId
 impl core::panic::unwind_safe::UnwindSafe for nmp::ReceiptId
 pub struct nmp::ReceiptStream
+pub nmp::ReceiptStream::event_id: nostr::event::id::EventId
 pub nmp::ReceiptStream::id: nmp::ReceiptId
 pub nmp::ReceiptStream::statuses: nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteFact>
 impl core::marker::Freeze for nmp::ReceiptStream

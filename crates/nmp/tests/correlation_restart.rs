@@ -41,7 +41,7 @@ fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::WriteAccepted(id)
+            Effect::WriteAccepted(id, _)
             | Effect::EmitReceipt(id, _)
             | Effect::ReplayReceipt(id, _) => Some(*id),
             _ => None,
@@ -132,7 +132,7 @@ fn kill_after_durable_acceptance_reattaches_by_token_alone_after_restart() {
         let id = receipt_id(&effects);
         assert!(effects
             .iter()
-            .any(|e| matches!(e, Effect::WriteAccepted(r) if *r == id)));
+            .any(|e| matches!(e, Effect::WriteAccepted(r, _) if *r == id)));
         // The process dies right here -- `id` is known only to this stack
         // frame, never durably recorded by the "app" (this test never
         // writes it to its own storage).

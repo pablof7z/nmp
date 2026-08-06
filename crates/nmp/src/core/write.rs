@@ -1916,6 +1916,7 @@ impl<S: EventStore> EngineCore<S> {
             facts,
             next_cursor,
             end_cursor: Some(cursor),
+            frozen_id: Some(receipt.frozen_id),
             isolated_fact_cursors,
         }
     }
@@ -2216,7 +2217,11 @@ impl<S: EventStore> EngineCore<S> {
                     Ok(receipt_id) => {
                         let id = ReceiptId(receipt_id);
                         vec![
-                            Effect::WriteAccepted(id),
+                            // The refusal never reached the CAS that could
+                            // have restamped anything, so the body this froze
+                            // is the body custody holds — and it is exactly
+                            // what `accept_refused` retained above.
+                            Effect::WriteAccepted(id, frozen.id),
                             Effect::EmitReceipt(
                                 id,
                                 WriteFact::Outcome(WriteOutcome::Refused(reason)),
@@ -2271,8 +2276,11 @@ impl<S: EventStore> EngineCore<S> {
 
         // Acceptance IS `publish()` returning `Ok`, never a stream item: an
         // app that must ask the stream whether its write was accepted is an
-        // app being made to wait on something it already knows.
-        let mut effects = vec![Effect::WriteAccepted(id)];
+        // app being made to wait on something it already knows. The same is
+        // true of the identity acceptance just froze: `frozen` was already
+        // re-derived above against the row the acceptance transaction CAS-ed,
+        // so this is the post-restamp id and never a pre-restamp guess.
+        let mut effects = vec![Effect::WriteAccepted(id, frozen.id)];
 
         self.pending.insert(
             id,
