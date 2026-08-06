@@ -27,12 +27,18 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp/src/config.rs`
 - Source: `crates/nmp/src/relay_information.rs`
 - Source: `crates/nmp/src/subscription.rs`
+- Source: `crates/nmp/src/observation.rs`
+- Source: `crates/nmp/src/auth.rs`
 - Source: `crates/nmp-grammar/src/binding.rs`
 - Source: `crates/nmp-grammar/src/descriptor.rs`
+- Source: `crates/nmp-grammar/src/live_query.rs`
+- Source: `crates/nmp-grammar/src/selector.rs`
 - Source: `crates/nmp-grammar/src/write.rs`
-- Source: `crates/nmp/src/delivery/mod.rs`
+- Source: `crates/nmp/src/publish_queue/mod.rs`
 - Source: `crates/nmp/src/core/diagnostics.rs`
+- Source: `crates/nmp/src/core/evidence.rs`
 - Source: `crates/nmp/src/core/mod.rs`
+- Source: `crates/nmp/src/diagnostics.rs`
 - Source: `crates/nmp/src/runtime/mod.rs`
 - Source: `crates/nmp/src/relay_information_service.rs`
 - Source: `crates/nmp-executor/src/lib.rs`
@@ -45,6 +51,23 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-content/src/document.rs`
 - Source: `crates/nmp-content/src/parse.rs`
 
+## Facade protocol doors
+
+- Source: `crates/nmp/src/nip18.rs`
+- Source: `crates/nmp/src/nip22.rs`
+- Source: `crates/nmp/src/nip25.rs`
+- Source: `crates/nmp/src/nip29/mod.rs`
+- Source: `crates/nmp/src/nip29/group.rs`
+- Source: `crates/nmp/src/nip29/groups.rs`
+- Source: `crates/nmp/src/nip29/predicate.rs`
+- Source: `crates/nmp/src/nip29/records.rs`
+- Source: `crates/nmp/src/nip51.rs`
+- Source: `crates/nmp/src/nip65.rs`
+- Source: `crates/nmp/src/nipc7.rs`
+- Source: `crates/nmp/src/content.rs`
+- Source: `crates/nmp/src/asset.rs`
+- Source: `crates/nmp/src/blossom.rs`
+
 ## FFI and native wrappers
 
 - Source: `crates/nmp-ffi/src/facade.rs`
@@ -52,11 +75,18 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-ffi/src/convert.rs`
 - Source: `crates/nmp-ffi/src/nip02.rs`
 - Source: `crates/nmp-ffi/src/nip22.rs`
+- Source: `crates/nmp-ffi/src/nip29.rs`
+- Source: `crates/nmp-ffi/src/nip51.rs`
+- Source: `crates/nmp-ffi/src/tagging.rs`
+- Source: `crates/nmp-ffi/src/content.rs`
+- Source: `crates/nmp-ffi/src/blossom.rs`
 - Source: `Packages/NMP/Sources/NMP/Engine.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPError.swift`
 - Source: `Packages/NMP/Sources/NMP/Query.swift`
+- Source: `Packages/NMP/Sources/NMP/Window.swift`
 - Source: `Packages/NMP/Sources/NMP/DiagnosticsQuery.swift`
 - Source: `Packages/NMP/Sources/NMP/InsecureFileAccountStore.swift`
+- Source: `Packages/NMP/Sources/NMP/KeychainAccountStore.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPFilter.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPDemand.swift`
 - Source: `Packages/NMP/Sources/NMP/Row.swift`
@@ -65,6 +95,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/Diagnostics.swift`
 - Source: `Packages/NMP/Sources/NMP/NostrEntity.swift`
 - Source: `Packages/NMP/Sources/NMP/Signing.swift`
+- Source: `Packages/NMP/Sources/NMP/AuthPolicy.swift`
 - Source: `Packages/NMP/Sources/NMP/RelayInformation.swift`
 - Source: `Packages/NMP/Tests/NMPTests/DiagnosticsTests.swift`
 - Source: `Packages/NMP/Tests/NMPTests/FollowingTests.swift`
@@ -73,8 +104,10 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Engine.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPError.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Query.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Window.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/DiagnosticsQuery.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/InsecureFileAccountStore.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/SecureKeyStoreAccountStore.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPFilter.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPDemand.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Row.kt`
@@ -93,16 +126,25 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Package.swift`
 - Source: `Packages/NMP/README.md`
 - Source: `Packages/NMP/Sources/NMP/Following.swift`
+- Source: `Packages/NMP/Sources/NMP/Tagging.swift`
 - Source: `Packages/NMP/Sources/NMP/NIP22.swift`
 - Source: `Packages/NMP/Sources/NMP/NIP29.swift`
+- Source: `Packages/NMP/Sources/NMP/NIP51.swift`
+- Source: `Packages/NMP/Sources/NMP/Blossom.swift`
 - Source: `Packages/NMP/Sources/NMPContent`
 - Source: `Packages/NMP/Sources/NMPContent/ContentDocument.swift`
 - Source: `Packages/NMP/Sources/NMPUI`
 - Source: `Packages/NMPKotlin/README.md`
 - Source: `Packages/NMPKotlin/build.gradle.kts`
+- Source: `Packages/NMPKotlin/settings.gradle.kts`
+- Source: `Packages/NMPKotlin/ui/build.gradle.kts`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Content.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Following.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Tagging.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP22.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP51.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Blossom.kt`
 - Source: `scripts/build-swift-xcframework.sh`
 - Source: `scripts/build-kotlin-jvm.sh`
 
