@@ -670,6 +670,141 @@ fn accepted_explicit_route_ignores_later_directory_fact_across_restart() {
     );
 }
 
+/// Fail-closed survived the removal of the route that used to spell it, and
+/// the privacy WORDING did not survive with it.
+///
+/// The directory already names both of this author's write relays when the
+/// publish arrives, and both are connected and authenticated -- so they are
+/// demonstrably live destinations the engine could reach in one step. An
+/// exact route that consulted the directory, or widened to it under any
+/// pressure, would therefore have somewhere to widen TO: the one-destination
+/// witness below is about the route being verbatim, not about the
+/// alternatives being unreachable.
+///
+/// The second half is vocabulary. An exact route is a routing property, and
+/// the relay an app names is routinely public -- a group host, an archive.
+/// A fact that described this write as private would be lying about what the
+/// app asked for, so no fact this publish emits may say the word.
+#[test]
+fn an_explicit_route_over_a_live_directory_is_verbatim_and_claims_no_privacy() {
+    let author = Keys::generate();
+    let chosen = RelayUrl::parse("wss://chosen-relay.example").unwrap();
+    let known_a = RelayUrl::parse("wss://outbox-a.example").unwrap();
+    let known_b = RelayUrl::parse("wss://outbox-b.example").unwrap();
+
+    let mut core = new_core(
+        FixtureRoutingFacts::new()
+            .with_outbound_routes(author.public_key(), [known_a.clone(), known_b.clone()]),
+    );
+    activate(&mut core, &author);
+    for (slot, relay) in [(0, &chosen), (1, &known_a), (2, &known_b)] {
+        connect_signer(&mut core, slot, relay, author.public_key());
+        authenticate_signer(&mut core, slot, relay, &author);
+    }
+
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Event(draft(61, "narrow")),
+        routing: WriteRouting::Explicit(vec![chosen.clone()]),
+        identity: Identity::Active,
+        correlation: None,
+    }));
+    let (receipt, generation, unsigned) = find_sign_request(&accepted);
+    let signed = unsigned.sign_with_keys(&author).unwrap();
+    let completed = core.handle(EngineMsg::SignerCompleted(
+        receipt,
+        generation,
+        Ok(signed.clone()),
+    ));
+
+    let published: BTreeSet<RelayUrl> = accepted
+        .iter()
+        .chain(completed.iter())
+        .filter_map(|effect| match effect {
+            Effect::PublishEvent(session, event, _) if event.id == signed.id => {
+                Some(session.relay.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        published,
+        BTreeSet::from([chosen.clone()]),
+        "an exact route executes verbatim: the two live relays the directory \
+         knows are never offered the event"
+    );
+    let ensured: BTreeSet<RelayUrl> = accepted
+        .iter()
+        .chain(completed.iter())
+        .filter_map(|effect| match effect {
+            Effect::EnsureWriteRelay(session) => Some(session.relay.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        ensured.iter().all(|relay| relay == &chosen),
+        "no lane may be opened outside the named relay: {ensured:?}"
+    );
+    assert!(
+        accepted
+            .iter()
+            .chain(completed.iter())
+            .any(|effect| matches!(
+                effect,
+                Effect::EmitReceipt(
+                    id,
+                    WriteFact::Destinations {
+                        relays,
+                        complete: true,
+                        awaiting_author_routes,
+                    }
+                ) if *id == receipt
+                    && relays == &BTreeSet::from([chosen.clone()])
+                    && awaiting_author_routes.is_empty()
+            )),
+        "the receipt names exactly the app's destination and nothing it \
+         could have discovered: {completed:?}"
+    );
+
+    mark_written(&mut core, &completed, &chosen);
+    let acked = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        signer_session(&chosen, signed.pubkey),
+        RelayFrame::from(RelayMessage::ok(signed.id, true, "")),
+    ));
+    assert!(
+        acked.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published })
+                if *id == receipt && relay == &chosen
+        )),
+        "the named relay is where the note actually lands: {acked:?}"
+    );
+
+    let facts = core.reattach_receipt(receipt).facts;
+    assert!(
+        !facts.iter().any(|fact| match fact {
+            WriteFact::Destinations { relays, .. } =>
+                relays.contains(&known_a) || relays.contains(&known_b),
+            WriteFact::Relay { relay, .. } => relay == &known_a || relay == &known_b,
+            WriteFact::Signing(_) | WriteFact::Outcome(_) => false,
+        }),
+        "no durable or replayed fact may name a relay the app did not: {facts:?}"
+    );
+    let privacy_claims: Vec<String> = facts
+        .iter()
+        .map(|fact| format!("{fact:?}"))
+        .filter(|rendered| rendered.to_lowercase().contains("private"))
+        .collect();
+    assert!(
+        privacy_claims.is_empty(),
+        "an exact route is not a privacy claim, but a fact said: \
+         {privacy_claims:?}"
+    );
+}
+
 #[test]
 fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_volatile() {
     let author = Keys::generate();
