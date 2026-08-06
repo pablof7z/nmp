@@ -56,7 +56,9 @@ mod tests {
     ///
     /// One entry as of #1214: `QUERIES-COMPOSED-027` names #1215, the open
     /// gap that no runtime test can assert the native live query keeps its
-    /// branch storage private and unforgeable.
+    /// branch storage private and unforgeable. As of #1105,
+    /// `ROUTING-REMOVEDROUTES-004/-005/-007` name #1320, the open gap that
+    /// three of the removal contract's claims have no executing proof.
     struct KnownLiveIssues(BTreeMap<u64, IssueState>);
 
     impl KnownLiveIssues {
@@ -64,6 +66,7 @@ mod tests {
             Self(BTreeMap::from([
                 (1215, IssueState::Open),
                 (1253, IssueState::Open),
+                (1320, IssueState::Open),
             ]))
         }
     }

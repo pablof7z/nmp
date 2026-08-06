@@ -36,8 +36,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # Both steps invoke the script by its exact repository path rather than
+      # through an interpreter. `ROUTING-REMOVEDROUTES-001/-002/-003` cite the
+      # gate as `script:repository::scripts/check-routing-vocabulary.sh`, and
+      # `tools/behavior-traceability` reads a lane only from a step that names
+      # the proof tool DIRECTLY -- a `bash` prefix is an environment the
+      # locator does not name, so the same command spelled that way maps to no
+      # lane at all and the citation fails closed. Both files are executable
+      # and carry a shebang; this is the spelling every other governed
+      # repository check already uses.
       - name: Falsify a third routing word, a restored spelling, and a relay-taking group verb
-        run: bash scripts/test-check-routing-vocabulary.sh
+        run: scripts/test-check-routing-vocabulary.sh
 
       - name: Require exactly Auto and Explicit on every surface
-        run: bash scripts/check-routing-vocabulary.sh
+        run: scripts/check-routing-vocabulary.sh
