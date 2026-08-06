@@ -119,10 +119,20 @@ expect_failure "thick PR scope" 'echo "mode=--macos-only"'
 
 reset_fixture
 sed -i.bak \
-  's/aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin/aarch64-apple-darwin/' \
+  's/echo "mode=" >> "\$GITHUB_OUTPUT"/echo "mode=--macos-only" >> "$GITHUB_OUTPUT"/' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "removed full master packaging" "aarch64-apple-ios aarch64-apple-ios-sim"
+expect_failure "removed full master packaging" 'echo "mode=" >> "$GITHUB_OUTPUT"'
+
+# #1240: the builder installs the Apple targets it builds for. A workflow-side
+# target list is a second owner of that fact and hides a builder that stopped.
+reset_fixture
+sed -i.bak \
+  '/scripts\/build-swift-xcframework.sh/i\
+          rustup target add aarch64-apple-darwin' \
+  "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
+rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
+expect_failure "workflow-owned target install" "rustup target add"
 
 reset_fixture
 sed -i.bak \
@@ -153,6 +163,6 @@ sed -i.bak \
         run: cargo test' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "portable work drifted onto macOS" "exactly six named Apple qualification steps"
+expect_failure "portable work drifted onto macOS" "exactly five named Apple qualification steps"
 
-echo "macOS CI throughput test: baseline and twelve mutations passed"
+echo "macOS CI throughput test: baseline and thirteen mutations passed"

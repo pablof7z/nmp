@@ -20,7 +20,9 @@ Options:
   -h, --help    show this help without building
 
 With no option, build iOS device, iOS simulator, and macOS slices.
-CARGO_TARGET_DIR is honored when supplied by the caller.
+Any Rust target the selected slices need is installed onto the toolchain
+rust-toolchain.toml pins. CARGO_TARGET_DIR is honored when supplied by the
+caller.
 USAGE
 }
 
@@ -94,6 +96,52 @@ if [[ "$TARGET_DIR_VALUE" == /* ]]; then
   TARGET_DIR="$TARGET_DIR_VALUE"
 else
   TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
+fi
+
+REQUIRED_TARGETS="$MACOS_TARGET"
+if [[ "$MODE" != macos ]]; then
+  REQUIRED_TARGETS="$REQUIRED_TARGETS $SIM_ARM_TARGET $SIM_X86_TARGET"
+fi
+if [[ "$MODE" == all ]]; then
+  REQUIRED_TARGETS="$REQUIRED_TARGETS $DEVICE_TARGET"
+fi
+
+# A cross-compilation target's standard library is installed per toolchain, and
+# this repository pins its toolchain in rust-toolchain.toml. This script is the
+# only place that knows both the pin and the target set, so it installs the
+# targets it is about to build for. Cargo without a target's std fails as
+# `error[E0463]: can't find crate for core`, which reads like a source break in
+# nmp-ffi and is not one.
+echo "== 0. Rust targets for the toolchain this repository pins =="
+if ! command -v rustup >/dev/null 2>&1; then
+  echo "error: rustup is required: rust-toolchain.toml selects the toolchain this build must use" >&2
+  echo "error: this build needs the Rust standard library for: $REQUIRED_TARGETS" >&2
+  exit 1
+fi
+# `rustup target` acts on the ACTIVE toolchain, and the working directory is the
+# repository root, so rust-toolchain.toml selects it. Installing against any
+# other toolchain (`rustup +nightly target add ...`) leaves this build with no
+# std for the target it names.
+ACTIVE_TOOLCHAIN=$(rustup show active-toolchain)
+ACTIVE_TOOLCHAIN=${ACTIVE_TOOLCHAIN%% *}
+INSTALLED_TARGETS=$(rustup target list --installed)
+MISSING_TARGETS=
+for required_target in $REQUIRED_TARGETS; do
+  grep -Fqx -- "$required_target" <<<"$INSTALLED_TARGETS" \
+    || MISSING_TARGETS="${MISSING_TARGETS:+$MISSING_TARGETS }$required_target"
+done
+if [[ -n "$MISSING_TARGETS" ]]; then
+  echo "installing on $ACTIVE_TOOLCHAIN: $MISSING_TARGETS"
+  # shellcheck disable=SC2086 # target triples never contain whitespace
+  if ! rustup target add $MISSING_TARGETS; then
+    echo "error: no Rust standard library for: $MISSING_TARGETS" >&2
+    echo "error: install it from the repository root, so rust-toolchain.toml selects the toolchain:" >&2
+    echo "error:   rustup target add $MISSING_TARGETS" >&2
+    echo "error: the active toolchain here is $ACTIVE_TOOLCHAIN; installing onto another one leaves cargo reporting a missing \`core\`" >&2
+    exit 1
+  fi
+else
+  echo "$ACTIVE_TOOLCHAIN already has: $REQUIRED_TARGETS"
 fi
 
 build_target() {

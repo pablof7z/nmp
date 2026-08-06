@@ -75,6 +75,32 @@ case "${1:-}" in
 esac
 SHIM
 
+cat > "$BIN/rustup" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'rustup' >> "$CALL_LOG"
+printf ' %q' "$@" >> "$CALL_LOG"
+printf '\n' >> "$CALL_LOG"
+case "${1:-} ${2:-}" in
+  'show active-toolchain')
+    printf '%s\n' \
+      "nightly-fixture-aarch64-apple-darwin (overridden by '/fixture/rust-toolchain.toml')"
+    ;;
+  'target list')
+    installed=${RUSTUP_INSTALLED_TARGETS-}
+    # shellcheck disable=SC2086 # target triples never contain whitespace
+    printf '%s\n' $installed
+    ;;
+  'target add')
+    if [[ ${RUSTUP_ADD_FAILS:-0} != 0 ]]; then
+      echo "error: fixture rustup cannot reach the toolchain manifest" >&2
+      exit 1
+    fi
+    ;;
+  *) exit 64 ;;
+esac
+SHIM
+
 cat > "$BIN/otool" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -186,8 +212,19 @@ run_script() {
       MACOSX_DEPLOYMENT_TARGET=99.0 \
       CFLAGS=-mmacosx-version-min=99.0 \
       CXXFLAGS=-mmacosx-version-min=99.0 \
+      RUSTUP_INSTALLED_TARGETS="${RUSTUP_INSTALLED_TARGETS-}" \
+      RUSTUP_ADD_FAILS="${RUSTUP_ADD_FAILS-0}" \
       scripts/build-swift-xcframework.sh "$@"
   )
+}
+
+# The first line of the log that matches a pattern, or the empty string.
+first_call() {
+  grep -n -- "$2" "$1" | head -1 | cut -d: -f1
+}
+
+added_targets() {
+  sed -n 's/^rustup target add //p' "$1"
 }
 
 assert_no_calls() {
@@ -261,6 +298,96 @@ grep -Fq -- '--target aarch64-apple-darwin' "$default_log"
 grep -Fq -- '--target aarch64-apple-ios deployment=unset' "$default_log"
 grep -Fq 'lipo -create' "$default_log"
 echo 'ok - sim-only and default target sets remain compatible'
+
+# #1240: the builder installs the Rust targets it is about to build for, on the
+# toolchain rust-toolchain.toml selects, before Cargo runs. Without that a clean
+# consumer clone meets `can't find crate for core` and reads it as an API break.
+RUSTUP_INSTALLED_TARGETS=
+RUSTUP_ADD_FAILS=0
+
+install_log="$TMP/install-macos.log"
+run_script "$install_log" "$TMP/install-macos-target" --macos-only >/dev/null
+[[ "$(added_targets "$install_log")" == 'aarch64-apple-darwin' ]]
+install_line=$(first_call "$install_log" '^rustup target add ')
+cargo_line=$(first_call "$install_log" '^cargo ')
+[[ -n "$install_line" && -n "$cargo_line" && "$cargo_line" -gt "$install_line" ]] || {
+  echo 'targets were not installed before Cargo ran:' >&2
+  cat "$install_log" >&2
+  exit 1
+}
+
+install_sim_log="$TMP/install-sim.log"
+run_script "$install_sim_log" "$TMP/install-sim-target" --sim-only >/dev/null
+[[ "$(added_targets "$install_sim_log")" == \
+   'aarch64-apple-darwin aarch64-apple-ios-sim x86_64-apple-ios' ]]
+
+install_all_log="$TMP/install-all.log"
+run_script "$install_all_log" "$TMP/install-all-target" >/dev/null
+[[ "$(added_targets "$install_all_log")" == \
+   'aarch64-apple-darwin aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-ios' ]]
+
+# Only the missing ones are installed, and an already-provisioned toolchain is
+# left untouched.
+RUSTUP_INSTALLED_TARGETS='aarch64-apple-darwin x86_64-apple-ios'
+partial_log="$TMP/install-partial.log"
+run_script "$partial_log" "$TMP/install-partial-target" --sim-only >/dev/null
+[[ "$(added_targets "$partial_log")" == 'aarch64-apple-ios-sim' ]]
+
+RUSTUP_INSTALLED_TARGETS='aarch64-apple-darwin aarch64-apple-ios-sim x86_64-apple-ios'
+provisioned_log="$TMP/install-provisioned.log"
+run_script "$provisioned_log" "$TMP/install-provisioned-target" --sim-only >/dev/null
+! grep -q '^rustup target add' "$provisioned_log"
+echo 'ok - every missing target is installed before Cargo, and no installed one is re-added'
+
+# When the install cannot happen the build refuses, names the exact missing
+# target and the command that supplies it, and never reaches Cargo.
+refuse_log="$TMP/install-refused.log"
+: > "$refuse_log"
+if refusal=$(
+  cd "$REPO"
+  PATH="$BIN:$PATH" \
+    CALL_LOG="$refuse_log" \
+    CARGO_TARGET_DIR="$TMP/install-refused-target" \
+    RUSTUP_INSTALLED_TARGETS= \
+    RUSTUP_ADD_FAILS=1 \
+    scripts/build-swift-xcframework.sh --sim-only 2>&1
+); then
+  echo 'the builder continued without the targets it needs' >&2
+  exit 1
+fi
+grep -Fq 'no Rust standard library for: aarch64-apple-darwin aarch64-apple-ios-sim x86_64-apple-ios' \
+  <<< "$refusal"
+grep -Fq 'rustup target add aarch64-apple-darwin aarch64-apple-ios-sim x86_64-apple-ios' \
+  <<< "$refusal"
+grep -Fq 'nightly-fixture-aarch64-apple-darwin' <<< "$refusal"
+! grep -q '^cargo ' "$refuse_log"
+
+# The same refusal without rustup at all: a toolchain manager is what selects
+# the pinned toolchain, so its absence cannot be silently built through.
+norustup_log="$TMP/no-rustup.log"
+: > "$norustup_log"
+NO_RUSTUP_BIN="$TMP/no-rustup-bin"
+mkdir -p "$NO_RUSTUP_BIN"
+for tool in cargo otool lipo xcodebuild; do
+  cp "$BIN/$tool" "$NO_RUSTUP_BIN/"
+done
+if missing_rustup=$(
+  cd "$REPO"
+  PATH="$NO_RUSTUP_BIN:/usr/bin:/bin" \
+    CALL_LOG="$norustup_log" \
+    CARGO_TARGET_DIR="$TMP/no-rustup-target" \
+    scripts/build-swift-xcframework.sh --macos-only 2>&1
+); then
+  echo 'the builder continued with no toolchain manager present' >&2
+  exit 1
+fi
+grep -Fq 'rustup is required' <<< "$missing_rustup"
+grep -Fq 'aarch64-apple-darwin' <<< "$missing_rustup"
+! grep -q '^cargo ' "$norustup_log"
+echo 'ok - an unavailable target install refuses by name instead of failing inside Cargo'
+
+RUSTUP_INSTALLED_TARGETS=
+RUSTUP_ADD_FAILS=0
 
 # The standalone checker derives the package minimum, accepts older members,
 # rejects one newer member or one missing load command, and can require the
