@@ -1,4 +1,13 @@
-/target
+# `/target` alone was anchored AND exact, so it covered the default Cargo
+# output directory and nothing else. Working in an isolated worktree with a
+# per-branch `CARGO_TARGET_DIR` is standing practice here -- sharing one target
+# dir across divergent branches produces bogus build failures -- and every such
+# directory (`target-allfeat`, `target-<issue>`, whatever the branch is called)
+# fell straight through the rule. One that did had 43,807 build artifacts
+# staged by an ordinary `git add -A`, including a 723 MiB `libnmp_ffi.a`, and
+# GitHub answered the push with HTTP 500 three times before anyone looked past
+# "network error". The glob covers the whole family.
+/target*
 /tools/component-interface-snapshot/target/
 /tools/rust-facade-snapshot/target/
 **/*.rs.bk

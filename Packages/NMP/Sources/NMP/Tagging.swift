@@ -154,6 +154,56 @@ public func repost(_ target: Row) throws -> WritePayload {
     try WritePayload(nmpRethrowing { try NMPFFI.repost(target: target.toFfi()) })
 }
 
+/// What a NIP-25 reaction says.
+///
+/// Not a string, because NIP-25 assigns fixed meanings to fixed bytes: content
+/// of `+` *or the empty string* MUST be read as a like, and `-` MUST be read
+/// as a dislike. An app writing content by hand can therefore spell "like"
+/// three ways, and can spell it by accident when an emoji picker returns
+/// nothing. These are the spec's own three readings and there is no fourth.
+public enum Reaction: Sendable, Hashable {
+    /// Rendered `+`.
+    case like
+    /// Rendered `-`.
+    case dislike
+    /// An emoji, which NIP-25 says SHOULD NOT be read as a like or a dislike.
+    ///
+    /// Validated by `react(to:with:)`: the empty string throws, because NIP-25
+    /// reads it as a like, and a NIP-30 `:shortcode:` throws, because it needs
+    /// a companion `emoji` row this door does not write and would otherwise
+    /// reach every reader as literal colons.
+    case emoji(String)
+
+    func toFfi() -> FfiReaction {
+        switch self {
+        case .like: return .like
+        case .dislike: return .dislike
+        case .emoji(let emoji): return .emoji(emoji: emoji)
+        }
+    }
+}
+
+/// Compose a NIP-25 reaction to `target`.
+///
+/// NMP had no reaction door at all, so both consuming apps hand-wrote
+/// `kind: 7` with their own `["e", …]` and `["p", …]` rows (#155). What that
+/// spelling loses is not the kind — it is everything this door fills: the
+/// relay hint NMP actually observed, the author slot, the `k` row naming what
+/// was reacted to, and the fact that a reaction to a REPLY must name the reply
+/// rather than its thread root, so a client tallying by the first `e` cannot
+/// credit the root with a reaction nobody gave it.
+///
+/// It composes SCHEMA ONLY — no routing, no identity, no `h` row. A group's
+/// `h` row and its relay set come from
+/// `NMPGroup.publish(engine:authorPubkeyHex:payload:)`, which takes exactly
+/// this value.
+public func react(to target: Row, with reaction: Reaction) throws -> WritePayload {
+    try WritePayload(
+        nmpRethrowing {
+            try NMPFFI.reactTo(target: target.toFfi(), reaction: reaction.toFfi())
+        })
+}
+
 extension Row {
     func toFfi() -> FfiRow {
         FfiRow(
