@@ -16,8 +16,8 @@ use super::schema::{
     EventKey, EVENTS, EVENT_IDS, INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_IDS,
 };
 use super::store_bench::{
-    duration_ns, nearest_rank, prepared_array, StoreBenchPreparedCorpus, StoreBenchPreparedMetrics,
-    StoreBenchPreparedTable, StoreBenchProcessCounters,
+    count_reopened_events, duration_ns, nearest_rank, prepared_array, StoreBenchPreparedCorpus,
+    StoreBenchPreparedMetrics, StoreBenchPreparedTable, StoreBenchProcessCounters,
 };
 
 const COMPACT_BY_CREATED_AT: TableDefinition<&[u8; 16], EventKey> =
@@ -259,33 +259,61 @@ pub fn run_prepared_redb_compact_index_bench(
     let reopen_started = Instant::now();
     let reopened = Database::open(path).map_err(|error| error.to_string())?;
     let read = reopened.begin_read().map_err(|error| error.to_string())?;
-    let reopened_table_rows = vec![
-        read.open_table(EVENTS).map_err(|e| e.to_string())?.len(),
-        read.open_table(EVENT_IDS).map_err(|e| e.to_string())?.len(),
-        read.open_table(RELAYS).map_err(|e| e.to_string())?.len(),
-        read.open_table(RELAY_IDS).map_err(|e| e.to_string())?.len(),
-        read.open_table(COMPACT_BY_CREATED_AT)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read.open_table(COMPACT_BY_AUTHOR)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read.open_table(COMPACT_BY_KIND)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read.open_table(COMPACT_BY_AUTHOR_KIND)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read.open_table(COMPACT_BY_TAG)
-            .map_err(|e| e.to_string())?
-            .len(),
-        read.open_table(INDEX_CARDINALITY)
-            .map_err(|e| e.to_string())?
-            .len(),
-    ]
-    .into_iter()
-    .map(|rows| rows.map_err(|error| error.to_string()))
-    .collect::<Result<Vec<_>, _>>()?;
+    // Indexed by `StoreBenchPreparedTable` and filled through an exhaustive
+    // match over `ALL`, so a variant added, removed, or renumbered is a
+    // compile error rather than a slot that silently stays zero. The spelling
+    // this replaced was a push-ordered `vec![]` with ten entries against
+    // eleven prepared tables and no `EventObservations` slot, so every count
+    // from `Relays` onward landed one table early, the two vectors could not
+    // even have equal length, and `exact_reopen` could never be true.
+    let mut reopened_table_rows = vec![0u64; StoreBenchPreparedTable::COUNT];
+    count_reopened_events(&read, &mut reopened_table_rows)?;
+    for table in StoreBenchPreparedTable::ALL {
+        let len = match table {
+            // #1248 folded `event_observations` into `EVENTS` as a column of
+            // the event key, so one tree answers for both of these tables and
+            // `.len()` cannot tell them apart. `count_reopened_events` above
+            // already split it by column byte; counting the tree whole is what
+            // made `reopened_rows` report observation rows as events.
+            StoreBenchPreparedTable::Events | StoreBenchPreparedTable::EventObservations => {
+                continue
+            }
+            StoreBenchPreparedTable::EventIds => {
+                read.open_table(EVENT_IDS).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::Relays => {
+                read.open_table(RELAYS).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::RelayIds => {
+                read.open_table(RELAY_IDS).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::ByCreatedAt => read
+                .open_table(COMPACT_BY_CREATED_AT)
+                .map_err(|e| e.to_string())?
+                .len(),
+            StoreBenchPreparedTable::ByAuthor => read
+                .open_table(COMPACT_BY_AUTHOR)
+                .map_err(|e| e.to_string())?
+                .len(),
+            StoreBenchPreparedTable::ByKind => read
+                .open_table(COMPACT_BY_KIND)
+                .map_err(|e| e.to_string())?
+                .len(),
+            StoreBenchPreparedTable::ByAuthorKind => read
+                .open_table(COMPACT_BY_AUTHOR_KIND)
+                .map_err(|e| e.to_string())?
+                .len(),
+            StoreBenchPreparedTable::ByTag => read
+                .open_table(COMPACT_BY_TAG)
+                .map_err(|e| e.to_string())?
+                .len(),
+            StoreBenchPreparedTable::IndexCardinality => read
+                .open_table(INDEX_CARDINALITY)
+                .map_err(|e| e.to_string())?
+                .len(),
+        };
+        reopened_table_rows[table as usize] = len.map_err(|e| e.to_string())?;
+    }
     let reopened_rows = reopened_table_rows[StoreBenchPreparedTable::Events as usize];
     drop(read);
     drop(reopened);
@@ -323,7 +351,57 @@ pub fn run_prepared_redb_compact_index_bench(
 
 #[cfg(test)]
 mod tests {
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+    use super::super::store_bench::prepare_equivalent_store_corpus;
     use super::*;
+
+    fn counters() -> StoreBenchProcessCounters {
+        StoreBenchProcessCounters::default()
+    }
+
+    /// `exact_reopen` is the claim that the run persisted the work it reports,
+    /// so it has to be reachable: it was unconditionally false while the row
+    /// counts were a ten-entry push-ordered vector compared against eleven
+    /// prepared tables.
+    #[test]
+    fn reopened_row_counts_match_the_prepared_corpus_table_by_table() {
+        let keys = Keys::generate();
+        let events: Vec<_> = (0..2)
+            .map(|index| {
+                EventBuilder::new(Kind::from(9u16), format!("event-{index}"))
+                    .tag(Tag::parse(["h", "room"]).unwrap())
+                    .custom_created_at(Timestamp::from(1_700_000_000 + index))
+                    .sign_with_keys(&keys)
+                    .unwrap()
+            })
+            .collect();
+        let prepared = prepare_equivalent_store_corpus(&events, 1).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let metrics = run_prepared_redb_compact_index_bench(
+            &scratch.path().join("compact.redb"),
+            &prepared,
+            counters,
+        )
+        .unwrap();
+
+        assert_eq!(
+            metrics.reopened_table_rows.len(),
+            StoreBenchPreparedTable::COUNT
+        );
+        assert_eq!(
+            metrics.reopened_table_rows, prepared.expected_table_rows,
+            "reopened rows must line up table by table"
+        );
+        // The `EVENTS` tree holds both columns since #1248: two events and two
+        // observations. Counting it whole reported four events.
+        assert_eq!(
+            metrics.reopened_table_rows[StoreBenchPreparedTable::EventObservations as usize],
+            2
+        );
+        assert_eq!(metrics.reopened_rows, 2);
+        assert!(metrics.exact_reopen);
+    }
 
     #[test]
     fn compact_key_keeps_prefix_timestamp_and_first_eight_id_bytes() {
