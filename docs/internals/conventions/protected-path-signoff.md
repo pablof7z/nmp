@@ -15,6 +15,7 @@ related:
 issues:
   - https://github.com/pablof7z/nmp/issues/608
   - https://github.com/pablof7z/nmp/issues/1183
+  - https://github.com/pablof7z/nmp/issues/1264
 ---
 
 # Protected-path changes need a different agent's signoff and a mosaico note
@@ -75,11 +76,20 @@ skipped everything downstream of it:
   double-order regeneration and the committed-snapshot staleness comparison, as
   well as change-log validation.
 
-Note what the abort does *not* skip: the base-trusted falsifier step
+Note what the abort does *not* skip: the base-trusted falsifiers
 (`test-surface-governance.sh`, `test-install-surface-tools.sh`, and the
-base-locked `cargo test` runs) executes *before* authorization, so its verdict
-on the head is real and already in the job log. Do not re-run those; run the two
-above.
+base-locked `cargo test` runs) run in their own job, reported under
+`surface-governance-selftest` and `surface-regeneration-selftest`
+([#1264](https://github.com/pablof7z/nmp/issues/1264)). Their result on the head
+is real and already in that job's log. Do not re-run those; run the two above.
+
+Read *which* of the eight checks is red before starting, because they no longer
+mean the same thing (`docs/architecture/supported-surface.md`, "What each check
+name claims"). A red `-selftest` or `-verdict-rendered` means the gate broke and
+there is no verdict to sign off on at all — that comes first. A red
+`-current-base` means the branch is stale: merge the base branch in and let it
+run again. Only a red `surface-governance` / `surface-regeneration` is the
+authorization abort this section is about.
 
 To run them, reproduce what `.github/workflows/surface-governance.yml` and
 `ci.yml` do: extract the governance program from the **base** commit into a
