@@ -22,6 +22,15 @@ unstable-mechanism = []
 # default-feature surface snapshot is unchanged.
 nip22 = ["dep:nmp-nip22"]
 
+# #155/#1239: NIP-25 reaction composition, projected through the canonical
+# facade for the same reason `nip22` is -- a direct-Rust app reaches a protocol
+# family through `nmp`, never as a second direct dependency alongside the
+# facade, which is the split #1239 records for four other families. The
+# mechanism crate stays optional: an app that never composes a reaction does
+# not link it. Non-default, so the governed default-feature surface snapshot is
+# unchanged.
+nip25 = ["dep:nmp-nip25"]
+
 # Pure Rust NIP-65 values plus the private automatic coordinator assembly.
 # Off by default: core-only builds contain no protocol dependency or symbols.
 nip65 = ["dep:nmp-nip65"]
@@ -49,6 +58,7 @@ required-features = ["bench-instrumentation"]
 nostr.workspace = true
 nmp-grammar.workspace = true
 nmp-nip22 = { workspace = true, optional = true }
+nmp-nip25 = { workspace = true, optional = true }
 nmp-nip65 = { workspace = true, optional = true }
 # #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
 # only this way round -- `Group` is pure composition over `nostr` +

@@ -147,6 +147,15 @@ pub mod mechanism {
 #[cfg(feature = "nip22")]
 pub mod nip22;
 
+// #155: NIP-25 reactions, projected here for the same reason NIP-22 is --
+// #1239 records four protocol families that `nmp-ffi` reaches and the `nmp`
+// facade does not, so a direct-Rust app needs a second Cargo dependency for
+// something a Swift app gets for free. A new family is wired through the
+// facade at birth rather than added to that list. Behind the `nip25` feature:
+// an app that never composes a reaction does not link the mechanism crate.
+#[cfg(feature = "nip25")]
+pub mod nip25;
+
 #[cfg(feature = "nip65")]
 pub mod nip65;
 
