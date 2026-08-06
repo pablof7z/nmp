@@ -145,9 +145,40 @@ extractor with an `exit 0`/stale-output program.
 Deterministic cargo-public-api/component regeneration runs separately in the
 ordinary `pull_request` trust domain, where compiling proposed code belongs.
 That job has no secrets or persisted credentials, and the trusted-target gate
-proves its workflow and invoked scripts are byte-identical to the base. Issue
-#81 must require both stable checks: `surface-governance` and
-`surface-regeneration`.
+proves its workflow and invoked scripts are byte-identical to the base.
+
+### What each check name claims
+
+Each workflow reports four checks, and each is a single claim that is true when
+it is green. The split exists because one red used to mean any of three
+unrelated things, and telling them apart cost a diagnosis cycle every time
+([#1264](https://github.com/pablof7z/nmp/issues/1264)):
+
+| Check | Green means | Red means |
+|---|---|---|
+| `…-selftest` | the gate's own falsifiers, its checksum-pinned installer, and its base-locked tool tests pass | the gate is broken. Nothing was judged, and this says nothing about the change |
+| `…-verdict-rendered` | the gate reached a verdict on this head | it never got that far: extraction, the API fetch, the install, the toolchain, or the checker itself failed |
+| `…-current-base` | the head is descended from the PR's current base | the branch is stale. Merge the base branch in; the diff itself was not judged |
+| `surface-governance` / `surface-regeneration` | the base-trusted program accepted this head | the base-trusted program rejected this head — the only red here that is a statement about the change |
+
+The eight names are `surface-governance` and `surface-regeneration`, each with
+its `-selftest`, `-verdict-rendered`, and `-current-base` companions. When a
+gate breaks, the later checks are **skipped** rather than red, because a verdict
+that was never rendered must not be displayed as a rejection. That is not
+fail-open — the broken gate's own check is red — but a skipped check counts as
+success under GitHub branch protection, so
+[#81](https://github.com/pablof7z/nmp/issues/81) and
+[#608](https://github.com/pablof7z/nmp/issues/608) must require **all eight**
+names rather than only the two verdict names.
+
+The split is carried by exit codes, never by message text.
+`scripts/check-surface-governance.sh` and
+`scripts/check-surface-migration-authorization.py` exit `1` for a verdict on the
+head, `4` when the head is not on the current base, and `70` when they could not
+reach a verdict at all. `scripts/report-surface-governance-verdict.sh` maps
+those onto the names above and treats every unclassified exit — including a gate
+that is killed and never exits on its own terms — as "no verdict". Every one of
+those codes is nonzero, and every one of them blocks.
 
 Both workflows always extract the catalog/checker/regenerator program from the
 base. The base-trusted target checker necessarily rejects replacement of its
@@ -169,8 +200,9 @@ an issue-specific exception. The base verifier owns the complete protected
 exact-path and directory-prefix inventory, including itself, its shell wrapper,
 their falsifiers, the trusted workflows, and every invoked governance tool.
 The shell invokes that verifier for every PR. Exit 3 means no protected path
-changed; any other nonzero result fails closed. No second shell path list can
-drift from the activation authority.
+changed; every other nonzero result fails closed, classified as above into a
+verdict (1), a stale base (4), or a gate that never decided (70). No second
+shell path list can drift from the activation authority.
 
 Protection reserves namespaces across deletion and type replacement. An exact
 path protects both that leaf and every `path/` descendant; a directory prefix
