@@ -77,6 +77,20 @@ Feature: One live query can watch several sources at once
       And the branch each fact belongs to is the only thing that distinguishes them
       And the facts are numbered in one sequence for the whole query, not one per branch
 
+    # nmp:id=QUERIES-COMPOSED-028
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::opening_execution_facts_ride_out_on_the_opening_frame
+    # nmp:evidence=rust:nmp::every_opening_frame_reports_one_evidence_entry_per_branch
+    # nmp:evidence=kotlin:NMPKotlin::branchCountMatchesDeliveredEvidenceCount
+    # nmp:evidence=swift:NMP::testBranchCountMatchesDeliveredEvidenceCount
+    # nmp:falsifier=Deliver the opening's resolution facts as a frame of their own before the query has opened. Give that frame no evidence and the first thing the app reads accounts for no branch at all, so the entry it looks up for its second branch is not there; give it the opening's evidence instead and the app is told a source has been proven while holding none of the rows that proof came from, which is what makes the following module report no contact list for an account that has one.
+    Scenario: The first frame I read is the opening itself, whole
+      Given two branches asking two hosts from cache only
+      When I open the query once and read the first frame it delivers
+      Then that frame reports one piece of evidence per branch I declared
+      And the evidence describes exactly the rows that frame delivered, never a later state
+      And the resolution facts the opening produced arrive on it rather than ahead of it
+
   Rule: The query delivers one result, never one result per branch
 
     # nmp:id=QUERIES-COMPOSED-006
