@@ -218,6 +218,49 @@ the fleet.
 There is no fixed-rate polling. The scheduler sleeps until the earliest real
 deadline and rearms after every state transition.
 
+### Recovery costs what changed, not what accumulated
+
+The engine thread rebuilds volatile ownership from the durable queue before it
+reads its first command, so recovery's cost is what the app's first call pays.
+The bound is therefore stated on the work rather than on a clock: **reopening
+commits one durable transaction per lane fact that is not already durable, and
+none at all for a queue that has not changed** (#889).
+
+Two paths used to violate it, and both spent a durability barrier to leave the
+database byte-identical:
+
+- lane bootstrap is idempotent and runs once per open intent on every boot, so
+  the overwhelmingly common call finds a complete lane set. It now commits only
+  when it stages a row, and aborts the transaction otherwise.
+- connectivity is process-local. `Eligible` and `WaitingConnection` already read
+  back as the identical `RelayState::Waiting(NotConnected)` through the
+  enumeration door, so re-parking an eligible lane whose relay is merely not
+  connected — which at boot is every eligible lane, because nothing is connected
+  yet — recorded nothing a later boot or an app could observe. The lane is left
+  alone; the same scheduler pass that closes every relay wake picks it up when a
+  session exists.
+
+The consequence is the incident this bound exists for. A 4,000-intent store on
+the evidence host, every lane eligible and unreached:
+
+| Measure | before | after |
+|---|---:|---:|
+| `recover_on_boot` | 38.915 s | 108.5 ms |
+| `Engine::add_account` behind that boot | 17.876 s | 45.0 ms |
+
+Falsifiers: `nmp::boot_recovery_rewrites_no_lane_when_no_durable_fact_changed`
+(no lane revision moves across a reopen),
+`nmp-store::a_lane_bootstrap_that_stages_no_row_commits_nothing` (the unstaged
+bootstrap count is the whole population), and the on-demand
+`nmp::measure_add_account_behind_boot_recovery` for the wall-clock pair.
+
+Recovery still visits every open intent, so what remains linear is bounded
+reads, not durability barriers. The other half of keeping that number small is
+acceptance-time retirement: a replaceable/addressable winner retires older
+obligations at its address that never started a wire attempt, so a presence
+renewal loop against an unreachable relay leaves one obligation rather than one
+per renewal (`nmp::presence_renewals_leave_exactly_one_open_obligation`).
+
 ### Access-scoped sessions under the physical cap
 
 A relay URL does not imply one interchangeable socket. Public reads and

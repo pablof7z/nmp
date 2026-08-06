@@ -366,11 +366,25 @@ pub(super) fn recover_attempts(
     Ok(recovered)
 }
 
+/// Seed every lane the intent's route revisions imply, and validate the ones
+/// that already exist.
+///
+/// The transaction commits only when a lane row was actually staged (#889).
+/// Bootstrap is called once per open intent on every boot, and on a store
+/// carrying thousands of them a lane set that is already complete is by far
+/// the common case: committing there spent one fsync-durable transaction per
+/// intent to make the database byte-identical to what it already was, which is
+/// how a 15,311-intent store turned the engine thread's pre-command rebuild
+/// into a 53-second block on the app's first call. Validation still runs
+/// against the same isolated snapshot either way; only the barrier is
+/// conditional, and an unstaged transaction has nothing for a commit to make
+/// durable.
 pub(super) fn bootstrap_publish_queue_lanes(
     store: &mut RedbStore,
     intent_id: IntentId,
 ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
     let write_txn = store.db.begin_write().map_err(persist_err)?;
+    let mut staged = false;
     let prepared = {
         let intents = write_txn
             .open_table(PUBLISH_QUEUE_INTENTS)
@@ -606,6 +620,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
             lanes
                 .insert(&storage_key, encoded.as_slice())
                 .map_err(persist_err)?;
+            staged = true;
         }
 
         // Construct the complete value this mutating door will return while
@@ -646,6 +661,14 @@ pub(super) fn bootstrap_publish_queue_lanes(
         recovered.sort_by(|left, right| left.key.relay.cmp(&right.key.relay));
         recovered
     };
+    if !staged {
+        write_txn.abort().map_err(persist_err)?;
+        #[cfg(test)]
+        store
+            .unstaged_lane_bootstraps
+            .fetch_add(1, Ordering::Relaxed);
+        return Ok(prepared);
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneBootstrapBeforeCommit);
     commit_prepared(write_txn, prepared)

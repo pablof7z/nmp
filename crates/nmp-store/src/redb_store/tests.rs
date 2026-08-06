@@ -2213,3 +2213,71 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
     }
     assert_canonical_integrity(&redb.db);
 }
+
+/// #889's store half: a lane bootstrap that stages no row commits nothing.
+///
+/// Bootstrap runs once per open intent on every boot and is idempotent by
+/// design, so on a store carrying a large open queue the overwhelmingly common
+/// call is the one that finds every lane already there. Committing that call
+/// spent a durability barrier per intent to leave the database byte-identical,
+/// which is the amplification behind the 15,311-intent laptop incident: the
+/// engine thread runs recovery to completion before it reads its first
+/// command, so the app's first call waited for all of them.
+///
+/// The counter proves the barrier is gone; re-reading the lane set proves
+/// aborting the unstaged transaction returned the same answer committing it
+/// did, and that a genuinely new route still commits.
+#[test]
+fn a_lane_bootstrap_that_stages_no_row_commits_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("unstaged-lane-bootstrap.redb");
+    let mut store = RedbStore::open(&path).expect("open redb store");
+    let keys = nostr::Keys::generate();
+    let first = RelayUrl::parse("wss://first.example").unwrap();
+    let second = RelayUrl::parse("wss://second.example").unwrap();
+
+    let (intent, _) = accepted_signed(&mut store, &keys, "unstaged", 1_000);
+    store
+        .record_route_revision(intent, BTreeSet::from([first.clone()]))
+        .unwrap();
+
+    let created = store.bootstrap_publish_queue_lanes(intent).unwrap();
+    assert_eq!(created.len(), 1, "the first bootstrap mints the lane");
+    assert_eq!(
+        store.unstaged_lane_bootstraps(),
+        0,
+        "minting a lane is a real mutation and must commit"
+    );
+
+    for _ in 0..8 {
+        assert_eq!(
+            store.bootstrap_publish_queue_lanes(intent).unwrap(),
+            created,
+            "a complete lane set bootstraps to the identical answer"
+        );
+    }
+    assert_eq!(
+        store.unstaged_lane_bootstraps(),
+        8,
+        "every bootstrap over an unchanged lane set must skip its commit"
+    );
+
+    store
+        .record_route_revision(intent, BTreeSet::from([first, second]))
+        .unwrap();
+    let widened = store.bootstrap_publish_queue_lanes(intent).unwrap();
+    assert_eq!(widened.len(), 2, "a new route still mints its lane");
+    assert_eq!(
+        store.unstaged_lane_bootstraps(),
+        8,
+        "the bootstrap that staged a lane committed"
+    );
+
+    drop(store);
+    let reopened = RedbStore::open(&path).expect("reopen redb store");
+    assert_eq!(
+        reopened.recover_publish_queue_lanes(intent).unwrap(),
+        widened,
+        "the committed lane set survives, and the aborted ones changed nothing"
+    );
+}
