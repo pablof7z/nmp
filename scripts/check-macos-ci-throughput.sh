@@ -100,18 +100,22 @@ require_text "$MACOS_WORKFLOW" "    name: macOS qualification"
 require_text "$MACOS_WORKFLOW" '  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}'
 require_text "$MACOS_WORKFLOW" "  cancel-in-progress: true"
 macos_named_step_count=$(grep -E -c '^[[:space:]]+- name:' "$MACOS_WORKFLOW" || true)
-[[ "$macos_named_step_count" -eq 6 ]] ||
-  fail "expected exactly six named Apple qualification steps, found $macos_named_step_count"
+[[ "$macos_named_step_count" -eq 5 ]] ||
+  fail "expected exactly five named Apple qualification steps, found $macos_named_step_count"
 
 # One native library, built once. Pull requests need only the macOS host
 # architecture exercised by SwiftPM/XCTest; master remains the least-frequent
 # trustworthy full packaging gate.
 require_text "$MACOS_WORKFLOW" "      - name: Select thin PR or full master Apple scope"
 require_text "$MACOS_WORKFLOW" 'if [[ "$EVENT_NAME" == pull_request ]]; then'
-require_text "$MACOS_WORKFLOW" 'echo "mode=--macos-only"'
-require_text "$MACOS_WORKFLOW" 'echo "targets=aarch64-apple-darwin"'
-require_text "$MACOS_WORKFLOW" 'echo "mode="'
-require_text "$MACOS_WORKFLOW" 'echo "targets=aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin"'
+require_text "$MACOS_WORKFLOW" 'echo "mode=--macos-only" >> "$GITHUB_OUTPUT"'
+require_text "$MACOS_WORKFLOW" 'echo "mode=" >> "$GITHUB_OUTPUT"'
+# #1240: the builder owns the Rust target set for the slices it builds, on the
+# toolchain rust-toolchain.toml pins. A target list restored here would be a
+# second owner of that fact, and would keep this job green against a builder
+# that installs nothing -- the state a consumer clone actually meets.
+forbid_text "$MACOS_WORKFLOW" "rustup target add"
+forbid_text "$MACOS_WORKFLOW" "targets="
 core_build_count=$(
   grep -F -c "scripts/build-swift-xcframework.sh" "$MACOS_WORKFLOW" || true
 )
