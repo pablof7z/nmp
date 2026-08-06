@@ -87,8 +87,19 @@ Current-epoch corruption remains a different `Database(Corrupted(...))`
 failure. An operator must never mistake damaged current bytes for a safely
 discardable old epoch.
 
+That separation reaches the app, not just the store (#920). `Engine::new`
+returns `EngineError::StoreUnsupportedSchema { path, expected, found }` —
+mirrored through UniFFI, Swift, and Kotlin — so a consumer branches on a type
+instead of matching the refusal's prose. Every other open refusal, damaged
+bytes and refused locks alike, stays `EngineError::StoreOpenFailed`, which
+carries the positive claim that discarding the store is not its recovery.
+`found` is `None` when the store carries no marker this build can read, which
+includes a marker written at a superseded epoch's address; it means "not this
+epoch", never "no data".
+
 The open refusal does not delete anything. Destruction is a separate,
-deliberate consumer action after every live owner is closed.
+deliberate consumer action after every live owner is closed — NMP states the
+epoch fact and never decides the discard.
 
 ## 4. Falsifiers — BUILT
 
@@ -105,3 +116,11 @@ knowledge of any retired schema:
 There is deliberately no old-schema fixture, old table inventory, or
 pre-current decoder in those tests. Negative executable awareness of one
 retired layout would still keep that layout alive.
+
+The app-facing half is proved separately, because a refusal that is typed at
+the store and collapsed at the facade is not reachable by the consumer this
+policy addresses. `crates/nmp/src/engine.rs` and
+`crates/nmp-ffi/src/facade.rs` each drive one nonempty store whose marker this
+build cannot read and one file of damaged bytes, and assert the two arrive as
+different variants and that only the epoch one renders "discard and recreate";
+Swift and Kotlin assert the same branch without reading any message.

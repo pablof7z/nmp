@@ -1729,6 +1729,105 @@ mod tests {
         reopened.shutdown();
     }
 
+    /// #920: the schema-epoch refusal survives the FFI boundary as its own
+    /// variant. An app on this side decides whether to delete a store; it
+    /// cannot make that call from `StoreOpenFailed`'s prose.
+    ///
+    /// The fixture is the real shape — a marker at the address a superseded
+    /// epoch owned, unreadable to this build, so `found` is `None`.
+    #[test]
+    fn ffi_superseded_epoch_store_is_its_own_refusal_and_damaged_bytes_are_not() {
+        use redb::{Database, TableDefinition};
+
+        let fixture = tempfile::tempdir().expect("tempdir");
+
+        let superseded = fixture.path().join("superseded-epoch.redb");
+        {
+            let database = Database::create(&superseded).expect("epoch fixture must create");
+            let write = database.begin_write().expect("epoch fixture must begin");
+            {
+                let mut marker = write
+                    .open_table(TableDefinition::<&str, u64>::new("schema_meta_v6"))
+                    .expect("epoch fixture must open its retired marker table");
+                marker.insert("version", 10u64).expect("marker must insert");
+            }
+            write.commit().expect("epoch fixture must commit");
+        }
+        let refusal = NmpEngine::new(NmpEngineConfig {
+            store_path: Some(superseded.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        })
+        .err()
+        .expect("a superseded-epoch store must refuse FFI construction");
+        match &refusal {
+            FfiError::StoreUnsupportedSchema {
+                path,
+                expected,
+                found,
+            } => {
+                assert!(
+                    path.ends_with("superseded-epoch.redb"),
+                    "the FFI refusal must name the store an app would delete: {path}"
+                );
+                assert!(*expected > 0, "the build's own epoch must cross the FFI");
+                assert_eq!(*found, None, "an unreadable marker is absent, not zero");
+            }
+            other => panic!("the epoch refusal must not collapse at the FFI: {other:?}"),
+        }
+        let rendered = refusal.to_string();
+        for required in [
+            "discard and recreate this store to continue",
+            "NMP can reacquire the relay-backed read cache",
+            "accepted but unpublished writes",
+            "permanently lost",
+        ] {
+            assert!(
+                rendered.contains(required),
+                "the FFI refusal must state {required:?}: {rendered}"
+            );
+        }
+
+        let damaged = fixture.path().join("damaged.redb");
+        std::fs::write(&damaged, b"not a redb database").expect("damaged fixture must write");
+        let generic = NmpEngine::new(NmpEngineConfig {
+            store_path: Some(damaged.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        })
+        .err()
+        .expect("damaged bytes must refuse FFI construction");
+        assert!(
+            matches!(generic, FfiError::StoreOpenFailed { .. }),
+            "damaged bytes must stay the generic FFI open failure: {generic:?}"
+        );
+        assert!(
+            !generic.to_string().contains("discard and recreate"),
+            "only the epoch refusal may tell an app to delete the file: {generic}"
+        );
+    }
+
+    /// A store whose marker this build CAN read reports the number. Reaching
+    /// that end to end would mean writing the current epoch's marker address
+    /// from outside the crate that owns it, so the projection is pinned here
+    /// instead: both `found` shapes cross intact.
+    #[test]
+    fn ffi_epoch_refusal_carries_both_found_shapes() {
+        for found in [Some(10u64), None] {
+            let projected = FfiError::from(nmp::EngineError::StoreUnsupportedSchema {
+                path: "/canonical/nmp.redb".to_owned(),
+                expected: 13,
+                found,
+            });
+            assert_eq!(
+                projected,
+                FfiError::StoreUnsupportedSchema {
+                    path: "/canonical/nmp.redb".to_owned(),
+                    expected: 13,
+                    found,
+                }
+            );
+        }
+    }
+
     // #680 deleted `reattachment_mapping_is_exhaustive_and_distinct`: it drove the
     // removed pure `reattachment_to_ffi` enum-mapping helper. The real reattach
     // behavior is exercised end-to-end by

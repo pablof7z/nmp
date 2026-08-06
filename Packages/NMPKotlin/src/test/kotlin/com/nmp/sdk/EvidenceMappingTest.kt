@@ -119,6 +119,42 @@ class EvidenceMappingTest {
         assertTrue(refusal != NMPError.StoreOpenFailed("/canonical/nmp.redb"))
     }
 
+    /** #920: an app deciding whether to delete a multi-gigabyte store must
+     * branch on a type, never on prose. The epoch refusal arrives as its own
+     * fact carrying the path; every other open refusal -- damaged bytes, a
+     * refused lock -- stays [NMPError.StoreOpenFailed], where deleting the
+     * file is the wrong move. */
+    @Test
+    fun supersededEpochRefusalRemainsTypedAndSeparableAtTheNativeBoundary() {
+        val readable =
+            NMPError.from(FfiException.StoreUnsupportedSchema("/canonical/nmp.redb", 13uL, 10uL))
+        assertEquals(
+            NMPError.StoreUnsupportedSchema("/canonical/nmp.redb", 13uL, 10uL),
+            readable,
+        )
+        val branched = readable as? NMPError.StoreUnsupportedSchema
+        assertTrue(branched != null, "the epoch refusal must be branchable without reading its text")
+        assertEquals("/canonical/nmp.redb", branched!!.path)
+        assertEquals(10uL, branched.found)
+
+        // A marker this build cannot read is absent, not zero, and is still
+        // the epoch refusal -- the exact shape a real 1 GB store hit.
+        val unreadable =
+            NMPError.from(FfiException.StoreUnsupportedSchema("/canonical/nmp.redb", 13uL, null))
+        assertEquals(
+            NMPError.StoreUnsupportedSchema("/canonical/nmp.redb", 13uL, null),
+            unreadable,
+        )
+        assertTrue(
+            unreadable.message!!.contains("discard and recreate this store to continue"),
+        )
+        assertTrue(unreadable.message!!.contains("permanently lost"))
+
+        val damaged = NMPError.from(FfiException.StoreOpenFailed("corrupted region"))
+        assertTrue(damaged !is NMPError.StoreUnsupportedSchema)
+        assertTrue(!damaged.message!!.contains("discard and recreate"))
+    }
+
     @Test
     fun finiteFactDeliveryFailuresRemainTypedAtTheNativeBoundary() {
         assertEquals(
