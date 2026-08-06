@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL=$(cd "$(dirname "$0")" && pwd)/install-surface-tools.sh
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/bin" "$TMP/root"
+mkdir -p "$TMP/bin" "$TMP/program/scripts" "$TMP/program/tools"
+
+# The installer reads the toolchain definition that sits next to it and takes
+# no path from its caller (#1186), so exercising it against a fixture
+# definition means giving it a fixture program directory -- which is also
+# exactly the shape CI runs it in: a scratch copy extracted from the base.
+cp "$SCRIPT_DIR/install-surface-tools.sh" "$TMP/program/scripts/"
+chmod +x "$TMP/program/scripts/install-surface-tools.sh"
+INSTALL="$TMP/program/scripts/install-surface-tools.sh"
 
 archive='fake cargo-public-api archive'
 printf '%s\n' "$archive" > "$TMP/archive"
@@ -13,7 +21,7 @@ if command -v sha256sum >/dev/null; then
 else
   checksum=$(shasum -a 256 "$TMP/archive" | awk '{print $1}')
 fi
-cat > "$TMP/toolchain.env" <<ENV
+cat > "$TMP/program/tools/surface-toolchain.env" <<ENV
 CARGO_PUBLIC_API_VERSION=9.9.9
 CARGO_PUBLIC_API_CRATE_SHA256=$checksum
 SURFACE_RUST_TOOLCHAIN=nightly-test
@@ -49,8 +57,6 @@ run_installer() {
   CALL_LOG="$1" \
   CARGO_HOME="$2" \
   VERSION_MODE="$3" \
-  SURFACE_ROOT="$TMP/root" \
-  SURFACE_TOOLCHAIN_ENV="$TMP/toolchain.env" \
   "$INSTALL"
 }
 

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=${SURFACE_ROOT:-$(git rev-parse --show-toplevel)}
+# The toolchain definition is sourced, so it runs. It is this program's own
+# copy and never the tree the gate is judging (#1186); in CI that is the
+# scratch directory extracted from the base commit.
+PROGRAM_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck disable=SC1091
-source "${SURFACE_TOOLCHAIN_ENV:-$ROOT/tools/surface-toolchain.env}"
+source "$PROGRAM_ROOT/tools/surface-toolchain.env"
 
 rustup toolchain install "$SURFACE_RUST_TOOLCHAIN" --profile minimal
 

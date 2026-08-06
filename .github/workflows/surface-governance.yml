@@ -35,6 +35,18 @@ permissions:
   pull-requests: read
   statuses: read
 
+# Every step runs through one hardened shell (#1170). GitHub's default `run:`
+# shell honours BASH_ENV, $ENV, profile files, and shell functions inherited
+# from the environment, so the command a step names is not necessarily the
+# command that runs -- a step can report success having executed something
+# else while the workflow text still reads correctly. `-p` makes bash ignore
+# all four; `--noprofile --norc` covers the startup files; `-eo pipefail`
+# keeps a failure anywhere in a step fatal.
+defaults:
+  run:
+    shell: bash --noprofile --norc -p -eo pipefail {0}
+
+
 jobs:
   # Claim: the judge works. Every input this job needs comes from the base, so a
   # red here is never about the proposed change.
@@ -93,15 +105,16 @@ jobs:
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
 
       - name: Install checksum-pinned surface tool through trusted base script
-        env:
-          SURFACE_ROOT: ${{ github.workspace }}
-          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-governance/tools/surface-toolchain.env
+        # Outside the workspace on purpose: `rustup`/`cargo` resolve a
+        # toolchain from `rust-toolchain.toml` in the working directory, and
+        # that file belongs to the proposed head. The installer names its
+        # toolchain explicitly and finds its own definition next to itself, so
+        # this is the last thing keeping the head out of the install (#1186).
         working-directory: ${{ runner.temp }}/nmp-surface-governance
         run: ${{ runner.temp }}/nmp-surface-governance/scripts/install-surface-tools.sh
 
       - name: Falsify trusted governance and installer
         env:
-          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-governance/tools/surface-component-catalog
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-governance-target/catalog
         run: |
           ${{ runner.temp }}/nmp-surface-governance/scripts/test-surface-governance.sh "${{ github.workspace }}"
@@ -209,9 +222,11 @@ jobs:
           fi
 
       - name: Install checksum-pinned surface tool through trusted base script
-        env:
-          SURFACE_ROOT: ${{ github.workspace }}
-          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-governance/tools/surface-toolchain.env
+        # Outside the workspace on purpose: `rustup`/`cargo` resolve a
+        # toolchain from `rust-toolchain.toml` in the working directory, and
+        # that file belongs to the proposed head. The installer names its
+        # toolchain explicitly and finds its own definition next to itself, so
+        # this is the last thing keeping the head out of the install (#1186).
         working-directory: ${{ runner.temp }}/nmp-surface-governance
         run: ${{ runner.temp }}/nmp-surface-governance/scripts/install-surface-tools.sh
 
@@ -221,7 +236,6 @@ jobs:
           SURFACE_ROOT: ${{ github.workspace }}
           SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
           SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
-          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-governance/tools/surface-component-catalog
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-governance-target/catalog
           SURFACE_PR_NUMBER: ${{ github.event.pull_request.number }}
           SURFACE_PR_URL: ${{ github.event.pull_request.html_url }}

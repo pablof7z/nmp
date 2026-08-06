@@ -17,6 +17,18 @@ on:
     branches: [master]
   pull_request:
 
+# Every step runs through one hardened shell (#1170). GitHub's default `run:`
+# shell honours BASH_ENV, $ENV, profile files, and shell functions inherited
+# from the environment, so the command a step names is not necessarily the
+# command that runs -- a step can report success having executed something
+# else while the workflow text still reads correctly. `-p` makes bash ignore
+# all four; `--noprofile --norc` covers the startup files; `-eo pipefail`
+# keeps a failure anywhere in a step fatal.
+defaults:
+  run:
+    shell: bash --noprofile --norc -p -eo pipefail {0}
+
+
 jobs:
   nip29-kind-blindness:
     name: NIP-29 owns no kind it does not itself define

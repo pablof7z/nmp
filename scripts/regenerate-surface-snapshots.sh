@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# PROGRAM_ROOT is where this program lives and where every tool it runs comes
+# from; ROOT is the tree being regenerated. In CI the two differ: the gate
+# extracts this program from the base commit and points it at the proposed
+# head, and resolving a tool from the head would run the head's own tooling
+# under base trust (#1186).
+PROGRAM_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ROOT=${SURFACE_ROOT:-$(git rev-parse --show-toplevel)}
 HEAD_REF=${SURFACE_HEAD_REF:-HEAD}
 OUTPUT_DIR="$ROOT/docs/surface"
@@ -14,11 +20,11 @@ elif [[ $# -ne 0 ]]; then
 fi
 
 # shellcheck disable=SC1091
-source "${SURFACE_TOOLCHAIN_ENV:-$ROOT/tools/surface-toolchain.env}"
+source "$PROGRAM_ROOT/tools/surface-toolchain.env"
 PUBLIC_API_VERSION=$CARGO_PUBLIC_API_VERSION
-COMPONENT_TOOL_DIR=${SURFACE_COMPONENT_TOOL_DIR:-$ROOT/tools/component-interface-snapshot}
-CATALOG_TOOL_DIR=${SURFACE_CATALOG_TOOL_DIR:-$ROOT/tools/surface-component-catalog}
-RUST_FACADE_TOOL_DIR=${SURFACE_RUST_FACADE_TOOL_DIR:-$ROOT/tools/rust-facade-snapshot}
+COMPONENT_TOOL_DIR="$PROGRAM_ROOT/tools/component-interface-snapshot"
+CATALOG_TOOL_DIR="$PROGRAM_ROOT/tools/surface-component-catalog"
+RUST_FACADE_TOOL_DIR="$PROGRAM_ROOT/tools/rust-facade-snapshot"
 
 command -v cargo-public-api >/dev/null || {
   echo "cargo-public-api is required; install with:" >&2
