@@ -45,15 +45,14 @@ jobs:
         run: |
           if [[ "$EVENT_NAME" == pull_request ]]; then
             echo "mode=--macos-only" >> "$GITHUB_OUTPUT"
-            echo "targets=aarch64-apple-darwin" >> "$GITHUB_OUTPUT"
           else
             echo "mode=" >> "$GITHUB_OUTPUT"
-            echo "targets=aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Add selected Apple targets
-        run: rustup target add ${{ steps.apple_scope.outputs.targets }}
-
+      # The builder installs the Rust targets its selected slices need, on the
+      # toolchain rust-toolchain.toml pins (#1240). A second target list here
+      # would be a second owner of the same fact, and would hide a builder that
+      # stopped installing them -- which is what a consumer clone hits.
       - name: Build the core XCFramework once
         id: apple_components
         run: |

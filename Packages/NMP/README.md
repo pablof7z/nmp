@@ -86,7 +86,11 @@ scripts/build-swift-xcframework.sh --sim-only
 This cross-compiles `nmp-ffi` for the iOS simulator (arm64 + x86_64,
 lipo'd into one fat slice) and macOS (arm64), runs `uniffi-bindgen` in
 library mode to generate `Sources/NMPFFI/nmp_ffi.swift`, and assembles
-`NMP.xcframework`. It needs no code-signing identity, so it works in CI /
+`NMP.xcframework`. It installs any Rust target those slices need onto the
+toolchain `rust-toolchain.toml` pins, so there is no separate `rustup
+target add` step to get right (#1240) -- installing those targets onto a
+different toolchain is what leaves a build reporting `can't find crate for
+core`. It needs no code-signing identity, so it works in CI /
 sandboxes with no signing setup. Takes a few minutes on a cold `cargo`
 cache. `--sim-only` skips the `aarch64-apple-ios` (physical device) slice;
 drop the flag to build that too if you need to run on a real device (needs
