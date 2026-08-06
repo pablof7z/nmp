@@ -16,15 +16,30 @@ set -euo pipefail
 MALFUNCTION_EXIT=70
 STALE_BASE_EXIT=4
 
+# Two roots, and conflating them is what #1186 is about.
+#
+# PROGRAM_ROOT is where this program lives. Every tool it runs -- the
+# regenerator, the component catalog, the toolchain definition it sources, the
+# migration verifier -- is resolved from there and from nowhere else. In CI
+# that directory is the scratch copy the workflow extracted from the base
+# commit, so the base-trusted judge runs base-trusted tooling by construction
+# rather than because a caller remembered to say so in five environment
+# variables. Locally the two roots coincide, which is what a developer means.
+#
+# ROOT is the tree under judgment. In CI it is the proposed head, checked out
+# as data. Nothing executable is ever resolved from it.
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+PROGRAM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+REGEN_CMD="$PROGRAM_ROOT/scripts/regenerate-surface-snapshots.sh"
+CATALOG_TOOL_DIR="$PROGRAM_ROOT/tools/surface-component-catalog"
+TOOLCHAIN_ENV="$PROGRAM_ROOT/tools/surface-toolchain.env"
+MIGRATION_CHECK="$SCRIPT_DIR/check-surface-migration-authorization.py"
+
 ROOT=${SURFACE_ROOT:-$(git rev-parse --show-toplevel)}
 BASE_REF=${SURFACE_BASE_REF:-}
 HEAD_REF=${SURFACE_HEAD_REF:-HEAD}
 SNAPSHOT_DIR=${SURFACE_SNAPSHOT_DIR:-docs/surface}
 CHANGE_LOG=${SURFACE_CHANGE_LOG:-docs/surface-change-log.md}
-REGEN_CMD=${SURFACE_REGEN_CMD:-scripts/regenerate-surface-snapshots.sh}
-CATALOG_TOOL_DIR=${SURFACE_CATALOG_TOOL_DIR:-$ROOT/tools/surface-component-catalog}
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-MIGRATION_CHECK="$SCRIPT_DIR/check-surface-migration-authorization.py"
 
 # A verdict about the proposed head. The wording of these lines is the record
 # the change-log, the triage rules, and the issue trail all quote; it does not
@@ -56,8 +71,13 @@ trap 'rm -rf "$TMP"' EXIT
 
 CATALOG_BIN=${SURFACE_CATALOG_BIN:-}
 if [[ -z "$CATALOG_BIN" ]]; then
+  # Sourcing runs whatever is in the file, so the file has to be this program's
+  # own. Reading the head's copy here would have let a proposed head put
+  # `exit 0` in it and be accepted before authorization was ever consulted.
+  [[ -f "$TOOLCHAIN_ENV" ]] ||
+    malfunction "this program has no toolchain definition: $TOOLCHAIN_ENV"
   # shellcheck disable=SC1091
-  source "${SURFACE_TOOLCHAIN_ENV:-$ROOT/tools/surface-toolchain.env}"
+  source "$TOOLCHAIN_ENV"
   CATALOG_TARGET=${SURFACE_CATALOG_TARGET_DIR:-$TMP/catalog-tool-target}
   cargo "+$SURFACE_RUST_TOOLCHAIN" build --quiet --locked \
     --manifest-path "$CATALOG_TOOL_DIR/Cargo.toml" \

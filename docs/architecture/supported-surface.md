@@ -186,6 +186,22 @@ own program, so only the repository owner's protected update procedure can land
 a change to it. Absence of any base governance artifact fails closed instead of
 executing proposed code.
 
+Extraction only holds if the extracted program then runs the extracted copy, so
+each governance program resolves what it executes — the regenerator, the
+component catalog, the toolchain definition it sources — relative to **itself**,
+never to the tree it is judging, and takes no program path from its caller
+([#1186](https://github.com/pablof7z/nmp/issues/1186)). The trust domain travels
+with the program instead of depending on a workflow setting five environment
+variables correctly, which is what `surface-governance.yml` had stopped doing for
+the file the checker sources. `SURFACE_ROOT` names the tree under judgment and
+nothing else.
+
+Every workflow also runs its steps through one hardened shell,
+`bash --noprofile --norc -p -eo pipefail`, so no step can be redirected by
+`BASH_ENV`, `$ENV`, a profile file, or a shell function inherited from the
+environment ([#1170](https://github.com/pablof7z/nmp/issues/1170)). A green step
+means the command the workflow names is the command that ran.
+
 The bootstrap checkpoint intentionally contained no fabricated change-log
 entry: the real PR number/URL, independent reviewer, and signoff were appended
 only once those facts existed. That one-time catalog bootstrap is complete and

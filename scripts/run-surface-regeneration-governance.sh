@@ -4,7 +4,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=${SURFACE_ROOT:-$(git rev-parse --show-toplevel)}
 BASE_REF=${SURFACE_BASE_REF:-}
-CHECKER=${SURFACE_CHECKER:-$SCRIPT_DIR/check-surface-governance.sh}
+# The checker this wrapper runs is its own sibling, never a path a caller
+# supplies: the two travel together out of the base commit (#1186).
+CHECKER="$SCRIPT_DIR/check-surface-governance.sh"
 
 # Wiring this wrapper wrong stops the gate before it judges anything, so it
 # exits with the checker's malfunction code rather than a code a caller could

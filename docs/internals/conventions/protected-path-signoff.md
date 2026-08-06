@@ -15,6 +15,7 @@ related:
 issues:
   - https://github.com/pablof7z/nmp/issues/608
   - https://github.com/pablof7z/nmp/issues/1183
+  - https://github.com/pablof7z/nmp/issues/1186
   - https://github.com/pablof7z/nmp/issues/1264
 ---
 
@@ -93,19 +94,17 @@ authorization abort this section is about.
 
 To run them, reproduce what `.github/workflows/surface-governance.yml` and
 `ci.yml` do: extract the governance program from the **base** commit into a
-scratch directory, and point it at a worktree checked out at the head. Three
-details decide whether the run is worth anything:
+scratch directory — `scripts/` and `tools/` together, because the program
+resolves everything it runs relative to itself
+([#1186](https://github.com/pablof7z/nmp/issues/1186)) — and point it at a
+worktree checked out at the head via `SURFACE_ROOT`. Two details decide whether
+the run is worth anything:
 
 - Set `SURFACE_BASE_REF`, `SURFACE_HEAD_REF`, `SURFACE_PR_NUMBER`,
   `SURFACE_PR_URL` **and** `SURFACE_CHANGED_PROJECTIONS` (from the same script's
   `--print-projections`). Without the last one the script hard-fails on
   `changed projection context mismatch` long before authorization, so the run
   proves nothing.
-- Point `SURFACE_CATALOG_TOOL_DIR`, `SURFACE_REGEN_CMD`, `SURFACE_TOOLCHAIN_ENV`,
-  `SURFACE_COMPONENT_TOOL_DIR` and `SURFACE_RUST_FACADE_TOOL_DIR` at the
-  **extracted base copies**. Their defaults resolve to the head's, which would
-  build and run the proposed head's own tooling — silently defeating the
-  base-trust boundary the whole exercise depends on.
 - The authorization step will abort again, so replace its `verify` call with
   `migration_status=3` **in the scratch copy only**. That copy is evidence
   scaffolding: it is never committed, and the checker in the tree is never

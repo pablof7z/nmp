@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This suite is part of the base-trusted program, so it has the same two roots
+# the program it proves has (#1186): PROGRAM_ROOT is where the program lives,
+# ROOT (the argument) is the tree under judgment. Anything this suite builds,
+# sources, or runs comes from PROGRAM_ROOT. Reading the tree under judgment for
+# a tool is the defect, and this suite must not commit it either -- it used to,
+# and a proposed head with `exit 0` in tools/surface-toolchain.env made the
+# whole suite exit 0 having asserted almost nothing.
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-CHECK="$SCRIPT_DIR/check-surface-governance.sh"
+PROGRAM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 REPORT="$SCRIPT_DIR/report-surface-governance-verdict.sh"
 PARITY="$SCRIPT_DIR/check-sdk-parity.sh"
 MIGRATION_TEST="$SCRIPT_DIR/test-surface-migration-authorization.py"
@@ -64,6 +71,24 @@ workflow_job_lines() {
   ' "$1"
 }
 
+# The workflow-level `defaults: run: shell:` value, or empty if the file does
+# not declare one. A step-level `shell:` would appear more deeply indented and
+# is deliberately not matched: the assertion below is about the one shell every
+# step inherits.
+workflow_default_shell() {
+  awk '
+    /^defaults:[[:space:]]*$/ { defaults = 1; next }
+    /^[^[:space:]#]/ { defaults = 0; run = 0 }
+    defaults && /^  run:[[:space:]]*$/ { run = 1; next }
+    defaults && /^  [A-Za-z0-9_-]+:/ { run = 0 }
+    run && /^    shell:[[:space:]]/ {
+      line = $0
+      sub(/^    shell:[[:space:]]*/, "", line)
+      print line
+    }
+  ' "$1"
+}
+
 falsify_missing_base_governance_artifact() {
   local fixture="$TMP/base-trust"
   local repo="$fixture/repo"
@@ -100,14 +125,43 @@ EOF
 CATALOG_BIN=${SURFACE_CATALOG_BIN:-}
 if [[ -z "$CATALOG_BIN" ]]; then
   # shellcheck source=tools/surface-toolchain.env
-  source "${SURFACE_TOOLCHAIN_ENV:-$ROOT/tools/surface-toolchain.env}"
+  source "$PROGRAM_ROOT/tools/surface-toolchain.env"
   target=${SURFACE_CATALOG_TARGET_DIR:-$TMP/catalog-target}
   cargo "+$SURFACE_RUST_TOOLCHAIN" build --quiet --locked \
-    --manifest-path "${SURFACE_CATALOG_TOOL_DIR:-$ROOT/tools/surface-component-catalog}/Cargo.toml" \
+    --manifest-path "$PROGRAM_ROOT/tools/surface-component-catalog/Cargo.toml" \
     --target-dir "$target"
   CATALOG_BIN="$target/debug/nmp-surface-component-catalog"
 fi
 [[ -x "$CATALOG_BIN" ]]
+
+# The checker under test runs out of its own scratch program directory, the way
+# CI runs it, so that "the program resolves its tools from where it lives"
+# is a property this suite can actually observe. A regenerator that compiles
+# Rust is not something a fixture can run, so the program directory carries a
+# fixture regenerator -- which is the only substitution, and it is made by
+# building a program directory rather than by handing the checker a path.
+PROGRAM="$TMP/program"
+mkdir -p "$PROGRAM/scripts/lib" "$PROGRAM/tools"
+for program_file in \
+  check-surface-governance.sh \
+  check-surface-migration-authorization.py \
+  check-sdk-parity.sh \
+  report-surface-governance-verdict.sh \
+  run-surface-regeneration-governance.sh; do
+  cp "$SCRIPT_DIR/$program_file" "$PROGRAM/scripts/$program_file"
+done
+cp "$SCRIPT_DIR/lib/require-commands.sh" "$PROGRAM/scripts/lib/"
+cp "$PROGRAM_ROOT/tools/surface-toolchain.env" "$PROGRAM/tools/"
+cat > "$PROGRAM/scripts/regenerate-surface-snapshots.sh" <<'REGEN'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $1 == --output-dir && $# == 2 ]]
+root=$(git rev-parse --show-toplevel)
+mkdir -p "$2"
+cp -R "$root/actual/." "$2"
+REGEN
+chmod +x "$PROGRAM/scripts/"*.sh
+CHECK="$PROGRAM/scripts/check-surface-governance.sh"
 
 commit_case() {
   git -C "$1" add -A
@@ -198,14 +252,6 @@ EOF
 ## Historical fixture
 
 seed
-EOF
-  cat > "$repo/scripts/regen.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-[[ $1 == --output-dir && $# == 2 ]]
-root=$(git rev-parse --show-toplevel)
-mkdir -p "$2"
-cp -R "$root/actual/." "$2"
 EOF
   for path in check-sdk-parity.sh check-surface-governance.sh \
     install-surface-tools.sh regenerate-surface-snapshots.sh \
@@ -390,7 +436,6 @@ run_checker() {
   SURFACE_PR_RECORD="$records/pull-request.json" \
   SURFACE_ISSUE_RECORD="$records/issue.json" \
   SURFACE_STATUS_RECORDS="$records/statuses.json" \
-  SURFACE_REGEN_CMD=scripts/regen.sh \
     "$CHECK"
 }
 
@@ -900,7 +945,6 @@ SURFACE_CHANGE_LOG=docs/surface-evidence.md \
 SURFACE_PR_NUMBER=999 \
 SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
 SURFACE_CHANGED_PROJECTIONS=correction \
-SURFACE_REGEN_CMD=scripts/regen.sh \
   "$CHECK" >/dev/null
 echo "ok - configured evidence path owns correction recognition"
 
@@ -1015,7 +1059,112 @@ for entry in \
   # #1186 already names, and would make deleting the reporter a silent pass.
   grep -Fq "the head's copy is deliberately NOT used instead" "$workflow" ||
     fail "trusted workflow does not name a missing base artifact as a malfunction: $workflow"
+
+  # #1186: extracting the program from the base is only worth something if the
+  # program then runs the extracted copy. Every one of these named a path the
+  # base-trusted checker would execute, source, or build, and every one of them
+  # silently resolved to the proposed head when the workflow forgot to set it --
+  # which surface-governance.yml did, for the toolchain file the checker
+  # sources. The program now finds its own tooling, so a workflow that hands it
+  # a program path is reintroducing the hole rather than plugging it.
+  if grep -Eq \
+      '^[[:space:]]+SURFACE_(TOOLCHAIN_ENV|REGEN_CMD|CATALOG_TOOL_DIR|COMPONENT_TOOL_DIR|RUST_FACADE_TOOL_DIR|CHECKER|CATALOG_BIN):' \
+      "$workflow"; then
+    fail "trusted workflow hands the gate a program path instead of letting it resolve its own: $workflow"
+  fi
 done
+
+# #1170: a green step is only evidence if the command the workflow names is the
+# command that ran. GitHub's default `run:` shell is an ordinary non-interactive
+# bash, which reads $BASH_ENV, imports shell functions from the environment, and
+# honours profile files -- so a step can exit 0 having executed something else
+# entirely while the workflow text still reads `cargo test --workspace`. Every
+# workflow therefore declares one hardened shell for every step it runs.
+#
+# The string is read back out of the workflows rather than assumed, and the
+# behaviour below is proved with the string that was read. Weakening the
+# declaration in a workflow therefore fails here twice: once for not matching
+# the other workflows, and once because the weakened flags no longer defeat the
+# bypass.
+declared_shell=""
+shopt -s nullglob
+proposed_workflows=("$ROOT"/.github/workflows/*.yml)
+shopt -u nullglob
+(( ${#proposed_workflows[@]} >= 2 )) ||
+  fail "the proposed head has no workflows to check"
+for workflow in "${proposed_workflows[@]}"; do
+  workflow_shell=$(workflow_default_shell "$workflow")
+  [[ -n $workflow_shell ]] ||
+    fail "workflow does not declare a hardened shell for its steps: $workflow"
+  if [[ -z $declared_shell ]]; then
+    declared_shell=$workflow_shell
+  elif [[ $workflow_shell != "$declared_shell" ]]; then
+    fail "workflows disagree on the hardened shell: $workflow"
+  fi
+  # Exactly the one declaration, so no job or step can opt back out of it.
+  (( $(grep -c '^[[:space:]]*shell:' "$workflow") == 1 )) ||
+    fail "a job or step overrides the workflow's hardened shell: $workflow"
+done
+[[ $declared_shell == *" {0}" ]] ||
+  fail "the declared shell is not a step-script invocation: $declared_shell"
+
+# The probe is a real executable that records that it ran and then fails, so
+# "the named command ran" and "a real failure is still reported" are the same
+# observation (#1170 falsifier 4).
+probe_dir="$TMP/shell-hardening"
+mkdir -p "$probe_dir/bin"
+probe_witness="$probe_dir/probe-ran"
+cat > "$probe_dir/bin/nmp_gate_probe" <<EOF
+#!/usr/bin/env bash
+touch "$probe_witness"
+exit 3
+EOF
+chmod +x "$probe_dir/bin/nmp_gate_probe"
+printf 'nmp_gate_probe\n' > "$probe_dir/step.sh"
+printf 'nmp_gate_probe() { return 0; }\n' > "$probe_dir/shadow.sh"
+
+run_step() {
+  # $1: "hardened" or "default"; the rest is the environment to inject.
+  local mode=$1
+  shift
+  rm -f "$probe_witness"
+  local -a argv
+  if [[ $mode == hardened ]]; then
+    # The declared string with {0} replaced by the step script, exactly as the
+    # runner expands it.
+    read -r -a argv <<< "${declared_shell/\{0\}/$probe_dir/step.sh}"
+  else
+    argv=(bash -e "$probe_dir/step.sh")
+  fi
+  local status=0
+  env PATH="$probe_dir/bin:$PATH" "$@" "${argv[@]}" >/dev/null 2>&1 || status=$?
+  printf '%s\n' "$status"
+}
+
+# The bypass is real: assert it before asserting it is closed, so this pair
+# cannot pass because the probe was broken.
+[[ $(run_step default BASH_ENV="$probe_dir/shadow.sh") == 0 ]] ||
+  fail "the BASH_ENV bypass did not reproduce; this falsifier proves nothing"
+[[ ! -e $probe_witness ]] ||
+  fail "the BASH_ENV bypass ran the real program; this falsifier proves nothing"
+[[ $(run_step hardened BASH_ENV="$probe_dir/shadow.sh") == 3 ]] ||
+  fail "the declared shell still honours BASH_ENV: $declared_shell"
+[[ -e $probe_witness ]] ||
+  fail "the declared shell did not run the command the step names: $declared_shell"
+
+exported_shadow() {
+  # An exported function, the second half of #1170: a step inherits it without
+  # any file being involved.
+  nmp_gate_probe() { return 0; }
+  export -f nmp_gate_probe
+  run_step "$1"
+}
+[[ $(exported_shadow default) == 0 ]] ||
+  fail "the inherited-function bypass did not reproduce; this falsifier proves nothing"
+[[ $(exported_shadow hardened) == 3 ]] ||
+  fail "the declared shell still inherits shell functions: $declared_shell"
+unset -f nmp_gate_probe 2>/dev/null || true
+echo "ok - every workflow step runs the command its workflow names"
 
 # The reporter must survive in the proposed tree, not only in the base.
 # Otherwise a head could delete it while the extraction line still found the
@@ -1023,6 +1172,176 @@ done
 # gone -- green all the way down.
 [[ -x "$ROOT/scripts/report-surface-governance-verdict.sh" ]] ||
   fail "the proposed head has no executable outcome reporter"
+
+# For the same reason, the claims this suite makes have to survive in the
+# proposed tree. A head that keeps a mechanism but deletes its proof passes --
+# correctly, the head is sound -- and then becomes the base, at which point the
+# mechanism can be removed with nothing left to fail. That asymmetry is what
+# docs/internals/conventions/protected-path-signoff.md 5 is about, and it is
+# the reason this list exists rather than trusting each new base to be honest.
+#
+# Every needle below is BUILT, never written out whole, because this file is
+# the file being searched: a list of literal needles matches itself, so
+# deleting the thing it guards leaves the list behind to satisfy it. That is
+# not hypothetical -- the first version of this block was written with literal
+# needles and a head that deleted both falsifier sections still passed.
+for surviving_claim in \
+  'ok - every workflow step runs the command its workflow names' \
+  "ok - the gate runs its own tooling and never the head's" \
+  'ok - workflows use least-read permissions and base-only governance bytes'; do
+  grep -Fq "echo \"$surviving_claim\"" "$ROOT/scripts/test-surface-governance.sh" ||
+    fail "the proposed falsifier suite no longer claims: $surviving_claim"
+done
+# The claim lines alone could be kept while their assertions were deleted, so
+# the machinery each one summarises has to be present too.
+for surviving_definition in \
+  workflow_default_shell \
+  falsify_head_supplied_tooling_is_never_run; do
+  grep -Fq "$surviving_definition() {" "$ROOT/scripts/test-surface-governance.sh" ||
+    fail "the proposed falsifier suite no longer defines $surviving_definition"
+done
+
+# #1186, at the source: the proposed head's program must not resolve anything
+# it runs from the tree it is judging. `git show` and `$ROOT/docs/...` are data
+# reads and stay; a program path under the tree under judgment does not.
+for program in \
+  scripts/check-surface-governance.sh \
+  scripts/regenerate-surface-snapshots.sh \
+  scripts/install-surface-tools.sh \
+  scripts/run-surface-regeneration-governance.sh; do
+  proposed="$ROOT/$program"
+  [[ -f $proposed ]] || fail "the proposed head has no $program"
+  if grep -Eq '\$\{?(ROOT|SURFACE_ROOT)[^}]*\}?/(tools|scripts)/' "$proposed"; then
+    fail "$program resolves a program from the tree it is judging"
+  fi
+  if grep -Eq \
+      'SURFACE_(TOOLCHAIN_ENV|REGEN_CMD|CATALOG_TOOL_DIR|COMPONENT_TOOL_DIR|RUST_FACADE_TOOL_DIR|CHECKER)' \
+      "$proposed"; then
+    fail "$program takes a program path from its caller again"
+  fi
+done
+grep -Fq 'PROGRAM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)' \
+  "$ROOT/scripts/check-surface-governance.sh" ||
+  fail "the proposed checker does not resolve its tooling from where it lives"
+
+# The installer prepares the gate and says nothing about a proposed head, so
+# every way it fails is a malfunction and has to exit 70 under its own prefix.
+# Its own falsifiers run the BASE copy, which is the right claim for them to
+# make and the wrong one for judging a head, so the head's copy is checked
+# here. Before this, a fatal git inside it escaped as exit 128 -- a step that
+# could not run the command it names, reported as neither a verdict nor a
+# legible malfunction.
+grep -Fq 'MALFUNCTION_EXIT=70' "$ROOT/scripts/install-surface-tools.sh" ||
+  fail "the proposed installer does not report its failures as gate malfunctions"
+grep -Fq "surface-tools-malfunction:" "$ROOT/scripts/install-surface-tools.sh" ||
+  fail "the proposed installer does not name its failures as gate malfunctions"
+
+# The falsifier suites are part of the same base-trusted program and had the
+# same defect: this suite used to source the tree under judgment's toolchain
+# definition, so a head with `exit 0` in it made the whole suite exit 0 having
+# asserted almost nothing -- a self-test reporting success without running its
+# command. They read the tree under judgment on purpose, so their rule is
+# narrower than the one above: nothing under it may be sourced or built.
+for program in \
+  scripts/test-surface-governance.sh \
+  scripts/test-install-surface-tools.sh; do
+  proposed="$ROOT/$program"
+  [[ -f $proposed ]] || fail "the proposed head has no $program"
+  if grep -Eq '(^|[[:space:]])(source|\.)[[:space:]]+"?\$\{?(ROOT|SURFACE_ROOT)' "$proposed"; then
+    fail "$program sources the tree it is judging"
+  fi
+  if grep -Eq -- '--manifest-path[[:space:]]+"?\$\{?(ROOT|SURFACE_ROOT)' "$proposed"; then
+    fail "$program builds a tool out of the tree it is judging"
+  fi
+  if grep -Eq \
+      'SURFACE_(TOOLCHAIN_ENV|REGEN_CMD|CATALOG_TOOL_DIR|COMPONENT_TOOL_DIR|RUST_FACADE_TOOL_DIR|CHECKER)' \
+      "$proposed"; then
+    fail "$program takes a program path from its caller again"
+  fi
+done
+
+# And in behaviour. The head below carries its own copies of two things the
+# gate runs -- the toolchain definition the checker sources, and the
+# regenerator it executes -- and each one records that it ran. Neither may
+# fire, and the gate must not accept the head on the strength of them: before
+# this was fixed, `exit 0` in the head's tools/surface-toolchain.env made the
+# base-trusted checker exit 0, which the outcome reporter reads as `accepted`,
+# before authorization was ever consulted.
+falsify_head_supplied_tooling_is_never_run() {
+  local repo="$TMP/head-tooling"
+  local sourced="$TMP/head-tooling-sourced"
+  local executed="$TMP/head-tooling-executed"
+  local program="$TMP/head-tooling-program"
+  new_repo "$repo"
+  local base
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat > "$repo/tools/surface-toolchain.env" <<EOF
+touch "$sourced"
+exit 0
+EOF
+  cat > "$repo/scripts/regenerate-surface-snapshots.sh" <<EOF
+#!/usr/bin/env bash
+touch "$executed"
+exit 0
+EOF
+  chmod +x "$repo/scripts/regenerate-surface-snapshots.sh"
+  commit_case "$repo" head-supplied-tooling
+
+  # A program directory that is not the head: its toolchain definition names a
+  # toolchain that does not exist, so if the checker sources its own copy the
+  # catalog build fails and the gate reports a malfunction. If it sources the
+  # head's copy instead, the gate exits 0 and the witness appears.
+  mkdir -p "$program/scripts/lib" "$program/tools/surface-component-catalog"
+  cp "$SCRIPT_DIR/check-surface-governance.sh" \
+    "$SCRIPT_DIR/check-surface-migration-authorization.py" \
+    "$program/scripts/"
+  cp "$PROGRAM/scripts/regenerate-surface-snapshots.sh" "$program/scripts/"
+  chmod +x "$program/scripts/"*.sh
+  printf 'SURFACE_RUST_TOOLCHAIN=nmp-gate-fixture-toolchain\n' \
+    > "$program/tools/surface-toolchain.env"
+
+  local records status=0
+  records=$(mktemp -d "$TMP/head-tooling-records-XXXXXX")
+  write_api_records "$repo" "$base" "$records"
+  env \
+    SURFACE_ROOT="$repo" \
+    SURFACE_BASE_REF="$base" \
+    SURFACE_HEAD_REF=HEAD \
+    SURFACE_PR_NUMBER=999 \
+    SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
+    SURFACE_CHANGED_PROJECTIONS=none \
+    SURFACE_PR_RECORD="$records/pull-request.json" \
+    SURFACE_ISSUE_RECORD="$records/issue.json" \
+    SURFACE_STATUS_RECORDS="$records/statuses.json" \
+    SURFACE_CATALOG_TARGET_DIR="$TMP/head-tooling-target" \
+    "$program/scripts/check-surface-governance.sh" >/dev/null 2>&1 || status=$?
+  [[ ! -e $sourced ]] ||
+    fail "the head's tools/surface-toolchain.env was sourced by the base-trusted gate"
+  (( status != 0 )) ||
+    fail "the gate accepted a head whose own tooling decided the outcome"
+
+  # Now with a working catalog binary, so the run reaches regeneration and the
+  # regenerator the head supplied is the one that would be executed.
+  status=0
+  env \
+    SURFACE_CATALOG_BIN="$CATALOG_BIN" \
+    SURFACE_ROOT="$repo" \
+    SURFACE_BASE_REF="$base" \
+    SURFACE_HEAD_REF=HEAD \
+    SURFACE_PR_NUMBER=999 \
+    SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
+    SURFACE_CHANGED_PROJECTIONS=none \
+    SURFACE_PR_RECORD="$records/pull-request.json" \
+    SURFACE_ISSUE_RECORD="$records/issue.json" \
+    SURFACE_STATUS_RECORDS="$records/statuses.json" \
+    "$program/scripts/check-surface-governance.sh" >/dev/null 2>&1 || status=$?
+  [[ ! -e $executed ]] ||
+    fail "the head's scripts/regenerate-surface-snapshots.sh was executed by the base-trusted gate"
+  [[ ! -e $sourced ]] ||
+    fail "the head's tools/surface-toolchain.env was sourced by the base-trusted gate"
+}
+falsify_head_supplied_tooling_is_never_run
+echo "ok - the gate runs its own tooling and never the head's"
 
 falsify_missing_base_governance_artifact
 if grep -Fq 'migration_candidate' "$ROOT/scripts/check-surface-governance.sh"; then
@@ -1120,7 +1439,6 @@ run_checker_with() {
     SURFACE_PR_RECORD="$records/pull-request.json" \
     SURFACE_ISSUE_RECORD="$records/issue.json" \
     SURFACE_STATUS_RECORDS="$records/statuses.json" \
-    SURFACE_REGEN_CMD=scripts/regen.sh \
     "$@" \
     "$CHECK"
 }
@@ -1249,7 +1567,6 @@ exec env \\
   SURFACE_PR_RECORD="$sound_records/pull-request.json" \\
   SURFACE_ISSUE_RECORD="$sound_records/issue.json" \\
   SURFACE_STATUS_RECORDS="$sound_records/statuses.json" \\
-  SURFACE_REGEN_CMD=scripts/regen.sh \\
   SURFACE_SKIP_REGEN=1 \\
   "$CHECK"
 GATE

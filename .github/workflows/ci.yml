@@ -11,6 +11,17 @@ permissions:
   pull-requests: read
   statuses: read
 
+# Every step runs through one hardened shell (#1170). GitHub's default `run:`
+# shell honours BASH_ENV, $ENV, profile files, and shell functions inherited
+# from the environment, so the command a step names is not necessarily the
+# command that runs -- a step can report success having executed something
+# else while the workflow text still reads correctly. `-p` makes bash ignore
+# all four; `--noprofile --norc` covers the startup files; `-eo pipefail`
+# keeps a failure anywhere in a step fatal.
+defaults:
+  run:
+    shell: bash --noprofile --norc -p -eo pipefail {0}
+
 jobs:
   # Deterministic regeneration runs in the ordinary pull_request trust domain,
   # never in pull_request_target. The separate trusted-base governance check
@@ -104,15 +115,14 @@ jobs:
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
 
       - name: Install checksum-pinned surface tool
-        env:
-          SURFACE_ROOT: ${{ github.workspace }}
-          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
-        working-directory: ${{ runner.temp }}/nmp-surface-regeneration
+        # No working-directory and no environment: the installer names every
+        # toolchain explicitly and finds its own toolchain definition next to
+        # itself, so nothing about where it runs decides what it installs
+        # (#1186).
         run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/install-surface-tools.sh
 
       - name: Falsify governance and installer
         env:
-          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
           SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
         run: |
@@ -240,10 +250,10 @@ jobs:
           fi
 
       - name: Install checksum-pinned surface tool
-        env:
-          SURFACE_ROOT: ${{ github.workspace }}
-          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
-        working-directory: ${{ runner.temp }}/nmp-surface-regeneration
+        # No working-directory and no environment: the installer names every
+        # toolchain explicitly and finds its own toolchain definition next to
+        # itself, so nothing about where it runs decides what it installs
+        # (#1186).
         run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/install-surface-tools.sh
 
       - name: Regenerate and verify proposed surfaces
@@ -256,14 +266,8 @@ jobs:
           SURFACE_PR_RECORD: ${{ runner.temp }}/nmp-surface-regeneration/authorization/pull-request.json
           SURFACE_ISSUE_RECORD: ${{ runner.temp }}/nmp-surface-regeneration/authorization/issue.json
           SURFACE_STATUS_RECORDS: ${{ runner.temp }}/nmp-surface-regeneration/authorization/statuses.json
-          SURFACE_REGEN_CMD: ${{ runner.temp }}/nmp-surface-regeneration/scripts/regenerate-surface-snapshots.sh
-          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
-          SURFACE_COMPONENT_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/component-interface-snapshot
-          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
           SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
-          SURFACE_RUST_FACADE_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot
-          SURFACE_CHECKER: ${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh
         # The changed-projection context is derived by the same trusted checker
         # immediately before the run that consumes it, so failing to derive it
         # is also "no verdict" rather than a verdict nobody rendered.
