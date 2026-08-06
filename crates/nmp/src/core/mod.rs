@@ -7,9 +7,13 @@
 //! impl<S: EventStore> EngineCore<S> {
 //!     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect>;
 //!     pub fn tick(&mut self, now: nostr::Timestamp) -> Vec<Effect>;
-//!     pub fn next_deadline(&self) -> Option<nostr::Timestamp>;
+//!     pub fn next_deadline(&self) -> Result<Option<nostr::Timestamp>, PersistenceError>;
 //! }
 //! ```
+//!
+//! The deadline door reads two durable indexes, so it can fail; `Ok(None)`
+//! means the driver has genuinely nothing to wake up for and never that the
+//! store could not be read (#763).
 //!
 //! `EngineCore` does NO I/O, spawns no threads, touches no socket, imposes
 //! no runtime — this is the seam that preserves M1/M2's headless property:
