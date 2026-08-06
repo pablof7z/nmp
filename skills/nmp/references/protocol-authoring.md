@@ -4,11 +4,11 @@ Use this workflow only when the desired behavior is absent from the supported fa
 
 ## Establish whether this is current or target work
 
-Inspect the existing protocol crate before creating another module. Extend the established owner when the requested schema/context belongs there; for example, `nmp-nip29` already owns current group demand/composition helpers even though it deliberately makes no broad claim over all NIP-29 kinds.
+Inspect the existing protocol crate before creating another module. Extend the established owner when the requested schema/context belongs there; for example, `nmp-nip29` owns NIP-29's vocabulary — the `h` context row, the relationships between the three relay-signed kinds, and the 9000-9022 composers — while the app-facing door that retains a relay scope and mints the write lives in the `nmp` facade, because a lower crate cannot mint a `WriteIntent` without importing the write plane.
 
 There is no ownership registry, and none is planned. The generic claim vocabulary and design-level module-registration composition the repository once carried were deleted in #859 (`nmp-ownership`, `nmp-audit`, and every protocol crate's `claims()` export), and #757/#758 — which would have wired them into routing — are closed NOT_PLANNED. A protocol crate owns a schema because it is the crate that defines, builds, and parses it, and because other crates consume its typed output rather than re-parsing the wire. Do not tell an author to declare claims, enroll in an audit, register modules at runtime, or pass registrations to `Engine`; none of those doors exist. A design proposing new governance must say what workspace-graph or API-boundary fact would enforce it, not propose a registry a future crate could decline to join.
 
-Check foreign-schema prerequisites too. Current NIP-23 support is decode-oriented: decoded `Article` includes existing event identity and is not an authorless write draft. A design that composes an article must first add or identify a foreign-owned immutable public draft/writer rather than pretending one ships.
+Check schema prerequisites too. There is no NIP-23 owner at all: no crate, no `Article` type, no decode, and `NMPUI` does not decode it either. A design that composes an article must add that owner from scratch, decode included, rather than pretending one ships.
 
 Rust protocol crates may be opt-in dependencies, but current Swift/Kotlin packaging bundles the projected NIP-29 helpers into the base facade. Do not describe native protocol packaging as opt-in until separate products/artifacts and parity tests exist.
 
@@ -54,17 +54,22 @@ Do not add a callback registry that chooses routing, admission, signer, ordering
 5. Preserve core receipt facts. Map only module-owned composition failures.
 6. Never mutate a signed event, access signer secrets, write store indexes, open transport, or create an optimistic row lane.
 
-When these steps resolve entirely to an ordinary public `WriteIntent`, return
-that noun directly. Do not add an Engine receiver, take-once wrapper, or second
-publication overload for symmetry. NIP-22 is the concrete native precedent:
-its top-level composer returns `WriteIntent`, then the app uses generic
-`publish`.
+Two governed shapes exist, and the choice is about what the door must retain.
 
-NIP-29 is the practical ownership model: a schema module first builds a
-complete immutable draft, then NIP-29 adds only its `h` context and retains the
-selected host beside that foreign draft. C7 independently owns kind:9 and `q`
-replies; mention/notification policy remains app-owned. The engine-routable
-NIP-29 publication step is not shipped yet.
+When the steps resolve entirely to an ordinary public `WriteIntent` that needs
+nothing retained, return that noun directly. Do not add a take-once wrapper or a
+second publication overload for symmetry. NIP-22 is the precedent: its top-level
+composer returns `WriteIntent`, then the app uses generic `publish`.
+
+When the door must retain state that the intent cannot carry, own the publish
+step instead and return the ordinary `ReceiptStream`. NIP-29 is that precedent:
+`nip29::on(hosts)` retains a nonempty host *set*, `group(id)` narrows it, and
+`Group::publish(&engine, author, builder)` appends the one `h` row, routes
+`Explicit` to every host in the scope, and hands back the same receipt stream
+every other write returns. Its intent mint is private on purpose — handing out a
+`WriteIntent` would buy nothing and would create a second write lifecycle to
+keep honest. C7 independently owns kind:9 and its `e` replies; mention and
+notification policy remain app-owned.
 
 ## Rust, FFI, and native projection
 
@@ -72,7 +77,7 @@ A consumer-facing semantic change is not complete at the Rust implementation alo
 
 1. Add the narrow direct-Rust API in the facade or opt-in protocol crate.
 2. Decide whether it changes supported surface under repository governance.
-3. Project closed records/enums and semantic operations through FFI. Protocol-owned composition returns the ordinary public `WriteIntent`, and publication uses generic `publish` (NIP-22). Preserve immutable staged composition rather than hiding composition inside a protocol-specific publish door. If contextual authority is not safely representable, fix the one write noun so the authority is non-forgeable and payload-bound; do not create an opaque parallel intent, take-once lifecycle, raw routing escape hatch, callback, or mutable mechanism object.
+3. Project closed records/enums and semantic operations through FFI. Protocol-owned composition either returns the ordinary public `WriteIntent` for generic `publish` (NIP-22), or owns the publish step and returns the ordinary `ReceiptStream` (NIP-29). Preserve immutable staged composition either way. If contextual authority is not safely representable, fix the one write noun so the authority is non-forgeable and payload-bound; do not create an opaque parallel intent, take-once lifecycle, raw routing escape hatch, callback, or mutable mechanism object.
 4. Wrap generated types in idiomatic Swift and Kotlin ownership shapes.
 5. Preserve semantic parity while allowing native lifecycle syntax to differ.
 6. Update supported-surface docs, known gaps, and the surface change log when required.
