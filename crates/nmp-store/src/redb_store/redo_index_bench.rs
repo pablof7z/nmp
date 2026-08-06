@@ -19,8 +19,8 @@ use super::schema::{
     INDEX_CARDINALITY, REDB_CACHE_BYTES, RELAYS, RELAY_IDS,
 };
 use super::store_bench::{
-    StoreBenchPreparedCorpus, StoreBenchPreparedMetrics, StoreBenchPreparedRecord,
-    StoreBenchPreparedTable, StoreBenchProcessCounters,
+    count_reopened_events, StoreBenchPreparedCorpus, StoreBenchPreparedMetrics,
+    StoreBenchPreparedRecord, StoreBenchPreparedTable, StoreBenchProcessCounters,
 };
 
 const INDEX_REDO: TableDefinition<u64, &[u8]> = TableDefinition::new("index_redo_bench");
@@ -348,29 +348,62 @@ fn recover_pending(db: &Database) -> Result<u64, String> {
     Ok(pending.len() as u64)
 }
 
+/// Reopened row counts for every prepared table, indexed by
+/// [`StoreBenchPreparedTable`], plus the surviving redo rows.
+///
+/// The match is over [`StoreBenchPreparedTable::ALL`] and exhaustive, so a
+/// variant added, removed, or renumbered is a compile error here instead of a
+/// slot that silently stays zero. The spelling this replaced was a
+/// push-ordered `vec![]` with ten entries against eleven prepared tables and
+/// no `EventObservations` slot, so every count from `Relays` onward landed one
+/// table early, the two vectors could not even have equal length, and
+/// `exact_reopen` could never be true.
 fn logical_row_counts(db: &Database) -> Result<(Vec<u64>, u64), String> {
     let txn = db.begin_read().map_err(|error| error.to_string())?;
-    let rows = vec![
-        txn.open_table(EVENTS).map_err(|e| e.to_string())?.len(),
-        txn.open_table(EVENT_IDS).map_err(|e| e.to_string())?.len(),
-        txn.open_table(RELAYS).map_err(|e| e.to_string())?.len(),
-        txn.open_table(RELAY_IDS).map_err(|e| e.to_string())?.len(),
-        txn.open_table(BY_CREATED_AT)
-            .map_err(|e| e.to_string())?
-            .len(),
-        txn.open_table(BY_AUTHOR).map_err(|e| e.to_string())?.len(),
-        txn.open_table(BY_KIND).map_err(|e| e.to_string())?.len(),
-        txn.open_table(COMPARISON_BY_AUTHOR_KIND)
-            .map_err(|e| e.to_string())?
-            .len(),
-        txn.open_table(BY_TAG).map_err(|e| e.to_string())?.len(),
-        txn.open_table(INDEX_CARDINALITY)
-            .map_err(|e| e.to_string())?
-            .len(),
-    ]
-    .into_iter()
-    .map(|rows| rows.map_err(|error| error.to_string()))
-    .collect::<Result<Vec<_>, _>>()?;
+    let mut rows = vec![0u64; StoreBenchPreparedTable::COUNT];
+    count_reopened_events(&txn, &mut rows)?;
+    for table in StoreBenchPreparedTable::ALL {
+        let len = match table {
+            // #1248 folded `event_observations` into `EVENTS` as a column of
+            // the event key, so one tree answers for both of these tables and
+            // `.len()` cannot tell them apart. `count_reopened_events` above
+            // already split it by column byte.
+            StoreBenchPreparedTable::Events | StoreBenchPreparedTable::EventObservations => {
+                continue
+            }
+            StoreBenchPreparedTable::EventIds => {
+                txn.open_table(EVENT_IDS).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::Relays => {
+                txn.open_table(RELAYS).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::RelayIds => {
+                txn.open_table(RELAY_IDS).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::ByCreatedAt => txn
+                .open_table(BY_CREATED_AT)
+                .map_err(|e| e.to_string())?
+                .len(),
+            StoreBenchPreparedTable::ByAuthor => {
+                txn.open_table(BY_AUTHOR).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::ByKind => {
+                txn.open_table(BY_KIND).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::ByAuthorKind => txn
+                .open_table(COMPARISON_BY_AUTHOR_KIND)
+                .map_err(|e| e.to_string())?
+                .len(),
+            StoreBenchPreparedTable::ByTag => {
+                txn.open_table(BY_TAG).map_err(|e| e.to_string())?.len()
+            }
+            StoreBenchPreparedTable::IndexCardinality => txn
+                .open_table(INDEX_CARDINALITY)
+                .map_err(|e| e.to_string())?
+                .len(),
+        };
+        rows[table as usize] = len.map_err(|e| e.to_string())?;
+    }
     let redo_rows = txn
         .open_table(INDEX_REDO)
         .map_err(|e| e.to_string())?
@@ -503,11 +536,61 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use wait_timeout::ChildExt;
 
+    use super::super::store_bench::prepare_equivalent_store_corpus;
     use super::*;
 
     const CRASH_WORKER: &str = "redb_store::redo_index_bench::tests::redo_index_crash_worker";
+
+    fn counters() -> StoreBenchProcessCounters {
+        StoreBenchProcessCounters::default()
+    }
+
+    /// `exact_reopen` is the claim that the run persisted the work it reports,
+    /// so it has to be reachable: it was unconditionally false while the row
+    /// counts were a ten-entry push-ordered vector compared against eleven
+    /// prepared tables.
+    #[test]
+    fn reopened_row_counts_match_the_prepared_corpus_table_by_table() {
+        let keys = Keys::generate();
+        let events: Vec<_> = (0..2)
+            .map(|index| {
+                EventBuilder::new(Kind::from(9u16), format!("event-{index}"))
+                    .tag(Tag::parse(["h", "room"]).unwrap())
+                    .custom_created_at(Timestamp::from(1_700_000_000 + index))
+                    .sign_with_keys(&keys)
+                    .unwrap()
+            })
+            .collect();
+        let prepared = prepare_equivalent_store_corpus(&events, 1).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let metrics = run_prepared_redb_redo_index_bench(
+            &scratch.path().join("redo.redb"),
+            &prepared,
+            counters,
+        )
+        .unwrap();
+
+        assert_eq!(
+            metrics.metrics.reopened_table_rows.len(),
+            StoreBenchPreparedTable::COUNT
+        );
+        assert_eq!(
+            metrics.metrics.reopened_table_rows, prepared.expected_table_rows,
+            "reopened rows must line up table by table"
+        );
+        // The `EVENTS` tree holds both columns since #1248: two events and two
+        // observations. Counting it whole reported four events.
+        assert_eq!(
+            metrics.metrics.reopened_table_rows
+                [StoreBenchPreparedTable::EventObservations as usize],
+            2
+        );
+        assert_eq!(metrics.metrics.reopened_rows, 2);
+        assert!(metrics.metrics.exact_reopen);
+    }
 
     fn crash_records() -> Vec<StoreBenchPreparedRecord> {
         vec![
