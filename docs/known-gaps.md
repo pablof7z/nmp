@@ -569,3 +569,20 @@ about current code:
   `-current-base` companion (#1264). Requiring only the two verdict names would
   fail open, because a gate that breaks leaves them skipped and GitHub counts a
   skipped required check as success.
+
+- **A step can still be redirected through `$GITHUB_ENV`/`$GITHUB_PATH` by an
+  earlier step in the same job (#1170 residue).** Every workflow now runs its
+  steps through `bash --noprofile --norc -p -eo pipefail`, so `BASH_ENV`, `$ENV`,
+  profile files, and shell functions inherited from the environment cannot
+  change what a step executes — that is the demonstrated bypass in #1170 and it
+  is closed and falsified (`scripts/test-surface-governance.sh`, *every workflow
+  step runs the command its workflow names*). What no shell flag reaches is the
+  runner's own inter-step channel: a step that compiles proposed-head code runs
+  that head's build scripts, and those inherit `GITHUB_ENV` and `GITHUB_PATH`
+  and can therefore rewrite `PATH` for a later step in the same job. In
+  `ci.yml`'s `test` job, `cargo clippy` precedes `cargo test`, so the vector is
+  reachable. Closing it needs a mechanism at the job boundary — a fresh runner
+  per evidence claim, as `surface-governance` already does — not a shell flag,
+  and it is not what #1170 demonstrated. The governance jobs are unaffected: they
+  never compile the head, and every program they run is an absolute path under
+  the base-extracted scratch directory.
