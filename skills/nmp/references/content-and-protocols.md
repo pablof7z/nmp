@@ -4,27 +4,30 @@
 
 The base engine delivers raw event rows. Formatting and product policy remain app-owned.
 
-Swift `NMPContent` and Kotlin's content SDK add source-ranged parsing, typed profile/article resources, and bounded reference sessions over ordinary NMP demand. Claims and nested sessions own live references; cancel Swift claims and `stop()` Swift sessions, and `close()` their Kotlin counterparts. They do not become another event store or routing authority.
+Content support is parser-only on every tier: `nmp::content::parse_content` in Rust, `parseNostrContent` in Swift's `NMPContent` and in the Kotlin SDK. Each returns an immutable source-ranged document. Parsing is pure — it owns no protocol schema, renderer, component registry, query handle, cache, engine, or network client, and it holds nothing to close.
 
-Current Kotlin content snapshots do not fully report helper-query failures: the canonical collector maps a thrown query setup failure into a query-rejected shortfall, while helper collectors only catch cancellation and do not surface an ordinary or windowed canonical-projection failure (`ObservationUnavailable`) as a typed shortfall. Helper collectors run as async tasks on the shared engine runtime with no public capacity refusal, so keep aggregate observation bounded in app ownership for your own resource reasons and do not claim that every helper failure is visible in the snapshot.
+The typed profile/article resource layer and the bounded reference-session machinery were deleted (#561). There is no `NMPContentClient`, no `NostrContentSession`, no `claim(referenceID:)`, and no session permit budget. To make a nested reference live, resolve its locator from the parsed document and open an ordinary query the app owns.
 
-Swift `NMPUI` adds replaceable SwiftUI components and renderer overrides above `NMPContent`. It includes identity primitives, mentions, event chrome, articles, user cards, reactions, a following button, and `NostrContent`. No Compose UI package is currently shipped.
+Swift `NMPUI` adds replaceable SwiftUI components and renderer overrides above `NMPContent`. It includes identity primitives, mentions, event chrome, articles, user cards, reactions, a following button, and `NostrContent`. It does not decode NIP-23. On the Kotlin side a narrow optional desktop-JVM Compose library ships as the separate `:ui` child project (`com.nmp.ui`), carrying relay identity/list primitives only; broad Compose parity and a Compose gallery are unbuilt, and it is not an Android AAR.
 
 ## NIP-02 following
 
-The current atomic follow/unfollow action is available in direct Rust protocol support and Swift. It first establishes an existing canonical contact-list base, preserves fields it does not own, and uses a replaceable precondition. It refuses a missing base; it does not silently create a first list containing only the new contact. The ergonomic Kotlin engine does not currently expose following actions.
+The current atomic follow/unfollow action is available in the `nmp-nip02` protocol crate, Swift, and Kotlin. `nmp-nip02` depends on `nmp`, so it is not and cannot be re-exported through the facade; `nmp-ffi` binds it directly. It first establishes an existing canonical contact-list base, preserves fields it does not own, and uses a replaceable precondition. It refuses a missing base; it does not silently create a first list containing only the new contact. Both wrappers surface `observeFollowing`/`follow`/`unfollow` on `NMPEngine` with the full typed `FollowActionStatus`/`FollowActionFailure` mirrors; the one Swift-only convenience is the SwiftUI `NMPFollowing` observable object.
 
 ## NIP-22 comments
 
-NIP-22 owns typed kind:1111 comments over event, address, and NIP-73 external
-roots. Rust, FFI, Swift, and Kotlin expose root-thread demand, strict decode,
+NIP-22 owns typed kind:1111 comments. Composition takes a single target — a
+`CommentTarget` that is either a `CommentRoot` (event, address, or NIP-73
+external) or an existing `Row` — rather than a separate root and parent. Rust, FFI, Swift, and Kotlin expose root-thread demand, strict decode,
 and schema composition. Composition names no author and reads no clock: the
 engine resolves the write's identity and stamps `created_at` at acceptance,
 so two composes of the same comment are two valid events, not one repeated
 one.
 
-The native composer is the top-level
-`commentIntent(root:parent:content:correlation:)`.
+The native composer is the top-level Swift
+`commentIntent(on:content:correlation:)` / Kotlin
+`commentIntent(target, content, correlation)`. The older
+`commentIntent(root:parent:...)` spellings were deleted with no alias.
 It returns the ordinary `WriteIntent` with durable author-outbox routing.
 Publish that value through the generic engine `publish` door and observe its
 ordinary receipt. There is no `engine.commentIntent`, `CommentIntent` wrapper,
@@ -82,10 +85,17 @@ Rust, FFI and both native SDKs project the full read-and-write door
 (`FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds`/`NmpGroupRecordsStream`;
 `NMPRelayScope`/`NMPGroup`/`NMPGroupSnapshot` in Swift and Kotlin).
 
-`nmp-nipc7` independently owns pure kind:9 chat and `q` replies. It does not
-materialize mentions, notification `p` rows, NIP-29 `h`, or routing. No
-Swift/Kotlin C7 projection is claimed yet.
+`nmp-nipc7` independently owns pure kind:9 chat, and its replies emit `e`, not
+`q`. It does not materialize mentions, notification `p` rows, NIP-29 `h`, or
+routing. It is projected natively as `chat()` and `chatReply(to:)` in Swift and
+Kotlin, over the FFI `chat`/`chat_reply` doors.
+
+The facade also carries NIP-18 `repost`, NIP-25 `react`, NIP-51 simple-groups
+lists, Blossom asset upload/fetch, and asset identity, each behind its own
+cargo feature; all but NIP-65 reach both wrappers. NIP-65 relay-list bootstrap
+is direct-Rust only. There is no NIP-23 owner at all — no crate, no `Article`
+type, no decode — so an article feature must add that owner from scratch.
 
 When implementing a protocol feature not already projected, do not assemble it from mechanism crates in app code. First determine whether it belongs in an opt-in protocol crate and whether Rust/FFI/native surface governance is required.
 
-Relay connection/worker failure during direct Rust NIP-02 observation is acquisition evidence, not `EngineError::ObservationUnavailable`; that error is reserved for an ordinary or windowed initial canonical-projection refusal after store degradation. The follow action has no capacity or thread refusal and reports any genuine terminal failure from `FollowAction` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant. Raw UniFFI carries the same terminal action fact, Swift projects the matching `NMPFollowActionFailure`, and Kotlin still has no ergonomic following action.
+Relay connection/worker failure during direct Rust NIP-02 observation is acquisition evidence, not `EngineError::ObservationUnavailable`; that error is reserved for an ordinary or windowed initial canonical-projection refusal after store degradation. The follow action has no worker/task refusal and reports any genuine terminal failure from `FollowAction` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant. Raw UniFFI carries the same terminal action fact, and both wrappers project the matching typed failure.

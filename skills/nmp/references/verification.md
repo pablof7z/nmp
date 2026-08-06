@@ -85,14 +85,16 @@ Exercise the product-relevant subset:
 - durable acceptance is visible separately from relay ACK;
 - missing signer retains the expected author and resumes only with that identity;
 - one ACK plus one rejection remains mixed evidence;
-- at-most-once ambiguity never offers blind retry;
+- an unacked `RelayState::Sent` is never treated as terminal and never offers blind retry;
 - pre-acceptance failure leaves no durable row/receipt;
-- the native receipt bridge is established before acceptance with no capacity or thread refusal, so a returned handle reflects an accepted obligation; NIP-22 must use an ordinary `WriteIntent` with no second lifecycle, while any test of NIP-29's current take-once path records defect behavior pending #838 rather than accepting it as a reusable contract;
+- `Ok` from publish is acceptance, so a returned handle names a write in custody; NIP-22 uses an ordinary `WriteIntent` with no second lifecycle, and NIP-29's `Group::publish` returns the same ordinary receipt stream;
+- `cancel` before signing commits `NotSent(Cancelled)` and refuses with a typed `CancelWriteError` afterwards; `publishQueue()` shows a signer-parked write, and `cancel` + `removePublishQueueEntry` genuinely removes it;
+- a correlation token persisted before publish reattaches the same write after simulated process loss;
 - process restart reattaches the same receipt and frozen intent;
-- restart replays persisted `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, `HandoffAmbiguous`, and exact-`Written` `Sent` facts while never replaying transient `Routed` or turning `AttemptStarted`, ambiguity, or an ephemeral handoff into `Sent`;
+- restart replays the durable `WriteFact` history in finite pages — `RelayWaiting::NotConnected`/`NeedsAuth`/`BackingOff`/`PersistenceStalled`, `Sent`, and terminal relay states — and reports lag as the typed `FactStreamLagged` rather than dropping frames;
 - old remote-signer close cannot detach its replacement;
 - secret/account checkpoint is separate from event-store reset;
-- cancelling the app receipt consumer neither detaches the native bridge nor cancels the obligation; and
+- detaching a fact stream leaves the durable write intact, and is distinguishable in test from `cancel` ending the obligation; and
 - Kotlin receipt collection remains drained/bounded by ownership policy and repeated reattachment does not accumulate unnoticed bridges.
 
 ## Protocol-module falsifiers
@@ -118,13 +120,13 @@ Drive a known demand through a scripted relay and assert semantic records:
 - query source evidence and shortfall; and
 - transport degradation when induced.
 
-Do not golden-test screenshots or health scores. Do not assert unprojected Rust-only fields from Swift/Kotlin.
+Do not golden-test screenshots or health scores. Do not assert unprojected Rust-only fields from Swift/Kotlin — `store_degraded` is direct-Rust only, and the rejection counters stop at raw UniFFI. Do cover the surfaces that *are* projected: `authSessions` for AUTH lifecycle and `stalledWrites`/`stalledWriteTotals` for stuck obligations.
 
 ## Boundedness
 
 Every async test needs a real deadline/task race. Avoid polling loops with `sleep`. A failed wait must report the missing state and most recent rows/evidence/receipt/diagnostics.
 
-Stress repeated query, diagnostics, follow, signer, receipt attachment, and content-session open/close when resource ownership changes. A successful native lifecycle test must show that after teardown the shared engine runtime retains no lingering async work and no OS thread for the ended observers/sessions, proven by an event rather than polling or sleeps; it must also show app-level aggregate content/observer counts stay capped. There is no worker/task admission ceiling and no capacity refusal, so concurrent operations must simply make progress. Exercise the genuine infra failures (`EngineStartFailed` at construction, `ObservationUnavailable` for a live observe) without panic, preserve no-handle failure for observations/direct signer setup, and preserve the terminal failure on the deliberately returned NIP-02 action handle.
+Stress repeated query, diagnostics, follow, signer, and receipt-attachment open/close when resource ownership changes. A successful native lifecycle test must show that after teardown the shared engine runtime retains no lingering async work and no OS thread for the ended observers, proven by an event rather than polling or sleeps; it must also show app-level aggregate observer counts stay capped. There is no worker/task admission ceiling, so concurrent operations must simply make progress — but `LiveQueryError::TooManyQueryBranches { requested, maximum }` and `AuthCapabilityRegistryFull { limit }` are real typed refusals and must be exercised as such. Exercise the genuine infra failures (`EngineStartFailed` at construction, `ObservationUnavailable` for a live observe) without panic, preserve no-handle failure for observations/direct signer setup, and preserve the terminal failure on the deliberately returned NIP-02 action handle.
 
 ## Live smoke discipline
 

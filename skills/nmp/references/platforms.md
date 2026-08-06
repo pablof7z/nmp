@@ -9,13 +9,20 @@ reset_persistent_store
 new
 observe
 publish
+cancel
+publish_queue
+remove_publish_queue_entry
 reattach_receipt
+reattach_by_correlation
 add_account
+remove_account
 add_signer
 remove_signer
 sign_event
 set_active_account
 active_account
+add_auth_policy
+remove_auth_policy
 observe_diagnostics
 relay_information
 shutdown
@@ -23,23 +30,23 @@ shutdown
 
 `from_parts` is hidden behind `unstable-mechanism` for in-repo tests and is not an application assembly path. `cargo test -p nmp-consumer-check` is the focused supported-facade proof. Test any other touched Rust crate with `cargo test -p <crate>`; `cargo test --workspace` is the merge gate.
 
-`EngineConfig` has no worker/task capacity field: #704 removed application-configurable task admission and all saturation outcomes. Observer/action/signer work runs as async tasks on one shared engine-owned runtime; private physical bounds backpressure rather than refusing ordinary operations. The only construction-time infrastructure failure is `EngineError::EngineStartFailed { component, reason }`, returned when the engine itself cannot be built (the OS refused an engine-owned thread, or the relay budget was unrepresentable); it is never raised by an ordinary operation once the engine exists.
+`EngineConfig` has no worker/task capacity field: #704 removed application-configurable task admission and all saturation outcomes. Observer/action/signer work runs as async tasks on one shared engine-owned runtime; private physical bounds backpressure rather than refusing ordinary operations. `EngineError::EngineStartFailed { component, reason }` is returned when the engine itself cannot be built (the OS refused an engine-owned thread, or the relay budget was unrepresentable) and is never raised by an ordinary operation once the engine exists — but it is not the only construction failure: `Engine::new` also reports `StoreOpenFailed`, `StoreAlreadyOpen`, and `InvalidRelayUrl`. `AuthCapabilityRegistryFull { limit }` is a real capacity refusal, bounded by the app-set `max_auth_capabilities`; what does not exist is a worker/task ceiling.
 
 `Engine::sign_event(SignEventRequest)` freezes the active author and returns a cancellable `SignEventOperation`; `recv` yields one fully verified event or a typed `SignEventError`. It never accepts or publishes a write. Asynchronous `SigningCapability` implementations create pending work with `SignerOp::pending_channel` or `pending_channel_with_cancel` and resolve the returned opaque `PendingSignerSender`; consumers do not receive or decompose NMP's internal channel.
 
-`Engine::relay_information(relay, policy)` is an async one-shot returning `RelayInformationSnapshot` or `RelayInformationRequestError`. `UseCache` returns an unexpired last-good representation; `Refresh` requests a generation-guarded single flight. Inspect `RelayInformationRequestError::Acquisition` without collapsing `ServiceClosed`, `Http`, `ResponseTooLarge`, or `InvalidDocument`. A stale-on-error success has `freshness: Stale` and `last_error`; `advertises_nip` is document evidence, not behavioral proof.
+`Engine::relay_information(relay, policy)` is an async one-shot returning `RelayInformationSnapshot` or `RelayInformationRequestError`. `UseCache` returns an unexpired last-good representation; `Refresh` requests a generation-guarded single flight. Inspect `RelayInformationRequestError::Acquisition` without collapsing `ServiceClosed`, `CredentialedRelayUrl`, `Http`, `ResponseTooLarge`, or `InvalidDocument`. A stale-on-error success has `freshness: Stale` and `last_error`; `advertises_nip` is document evidence, not behavioral proof.
 
 These infrastructure failures have distinct direct-Rust doors:
 
-- `Engine::new` reports `EngineError::EngineStartFailed` when the engine itself cannot be constructed; no ordinary operation raises it.
-- An ordinary or windowed `Engine::observe` reports `EngineError::ObservationUnavailable` only when store degradation prevents its initial canonical projection from opening. Relay connection/worker failure remains acquisition evidence. No OS thread is consumed per observation, and there is no public task-capacity refusal.
+- `Engine::new` reports `EngineError::EngineStartFailed` when the engine itself cannot be constructed; no ordinary operation raises it. Store and relay-URL problems are their own variants.
+- An ordinary or windowed `Engine::observe` reports `EngineError::ObservationUnavailable` only when store degradation prevents its initial canonical projection from opening. Relay connection/worker failure remains acquisition evidence. Window and `LiveQuery` validation refuse through their own variants. No OS thread is consumed per observation, and there is no worker/task-capacity refusal.
 - `nmp_nip02::set_following` returns `FollowAction`, not `Result`. It has no capacity or thread refusal; a genuine terminal failure surfaces through `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant.
 
 These are typed operational failures, not interchangeable error cases, a hidden task queue, panics, or timeouts. Every observer/action/signer path runs as an async task on the shared engine runtime, so ordinary concurrent operations simply make progress.
 
 ## Swift
 
-Import `NMP`, not `NMPFFI`. `NMPEngine` exposes persistent reset; construction; account add/activate/read/clear-persisted; filter/demand observation; diagnostics; async governed sign-only; async one-shot relay information; publish; receipt reattachment; and shutdown. NIP-22 comment composition is the top-level `commentIntent(...) -> WriteIntent`, not an engine method; publish its result through ordinary `NMPEngine.publish`. NIP-29's full read-and-write door is projected as `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` (#1033, #1252): `NMPRelayScope.on(hosts)` names the relays once, `group(_:)` narrows to one group, `read(_:)` returns an `NMPLiveQuery` for the ordinary observe door, `observeRecords(engine:matching:records:limit:)` is the `AsyncSequence` of `NMPGroupSnapshot`s for the relay-signed records, and the group's write methods return the ordinary receipt stream. C7 construction is direct-Rust-only. Optional products are `NMPContent` and `NMPUI`.
+Import `NMP`, not `NMPFFI`. `NMPEngine` exposes persistent reset; construction; account generate/add/activate/read/remove/detach-persisted; auth-policy add/remove; filter/demand/live-query observation, windowed and unwindowed; diagnostics; async governed sign-only; async one-shot relay information; publish; write cancellation; publish-queue enumeration and entry removal; receipt reattachment by id and by correlation token; NIP-02 `observeFollowing`/`follow`/`unfollow`; and shutdown. NIP-22 comment composition is the top-level `commentIntent(...) -> WriteIntent`, not an engine method; publish its result through ordinary `NMPEngine.publish`. NIP-29's full read-and-write door is projected as `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` (#1033, #1252): `NMPRelayScope.on(hosts)` names the relays once, `group(_:)` narrows to one group, `read(_:)` returns an `NMPLiveQuery` for the ordinary observe door, `observeRecords(engine:matching:records:limit:)` is the `AsyncSequence` of `NMPGroupSnapshot`s for the relay-signed records, and the group's write methods return the ordinary receipt stream. NIP-18 `repost`, NIP-25 `react(to:with:)`, and NIP-C7 `chat`/`chatReply(to:)` are top-level composers alongside the generic tagging door; NIP-51 and Blossom are projected too. Optional products are `NMPContent` (parser only) and `NMPUI`.
 
 From a clean clone, generate the ignored FFI artifacts from the repo root, then run SwiftPM in its package directory:
 
@@ -53,9 +60,9 @@ Drop `--sim-only` when a physical-device slice is required. Rebuild the xcframew
 
 `swift test` above executes on the macOS host. The build script compiles the iOS Simulator slices, but the package currently has no simulator runtime test target; issue #465 tracks that missing qualification harness.
 
-Swift `NMPConfig` has `storePath`, `appRelays`, and `fallbackRelays`; it exposes no protocol-provider setting, worker/task capacity field, or Rust `allowed_local_relay_hosts`/`max_relays` knob.
+Swift `NMPConfig` has `storePath`, `appRelays`, `fallbackRelays`, `allowedLocalRelayHosts`, `torReachable`, `maxRelays` (default 10), and `maxAuthCapabilities` (default 64). It exposes no protocol-provider setting and no worker/task capacity field; the Rust fields it omits are `indexer_relays` and `max_publish_attempts`.
 
-Construction, observation, and receipt attachment throw. Construction can report `NMPError.engineStartFailed(component:reason:)` when the engine itself cannot be built; `NMPError.observationUnavailable(reason:)` means only that store degradation prevented an ordinary or windowed observation's initial canonical projection from opening. Relay connection/worker failure remains acquisition evidence, and no ordinary operation is refused for capacity. Swift following actions carry the corresponding `NMPFollowActionFailure` terminal case for genuine failures. Do not turn any immediate failure shape into a readiness timeout.
+Construction, observation, and receipt attachment throw. Construction can report `NMPError.engineStartFailed(component:reason:)` when the engine itself cannot be built; `NMPError.observationUnavailable(reason:)` means only that store degradation prevented an ordinary or windowed observation's initial canonical projection from opening. Relay connection/worker failure remains acquisition evidence, and no operation is refused for worker/task capacity. Swift following actions carry the corresponding `NMPFollowActionFailure` terminal case for genuine failures. Do not turn any immediate failure shape into a readiness timeout.
 
 `relayInformation(for:policy:)` suspends and throws. It has no capacity or thread refusal; credentialed URL, HTTP, document, size, and closed-service failures map to `NMPError.relayInformationUnavailable(RelayInformationErrorKind)` -- a typed kind, not a message string (#494). Treat `RelayInformation.rawJSON` as forward-compatible authority and `lastError: RelayInformationErrorKind?` as stale-on-error evidence.
 
@@ -63,7 +70,7 @@ Construction, observation, and receipt attachment throw. Construction can report
 
 ## Kotlin/JVM
 
-Import `com.nmp.sdk.*`, not `uniffi.nmp_ffi`. `NMPEngine` implements `AutoCloseable`; prefer `use {}`. Its public methods cover persistent reset; account add/activate/read/clear-persisted; filter/demand observation; diagnostics; suspending governed sign-only; suspending one-shot relay information; publish; receipt reattachment; shutdown/close. NIP-22 comment composition is the top-level `commentIntent(...) -> WriteIntent`; publish that ordinary value through `NMPEngine.publish`. NIP-29's full read-and-write door is projected as `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` (#1033, #1252): `NMPRelayScope.on(hosts)` names the relays once, `group(...)` narrows to one group, `read(...)` returns an `NMPLiveQuery` for the ordinary observe door, `observeRecords(engine, predicate, records, limit)` is the `Flow` of `NMPGroupSnapshot`s for the relay-signed records, and the group's write methods return the ordinary receipt stream. C7 construction is direct-Rust-only.
+Import `com.nmp.sdk.*`, not `uniffi.nmp_ffi`. `NMPEngine` implements `AutoCloseable`; prefer `use {}`. Its public methods cover persistent reset; account generate/add/activate/read/remove/detach-persisted; auth-policy add/remove; filter/demand/live-query observation, windowed and unwindowed; diagnostics; suspending governed sign-only; suspending one-shot relay information; publish; write cancellation; publish-queue enumeration and entry removal; receipt reattachment by id and by correlation token; NIP-02 `observeFollowing`/`follow`/`unfollow`; shutdown/close. NIP-22 comment composition is the top-level `commentIntent(...) -> WriteIntent`; publish that ordinary value through `NMPEngine.publish`. NIP-29's full read-and-write door is projected as `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` (#1033, #1252): `NMPRelayScope.on(hosts)` names the relays once, `group(...)` narrows to one group, `read(...)` returns an `NMPLiveQuery` for the ordinary observe door, `observeRecords(engine, predicate, records, limit)` is the `Flow` of `NMPGroupSnapshot`s for the relay-signed records, and the group's write methods return the ordinary receipt stream. NIP-18 `repost`, NIP-25 `react`, and NIP-C7 `chat`/`chatReply` are top-level composers alongside the generic tagging door; NIP-51 and Blossom are projected too.
 
 From a clean clone:
 
@@ -73,11 +80,11 @@ cd Packages/NMPKotlin
 ./gradlew test
 ```
 
-Rebuild generated bindings after a UniFFI surface change. This module targets desktop JVM. It does not ship an Android AAR, Compose UI, or Android-owned `Intent`/package-manager calls.
+Rebuild generated bindings after a UniFFI surface change. This module targets desktop JVM. It does not ship an Android AAR or Android-owned `Intent`/package-manager calls. A narrow optional desktop-JVM Compose library ships as the separate `:ui` child project (`com.nmp.ui`, relay identity/list primitives from #198) so Compose never becomes a dependency of the core SDK; it is not an Android runtime qualification.
 
-Kotlin `NMPConfig` mirrors Swift's four fields, exposes no worker/task capacity field, and omits `allowed_local_relay_hosts` and `max_relays`. Its flows are cold; one collection equals one engine observation unless the app shares the flow.
+Kotlin `NMPConfig` mirrors Swift's seven fields — `storePath`, `appRelays`, `fallbackRelays`, `allowedLocalRelayHosts`, `torReachable`, `maxRelays` (default 10), `maxAuthCapabilities` (default 64) — and exposes no worker/task capacity field. Unwindowed observation returns a cold flow, so one collection equals one engine observation unless the app shares it; windowed observation instead returns an `NMPQuery` whose `frames` flow can be collected only once.
 
-Kotlin has no checked-exception syntax, but the wrapper maps engine construction failure to `NMPError.EngineStartFailed(component, reason)` and ordinary or windowed initial canonical-projection setup failure to `NMPError.ObservationUnavailable(reason)`. Relay connection/worker failure remains acquisition evidence and there is no capacity or thread refusal on ordinary operations.
+Kotlin has no checked-exception syntax, but the wrapper maps engine construction failure to `NMPError.EngineStartFailed(component, reason)` and ordinary or windowed initial canonical-projection setup failure to `NMPError.ObservationUnavailable(reason)`. Relay connection/worker failure remains acquisition evidence and there is no worker/task refusal on ordinary operations.
 
 The suspending `relayInformation(relay, policy)` call has no capacity or thread refusal. Acquisition failures are `NMPError.RelayInformationUnavailable(kind: RelayInformationErrorKind)` -- a typed kind, not a message string (#494). Preserve `RelayInformation.rawJson`, freshness, and separate `lastError: RelayInformationErrorKind?`; do not turn this one-shot into an unbounded polling flow.
 
@@ -85,4 +92,4 @@ The suspending `signEvent(NMPUnsignedEvent)` call is cancellable and uses one te
 
 ## Raw UniFFI
 
-Raw UniFFI uses `NmpEngineConfig`, `NmpEngine`, observer callbacks, and `FfiReceiptReattachment`; Rust's distinct `FfiError::EngineStartFailed` (engine construction) and `FfiError::ObservationUnavailable` (ordinary or windowed initial canonical-projection setup) become generated Swift/Kotlin exception cases. The raw projection includes cancellable sign-only observation, async `relayInformation`, engine-free NIP-22 `commentIntent(...) -> FfiWriteIntent`, the full read-and-write NIP-29 `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` door (#1033, #1252), `allowedLocalRelayHosts`/`maxRelays` configuration, and the private-rejection/over-cap/store-degraded diagnostic fields omitted by the ergonomic native wrappers. `NmpEngine` itself has no NIP-22 or NIP-29 composer/publish method — those are minted by the free `comment_intent`/`nip29` doors, not the engine. The raw engine exposes no worker/task capacity, census, idle-barrier method, or saturation refusal; private physical bounds backpressure internally. Treat this as parity authority for wrapper maintainers, not an alternate app API; Swift apps import `NMP`, and Kotlin apps import `com.nmp.sdk`.
+Raw UniFFI uses `NmpEngineConfig`, `NmpEngine`, single-consumer pull handles, and `FfiReceiptReattachment`. The read path is not observer callbacks: `observe` returns an `NmpRowStream` driven by a `begin_next`/`receive`/`commit`/`abort` cycle, which is exactly why `FfiError::ConcurrentNext` exists; diagnostics and receipts pull the same way. Rust's distinct `FfiError::EngineStartFailed` (engine construction) and `FfiError::ObservationUnavailable` (ordinary or windowed initial canonical-projection setup) become generated Swift/Kotlin exception cases. The raw projection includes cancellable sign-only observation, async `relayInformation`, engine-free NIP-22 `commentIntent(...) -> FfiWriteIntent`, the full read-and-write NIP-29 `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` door (#1033, #1252), write cancellation, publish-queue enumeration and entry removal, correlation-token reattachment, and the `discovered_private_relays_rejected`/`sessions_rejected_over_cap` diagnostic fields omitted by the ergonomic native wrappers. `store_degraded` is not in the raw projection either — it is reachable only from direct Rust, and `allowedLocalRelayHosts`/`maxRelays` are now on both hand-written configs as well. `NmpEngine` itself has no NIP-22 or NIP-29 composer/publish method — those are minted by the free `comment_intent`/`nip29` doors, not the engine. The raw engine exposes no worker/task capacity, census, idle-barrier method, or worker saturation refusal; private physical bounds backpressure internally. Treat this as parity authority for wrapper maintainers, not an alternate app API; Swift apps import `NMP`, and Kotlin apps import `com.nmp.sdk`.

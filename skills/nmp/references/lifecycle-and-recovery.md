@@ -7,13 +7,14 @@
 | Engine | app/service composition root | `shutdown`/`close`, then release | one owner for store, transport, queries, signers, receipts |
 | Swift query/diagnostics/follow observation | feature model or scoped task | `cancel` or release owner | observation is eager |
 | Kotlin query/diagnostics flow | collection scope | cancel collector; share deliberately | every unshared collection subscribes |
-| Content session/claim | content feature owner | Swift claim `cancel`, then session `stop`; Kotlin claim/session `close` | nested references remain live while claimed |
-| Receipt consumption task/collector | delivery/activity owner | cancel app task/collector | public `Receipt` has no detach handle; cancellation stops app consumption, not the underlying receipt bridge or write |
-| Durable receipt id | app durable state | explicit retention policy | required because receipt enumeration is absent |
+| Parsed content document | content feature owner | plain value; nothing to close | parsing is pure; any live reference is an ordinary query the app owns |
+| Receipt fact stream | delivery/activity owner | Swift `ReceiptStatus.cancel()`; Kotlin end the collection scope | detaches the live stream only; the durable write is untouched |
+| Durable write obligation | engine, from acceptance | `cancel` before signing, then `removePublishQueueEntry` | the only termination path for a write parked on a missing signer |
+| Durable receipt id or correlation token | app durable state | explicit retention policy | either one recovers a write; `publishQueue()` finds the rest |
 
 ## Construction and observation failures
 
-Observers, actions, and signers run as async tasks on one shared engine-owned runtime. No OS thread is consumed per observation while waiting, and there is no public capacity refusal; private NIP-11 bounds backpressure producers. `EngineStartFailed` means the engine itself could not be constructed. `ObservationUnavailable` means only that store degradation prevented an ordinary or windowed observation's initial canonical projection from opening; relay connection/worker failure remains acquisition evidence.
+Observers, actions, and signers run as async tasks on one shared engine-owned runtime. No OS thread is consumed per observation while waiting, and there is no worker/task capacity refusal; private NIP-11 bounds backpressure producers. `EngineStartFailed` means the engine itself could not be constructed. `ObservationUnavailable` means only that store degradation prevented an ordinary or windowed observation's initial canonical projection from opening; relay connection/worker failure remains acquisition evidence.
 
 Handle each failure at the operation that owns it. Engine construction is the throwing creation call. For a live observe the failure surfaces where observation starts: for Swift the throwing creation call, and for Kotlin `observe(...)` returns a cold `Flow`, so it surfaces when collection starts, not when the flow value is created.
 
@@ -23,11 +24,11 @@ Handle each failure at the operation that owns it. Engine construction is the th
 4. Record the component/reason without secrets.
 5. Respect each public ownership shape: query/NIP-02 observation returns no handle on error, while `set_following` always returns a `FollowAction` and reports any genuine terminal failure through its status.
 
-Direct Rust `Engine::new` can return `EngineError::EngineStartFailed`. An ordinary or windowed `Engine::observe` can return `EngineError::ObservationUnavailable` only for initial canonical-projection setup failure after store degradation; relay opens do not feed this error. `set_following` returns `FollowAction`, not `Result`; it has no capacity or thread refusal, and a genuine terminal failure reads from `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant.
+Direct Rust `Engine::new` can return `EngineError::EngineStartFailed`, and also `StoreOpenFailed`, `StoreAlreadyOpen`, or `InvalidRelayUrl`. An `observe` call additionally refuses `WindowInitialExceedsMax`, `WindowSelectionHasLimit`, `WindowAggregateResultLimit`, the four `LiveQueryError` construction refusals, and `EngineClosed`; `AuthCapabilityRegistryFull { limit }` is an application-configured ceiling. An ordinary or windowed `Engine::observe` can return `EngineError::ObservationUnavailable` only for initial canonical-projection setup failure after store degradation; relay opens do not feed this error. `set_following` returns `FollowAction`, not `Result`; it has no capacity or thread refusal, and a genuine terminal failure reads from `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant.
 
 Kotlin normalizes synchronous raw exceptions through `nmpRethrowing`.
 
-Native tracked publish starts the receipt bridge as async work on the shared runtime before calling core acceptance. NIP-22 returns an ordinary `WriteIntent` and follows that generic path, with no composed carrier or second lifecycle. The live NIP-29 path additionally establishes the bridge before taking its opaque intent, but that extra noun and lifecycle are an unsound defect pending #838, not an accepted pattern. There is no capacity or thread refusal on either live path, so a returned receipt handle reflects an accepted obligation. After a successful return, persist the id promptly: process loss before app persistence remains unrecoverable because receipt enumeration is absent.
+`Ok` from `publish` *is* acceptance; there is no bridge established before it and no capacity or thread refusal on the path. NIP-22 composes an ordinary `WriteIntent` and follows the generic path. NIP-29's `Group::publish` mints its intent privately and returns the same ordinary receipt stream. Neither has a composed carrier or a second lifecycle. Persist the receipt id promptly, but process loss before that is recoverable: mint a `correlation` token, persist it before publishing, and reattach by token — or enumerate with `publishQueue()`.
 
 ## Background, disconnect, and resume
 
@@ -48,7 +49,7 @@ An in-progress relay reconciliation is connection-local. A replacement connectio
 2. Restore signer capability from app-owned secure storage, or explicitly opt into the insecure development store for local keys. NMP ships no remote-signer provider and no secure remote-signer credential vault.
 3. Add/select the intended active account.
 4. Recreate current feature demands from app state. NMP restores cached facts but does not invent app queries.
-5. Reattach retained receipt ids and fold replayed/current facts.
+5. Call `publishQueue()` to see everything still outstanding, reattach by retained id or by correlation token, fold the replayed facts, and decide cancel/remove for parked and refused entries.
 6. Start new UI observers only after the model is ready to own their teardown.
 
 NMP may restore canonical rows, provenance, source evidence, durable write lanes, and retained receipt facts. It does not restore UI navigation, ordering, moderation state, query-handle ownership, or secret material from the event/delivery store.
@@ -61,16 +62,16 @@ NMP may restore canonical rows, provenance, source evidence, durable write lanes
 | Not found | no retained receipt at that id | show unknown/not retained; do not claim failure or success |
 | Retained but unreadable | retained state exists but cannot be decoded/read | surface recovery failure and preserve evidence for diagnosis |
 
-A stream-local id emitted by a pre-acceptance failure may never have had a durable receipt row. The receipt bridge is established before acceptance and has no capacity or thread refusal, so a returned durable id reflects an accepted write. Receipt-channel closure is not ACK. Reattachment reconstructs retained receipt state plus current/persisted `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, `HandoffAmbiguous`, proven-`Written` `Sent`, terminal-attempt, and persistence-blocked facts; it does not replay transient `Routed` history or invent an ephemeral handoff. `RetryEligible` is the engine-owned scheduler's evidence, not a same-obligation retry door. There is no public enumeration, write cancellation, app-controlled retry, or receipt-observer detach API. Cancelling a Swift task or Kotlin collector stops only that app consumer; the native receipt bridge remains until its channel/engine closes.
+A refusal before acceptance yields a typed error and no id at all, so every id you hold names a write actually in custody. Fact-stream closure is not an ACK. Reattachment traverses the durable `WriteFact` history in finite pages before streaming onward, and lag is the typed `FactStreamLagged` rather than silent loss. `RelayWaiting::BackingOff` is the engine-owned scheduler's evidence, not a same-obligation retry door — app-controlled retry is the one thing on this list that genuinely does not exist. Enumeration (`publishQueue`), write cancellation (`cancel`), and live-stream detachment (Swift `ReceiptStatus.cancel()`, Kotlin collection-scope teardown) all do.
 
-Kotlin's receipt bridge uses an unbounded status channel. Keep one collector for an owned receipt alive until terminal/channel/engine closure when feasible, fold statuses promptly, and avoid repeated reattachment to the same id: cancellation does not detach an old bridge, and another attachment creates another long-lived bridge.
+Kotlin's receipt status is a cold `Flow` pull loop that cancels the underlying stream when its collection scope ends. The live fact channel is finite: a consumer that falls behind gets `NMPError.FactStreamLagged` rather than unbounded growth or silent drops. Keep one collector per owned receipt and fold facts promptly.
 
 ## Sign-out
 
 Treat identity persistence and the NMP event store as different authorities:
 
 1. Stop creating new unsigned writes for the account.
-2. Decide product policy for unresolved accepted obligations; there is no cancel verb.
+2. Resolve unsigned obligations for the departing account: `cancel(receiptId:)` each one, then `removePublishQueueEntry(receiptId:)`. That two-call pair is the only way such a write ends.
 3. Clear any separately persisted account credential before engine shutdown when using the insecure file store.
 4. Clear/deactivate the active account.
 5. Close remote signer connections and observers.
@@ -98,9 +99,9 @@ Keep recovery owned by the failing layer:
 - missing signer: restore/attach the same expected identity; do not re-author;
 - remote signer handoff failure: close that connection attempt and begin a new explicit attempt;
 - durable relay failure: delivery owns attempts/backoff and emits receipt facts;
-- at-most-once ambiguity: preserve `OutcomeUnknown`; never blind resend;
-- replaceable conflict: acquire the new canonical base and make a new user decision;
-- engine-start or observation infra failure (`EngineStartFailed` at construction, `ObservationUnavailable` for ordinary or windowed initial canonical-projection setup): preserve the owning boundary and retry only as a new bounded attempt; relay connection failure remains acquisition evidence and ordinary operations are never refused for capacity;
+- unacked relay handoff: `RelayState::Sent` already means written-but-unacked and is not terminal; let the lane run, never blind resend;
+- replaceable conflict: `RefuseReason::ReplaceableBaseChanged { expected, actual }` keeps both ids so the app can refetch `actual`, reapply and resubmit without troubling the user;
+- engine-start or observation infra failure (`EngineStartFailed` at construction, `ObservationUnavailable` for ordinary or windowed initial canonical-projection setup): preserve the owning boundary and retry only as a new bounded attempt; relay connection failure remains acquisition evidence and no operation is refused for worker/task capacity;
 - store reset: explicit destructive user/maintenance operation, never automatic fallback.
 
 ## Teardown proof
@@ -111,8 +112,8 @@ A lifecycle implementation is incomplete until a test proves:
 - cancelling one shared UI consumer does not accidentally tear down another;
 - repeated open/close stays inside the thread/resource budget;
 - after the last observer/session ends, the shared engine runtime has no lingering async work for it and no OS thread is retained on its behalf, proven by an event rather than polling or sleeps;
-- aggregate visible-row content sessions and claimed references stay inside app-owned budgets: cap row sessions separately and charge each distinct claimed target `1 + helpers.count` permits from its reference-demand plan;
+- content parsing holds nothing to leak: any live reference is an ordinary query with ordinary teardown;
 - an old signer connection cannot detach a newer replacement;
-- app receipt-consumer cancellation leaves durable write ownership intact and is not described as native observer teardown;
+- detaching a receipt fact stream leaves the durable write intact, and `cancel` + `removePublishQueueEntry` genuinely terminate a signer-parked write so it disappears from `publishQueue()`;
 - shutdown is deterministic and idempotent; and
 - restart reconstructs declared demand and reattaches selected receipts without secret leakage.
