@@ -721,23 +721,20 @@ impl<S: EventStore> EngineCore<S> {
                 lane.key.relay.clone(),
                 AccessContext::Nip42(pending.signing_pubkey),
             );
+            // Connectivity is process-local, so re-parking the lane records
+            // NOTHING durable (#889): `Eligible` and `WaitingConnection`
+            // already project to the identical
+            // `RelayState::Waiting(NotConnected)` at the enumeration door, and
+            // the reverse transition is the one `wake_relay_lanes` performs
+            // when a session arrives. Committing it here cost one
+            // fsync-durable transaction per eligible lane every time a
+            // disconnected engine passed over the queue -- at boot, where
+            // NOTHING is connected yet, that is the whole queue. The lane
+            // stays `Eligible` and this same loop picks it up on the
+            // `schedule_ready` that closes every `wake_relay_lanes`, so
+            // nothing is stranded by leaving it alone.
             if !self.connected_relays.contains(&session) {
-                if self
-                    .commit_lane_waiting(&lane.key, lane.revision, false)
-                    .is_ok()
-                {
-                    self.emit_write_fact(
-                        id,
-                        WriteFact::Relay {
-                            relay: lane.key.relay.clone(),
-                            state: RelayState::Waiting(RelayWaiting::NotConnected),
-                        },
-                        &mut effects,
-                    );
-                    effects.push(Effect::EnsureWriteRelay(session));
-                } else {
-                    self.retry_scheduler_blocked = true;
-                }
+                effects.push(Effect::EnsureWriteRelay(session));
                 continue;
             }
             // The AUTH gate: a lane parks before an attempt ordinal is
@@ -3708,20 +3705,22 @@ impl<S: EventStore> EngineCore<S> {
             }
             let relay = &session.relay;
             match lane.state {
+                // The loss of a socket is process-local knowledge, so the fact
+                // is emitted and the lane is left exactly as durable as it was
+                // (#889). An eligible lane already reads back as
+                // `RelayState::Waiting(NotConnected)` through the enumeration
+                // door, so the old `WaitingConnection` rewrite spent one
+                // fsync-durable transaction per lane on this relay to change
+                // nothing an app or a later boot could observe.
                 PublishQueueLaneState::Eligible { .. } => {
-                    if self
-                        .commit_lane_waiting(&lane.key, lane.revision, false)
-                        .is_ok()
-                    {
-                        self.emit_write_fact(
-                            id,
-                            WriteFact::Relay {
-                                relay: relay.clone(),
-                                state: RelayState::Waiting(RelayWaiting::NotConnected),
-                            },
-                            effects,
-                        );
-                    }
+                    self.emit_write_fact(
+                        id,
+                        WriteFact::Relay {
+                            relay: relay.clone(),
+                            state: RelayState::Waiting(RelayWaiting::NotConnected),
+                        },
+                        effects,
+                    );
                 }
                 PublishQueueLaneState::InFlight {
                     ordinal,

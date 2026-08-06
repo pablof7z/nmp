@@ -100,6 +100,12 @@ pub struct RedbStore {
     /// Equivalent instrumentation for resolved-route revision ranges.
     #[cfg(test)]
     pub(super) route_revision_range_rows: AtomicU64,
+    /// Lane bootstraps that staged no row and therefore committed nothing
+    /// (#889). Boot calls bootstrap once per open intent, so this is the
+    /// counter that proves recovery over an unchanged lane set spends no
+    /// durability barriers at all.
+    #[cfg(test)]
+    pub(super) unstaged_lane_bootstraps: AtomicU64,
 }
 
 #[derive(Default)]
@@ -559,6 +565,8 @@ impl RedbStore {
             attempt_range_rows: AtomicU64::new(0),
             #[cfg(test)]
             route_revision_range_rows: AtomicU64::new(0),
+            #[cfg(test)]
+            unstaged_lane_bootstraps: AtomicU64::new(0),
         })
     }
 
@@ -614,6 +622,12 @@ impl RedbStore {
     #[cfg(test)]
     pub(super) fn open_write_transactions(&self) -> u64 {
         self.open_write_transactions
+    }
+
+    /// Lane bootstraps that staged nothing and therefore committed nothing.
+    #[cfg(test)]
+    pub(super) fn unstaged_lane_bootstraps(&self) -> u64 {
+        self.unstaged_lane_bootstraps.load(Ordering::Relaxed)
     }
 
     /// Current value of [`Self::examined_rows`] — the `query`-indexing
