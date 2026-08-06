@@ -1527,6 +1527,22 @@ mod tests {
             );
         }
 
+        // The variant tells an app the discard is correct; it is worth
+        // nothing if the refused open still owns the file. This is the exact
+        // sequence a consumer runs after branching on it.
+        Engine::reset_persistent_store(&superseded)
+            .expect("the epoch refusal must release its store ownership");
+        assert!(
+            !superseded.exists(),
+            "the discard an app is told to perform must actually be performable"
+        );
+        Engine::new(EngineConfig {
+            store_path: Some(superseded.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .expect("a recreated store must open as the current epoch")
+        .shutdown();
+
         let damaged = fixture.path().join("damaged.redb");
         std::fs::write(&damaged, b"not a redb database").expect("damaged fixture must write");
         let refusal = Engine::new(EngineConfig {
