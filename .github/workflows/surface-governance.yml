@@ -81,7 +81,14 @@ jobs:
             tools/rust-facade-snapshot/Cargo.toml \
             tools/rust-facade-snapshot/Cargo.lock \
             tools/rust-facade-snapshot/src/main.rs; do
-            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
+            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path" || {
+              echo "surface-governance-malfunction: the base commit $BASE_SHA does not contain" >&2
+              echo "$path, so the trusted program this job needs does not exist yet." >&2
+              echo "A pull request that adds a file to the trusted set cannot be judged" >&2
+              echo "by it: the judge comes from the base, by design. No verdict was" >&2
+              echo "rendered, and the head's copy is deliberately NOT used instead." >&2
+              exit 1
+            }
           done
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
 
@@ -149,7 +156,14 @@ jobs:
             tools/rust-facade-snapshot/Cargo.toml \
             tools/rust-facade-snapshot/Cargo.lock \
             tools/rust-facade-snapshot/src/main.rs; do
-            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
+            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path" || {
+              echo "surface-governance-malfunction: the base commit $BASE_SHA does not contain" >&2
+              echo "$path, so the trusted program this job needs does not exist yet." >&2
+              echo "A pull request that adds a file to the trusted set cannot be judged" >&2
+              echo "by it: the judge comes from the base, by design. No verdict was" >&2
+              echo "rendered, and the head's copy is deliberately NOT used instead." >&2
+              exit 1
+            }
           done
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
 

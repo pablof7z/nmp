@@ -161,7 +161,10 @@ python3 "$MIGRATION_CHECK" "${migration_args[@]}" verify \
 case "$migration_status" in
   0) ;;
   3) ;;
-  1) fail "protected governance migration is not exactly authorized" ;;
+  # A verdict, and a narrow one: it is about authorization, not about the
+  # surface. Everything below this step is skipped, so the line says so rather
+  # than leaving a reader to reconstruct it from a convention document.
+  1) fail "protected governance migration is not exactly authorized; the change-log and regeneration checks below it did not run" ;;
   "$STALE_BASE_EXIT")
     stale_base "protected migration head is not descended from the current PR base" ;;
   "$MALFUNCTION_EXIT")

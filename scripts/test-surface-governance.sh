@@ -1010,7 +1010,20 @@ for entry in \
   )
   grep -Fq 'scripts/report-surface-governance-verdict.sh' "$workflow" ||
     fail "trusted workflow does not extract the base outcome reporter: $workflow"
+  # Extraction must fail closed and say why. A workflow that shrugged off a
+  # missing base artifact -- or filled it from the head -- would be the hole
+  # #1186 already names, and would make deleting the reporter a silent pass.
+  grep -Fq "the head's copy is deliberately NOT used instead" "$workflow" ||
+    fail "trusted workflow does not name a missing base artifact as a malfunction: $workflow"
 done
+
+# The reporter must survive in the proposed tree, not only in the base.
+# Otherwise a head could delete it while the extraction line still found the
+# base's surviving copy, and master would end up with workflows whose program is
+# gone -- green all the way down.
+[[ -x "$ROOT/scripts/report-surface-governance-verdict.sh" ]] ||
+  fail "the proposed head has no executable outcome reporter"
+
 falsify_missing_base_governance_artifact
 if grep -Fq 'migration_candidate' "$ROOT/scripts/check-surface-governance.sh"; then
   fail "shell wrapper duplicates the verifier's migration activation authority"
