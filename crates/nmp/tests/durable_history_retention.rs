@@ -138,7 +138,9 @@ fn bounded_runtime_working_sets_do_not_delete_default_durable_history() {
     assert_eq!(retained.len(), HISTORY_LEN);
     assert_eq!(retained, all_ids.into_iter().collect());
     assert_eq!(
-        reopened.get_coverage(coverage_key(&atom), &relay),
+        reopened
+            .get_coverage(coverage_key(&atom), &relay)
+            .expect("coverage peek"),
         Some(coverage),
         "ordinary runtime pressure must not lower durable acquisition evidence"
     );

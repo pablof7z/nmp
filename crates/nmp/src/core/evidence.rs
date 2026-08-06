@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey};
 use nmp_router::RelayPlan;
-use nmp_store::{coverage_key, EventStore};
+use nmp_store::{coverage_key, EventStore, PersistenceError};
 use nostr::{RelayUrl, Timestamp};
 
 /// Compact acquisition evidence for one query snapshot, scoped to THIS
@@ -190,12 +190,12 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
     connected: &BTreeSet<RelaySessionKey>,
     auth_status: &BTreeMap<RelaySessionKey, SourceStatus>,
     ever_connected: &BTreeSet<RelaySessionKey>,
-) -> AcquisitionEvidence {
+) -> Result<AcquisitionEvidence, PersistenceError> {
     if subtree_atoms.is_empty() {
-        return AcquisitionEvidence {
+        return Ok(AcquisitionEvidence {
             sources: Vec::new(),
             shortfall: vec![ShortfallFact::NoResolvedDemand],
-        };
+        });
     }
 
     // session -> (every covered atom proven so far?, min proven `through`).
@@ -237,7 +237,11 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
             // access distinction already lives inside `key` itself
             // (`CoverageKey` is a context-inclusive hash), so the store read
             // needs only the session's relay.
-            match store.get_coverage(key, &session.relay) {
+            // `?`, never a `_ =>` arm folding the error in with the misses
+            // (#763). `reconciled_through: None` is this function telling an
+            // app "this source has proven nothing over your window", and a
+            // store that could not be read has not established that.
+            match store.get_coverage(key, &session.relay)? {
                 Some(interval) if interval.from <= window_start => {
                     entry.1 = Some(match entry.1 {
                         None => interval.through,
@@ -277,7 +281,7 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         })
         .collect();
 
-    AcquisitionEvidence { sources, shortfall }
+    Ok(AcquisitionEvidence { sources, shortfall })
 }
 
 /// Combine independently-planned Demand scopes into one query snapshot
@@ -374,7 +378,8 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeSet::new(),
-        );
+        )
+        .expect("MemoryStore coverage never fails");
 
         assert_eq!(evidence.sources.len(), 1);
         assert_eq!(evidence.sources[0].relay, relay);
@@ -403,7 +408,8 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeSet::new(),
-        );
+        )
+        .expect("MemoryStore coverage never fails");
 
         assert!(evidence.sources.is_empty());
         assert_eq!(
@@ -455,7 +461,8 @@ mod tests {
                 &connected,
                 &BTreeMap::from([(session.clone(), status)]),
                 &connected,
-            );
+            )
+            .expect("MemoryStore coverage never fails");
             assert_eq!(evidence.sources[0].status, status);
         }
 
@@ -466,7 +473,8 @@ mod tests {
             &connected,
             &BTreeMap::new(),
             &connected,
-        );
+        )
+        .expect("MemoryStore coverage never fails");
         assert_eq!(
             waiting.sources[0].status,
             SourceStatus::AwaitingAuth {

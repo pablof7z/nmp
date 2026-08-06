@@ -40,6 +40,18 @@ pub(super) fn expiration_key(ts: Timestamp, id: &EventId) -> [u8; 40] {
     key
 }
 
+/// The deadline half of an [`expiration_key`], read back.
+///
+/// Total by construction, and deliberately so: the array pattern is
+/// irrefutable against the table's fixed `[u8; 40]` key type, so the width
+/// invariant `expiration_key` establishes is proven by the compiler instead
+/// of being asserted at runtime by an `.expect()` that a corrupt page could
+/// turn into a host-process abort (#763).
+pub(super) fn expiration_key_timestamp(key: &[u8; 40]) -> Timestamp {
+    let &[s0, s1, s2, s3, s4, s5, s6, s7, ..] = key;
+    Timestamp::from(u64::from_be_bytes([s0, s1, s2, s3, s4, s5, s6, s7]))
+}
+
 /// The inclusive upper bound of every [`expiration_key`] at or before `ts`.
 pub(super) fn expiration_key_upper_bound(ts: Timestamp) -> [u8; 40] {
     let mut key = [u8::MAX; 40];

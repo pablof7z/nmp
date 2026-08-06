@@ -28,10 +28,25 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
         }
-        let acquisitions_by_branch = handles
-            .iter()
-            .map(|handle| self.decide_handle_acquisition(handle.id(), handle.freshness()))
-            .collect();
+        // Before the session exists, for the same reason the subscribe loop
+        // above unwinds: a coverage read that cannot answer refuses the open
+        // outright (#763) rather than deciding `Live` on a failure and
+        // presenting that as a policy decision the app asked for.
+        let mut acquisitions_by_branch = Vec::with_capacity(handles.len());
+        for index in 0..handles.len() {
+            let (branch, freshness) = (handles[index].id(), handles[index].freshness());
+            match self.decide_handle_acquisition(branch, freshness) {
+                Ok(acquisition) => acquisitions_by_branch.push(acquisition),
+                Err(error) => {
+                    for handle in handles {
+                        let _ = self.resolver.unsubscribe(handle.id());
+                    }
+                    let reason = format!("history freshness decision failed: {error}");
+                    self.degrade_store(error, &mut effects);
+                    return ObservationOpen::Refused { reason, effects };
+                }
+            }
+        }
         let id = HistorySessionId(self.next_history_id);
         self.next_history_id = self.next_history_id.wrapping_add(1).max(1);
         let live_handle_ids: Vec<HandleId> = handles.iter().map(|handle| handle.id()).collect();
@@ -88,7 +103,31 @@ impl<S: EventStore> EngineCore<S> {
         self.recompile(&mut effects);
         self.refresh_all_observations(&mut effects);
         self.refresh_all_histories_except(id, &mut effects);
-        let evidence = self.history_evidence_for(id);
+        // The opening evidence frame reads coverage and refuses the open on a
+        // failed read (#763), the same unwind the canonical row projection
+        // above takes -- a window is installed whole or not at all, and a
+        // frame whose sources read "nothing proven" because nothing could be
+        // read is not a window.
+        let evidence = match self.history_evidence_for(id) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let reason = format!("history evidence projection failed: {error}");
+                let withdrawn = self
+                    .histories
+                    .remove(&id)
+                    .map(|state| state.live_handle_ids)
+                    .unwrap_or_default();
+                for handle_id in withdrawn {
+                    self.history_by_handle.remove(&handle_id);
+                    let _ = self.resolver.unsubscribe(handle_id);
+                }
+                self.recompile(&mut effects);
+                self.refresh_all_observations(&mut effects);
+                self.refresh_all_histories(&mut effects);
+                self.degrade_store(error, &mut effects);
+                return ObservationOpen::Refused { reason, effects };
+            }
+        };
         let seed = self
             .apply_history_projection(id, current, evidence, WindowLoad::Idle)
             .expect("a new history session has no prior projection and always yields one seed");
@@ -764,7 +803,16 @@ impl<S: EventStore> EngineCore<S> {
             return;
         }
 
-        let evidence = self.history_evidence_for(id);
+        // Same rule as `refresh_observation_evidence` (#122/#763): a coverage
+        // read that could not answer leaves the last delivered evidence in
+        // place and degrades, instead of republishing it as unproven.
+        let evidence = match self.history_evidence_for(id) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                self.degrade_store(error, effects);
+                return;
+            }
+        };
         let Some(state) = self.histories.get_mut(&id) else {
             return;
         };
@@ -780,20 +828,22 @@ impl<S: EventStore> EngineCore<S> {
     /// A branch's evidence is computed only from ITS OWN handles and its own
     /// opening-time policy decision; no branch's proof can stand in for
     /// another's, and nothing is rolled up into a window-global verdict.
-    fn history_evidence_for(&self, id: HistorySessionId) -> Vec<AcquisitionEvidence> {
+    fn history_evidence_for(
+        &self,
+        id: HistorySessionId,
+    ) -> Result<Vec<AcquisitionEvidence>, PersistenceError> {
         let Some(state) = self.histories.get(&id) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        self.history_handles_by_branch(id)
-            .into_iter()
-            .enumerate()
-            .map(|(branch, handles)| {
-                self.acquisition_evidence_for_scopes(
-                    self.history_branch_demand_scopes(&handles),
-                    &state.acquisitions_by_branch[branch],
-                )
-            })
-            .collect()
+        let by_branch = self.history_handles_by_branch(id);
+        let mut evidence = Vec::with_capacity(by_branch.len());
+        for (branch, handles) in by_branch.into_iter().enumerate() {
+            evidence.push(self.acquisition_evidence_for_scopes(
+                self.history_branch_demand_scopes(&handles),
+                &state.acquisitions_by_branch[branch],
+            )?);
+        }
+        Ok(evidence)
     }
 
     pub(super) fn history_rows_and_evidence_for(
@@ -801,7 +851,7 @@ impl<S: EventStore> EngineCore<S> {
         id: HistorySessionId,
     ) -> Result<(BTreeMap<EventId, Row>, Vec<AcquisitionEvidence>), PersistenceError> {
         let rows = self.history_rows_for(id)?;
-        let evidence = self.history_evidence_for(id);
+        let evidence = self.history_evidence_for(id)?;
         Ok((rows, evidence))
     }
 
@@ -978,25 +1028,25 @@ impl<S: EventStore> EngineCore<S> {
         });
         ordered.truncate(needed);
         let auth_status = self.auth_status_map();
-        let evidence: Vec<AcquisitionEvidence> = self
-            .history_handles_by_branch(id)
-            .into_iter()
-            .enumerate()
-            .map(|(branch, handles)| {
-                let subtree_atoms: BTreeSet<ContextualAtom> = handles
-                    .iter()
-                    .flat_map(|handle| self.resolver.subtree_atoms(*handle))
-                    .collect();
-                evidence::acquisition_evidence(
-                    &subtree_atoms,
-                    plans.get(branch).unwrap_or(&RelayPlan::default()),
-                    self.resolver.store(),
-                    &self.connected_relays,
-                    &auth_status,
-                    &self.ever_connected_relays,
-                )
-            })
-            .collect();
+        let by_branch = self.history_handles_by_branch(id);
+        let mut evidence: Vec<AcquisitionEvidence> = Vec::with_capacity(by_branch.len());
+        for (branch, handles) in by_branch.into_iter().enumerate() {
+            let subtree_atoms: BTreeSet<ContextualAtom> = handles
+                .iter()
+                .flat_map(|handle| self.resolver.subtree_atoms(*handle))
+                .collect();
+            // `?`: this whole advance is already all-or-nothing on a store
+            // failure, and a coverage read is no different from the row
+            // reads above it (#763).
+            evidence.push(evidence::acquisition_evidence(
+                &subtree_atoms,
+                plans.get(branch).unwrap_or(&RelayPlan::default()),
+                self.resolver.store(),
+                &self.connected_relays,
+                &auth_status,
+                &self.ever_connected_relays,
+            )?);
+        }
 
         let state = self
             .histories

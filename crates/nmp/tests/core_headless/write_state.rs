@@ -661,7 +661,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
         |effect| matches!(effect, Effect::EmitReceipt(id, WriteFact::Relay { relay: _, state: RelayState::GaveUp }) if *id == id_a)
     ));
     assert!(
-        core.next_deadline().is_some(),
+        core.next_deadline().expect("deadline peek").is_some(),
         "durable disconnect arms retry eligibility"
     );
 }

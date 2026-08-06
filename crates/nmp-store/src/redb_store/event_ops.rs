@@ -3,7 +3,7 @@ use super::ingest::insert_with_tables;
 use super::ingest_txn::GovernedWrite;
 use super::mutation::remove_row_in_txn;
 use super::publish_queue::is_suppressed_in_txn;
-use super::query::{expiration_key_upper_bound, plan_ordered_query};
+use super::query::{expiration_key_timestamp, expiration_key_upper_bound, plan_ordered_query};
 use super::schema::{
     event_local_key, event_row_key, persist_err, EventKey, COVERAGE, EVENTS, EVENT_COL_LOCAL,
     EVENT_COL_ROW, EVENT_IDS, EXPIRATION_INDEX, RELAYS,
@@ -466,19 +466,29 @@ pub(super) fn expire_due(
     write.commit_prepared(removed)
 }
 
-pub(super) fn next_expiration(store: &RedbStore) -> Option<Timestamp> {
-    let read_txn = store.db.begin_read().expect("redb: begin_read");
-    let expiration_index = read_txn
-        .open_table(EXPIRATION_INDEX)
-        .expect("redb: open expiration_index");
-    let (key, _value) = expiration_index
-        .first()
-        .expect("redb: first expiration_index")?;
-    Some(Timestamp::from(u64::from_be_bytes(
-        key.value()[..8]
-            .try_into()
-            .expect("expiration index timestamp is eight bytes"),
-    )))
+/// Peek the minimum of the expiration index.
+///
+/// All three backend steps below are ordinary reads, and every one of them
+/// can fail for a reason outside this crate's control — the handle latched
+/// by an earlier I/O failure, a full or disconnected disk, a poisoned lock,
+/// on-disk corruption. `persist_err` is what tells those apart from this
+/// crate misusing its own database (`PersistenceFault::Invariant`), and both
+/// now leave the host process alive: before #763 every one of them was an
+/// `.expect()`, so a read error aborted the embedding iOS/Android app.
+///
+/// The key decode is the one genuine invariant here, and it is expressed as
+/// a total operation rather than an `.expect()`: the index key type is a
+/// fixed 40-byte array whose first eight bytes are the big-endian seconds
+/// [`expiration_key`] wrote, so the irrefutable array pattern in
+/// [`expiration_key_timestamp`] proves the width at compile time and leaves
+/// no panic branch to reach.
+pub(super) fn next_expiration(store: &RedbStore) -> Result<Option<Timestamp>, PersistenceError> {
+    let read_txn = store.db.begin_read().map_err(persist_err)?;
+    let expiration_index = read_txn.open_table(EXPIRATION_INDEX).map_err(persist_err)?;
+    let Some((key, _value)) = expiration_index.first().map_err(persist_err)? else {
+        return Ok(None);
+    };
+    Ok(Some(expiration_key_timestamp(key.value())))
 }
 
 pub(super) fn record_coverage(
@@ -521,27 +531,29 @@ pub(super) fn record_coverage(
     Ok(())
 }
 
+/// Read one coverage row.
+///
+/// Every step is fallible for the same reasons [`next_expiration`] is, and
+/// the decode is the reason the door had to widen rather than answer `None`
+/// on failure: a corrupt watermark answered as `None` reads as "no coverage
+/// proven", which is a refetch decision made on a false cache miss. The
+/// decode failure is a genuine invariant violation (`PersistenceError::
+/// invariant`, raised inside [`decode_interval`]) and the transaction/table/
+/// row steps are environmental; both are `Err` here, and `PersistenceFault`
+/// is what tells them apart at the caller.
 pub(super) fn get_coverage(
     store: &RedbStore,
     key: CoverageKey,
     relay: &RelayUrl,
-) -> Option<CoverageInterval> {
+) -> Result<Option<CoverageInterval>, PersistenceError> {
     let row_key = RedbStore::coverage_row_key(key, relay);
-    let read_txn = store.db.begin_read().expect("redb: begin_read");
-    let coverage = read_txn.open_table(COVERAGE).expect("redb: open coverage");
+    let read_txn = store.db.begin_read().map_err(persist_err)?;
+    let coverage = read_txn.open_table(COVERAGE).map_err(persist_err)?;
     coverage
         .get(row_key.as_str())
-        .expect("redb: get coverage row")
-        .map(|guard| {
-            // The one surviving persisted-decode `.expect()` in this file,
-            // and it is here only because the trait door above it is still
-            // infallible. Widening `get_coverage` (and `next_expiration`)
-            // is #763's unit, which owns the caller changes; #790 must not
-            // pre-empt it, and answering `None` here would be strictly
-            // worse -- a corrupt watermark would read as "no coverage
-            // proven", the false miss this issue exists to forbid.
-            decode_interval(guard.value()).expect("redb: decode coverage row (see #763)")
-        })
+        .map_err(persist_err)?
+        .map(|guard| decode_interval(guard.value()))
+        .transpose()
 }
 
 pub(super) fn gc(
