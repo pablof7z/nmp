@@ -31,13 +31,25 @@ if [[ $# -lt 1 ]]; then
   note "usage: $0 <gate-program> [argument...]"
   status=$MALFUNCTION_EXIT
 elif [[ ! -f $1 || ! -x $1 ]]; then
-  # An executable file by path, never a name resolved through PATH and never a
-  # shell function inherited from the environment. Two reasons: the gate this
-  # program reports on must be the gate that ran, and a command bash cannot
-  # find does not report a stable status -- bash 3.2 returns 1 for it, which is
-  # the code that means "the head was rejected". A missing program would then
-  # have rendered as a verdict, which is the exact defect this file exists to
-  # remove.
+  # An executable file by path: never a name resolved through PATH, never a
+  # shell function inherited from the environment. The gate this program reports
+  # on must be the gate that actually ran, which is why the argument is checked
+  # rather than trusted. That reason holds on every shell and is on its own the
+  # justification for this branch.
+  #
+  # It also closes a narrower hole, measured rather than assumed. The status
+  # bash reports for an unrunnable program is not the same everywhere:
+  #
+  #   missing file        bash 3.2.57 + set -e -> 1     bash 5.3.15 -> 127
+  #   exists, not +x      bash 3.2.57 + set -e -> 1     bash 5.3.15 -> 126
+  #   missing, no set -e  bash 3.2.57          -> 127   bash 5.3.15 -> 127
+  #
+  # This script sets `set -e`, and 1 is the code that means "the head was
+  # rejected". So on macOS's /bin/bash -- which runs the falsifier suite locally
+  # and the by-hand signoff in protected-path-signoff.md 2.1 -- an unrunnable
+  # gate would have rendered as a verdict. On the ubuntu-latest runner it would
+  # not: 127 and 126 already fall through to no-verdict. Checking first makes
+  # the classification independent of which bash is reading it.
   note "the gate program is not an executable file: $1"
   status=$MALFUNCTION_EXIT
 else
