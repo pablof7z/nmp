@@ -60,46 +60,7 @@ impl PendingRows {
     }
 
     fn push_execution(&mut self, facts: Vec<ObservationEvidence>) {
-        self.execution.extend(facts);
-        if self.execution.len() <= EXECUTION_EVIDENCE_CAPACITY {
-            return;
-        }
-
-        let mut first = u64::MAX;
-        let mut last = 0;
-        let mut dropped = 0u64;
-        while self
-            .execution
-            .front()
-            .is_some_and(|fact| matches!(fact.fact, ObservationFact::Overflow { .. }))
-        {
-            let prior = self.execution.pop_front().expect("front existed");
-            if let ObservationFact::Overflow {
-                first_sequence,
-                last_sequence,
-                dropped: prior_dropped,
-            } = prior.fact
-            {
-                first = first.min(first_sequence);
-                last = last.max(last_sequence);
-                dropped = dropped.saturating_add(prior_dropped);
-            }
-        }
-        while self.execution.len() >= EXECUTION_EVIDENCE_CAPACITY {
-            let removed = self.execution.pop_front().expect("length checked");
-            first = first.min(removed.sequence);
-            last = last.max(removed.sequence);
-            dropped = dropped.saturating_add(1);
-        }
-        self.execution.push_front(ObservationEvidence {
-            branch: None,
-            sequence: last,
-            fact: ObservationFact::Overflow {
-                first_sequence: first,
-                last_sequence: last,
-                dropped,
-            },
-        });
+        push_execution_capped(&mut self.execution, facts);
     }
 
     fn push(&mut self, delta: RowDelta) {
@@ -181,14 +142,34 @@ impl PendingRows {
     }
 }
 
+/// What this mailbox may say about acquisition, as the two states that are
+/// actually distinguishable — never one `Vec` doing both jobs (#1276).
+///
+/// The distinction is load-bearing twice over. `AcquisitionEvidence` is
+/// per-CANONICAL-BRANCH and positional: `RowBatch.evidence[i]` is the fact
+/// about `branches[i]` on every SDK, so a frame carrying a shorter vector
+/// breaks an index correspondence rather than merely reporting less. And
+/// evidence describes the state the delivered ROWS came from, so a frame may
+/// never carry evidence for a projection whose rows the consumer has not been
+/// given — `nmp-nip02` reads `availability` off `frame.evidence` and the
+/// contact list off the deltas it has folded, and pairing a proven source with
+/// rows that have not arrived makes it report `NoContactList` for an account
+/// that has one.
+enum Acquisition {
+    /// The opening row frame has not reached this mailbox yet. Execution facts
+    /// issued in the meantime wait HERE rather than becoming a frame of their
+    /// own: there is no honest evidence to give such a frame. They ride out on
+    /// the opening frame, which always follows.
+    BeforeOpening(VecDeque<ObservationEvidence>),
+    /// Per-branch evidence as of the last delivered row frame. Execution-only
+    /// facts compose onto this, which is why it is retained at all — otherwise
+    /// they would replace real evidence with `AcquisitionEvidence::default()`.
+    Delivered(Vec<AcquisitionEvidence>),
+}
+
 pub(crate) struct RowsSender {
     pending: LatestSender<PendingRows>,
-    /// The acquisition snapshot most recently sent for this observation.
-    ///
-    /// Execution-only facts can arrive after the receiver consumed the latest
-    /// row batch. Retaining this snapshot prevents those facts from replacing
-    /// real acquisition evidence with `AcquisitionEvidence::default()`.
-    last_evidence: Mutex<Vec<AcquisitionEvidence>>,
+    acquisition: Mutex<Acquisition>,
 }
 
 /// The single-consumer half of an ordinary live-query stream.
@@ -214,7 +195,7 @@ pub(crate) fn rows_channel() -> (RowsSender, RowsReceiver) {
     (
         RowsSender {
             pending: sender,
-            last_evidence: Mutex::new(Vec::new()),
+            acquisition: Mutex::new(Acquisition::BeforeOpening(VecDeque::new())),
         },
         RowsReceiver {
             pending: receiver,
@@ -229,26 +210,96 @@ impl RowsSender {
         let send_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let delta_count = deltas.len();
-        *self.last_evidence.lock().unwrap() = evidence.clone();
+        // Whatever was issued before the opening frame rides out ON it, ahead
+        // of this frame's own facts: one ordered trace, nothing dropped, and
+        // no frame delivered before the projection it reports on.
+        let mut carried = {
+            let mut acquisition = self.acquisition.lock().unwrap();
+            match std::mem::replace(&mut *acquisition, Acquisition::Delivered(evidence.clone())) {
+                Acquisition::BeforeOpening(waiting) => waiting,
+                Acquisition::Delivered(_) => VecDeque::new(),
+            }
+        };
+        push_execution_capped(&mut carried, execution);
         self.pending.update(|pending| {
             let pending = pending.get_or_insert_with(|| PendingRows::new(evidence.clone()));
             for delta in deltas {
                 pending.push(delta);
             }
             pending.evidence = evidence;
-            pending.push_execution(execution);
+            pending.push_execution(carried.iter().cloned().collect());
         });
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::row_channel_send(send_started.elapsed(), delta_count);
     }
 
     pub(crate) fn send_evidence(&self, execution: Vec<ObservationEvidence>) {
-        let evidence = self.last_evidence.lock().unwrap().clone();
+        let evidence = {
+            let mut acquisition = self.acquisition.lock().unwrap();
+            match &mut *acquisition {
+                // No opening frame yet, so there is no evidence a frame could
+                // honestly carry. Hold the facts for the frame that will.
+                Acquisition::BeforeOpening(waiting) => {
+                    push_execution_capped(waiting, execution);
+                    return;
+                }
+                Acquisition::Delivered(evidence) => evidence.clone(),
+            }
+        };
         self.pending.update(|pending| {
             let pending = pending.get_or_insert_with(|| PendingRows::new(evidence));
             pending.push_execution(execution);
         });
     }
+}
+
+/// Append `facts`, collapsing the oldest into ONE `Overflow` fact once the
+/// queue would exceed [`EXECUTION_EVIDENCE_CAPACITY`]. Shared by the pending
+/// frame and by the pre-opening hold, so a slow opening cannot grow unbounded
+/// where a slow consumer could not.
+fn push_execution_capped(
+    queue: &mut VecDeque<ObservationEvidence>,
+    facts: Vec<ObservationEvidence>,
+) {
+    queue.extend(facts);
+    if queue.len() <= EXECUTION_EVIDENCE_CAPACITY {
+        return;
+    }
+
+    let mut first = u64::MAX;
+    let mut last = 0;
+    let mut dropped = 0u64;
+    while queue
+        .front()
+        .is_some_and(|fact| matches!(fact.fact, ObservationFact::Overflow { .. }))
+    {
+        let prior = queue.pop_front().expect("front existed");
+        if let ObservationFact::Overflow {
+            first_sequence,
+            last_sequence,
+            dropped: prior_dropped,
+        } = prior.fact
+        {
+            first = first.min(first_sequence);
+            last = last.max(last_sequence);
+            dropped = dropped.saturating_add(prior_dropped);
+        }
+    }
+    while queue.len() >= EXECUTION_EVIDENCE_CAPACITY {
+        let removed = queue.pop_front().expect("length checked");
+        first = first.min(removed.sequence);
+        last = last.max(removed.sequence);
+        dropped = dropped.saturating_add(1);
+    }
+    queue.push_front(ObservationEvidence {
+        branch: None,
+        sequence: last,
+        fact: ObservationFact::Overflow {
+            first_sequence: first,
+            last_sequence: last,
+            dropped,
+        },
+    });
 }
 
 impl RowsReceiver {
@@ -308,6 +359,8 @@ mod tests {
 
     use nostr::{Keys, Kind, Timestamp, UnsignedEvent};
 
+    use nmp_grammar::ConcreteFilter;
+
     use super::*;
     use crate::core::ShortfallFact;
 
@@ -340,6 +393,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// One observation's opening per-branch acquisition evidence, in the exact
+    /// shape `open_observation` computes: one entry per canonical branch, in
+    /// branch order, each naming its OWN branch so a collapse or a reorder is
+    /// visible rather than absorbed by a length check.
+    fn opening_evidence(branches: usize) -> Vec<AcquisitionEvidence> {
+        (0..branches)
+            .map(|branch| AcquisitionEvidence {
+                sources: Vec::new(),
+                shortfall: vec![ShortfallFact::NoPlannedSource {
+                    atom: ConcreteFilter {
+                        kinds: Some(BTreeSet::from([branch as u16])),
+                        ..ConcreteFilter::default()
+                    },
+                }],
+            })
+            .collect()
     }
 
     fn latest_evidence() -> Vec<AcquisitionEvidence> {
@@ -516,6 +587,10 @@ mod tests {
     #[test]
     fn slow_observer_gets_explicit_execution_evidence_overflow() {
         let (tx, rx) = rows_channel();
+        // Open first: execution-only frames exist only once the observation's
+        // opening projection has been delivered (#1276).
+        send_rows(&tx, Vec::new(), opening_evidence(1));
+        rx.recv().unwrap();
         tx.send_evidence(
             (1..=300)
                 .map(|sequence| ObservationEvidence {
@@ -561,5 +636,99 @@ mod tests {
         assert!(deltas.is_empty());
         assert_eq!(received_evidence, evidence);
         assert_eq!(execution.len(), 1);
+    }
+
+    /// #1276: an observation's opening execution facts reach this mailbox
+    /// BEFORE its opening row emit does — `Cmd::Subscribe` hands the receiver
+    /// back before it dispatches, and each branch's `ConcreteFilter` fact is
+    /// dispatched ahead of the opening `Effect::EmitRows`. They must not become
+    /// a frame of their own: the OPENING frame is the first frame, carrying
+    /// those facts, its rows, and one evidence entry per canonical branch.
+    ///
+    /// Two disablements must turn this red, and they are the two ways the
+    /// mailbox can lie:
+    ///
+    /// - Let `send_evidence` create a frame from an empty acquisition snapshot
+    ///   (the shipped defect). The first frame then reports evidence for ZERO
+    ///   branches, so `RowBatch.evidence[i]` stops being the fact about
+    ///   `branches[i]` on both SDKs.
+    /// - Let it create a frame from the opening projection's evidence instead.
+    ///   The count is right, but the frame now reports a proven source while
+    ///   carrying none of the rows that proof came from — which is what makes
+    ///   `nmp-nip02` report `NoContactList` for an account that has one, caught
+    ///   by `nmp-parity`'s `direct_and_ffi_follow_actions_are_identical_over_real_loopback`.
+    #[test]
+    fn opening_execution_facts_ride_out_on_the_opening_frame() {
+        let opening = opening_evidence(2);
+        let keys = Keys::generate();
+        let row = row(&keys, 1, "opening row");
+        let (tx, rx) = rows_channel();
+
+        tx.send_evidence(vec![ObservationEvidence {
+            branch: Some(1),
+            sequence: 1,
+            fact: ObservationFact::Withdrawn,
+        }]);
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "no frame precedes the opening projection"
+        );
+
+        tx.send((
+            vec![RowDelta::Added(row.clone())],
+            opening.clone(),
+            Vec::new(),
+        ));
+
+        let (deltas, evidence, execution) = rx.recv().unwrap();
+        assert!(
+            matches!(deltas.as_slice(), [RowDelta::Added(delivered)] if delivered == &row),
+            "the opening frame carries the opening rows"
+        );
+        assert_eq!(
+            evidence, opening,
+            "one evidence entry per canonical branch, for the rows just delivered"
+        );
+        assert_eq!(
+            execution.len(),
+            1,
+            "the fact issued before the opening frame is carried BY it, never dropped"
+        );
+        assert_eq!(execution[0].sequence, 1);
+    }
+
+    /// The pre-opening hold is bounded exactly like the pending frame's own
+    /// execution queue: a slow opening cannot grow memory where a slow consumer
+    /// could not, and the collapse is reported rather than silent.
+    #[test]
+    fn facts_held_for_a_slow_opening_overflow_explicitly() {
+        let (tx, rx) = rows_channel();
+        tx.send_evidence(
+            (1..=300)
+                .map(|sequence| ObservationEvidence {
+                    branch: Some(0),
+                    sequence,
+                    fact: ObservationFact::Withdrawn,
+                })
+                .collect(),
+        );
+
+        tx.send((Vec::new(), opening_evidence(1), Vec::new()));
+
+        let (_, _, execution) = rx.recv().unwrap();
+        assert_eq!(execution.len(), EXECUTION_EVIDENCE_CAPACITY);
+        assert!(matches!(
+            &execution[0],
+            ObservationEvidence {
+                sequence: 45,
+                branch: None,
+                fact: ObservationFact::Overflow {
+                    first_sequence: 1,
+                    last_sequence: 45,
+                    dropped: 45,
+                },
+            }
+        ));
+        assert_eq!(execution.last().unwrap().sequence, 300);
     }
 }
