@@ -33,6 +33,10 @@ pub(crate) struct LaneFaultState {
     bootstrap: Option<PersistenceFault>,
     route_revisions: bool,
     auth_denial: Option<PersistenceFault>,
+    /// Refuse the NEXT `record_lane_handoff` only. One shot is the whole
+    /// point: the transport's handoff result is itself one-shot (#93), so a
+    /// refusal that heals immediately still consumes the lane's only exit.
+    handoff_once: Option<PersistenceFault>,
     bootstrap_calls: u32,
 }
 
@@ -52,11 +56,16 @@ impl LaneFaults {
         self.0.lock().unwrap().auth_denial = Some(fault);
     }
 
+    pub(crate) fn fail_handoff_once(&self, fault: PersistenceFault) {
+        self.0.lock().unwrap().handoff_once = Some(fault);
+    }
+
     pub(crate) fn heal(&self) {
         let mut state = self.0.lock().unwrap();
         state.bootstrap = None;
         state.route_revisions = false;
         state.auth_denial = None;
+        state.handoff_once = None;
     }
 
     pub(crate) fn bootstrap_calls(&self) -> u32 {
@@ -78,6 +87,15 @@ impl LaneFaults {
                 "injected route revision read failure".to_string(),
             )
         })
+    }
+
+    fn take_handoff_failure(&self) -> Option<PersistenceError> {
+        self.0
+            .lock()
+            .unwrap()
+            .handoff_once
+            .take()
+            .map(|fault| PersistenceError::new(fault, "injected lane handoff failure".to_string()))
     }
 
     fn take_auth_denial_failure(&self) -> Option<PersistenceError> {
@@ -199,6 +217,9 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
         detail: PublishQueueAttemptHandoff,
         next: PublishQueuePostHandoffState,
     ) -> Result<PublishQueueLane, PersistenceError> {
+        if let Some(error) = self.faults.take_handoff_failure() {
+            return Err(error);
+        }
         self.inner
             .record_lane_handoff(key, revision, ordinal, detail, next)
     }

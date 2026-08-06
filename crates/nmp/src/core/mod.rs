@@ -32,6 +32,8 @@ mod auth_core_headless;
 mod auth_transport;
 mod diagnostics;
 mod evidence;
+#[cfg(test)]
+mod handoff_starvation_tests;
 mod history;
 mod history_lifecycle;
 #[cfg(test)]
@@ -320,6 +322,13 @@ const MAX_GLOBAL_ATTEMPTS: usize = 32;
 /// happened. They differ only in whether the resolved relay URL survives a
 /// crash — a recovery detail, not an app decision, which is why it rides
 /// `detail` rather than a second variant.
+/// Why an attempt was replaced without ever having been acknowledged or
+/// refused: nothing is left in this process that could deliver its transport
+/// handoff, so the attempt is abandoned in favour of a fresh one rather than
+/// held open against a reply that cannot come (#1316).
+const ORPHANED_HANDOFF_DETAIL: &str =
+    "no transport handoff is outstanding for this attempt; the identical frozen event is \
+     republished under a new attempt";
 const ATTEMPT_STALL_DETAIL: &str =
     "the durable attempt fact could not be committed; no wire EVENT was emitted and recovery \
      rediscovers this exact relay from its committed route revision";
