@@ -24,7 +24,7 @@ fn enqueue_is_not_converged() {
         correlation: None,
     }));
     assert!(
-        matches!(effects.first(), Some(Effect::WriteAccepted(_))),
+        matches!(effects.first(), Some(Effect::WriteAccepted(..))),
         "the publish turn takes custody first of all: {effects:?}"
     );
     assert!(

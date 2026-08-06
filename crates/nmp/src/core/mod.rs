@@ -581,6 +581,13 @@ pub struct ReceiptReplayPage {
     /// Final cursor after every fact in this page. Runtime retains this only
     /// when the whole page entered the consumer mailbox.
     pub(crate) end_cursor: Option<ReceiptReplayCursor>,
+    /// The frozen event id of the receipt this page replayed, read from the
+    /// same durable record. `Some` exactly when `outcome` is `Attached`: an
+    /// absent or unreadable receipt has no identity to report. A
+    /// correlation-idempotent republish resolves to an existing obligation
+    /// instead of accepting a new one, and this is where its acceptance
+    /// answer gets the same event id a first acceptance returns.
+    pub(crate) frozen_id: Option<EventId>,
     /// #961: each entry advances only the matching fact over the page's input
     /// cursor. Runtime uses this to checkpoint one accepted live effect
     /// without accidentally acknowledging another effect returned by the
@@ -601,6 +608,7 @@ impl ReceiptReplayPage {
             facts: Vec::new(),
             next_cursor: None,
             end_cursor: None,
+            frozen_id: None,
             isolated_fact_cursors: Vec::new(),
         }
     }
@@ -1067,9 +1075,15 @@ pub enum Effect {
     /// stream — acceptance is what the `Ok` return already says — so nothing
     /// downstream delivers it to an observer.
     ///
+    /// Carries the event id acceptance FROZE alongside the receipt id it
+    /// issued, because both were decided by the same transaction: the id is
+    /// re-derived inside `on_publish` when the acceptance transaction moves a
+    /// replaceable edit's stamp, so what travels here is the post-restamp
+    /// value in every case.
+    ///
     /// Custody is not viability: a write can be in custody and already
     /// permanently failed.
-    WriteAccepted(ReceiptId),
+    WriteAccepted(ReceiptId, EventId),
     /// A correlation-idempotent publish resolved to an existing receipt.
     /// These retained facts are not new live transitions: runtime must prime
     /// only that publish caller's fresh mailbox, then join it to live delivery

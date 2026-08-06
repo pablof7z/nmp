@@ -600,6 +600,17 @@ pub struct HistoryHandle(HistorySessionId);
 /// call [`Handle::reattach_receipt`] without replaying acceptance.
 pub struct ReceiptStream {
     pub id: ReceiptId,
+    /// The event id acceptance FROZE — this write's identity from acceptance
+    /// onward, unchanged by signing (a NIP-01 id never depends on `sig`) and
+    /// already re-derived against the row a replaceable edit's acceptance
+    /// CAS-ed, so it is the post-restamp value in every case.
+    ///
+    /// It is here because the same transaction that issued `id` decided it.
+    /// The alternative is reading it back out of
+    /// [`Handle::publish_queue_entries`], which materializes the whole
+    /// retained receipt set — a set nothing bounds yet (#46) — so a question
+    /// about one write would cost every write that app has ever made (#1314).
+    pub event_id: EventId,
     pub statuses: FifoReceiver<WriteFact>,
 }
 
@@ -762,11 +773,22 @@ fn deliver_receipt_replay_page(
     (outcome, next_cursor)
 }
 
-fn publish_result(effects: &[Effect]) -> Result<ReceiptId, PublishError> {
+/// What acceptance answered: the receipt id the store issued and the event id
+/// it froze, or the one typed pre-receipt refusal. Both ids come from the same
+/// reducer step, so neither is ever reported without the other.
+fn publish_result(effects: &[Effect]) -> Result<(ReceiptId, EventId), PublishError> {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::WriteAccepted(id) | Effect::ReplayReceipt(id, _) => Some(Ok(*id)),
+            Effect::WriteAccepted(id, event_id) => Some(Ok((*id, *event_id))),
+            // A correlation-idempotent republish answers with the obligation
+            // it resolved to, so its identity is the retained one this page
+            // replayed — never the discarded re-composed draft's.
+            Effect::ReplayReceipt(id, page) => Some(Ok((
+                *id,
+                page.frozen_id
+                    .expect("an attached replay page always carries its frozen id"),
+            ))),
             Effect::PublishFailed(err) => Some(Err(err.clone())),
             _ => None,
         })
@@ -801,10 +823,11 @@ mod publish_result_tests {
             Err(PublishError::NoActiveAccount)
         );
         // Custody: `WriteAccepted` is the acceptance answer, and it is not a
-        // fact on the stream. `publish()` returning the id IS the acceptance.
+        // fact on the stream. `publish()` returning the ids IS the acceptance.
+        let frozen = nostr::EventId::from_slice(&[0x5a; 32]).unwrap();
         assert_eq!(
-            publish_result(&[Effect::WriteAccepted(ReceiptId(7))]),
-            Ok(ReceiptId(7))
+            publish_result(&[Effect::WriteAccepted(ReceiptId(7), frozen)]),
+            Ok((ReceiptId(7), frozen))
         );
     }
 }
@@ -859,7 +882,9 @@ enum Cmd {
         intent: WriteIntent,
         sender: FifoSender<WriteFact>,
         registration: ReceiptDeliveryRegistration,
-        reply: Sender<Result<ReceiptId, PublishError>>,
+        /// The whole acceptance answer: the receipt id the store issued and
+        /// the event id it froze, decided together and reported together.
+        reply: Sender<Result<(ReceiptId, EventId), PublishError>>,
     },
     ReattachReceipt {
         id: ReceiptId,
@@ -4888,7 +4913,7 @@ fn engine_loop<S>(
                 let mut publish_effects = core.handle(EngineMsg::Publish(intent));
                 let result = publish_result(&publish_effects);
                 let replay = take_publish_replay(&mut publish_effects);
-                if let Ok(id) = result {
+                if let Ok((id, _)) = result {
                     if let Some((replay_id, page)) = replay {
                         debug_assert_eq!(replay_id, id);
                         let (_, next_cursor) = deliver_receipt_replay_page(
@@ -4912,7 +4937,7 @@ fn engine_loop<S>(
                         );
                     }
                 }
-                let accepted = result.as_ref().ok().copied();
+                let accepted = result.as_ref().ok().map(|(id, _)| *id);
                 if reply.send(result).is_err() {
                     if let Some(id) = accepted {
                         receipt_deliveries.borrow_mut().detach(id, &registration);
@@ -6582,9 +6607,10 @@ impl Handle {
     }
 
     /// Enqueue a write. The returned [`ReceiptStream`] carries the stable
-    /// store-issued receipt id AND streams every `WriteFact` this intent
-    /// ever reaches (ledger #9 — enqueue is not converged; the FIRST value
-    /// is never a terminal for a durable/at-most-once intent).
+    /// store-issued receipt id and the event id acceptance froze, AND streams
+    /// every `WriteFact` this intent ever reaches (ledger #9 — enqueue is not
+    /// converged; the FIRST value is never a terminal for a durable/
+    /// at-most-once intent).
     /// `Ephemeral` also yields receipt facts, but owns no publish queue
     /// obligation or query-visible pending row.
     ///
@@ -6604,11 +6630,15 @@ impl Handle {
                 reply: reply_tx,
             })
             .expect("nmp-engine: publish called after shutdown");
-        let id = reply_rx
+        let (id, event_id) = reply_rx
             .recv()
             .expect("nmp-engine: engine dropped publish receipt reply")?;
         arm_receipt_delivery_close(&rx, self.inbox.clone(), id, registration);
-        Ok(ReceiptStream { id, statuses: rx })
+        Ok(ReceiptStream {
+            id,
+            event_id,
+            statuses: rx,
+        })
     }
 
     /// Attach an additional observer to a retained receipt. The returned
