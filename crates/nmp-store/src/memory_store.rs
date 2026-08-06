@@ -1596,8 +1596,11 @@ impl EventStore for MemoryStore {
             .collect())
     }
 
-    fn next_expiration(&self) -> Option<Timestamp> {
-        self.expiration_index.keys().next().copied()
+    /// In-memory reads cannot fail, so this backend's half of the #763
+    /// contract is that it NEVER answers `Err` -- the parity oracle holds
+    /// both backends to the same `Ok(None)`-means-absence reading.
+    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        Ok(self.expiration_index.keys().next().copied())
     }
 
     fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
@@ -1673,10 +1676,15 @@ impl EventStore for MemoryStore {
         Ok(())
     }
 
-    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
-        self.coverage
+    fn get_coverage(
+        &self,
+        key: CoverageKey,
+        relay: &RelayUrl,
+    ) -> Result<Option<CoverageInterval>, PersistenceError> {
+        Ok(self
+            .coverage
             .get(&(key, relay.clone()))
-            .map(|row| row.interval)
+            .map(|row| row.interval))
     }
 
     fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {

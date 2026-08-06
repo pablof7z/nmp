@@ -13,6 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -32,6 +33,11 @@ use crate::{
 /// Every `write` fails: the disk-full sequence from the incident. (`0` is
 /// the disarmed default and needs no name — `FaultControl` starts there.)
 const FAIL_WRITE: u8 = 1;
+/// Every `read` fails: the store's file has gone away underneath a live
+/// handle — the removable volume, the sandbox container reclaimed by the
+/// OS, the file another process replaced. Reads alone; a peek opens no
+/// write transaction, so this arms exactly the seam #763 is about.
+const FAIL_READ: u8 = 3;
 /// `write`/`sync_data` succeed and the FIRST `set_len` after a successful
 /// `sync_data` fails. That is exactly redb's post-durability `resize`
 /// (`page_manager.rs` — `storage.flush()` returns `Ok`, so the transaction
@@ -44,6 +50,7 @@ struct FaultControl {
     mode: AtomicU8,
     synced: AtomicBool,
     failed_writes: AtomicUsize,
+    failed_reads: AtomicUsize,
     failed_post_sync_resizes: AtomicUsize,
 }
 
@@ -55,6 +62,10 @@ impl FaultControl {
 
     fn failed_writes(&self) -> usize {
         self.failed_writes.load(Ordering::SeqCst)
+    }
+
+    fn failed_reads(&self) -> usize {
+        self.failed_reads.load(Ordering::SeqCst)
     }
 
     fn failed_post_sync_resizes(&self) -> usize {
@@ -76,12 +87,22 @@ fn disk_full() -> io::Error {
     io::Error::from_raw_os_error(28)
 }
 
+/// `EIO`. A read that reaches the device and fails there — the honest shape
+/// of a store whose backing file went away under a live handle.
+fn disk_gone() -> io::Error {
+    io::Error::from_raw_os_error(5)
+}
+
 impl StorageBackend for FaultBackend {
     fn len(&self) -> Result<u64, io::Error> {
         self.inner.len()
     }
 
     fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+        if self.control.mode.load(Ordering::SeqCst) == FAIL_READ {
+            self.control.failed_reads.fetch_add(1, Ordering::SeqCst);
+            return Err(disk_gone());
+        }
         self.inner.read(offset, out)
     }
 
@@ -528,4 +549,190 @@ fn every_current_fault_variant_has_a_redb_error_that_produces_it() {
     assert_eq!(future, PersistenceFault::UnknownBackend);
     assert_eq!(future.durability(), DurabilityOutcome::Unknown);
     assert!(future.requires_reopen());
+}
+
+// ---- #763: the two peeks that used to abort the host ---------------------
+
+/// Seed one expiring row and one coverage row, so both peeks have something
+/// real to find and `Ok(None)` cannot pass for a successful read by
+/// accident.
+fn seed_peekable_state(store: &mut RedbStore) {
+    let signed = EventBuilder::new(Kind::TextNote, "peek-fixture")
+        .custom_created_at(Timestamp::from(1_000))
+        .tag(nostr::Tag::expiration(Timestamp::from(9_000)))
+        .sign_with_keys(&keys())
+        .expect("sign peek fixture");
+    store
+        .insert(
+            signed,
+            crate::RelayObserved::new(peek_relay(), Timestamp::from(1_000)),
+        )
+        .expect("seed an expiring row");
+    store
+        .record_coverage(&[(
+            peek_atom(),
+            peek_relay(),
+            crate::CoverageInterval::new(Timestamp::from(10), Timestamp::from(20)),
+        )])
+        .expect("seed a coverage row");
+}
+
+/// A seeded store on its own storage whose backend can be made to fail.
+///
+/// The healthy readings live on a SEPARATE store deliberately: a peek warms
+/// redb's page cache with exactly the pages it needs, so peeking once for
+/// reassurance and then arming the fault would prove only that redb can
+/// answer out of memory.
+fn seeded_peekable_store(dir: &TempDir, name: &str) -> (RedbStore, Arc<FaultControl>) {
+    let (mut store, control, _bytes) = store_with_injectable_backend(dir, name);
+    seed_peekable_state(&mut store);
+    (store, control)
+}
+
+fn peek_relay() -> RelayUrl {
+    RelayUrl::parse("wss://peek.example").expect("peek relay")
+}
+
+fn peek_atom() -> nmp_grammar::ContextualAtom {
+    nmp_grammar::ContextualAtom {
+        filter: nmp_grammar::ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            authors: Some(BTreeSet::from([keys().public_key().to_hex()])),
+            ids: None,
+            tags: std::collections::BTreeMap::new(),
+            since: None,
+            until: None,
+            limit: None,
+        },
+        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+        access: nmp_grammar::AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
+}
+
+/// #763 falsifier: a backend read failure on the deadline peek is a value,
+/// not a panic.
+///
+/// This is the whole reason the issue exists. `next_expiration` is called
+/// once per engine-loop iteration to arm the wait, on the embedder's own
+/// thread; on iOS and Android that thread belongs to the application, so
+/// the `.expect("redb: begin_read")` this replaced did not degrade NMP, it
+/// terminated a shipped app. The fault is armed on a store that was healthy
+/// a moment ago, and nothing about the caller changed — which is exactly
+/// why this cannot be a panic.
+#[test]
+fn a_failing_read_makes_the_deadline_peek_report_rather_than_abort() {
+    let dir = TempDir::new().expect("tempdir");
+
+    // A real answer from healthy storage, so the `Err` below is provably
+    // distinguishable from a peek that simply found nothing.
+    let (healthy, _control) = seeded_peekable_store(&dir, "peek-deadline-healthy.redb");
+    assert_eq!(
+        healthy.next_expiration().expect("healthy deadline peek"),
+        Some(Timestamp::from(9_000)),
+        "a healthy peek answers the indexed deadline"
+    );
+    drop(healthy);
+
+    let (store, control) = seeded_peekable_store(&dir, "peek-deadline.redb");
+    control.arm(FAIL_READ);
+    let outcome = catch_unwind(AssertUnwindSafe(|| store.next_expiration()))
+        .unwrap_or_else(|_| panic!("the deadline peek aborted the host process on a read error"));
+    let error = outcome.expect_err("a failing backend read must surface as Err");
+    assert!(
+        control.failed_reads() > 0,
+        "the fault must have been reached at the backend"
+    );
+    assert_ne!(
+        error.fault(),
+        PersistenceFault::Invariant,
+        "a read that could not reach its bytes is a condition, not this crate misusing its own \
+         database: {}",
+        error.message()
+    );
+}
+
+/// #763 falsifier: the same for the coverage peek, and with the stronger
+/// requirement that the failure never renders as absent coverage.
+///
+/// `Ok(None)` here means "this relay has proven nothing for this key",
+/// which is a cache-miss decision an engine acts on by refetching. A read
+/// that could not answer must not be able to say that.
+#[test]
+fn a_failing_read_makes_the_coverage_peek_report_rather_than_abort() {
+    let dir = TempDir::new().expect("tempdir");
+    let key = crate::coverage::coverage_key(&peek_atom());
+    let absent = RelayUrl::parse("wss://never-asked.example").expect("absent relay");
+
+    let (healthy, _control) = seeded_peekable_store(&dir, "peek-coverage-healthy.redb");
+    assert_eq!(
+        healthy
+            .get_coverage(key, &peek_relay())
+            .expect("healthy coverage peek"),
+        Some(crate::CoverageInterval::new(
+            Timestamp::from(10),
+            Timestamp::from(20)
+        )),
+        "a healthy peek answers the recorded interval"
+    );
+    assert_eq!(
+        healthy.get_coverage(key, &absent).expect("healthy peek"),
+        None,
+        "an unrecorded row is honest absence"
+    );
+    drop(healthy);
+
+    let (store, control) = seeded_peekable_store(&dir, "peek-coverage.redb");
+    control.arm(FAIL_READ);
+    let outcome = catch_unwind(AssertUnwindSafe(|| store.get_coverage(key, &peek_relay())))
+        .unwrap_or_else(|_| panic!("the coverage peek aborted the host process on a read error"));
+    let error = outcome.expect_err("a failing backend read must surface as Err");
+    assert!(
+        control.failed_reads() > 0,
+        "the fault must have been reached at the backend"
+    );
+    assert_ne!(
+        error.fault(),
+        PersistenceFault::Invariant,
+        "a backend read failure is not the caller's bug: {}",
+        error.message()
+    );
+}
+
+/// #763 falsifier: the host survives. A store whose reads all fail is asked
+/// for both peeks sixteen times; every answer is a value, and the process
+/// that asked is still running to make the assertion.
+#[test]
+fn both_peeks_leave_the_host_alive_across_repeated_read_failures() {
+    let dir = TempDir::new().expect("tempdir");
+    let (store, control) = seeded_peekable_store(&dir, "peek-alive.redb");
+    let key = crate::coverage::coverage_key(&peek_atom());
+
+    control.arm(FAIL_READ);
+    let mut faults: Vec<PersistenceFault> = Vec::new();
+    for _ in 0..8 {
+        faults.push(
+            store
+                .next_expiration()
+                .expect_err("a failing read never answers a deadline")
+                .fault(),
+        );
+        faults.push(
+            store
+                .get_coverage(key, &peek_relay())
+                .expect_err("a failing read never answers coverage")
+                .fault(),
+        );
+    }
+    // The first failure is the originating read; every one after it is
+    // redb's own latch refusing ahead of the backend (#895). Both are
+    // environmental, both are values, and both leave the host alive.
+    assert!(
+        faults.contains(&PersistenceFault::Latched),
+        "a repeated peek against a latched handle stays a report: {faults:?}"
+    );
+    assert!(
+        !faults.contains(&PersistenceFault::Invariant),
+        "no peek blamed the caller for a disk that went away: {faults:?}"
+    );
 }

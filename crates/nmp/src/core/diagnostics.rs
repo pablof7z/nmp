@@ -19,7 +19,7 @@ use nostr::{EventId, JsonUtil, RelayUrl, Timestamp};
 
 use nmp_grammar::{AccessContext, RelaySessionKey};
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
-use nmp_store::{CoverageInterval, CoverageKey};
+use nmp_store::{CoverageInterval, CoverageKey, PersistenceError};
 
 /// One filter's proven coverage state at one relay (parallel to
 /// [`RelayDiagnosticsSnapshot::filters`] — same order, same rendering).
@@ -37,6 +37,13 @@ pub struct FilterCoverageEntry {
     /// `Some(interval)` -- this relay has a proven `[from, through]` row for
     /// this exact filter's shape; `None` -- unproven ("no row = not
     /// covered", unchanged from the store's own rule).
+    ///
+    /// `None` is NOT self-standing evidence that nothing is proven: if the
+    /// store could not be read while this snapshot was built,
+    /// [`DiagnosticsSnapshot::store_degraded`] is `Some` and every entry
+    /// here is unknown rather than unproven (#763). Read the two together;
+    /// they are one fact reported in the one place an app already looks for
+    /// persistence health (#122/#745).
     pub coverage: Option<CoverageInterval>,
 }
 
@@ -305,15 +312,27 @@ pub struct DiagnosticsSnapshot {
 /// Combine `diag` (subs/filters/lanes/authors_served — `nmp-router`-owned)
 /// with `events_by_session_kind` (this crate's own counter) and per-(relay,
 /// filter) coverage (`get_coverage`, read from the store) into one
-/// [`DiagnosticsSnapshot`]. Pure — no mutation, no I/O; called by
-/// `EngineCore::diagnostics_snapshot`.
+/// [`DiagnosticsSnapshot`]. Called by `EngineCore::diagnostics_snapshot`.
+///
+/// Total by construction, because `degrade_store` builds a snapshot in order
+/// to report a failure — so a failing coverage read cannot abort this. It
+/// lands in [`DiagnosticsSnapshot::store_degraded`] instead, which is what
+/// keeps the empty `coverage` entry beside it readable as "unknown" rather
+/// than "nothing proven" (#763).
 pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
     events_by_session_kind: &HashMap<RelaySessionKey, BTreeMap<u16, u64>>,
     discovered_private_relays_rejected: u64,
-    get_coverage: impl Fn(&RelayUrl, CoverageKey) -> Option<CoverageInterval>,
+    get_coverage: impl Fn(&RelayUrl, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> DiagnosticsSnapshot {
+    // A coverage read that could not answer is kept as the snapshot's own
+    // store-degradation fact rather than rendered as `coverage: None`
+    // (#763). This snapshot has to stay total -- `degrade_store` builds one
+    // to REPORT a failure -- so the read failure travels in the field an app
+    // already reads for exactly this (#122/#745), never as a second health
+    // noun and never as absent coverage.
+    let mut coverage_unreadable: Option<String> = None;
     let mut relays = Vec::new();
     for (session, rd) in &diag.per_session {
         let filters: Vec<String> = rd.filters.iter().map(|f| f.to_nostr().as_json()).collect();
@@ -331,9 +350,16 @@ pub(crate) fn build(
             .flatten()
             .map(|req| {
                 let text = req.filter.to_nostr().as_json();
+                let coverage = match request_coverage(&session.relay, req, &get_coverage) {
+                    Ok(coverage) => coverage,
+                    Err(error) => {
+                        coverage_unreadable.get_or_insert_with(|| error.to_string());
+                        None
+                    }
+                };
                 FilterCoverageEntry {
                     filter: text,
-                    coverage: request_coverage(&session.relay, req, &get_coverage),
+                    coverage,
                 }
             })
             .collect();
@@ -378,10 +404,12 @@ pub(crate) fn build(
             diag.sessions_refused_by_subscription_budget,
         )
         .unwrap_or(u64::MAX),
-        // Filled in by `EngineCore::diagnostics_snapshot` (which owns the
-        // degrade flag); `build` itself is a pure projection of router/store
-        // facts and has no notion of persistence health.
-        store_degraded: None,
+        // A coverage read that failed WHILE building this snapshot is set
+        // here; `EngineCore::diagnostics_snapshot` then lets the reducer's
+        // own latched #122 error win if it holds one. Either way the field
+        // is non-`None` whenever a `coverage` entry above is empty because
+        // the store could not be read.
+        store_degraded: coverage_unreadable,
         transport_degraded: None,
         // Filled in by `EngineCore::diagnostics_snapshot` from the reducer's
         // own pending-obligation set: `build` sees only router/store read
@@ -423,16 +451,27 @@ pub(crate) fn stalled_write_id(intent_id: u64, frozen: &EventId) -> String {
 fn request_coverage(
     relay: &RelayUrl,
     req: &WireReq,
-    get_coverage: &impl Fn(&RelayUrl, CoverageKey) -> Option<CoverageInterval>,
-) -> Option<CoverageInterval> {
+    get_coverage: &impl Fn(&RelayUrl, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
+) -> Result<Option<CoverageInterval>, PersistenceError> {
     let mut keys = req.absorbed.iter().copied();
-    let first = get_coverage(relay, keys.next()?)?;
-    keys.try_fold(first, |common, key| {
-        let next = get_coverage(relay, key)?;
+    let Some(first_key) = keys.next() else {
+        return Ok(None);
+    };
+    let Some(mut common) = get_coverage(relay, first_key)? else {
+        return Ok(None);
+    };
+    for key in keys {
+        let Some(next) = get_coverage(relay, key)? else {
+            return Ok(None);
+        };
         let intersection = CoverageInterval {
             from: common.from.max(next.from),
             through: common.through.min(next.through),
         };
-        (intersection.from <= intersection.through).then_some(intersection)
-    })
+        if intersection.from > intersection.through {
+            return Ok(None);
+        }
+        common = intersection;
+    }
+    Ok(Some(common))
 }

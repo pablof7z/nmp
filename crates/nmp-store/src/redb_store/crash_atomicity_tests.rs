@@ -506,8 +506,14 @@ fn event_and_request_coverage_state(path: &Path) -> (bool, bool, bool) {
     let key = compute_coverage_key(&atom);
     (
         event_present,
-        store.get_coverage(key, &first).is_some(),
-        store.get_coverage(key, &second).is_some(),
+        store
+            .get_coverage(key, &first)
+            .expect("coverage read after crash")
+            .is_some(),
+        store
+            .get_coverage(key, &second)
+            .expect("coverage read after crash")
+            .is_some(),
     )
 }
 
@@ -745,7 +751,7 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
             "retained provenance must roll back with its row"
         );
         assert_eq!(
-            store.get_coverage(key, &relay),
+            store.get_coverage(key, &relay).expect("coverage read"),
             Some(before),
             "coverage lowering must roll back with row deletion"
         );
@@ -762,7 +768,7 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
         .expect("query after explicit eviction")
         .is_empty());
     assert_eq!(
-        store.get_coverage(key, &relay),
+        store.get_coverage(key, &relay).expect("coverage read"),
         Some(CoverageInterval::new(
             Timestamp::from(1_001u64),
             Timestamp::from(1_100u64),
@@ -803,7 +809,7 @@ fn committed_retention_eviction_and_coverage_lowering_survive_process_death() {
         "event removal must survive a process death after commit"
     );
     assert_eq!(
-        store.get_coverage(key, &relay),
+        store.get_coverage(key, &relay).expect("coverage read"),
         Some(CoverageInterval::new(
             Timestamp::from(1_001u64),
             Timestamp::from(1_100u64),

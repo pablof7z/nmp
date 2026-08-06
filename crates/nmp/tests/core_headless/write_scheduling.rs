@@ -345,7 +345,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         }));
         drop(auth_replay);
         assert_eq!(
-            core.next_deadline(),
+            core.next_deadline().expect("deadline peek"),
             None,
             "AUTH wait has no polling deadline"
         );
@@ -803,6 +803,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
     let due = core
         .next_deadline()
+        .expect("deadline peek")
         .expect("transient retry must arm one deadline");
     assert!((3..8).contains(&due.as_secs()));
     assert!(receipt_statuses(&classified).contains(&WriteFact::Relay {
@@ -839,7 +840,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
         1
     );
     assert_eq!(
-        core.next_deadline(),
+        core.next_deadline().expect("deadline peek"),
         None,
         "the exposed due row is consumed before the next deadline is armed"
     );
@@ -888,6 +889,7 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
         )));
         let due = core
             .next_deadline()
+            .expect("deadline peek")
             .expect("every transient durable attempt schedules its retry");
         scheduled = core.handle(EngineMsg::Tick(due));
         assert!(scheduled
@@ -979,6 +981,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
         )));
         let due = core
             .next_deadline()
+            .expect("deadline peek")
             .expect("the later relay's retry remains scheduled");
         scheduled = core.handle(EngineMsg::Tick(due));
     }

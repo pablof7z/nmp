@@ -7,9 +7,13 @@
 //! impl<S: EventStore> EngineCore<S> {
 //!     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect>;
 //!     pub fn tick(&mut self, now: nostr::Timestamp) -> Vec<Effect>;
-//!     pub fn next_deadline(&self) -> Option<nostr::Timestamp>;
+//!     pub fn next_deadline(&self) -> Result<Option<nostr::Timestamp>, PersistenceError>;
 //! }
 //! ```
+//!
+//! The deadline door reads two durable indexes, so it can fail; `Ok(None)`
+//! means the driver has genuinely nothing to wake up for and never that the
+//! store could not be read (#763).
 //!
 //! `EngineCore` does NO I/O, spawns no threads, touches no socket, imposes
 //! no runtime — this is the seam that preserves M1/M2's headless property:
@@ -2263,7 +2267,7 @@ impl<S: EventStore> EngineCore<S> {
         &self,
         atom: &ContextualAtom,
         relay: &RelayUrl,
-    ) -> Option<nmp_store::CoverageInterval> {
+    ) -> Result<Option<nmp_store::CoverageInterval>, PersistenceError> {
         self.resolver
             .store()
             .get_coverage(nmp_store::coverage_key(atom), relay)
@@ -2332,8 +2336,16 @@ impl<S: EventStore> EngineCore<S> {
         );
         // Surface the read-only degrade signal (issue #122) if an ingest/read
         // door has failed — the one persistence-health fact `build` cannot
-        // see on its own.
-        snapshot.store_degraded = self.store_degraded.clone();
+        // see on its own. The latched engine-wide error is the first one and
+        // therefore wins; when the reducer holds none, whatever `build`
+        // already recorded stands, because a coverage read that failed while
+        // building THIS snapshot is the same fact (#763). Overwriting it
+        // unconditionally would present a snapshot whose coverage entries are
+        // empty because the store could not be read as a healthy store with
+        // nothing proven.
+        if self.store_degraded.is_some() {
+            snapshot.store_degraded = self.store_degraded.clone();
+        }
         snapshot.transport_degraded = self
             .relay_open_failures
             .iter()
@@ -2604,8 +2616,18 @@ impl<S: EventStore> EngineCore<S> {
     /// Extensible to future timers (backoff, drop-grace debounce) by folding
     /// another `.min()` term in here -- the runtime driver itself never
     /// needs to change to pick up a new deadline source.
-    pub fn next_deadline(&self) -> Option<Timestamp> {
-        let expiry = self.resolver.store().next_expiration();
+    ///
+    /// Two of the four terms are durable and therefore fallible, and this
+    /// door hands both failures straight to its caller rather than folding
+    /// them into `None` (#763). The distinction is the whole point: `Ok(None)`
+    /// tells the driver to park on a plain `recv()` forever, which is correct
+    /// only when there is genuinely nothing to wake up for. A read that could
+    /// not answer is not that, and the delivery term reaching here as
+    /// `.ok().flatten()` is how a durable, due obligation could stop being
+    /// scheduled with nothing recording why. `runtime::engine_loop` degrades
+    /// the store on `Err`, which is the #122 fact an app already reads.
+    pub fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        let expiry = self.resolver.store().next_expiration()?;
         let neg_liveness = self
             .neg_sessions
             .values()
@@ -2616,15 +2638,16 @@ impl<S: EventStore> EngineCore<S> {
                     .map(|handoff| handoff.started_at + NEG_LIVENESS_DEADLINE_SECS),
             )
             .min();
-        let delivery = (!self.retry_scheduler_blocked)
-            .then(|| {
-                self.resolver
-                    .store()
-                    .next_publish_queue_deadline()
-                    .ok()
-                    .flatten()
-            })
-            .flatten();
+        // A persistence failure already latched by the write plane suppresses
+        // this term until real work arrives (`handle` clears the flag), which
+        // is a recorded decision rather than an erased read. The read itself
+        // still propagates.
+        let delivery = match (!self.retry_scheduler_blocked)
+            .then(|| self.resolver.store().next_publish_queue_deadline())
+        {
+            Some(read) => read?,
+            None => None,
+        };
         // Lane-bootstrap retries carry their own capped backoff, so unlike
         // the delivery deadline they are NOT suppressed by
         // `retry_scheduler_blocked`: a failed bootstrap has no durable
@@ -2635,10 +2658,10 @@ impl<S: EventStore> EngineCore<S> {
             .values()
             .map(|retry| retry.due)
             .min();
-        [expiry, neg_liveness, delivery, bootstrap]
+        Ok([expiry, neg_liveness, delivery, bootstrap]
             .into_iter()
             .flatten()
-            .min()
+            .min())
     }
 
     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {

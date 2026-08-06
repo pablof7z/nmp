@@ -557,7 +557,8 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
         event_frame(&wire, e),
     ));
     assert_eq!(
-        core.get_coverage(&ctx_atom(atom.clone()), &relay0),
+        core.get_coverage(&ctx_atom(atom.clone()), &relay0)
+            .expect("coverage peek"),
         None,
         "presence != coverage"
     );
@@ -576,6 +577,7 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
     let interval = core
         .get_coverage(&ctx_atom(atom.clone()), &relay0)
         .expect("EOSE must record a coverage row");
+    let interval = interval.expect("a proven coverage row");
     assert_eq!(interval.from, Timestamp::from(0u64));
     assert_eq!(interval.through, Timestamp::from(500u64));
 }
@@ -631,11 +633,14 @@ fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
             &ctx_atom_with(filter.clone(), SourceAuthority::Public),
             &relay0
         )
+        .expect("coverage peek")
         .is_some(),
         "the TRUE declared context (Public) must find the recorded coverage"
     );
     assert!(
-        core.get_coverage(&ctx_atom(filter), &relay0).is_none(),
+        core.get_coverage(&ctx_atom(filter), &relay0)
+            .expect("coverage peek")
+            .is_none(),
         "the static-default's WRONG guess (AuthorOutboxes, since the filter is \
          author-bearing) must NOT find coverage recorded under a genuinely \
          different declared context"
@@ -960,11 +965,13 @@ fn eose_overwrite_race_credits_only_the_intersection() {
     let atom_e = cf(&[1], &[&e_key.public_key().to_hex()]);
     assert!(
         core.get_coverage(&ctx_atom(atom_a.clone()), &relay0)
+            .expect("coverage peek")
             .is_some(),
         "a is in BOTH outstanding snapshots -- must be credited"
     );
     assert!(
         core.get_coverage(&ctx_atom(atom_e.clone()), &relay0)
+            .expect("coverage peek")
             .is_none(),
         "e is only in the newer snapshot -- the straggler EOSE must NOT credit it"
     );
@@ -981,6 +988,7 @@ fn eose_overwrite_race_credits_only_the_intersection() {
     ));
     assert!(
         core.get_coverage(&ctx_atom(atom_e.clone()), &relay0)
+            .expect("coverage peek")
             .is_some(),
         "the second EOSE must credit the still-outstanding snapshot's atoms"
     );
@@ -1019,7 +1027,8 @@ fn limited_fetch_never_records_coverage() {
 
     let atom = cf(&[1], &[&a.public_key().to_hex()]);
     assert_eq!(
-        core.get_coverage(&ctx_atom(atom.clone()), &relay0),
+        core.get_coverage(&ctx_atom(atom.clone()), &relay0)
+            .expect("coverage peek"),
         None,
         "a limited REQ's EOSE must poison -- never record a watermark"
     );
@@ -1088,7 +1097,10 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
             .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
         "the closed request's late EOSE must credit nothing: {stale:?}"
     );
-    assert_eq!(core.get_coverage(&atom, &relay0), None);
+    assert_eq!(
+        core.get_coverage(&atom, &relay0).expect("coverage peek"),
+        None
+    );
 
     let served = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -1104,7 +1116,10 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
             .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
         "the reopened request's own EOSE must still earn its coverage: {served:?}"
     );
-    assert!(core.get_coverage(&atom, &relay0).is_some());
+    assert!(core
+        .get_coverage(&atom, &relay0)
+        .expect("coverage peek")
+        .is_some());
 }
 
 // ---- per-source acquisition evidence (docs/design/

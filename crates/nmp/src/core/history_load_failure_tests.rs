@@ -171,7 +171,7 @@ impl EventStore for FailingReadStore {
         self.inner.expire_due(now)
     }
 
-    fn next_expiration(&self) -> Option<Timestamp> {
+    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
         self.inner.next_expiration()
     }
 
@@ -182,7 +182,11 @@ impl EventStore for FailingReadStore {
         self.inner.record_coverage(claims)
     }
 
-    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
+    fn get_coverage(
+        &self,
+        key: CoverageKey,
+        relay: &RelayUrl,
+    ) -> Result<Option<CoverageInterval>, PersistenceError> {
         self.inner.get_coverage(key, relay)
     }
 

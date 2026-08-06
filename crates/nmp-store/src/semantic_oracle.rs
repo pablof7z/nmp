@@ -360,7 +360,9 @@ fn normalized_state(
         .coverage
         .iter()
         .map(|(atom, relay)| {
-            let interval = store.get_coverage(coverage_key(atom), relay);
+            let interval = store
+                .get_coverage(coverage_key(atom), relay)
+                .expect("oracle coverage read");
             json!({
                 "key": blake3::hash(coverage_key(atom).as_bytes()).to_hex().to_string(),
                 "relay": relay.as_str(),
@@ -417,7 +419,10 @@ fn normalized_state(
         "correlations": correlations,
         "delivery": delivery,
         "deadlines": format!("{:?}", store.due_publish_queue_deadlines(Timestamp::from(u64::MAX), 1_000).expect("deadlines")),
-        "next_expiration": store.next_expiration().map(|value| value.as_secs()),
+        "next_expiration": store
+            .next_expiration()
+            .expect("oracle expiration peek")
+            .map(|value| value.as_secs()),
     });
     serde_json::to_string(&state).expect("serialize normalized oracle state")
 }
@@ -507,7 +512,10 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
         "ordered": ordered,
         "open_intents": intents,
         "deadlines": format!("{:?}", store.due_publish_queue_deadlines(Timestamp::from(u64::MAX), 1_024).expect("crash-oracle deadlines")),
-        "next_expiration": store.next_expiration().map(|value| value.as_secs()),
+        "next_expiration": store
+            .next_expiration()
+            .expect("crash-oracle expiration peek")
+            .map(|value| value.as_secs()),
     }))
     .expect("serialize crash-oracle state");
     blake3::hash(normalized.as_bytes()).to_hex().to_string()

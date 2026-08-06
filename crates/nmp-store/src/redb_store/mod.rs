@@ -24,9 +24,10 @@
 //! empty result, a skipped row, or a defaulted value — a false miss is
 //! exactly the outcome the typed error exists to prevent.
 //!
-//! Two peek doors, `next_expiration` and `get_coverage`, are still infallible
-//! at the trait and therefore still `.expect()` at the end of an otherwise
-//! fallible chain. Widening them is #763's unit, not this one.
+//! Every read door on this backend is fallible, including the two deadline
+//! and coverage peeks that #763 widened last: an embedded host is the app
+//! itself, so a `.expect()` on a read error was an application crash, not a
+//! contained failure.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -226,7 +227,7 @@ impl EventStore for RedbStore {
         event_ops::expire_due(self, now)
     }
 
-    fn next_expiration(&self) -> Option<Timestamp> {
+    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
         event_ops::next_expiration(self)
     }
 
@@ -237,7 +238,11 @@ impl EventStore for RedbStore {
         event_ops::record_coverage(self, claims)
     }
 
-    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
+    fn get_coverage(
+        &self,
+        key: CoverageKey,
+        relay: &RelayUrl,
+    ) -> Result<Option<CoverageInterval>, PersistenceError> {
         event_ops::get_coverage(self, key, relay)
     }
 

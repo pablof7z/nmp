@@ -195,7 +195,12 @@ impl<S: EventStore> EngineCore<S> {
     /// panicking: latch the first error message (read-only degrade) and push
     /// a fresh diagnostics snapshot so an observer sees the degraded state
     /// immediately. Idempotent — a later failure keeps the first message.
-    pub(super) fn degrade_store(&mut self, err: PersistenceError, effects: &mut Vec<Effect>) {
+    ///
+    /// `pub(crate)` because `runtime::engine_loop` owns one read this reducer
+    /// cannot: it asks for [`EngineCore::next_deadline`] outside any message,
+    /// so a failing deadline peek has no reducer entry point to report
+    /// through and reports here directly (#763).
+    pub(crate) fn degrade_store(&mut self, err: PersistenceError, effects: &mut Vec<Effect>) {
         if self.store_degraded.is_none() {
             self.store_degraded = Some(err.to_string());
         }

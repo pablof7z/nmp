@@ -68,12 +68,31 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
+        // Every branch's freshness decision is taken before the observation
+        // exists, so a store read that cannot answer unwinds exactly like a
+        // failed resolve above (#763): the alternative is deciding `Live` on
+        // a failed coverage read and reporting it as a policy decision.
+        let mut acquisitions = Vec::with_capacity(opened.len());
+        for index in 0..opened.len() {
+            let (id, freshness) = (opened[index].id(), opened[index].freshness());
+            match self.decide_handle_acquisition(id, freshness) {
+                Ok(acquisition) => acquisitions.push(acquisition),
+                Err(error) => {
+                    for handle in opened {
+                        let _ = self.resolver.unsubscribe(handle.id());
+                    }
+                    let reason = format!("query freshness decision failed: {error}");
+                    self.degrade_store(error, &mut effects);
+                    return ObservationOpen::Refused { reason, effects };
+                }
+            }
+        }
+
         let observation = ObservationId(self.next_observation_id);
         self.next_observation_id = self.next_observation_id.wrapping_add(1);
         let branches: Vec<HandleId> = opened.iter().map(|handle| handle.id()).collect();
-        for (index, handle) in opened.into_iter().enumerate() {
+        for (index, (handle, acquisition)) in opened.into_iter().zip(acquisitions).enumerate() {
             let id = handle.id();
-            let acquisition = self.decide_handle_acquisition(id, handle.freshness());
             self.handles.insert(
                 id,
                 BranchState {
@@ -121,12 +140,34 @@ impl<S: EventStore> EngineCore<S> {
             self.reconcile_observation_resolution(*branch, ResolutionCause::Initial, &mut effects);
         }
         self.recompile(&mut effects);
+        // The opening evidence frame reads coverage, so it can fail the same
+        // way the canonical row projection above can (#763). It is the last
+        // fallible step of the open, and it refuses the open rather than
+        // delivering a frame whose sources read as "nothing proven" when the
+        // store could not be read at all. The withdrawal is `on_unsubscribe`'s
+        // unwind minus its `Withdrawn` fact: nothing was ever delivered for
+        // this observation, so nothing is owed a terminal fact.
+        let evidence = match self.observation_evidence_for(observation) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let reason = format!("acquisition evidence projection failed: {error}");
+                self.observations.remove(&observation);
+                for branch in &branches {
+                    let _delta = self.resolver.unsubscribe(*branch);
+                    self.handles.remove(branch);
+                }
+                self.recompile(&mut effects);
+                self.refresh_all_observations(&mut effects);
+                self.refresh_all_histories(&mut effects);
+                self.degrade_store(error, &mut effects);
+                return ObservationOpen::Refused { reason, effects };
+            }
+        };
         // A wire-contributing query can change the capped greedy source plan
         // for every existing query. A suppressed query leaves that plan
         // untouched but still needs its initial cache/evidence frame.
         self.refresh_all_observations_except(observation, &mut effects);
         self.refresh_all_histories(&mut effects);
-        let evidence = self.observation_evidence_for(observation);
         let seed = self
             .apply_observation_projection(observation, current, evidence)
             .expect("a new observation has no prior projection and always yields one seed");
@@ -461,7 +502,7 @@ impl<S: EventStore> EngineCore<S> {
         &self,
         id: HandleId,
         root_freshness: Freshness,
-    ) -> HandleAcquisition {
+    ) -> Result<HandleAcquisition, PersistenceError> {
         let mut scopes = self.resolver.demand_scopes(id);
         if let Some((_, freshness)) = scopes.first_mut() {
             *freshness = root_freshness;
@@ -479,75 +520,78 @@ impl<S: EventStore> EngineCore<S> {
                 );
                 self.shadow_plan_for(candidate_demand)
             });
-        let scopes = scopes
-            .into_iter()
-            .map(|(atoms, freshness)| match freshness {
+        let mut decided = Vec::with_capacity(scopes.len());
+        for (atoms, freshness) in scopes {
+            decided.push(match freshness {
                 Freshness::Live => ScopeAcquisition::Live,
                 Freshness::CacheOnly => ScopeAcquisition::CacheOnly(RelayPlan::default()),
                 Freshness::MaxAge { seconds } => {
                     let plan = candidate_plan
                         .as_ref()
                         .expect("a MaxAge scope built the candidate plan");
-                    if self.plan_is_fresh_for(&atoms, plan, seconds) {
+                    if self.plan_is_fresh_for(&atoms, plan, seconds)? {
                         ScopeAcquisition::CoverageSatisfied(plan.clone())
                     } else {
                         ScopeAcquisition::Live
                     }
                 }
-            })
-            .collect();
-        HandleAcquisition { scopes }
+            });
+        }
+        Ok(HandleAcquisition { scopes: decided })
     }
 
     pub(super) fn acquisition_evidence_for_scopes(
         &self,
         scopes: Vec<(BTreeSet<ContextualAtom>, Freshness)>,
         acquisition: &HandleAcquisition,
-    ) -> AcquisitionEvidence {
+    ) -> Result<AcquisitionEvidence, PersistenceError> {
         let auth_status = self.auth_status_map();
-        let parts: Vec<_> = scopes
-            .into_iter()
-            .zip(&acquisition.scopes)
-            .map(|((atoms, _), decision)| {
-                let plan = decision
-                    .evidence_plan()
-                    .unwrap_or_else(|| self.router.plan());
-                evidence::acquisition_evidence(
-                    &atoms,
-                    plan,
-                    self.resolver.store(),
-                    &self.connected_relays,
-                    &auth_status,
-                    &self.ever_connected_relays,
-                )
-            })
-            .collect();
+        let mut parts = Vec::with_capacity(scopes.len());
+        for ((atoms, _), decision) in scopes.into_iter().zip(&acquisition.scopes) {
+            let plan = decision
+                .evidence_plan()
+                .unwrap_or_else(|| self.router.plan());
+            parts.push(evidence::acquisition_evidence(
+                &atoms,
+                plan,
+                self.resolver.store(),
+                &self.connected_relays,
+                &auth_status,
+                &self.ever_connected_relays,
+            )?);
+        }
         if parts.is_empty() {
-            return AcquisitionEvidence {
+            return Ok(AcquisitionEvidence {
                 sources: Vec::new(),
                 shortfall: vec![ShortfallFact::NoResolvedDemand],
-            };
+            });
         }
-        evidence::merge_acquisition_evidence(parts)
+        Ok(evidence::merge_acquisition_evidence(parts))
     }
 
     /// Unanimous current-assignment freshness. Presence of a matching event
     /// is deliberately irrelevant: a coverage row proves the question was
     /// checked, so an empty cached result can satisfy `MaxAge` too.
+    ///
+    /// Fallible (#763), and not merely for tidiness: `false` here means
+    /// "the cache is not fresh enough, go to the network", which is a real
+    /// decision made about real coverage rows. A store read that could not
+    /// answer has decided nothing, so it leaves through `Err` and the caller
+    /// degrades — it never gets to vote `false`.
     pub(super) fn plan_is_fresh_for(
         &self,
         atoms: &BTreeSet<ContextualAtom>,
         plan: &RelayPlan,
         max_age_seconds: u64,
-    ) -> bool {
+    ) -> Result<bool, PersistenceError> {
         if atoms.is_empty() {
-            return false;
+            return Ok(false);
         }
         let cutoff = Timestamp::from(self.clock.as_secs().saturating_sub(max_age_seconds));
-        atoms.iter().all(|atom| {
+        for atom in atoms {
             let key = nmp_store::coverage_key(atom);
             if plan.limited.contains(&key) {
-                return false;
+                return Ok(false);
             }
             let covering: Vec<&RelaySessionKey> = plan
                 .reqs
@@ -558,17 +602,22 @@ impl<S: EventStore> EngineCore<S> {
                         .then_some(session)
                 })
                 .collect();
-            !covering.is_empty()
-                && covering.into_iter().all(|session| {
-                    let floor = Timestamp::from(atom.filter.since.unwrap_or(0));
-                    self.resolver
-                        .store()
-                        .get_coverage(key, &session.relay)
-                        .is_some_and(|interval| {
-                            interval.from <= floor && interval.through >= cutoff
-                        })
-                })
-        })
+            if covering.is_empty() {
+                return Ok(false);
+            }
+            let floor = Timestamp::from(atom.filter.since.unwrap_or(0));
+            for session in covering {
+                let proven = self
+                    .resolver
+                    .store()
+                    .get_coverage(key, &session.relay)?
+                    .is_some_and(|interval| interval.from <= floor && interval.through >= cutoff);
+                if !proven {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Gate every network-sourced selector hint/provenance URL before it can
@@ -1812,7 +1861,18 @@ impl<S: EventStore> EngineCore<S> {
             return;
         }
 
-        let evidence = self.observation_evidence_for(id);
+        // A coverage read that could not answer leaves the LAST delivered
+        // evidence in place and degrades, exactly as `refresh_observation`
+        // does for a failed row snapshot (#122/#763): re-emitting evidence
+        // computed from a failed read would republish "nothing proven" over
+        // a watermark this reducer simply could not see.
+        let evidence = match self.observation_evidence_for(id) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                self.degrade_store(error, effects);
+                return;
+            }
+        };
         let Some(state) = self.observations.get_mut(&id) else {
             return;
         };
@@ -1829,26 +1889,29 @@ impl<S: EventStore> EngineCore<S> {
     /// scalar value keep separate entries, and a branch whose sources are all
     /// unreachable reports its own shortfall without any sibling's proof
     /// masking it. Nothing here is rolled up into a query-global verdict.
-    fn observation_evidence_for(&self, id: ObservationId) -> Vec<AcquisitionEvidence> {
+    fn observation_evidence_for(
+        &self,
+        id: ObservationId,
+    ) -> Result<Vec<AcquisitionEvidence>, PersistenceError> {
         let Some(state) = self.observations.get(&id) else {
-            return vec![AcquisitionEvidence {
+            return Ok(vec![AcquisitionEvidence {
                 sources: Vec::new(),
                 shortfall: vec![ShortfallFact::NoResolvedDemand],
-            }];
+            }]);
         };
-        state
-            .branches
-            .iter()
-            .map(|branch| self.branch_evidence_for(*branch))
-            .collect()
+        let mut evidence = Vec::with_capacity(state.branches.len());
+        for branch in &state.branches {
+            evidence.push(self.branch_evidence_for(*branch)?);
+        }
+        Ok(evidence)
     }
 
-    fn branch_evidence_for(&self, id: HandleId) -> AcquisitionEvidence {
+    fn branch_evidence_for(&self, id: HandleId) -> Result<AcquisitionEvidence, PersistenceError> {
         let Some(state) = self.handles.get(&id) else {
-            return AcquisitionEvidence {
+            return Ok(AcquisitionEvidence {
                 sources: Vec::new(),
                 shortfall: vec![ShortfallFact::NoResolvedDemand],
-            };
+            });
         };
         self.acquisition_evidence_for_scopes(self.resolver.demand_scopes(id), &state.acquisition)
     }
@@ -1863,7 +1926,7 @@ impl<S: EventStore> EngineCore<S> {
             return Ok(None);
         }
         let rows = self.observation_rows_for(id)?;
-        let evidence = self.observation_evidence_for(id);
+        let evidence = self.observation_evidence_for(id)?;
         Ok(Some((rows, evidence)))
     }
 
