@@ -43,9 +43,9 @@ Goal: show identity metadata and authored content without creating an app cache 
 
 1. Decode the route input with the platform's public Nostr-entity decoder when it may be `npub`, `nprofile`, or a `nostr:` URI. Reject unsupported entity shapes explicitly.
 2. Open a replaceable metadata query and the content query as separate live demands. Each owns its source evidence and cancellation.
-3. Let the profile/content resource layer parse row content if using `NMPContent`, and claim only nested reference occurrences/targets that must remain live; otherwise parse raw event content in app-owned presentation code.
+3. Parse row content with `parseNostrContent` when you want source ranges and resolved locators; otherwise parse raw event content in app-owned presentation code. Parsing is pure and owns nothing.
 4. Keep one current profile projection for display, but do not persist it as an authority beside NMP's canonical store.
-5. If opening nested references, keep each claim/session in the view-model or feature owner. Cancel Swift claims before `stop()` on their session; close Kotlin claims before closing their session.
+5. If a nested reference must be live, open an ordinary query for its resolved locator and keep that query in the view-model or feature owner, with ordinary cancellation.
 6. Test profile replacement and removal as live snapshot changes, not one-shot fetch completion.
 
 This deliberately avoids a magic `loadProfileAndPosts` noun. NMP exposes composable live queries; the app owns the screen composition.
@@ -125,9 +125,14 @@ Rules:
 - Sort the accumulated rows in the app. Preserve each row's source proof and the query evidence.
 - Direct Rust holds a `Group` for the room's whole lifetime and publishes
   through it: `group.publish(&engine, author, builder)` appends the one `h`
-  row before signing and routes `Explicit` to every host in the scope. It
-  emits no `previous`, and a draft that arrives carrying `h` or `previous` is
-  a typed refusal.
+  row before signing, routes `Explicit` to every host in the scope, and
+  returns the ordinary `ReceiptStream`. It emits no `previous`, and a draft
+  that arrives carrying `h` or `previous` is a typed refusal. The nine named
+  9000-9022 operations (`join_request`, `add_user`, `edit_metadata`,
+  `create_group` with an optional parent for subgroups, and the rest) all
+  delegate to it.
+- For a write that must carry several `h` rows, `scope.groups(ids)?.publish(...)`
+  is the multi-context door; `group(id)` is the single-context one.
 - The app never names a host on a write, never spells a routing value, and
   never touches `h` -- the relay set is named once, at the scope, not per
   operation. Do not hand-assemble a group write from raw tags plus a routing
@@ -138,7 +143,7 @@ Rules:
   appearance -- per-host, on that host's own acceptance, is the correct and
   intentional behavior.
 
-For rich rendering, use Swift `NMPContent` resources or Kotlin `NMPContentClient(engine).session(...) -> NostrContentSession` for only a bounded visible-plus-prefetch window keyed by stable event id. Session policy limits are per session, not engine-global. Enforce a separate aggregate app permit pool before claiming a distinct target: use the reference-demand plan's `1 + helpers.count` as that target's query cost (one canonical query plus its helper queries), and cap the number of open row sessions independently. `claim(referenceID:)` in Swift / `claim(referenceId)` in Kotlin accepts an occurrence id from that session's parsed document and may return `nil`/`null`; it is not a row id or target key. Record the permits with the claim, then cancel/close claims and release their permits before stopping/closing the row's session on eviction.
+For rich rendering, parse row content with `parseNostrContent` and open ordinary queries for the locators you actually need live, bounded to a visible-plus-prefetch window keyed by stable event id. There is no content session, no claim, and no permit budget to manage — the budget is whatever query ownership the app imposes on itself. Swift's `NMPUI` offers `observeWhileVisible` components over the same idea.
 
 ## Follow button and relationship state
 
@@ -153,7 +158,7 @@ Swift has `observeFollowing`, `follow`, `unfollow`, and the `NMPFollowing` resou
 
 Do not set `isFollowing = true` on tap. Render action progress separately until the live following snapshot changes. A missing reconciled contact list is an explicit refusal: ordinary follow must not create a first kind-3 list containing only one contact. Product onboarding must handle first-list creation as a distinct capability/workflow.
 
-Kotlin currently lacks the ergonomic following resource/action. Report that limitation; do not import generated FFI types or reproduce contact-list editing in application code.
+Both wrappers expose `observeFollowing`/`follow`/`unfollow` on `NMPEngine`; only the SwiftUI `NMPFollowing` observable object is Swift-specific. Do not import generated FFI types or reproduce contact-list editing in application code.
 
 ## Durable publishing and restart
 
@@ -162,12 +167,12 @@ Goal: accept a post offline, show honest delivery, and resume after process loss
 1. Restore the intended signer/account, then activate it.
 2. Construct an unsigned `WriteIntent` with deliberate durability and routing.
 3. Publish and persist `receipt.id` in app-owned durable state immediately.
-4. Observe receipt facts independently from the query that renders the canonical row. The row is not an optimistic overlay created from the draft. Before `Signed(eventId)` the public row exposes no intent/receipt id, so delivery UI must remain receipt-centric; correlate to a feed row only after the signed event id exists.
-5. On restart, reopen the same NMP store, restore the same signer identity, and call `reattachReceipt(id:)` / `reattachReceipt(id)`.
-6. Distinguish attached, not found, and retained-but-unreadable. Reattachment reconstructs persisted relay/AUTH waits, retry eligibility, ambiguous handoffs, and `Sent` only where an exact durable lane has persisted `Written`; it does not reproduce transient `Routed` history or invent ephemeral handoffs. Journal non-retained live progress separately if the product needs a complete historical activity log.
+4. Observe write facts independently from the query that renders the canonical row. The row is not an optimistic overlay created from the draft. Before `SigningState::Signed { event_id }` the public row exposes no intent/receipt id, so delivery UI must remain receipt-centric; correlate to a feed row only after the signed event id exists.
+5. On restart, reopen the same NMP store, restore the same signer identity, then call `publishQueue()` to see what is outstanding and `reattachReceipt(id:)` / `reattachReceipt(correlation:)` to resume the ones you care about. Writes parked on a missing signer end only by `cancel` followed by `removePublishQueueEntry`.
+6. Distinguish attached, not found, and retained-but-unreadable. Reattachment traverses the durable `WriteFact` history in finite pages before streaming onward; stream lag is the typed `FactStreamLagged`, not silent loss.
 7. Remove the app's receipt pointer only under explicit product retention policy after terminal evidence has been handled.
 
-The receipt bridge starts as async work on the shared engine runtime before core acceptance, and there is no capacity or thread refusal on this path, so a returned id reflects an accepted obligation and a consumed composed intent. One lost-id window remains because receipt enumeration does not exist: process loss after a successful return but before app persistence. State that limitation rather than claiming perfect app-level recovery, and do not blindly publish a replacement for an obligation whose id is unknown.
+`Ok` from `publish` is acceptance, so a returned id names a write actually in custody. Process loss before you persist the id is recoverable two ways: mint a `correlation` token and persist it *before* publishing, then reattach by token; or enumerate with `publishQueue()`. Do not blindly publish a replacement for an obligation you have not looked for first.
 
 ## Relay-debug sheet
 
