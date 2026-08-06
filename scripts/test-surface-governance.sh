@@ -3,8 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CHECK="$SCRIPT_DIR/check-surface-governance.sh"
+REPORT="$SCRIPT_DIR/report-surface-governance-verdict.sh"
 PARITY="$SCRIPT_DIR/check-sdk-parity.sh"
 MIGRATION_TEST="$SCRIPT_DIR/test-surface-migration-authorization.py"
+# The checker's three-way exit contract (#1264). A suite that only asserted
+# "nonzero" could not tell a verdict about the head from the gate breaking --
+# which is the exact confusion the reporting split exists to remove, so the
+# suite has to be able to see it too.
+CHECK_STALE_BASE_EXIT=4
+CHECK_MALFUNCTION_EXIT=70
 [[ $# -eq 1 ]] || {
   echo "usage: $0 <workspace-root>" >&2
   exit 2
@@ -40,6 +47,21 @@ workflow_permissions() {
         print line
       }
   ' "$1" | LC_ALL=C sort
+}
+
+# Every line of one job, so an assertion can say "this appears in that job and
+# nowhere else". Job identifiers are the only two-space keys under `jobs:`;
+# `on:` children share that indentation but never share a job's name.
+workflow_job_lines() {
+  awk -v want="$2" '
+    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+      job = $0
+      sub(/^  /, "", job)
+      sub(/:[[:space:]]*$/, "", job)
+      next
+    }
+    job == want { print }
+  ' "$1"
 }
 
 falsify_missing_base_governance_artifact() {
@@ -246,6 +268,72 @@ expect_pass() {
   echo "ok - $label"
 }
 
+# A verdict about the proposed head: exit 1, a `surface-governance:` line, and
+# the exact reason the case was built to provoke. Asserting the reason is what
+# stops a case from passing because something unrelated broke.
+expect_verdict() {
+  local label=$1 reason=$2
+  shift 2
+  local output status=0
+  output=$("$@" 2>&1) || status=$?
+  if (( status != 1 )); then
+    echo "FAIL: $label exited $status; a verdict is exit 1" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$output" | grep -Fq "surface-governance: $reason"; then
+    echo "FAIL: $label did not render the verdict line: $reason" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$output" | grep -Fq "surface-governance-malfunction:"; then
+    echo "FAIL: $label reported a malfunction under a verdict" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  echo "ok - $label"
+}
+
+# A stale head. Its own exit code so the reporting layer can give it its own
+# check name instead of borrowing the verdict's.
+expect_stale_base() {
+  local label=$1 reason=$2
+  shift 2
+  local output status=0
+  output=$("$@" 2>&1) || status=$?
+  if (( status != CHECK_STALE_BASE_EXIT )); then
+    echo "FAIL: $label exited $status; staleness is exit $CHECK_STALE_BASE_EXIT" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$output" | grep -Fq "$reason"; then
+    echo "FAIL: $label did not report staleness: $reason" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  echo "ok - $label"
+}
+
+# The gate never reached a verdict. Distinct exit code, distinct prefix, and no
+# verdict line at all -- a reader must not be able to mistake it for one.
+expect_malfunction() {
+  local label=$1 reason=$2
+  shift 2
+  local output status=0
+  output=$("$@" 2>&1) || status=$?
+  if (( status != CHECK_MALFUNCTION_EXIT )); then
+    echo "FAIL: $label exited $status; a malfunction is exit $CHECK_MALFUNCTION_EXIT" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$output" | grep -Fq "malfunction: $reason"; then
+    echo "FAIL: $label did not name the malfunction: $reason" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  echo "ok - $label"
+}
+
 expect_catalog_mutation_fail() {
   local label=$1 mutate=$2
   local repo="$TMP/catalog-${label//[^a-zA-Z0-9]/-}"
@@ -261,10 +349,37 @@ checker_projections() {
     "$CHECK" --print-projections
 }
 
+# The workflow always supplies the three fetched API records, so the fixture
+# supplies them too. Without them the checker cannot reach the authorization
+# question at all, and a protected-path case would pass on an unreadable file
+# rather than on the missing owner status it was written to prove.
+write_api_records() {
+  local repo=$1 base=$2 dir=$3
+  local head
+  head=$(git -C "$repo" rev-parse HEAD)
+  mkdir -p "$dir"
+  cat > "$dir/pull-request.json" <<EOF
+{
+  "number": 999,
+  "state": "open",
+  "merged": false,
+  "html_url": "https://github.com/pablof7z/nmp/pull/999",
+  "base": {"sha": "$base", "repo": {"full_name": "pablof7z/nmp"}},
+  "head": {"sha": "$head", "repo": {"full_name": "pablof7z/nmp"}}
+}
+EOF
+  printf '{}\n' > "$dir/issue.json"
+  printf '[]\n' > "$dir/statuses.json"
+}
+
 run_checker() {
   local repo=$1 base=$2
-  local projections
+  local projections records
   projections=$(checker_projections "$repo" "$base")
+  # Outside the fixture worktree: the checker refuses a dirty checkout, and the
+  # records are the job's scratch state, not the head's content.
+  records=$(mktemp -d "$TMP/records-XXXXXX")
+  write_api_records "$repo" "$base" "$records"
   SURFACE_CATALOG_BIN="$CATALOG_BIN" \
   SURFACE_ROOT="$repo" \
   SURFACE_BASE_REF="$base" \
@@ -272,6 +387,9 @@ run_checker() {
   SURFACE_PR_NUMBER=999 \
   SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
   SURFACE_CHANGED_PROJECTIONS="$projections" \
+  SURFACE_PR_RECORD="$records/pull-request.json" \
+  SURFACE_ISSUE_RECORD="$records/issue.json" \
+  SURFACE_STATUS_RECORDS="$records/statuses.json" \
   SURFACE_REGEN_CMD=scripts/regen.sh \
     "$CHECK"
 }
@@ -706,12 +824,16 @@ repo="$TMP/checker-stale"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEA
 printf 'stale delta\n' >> "$repo/actual/components/alpha/uniffi.txt"
 append_entry "$repo" ffi
 commit_case "$repo" stale
-expect_fail "stale component snapshot" run_checker "$repo" "$base"
+expect_verdict "stale component snapshot" \
+  "docs/surface/components/alpha/uniffi.txt is stale; regenerate and commit it" \
+  run_checker "$repo" "$base"
 
 repo="$TMP/checker-no-log"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf '// changed\n' >> "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
 commit_case "$repo" no-log
-expect_fail "governed SDK change without evidence" run_checker "$repo" "$base"
+expect_verdict "governed SDK change without evidence" \
+  "governed projection changed without an appended change-log entry" \
+  run_checker "$repo" "$base"
 
 repo="$TMP/checker-swift-manifest"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf '// changed Swift manifest\n' >> "$repo/Packages/Alpha/Package.swift"
@@ -746,7 +868,9 @@ cp "$repo/actual/components/alpha/uniffi.txt" \
   "$repo/docs/surface/components/alpha/uniffi.txt"
 append_entry "$repo" ffi
 commit_case "$repo" history
-expect_fail "append-only history rewrite" run_checker "$repo" "$base"
+expect_verdict "append-only history rewrite" \
+  "historical change-log content was edited, deleted, or reordered" \
+  run_checker "$repo" "$base"
 
 repo="$TMP/checker-configured-evidence"; new_repo "$repo"
 mv "$repo/docs/surface-change-log.md" "$repo/docs/surface-evidence.md"
@@ -804,13 +928,17 @@ for protected in \
   base=$(git -C "$repo" rev-parse HEAD)
   printf '# tamper\n' >> "$repo/$protected"
   commit_case "$repo" tamper
-  expect_fail "protected program tamper: $protected" run_checker "$repo" "$base"
+  expect_verdict "protected program tamper: $protected" \
+    "protected governance migration is not exactly authorized" \
+    run_checker "$repo" "$base"
 done
 
 expected_permissions=$'contents:read\nissues:read\npull-requests:read\nstatuses:read'
-for workflow in \
-  "$ROOT/.github/workflows/surface-governance.yml" \
-  "$ROOT/.github/workflows/ci.yml"; do
+for entry in \
+  "$ROOT/.github/workflows/surface-governance.yml:surface-governance" \
+  "$ROOT/.github/workflows/ci.yml:surface-regeneration"; do
+  workflow=${entry%:*}
+  gate=${entry##*:}
   [[ $(workflow_permissions "$workflow") == "$expected_permissions" ]] ||
     fail "trusted workflow permissions are not the exact least-read set: $workflow"
   grep -Fq 'check-surface-migration-authorization.py' "$workflow" ||
@@ -830,7 +958,72 @@ for workflow in \
       "$workflow"; then
     fail "trusted workflow retains a proposed-head governance fallback: $workflow"
   fi
+
+  # #1264: one check name per claim. Undoing the split -- folding the self-test
+  # back in with the verdict, or letting the verdict-named job run the gate
+  # itself -- fails here, which is what makes the separation live rather than
+  # incidental.
+  selftest_job=$(workflow_job_lines "$workflow" "$gate-selftest")
+  verdict_job=$(workflow_job_lines "$workflow" "$gate-verdict-rendered")
+  base_job=$(workflow_job_lines "$workflow" "$gate-current-base")
+  render_job=$(workflow_job_lines "$workflow" "$gate")
+  for named in "$gate-selftest:$selftest_job" "$gate-verdict-rendered:$verdict_job" \
+    "$gate-current-base:$base_job" "$gate:$render_job"; do
+    [[ -n ${named#*:} ]] ||
+      fail "trusted workflow has no ${named%%:*} job: $workflow"
+  done
+  printf '%s\n' "$selftest_job" |
+    grep -Eq 'runner\.temp.*scripts/test-surface-governance\.sh' ||
+    fail "the self-test job does not run the governance falsifiers: $workflow"
+  printf '%s\n' "$selftest_job" |
+    grep -Eq 'runner\.temp.*scripts/test-install-surface-tools\.sh' ||
+    fail "the self-test job does not run the installer falsifiers: $workflow"
+  if printf '%s\n' "$verdict_job" |
+      grep -Eq 'runner\.temp.*scripts/test-(surface-governance|install-surface-tools)\.sh'; then
+    fail "the verdict job still runs the gate's own falsifiers: $workflow"
+  fi
+  printf '%s\n' "$verdict_job" |
+    grep -Eq 'runner\.temp.*scripts/report-surface-governance-verdict\.sh' ||
+    fail "the verdict job does not report through the outcome reporter: $workflow"
+  if printf '%s\n' "$render_job" | grep -Eq 'runner\.temp.*scripts/'; then
+    fail "the verdict-named job runs the gate instead of reading its outcome: $workflow"
+  fi
+  for reader in "$base_job" "$render_job"; do
+    printf '%s\n' "$reader" |
+      grep -Fq "needs.$gate-verdict-rendered.outputs.outcome" ||
+      fail "a reporting job does not read the rendered outcome: $workflow"
+  done
+
+  # Every extraction block in the file must extract the same set. The two jobs
+  # each need the whole base-trusted program, and a list that drifts would let
+  # one job silently resolve a tool from the head (#1186).
+  blocks=$(grep -c 'git show "\$BASE_SHA:\$path" > "\$TRUSTED_DIR/\$path"' "$workflow")
+  (( blocks >= 2 )) ||
+    fail "trusted workflow no longer extracts the base program per job: $workflow"
+  while read -r count path; do
+    (( count == blocks )) ||
+      fail "extracted path is missing from an extraction block: $path ($workflow)"
+  done < <(
+    grep -E '^[[:space:]]+(scripts|tools)/[^[:space:]]+[[:space:]]*\\?$' "$workflow" |
+      awk '{ gsub(/[[:space:]]/, ""); sub(/\\$/, ""); print }' |
+      LC_ALL=C sort | uniq -c
+  )
+  grep -Fq 'scripts/report-surface-governance-verdict.sh' "$workflow" ||
+    fail "trusted workflow does not extract the base outcome reporter: $workflow"
+  # Extraction must fail closed and say why. A workflow that shrugged off a
+  # missing base artifact -- or filled it from the head -- would be the hole
+  # #1186 already names, and would make deleting the reporter a silent pass.
+  grep -Fq "the head's copy is deliberately NOT used instead" "$workflow" ||
+    fail "trusted workflow does not name a missing base artifact as a malfunction: $workflow"
 done
+
+# The reporter must survive in the proposed tree, not only in the base.
+# Otherwise a head could delete it while the extraction line still found the
+# base's surviving copy, and master would end up with workflows whose program is
+# gone -- green all the way down.
+[[ -x "$ROOT/scripts/report-surface-governance-verdict.sh" ]] ||
+  fail "the proposed head has no executable outcome reporter"
+
 falsify_missing_base_governance_artifact
 if grep -Fq 'migration_candidate' "$ROOT/scripts/check-surface-governance.sh"; then
   fail "shell wrapper duplicates the verifier's migration activation authority"
@@ -847,7 +1040,9 @@ cp "$repo/actual/components/alpha/uniffi.txt" \
   "$repo/docs/surface/components/alpha/uniffi.txt"
 append_entry "$repo" ffi 998
 commit_case "$repo" wrong-pr-evidence
-expect_fail "change-log evidence names wrong PR" run_checker "$repo" "$base"
+expect_verdict "change-log evidence names wrong PR" \
+  "appended entry 1 must link this exact PR: https://github.com/pablof7z/nmp/pull/999" \
+  run_checker "$repo" "$base"
 
 repo="$TMP/checker-wrong-projection"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \
@@ -856,7 +1051,9 @@ cp "$repo/actual/components/alpha/uniffi.txt" \
   "$repo/docs/surface/components/alpha/uniffi.txt"
 append_entry "$repo" correction
 commit_case "$repo" wrong-projection-evidence
-expect_fail "change-log evidence names wrong projection" run_checker "$repo" "$base"
+expect_verdict "change-log evidence names wrong projection" \
+  "appended entry 1 projections must be exactly: ffi" \
+  run_checker "$repo" "$base"
 
 repo="$TMP/checker-placeholder"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \
@@ -868,19 +1065,201 @@ sed -i.bak 's/Fixture Reviewer, PR #999, 2026-07-30/pending, PR #999, 2026-07-30
   "$repo/docs/surface-change-log.md"
 rm "$repo/docs/surface-change-log.md.bak"
 commit_case "$repo" placeholder-signoff
-expect_fail "change-log placeholder signoff" run_checker "$repo" "$base"
+expect_verdict "change-log placeholder signoff" \
+  "appended entry 1 has a placeholder human signoff" \
+  run_checker "$repo" "$base"
 
 repo="$TMP/checker-dirty"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf 'dirty\n' >> "$repo/actual/components/alpha/uniffi.txt"
-expect_fail "unstaged dirty checkout" run_checker "$repo" "$base"
+expect_malfunction "unstaged dirty checkout" \
+  "deterministic regeneration requires a clean worktree" \
+  run_checker "$repo" "$base"
 
 repo="$TMP/checker-staged"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf '// staged\n' >> "$repo/Packages/Alpha/Sources/Alpha/Alpha.swift"
 git -C "$repo" add Packages/Alpha/Sources/Alpha/Alpha.swift
-expect_fail "staged dirty checkout" run_checker "$repo" "$base"
+expect_malfunction "staged dirty checkout" \
+  "deterministic regeneration requires a clean worktree" \
+  run_checker "$repo" "$base"
 
 repo="$TMP/checker-untracked"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf 'untracked\n' > "$repo/docs/surface/components/untracked.txt"
-expect_fail "untracked dirty checkout" run_checker "$repo" "$base"
+expect_malfunction "untracked dirty checkout" \
+  "deterministic regeneration requires a clean worktree" \
+  run_checker "$repo" "$base"
+
+# #1264: a malfunction must be visibly a malfunction and never a verdict, in
+# both directions. The cases below break the gate on purpose -- its tool, its
+# scratch state, its wiring, and the gate process itself -- and each one has to
+# come out with the malfunction exit code and prefix rather than a verdict line.
+
+repo="$TMP/checker-protected-for-malfunction"; new_repo "$repo"
+base=$(git -C "$repo" rev-parse HEAD)
+printf '# tamper\n' >> "$repo/.github/workflows/ci.yml"
+commit_case "$repo" protected-change
+protected_repo=$repo
+protected_base=$base
+
+run_checker_with() {
+  # run_checker, but with the named environment overridden, so one induced
+  # break at a time is the only difference from the verdict case above.
+  local repo=$1 base=$2
+  shift 2
+  local projections records
+  projections=$(checker_projections "$repo" "$base")
+  records=$(mktemp -d "$TMP/records-XXXXXX")
+  write_api_records "$repo" "$base" "$records"
+  env \
+    SURFACE_CATALOG_BIN="$CATALOG_BIN" \
+    SURFACE_ROOT="$repo" \
+    SURFACE_BASE_REF="$base" \
+    SURFACE_HEAD_REF=HEAD \
+    SURFACE_PR_NUMBER=999 \
+    SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
+    SURFACE_CHANGED_PROJECTIONS="$projections" \
+    SURFACE_PR_RECORD="$records/pull-request.json" \
+    SURFACE_ISSUE_RECORD="$records/issue.json" \
+    SURFACE_STATUS_RECORDS="$records/statuses.json" \
+    SURFACE_REGEN_CMD=scripts/regen.sh \
+    "$@" \
+    "$CHECK"
+}
+
+# The same protected head that renders a verdict above renders a malfunction
+# once the gate's own machinery is broken. Same input, different report.
+expect_verdict "protected head is a verdict while the gate is sound" \
+  "protected governance migration is not exactly authorized" \
+  run_checker "$protected_repo" "$protected_base"
+
+expect_malfunction "the gate's tool is missing" \
+  "component catalog tool is unavailable" \
+  run_checker_with "$protected_repo" "$protected_base" \
+  SURFACE_CATALOG_BIN="$TMP/no-such-catalog-tool"
+
+corrupt_records=$(mktemp -d "$TMP/corrupt-records-XXXXXX")
+write_api_records "$protected_repo" "$protected_base" "$corrupt_records"
+printf 'this is not json\n' > "$corrupt_records/statuses.json"
+expect_malfunction "the gate's scratch state is corrupt" \
+  "the migration verifier did not reach a verdict" \
+  run_checker_with "$protected_repo" "$protected_base" \
+  SURFACE_STATUS_RECORDS="$corrupt_records/statuses.json"
+
+rm -f "$corrupt_records/pull-request.json"
+expect_malfunction "a fetched record never arrived" \
+  "the migration verifier did not reach a verdict" \
+  run_checker_with "$protected_repo" "$protected_base" \
+  SURFACE_PR_RECORD="$corrupt_records/pull-request.json"
+
+expect_malfunction "the gate is wired to a commit that does not exist" \
+  "base commit is unavailable" \
+  run_checker_with "$protected_repo" "$protected_base" \
+  SURFACE_BASE_REF=0000000000000000000000000000000000000000
+
+# Staleness: the head is not on the current base, so nothing about it was
+# judged. Distinct exit code, distinct line, distinct check name in CI.
+repo="$TMP/checker-stale-base"; new_repo "$repo"
+root_commit=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" checkout -q -b advanced-base "$root_commit"
+printf 'the base moved on\n' > "$repo/ordinary.txt"
+commit_case "$repo" advance-base
+advanced_base=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" checkout -q -b proposed-head "$root_commit"
+printf '# tamper\n' >> "$repo/.github/workflows/ci.yml"
+commit_case "$repo" protected-change-on-stale-branch
+expect_stale_base "head is not descended from the current PR base" \
+  "protected migration head is not descended from the current PR base" \
+  run_checker "$repo" "$advanced_base"
+
+# The reporter is what turns those exit codes into a check name. Its mapping is
+# proved directly, including the case the workflow cannot express: a gate that
+# is killed and never exits on its own terms at all.
+expect_report() {
+  local label=$1 expected_outcome=$2 expected_status=$3
+  shift 3
+  local output status=0
+  output=$("$@" 2>&1) || status=$?
+  if (( status != expected_status )); then
+    echo "FAIL: $label reported exit $status, expected $expected_status" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$output" |
+      grep -Fq "surface-governance-outcome: $expected_outcome"; then
+    echo "FAIL: $label did not report outcome $expected_outcome" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  echo "ok - $label"
+}
+
+exiting_gate() {
+  local script="$TMP/gate-exit-$1.sh"
+  printf '#!/usr/bin/env bash\nexit %s\n' "$1" > "$script"
+  chmod +x "$script"
+  printf '%s\n' "$script"
+}
+
+expect_report "reporter: an accepted head is a verdict" accepted 0 \
+  "$REPORT" "$(exiting_gate 0)"
+expect_report "reporter: a rejected head is a verdict" rejected 0 \
+  "$REPORT" "$(exiting_gate 1)"
+expect_report "reporter: a stale head is a verdict" stale-base 0 \
+  "$REPORT" "$(exiting_gate $CHECK_STALE_BASE_EXIT)"
+expect_report "reporter: a malfunction is not a verdict" \
+  no-verdict "$CHECK_MALFUNCTION_EXIT" \
+  "$REPORT" "$(exiting_gate $CHECK_MALFUNCTION_EXIT)"
+expect_report "reporter: an unclassified exit is not a verdict" \
+  no-verdict "$CHECK_MALFUNCTION_EXIT" \
+  "$REPORT" "$(exiting_gate 2)"
+
+killed_gate="$TMP/gate-killed.sh"
+cat > "$killed_gate" <<'GATE'
+#!/usr/bin/env bash
+kill -KILL $$
+GATE
+chmod +x "$killed_gate"
+expect_report "reporter: a gate killed mid-run is not a verdict" \
+  no-verdict "$CHECK_MALFUNCTION_EXIT" \
+  "$REPORT" "$killed_gate"
+
+expect_report "reporter: nothing to run is not a verdict" \
+  no-verdict "$CHECK_MALFUNCTION_EXIT" \
+  "$REPORT" "$TMP/no-such-gate-program"
+
+# End to end through the real checker: one fixture, one reporter, two induced
+# situations, two different reports. This is the pair the whole change exists
+# for.
+sound_records=$(mktemp -d "$TMP/sound-records-XXXXXX")
+write_api_records "$protected_repo" "$protected_base" "$sound_records"
+real_gate() {
+  # A file, not an exported shell function: the reporter runs whatever program
+  # it is handed, and handing it a function would make this suite depend on the
+  # inherited-environment behaviour that #1170 is about.
+  local name=$1 catalog=$2 script="$TMP/real-gate-$1.sh"
+  cat > "$script" <<GATE
+#!/usr/bin/env bash
+exec env \\
+  SURFACE_CATALOG_BIN="$catalog" \\
+  SURFACE_ROOT="$protected_repo" \\
+  SURFACE_BASE_REF="$protected_base" \\
+  SURFACE_HEAD_REF=HEAD \\
+  SURFACE_PR_NUMBER=999 \\
+  SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \\
+  SURFACE_CHANGED_PROJECTIONS=none \\
+  SURFACE_PR_RECORD="$sound_records/pull-request.json" \\
+  SURFACE_ISSUE_RECORD="$sound_records/issue.json" \\
+  SURFACE_STATUS_RECORDS="$sound_records/statuses.json" \\
+  SURFACE_REGEN_CMD=scripts/regen.sh \\
+  SURFACE_SKIP_REGEN=1 \\
+  "$CHECK"
+GATE
+  chmod +x "$script"
+  printf '%s\n' "$script"
+}
+expect_report "reporter: the real gate rejecting a protected head" rejected 0 \
+  "$REPORT" "$(real_gate sound "$CATALOG_BIN")"
+expect_report "reporter: the real gate broken on the same head" \
+  no-verdict "$CHECK_MALFUNCTION_EXIT" \
+  "$REPORT" "$(real_gate broken "$TMP/no-such-catalog-tool")"
 
 echo "surface governance adversarial tests passed"

@@ -15,7 +15,28 @@ jobs:
   # Deterministic regeneration runs in the ordinary pull_request trust domain,
   # never in pull_request_target. The separate trusted-base governance check
   # protects this workflow and every script it invokes from PR modification.
-  surface-regeneration:
+  #
+  # Reporting boundary (#1264): four jobs, four claims, so a red says which
+  # thing went wrong without anyone opening a log.
+  #
+  #   surface-regeneration-selftest         the gate's own falsifiers, its
+  #                                         installer, and its base-locked tool
+  #                                         tests pass, so the judge is sound
+  #   surface-regeneration-verdict-rendered the gate reached a verdict at all
+  #   surface-regeneration-current-base     the head is descended from the PR's
+  #                                         current base
+  #   surface-regeneration                  the base-trusted program accepted
+  #                                         this head
+  #
+  # Only the last is a statement about the proposed change. A broken gate turns
+  # one of the first two red and leaves the rest skipped -- never a rejection
+  # that was never rendered. None of it is fail-open: every red still blocks,
+  # and #608 must require all four names, because a skipped check counts as
+  # success under branch protection.
+
+  # Claim: the judge works. Everything it runs comes from the base, so a red
+  # here is never about the proposed change.
+  surface-regeneration-selftest:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -46,6 +67,7 @@ jobs:
             scripts/lib/require-commands.sh
             scripts/install-surface-tools.sh
             scripts/regenerate-surface-snapshots.sh
+            scripts/report-surface-governance-verdict.sh
             scripts/run-surface-regeneration-governance.sh
             scripts/test-install-surface-tools.sh
             scripts/test-surface-migration-authorization.py
@@ -70,7 +92,109 @@ jobs:
             tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src/lib.rs
           )
           for path in "${paths[@]}"; do
-            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"
+            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path" || {
+              echo "surface-regeneration-malfunction: the base commit $BASE_SHA does not contain" >&2
+              echo "$path, so the trusted program this job needs does not exist yet." >&2
+              echo "A pull request that adds a file to the trusted set cannot be judged" >&2
+              echo "by it: the judge comes from the base, by design. No verdict was" >&2
+              echo "rendered, and the head's copy is deliberately NOT used instead." >&2
+              exit 1
+            }
+          done
+          chmod +x "$TRUSTED_DIR/scripts/"*.sh
+
+      - name: Install checksum-pinned surface tool
+        env:
+          SURFACE_ROOT: ${{ github.workspace }}
+          SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
+        working-directory: ${{ runner.temp }}/nmp-surface-regeneration
+        run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/install-surface-tools.sh
+
+      - name: Falsify governance and installer
+        env:
+          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog
+          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
+          SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
+        run: |
+          ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-surface-governance.sh "${{ github.workspace }}"
+          ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-install-surface-tools.sh
+          source ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
+          RUSTUP_TOOLCHAIN="$SURFACE_RUST_TOOLCHAIN" cargo "+$SURFACE_RUST_TOOLCHAIN" test --locked \
+            --manifest-path ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog/Cargo.toml \
+            --target-dir ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
+          RUSTUP_TOOLCHAIN="$SURFACE_RUST_TOOLCHAIN" cargo "+$SURFACE_RUST_TOOLCHAIN" test --locked \
+            --manifest-path ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot/Cargo.toml
+
+  # Claim: a verdict exists. Every step here is part of reaching one, so any
+  # failure -- extraction, the API fetch, the install, the toolchain, the
+  # checker crashing -- correctly means "no verdict", while the reporter turns a
+  # rejection into this job's success because a rejection IS a verdict.
+  surface-regeneration-verdict-rendered:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.verdict.outputs.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare base-trusted surface program
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TRUSTED_DIR: ${{ runner.temp }}/nmp-surface-regeneration
+        run: |
+          mkdir -p \
+            "$TRUSTED_DIR/scripts" \
+            "$TRUSTED_DIR/scripts/lib" \
+            "$TRUSTED_DIR/tools/component-interface-snapshot/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/src" \
+            "$TRUSTED_DIR/tools/surface-component-catalog/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/facade/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/src" \
+            "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src"
+          paths=(
+            scripts/check-surface-migration-authorization.py
+            scripts/check-surface-governance.sh
+            scripts/check-sdk-parity.sh
+            scripts/check-sdk-parity-allowlist.toml
+            scripts/lib/require-commands.sh
+            scripts/install-surface-tools.sh
+            scripts/regenerate-surface-snapshots.sh
+            scripts/report-surface-governance-verdict.sh
+            scripts/run-surface-regeneration-governance.sh
+            scripts/test-install-surface-tools.sh
+            scripts/test-surface-migration-authorization.py
+            scripts/test-surface-governance.sh
+            tools/surface-toolchain.env
+            tools/component-interface-snapshot/Cargo.toml
+            tools/component-interface-snapshot/Cargo.lock
+            tools/component-interface-snapshot/src/main.rs
+            tools/surface-component-catalog/Cargo.toml
+            tools/surface-component-catalog/Cargo.lock
+            tools/surface-component-catalog/src/main.rs
+            tools/rust-facade-snapshot/Cargo.toml
+            tools/rust-facade-snapshot/Cargo.lock
+            tools/rust-facade-snapshot/src/main.rs
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/Cargo.toml
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/Cargo.lock
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/facade/Cargo.toml
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/facade/src/lib.rs
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/Cargo.toml
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/src/lib.rs
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/Cargo.toml
+            tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src/lib.rs
+          )
+          for path in "${paths[@]}"; do
+            git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path" || {
+              echo "surface-regeneration-malfunction: the base commit $BASE_SHA does not contain" >&2
+              echo "$path, so the trusted program this job needs does not exist yet." >&2
+              echo "A pull request that adds a file to the trusted set cannot be judged" >&2
+              echo "by it: the judge comes from the base, by design. No verdict was" >&2
+              echo "rendered, and the head's copy is deliberately NOT used instead." >&2
+              exit 1
+            }
           done
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
 
@@ -122,33 +246,8 @@ jobs:
         working-directory: ${{ runner.temp }}/nmp-surface-regeneration
         run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/install-surface-tools.sh
 
-      - name: Falsify governance and installer
-        env:
-          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog
-          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
-          SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
-        run: |
-          ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-surface-governance.sh "${{ github.workspace }}"
-          ${{ runner.temp }}/nmp-surface-regeneration/scripts/test-install-surface-tools.sh
-          source ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
-          RUSTUP_TOOLCHAIN="$SURFACE_RUST_TOOLCHAIN" cargo "+$SURFACE_RUST_TOOLCHAIN" test --locked \
-            --manifest-path ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog/Cargo.toml \
-            --target-dir ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
-          RUSTUP_TOOLCHAIN="$SURFACE_RUST_TOOLCHAIN" cargo "+$SURFACE_RUST_TOOLCHAIN" test --locked \
-            --manifest-path ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot/Cargo.toml
-
-      - name: Compute changed projection context
-        id: projections
-        env:
-          SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
-          SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
-          SURFACE_CATALOG_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-component-catalog
-          SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
-        run: |
-          value=$(${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh --print-projections)
-          echo "value=$value" >> "$GITHUB_OUTPUT"
-
       - name: Regenerate and verify proposed surfaces
+        id: verdict
         env:
           SURFACE_BASE_REF: ${{ github.event.pull_request.base.sha }}
           SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
@@ -157,7 +256,6 @@ jobs:
           SURFACE_PR_RECORD: ${{ runner.temp }}/nmp-surface-regeneration/authorization/pull-request.json
           SURFACE_ISSUE_RECORD: ${{ runner.temp }}/nmp-surface-regeneration/authorization/issue.json
           SURFACE_STATUS_RECORDS: ${{ runner.temp }}/nmp-surface-regeneration/authorization/statuses.json
-          SURFACE_CHANGED_PROJECTIONS: ${{ steps.projections.outputs.value }}
           SURFACE_REGEN_CMD: ${{ runner.temp }}/nmp-surface-regeneration/scripts/regenerate-surface-snapshots.sh
           SURFACE_TOOLCHAIN_ENV: ${{ runner.temp }}/nmp-surface-regeneration/tools/surface-toolchain.env
           SURFACE_COMPONENT_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/component-interface-snapshot
@@ -166,7 +264,58 @@ jobs:
           SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
           SURFACE_RUST_FACADE_TOOL_DIR: ${{ runner.temp }}/nmp-surface-regeneration/tools/rust-facade-snapshot
           SURFACE_CHECKER: ${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh
-        run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/run-surface-regeneration-governance.sh
+        # The changed-projection context is derived by the same trusted checker
+        # immediately before the run that consumes it, so failing to derive it
+        # is also "no verdict" rather than a verdict nobody rendered.
+        run: |
+          projections=$(${{ runner.temp }}/nmp-surface-regeneration/scripts/check-surface-governance.sh --print-projections)
+          SURFACE_CHANGED_PROJECTIONS="$projections" \
+            ${{ runner.temp }}/nmp-surface-regeneration/scripts/report-surface-governance-verdict.sh \
+              ${{ runner.temp }}/nmp-surface-regeneration/scripts/run-surface-regeneration-governance.sh
+
+  # Claim: the head is on the PR's current base. A stale branch says nothing
+  # about the diff, so it gets its own name instead of borrowing the verdict's.
+  surface-regeneration-current-base:
+    needs: [surface-regeneration-selftest, surface-regeneration-verdict-rendered]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the head to be descended from the current PR base
+        env:
+          OUTCOME: ${{ needs.surface-regeneration-verdict-rendered.outputs.outcome }}
+        run: |
+          if [[ $OUTCOME == stale-base ]]; then
+            echo "surface-regeneration-current-base: this head is not descended from the current PR base." >&2
+            echo "Merge the base branch into this branch and push. Nothing about the change itself was judged." >&2
+            exit 1
+          fi
+          echo "surface-regeneration-current-base: the head is on the PR's current base"
+
+  # Claim: the head was accepted. The only check here that is a statement about
+  # the proposed change.
+  surface-regeneration:
+    needs: [surface-regeneration-selftest, surface-regeneration-verdict-rendered]
+    if: needs.surface-regeneration-verdict-rendered.outputs.outcome != 'stale-base'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Render the base-trusted program's verdict
+        env:
+          OUTCOME: ${{ needs.surface-regeneration-verdict-rendered.outputs.outcome }}
+        run: |
+          case "$OUTCOME" in
+            accepted)
+              echo "surface-regeneration: the base-trusted program accepted this head"
+              ;;
+            rejected)
+              echo "surface-regeneration: the base-trusted program rejected this head." >&2
+              echo "Its verdict line is in the surface-regeneration-verdict-rendered job log." >&2
+              exit 1
+              ;;
+            *)
+              echo "surface-regeneration: no verdict record exists (outcome '$OUTCOME')." >&2
+              echo "This is a gate malfunction and must not be read as a rejection." >&2
+              exit 70
+              ;;
+          esac
 
   test:
     runs-on: ubuntu-latest

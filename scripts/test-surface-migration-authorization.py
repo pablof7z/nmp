@@ -500,6 +500,7 @@ class MigrationAuthorizationTests(unittest.TestCase):
             ".github/workflows/surface-governance.yml",
             "scripts/check-surface-migration-authorization.py",
             "scripts/check-surface-governance.sh",
+            "scripts/report-surface-governance-verdict.sh",
             "scripts/run-surface-regeneration-governance.sh",
             "scripts/test-surface-migration-authorization.py",
             "scripts/test-surface-governance.sh",
@@ -724,6 +725,95 @@ class MigrationAuthorizationTests(unittest.TestCase):
                     ),
                     0,
                 )
+
+    def test_cli_exit_code_separates_verdict_staleness_and_malfunction(self) -> None:
+        """#1264: a red must say which of three things happened.
+
+        The verifier is the innermost place where "your change is not
+        authorized" and "I could not tell" shared one exit code, so the split is
+        asserted on the exit code itself and never on message text. Every case
+        here still exits nonzero: none of it makes the gate fail open.
+        """
+        pull_record = self.root / "pull-request.json"
+        issue_record = self.root / "issue.json"
+        status_records = self.root / "statuses.json"
+        pull_record.write_text(json.dumps(self.pull_request), encoding="utf-8")
+        issue_record.write_text(json.dumps(self.issue), encoding="utf-8")
+
+        def run(*, base: str | None = None, root: Path | None = None) -> int:
+            with mock.patch.object(authorization, "PRODUCTION_POLICY", self.policy):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        return authorization.main(
+                            [
+                                "--root",
+                                str(self.root if root is None else root),
+                                "--base",
+                                base or self.base,
+                                "--head",
+                                self.head,
+                                "--pr-number",
+                                str(self.pr_number),
+                                "verify",
+                                "--pr-url",
+                                self.pr_url,
+                                "--pull-request-record",
+                                str(pull_record),
+                                "--issue-record",
+                                str(issue_record),
+                                "--status-records",
+                                str(status_records),
+                            ]
+                        )
+
+        # A verdict: the head is protected and no owner status authorizes it.
+        status_records.write_text("[]", encoding="utf-8")
+        self.assertEqual(run(), authorization.VERDICT_EXIT)
+
+        # Authorized: the same call with the exact owner status.
+        status_records.write_text(json.dumps(self.statuses), encoding="utf-8")
+        self.assertEqual(run(), 0)
+
+        # Malfunction: the fetched record is unreadable, so nothing was judged.
+        status_records.unlink()
+        self.assertEqual(run(), authorization.MALFUNCTION_EXIT)
+        status_records.write_text("{not json", encoding="utf-8")
+        self.assertEqual(run(), authorization.MALFUNCTION_EXIT)
+        status_records.write_text(json.dumps(self.statuses), encoding="utf-8")
+
+        # Malfunction: Git itself fails, so no diff exists to judge.
+        outside = Path(tempfile.mkdtemp(prefix="surface-not-a-repository-"))
+        self.addCleanup(remove_scratch_tree, outside)
+        self.assertEqual(run(root=outside), authorization.MALFUNCTION_EXIT)
+
+        # Malfunction: an unhandled defect in the verifier is never a rejection.
+        with mock.patch.object(
+            authorization,
+            "verify_authorization",
+            side_effect=ZeroDivisionError("defect"),
+        ):
+            self.assertEqual(run(), authorization.MALFUNCTION_EXIT)
+
+        # Staleness: the head is not on the current base, so again nothing about
+        # it was judged. Committed last because it moves the fixture's branch.
+        self.git("checkout", "-q", "-b", "advanced-base", self.base)
+        self.write("base-only.txt", "base advanced\n")
+        advanced_base = self.commit("advance base")
+        self.assertEqual(run(base=advanced_base), authorization.STALE_BASE_EXIT)
+
+        self.assertEqual(
+            len(
+                {
+                    0,
+                    authorization.VERDICT_EXIT,
+                    authorization.UNPROTECTED_EXIT,
+                    authorization.STALE_BASE_EXIT,
+                    authorization.MALFUNCTION_EXIT,
+                }
+            ),
+            5,
+            "the five outcomes must not share an exit code",
+        )
 
     def test_unrelated_ordinary_diff_does_not_activate(self) -> None:
         self.git("checkout", "-q", "-b", "ordinary", self.base)

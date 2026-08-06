@@ -15,12 +15,37 @@ import json
 import re
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
 class AuthorizationError(Exception):
     """The proposed governance migration is not exactly authorized."""
+
+
+class StaleBaseError(AuthorizationError):
+    """The head is not on the PR's current base, so nothing about it was judged.
+
+    A verdict the author acts on by merging the current base in, not by changing
+    the diff. It exits distinctly so a caller never has to parse the message
+    (#1264).
+    """
+
+
+class GateMalfunction(Exception):
+    """The verifier could not reach a verdict at all.
+
+    Its inputs were unreadable or a Git command failed. This says nothing about
+    the proposed change, so it must never be reported as a rejection. It still
+    exits nonzero: the gate blocks either way.
+    """
+
+
+VERDICT_EXIT = 1
+UNPROTECTED_EXIT = 3
+STALE_BASE_EXIT = 4
+MALFUNCTION_EXIT = 70
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,6 +98,7 @@ PRODUCTION_POLICY = AuthorizationPolicy(
         "scripts/install-surface-tools.sh",
         "scripts/lib/require-commands.sh",
         "scripts/regenerate-surface-snapshots.sh",
+        "scripts/report-surface-governance-verdict.sh",
         "scripts/run-surface-regeneration-governance.sh",
         "scripts/test-install-surface-tools.sh",
         "scripts/test-surface-governance.sh",
@@ -185,7 +211,10 @@ def _git_bytes(root: Path, *args: str) -> bytes:
             or result.stdout.decode("utf-8", errors="replace").strip()
             or "git command failed"
         )
-        raise AuthorizationError(detail)
+        # Git failing is the repository or the checkout failing, never the
+        # proposed change failing. Reporting it as an authorization rejection is
+        # exactly the confusion #1264 removes.
+        raise GateMalfunction(detail)
     return result.stdout
 
 
@@ -345,7 +374,7 @@ def protected_paths_changed(
 
 def require_current_base(snapshot: DiffSnapshot, base: str) -> None:
     if snapshot.merge_base != base:
-        raise AuthorizationError(
+        raise StaleBaseError(
             "protected migration head is not descended from the current PR base"
         )
 
@@ -480,7 +509,11 @@ def _read_json(path: Path, label: str) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AuthorizationError(
+        # The workflow fetched these records; an unreadable one means the gate
+        # never obtained the evidence it judges with. A fork head whose statuses
+        # are unreachable still gets a readable `[]`, which fails closed as an
+        # ordinary rejection.
+        raise GateMalfunction(
             f"{label} is unavailable or invalid: {error}"
         ) from error
 
@@ -698,7 +731,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         head = _resolve_commit(args.root, "head", args.head)
         snapshot = canonical_diff(args.root, base=base, head=head)
         if not protected_paths_changed(PRODUCTION_POLICY, snapshot.entries):
-            return 3
+            return UNPROTECTED_EXIT
         if args.mode == "print-status":
             description = authorization_description(
                 PRODUCTION_POLICY,
@@ -731,9 +764,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"description={description}")
         print(f"target_url={target_url}")
         return 0
+    except StaleBaseError as error:
+        print(f"surface-migration-authorization: {error}", file=sys.stderr)
+        return STALE_BASE_EXIT
     except AuthorizationError as error:
         print(f"surface-migration-authorization: {error}", file=sys.stderr)
-        return 1
+        return VERDICT_EXIT
+    except GateMalfunction as error:
+        print(
+            f"surface-migration-authorization-malfunction: {error}",
+            file=sys.stderr,
+        )
+        return MALFUNCTION_EXIT
+    except Exception:
+        # An unhandled defect in the verifier is the loudest possible
+        # malfunction. It must not exit 1, because 1 is the code that means
+        # "the head is not authorized".
+        traceback.print_exc()
+        print(
+            "surface-migration-authorization-malfunction: "
+            "the verifier crashed without rendering a verdict",
+            file=sys.stderr,
+        )
+        return MALFUNCTION_EXIT
 
 
 if __name__ == "__main__":

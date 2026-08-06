@@ -561,5 +561,9 @@ about current code:
 
 - **Required-status branch protection is not configured (#81).** Ordinary CI
   and the trusted-base `surface-governance` workflow exist, but repository
-  settings must require both `surface-governance` and the protected ordinary
-  `surface-regeneration` check after the governance bootstrap merges.
+  settings must require all eight governance check names after the governance
+  bootstrap merges: `surface-governance` and the protected ordinary
+  `surface-regeneration`, plus each one's `-selftest`, `-verdict-rendered`, and
+  `-current-base` companion (#1264). Requiring only the two verdict names would
+  fail open, because a gate that breaks leaves them skipped and GitHub counts a
+  skipped required check as success.
