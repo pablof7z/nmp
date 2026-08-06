@@ -103,7 +103,7 @@ mod receipt_allocator_tests {
         let receipt = effects
             .iter()
             .find_map(|effect| match effect {
-                Effect::WriteAccepted(id) => Some(*id),
+                Effect::WriteAccepted(id, _) => Some(*id),
                 _ => None,
             })
             .expect("a store-refused write is still taken into custody");
@@ -517,7 +517,7 @@ mod persistence_stall_replay_tests {
         let id = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::WriteAccepted(id) => Some(*id),
+                Effect::WriteAccepted(id, _) => Some(*id),
                 _ => None,
             })
             .expect("publish takes custody and answers with the receipt id");
@@ -590,7 +590,7 @@ mod persistence_stall_replay_tests {
         let id = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::WriteAccepted(id) => Some(*id),
+                Effect::WriteAccepted(id, _) => Some(*id),
                 _ => None,
             })
             .expect("publish takes custody and answers with the receipt id");
