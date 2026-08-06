@@ -2761,7 +2761,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "`NmpEngine::new`'s `store_path` pointed at a file `RedbStore::open`\ncould not open.",
+                "`NmpEngine::new`'s `store_path` pointed at a file `RedbStore::open`\ncould not open: damaged bytes, a refused lock, an unresolvable path,\nan I/O failure.\n\nA positive claim, not a catch-all (#920): **discarding the store is\nnot the recovery for this.** The one refusal a fresh store does fix\nis `StoreUnsupportedSchema`, and it never arrives here.",
             ),
         },
         Variant {
@@ -2777,6 +2777,35 @@ enum Enum {
             ],
             docstring: Some(
                 "`NmpEngine::new`'s `store_path` named a persistent store already owned\nby this or another process. No second database owner and no partial\nengine were created (#489).",
+            ),
+        },
+        Variant {
+            name: "StoreUnsupportedSchema",
+            discr: None,
+            fields: [
+                Field {
+                    name: "path",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "expected",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "found",
+                    type_: Optional {
+                        inner_type: UInt64,
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "`NmpEngine::new`'s `store_path` holds durable bytes that are not the\none schema epoch this build supports (#867/#920). Nothing was\nmigrated, adopted, drained, or reset, and no engine was constructed.\n\nThe only response that lets this build run is to close every owner,\ndiscard the store, and create a fresh one — the app's call, through\nthe separate destructive reset door. The relay-backed read cache is\nreacquirable; the publish queue is not, so accepted but unpublished\nwrites and their receipts, correlation tokens, route revisions, and\nattempt evidence go with it.\n\n`found` is `None` when the store carries no marker this build can\nread, which includes a marker written at an address a superseded\nepoch owned. `None` means \"not this epoch\", never \"no data\".",
             ),
         },
         Variant {

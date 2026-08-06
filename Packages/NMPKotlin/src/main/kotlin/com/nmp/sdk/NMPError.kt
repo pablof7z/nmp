@@ -54,12 +54,50 @@ sealed class NMPError(message: String) : Exception(message) {
      * it -- including a stale replaceable base, which succeeds here and
      * arrives as [WriteOutcome.Refused]. */
     data class PublishRefused(val reason: String) : NMPError(reason)
+    /** The configured `storePath` pointed at a file the on-disk store could
+     * not open: damaged bytes, a refused lock, an unresolvable path, an I/O
+     * failure.
+     *
+     * A positive claim, not a catch-all (#920): **deleting the store is not
+     * the recovery for this.** The one refusal a fresh store does fix is
+     * [StoreUnsupportedSchema], and it never arrives here. */
     data class StoreOpenFailed(val reason: String) : NMPError("store open failed: $reason")
     /** #489: the configured `storePath` names a persistent store already owned
      * by this or another process. No second database owner and no partial
      * engine were created. */
     data class StoreAlreadyOpen(val path: String) :
         NMPError("persistent store is already open: $path")
+    /** #867/#920: the configured `storePath` holds durable bytes that are not
+     * the one schema epoch this build supports. Nothing was migrated, adopted,
+     * drained, or reset, and no engine was constructed.
+     *
+     * The only response that lets this build run is to close every owner,
+     * delete the store, and create a fresh one -- your call, through the
+     * separate destructive reset. The relay-backed read cache is reacquirable;
+     * the publish queue is not, so accepted but unpublished writes and their
+     * receipts, correlation tokens, route revisions, and attempt evidence go
+     * with it.
+     *
+     * [found] is `null` when the store carries no marker this build can read,
+     * which includes a marker written at an address a superseded epoch owned.
+     * `null` means "not this epoch", never "no data". */
+    data class StoreUnsupportedSchema(
+        val path: String,
+        val expected: ULong,
+        val found: ULong?,
+    ) : NMPError(
+        (
+            found?.let {
+                "persistent store $path is schema epoch $it, not the one supported epoch $expected"
+            }
+                ?: "persistent store $path carries no readable schema marker and is not the one " +
+                "supported epoch $expected"
+            ) +
+            "; it was not migrated, adopted, drained, or reset; discard and recreate this store " +
+            "to continue; NMP can reacquire the relay-backed read cache, but the publish queue " +
+            "state (accepted but unpublished writes, receipts, correlation tokens, route " +
+            "revisions, and attempt evidence) will be permanently lost",
+    )
     data class StoreResetFailed(val reason: String) : NMPError("store reset failed: $reason")
     data class StoreStillOpen(val path: String) : NMPError("persistent store is still open: $path")
     /** The engine could not be constructed (`NmpEngine` creation): a genuine
@@ -299,6 +337,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.PublishRefused -> PublishRefused(ffi.reason)
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)
                 is FfiException.StoreAlreadyOpen -> StoreAlreadyOpen(ffi.path)
+                is FfiException.StoreUnsupportedSchema ->
+                    StoreUnsupportedSchema(ffi.path, ffi.expected, ffi.found)
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)
                 is FfiException.StoreStillOpen -> StoreStillOpen(ffi.path)
                 is FfiException.EngineStartFailed -> EngineStartFailed(ffi.component, ffi.reason)

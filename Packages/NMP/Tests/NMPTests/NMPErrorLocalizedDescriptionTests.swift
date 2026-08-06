@@ -24,6 +24,23 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
                 .storeAlreadyOpen("/sentinel/store"),
                 "Persistent store is already open: /sentinel/store"
             ),
+            (
+                .storeUnsupportedSchema(path: "/sentinel/store", expected: 13, found: 10),
+                "Persistent store /sentinel/store is schema epoch 10, not the one supported epoch 13;"
+                    + " it was not migrated, adopted, drained, or reset; discard and recreate this store to continue;"
+                    + " NMP can reacquire the relay-backed read cache, but the publish queue state (accepted but"
+                    + " unpublished writes, receipts, correlation tokens, route revisions, and attempt evidence) will be"
+                    + " permanently lost"
+            ),
+            (
+                .storeUnsupportedSchema(path: "/sentinel/store", expected: 13, found: nil),
+                "Persistent store /sentinel/store carries no readable schema marker and is not the one supported"
+                    + " epoch 13;"
+                    + " it was not migrated, adopted, drained, or reset; discard and recreate this store to continue;"
+                    + " NMP can reacquire the relay-backed read cache, but the publish queue state (accepted but"
+                    + " unpublished writes, receipts, correlation tokens, route revisions, and attempt evidence) will be"
+                    + " permanently lost"
+            ),
             (.storeResetFailed("sentinel-reset"), "Could not reset store: sentinel-reset"),
             (.storeStillOpen("/sentinel/store"), "Persistent store is still open: /sentinel/store"),
             (

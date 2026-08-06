@@ -619,6 +619,10 @@ pub nmp::EngineError::StoreResetFailed
 pub nmp::EngineError::StoreResetFailed::reason: alloc::string::String
 pub nmp::EngineError::StoreStillOpen
 pub nmp::EngineError::StoreStillOpen::path: alloc::string::String
+pub nmp::EngineError::StoreUnsupportedSchema
+pub nmp::EngineError::StoreUnsupportedSchema::expected: u64
+pub nmp::EngineError::StoreUnsupportedSchema::found: core::option::Option<u64>
+pub nmp::EngineError::StoreUnsupportedSchema::path: alloc::string::String
 pub nmp::EngineError::WindowAggregateResultLimit
 pub nmp::EngineError::WindowInitialExceedsMax
 pub nmp::EngineError::WindowInitialExceedsMax::initial: usize

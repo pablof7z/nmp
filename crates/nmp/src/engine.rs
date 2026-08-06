@@ -304,13 +304,41 @@ impl Engine {
         };
         let (engine_thread, handle) = match &config.store_path {
             Some(path) => {
+                // Exhaustive on purpose (#920). A catch-all here is what
+                // silently collapsed the one open refusal a fresh store
+                // fixes into the family it must never be confused with, and
+                // it would collapse the next new refusal the same way. Every
+                // arm below is a decision someone made; adding a
+                // `RedbStoreOpenError` variant now fails this build until
+                // someone makes the next one.
                 let store = RedbStore::open(path).map_err(|error| match error {
                     RedbStoreOpenError::StoreAlreadyOpen { path } => {
                         EngineError::StoreAlreadyOpen {
                             path: path.to_string_lossy().into_owned(),
                         }
                     }
-                    error => EngineError::StoreOpenFailed {
+                    RedbStoreOpenError::UnsupportedSchema {
+                        path,
+                        expected,
+                        found,
+                    } => EngineError::StoreUnsupportedSchema {
+                        path: path.to_string_lossy().into_owned(),
+                        expected,
+                        found,
+                    },
+                    // The rest of the family shares ONE app-visible fact:
+                    // this store must not be discarded in response. A
+                    // refused lock, an unresolvable path, a target swapped
+                    // mid-open, damaged current-epoch bytes — recreating the
+                    // file fixes none of them, and doing it to the damaged
+                    // case destroys the only copy of unsent writes. They are
+                    // one variant because the branch is one branch, not
+                    // because nobody looked.
+                    error @ (RedbStoreOpenError::PathResolutionFailed { .. }
+                    | RedbStoreOpenError::LockFileOpenFailed { .. }
+                    | RedbStoreOpenError::LockFailed { .. }
+                    | RedbStoreOpenError::TargetChanged { .. }
+                    | RedbStoreOpenError::Database(_)) => EngineError::StoreOpenFailed {
                         reason: error.to_string(),
                     },
                 })?;
@@ -1425,6 +1453,96 @@ mod tests {
         Engine::reset_persistent_store(&path)
             .expect("failed construction must release its store ownership");
         assert!(!path.exists(), "reset must remove the failed-open store");
+    }
+
+    /// #920: the two open refusals an app must never confuse. A store from a
+    /// superseded epoch is recoverable and the recovery is to discard the
+    /// file; damaged current-epoch bytes are not, and discarding them
+    /// destroys the only copy of accepted-but-unpublished writes.
+    ///
+    /// The epoch fixture is the shape a real store hit: a marker written at
+    /// the address a superseded epoch owned (`schema_meta_v6`/`version`),
+    /// which this build cannot read, so `found` is `None` — "not this
+    /// epoch", not "no data". That fixture is exactly what made the refusal
+    /// text ("predates the schema marker") read as indistinguishable from an
+    /// unreadable file, and it is why the branch has to be a type.
+    #[test]
+    fn superseded_epoch_and_damaged_bytes_are_different_typed_open_refusals() {
+        use redb::{Database, TableDefinition};
+
+        let fixture = tempfile::tempdir().expect("temporary directory");
+
+        let superseded = fixture.path().join("superseded-epoch.redb");
+        {
+            let database = Database::create(&superseded).expect("epoch fixture must create");
+            let write = database.begin_write().expect("epoch fixture must begin");
+            {
+                let mut marker = write
+                    .open_table(TableDefinition::<&str, u64>::new("schema_meta_v6"))
+                    .expect("epoch fixture must open its retired marker table");
+                marker.insert("version", 10u64).expect("marker must insert");
+            }
+            write.commit().expect("epoch fixture must commit");
+        }
+        let error = Engine::new(EngineConfig {
+            store_path: Some(superseded.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .err()
+        .expect("a superseded-epoch store must refuse construction");
+        let expected = match &error {
+            EngineError::StoreUnsupportedSchema {
+                path,
+                expected,
+                found,
+            } => {
+                assert!(
+                    path.ends_with("superseded-epoch.redb"),
+                    "the refusal must name the store an app would discard: {path}"
+                );
+                assert_eq!(
+                    *found, None,
+                    "a marker this build cannot read is absent, not a different number"
+                );
+                *expected
+            }
+            other => panic!(
+                "a superseded epoch must not collapse into a generic open failure: {other:?}"
+            ),
+        };
+        assert!(expected > 0, "the build's own epoch must be reported");
+
+        // The operator contract (#1017) has to survive the promotion to this
+        // boundary, because this is where an app's operator reads it.
+        let rendered = error.to_string();
+        for required in [
+            "discard and recreate this store to continue",
+            "NMP can reacquire the relay-backed read cache",
+            "accepted but unpublished writes",
+            "permanently lost",
+        ] {
+            assert!(
+                rendered.contains(required),
+                "the reachable refusal must state {required:?}: {rendered}"
+            );
+        }
+
+        let damaged = fixture.path().join("damaged.redb");
+        std::fs::write(&damaged, b"not a redb database").expect("damaged fixture must write");
+        let refusal = Engine::new(EngineConfig {
+            store_path: Some(damaged.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        })
+        .err()
+        .expect("damaged bytes must refuse construction");
+        assert!(
+            matches!(refusal, EngineError::StoreOpenFailed { .. }),
+            "damaged bytes must never be reported as a discardable epoch: {refusal:?}"
+        );
+        assert!(
+            !refusal.to_string().contains("discard and recreate"),
+            "no open refusal but the epoch one may tell an operator to discard: {refusal}"
+        );
     }
 
     #[test]
