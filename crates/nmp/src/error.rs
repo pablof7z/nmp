@@ -22,12 +22,47 @@ pub enum EngineError {
     /// URL.
     InvalidRelayUrl { url: String },
     /// [`EngineConfig::store_path`](crate::EngineConfig::store_path) pointed
-    /// at a file the on-disk store could not open.
+    /// at a file the on-disk store could not open: damaged bytes, a refused
+    /// lock, an unresolvable path, an I/O failure.
+    ///
+    /// This is a POSITIVE claim, not a catch-all (#920): whatever refused
+    /// this open, **discarding the store is not the recovery**. The one
+    /// refusal a fresh store does fix is
+    /// [`Self::StoreUnsupportedSchema`], and it is never rendered here.
+    /// Treating a damaged current-epoch file as a discardable old one
+    /// destroys accepted-but-unpublished writes that the network cannot
+    /// re-supply, so the two stay separate variants in both directions.
     StoreOpenFailed { reason: String },
     /// [`EngineConfig::store_path`](crate::EngineConfig::store_path) names a
     /// persistent store already owned by this or another process. No second
     /// database owner and no partial engine were created (#489).
     StoreAlreadyOpen { path: String },
+    /// [`EngineConfig::store_path`](crate::EngineConfig::store_path)'s
+    /// durable bytes are not the one schema epoch this build supports
+    /// (#867/#920). Nothing was migrated, adopted, drained, or reset, and no
+    /// engine was constructed.
+    ///
+    /// NMP states the fact; the app owns the response. The only response
+    /// that lets this build run is to close every owner, discard the store,
+    /// and create a fresh one
+    /// (`docs/internals/conventions/schema-epoch-discard.md`) — but that
+    /// discard is permanent and it is the app's call, so
+    /// [`Engine::reset_persistent_store`](crate::Engine::reset_persistent_store)
+    /// stays a separate deliberate act. The relay-backed read cache can be
+    /// reacquired; the publish queue cannot, so accepted but unpublished
+    /// writes and their receipts, correlation tokens, route revisions, and
+    /// attempt evidence are lost with it.
+    ///
+    /// `expected` is this build's epoch. `found` is the marker actually
+    /// present, and is `None` when the store carries no marker this build
+    /// can read — which includes a store whose marker lives at an address a
+    /// superseded epoch owned. `None` therefore means "not this epoch", not
+    /// "no data".
+    StoreUnsupportedSchema {
+        path: String,
+        expected: u64,
+        found: Option<u64>,
+    },
     /// [`Engine::reset_persistent_store`](crate::Engine::reset_persistent_store)
     /// could not remove the requested unowned persistent store.
     StoreResetFailed { reason: String },
@@ -95,6 +130,35 @@ impl std::fmt::Display for EngineError {
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreAlreadyOpen { path } => {
                 write!(f, "persistent store is already open: {path}")
+            }
+            Self::StoreUnsupportedSchema {
+                path,
+                expected,
+                found,
+            } => {
+                match found {
+                    Some(found) => write!(
+                        f,
+                        "persistent store {path} is schema epoch {found}, not the one supported \
+                         epoch {expected}"
+                    ),
+                    None => write!(
+                        f,
+                        "persistent store {path} carries no readable schema marker and is not the \
+                         one supported epoch {expected}"
+                    ),
+                }?;
+                // #1017's operator contract: whoever reads the reachable
+                // refusal learns the full cost before choosing the discard.
+                // The facade is where an app's operator reads it, so it
+                // states the same two facts the store-level refusal does.
+                write!(
+                    f,
+                    "; it was not migrated, adopted, drained, or reset; discard and recreate this \
+                     store to continue; NMP can reacquire the relay-backed read cache, but the \
+                     publish queue state (accepted but unpublished writes, receipts, correlation \
+                     tokens, route revisions, and attempt evidence) will be permanently lost"
+                )
             }
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
             Self::StoreStillOpen { path } => {

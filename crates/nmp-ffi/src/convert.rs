@@ -111,7 +111,12 @@ pub enum FfiError {
         reason: String,
     },
     /// `NmpEngine::new`'s `store_path` pointed at a file `RedbStore::open`
-    /// could not open.
+    /// could not open: damaged bytes, a refused lock, an unresolvable path,
+    /// an I/O failure.
+    ///
+    /// A positive claim, not a catch-all (#920): **discarding the store is
+    /// not the recovery for this.** The one refusal a fresh store does fix
+    /// is `StoreUnsupportedSchema`, and it never arrives here.
     StoreOpenFailed {
         reason: String,
     },
@@ -120,6 +125,25 @@ pub enum FfiError {
     /// engine were created (#489).
     StoreAlreadyOpen {
         path: String,
+    },
+    /// `NmpEngine::new`'s `store_path` holds durable bytes that are not the
+    /// one schema epoch this build supports (#867/#920). Nothing was
+    /// migrated, adopted, drained, or reset, and no engine was constructed.
+    ///
+    /// The only response that lets this build run is to close every owner,
+    /// discard the store, and create a fresh one — the app's call, through
+    /// the separate destructive reset door. The relay-backed read cache is
+    /// reacquirable; the publish queue is not, so accepted but unpublished
+    /// writes and their receipts, correlation tokens, route revisions, and
+    /// attempt evidence go with it.
+    ///
+    /// `found` is `None` when the store carries no marker this build can
+    /// read, which includes a marker written at an address a superseded
+    /// epoch owned. `None` means "not this epoch", never "no data".
+    StoreUnsupportedSchema {
+        path: String,
+        expected: u64,
+        found: Option<u64>,
     },
     /// The requested unowned persistent store could not be removed.
     StoreResetFailed {
@@ -510,6 +534,15 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::InvalidRelayUrl { url } => Self::InvalidRelayUrl { got: url },
             nmp::EngineError::StoreOpenFailed { reason } => Self::StoreOpenFailed { reason },
             nmp::EngineError::StoreAlreadyOpen { path } => Self::StoreAlreadyOpen { path },
+            nmp::EngineError::StoreUnsupportedSchema {
+                path,
+                expected,
+                found,
+            } => Self::StoreUnsupportedSchema {
+                path,
+                expected,
+                found,
+            },
             nmp::EngineError::StoreResetFailed { reason } => Self::StoreResetFailed { reason },
             nmp::EngineError::StoreStillOpen { path } => Self::StoreStillOpen { path },
             nmp::EngineError::EngineStartFailed { component, reason } => {
@@ -590,6 +623,31 @@ impl std::fmt::Display for FfiError {
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreAlreadyOpen { path } => {
                 write!(f, "persistent store is already open: {path}")
+            }
+            Self::StoreUnsupportedSchema {
+                path,
+                expected,
+                found,
+            } => {
+                match found {
+                    Some(found) => write!(
+                        f,
+                        "persistent store {path} is schema epoch {found}, not the one supported \
+                         epoch {expected}"
+                    ),
+                    None => write!(
+                        f,
+                        "persistent store {path} carries no readable schema marker and is not the \
+                         one supported epoch {expected}"
+                    ),
+                }?;
+                write!(
+                    f,
+                    "; it was not migrated, adopted, drained, or reset; discard and recreate this \
+                     store to continue; NMP can reacquire the relay-backed read cache, but the \
+                     publish queue state (accepted but unpublished writes, receipts, correlation \
+                     tokens, route revisions, and attempt evidence) will be permanently lost"
+                )
             }
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
             Self::StoreStillOpen { path } => {

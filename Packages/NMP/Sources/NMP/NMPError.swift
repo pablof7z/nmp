@@ -47,11 +47,33 @@ public enum NMPError: Error, Sendable, Equatable {
     /// it -- including a stale replaceable base, which succeeds here and
     /// arrives as `WriteOutcome.refused`.
     case publishRefused(String)
+    /// `NmpEngineConfig.storePath` pointed at a file the on-disk store could
+    /// not open: damaged bytes, a refused lock, an unresolvable path, an I/O
+    /// failure.
+    ///
+    /// A positive claim, not a catch-all (#920): **deleting the store is not
+    /// the recovery for this.** The one refusal a fresh store does fix is
+    /// `storeUnsupportedSchema`, and it never arrives here.
     case storeOpenFailed(String)
     /// #489: `NmpEngineConfig.storePath` names a persistent store already
     /// owned by this or another process. No second database owner and no
     /// partial engine were created.
     case storeAlreadyOpen(String)
+    /// #867/#920: `NmpEngineConfig.storePath` holds durable bytes that are
+    /// not the one schema epoch this build supports. Nothing was migrated,
+    /// adopted, drained, or reset, and no engine was constructed.
+    ///
+    /// The only response that lets this build run is to close every owner,
+    /// delete the store, and create a fresh one -- your call, through the
+    /// separate destructive reset. The relay-backed read cache is
+    /// reacquirable; the publish queue is not, so accepted but unpublished
+    /// writes and their receipts, correlation tokens, route revisions, and
+    /// attempt evidence go with it.
+    ///
+    /// `found` is `nil` when the store carries no marker this build can
+    /// read, which includes a marker written at an address a superseded
+    /// epoch owned. `nil` means "not this epoch", never "no data".
+    case storeUnsupportedSchema(path: String, expected: UInt64, found: UInt64?)
     case storeResetFailed(String)
     case storeStillOpen(String)
     /// The engine could not be constructed (`NmpEngine.init`): a genuine
@@ -206,6 +228,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .PublishRefused(let reason): self = .publishRefused(reason)
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
         case .StoreAlreadyOpen(let path): self = .storeAlreadyOpen(path)
+        case .StoreUnsupportedSchema(let path, let expected, let found):
+            self = .storeUnsupportedSchema(path: path, expected: expected, found: found)
         case .StoreResetFailed(let reason): self = .storeResetFailed(reason)
         case .StoreStillOpen(let path): self = .storeStillOpen(path)
         case .EngineStartFailed(let component, let reason):
@@ -305,6 +329,14 @@ extension NMPError: LocalizedError {
             "Could not open store: \(reason)"
         case .storeAlreadyOpen(let path):
             "Persistent store is already open: \(path)"
+        case .storeUnsupportedSchema(let path, let expected, let found):
+            (found.map {
+                "Persistent store \(path) is schema epoch \($0), not the one supported epoch \(expected)"
+            } ?? "Persistent store \(path) carries no readable schema marker and is not the one supported epoch \(expected)")
+                + "; it was not migrated, adopted, drained, or reset; discard and recreate this store to continue;"
+                + " NMP can reacquire the relay-backed read cache, but the publish queue state (accepted but"
+                + " unpublished writes, receipts, correlation tokens, route revisions, and attempt evidence) will be"
+                + " permanently lost"
         case .storeResetFailed(let reason):
             "Could not reset store: \(reason)"
         case .storeStillOpen(let path):

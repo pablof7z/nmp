@@ -90,6 +90,41 @@ final class EvidenceMappingTests: XCTestCase {
         )
     }
 
+    /// #920: an app deciding whether to delete a multi-gigabyte store must
+    /// branch on a type, never on prose. The epoch refusal arrives as its own
+    /// fact carrying the path; every other open refusal — damaged bytes, a
+    /// refused lock — stays `.storeOpenFailed`, where deleting is wrong.
+    func testSupersededEpochRefusalRemainsTypedAndSeparableAtTheNativeBoundary() {
+        XCTAssertEqual(
+            NMPError(.StoreUnsupportedSchema(path: "/canonical/nmp.redb", expected: 13, found: 10)),
+            .storeUnsupportedSchema(path: "/canonical/nmp.redb", expected: 13, found: 10)
+        )
+        // A marker this build cannot read is absent, not zero, and is still
+        // the epoch refusal — the exact shape a real 1 GB store hit.
+        let unreadable = NMPError(
+            .StoreUnsupportedSchema(path: "/canonical/nmp.redb", expected: 13, found: nil)
+        )
+        XCTAssertEqual(
+            unreadable,
+            .storeUnsupportedSchema(path: "/canonical/nmp.redb", expected: 13, found: nil)
+        )
+        guard case .storeUnsupportedSchema(let path, _, let found) = unreadable else {
+            return XCTFail("the epoch refusal must be branchable without reading its text")
+        }
+        XCTAssertEqual(path, "/canonical/nmp.redb")
+        XCTAssertNil(found)
+        XCTAssertTrue(
+            unreadable.localizedDescription.contains("discard and recreate this store to continue")
+        )
+
+        let damaged = NMPError(.StoreOpenFailed(reason: "corrupted region"))
+        XCTAssertNotEqual(
+            damaged,
+            .storeUnsupportedSchema(path: "/canonical/nmp.redb", expected: 13, found: nil)
+        )
+        XCTAssertFalse(damaged.localizedDescription.contains("discard and recreate"))
+    }
+
     func testFiniteFactDeliveryFailuresRemainTypedAtTheNativeBoundary() {
         XCTAssertEqual(
             NMPError(.FactStreamLagged(receiptId: 42)),
