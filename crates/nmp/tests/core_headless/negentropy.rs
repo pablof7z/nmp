@@ -847,8 +847,14 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
     );
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
-    assert_eq!(core.get_coverage(&atom_a, &relay), None);
-    assert_eq!(core.get_coverage(&atom_b, &relay), None);
+    assert_eq!(
+        core.get_coverage(&atom_a, &relay).expect("coverage peek"),
+        None
+    );
+    assert_eq!(
+        core.get_coverage(&atom_b, &relay).expect("coverage peek"),
+        None
+    );
 
     let healthy_event = nostr::EventBuilder::new(Kind::Custom(2), "healthy concurrent request")
         .custom_created_at(Timestamp::from(101u64))
@@ -877,7 +883,10 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         "the missing-id failure must not poison a concurrent healthy request"
     );
     let healthy_atom = ctx_atom(cf(&[2], &[&healthy.public_key().to_hex()]));
-    assert!(core.get_coverage(&healthy_atom, &healthy_relay).is_some());
+    assert!(core
+        .get_coverage(&healthy_atom, &healthy_relay)
+        .expect("coverage peek")
+        .is_some());
 }
 
 /// A relay that answers the capability probe with `NEG-ERR` is classified
@@ -1619,8 +1628,14 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
     );
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
-    assert_eq!(core.get_coverage(&atom_a, &relay), None);
-    assert_eq!(core.get_coverage(&atom_b, &relay), None);
+    assert_eq!(
+        core.get_coverage(&atom_a, &relay).expect("coverage peek"),
+        None
+    );
+    assert_eq!(
+        core.get_coverage(&atom_b, &relay).expect("coverage peek"),
+        None
+    );
 
     // The positive leg: the reopened request's OWN EOSE still earns exactly
     // the coverage it proved.
@@ -1639,8 +1654,14 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         "the reopened request's own EOSE must still record coverage -- \
          exact attribution, not dead attribution: {served:?}"
     );
-    assert!(core.get_coverage(&atom_a, &relay).is_some());
-    assert!(core.get_coverage(&atom_b, &relay).is_some());
+    assert!(core
+        .get_coverage(&atom_a, &relay)
+        .expect("coverage peek")
+        .is_some());
+    assert!(core
+        .get_coverage(&atom_b, &relay)
+        .expect("coverage peek")
+        .is_some());
 }
 
 /// The same reincarnation defect at the live-candidate role (#932). A

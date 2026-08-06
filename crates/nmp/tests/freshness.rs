@@ -832,7 +832,8 @@ fn stale_max_age_refreshes_coverage_once_and_remains_live() {
     );
     assert_eq!(
         core.get_coverage(&atom(&keys, SourceAuthority::AuthorOutboxes), &relay)
-            .unwrap()
+            .expect("coverage peek")
+            .expect("a proven row")
             .through,
         Timestamp::from(100_000u64)
     );
@@ -902,7 +903,8 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
     ));
     assert_eq!(
         core.get_coverage(&atom(&keys, SourceAuthority::AuthorOutboxes), &relay)
-            .unwrap()
+            .expect("coverage peek")
+            .expect("a proven row")
             .through,
         Timestamp::from(100_001u64)
     );

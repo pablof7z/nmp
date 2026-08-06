@@ -136,7 +136,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
     let mut core = new_core(dir);
 
     assert_eq!(
-        core.next_deadline(),
+        core.next_deadline().expect("deadline peek"),
         None,
         "a fresh core tracks no expiring events and no open neg session"
     );
@@ -160,7 +160,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
         event_frame("s", expiring),
     ));
     assert_eq!(
-        core.next_deadline(),
+        core.next_deadline().expect("deadline peek"),
         Some(Timestamp::from(150u64)),
         "with only an expiring event, next_deadline is the store's expiry"
     );
@@ -211,7 +211,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
     // NEG_LIVENESS_DEADLINE_SECS (30), strictly nearer than the expiry at
     // 150, and must win the min.
     assert_eq!(
-        core.next_deadline(),
+        core.next_deadline().expect("deadline peek"),
         Some(Timestamp::from(30u64)),
         "an open neg session's liveness deadline (30) is nearer than the \
          expiry (150) and must win the min"

@@ -1036,14 +1036,23 @@ fn a_healthy_store_answers_every_hardened_door() {
         .recover_publish_queue()
         .expect("recover_publish_queue")
         .is_empty());
-    assert!(
+    assert_eq!(
         store
             .get_coverage(
                 crate::coverage::coverage_key(&healthy_atom(&keys())),
                 &relay()
             )
-            .is_none(),
-        "an unrecorded coverage row stays a healthy None"
+            .expect("a healthy store answers the coverage peek"),
+        None,
+        "an unrecorded coverage row stays a healthy `Ok(None)` -- absence, \
+         never the store failing to look (#763)"
+    );
+    assert_eq!(
+        store
+            .next_expiration()
+            .expect("a healthy store answers the deadline peek"),
+        None,
+        "an empty expiration index stays a healthy `Ok(None)`"
     );
 }
 

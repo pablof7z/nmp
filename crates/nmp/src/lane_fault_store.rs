@@ -285,7 +285,7 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.expire_due(now)
     }
-    fn next_expiration(&self) -> Option<Timestamp> {
+    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
         self.inner.next_expiration()
     }
     fn record_coverage(
@@ -294,7 +294,11 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     ) -> Result<(), PersistenceError> {
         self.inner.record_coverage(claims)
     }
-    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
+    fn get_coverage(
+        &self,
+        key: CoverageKey,
+        relay: &RelayUrl,
+    ) -> Result<Option<CoverageInterval>, PersistenceError> {
         self.inner.get_coverage(key, relay)
     }
     fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {

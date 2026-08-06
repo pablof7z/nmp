@@ -829,7 +829,10 @@ fn record_coverage_then_get_coverage_roundtrip() {
             .unwrap();
 
         let key = coverage_key(&atom(&s));
-        let interval = store.get_coverage(key, &r).expect("row should exist");
+        let interval = store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .expect("row should exist");
         assert_eq!(interval.from, Timestamp::from(0u64));
         assert_eq!(interval.through, Timestamp::from(100u64));
     });
@@ -840,7 +843,10 @@ fn get_coverage_returns_none_when_no_row_recorded() {
     for_each_backend(|store| {
         let s = shape(&[1], None);
         let key = coverage_key(&atom(&s));
-        assert!(store.get_coverage(key, &relay("wss://r1")).is_none());
+        assert!(store
+            .get_coverage(key, &relay("wss://r1"))
+            .expect("coverage peek")
+            .is_none());
     });
 }
 
@@ -868,6 +874,7 @@ fn coverage_key_is_window_erased_a_floored_refetch_finds_the_same_row() {
         assert_eq!(key, coverage_key(&atom(&unfloored)));
         let interval = store
             .get_coverage(key, &r)
+            .expect("coverage peek")
             .expect("same row, found via the floored atom's key");
         assert_eq!(interval.through, Timestamp::from(100u64));
     });
@@ -889,7 +896,10 @@ fn limited_fetch_that_never_calls_record_coverage_leaves_get_coverage_none() {
         // The engine never calls `record_coverage` here — that's the whole
         // point. We only assert the store's side: nothing was ever recorded.
         let key = coverage_key(&atom(&limited_shape));
-        assert!(store.get_coverage(key, &relay("wss://r1")).is_none());
+        assert!(store
+            .get_coverage(key, &relay("wss://r1"))
+            .expect("coverage peek")
+            .is_none());
     });
 }
 
@@ -916,7 +926,7 @@ fn coverage_merge_extends_across_two_record_coverage_calls() {
             .unwrap();
 
         let key = coverage_key(&atom(&s));
-        let interval = store.get_coverage(key, &r).unwrap();
+        let interval = store.get_coverage(key, &r).expect("coverage peek").unwrap();
         assert_eq!(interval.from, Timestamp::from(0u64));
         assert_eq!(interval.through, Timestamp::from(200u64));
     });
@@ -944,7 +954,7 @@ fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
             .unwrap();
 
         let key = coverage_key(&atom(&s));
-        let interval = store.get_coverage(key, &r).unwrap();
+        let interval = store.get_coverage(key, &r).expect("coverage peek").unwrap();
         assert_eq!(interval.from, Timestamp::from(300u64));
         assert_eq!(interval.through, Timestamp::from(400u64));
     });
@@ -981,6 +991,7 @@ fn explicit_gc_policy_evicts_durable_row_and_lowers_covering_watermark() {
         let key = coverage_key(&atom(&s));
         let interval = store
             .get_coverage(key, &r)
+            .expect("coverage peek")
             .expect("row should survive, shrunk");
         assert_eq!(interval.from, Timestamp::from(151u64));
         assert_eq!(interval.through, Timestamp::from(300u64));
@@ -1016,7 +1027,10 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
         assert_eq!(report.coverage_rows_shrunk, 0);
 
         let key = coverage_key(&atom(&s));
-        assert!(store.get_coverage(key, &r).is_none());
+        assert!(store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .is_none());
     });
 }
 
@@ -1045,7 +1059,10 @@ fn gc_deletes_coverage_when_evicting_the_maximum_timestamp_boundary() {
 
         let key = coverage_key(&atom(&s));
         assert!(
-            store.get_coverage(key, &r).is_none(),
+            store
+                .get_coverage(key, &r)
+                .expect("coverage peek")
+                .is_none(),
             "coverage must not claim the evicted u64::MAX point"
         );
         assert!(store.query(&Filter::new().id(event_id)).unwrap().is_empty());
@@ -1139,7 +1156,10 @@ fn gc_coverage_shrink_uses_only_the_max_matching_victim_and_counts_once_per_row(
         assert_eq!(report.coverage_rows_deleted, 0);
 
         let key = coverage_key(&atom(&s));
-        let interval = store.get_coverage(key, &r).expect("row survives, shrunk");
+        let interval = store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .expect("row survives, shrunk");
         assert_eq!(interval.from, Timestamp::from(101u64));
         assert_eq!(interval.through, Timestamp::from(300u64));
     });
@@ -1174,7 +1194,10 @@ fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
         assert_eq!(report.coverage_rows_shrunk, 0);
 
         let key = coverage_key(&atom(&s));
-        assert!(store.get_coverage(key, &r).is_none());
+        assert!(store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .is_none());
     });
 }
 
@@ -1211,7 +1234,10 @@ fn gc_coverage_shrink_ignores_victims_of_a_non_matching_kind() {
         assert_eq!(report.coverage_rows_deleted, 0);
 
         let key = coverage_key(&atom(&s));
-        let interval = store.get_coverage(key, &r).expect("row untouched");
+        let interval = store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .expect("row untouched");
         assert_eq!(interval.from, Timestamp::from(0u64));
         assert_eq!(interval.through, Timestamp::from(100u64));
     });
@@ -1379,6 +1405,7 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
 
     let interval = store
         .get_coverage(key, &r)
+        .expect("coverage peek")
         .expect("coverage survives reopen");
     assert_eq!(interval.from, Timestamp::from(0u64));
     assert_eq!(interval.through, Timestamp::from(150u64));
@@ -1414,7 +1441,10 @@ fn gc_max_timestamp_coverage_deletion_survives_redb_reopen() {
 
     let store = RedbStore::open(&path).expect("reopen redb store");
     assert!(
-        store.get_coverage(key, &r).is_none(),
+        store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .is_none(),
         "the deleted u64::MAX coverage row must not survive reopen"
     );
     assert!(store.query(&Filter::new().id(event_id)).unwrap().is_empty());
@@ -1742,18 +1772,24 @@ fn expiration_index_drains_due_and_reports_next() {
         store.insert(soon, observed("wss://r1", 1)).unwrap();
         store.insert(later, observed("wss://r1", 1)).unwrap();
 
-        assert_eq!(store.next_expiration(), Some(Timestamp::from(150u64)));
+        assert_eq!(
+            store.next_expiration().expect("deadline peek"),
+            Some(Timestamp::from(150u64))
+        );
 
         let due = store.expire_due(Timestamp::from(200u64)).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].event.id, soon_id);
         assert!(store.query(&Filter::new().id(soon_id)).unwrap().is_empty());
 
-        assert_eq!(store.next_expiration(), Some(Timestamp::from(300u64)));
+        assert_eq!(
+            store.next_expiration().expect("deadline peek"),
+            Some(Timestamp::from(300u64))
+        );
         let due2 = store.expire_due(Timestamp::from(300u64)).unwrap();
         assert_eq!(due2.len(), 1);
         assert_eq!(due2[0].event.id, later_id);
-        assert_eq!(store.next_expiration(), None);
+        assert_eq!(store.next_expiration().expect("deadline peek"), None);
     });
 }
 
@@ -1777,7 +1813,10 @@ fn expired_events_retract_at_reopen() {
     }
 
     let mut store = RedbStore::open(&path).expect("reopen");
-    assert_eq!(store.next_expiration(), Some(Timestamp::from(150u64)));
+    assert_eq!(
+        store.next_expiration().expect("deadline peek"),
+        Some(Timestamp::from(150u64))
+    );
     let due = store.expire_due(Timestamp::from(200u64)).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].event.id, expiring_id);
@@ -1818,7 +1857,10 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
             .unwrap();
 
         let key = coverage_key(&atom(&s));
-        let before = store.get_coverage(key, &r).expect("row exists");
+        let before = store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .expect("row exists");
 
         assert!(matches!(
             store
@@ -1827,18 +1869,24 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
             InsertOutcome::Superseded { .. }
         ));
         assert_eq!(
-            store.get_coverage(key, &r),
+            store.get_coverage(key, &r).expect("coverage peek"),
             Some(before),
             "supersession must not touch coverage"
         );
 
         let deletion = deletion_event(&k, vec![Tag::event(deleted_target_id)], 200);
         store.insert(deletion, observed("wss://r1", 2)).unwrap();
-        let after_delete = store.get_coverage(key, &r).expect("row still exists");
+        let after_delete = store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .expect("row still exists");
         assert_eq!(before, after_delete, "delete must not touch coverage");
 
         store.expire_due(Timestamp::from(200u64)).unwrap();
-        let after_expiry = store.get_coverage(key, &r).expect("row still exists");
+        let after_expiry = store
+            .get_coverage(key, &r)
+            .expect("coverage peek")
+            .expect("row still exists");
         assert_eq!(before, after_expiry, "expiry must not touch coverage");
 
         let signed_pending = regular_event_at(&k, "cancel me", 220);
@@ -1868,7 +1916,7 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
             .compensate_write(accepted.journaled_intent_id().expect("pending intent"))
             .expect("compensate pending row");
         assert_eq!(
-            store.get_coverage(key, &r),
+            store.get_coverage(key, &r).expect("coverage peek"),
             Some(before),
             "pre-signature termination must not touch coverage"
         );
@@ -1878,7 +1926,7 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
         let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert!(report.coverage_rows_shrunk + report.coverage_rows_deleted > 0);
         assert_ne!(
-            store.get_coverage(key, &r),
+            store.get_coverage(key, &r).expect("coverage peek"),
             Some(before),
             "GC must remain the only operation in this matrix that lowers coverage"
         );

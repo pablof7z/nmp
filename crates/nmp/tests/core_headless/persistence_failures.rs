@@ -14,6 +14,12 @@ pub(super) struct FailIngestStore {
     fail_insert: bool,
     fail_coverage: bool,
     fail_query: Rc<Cell<bool>>,
+    /// #763's two peeks and the deadline read whose error the caller used to
+    /// erase. Sticky (not one-shot) because these model a store that has
+    /// gone away rather than a single failed operation, and because the
+    /// falsifiers below need to heal them explicitly to prove the engine
+    /// comes back.
+    fail_peeks: Rc<Cell<bool>>,
     coverage_batch_sizes: Rc<RefCell<Vec<usize>>>,
 }
 
@@ -24,6 +30,7 @@ impl FailIngestStore {
             fail_insert: true,
             fail_coverage: false,
             fail_query: Rc::new(Cell::new(false)),
+            fail_peeks: Rc::new(Cell::new(false)),
             coverage_batch_sizes: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -34,6 +41,7 @@ impl FailIngestStore {
             fail_insert: false,
             fail_coverage: true,
             fail_query: Rc::new(Cell::new(false)),
+            fail_peeks: Rc::new(Cell::new(false)),
             coverage_batch_sizes,
         }
     }
@@ -44,8 +52,31 @@ impl FailIngestStore {
             fail_insert: false,
             fail_coverage: false,
             fail_query,
+            fail_peeks: Rc::new(Cell::new(false)),
             coverage_batch_sizes: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+
+    /// Healthy in every door except the three #763 reads, which refuse while
+    /// `fail_peeks` is set.
+    fn peek_armed(fail_peeks: Rc<Cell<bool>>) -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            fail_insert: false,
+            fail_coverage: false,
+            fail_query: Rc::new(Cell::new(false)),
+            fail_peeks,
+            coverage_batch_sizes: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    /// The classification a real backend read failure carries: an
+    /// environmental condition, never `Invariant` (which would name this
+    /// crate misusing its own database).
+    fn peek_failure(&self) -> Option<PersistenceError> {
+        self.fail_peeks
+            .get()
+            .then(|| PersistenceError::new(PersistenceFault::Io, "injected store read failure"))
     }
 }
 
@@ -92,8 +123,11 @@ impl EventStore for FailIngestStore {
     fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.expire_due(now)
     }
-    fn next_expiration(&self) -> Option<Timestamp> {
-        self.inner.next_expiration()
+    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        match self.peek_failure() {
+            Some(error) => Err(error),
+            None => self.inner.next_expiration(),
+        }
     }
     fn record_coverage(
         &mut self,
@@ -109,8 +143,15 @@ impl EventStore for FailIngestStore {
         }
         self.inner.record_coverage(claims)
     }
-    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
-        self.inner.get_coverage(key, relay)
+    fn get_coverage(
+        &self,
+        key: CoverageKey,
+        relay: &RelayUrl,
+    ) -> Result<Option<CoverageInterval>, PersistenceError> {
+        match self.peek_failure() {
+            Some(error) => Err(error),
+            None => self.inner.get_coverage(key, relay),
+        }
     }
     fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         self.inner.gc(claims)
@@ -161,6 +202,17 @@ impl EventStore for FailIngestStore {
         intent_id: nmp_store::IntentId,
     ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
+    }
+    /// Delegated explicitly rather than left on the trait default (which is
+    /// `Err("delivery deadlines unsupported")`): `EngineCore::next_deadline`
+    /// no longer erases this door's failure with `.ok().flatten()` (#763),
+    /// so a double that wants to model a healthy delivery plane has to
+    /// actually answer here. Armed by the same `fail_peeks` switch.
+    fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        match self.peek_failure() {
+            Some(error) => Err(error),
+            None => self.inner.next_publish_queue_deadline(),
+        }
     }
     delegate_publish_queue_door!(inner);
 }
@@ -361,7 +413,10 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         "a failed local EVENT commit must not become protocol absence evidence: {completed:?}"
     );
     let atom = ctx_atom(cf(&[1], &[&author.public_key().to_hex()]));
-    assert_eq!(core.get_coverage(&atom, &relay), None);
+    assert_eq!(
+        core.get_coverage(&atom, &relay).expect("coverage peek"),
+        None
+    );
 
     let healthy_wire = wire_sub_string(&healthy_request);
     let healthy_event = nostr::EventBuilder::new(Kind::Custom(2), "healthy")
@@ -406,7 +461,10 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         "a healthy persisted completion must expose its EOSE settlement: {healthy_completed:#?}"
     );
     let healthy_atom = ctx_atom(cf(&[2], &[&healthy_author.public_key().to_hex()]));
-    assert!(core.get_coverage(&healthy_atom, &healthy_relay).is_some());
+    assert!(core
+        .get_coverage(&healthy_atom, &healthy_relay)
+        .expect("coverage peek")
+        .is_some());
 }
 
 /// The event-failure key is the full physical relay session, not the relay
@@ -564,8 +622,15 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         access: AccessContext::Nip42(protected_author.public_key()),
         routing_evidence: BTreeSet::new(),
     };
-    assert_eq!(core.get_coverage(&public_atom, &relay), None);
-    assert!(core.get_coverage(&protected_atom, &relay).is_some());
+    assert_eq!(
+        core.get_coverage(&public_atom, &relay)
+            .expect("coverage peek"),
+        None
+    );
+    assert!(core
+        .get_coverage(&protected_atom, &relay)
+        .expect("coverage peek")
+        .is_some());
 }
 
 /// An EVENT on an overwritten wire id cannot identify which outstanding REQ
@@ -646,9 +711,18 @@ fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
                 .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
             "both revisions present at the failed EVENT stay poisoned: {poisoned:?}"
         );
-        assert_eq!(core.get_coverage(&atom_a, &relay), None);
-        assert_eq!(core.get_coverage(&atom_b, &relay), None);
-        assert_eq!(core.get_coverage(&atom_c, &relay), None);
+        assert_eq!(
+            core.get_coverage(&atom_a, &relay).expect("coverage peek"),
+            None
+        );
+        assert_eq!(
+            core.get_coverage(&atom_b, &relay).expect("coverage peek"),
+            None
+        );
+        assert_eq!(
+            core.get_coverage(&atom_c, &relay).expect("coverage peek"),
+            None
+        );
     }
 
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(800u64)));
@@ -666,9 +740,18 @@ fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
             .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
         "the revision recorded after the failure remains eligible: {later:?}"
     );
-    assert!(core.get_coverage(&atom_a, &relay).is_some());
-    assert!(core.get_coverage(&atom_b, &relay).is_some());
-    assert!(core.get_coverage(&atom_c, &relay).is_some());
+    assert!(core
+        .get_coverage(&atom_a, &relay)
+        .expect("coverage peek")
+        .is_some());
+    assert!(core
+        .get_coverage(&atom_b, &relay)
+        .expect("coverage peek")
+        .is_some());
+    assert!(core
+        .get_coverage(&atom_c, &relay)
+        .expect("coverage peek")
+        .is_some());
 }
 
 /// A projection read can fail only after the EVENT transaction has committed.
@@ -748,7 +831,10 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         "the committed event's request remains eligible despite projection failure"
     );
     let atom = ctx_atom(cf(&[3], &[&author.public_key().to_hex()]));
-    assert!(core.get_coverage(&atom, &relay).is_some());
+    assert!(core
+        .get_coverage(&atom, &relay)
+        .expect("coverage peek")
+        .is_some());
 }
 
 /// #816's request-atomic coverage falsifier. Two narrow atoms coalesced into
@@ -839,8 +925,16 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
     );
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
-    assert_eq!(core.get_coverage(&atom_a, &failed_relay), None);
-    assert_eq!(core.get_coverage(&atom_b, &failed_relay), None);
+    assert_eq!(
+        core.get_coverage(&atom_a, &failed_relay)
+            .expect("coverage peek"),
+        None
+    );
+    assert_eq!(
+        core.get_coverage(&atom_b, &failed_relay)
+            .expect("coverage peek"),
+        None
+    );
 
     let succeeded = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -854,7 +948,10 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         .iter()
         .any(|effect| matches!(effect, Effect::RecordCoverage(..))));
     let healthy_atom = ctx_atom(cf(&[1], &[&healthy.public_key().to_hex()]));
-    assert!(core.get_coverage(&healthy_atom, &healthy_relay).is_some());
+    assert!(core
+        .get_coverage(&healthy_atom, &healthy_relay)
+        .expect("coverage peek")
+        .is_some());
     assert_eq!(
         batch_sizes.borrow().as_slice(),
         &[2, 1],
@@ -932,7 +1029,7 @@ impl EventStore for WakeLaneProbeStore {
     fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
         self.inner.expire_due(now)
     }
-    fn next_expiration(&self) -> Option<Timestamp> {
+    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
         self.inner.next_expiration()
     }
     fn record_coverage(
@@ -941,7 +1038,11 @@ impl EventStore for WakeLaneProbeStore {
     ) -> Result<(), PersistenceError> {
         self.inner.record_coverage(claims)
     }
-    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval> {
+    fn get_coverage(
+        &self,
+        key: CoverageKey,
+        relay: &RelayUrl,
+    ) -> Result<Option<CoverageInterval>, PersistenceError> {
         self.inner.get_coverage(key, relay)
     }
     fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
@@ -1751,4 +1852,214 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
          corrupt receipt_for_intent's resolution of write #2's own due \
          deadline, got {effects:?}"
     );
+}
+
+// ---- #763: the deadline and coverage peeks -----------------------------
+
+/// #763 falsifier: a failing deadline peek is a value the driver can act on,
+/// not a panic and not a false `None`.
+///
+/// `EngineCore::next_deadline` is what the runtime loop arms its wait from,
+/// on the embedder's own thread. Two separate erasures met there: the
+/// expiration peek could not carry failure at all (it panicked), and the
+/// delivery peek's failure was discarded by `.ok().flatten()`, which parked
+/// the engine with a durable due obligation and nothing recording why. Both
+/// now leave as `Err`, and `Ok(None)` means only honest absence.
+#[test]
+fn a_failing_store_read_makes_the_next_deadline_a_typed_error_not_a_false_none() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
+    let faults = Rc::new(Cell::new(false));
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        FailIngestStore::peek_armed(Rc::clone(&faults)),
+        dir,
+        10,
+    );
+
+    // Honest absence from a healthy store: nothing expiring, nothing due.
+    assert_eq!(
+        core.next_deadline().expect("a healthy peek answers"),
+        None,
+        "a fresh core genuinely has no deadline"
+    );
+
+    faults.set(true);
+    let error = core
+        .next_deadline()
+        .expect_err("a store read that cannot answer must not be reported as `no deadline`");
+    assert_ne!(
+        error.fault(),
+        PersistenceFault::Invariant,
+        "a read failure is a condition, not a bug in the caller: {}",
+        error.message()
+    );
+
+    // Still alive, and the failure was a condition rather than a state: the
+    // reducer keeps handling messages and answers normally once healthy.
+    faults.set(false);
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
+    assert_eq!(core.next_deadline().expect("the peek answers again"), None);
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &author.public_key().to_hex(),
+    )));
+}
+
+/// #763 falsifier: opening a query while the coverage peek fails refuses the
+/// observation and degrades — it never opens one whose evidence says the
+/// sources have proven nothing.
+///
+/// `AcquisitionEvidence::sources[..].reconciled_through == None` is a claim
+/// about what a relay has proven. A store that could not be read has
+/// established no such thing, so it must not be able to render as one.
+#[test]
+fn a_failing_coverage_peek_refuses_the_open_instead_of_reporting_nothing_proven() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
+    let faults = Rc::new(Cell::new(false));
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        FailIngestStore::peek_armed(Rc::clone(&faults)),
+        dir,
+        10,
+    );
+    let _ = connect(&mut core, 0, &relay);
+
+    faults.set(true);
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &author.public_key().to_hex(),
+    )));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())),
+        "a failed coverage peek must surface the #122 degrade fact, got {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitRows(..))),
+        "a refused open delivers no evidence frame at all, got {effects:?}"
+    );
+
+    // And the engine is still usable: healing the store lets the very same
+    // subscribe succeed, evidence and all.
+    faults.set(false);
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &author.public_key().to_hex(),
+    )));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitRows(..))),
+        "a healthy store opens the observation normally, got {effects:?}"
+    );
+}
+
+/// #763 falsifier: a coverage peek that fails while REFRESHING evidence
+/// leaves the last delivered evidence standing.
+///
+/// The open above had nowhere to fall back to; a live observation does. The
+/// established #122 rule for a failed read on a live handle is "leave the
+/// last delivered state alone and degrade" (`refresh_observation` says so
+/// for rows), and evidence follows it: re-emitting a frame computed from a
+/// failed read would publish "nothing proven" over a watermark this reducer
+/// merely could not see.
+#[test]
+fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
+    let faults = Rc::new(Cell::new(false));
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        FailIngestStore::peek_armed(Rc::clone(&faults)),
+        dir,
+        10,
+    );
+    let _ = connect(&mut core, 0, &relay);
+    let opened = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &author.public_key().to_hex(),
+    )));
+    let baseline = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(_, _, evidence) => Some(evidence.clone()),
+            _ => None,
+        })
+        .expect("a healthy open delivers one evidence frame");
+
+    faults.set(true);
+    let second_relay = RelayUrl::parse("wss://second.example.com").unwrap();
+    let effects = connect(&mut core, 1, &second_relay);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())),
+        "the failed refresh must surface the degrade, got {effects:?}"
+    );
+    for effect in &effects {
+        if let Effect::EmitRows(_, _, evidence) = effect {
+            assert_eq!(
+                *evidence, baseline,
+                "a failed coverage read must not republish evidence at all"
+            );
+        }
+    }
+}
+
+/// #763 falsifier: the diagnostics snapshot cannot show empty coverage as a
+/// healthy store.
+///
+/// `FilterCoverageEntry::coverage` has no third state and is not gaining one
+/// for this (#920's rule: reuse the vocabulary that exists). What it must
+/// never do is present `None` beside `store_degraded: None`, because that
+/// pair reads as "the store is fine and nothing is proven".
+#[test]
+fn a_diagnostics_snapshot_built_over_a_failing_store_says_so() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
+    let faults = Rc::new(Cell::new(false));
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        FailIngestStore::peek_armed(Rc::clone(&faults)),
+        dir,
+        10,
+    );
+    let _ = connect(&mut core, 0, &relay);
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &author.public_key().to_hex(),
+    )));
+
+    let healthy = core.diagnostics_snapshot();
+    assert!(
+        healthy.store_degraded.is_none(),
+        "a healthy store reports no degradation"
+    );
+    assert!(
+        healthy
+            .relays
+            .iter()
+            .any(|relay| !relay.coverage.is_empty()),
+        "the fixture must actually project per-filter coverage entries"
+    );
+
+    faults.set(true);
+    let degraded = core.diagnostics_snapshot();
+    assert!(
+        degraded.store_degraded.is_some(),
+        "empty coverage entries must never stand beside a healthy-looking store"
+    );
+    for relay in &degraded.relays {
+        for entry in &relay.coverage {
+            assert!(
+                entry.coverage.is_none(),
+                "a failed read proves nothing, so it fabricates no interval either"
+            );
+        }
+    }
 }

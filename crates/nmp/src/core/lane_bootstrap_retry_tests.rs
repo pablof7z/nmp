@@ -181,6 +181,7 @@ fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq:
     faults.heal();
     let due = core
         .next_deadline()
+        .expect("deadline peek")
         .expect("an outstanding bootstrap gap arms a deadline");
     let retried = core.tick(due);
     assert!(
@@ -308,7 +309,11 @@ fn a_failed_bootstrap_never_parks_an_intent_permanently() {
     );
 
     faults.heal();
-    core.tick(core.next_deadline().expect("the gap arms a deadline"));
+    core.tick(
+        core.next_deadline()
+            .expect("deadline peek")
+            .expect("the gap arms a deadline"),
+    );
     deliver_ok(&mut core, &author, &relay, 0, &signed);
 
     assert!(
@@ -344,6 +349,7 @@ fn an_unresolved_bootstrap_keeps_retaining_and_backs_off() {
     for _ in 0..4 {
         let due = core
             .next_deadline()
+            .expect("deadline peek")
             .expect("the gap keeps arming a deadline");
         assert!(due > previous, "the retry must back off, not spin");
         previous = due;
@@ -395,6 +401,7 @@ fn a_boot_route_revision_read_error_re_enables_worker_reconciliation() {
     faults.heal();
     let due = recovered
         .next_deadline()
+        .expect("deadline peek")
         .expect("the blind boot gap arms a deadline");
     recovered.tick(due);
 

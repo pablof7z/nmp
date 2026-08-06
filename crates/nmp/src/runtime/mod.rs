@@ -4112,9 +4112,31 @@ fn engine_loop<S>(
 
     let mut shutting_down = false;
     loop {
-        let core_wait = core
-            .next_deadline()
-            .map(|deadline| duration_until(deadline, clock.now()));
+        // A deadline the store could not read is neither "due now" nor
+        // "nothing to wait for" (#763). It is a persistence failure, and it
+        // is recorded as the one #122 degrade fact an app already reads
+        // rather than folded into the `None` that means "park forever". The
+        // wait then falls back to the plain `recv()`, and the next message
+        // re-reads the deadline -- so a failing store cannot spin this loop
+        // either.
+        let core_wait = match core.next_deadline() {
+            Ok(deadline) => deadline.map(|deadline| duration_until(deadline, clock.now())),
+            Err(error) => {
+                let mut effects = Vec::new();
+                core.degrade_store(error, &mut effects);
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &registry,
+                    dispatch_runtime,
+                );
+                None
+            }
+        };
         let nip11_wait = nip11_decisions
             .borrow()
             .next_deadline()
@@ -4152,10 +4174,30 @@ fn engine_loop<S>(
                         );
                     }
                     let wall_now = clock.now();
-                    if core
-                        .next_deadline()
-                        .is_some_and(|deadline| deadline <= wall_now)
-                    {
+                    // A failed re-read fires no `Tick`: the store this tick
+                    // would drain is the store that just refused to be read,
+                    // and firing anyway would only reach the same failure
+                    // one door deeper. The degrade is recorded instead, and
+                    // the `continue` below re-arms from the top (#763).
+                    let due = match core.next_deadline() {
+                        Ok(deadline) => deadline.is_some_and(|deadline| deadline <= wall_now),
+                        Err(error) => {
+                            let mut effects = Vec::new();
+                            core.degrade_store(error, &mut effects);
+                            dispatch_core_effects(
+                                &mut core,
+                                effects,
+                                &pool,
+                                &mut row_channels,
+                                &mut history_channels,
+                                &mut diag_channels,
+                                &registry,
+                                dispatch_runtime,
+                            );
+                            false
+                        }
+                    };
+                    if due {
                         let effects = core.handle(EngineMsg::Tick(wall_now));
                         dispatch_core_effects(
                             &mut core,

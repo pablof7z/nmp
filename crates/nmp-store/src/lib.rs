@@ -1789,9 +1789,16 @@ pub trait EventStore {
     fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError>;
 
     /// The earliest NIP-40 `expiration` deadline among currently stored
-    /// rows, or `None` if nothing carries one. Index-backed: peeks the
+    /// rows, or `Ok(None)` if nothing carries one. Index-backed: peeks the
     /// minimum of the same persistent expiration index `expire_due` drains.
-    fn next_expiration(&self) -> Option<Timestamp>;
+    ///
+    /// Fallible for the same reason every other read door is (#122/#763): a
+    /// backend read can fail for reasons that are not a bug in the caller —
+    /// a disk error, a latched handle, a poisoned lock — and on an embedded
+    /// host a panic here takes the whole application down. `Ok(None)` is
+    /// honest absence and NOTHING else; a read that could not answer is
+    /// `Err`.
+    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError>;
 
     /// Atomically record every coverage claim earned by one completed
     /// request. Each tuple is `(atom, relay, proven interval)`. The coverage
@@ -1806,10 +1813,20 @@ pub trait EventStore {
         claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError>;
 
-    /// The proven interval for `key` at `relay`, or `None` if no row exists.
-    /// `None` means this relay has no persisted interval for this key; it
-    /// makes no wider claim.
-    fn get_coverage(&self, key: CoverageKey, relay: &RelayUrl) -> Option<CoverageInterval>;
+    /// The proven interval for `key` at `relay`, or `Ok(None)` if no row
+    /// exists. `Ok(None)` means this relay has no persisted interval for
+    /// this key; it makes no wider claim.
+    ///
+    /// Fallible for the same reason [`EventStore::next_expiration`] is
+    /// (#122/#763). The distinction is load-bearing here rather than merely
+    /// tidy: "no coverage is proven" drives a refetch, while "the store
+    /// could not be read" must not be answered as absent coverage, or a
+    /// corrupt/unreadable watermark reads as an honest cache miss.
+    fn get_coverage(
+        &self,
+        key: CoverageKey,
+        relay: &RelayUrl,
+    ) -> Result<Option<CoverageInterval>, PersistenceError>;
 
     /// Apply an EXPLICIT durable-retention policy by running claim-based GC
     /// (ruling §5): evicts every regular
