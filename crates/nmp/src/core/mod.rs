@@ -42,6 +42,8 @@ mod history_lifecycle_tests;
 mod lane_bootstrap_retry_tests;
 mod lane_projection;
 mod observation;
+#[cfg(test)]
+mod outbox_tests;
 mod query;
 #[cfg(test)]
 mod query_tests;

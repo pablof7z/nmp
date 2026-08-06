@@ -933,6 +933,115 @@ fn write_ack_per_relay() {
         .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: _ } } if r == &relay_bad)));
 }
 
+/// A relay named by two outbox sources is ONE destination, not two.
+///
+/// Bob reads from a relay the author also writes to, which is extremely
+/// ordinary. The `(intent_id, relay)` lane key must make the recipient's
+/// inbox collide with the lane the author's own outbox already minted, so
+/// the event is offered to that host once — not published twice to the same
+/// relay because two sources happened to name it.
+#[test]
+fn a_relay_two_outbox_sources_name_is_offered_the_event_exactly_once() {
+    let author = Keys::generate();
+    let bob = Keys::generate();
+    let shared = RelayUrl::parse("wss://shared.example").unwrap();
+    let author_only = RelayUrl::parse("wss://author-only.example").unwrap();
+    // Bob's inbox is not a subset of the author's outbox, so a resolver that
+    // ignored p-tagged recipients entirely would fail this test rather than
+    // pass it by coincidence.
+    let bob_only = RelayUrl::parse("wss://bob-only.example").unwrap();
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(author.public_key(), [shared.clone(), author_only.clone()])
+        .with_inbound_routes(bob.public_key(), [shared.clone(), bob_only.clone()]);
+    let mut core = new_core(dir);
+    activate(&mut core, &author);
+
+    // Nothing is connected yet, so every obligation this route mints announces
+    // itself as one `EnsureWriteRelay` -- the countable witness that the
+    // shared host became ONE delivery obligation rather than one per source.
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Event(
+            draft(11, "we share a relay").tag(nostr::Tag::public_key(bob.public_key())),
+        ),
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+        correlation: None,
+    }));
+    let (id, generation, unsigned) = find_sign_request(&accepted);
+    let signed = unsigned.sign_with_keys(&author).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(
+        id,
+        generation,
+        Ok(signed.clone()),
+    ));
+
+    let shared_session = signer_session(&shared, signed.pubkey);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(
+                |effect| matches!(effect, Effect::EnsureWriteRelay(session) if session == &shared_session)
+            )
+            .count(),
+        1,
+        "a host two sources name must cost ONE obligation, not one per source: {effects:?}"
+    );
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::EnsureWriteRelay(_)))
+            .count(),
+        3,
+        "the union of the author's two write relays with Bob's two-relay inbox is three \
+         obligations, and the shared host is one of them: {effects:?}"
+    );
+
+    // The same claim at the wire: connected, the note is offered to the shared
+    // host once, not once per source that named it.
+    let mut delivery: Vec<Effect> = Vec::new();
+    delivery.extend(connect_signer(&mut core, 0, &shared, author.public_key()));
+    delivery.extend(connect_signer(
+        &mut core,
+        1,
+        &author_only,
+        author.public_key(),
+    ));
+    delivery.extend(connect_signer(&mut core, 2, &bob_only, author.public_key()));
+    delivery.extend(authenticate_signer(&mut core, 0, &shared, &author));
+    delivery.extend(authenticate_signer(&mut core, 1, &author_only, &author));
+    delivery.extend(authenticate_signer(&mut core, 2, &bob_only, &author));
+    let offered_to_shared = |seen: &[Effect]| {
+        seen.iter()
+            .filter(
+                |effect| matches!(effect, Effect::PublishEvent(session, ..) if session == &shared_session)
+            )
+            .count()
+    };
+    assert_eq!(
+        offered_to_shared(&effects) + offered_to_shared(&delivery),
+        1,
+        "the shared host is offered the note exactly once across the whole delivery: {delivery:?}"
+    );
+
+    let destinations = effects
+        .iter()
+        .rev()
+        .find_map(|effect| match effect {
+            Effect::EmitReceipt(receipt, WriteFact::Destinations { relays, .. })
+                if *receipt == id =>
+            {
+                Some(relays.clone())
+            }
+            _ => None,
+        })
+        .expect("an accepted Auto write reports its destinations");
+    assert_eq!(
+        destinations,
+        BTreeSet::from([shared.clone(), author_only.clone(), bob_only.clone()]),
+        "the route is a set union, never a concatenation: {effects:?}"
+    );
+}
+
 #[test]
 fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
     let a = Keys::generate();
