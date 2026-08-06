@@ -53,6 +53,7 @@ nmp-nip29.workspace = true
 # nmp-nip51/nmp-nip29 above.
 nmp-nipc7.workspace = true
 nmp-nip18.workspace = true
+nmp-nip25.workspace = true
 nmp-content.workspace = true
 # #555 (epic #216 T15-A-BLOSSOM): the opt-in Blossom blob projection, same
 # direct-dep treatment as nmp-nip51/nmp-nip29 above -- nmp-ffi is the ONE
