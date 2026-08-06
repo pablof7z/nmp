@@ -1,6 +1,6 @@
 //! UniFFI projection of the optional, UI-blind content semantic layer.
 
-use nmp_content::{
+use nmp::content::{
     BlockKind, ContentDiagnostic, ContentSyntax, InlineNode, InlineStyle, ReferencePlacement,
     SourceRange,
 };
@@ -124,7 +124,7 @@ pub struct FfiContentDocument {
 
 #[uniffi::export]
 pub fn parse_nostr_content(content: String, syntax: FfiContentSyntax) -> FfiContentDocument {
-    document_to_ffi(nmp_content::parse_content(
+    document_to_ffi(nmp::content::parse_content(
         &content,
         syntax_from_ffi(syntax),
     ))
@@ -186,7 +186,7 @@ fn placement_to_ffi(value: ReferencePlacement) -> FfiReferencePlacement {
     }
 }
 
-fn occurrence_to_ffi(value: nmp_content::ReferenceOccurrence) -> FfiReferenceOccurrence {
+fn occurrence_to_ffi(value: nmp::content::ReferenceOccurrence) -> FfiReferenceOccurrence {
     FfiReferenceOccurrence {
         id: value.id,
         original: value.original,
@@ -260,7 +260,7 @@ fn diagnostic_to_ffi(value: ContentDiagnostic) -> FfiContentDiagnostic {
     }
 }
 
-fn document_to_ffi(value: nmp_content::ContentDocument) -> FfiContentDocument {
+fn document_to_ffi(value: nmp::content::ContentDocument) -> FfiContentDocument {
     FfiContentDocument {
         syntax: syntax_to_ffi(value.syntax),
         blocks: value

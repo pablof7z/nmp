@@ -32,37 +32,38 @@ nostr.workspace = true
 # app links, so a direct mechanism edge here would let the native product
 # boundary bind a type the facade never projected or governed.
 #
-# The `nip22` feature is how this crate reaches the NIP-22 comment vocabulary
-# (#572/#907): one owner, turned on, rather than a second edge to
-# `nmp-nip22` alongside the facade. `scripts/check-ffi-facade-boundary.sh` is
-# the mechanism that keeps all of this true.
-nmp = { workspace = true, features = ["nip22"] }
+# The feature list is how this crate reaches every optional protocol and
+# content family (#572/#907 for NIP-22, #1239 for the rest): one owner, turned
+# on, rather than a second edge to the mechanism crate alongside the facade.
+# `scripts/check-ffi-facade-boundary.sh` is the mechanism that keeps all of
+# this true.
+#
+# Before #1239 these were direct edges here and nowhere in the facade, on the
+# reasoning that they are "app-chosen protocol modules, not engine/query/
+# signer/write concepts the canonical facade governs". That reasoning decided
+# what `nmp-ffi` may BIND and never what the facade must OFFER, so it left the
+# families reachable from Swift and not from direct Rust. Now that the facade
+# offers each one, a direct edge here would be a second owner of the same
+# values -- exactly what #851 closed for `nmp-nip22`.
+nmp = { workspace = true, features = [
+    "nip18",
+    "nip22",
+    "nip25",
+    "nip51",
+    "nipc7",
+    "asset",
+    "blossom",
+    "content",
+] }
 uniffi = { workspace = true, features = ["cli"] }
-# #108: the read-only NIP-29 host-browser projection. Direct deps here
-# (not proxied through the `nmp` facade) -- these stay opt-in, app-chosen
-# dependencies at the direct-Rust layer (#63/#45's "opt-in protocol
-# crate" framing), but `nmp-ffi` is the ONE staticlib/cdylib every Swift/
-# Kotlin app links, so it bundles the projection directly. Unlike the
-# mechanism crates #851 closed off, these are app-chosen protocol modules,
-# not engine/query/signer/write concepts the canonical facade governs.
-nmp-nip51.workspace = true
+# The ONE family that cannot come through the facade: `nmp-nip02` depends on
+# `nmp` (a `protocol-service` in `scripts/dependency-direction-policy.json`,
+# above the facade rather than below it), so `nmp -> nmp-nip02` is a cyclic
+# package dependency cargo refuses to resolve. #1239 records this as its own
+# unit of work: the follow service's engine coupling has to be inverted before
+# the facade can own its vocabulary. Until then this edge is the only way the
+# staticlib every Swift and Kotlin app links can project the follow door.
 nmp-nip02.workspace = true
-nmp-nip29.workspace = true
-# #1243: the C7 chat composer and the NIP-18 repost composer, which #1243
-# reported as unreachable from Swift. Same direct-dep treatment as
-# nmp-nip51/nmp-nip29 above.
-nmp-nipc7.workspace = true
-nmp-nip18.workspace = true
-nmp-nip25.workspace = true
-nmp-content.workspace = true
-# #555 (epic #216 T15-A-BLOSSOM): the opt-in Blossom blob projection, same
-# direct-dep treatment as nmp-nip51/nmp-nip29 above -- nmp-ffi is the ONE
-# staticlib/cdylib every Swift/Kotlin app links, so it bundles the
-# projection without the crate joining the canonical `nmp` facade.
-# #884: the FFI boundary parses/formats `Sha256Hash` from its one
-# protocol-neutral owner.
-nmp-asset.workspace = true
-nmp-blossom.workspace = true
 # #555: `FfiBlossomAuthorization::validate_signed_event` reassembles an
 # `FfiSignedEvent` record into canonical event JSON for nostr's strict
 # `Event::from_json` parser (typed refusal on malformed id/sig hex).

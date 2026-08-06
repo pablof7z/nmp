@@ -79,7 +79,7 @@ pub fn reply_to(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 /// mention or quote needs.
 #[uniffi::export]
 pub fn chat() -> FfiEventBuilder {
-    builder_to_ffi(nmp_nipc7::chat())
+    builder_to_ffi(nmp::nipc7::chat())
 }
 
 /// State what a composed draft SAYS, and emit the rows its inline references
@@ -145,7 +145,7 @@ fn interpolate(mention: &dyn Mention, into: &mut InterpolatedContent) {
 /// takes exactly this value.
 #[uniffi::export]
 pub fn chat_reply(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
-    Ok(builder_to_ffi(nmp_nipc7::chat_reply(&row_from_ffi(
+    Ok(builder_to_ffi(nmp::nipc7::chat_reply(&row_from_ffi(
         target,
     )?)))
 }
@@ -159,7 +159,7 @@ pub fn chat_reply(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
     let row = row_from_ffi(target)?;
     let hint = row.sources.iter().next().cloned();
-    Ok(builder_to_ffi(nmp_nip18::repost(&row.event, hint)))
+    Ok(builder_to_ffi(nmp::nip18::repost(&row.event, hint)))
 }
 
 /// Compose a NIP-25 reaction to `target`.
@@ -177,17 +177,19 @@ pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 #[uniffi::export]
 pub fn react_to(target: FfiRow, reaction: FfiReaction) -> Result<FfiEventBuilder, FfiError> {
     let reaction = match reaction {
-        FfiReaction::Like => nmp_nip25::Reaction::Like,
-        FfiReaction::Dislike => nmp_nip25::Reaction::Dislike,
+        FfiReaction::Like => nmp::nip25::Reaction::Like,
+        FfiReaction::Dislike => nmp::nip25::Reaction::Dislike,
         FfiReaction::Emoji { emoji } => {
-            nmp_nip25::Reaction::emoji(emoji).map_err(|error| FfiError::InvalidReaction {
+            nmp::nip25::Reaction::emoji(emoji).map_err(|error| FfiError::InvalidReaction {
                 reason: error.to_string(),
             })?
         }
     };
     let row = row_from_ffi(target)?;
     let hint = row.sources.iter().next().cloned();
-    Ok(builder_to_ffi(nmp_nip25::react(&row.event, hint, reaction)))
+    Ok(builder_to_ffi(nmp::nip25::react(
+        &row.event, hint, reaction,
+    )))
 }
 
 #[cfg(test)]
