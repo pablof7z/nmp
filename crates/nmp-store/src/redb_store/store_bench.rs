@@ -876,7 +876,13 @@ fn events_column_table(key: &[u8]) -> Result<StoreBenchPreparedTable, String> {
 }
 
 /// Count the reopened [`EVENTS`] tree into its two prepared tables.
-fn count_reopened_events(
+///
+/// Every bench that reopens a database and compares against
+/// `StoreBenchPreparedCorpus::expected_table_rows` calls this one helper:
+/// the column-byte split is the only place that knows one physical tree
+/// answers for two prepared tables, and a second copy of that knowledge is
+/// exactly what went stale in the three push-ordered vectors this replaced.
+pub(super) fn count_reopened_events(
     read_txn: &redb::ReadTransaction,
     reopened_table_rows: &mut [u64],
 ) -> Result<(), String> {
