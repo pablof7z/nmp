@@ -13,9 +13,24 @@ publish.workspace = true
 # re-export inventory has a gap -- this crate existing and compiling IS the
 # acceptance proof for #52's "an app's Cargo.toml names `nmp` alone".
 #
-# The `nip22` feature is switched on here for the same reason: #851 made
-# `nmp::nip22` the ONE owner of the NIP-22 comment vocabulary, so this crate
-# proves that vocabulary is reachable WITHOUT a second `nmp-nip22` line --
-# turning a facade feature on is still "names `nmp` alone".
+# The protocol/content features are switched on here for the same reason: #851
+# made `nmp::nip22` the ONE owner of the NIP-22 comment vocabulary, and #1239
+# did the same for the families that were reachable from `nmp-ffi` and not from
+# this facade. Turning a facade feature on is still "names `nmp` alone"; adding
+# `nmp-content` or `nmp-blossom` to this dependency list would not be, which is
+# exactly why this crate is where the claim gets checked rather than asserted.
+#
+# `nip02` is absent because it cannot be present: `nmp-nip02` depends on `nmp`,
+# so the follow service sits above this facade rather than behind a feature of
+# it, and no feature list here can reach it.
 [dependencies]
-nmp = { workspace = true, features = ["nip22"] }
+nmp = { workspace = true, features = [
+    "asset",
+    "blossom",
+    "content",
+    "nip18",
+    "nip22",
+    "nip25",
+    "nip51",
+    "nipc7",
+] }

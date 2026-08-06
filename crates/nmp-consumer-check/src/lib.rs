@@ -33,6 +33,13 @@
 //!   #851 moved behind this facade so `nmp-ffi` could drop its direct
 //!   `nmp-nip22` edge. It is the exact value the FFI projection composes,
 //!   proving one owner rather than two aligned by convention.
+//! - every protocol/content family #1239 retrofitted onto the facade
+//!   ([`compose_every_retrofitted_family`]) -- NIP-C7 chat, NIP-18 reposts,
+//!   NIP-25 reactions, NIP-51 simple groups, content parsing, exact-byte asset
+//!   identity and Blossom. `nmp-ffi` bound all of them directly and the facade
+//!   offered none, so a Swift app got them by linking one staticlib while a
+//!   direct-Rust app named six more crates. This crate's `Cargo.toml` still
+//!   names `nmp` alone.
 //!
 //! The `#[cfg(test)]` module below additionally drives a real `Engine`
 //! end-to-end (construct, `add_account`, `observe`, `publish`,
@@ -41,9 +48,10 @@
 
 use nmp::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, CoverageInterval, Demand,
-    Derived, DiagnosticsSnapshot, EventBuilder, Filter, FilterCoverageEntry, Identity,
-    IdentityField, IndexedTagName, Kind, Lane, LiveQuery, ObservationEvidence, PublicKey,
-    RelayDiagnosticsSnapshot, Selector, Tag, Timestamp, WriteIntent, WritePayload, WriteRouting,
+    Derived, DiagnosticsSnapshot, Event, EventBuilder, Filter, FilterCoverageEntry, Identity,
+    IdentityField, IndexedTagName, Kind, Lane, LiveQuery, NostrEntity, ObservationEvidence,
+    PublicKey, RelayDiagnosticsSnapshot, RelayUrl, Selector, Tag, Timestamp, WriteIntent,
+    WritePayload, WriteRouting,
 };
 
 /// The reactive index kind an app might declare its own membership list
@@ -185,6 +193,80 @@ pub fn build_comment_intent(
 ) -> Result<WriteIntent, nmp::nip22::Nip73Error> {
     let root = nmp::nip22::CommentRoot::External(nmp::nip22::Nip73::podcast_episode(guid)?);
     Ok(nmp::nip22::comment_intent(&root, content.to_string(), None))
+}
+
+/// Names every protocol/content family #1239 retrofitted onto the facade, from
+/// `nmp` alone.
+///
+/// This is the acceptance proof for that issue, and it is deliberately one
+/// function rather than six: the claim is not "each family compiles" but "an
+/// app reaching all of them still names `nmp` alone", and only a single
+/// `Cargo.toml` with no second crate in it can say that. Before #1239 the same
+/// code needed six more dependency lines that a Swift app never needed,
+/// because `nmp-ffi` bound the crates directly and the facade offered nothing.
+///
+/// Every door here composes and returns rather than merely being imported, so
+/// removing any one re-export breaks this crate instead of leaving a stale
+/// claim in a doc comment. `nip02` is absent by construction, not oversight:
+/// `nmp-nip02` depends on `nmp`, so no feature of this facade can reach it.
+pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>) -> Vec<String> {
+    // NIP-C7 kind:9 chat, top-level and threaded (`nmp::nipc7`).
+    let chat = nmp::nipc7::chat();
+    let chat_reply = nmp::nipc7::chat_reply(target);
+    // NIP-18 repost, whose whole value is that the caller never picks between
+    // kind:6 and kind:16 (`nmp::nip18`).
+    let repost = nmp::nip18::repost(target, source.clone());
+    // NIP-25 reaction (`nmp::nip25`), wired at birth by #155 and named here so
+    // the retrofit and the family that avoided it are proven the same way.
+    let reaction = nmp::nip25::react(target, source, nmp::nip25::Reaction::Like);
+    // NIP-51 kind:10009: the demand that reads it and the tolerant codec that
+    // decodes what came back (`nmp::nip51`).
+    let groups_demand: Demand = nmp::nip51::active_account_demand();
+    let groups: nmp::nip51::SimpleGroupsList =
+        nmp::nip51::parse_simple_groups_list_tolerant(target);
+    let first_group: Option<&nmp::nip51::SimpleGroupEntry> = groups.items.first();
+    // Content parsing (`nmp::content`) -- the door mosaico hand-rolled a
+    // `find("nostr:")` scanner for, because it could not reach this one.
+    let document: nmp::content::ContentDocument =
+        nmp::content::parse_content(&target.content, nmp::content::ContentSyntax::PlainText);
+    let references: Vec<&NostrEntity> = document
+        .references()
+        .into_iter()
+        .map(|occurrence: &nmp::content::ReferenceOccurrence| &occurrence.target)
+        .collect();
+    // Exact-byte identity and the Blossom vocabulary built on it
+    // (`nmp::asset`, `nmp::blossom`).
+    let digest: nmp::asset::Sha256Hash = nmp::asset::Sha256Hash::of(target.content.as_bytes());
+    let verbs = [
+        nmp::blossom::BlossomVerb::Upload,
+        nmp::blossom::BlossomVerb::Delete,
+        nmp::blossom::BlossomVerb::List,
+    ];
+
+    vec![
+        format!("chat {:?}", chat.kind),
+        format!(
+            "chat_reply {:?} +{} row(s)",
+            chat_reply.kind,
+            chat_reply.tags.len()
+        ),
+        format!("repost {:?}", repost.kind),
+        format!("reaction {:?} {:?}", reaction.kind, reaction.content),
+        format!("groups demand {groups_demand:?}"),
+        format!(
+            "{} group(s), first {:?}, {} malformed",
+            groups.items.len(),
+            first_group.map(|entry| &entry.group_id),
+            groups.malformed_item_count,
+        ),
+        format!(
+            "{} reference(s) in {} block(s)",
+            references.len(),
+            document.blocks.len()
+        ),
+        digest.to_hex(),
+        format!("{verbs:?}"),
+    ]
 }
 
 /// Names and reads the observation-scoped execution envelope from an

@@ -454,7 +454,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "`nmp_blossom::AuthDraftError::ExpirationNotAfterCreatedAt` mirror:\nsuch a window is expired at birth.",
+                "`nmp::blossom::AuthDraftError::ExpirationNotAfterCreatedAt` mirror:\nsuch a window is expired at birth.",
             ),
         },
         Variant {
@@ -598,7 +598,7 @@ enum Enum {
     },
     non_exhaustive: false,
     docstring: Some(
-        "The draft-construction + validation failure taxonomy\n(`nmp_blossom::AuthDraftError` + `nmp_blossom::AuthValidationError`\nmirrors, plus the boundary-re-introduced input parses). One enum for\nboth stages because both answer the same caller question -- \"why is\nthere no usable authorization?\" -- while every underlying check keeps\nits own variant (a refused authorization still names the exact BUD-11\nclause it failed).",
+        "The draft-construction + validation failure taxonomy\n(`nmp::blossom::AuthDraftError` + `nmp::blossom::AuthValidationError`\nmirrors, plus the boundary-re-introduced input parses). One enum for\nboth stages because both answer the same caller question -- \"why is\nthere no usable authorization?\" -- while every underlying check keeps\nits own variant (a refused authorization still names the exact BUD-11\nclause it failed).",
     ),
 }
 
@@ -671,7 +671,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "`nmp_blossom::ClientBuildError` mirror.",
+                "`nmp::blossom::ClientBuildError` mirror.",
             ),
         },
         Variant {
@@ -843,7 +843,7 @@ enum Enum {
     },
     non_exhaustive: false,
     docstring: Some(
-        "`nmp_blossom::DeleteError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive.",
+        "`nmp::blossom::DeleteError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive.",
     ),
 }
 
@@ -929,7 +929,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp_blossom::DescriptorError` mirror -- the strict BUD-02 descriptor\nparse refusals, variant-for-variant.",
+        "`nmp::blossom::DescriptorError` mirror -- the strict BUD-02 descriptor\nparse refusals, variant-for-variant.",
     ),
 }
 
@@ -1017,7 +1017,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "`nmp_blossom::ClientBuildError` mirror.",
+                "`nmp::blossom::ClientBuildError` mirror.",
             ),
         },
         Variant {
@@ -1212,7 +1212,7 @@ enum Enum {
     },
     non_exhaustive: false,
     docstring: Some(
-        "`nmp_blossom::ListError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive.",
+        "`nmp::blossom::ListError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive.",
     ),
 }
 
@@ -1285,7 +1285,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "`nmp_blossom::ClientBuildError` mirror.",
+                "`nmp::blossom::ClientBuildError` mirror.",
             ),
         },
         Variant {
@@ -1528,7 +1528,7 @@ enum Enum {
     },
     non_exhaustive: false,
     docstring: Some(
-        "`nmp_blossom::MirrorError` mirror plus the boundary-re-introduced\nparse/machinery variants. Deliberately its own enum: mirror has failure\nmodes with no upload analogue (the 409 hash refusal, the 502\norigin-fetch failure) and operation failures are never collapsed.",
+        "`nmp::blossom::MirrorError` mirror plus the boundary-re-introduced\nparse/machinery variants. Deliberately its own enum: mirror has failure\nmodes with no upload analogue (the 409 hash refusal, the 502\norigin-fetch failure) and operation failures are never collapsed.",
     ),
 }
 
@@ -1611,7 +1611,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp_blossom::ServerUrlError` mirror -- every base-URL admission\nrefusal, variant-for-variant.",
+        "`nmp::blossom::ServerUrlError` mirror -- every base-URL admission\nrefusal, variant-for-variant.",
     ),
 }
 
@@ -1655,7 +1655,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp_blossom::Sha256HexError` mirror -- the strict lowercase-hex parse\nrefusals, carried as a typed field by the variants that wrap it (never\nflattened into a message string).",
+        "`nmp::asset::Sha256HexError` mirror -- the strict lowercase-hex parse\nrefusals, carried as a typed field by the variants that wrap it (never\nflattened into a message string).",
     ),
 }
 
@@ -1710,7 +1710,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "`nmp_blossom::ClientBuildError` mirror: the HTTP stack could not be\nconstructed (system DNS configuration unreadable, or reqwest client\nconstruction failed).",
+                "`nmp::blossom::ClientBuildError` mirror: the HTTP stack could not be\nconstructed (system DNS configuration unreadable, or reqwest client\nconstruction failed).",
             ),
         },
         Variant {
@@ -1919,7 +1919,7 @@ enum Enum {
     },
     non_exhaustive: false,
     docstring: Some(
-        "`nmp_blossom::UploadError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive; never collapsed with the other\noperations' taxonomies.",
+        "`nmp::blossom::UploadError` mirror plus the boundary-re-introduced\nparse/machinery variants. Exhaustive; never collapsed with the other\noperations' taxonomies.",
     ),
 }
 
@@ -1957,7 +1957,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The BUD-11 authorization verbs (`nmp_blossom::BlossomVerb` mirror).\n`get` is modeled totally (the Rust enum is total) but has no draft\nbuilder yet -- the `get`/`media` endpoints are epic-#216 follow-ups.",
+        "The BUD-11 authorization verbs (`nmp::blossom::BlossomVerb` mirror).\n`get` is modeled totally (the Rust enum is total) but has no draft\nbuilder yet -- the `get`/`media` endpoints are epic-#216 follow-ups.",
     ),
 }
 
@@ -3109,7 +3109,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "#155: an `FfiReaction::Emoji` failed `nmp_nip25::Reaction::emoji`'s\nvalidation. Two states reach here, both of which would otherwise\npublish a reaction whose content says something the caller did not:\nthe empty string, which NIP-25 reads as `+` and therefore as a LIKE,\nand a NIP-30 `:shortcode:`, which needs a companion `emoji` row this\ndoor does not write and would reach every reader as literal colons.",
+                "#155: an `FfiReaction::Emoji` failed `nmp::nip25::Reaction::emoji`'s\nvalidation. Two states reach here, both of which would otherwise\npublish a reaction whose content says something the caller did not:\nthe empty string, which NIP-25 reads as `+` and therefore as a LIKE,\nand a NIP-30 `:shortcode:`, which needs a companion `emoji` row this\ndoor does not write and would reach every reader as literal colons.",
             ),
         },
         Variant {
@@ -4180,7 +4180,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "What a NIP-25 reaction SAYS (`nmp_nip25::Reaction` mirror, #155).\n\nNot a string, because NIP-25 assigns fixed meanings to fixed bytes: *\"A\nreaction with `content` set to `+` or an empty string MUST be interpreted\nas a 'like' or 'upvote'. A reaction with `content` set to `-` MUST be\ninterpreted as a 'dislike' or 'downvote'.\"* A caller passing content by\nhand can therefore spell \"like\" three ways, and can spell it by accident\nwith an empty picker result. These are the spec's own three readings and\nthere is no fourth.",
+        "What a NIP-25 reaction SAYS (`nmp::nip25::Reaction` mirror, #155).\n\nNot a string, because NIP-25 assigns fixed meanings to fixed bytes: *\"A\nreaction with `content` set to `+` or an empty string MUST be interpreted\nas a 'like' or 'upvote'. A reaction with `content` set to `-` MUST be\ninterpreted as a 'dislike' or 'downvote'.\"* A caller passing content by\nhand can therefore spell \"like\" three ways, and can spell it by accident\nwith an empty picker result. These are the spec's own three readings and\nthere is no fourth.",
     ),
 }
 
@@ -5900,7 +5900,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). When\nreturned by [`FfiBlossomClient::upload`] its `sha256` was PROVEN equal to\nthe hash of the exact bytes this client uploaded. A\n[`FfiBlossomClient::mirror`] result was checked only against the hash the\ncaller authorized -- this client never sees the mirrored bytes, so it\nmints no exact-byte proof (#884). Rows from [`FfiBlossomClient::list`] are\nstrictly parsed but remain unverified server claims, exactly as in the\nRust crate.",
+        "A BUD-02 blob descriptor (`nmp::blossom::BlobDescriptor` mirror). When\nreturned by [`FfiBlossomClient::upload`] its `sha256` was PROVEN equal to\nthe hash of the exact bytes this client uploaded. A\n[`FfiBlossomClient::mirror`] result was checked only against the hash the\ncaller authorized -- this client never sees the mirrored bytes, so it\nmints no exact-byte proof (#884). Rows from [`FfiBlossomClient::list`] are\nstrictly parsed but remain unverified server claims, exactly as in the\nRust crate.",
     ),
 }
 
@@ -6033,7 +6033,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "[`FfiBlossomClient`] construction knobs\n(`nmp_blossom::BlossomClientConfig` mirror). `None` means the crate\ndefault.",
+        "[`FfiBlossomClient`] construction knobs\n(`nmp::blossom::BlossomClientConfig` mirror). `None` means the crate\ndefault.",
     ),
 }
 
@@ -7901,7 +7901,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "One tolerantly parsed Simple-groups item (#863, `nmp_nip51::\nSimpleGroupEntry` mirror) -- group id, host relay, optional name.\n`host_relay` is a canonically SPELLED observed string; it is not a\nrouting permission and no NIP-29 constructor accepts it implicitly.",
+        "One tolerantly parsed Simple-groups item (#863, `nmp::nip51::\nSimpleGroupEntry` mirror) -- group id, host relay, optional name.\n`host_relay` is a canonically SPELLED observed string; it is not a\nrouting permission and no NIP-29 constructor accepts it implicitly.",
     ),
 }
 
@@ -7943,7 +7943,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "NIP-51's tolerantly parsed Simple groups list (#863,\n`nmp_nip51::SimpleGroupsList` mirror), with every evidence field\npreserved across the FFI boundary. OBSERVATIONAL DATA ONLY: it may be\nproduced from a caller-constructed [`FfiRow`] of any kind, and it asserts\nno signature, canonical-store, provenance, routing, or mutation\nauthority. There is deliberately no observation-qualified wrapper,\nprojection error, or frame proof around it.",
+        "NIP-51's tolerantly parsed Simple groups list (#863,\n`nmp::nip51::SimpleGroupsList` mirror), with every evidence field\npreserved across the FFI boundary. OBSERVATIONAL DATA ONLY: it may be\nproduced from a caller-constructed [`FfiRow`] of any kind, and it asserts\nno signature, canonical-store, provenance, routing, or mutation\nauthority. There is deliberately no observation-qualified wrapper,\nprojection error, or frame proof around it.",
     ),
 }
 
@@ -8305,12 +8305,12 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "The signed-in account's Simple-groups-list demand (#108,\n`nmp_nip51::active_account_demand` mirror): `kinds:[10009]`,\n`AuthorOutboxes + Public`. Signed-out (no active account) resolves to\nzero atoms through the ordinary reactive-binding empty-resolution path\n-- no special case needed on either side of this boundary.\n\n#858 moved this out of `crate::nip29`: kind:10009 is NIP-51's kind, so\nits demand constructor lives with the rest of NIP-51.",
+        "The signed-in account's Simple-groups-list demand (#108,\n`nmp::nip51::active_account_demand` mirror): `kinds:[10009]`,\n`AuthorOutboxes + Public`. Signed-out (no active account) resolves to\nzero atoms through the ordinary reactive-binding empty-resolution path\n-- no special case needed on either side of this boundary.\n\n#858 moved this out of `crate::nip29`: kind:10009 is NIP-51's kind, so\nits demand constructor lives with the rest of NIP-51.",
     ),
     throws: None,
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_active_account_demand",
     checksum: Some(
-        12332,
+        58732,
     ),
 }
 
@@ -8530,7 +8530,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Compose an UNSIGNED BUD-12 `delete` authorization draft --\n`nmp_blossom::delete_authorization_draft` mirror. Exactly ONE blob is\nbound (BUD-12 forbids multi-blob deletes via extra `x` tags).",
+        "Compose an UNSIGNED BUD-12 `delete` authorization draft --\n`nmp::blossom::delete_authorization_draft` mirror. Exactly ONE blob is\nbound (BUD-12 forbids multi-blob deletes via extra `x` tags).",
     ),
     throws: Some(
         Enum {
@@ -8540,7 +8540,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_blossom_delete_authorization_draft",
     checksum: Some(
-        19630,
+        60649,
     ),
 }
 
@@ -8623,7 +8623,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Compose an UNSIGNED BUD-12 `list` authorization draft --\n`nmp_blossom::list_authorization_draft` mirror. No `x` tag: listing is\nscoped to a pubkey by the request path, not to any blob.",
+        "Compose an UNSIGNED BUD-12 `list` authorization draft --\n`nmp::blossom::list_authorization_draft` mirror. No `x` tag: listing is\nscoped to a pubkey by the request path, not to any blob.",
     ),
     throws: Some(
         Enum {
@@ -8633,7 +8633,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_blossom_list_authorization_draft",
     checksum: Some(
-        5585,
+        49988,
     ),
 }
 
@@ -8729,7 +8729,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Compose an UNSIGNED BUD-11 `upload` authorization draft (kind 24242) --\n`nmp_blossom::upload_authorization_draft` mirror. BUD-04 NOTE: a mirror\nis authorized with THIS builder (the spec assigns mirroring the\n`upload` verb); there is deliberately no separate mirror builder.\nEngine-less free function ([`crate::entity`]'s precedent).",
+        "Compose an UNSIGNED BUD-11 `upload` authorization draft (kind 24242) --\n`nmp::blossom::upload_authorization_draft` mirror. BUD-04 NOTE: a mirror\nis authorized with THIS builder (the spec assigns mirroring the\n`upload` verb); there is deliberately no separate mirror builder.\nEngine-less free function ([`crate::entity`]'s precedent).",
     ),
     throws: Some(
         Enum {
@@ -8739,7 +8739,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_blossom_upload_authorization_draft",
     checksum: Some(
-        22765,
+        14626,
     ),
 }
 
@@ -10494,7 +10494,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "A signed kind:24242 event PROVEN (at construction) to satisfy every\nBUD-11 check -- `nmp_blossom::SignedAuthorization`'s\ntype-over-convention witness, carried across the boundary as an opaque\nobject so an unvalidated event can never enter a client operation.",
+        "A signed kind:24242 event PROVEN (at construction) to satisfy every\nBUD-11 check -- `nmp::blossom::SignedAuthorization`'s\ntype-over-convention witness, carried across the boundary as an opaque\nobject so an unvalidated event can never enter a client operation.",
     ),
 }
 
@@ -10627,7 +10627,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "BLOCKING `DELETE /<sha256>` (BUD-12)\n(`nmp_blossom::BlossomClient::delete`). The authorization is a\n`delete` grant bound to EXACTLY `blob_sha256_hex`. Call off the main\nthread.",
+                "BLOCKING `DELETE /<sha256>` (BUD-12)\n(`nmp::blossom::BlossomClient::delete`). The authorization is a\n`delete` grant bound to EXACTLY `blob_sha256_hex`. Call off the main\nthread.",
             ),
             throws: Some(
                 Enum {
@@ -10638,7 +10638,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_delete",
             checksum: Some(
-                45793,
+                37966,
             ),
         },
         Method {
@@ -10752,7 +10752,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "BLOCKING `GET /list/<pubkey>` (BUD-12)\n(`nmp_blossom::BlossomClient::list`): the blobs `server_url` stores\nfor `owner_pubkey_hex`, newest first. `auth` is optional -- a server\nthat requires a `list` authorization answers 401 on an auth-less\ncall, surfaced as `AuthRejected`. `cursor_sha256_hex`/`limit` are\nthe BUD-12 pagination parameters, sent only when set. Call off the\nmain thread.",
+                "BLOCKING `GET /list/<pubkey>` (BUD-12)\n(`nmp::blossom::BlossomClient::list`): the blobs `server_url` stores\nfor `owner_pubkey_hex`, newest first. `auth` is optional -- a server\nthat requires a `list` authorization answers 401 on an auth-less\ncall, surfaced as `AuthRejected`. `cursor_sha256_hex`/`limit` are\nthe BUD-12 pagination parameters, sent only when set. Call off the\nmain thread.",
             ),
             throws: Some(
                 Enum {
@@ -10763,7 +10763,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_list",
             checksum: Some(
-                40863,
+                5797,
             ),
         },
         Method {
@@ -10861,7 +10861,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "BLOCKING `PUT /mirror` (BUD-04): ask `server_url` to download the\nblob at `source_url` itself, integrity-gated against\n`expected_sha256_hex` (`nmp_blossom::BlossomClient::mirror`). The\nauthorization is an `upload` grant bound to that hash. Call off the\nmain thread.",
+                "BLOCKING `PUT /mirror` (BUD-04): ask `server_url` to download the\nblob at `source_url` itself, integrity-gated against\n`expected_sha256_hex` (`nmp::blossom::BlossomClient::mirror`). The\nauthorization is an `upload` grant bound to that hash. Call off the\nmain thread.",
             ),
             throws: Some(
                 Enum {
@@ -10872,7 +10872,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_mirror",
             checksum: Some(
-                55512,
+                41771,
             ),
         },
         Method {
@@ -10972,7 +10972,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "BLOCKING `PUT /upload` of `blob`'s exact bytes -- self-verifying end\nto end (`nmp_blossom::BlossomClient::upload`): the returned\ndescriptor's sha256 was PROVEN equal to the hash of the uploaded\nbytes. Call off the main thread.",
+                "BLOCKING `PUT /upload` of `blob`'s exact bytes -- self-verifying end\nto end (`nmp::blossom::BlossomClient::upload`): the returned\ndescriptor's sha256 was PROVEN equal to the hash of the uploaded\nbytes. Call off the main thread.",
             ),
             throws: Some(
                 Enum {
@@ -10983,7 +10983,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiblossomclient_upload",
             checksum: Some(
-                21684,
+                55157,
             ),
         },
     ],
@@ -11025,7 +11025,7 @@ object Object {
     },
     ffi_init_callback: None,
     docstring: Some(
-        "The BUD-02/04/12 blob client (`nmp_blossom::BlossomClient` mirror).\nEvery method BLOCKS the calling thread for up to the configured request\ndeadline -- call OFF the main thread (the hand-written Swift/Kotlin\nwrappers dispatch for you). Construction is infallible: the config is\nheld as data and the HTTP stack is built per call (see module doc), so\nconstruction failures surface as each operation's own typed\n`ClientBuild` variant.",
+        "The BUD-02/04/12 blob client (`nmp::blossom::BlossomClient` mirror).\nEvery method BLOCKS the calling thread for up to the configured request\ndeadline -- call OFF the main thread (the hand-written Swift/Kotlin\nwrappers dispatch for you). Construction is infallible: the config is\nheld as data and the HTTP stack is built per call (see module doc), so\nconstruction failures surface as each operation's own typed\n`ClientBuild` variant.",
     ),
 }
 

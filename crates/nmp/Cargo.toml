@@ -35,6 +35,34 @@ nip25 = ["dep:nmp-nip25"]
 # Off by default: core-only builds contain no protocol dependency or symbols.
 nip65 = ["dep:nmp-nip65"]
 
+# #1239: the retrofit. Each family below was reachable from `nmp-ffi` and NOT
+# from this facade, so a Swift app linking the one staticlib got it while a
+# direct-Rust app had to name a second crate in its own `Cargo.toml` -- the
+# exact shape `nmp-consumer-check` exists to forbid, in the direction that
+# penalises the tier NMP calls primary. Each follows the `nip22` shape above
+# for the same reason it does: ONE owner of the values, and an app that never
+# uses the family does not link its crate. All non-default, so the governed
+# default-feature surface snapshot is unchanged by any of them.
+#
+# `nmp-nip02` is NOT here and cannot be: it is a `protocol-service` in
+# `scripts/dependency-direction-policy.json`, meaning it sits ABOVE the facade
+# and depends on `nmp` itself. An `nmp -> nmp-nip02` edge is a cyclic package
+# dependency cargo refuses to resolve, so reaching the follow service through
+# the facade needs the service's engine coupling inverted first, not a feature.
+nip18 = ["dep:nmp-nip18"]
+nip51 = ["dep:nmp-nip51"]
+nipc7 = ["dep:nmp-nipc7"]
+content = ["dep:nmp-content"]
+
+# Exact-byte asset identity (#884's one protocol-neutral owner). Separate from
+# `blossom` because an app can hash and verify bytes without ever speaking to a
+# Blossom server -- mosaico does exactly that. `blossom` turns it on because
+# `BlobDescriptor`/`VerifiedUpload` name `Sha256Hash` in their public
+# signatures: a Blossom door whose own types the caller cannot name would be
+# the second Cargo line this feature exists to remove.
+asset = ["dep:nmp-asset"]
+blossom = ["dep:nmp-blossom", "asset"]
+
 # #827: both instrumentation features came in with the folded engine modules
 # (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default, so the
 # governed default-feature surface snapshot is unaffected by either.
@@ -60,6 +88,14 @@ nmp-grammar.workspace = true
 nmp-nip22 = { workspace = true, optional = true }
 nmp-nip25 = { workspace = true, optional = true }
 nmp-nip65 = { workspace = true, optional = true }
+# #1239: the families the facade did not offer and `nmp-ffi` did. Optional for
+# the same reason `nmp-nip22` is -- see the feature block above.
+nmp-nip18 = { workspace = true, optional = true }
+nmp-nip51 = { workspace = true, optional = true }
+nmp-nipc7 = { workspace = true, optional = true }
+nmp-content = { workspace = true, optional = true }
+nmp-asset = { workspace = true, optional = true }
+nmp-blossom = { workspace = true, optional = true }
 # #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
 # only this way round -- `Group` is pure composition over `nostr` +
 # `nmp-grammar`, and `crate::nip29`'s extension trait is what binds it to
@@ -112,7 +148,10 @@ libc = { version = "0.2", optional = true }
 # configured. That discovery is the optional NIP-65 coordinator, so this
 # crate's own test targets enable it. Test-only: the default feature set a
 # consumer links, and therefore the governed surface snapshot, is unchanged.
-nmp = { path = ".", features = ["nip65"] }
+# `nip51` joins it for #1239: `nip51_headless.rs` proves the kind:10009 demand
+# against a real engine, and it now proves it through `nmp::nip51` -- the same
+# path an app has -- instead of through a second `nmp-nip51` dev edge.
+nmp = { path = ".", features = ["nip65", "nip51"] }
 nmp-test-support.workspace = true
 # In-process test relay for the runtime (C) integration tests: reconnection
 # replay (test 6) and the end-to-end subscribe/publish/reconnect drive.
@@ -149,8 +188,3 @@ libc = "0.2"
 tungstenite = "0.29"
 serde = { version = "1", features = ["derive"] }
 url = "2"
-# #108: proves nmp-nip51's active_account_demand() reroots/reconstructs
-# correctly against a REAL engine (SetActivePubkey) -- a cross-crate
-# integration proof, not something nmp-nip51 itself (deliberately
-# engine-free) can assert on its own.
-nmp-nip51.workspace = true

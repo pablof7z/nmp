@@ -472,7 +472,7 @@ impl std::fmt::Display for FfiSignEventFailure {
 
 impl std::error::Error for FfiSignEventFailure {}
 
-/// One tolerantly parsed Simple-groups item (#863, `nmp_nip51::
+/// One tolerantly parsed Simple-groups item (#863, `nmp::nip51::
 /// SimpleGroupEntry` mirror) -- group id, host relay, optional name.
 /// `host_relay` is a canonically SPELLED observed string; it is not a
 /// routing permission and no NIP-29 constructor accepts it implicitly.
@@ -484,7 +484,7 @@ pub struct FfiSimpleGroupEntry {
 }
 
 /// NIP-51's tolerantly parsed Simple groups list (#863,
-/// `nmp_nip51::SimpleGroupsList` mirror), with every evidence field
+/// `nmp::nip51::SimpleGroupsList` mirror), with every evidence field
 /// preserved across the FFI boundary. OBSERVATIONAL DATA ONLY: it may be
 /// produced from a caller-constructed [`FfiRow`] of any kind, and it asserts
 /// no signature, canonical-store, provenance, routing, or mutation
@@ -688,7 +688,7 @@ pub enum FfiContentPart {
     Quote { target: FfiRow },
 }
 
-/// What a NIP-25 reaction SAYS (`nmp_nip25::Reaction` mirror, #155).
+/// What a NIP-25 reaction SAYS (`nmp::nip25::Reaction` mirror, #155).
 ///
 /// Not a string, because NIP-25 assigns fixed meanings to fixed bytes: *"A
 /// reaction with `content` set to `+` or an empty string MUST be interpreted

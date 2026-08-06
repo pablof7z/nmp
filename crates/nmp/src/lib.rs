@@ -159,6 +159,36 @@ pub mod nip25;
 #[cfg(feature = "nip65")]
 pub mod nip65;
 
+// #1239: the retrofit the two comments above anticipated. Each module below is
+// a family `nmp-ffi` reached and this facade did not, so a Swift app got it by
+// linking one staticlib while a direct-Rust app named a second crate. Each is
+// behind its own non-default cargo feature for the same reason `nip22` is: one
+// owner of the values, and an app that never uses the family does not link it.
+//
+// `nip02` is deliberately absent. `nmp-nip02` depends on `nmp` -- it is a
+// `protocol-service` in `scripts/dependency-direction-policy.json`, sitting
+// ABOVE the facade rather than below it -- so an `nmp -> nmp-nip02` edge is a
+// cyclic package dependency cargo refuses to resolve. Reaching the follow
+// service through the facade means inverting its engine coupling first, which
+// is a different unit of work than this one.
+#[cfg(feature = "nip18")]
+pub mod nip18;
+
+#[cfg(feature = "nip51")]
+pub mod nip51;
+
+#[cfg(feature = "nipc7")]
+pub mod nipc7;
+
+#[cfg(feature = "content")]
+pub mod content;
+
+#[cfg(feature = "asset")]
+pub mod asset;
+
+#[cfg(feature = "blossom")]
+pub mod blossom;
+
 // #1033: the app-facing NIP-29 door. A real facade module, not a re-export of
 // `nmp-nip29`: the door retains a relay scope AND mints the one opaque
 // `WriteIntent`, and a crate that is engine-free by construction cannot do the
