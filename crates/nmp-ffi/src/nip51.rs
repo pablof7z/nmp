@@ -29,7 +29,7 @@ use nostr::RelayUrl;
 use crate::convert::demand_to_ffi;
 use crate::types::{FfiDemand, FfiRow, FfiSimpleGroupEntry, FfiSimpleGroupsList};
 
-fn simple_group_entry_to_ffi(entry: &nmp_nip51::SimpleGroupEntry) -> FfiSimpleGroupEntry {
+fn simple_group_entry_to_ffi(entry: &nmp::nip51::SimpleGroupEntry) -> FfiSimpleGroupEntry {
     FfiSimpleGroupEntry {
         group_id: entry.group_id.clone(),
         host_relay: entry.host_relay.to_string(),
@@ -37,7 +37,7 @@ fn simple_group_entry_to_ffi(entry: &nmp_nip51::SimpleGroupEntry) -> FfiSimpleGr
     }
 }
 
-fn simple_groups_list_to_ffi(list: &nmp_nip51::SimpleGroupsList) -> FfiSimpleGroupsList {
+fn simple_groups_list_to_ffi(list: &nmp::nip51::SimpleGroupsList) -> FfiSimpleGroupsList {
     FfiSimpleGroupsList {
         items: list.items.iter().map(simple_group_entry_to_ffi).collect(),
         relays_in_use: list.relays_in_use.iter().map(RelayUrl::to_string).collect(),
@@ -48,7 +48,7 @@ fn simple_groups_list_to_ffi(list: &nmp_nip51::SimpleGroupsList) -> FfiSimpleGro
 }
 
 /// The signed-in account's Simple-groups-list demand (#108,
-/// `nmp_nip51::active_account_demand` mirror): `kinds:[10009]`,
+/// `nmp::nip51::active_account_demand` mirror): `kinds:[10009]`,
 /// `AuthorOutboxes + Public`. Signed-out (no active account) resolves to
 /// zero atoms through the ordinary reactive-binding empty-resolution path
 /// -- no special case needed on either side of this boundary.
@@ -57,7 +57,7 @@ fn simple_groups_list_to_ffi(list: &nmp_nip51::SimpleGroupsList) -> FfiSimpleGro
 /// its demand constructor lives with the rest of NIP-51.
 #[uniffi::export]
 pub fn active_account_demand() -> FfiDemand {
-    demand_to_ffi(nmp_nip51::active_account_demand())
+    demand_to_ffi(nmp::nip51::active_account_demand())
 }
 
 /// Tolerantly parse Simple-groups-shaped public items out of a raw native
@@ -71,10 +71,12 @@ pub fn active_account_demand() -> FfiDemand {
 /// host or invents a fixed group-content catalog on the app's behalf.
 #[uniffi::export]
 pub fn parse_simple_groups_list_tolerant(row: FfiRow) -> FfiSimpleGroupsList {
-    simple_groups_list_to_ffi(&nmp_nip51::parse_simple_groups_list_from_raw_tags_tolerant(
-        row.tags.iter().map(|tag| tag.as_slice()),
-        &row.content,
-    ))
+    simple_groups_list_to_ffi(
+        &nmp::nip51::parse_simple_groups_list_from_raw_tags_tolerant(
+            row.tags.iter().map(|tag| tag.as_slice()),
+            &row.content,
+        ),
+    )
 }
 
 #[cfg(test)]

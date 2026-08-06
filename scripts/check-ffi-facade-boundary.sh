@@ -3,6 +3,14 @@
 # values through the canonical `nmp` product facade. The mechanism crates
 # behind it stay transitive implementation detail.
 #
+# #1239 extended that from the mechanism crates to every protocol and content
+# family the facade offers. Those families used to be direct edges here and
+# absent from the facade entirely, which made them reachable from Swift and
+# unreachable from direct Rust; now that `nmp` offers each behind a feature, a
+# direct edge here would be a second owner of exactly the values the facade
+# projects. The one family still edged directly is `nmp-nip02`, which depends
+# on `nmp` itself and so cannot become a facade dependency without a cycle.
+#
 # Why this is a mechanism and not a review convention: `nmp-ffi` is the ONE
 # staticlib/cdylib every Swift and Kotlin app links. A direct import of a
 # mechanism crate lets the native product boundary bind a type the canonical
@@ -37,12 +45,41 @@ fail() { echo "ffi-facade-boundary: $*" >&2; exit 1; }
 
 FFI_MANIFEST=crates/nmp-ffi/Cargo.toml
 FACADE_MANIFEST=crates/nmp/Cargo.toml
-FACADE_NIP22=crates/nmp/src/nip22.rs
+
+# Every protocol/content family the facade owns behind a cargo feature, as
+# `<crate>:<feature>:<module>`. `nmp-ffi` reaches each by turning the feature
+# on -- never by a second edge -- so this one table drives all three checks
+# below: the edge stays closed, the feature stays enabled, and the facade
+# module that projects the vocabulary stays present.
+FACADE_OWNED_FAMILIES=(
+  nmp-nip18:nip18:nip18
+  nmp-nip22:nip22:nip22
+  nmp-nip25:nip25:nip25
+  nmp-nip51:nip51:nip51
+  nmp-nipc7:nipc7:nipc7
+  nmp-asset:asset:asset
+  nmp-blossom:blossom:blossom
+  nmp-content:content:content
+)
+
+# NIP-29 is owned by the facade UNCONDITIONALLY (`crates/nmp/src/nip29.rs` is a
+# real door, not a re-export, so there is no mechanism crate for a feature to
+# keep unlinked). The edge must still stay closed here.
+FACADE_OWNED_UNCONDITIONAL=(nmp-nip29:nip29)
 
 # Every path this gate reasons about must exist. A missing one would otherwise
 # turn the searches below into a vacuous pass.
-for required in "$FFI_MANIFEST" "$FACADE_MANIFEST" "$FACADE_NIP22" crates/nmp-ffi/src; do
+for required in "$FFI_MANIFEST" "$FACADE_MANIFEST" crates/nmp-ffi/src; do
   [[ -e $required ]] || fail "required path is missing: $required"
+done
+# A family's facade module is either a file or a directory (`nip29` is a real
+# door with submodules, the rest are single-file re-export modules). Either
+# spelling is the module existing; neither missing is acceptable, because an
+# absent module would make the "reach it through the facade" checks vacuous.
+for entry in "${FACADE_OWNED_FAMILIES[@]}" "${FACADE_OWNED_UNCONDITIONAL[@]}"; do
+  module=${entry##*:}
+  [[ -f crates/nmp/src/$module.rs || -d crates/nmp/src/$module ]] ||
+    fail "facade module is missing: crates/nmp/src/$module"
 done
 
 # Portability note: plain POSIX `grep`/`awk` only. GitHub's ubuntu-latest
@@ -61,9 +98,13 @@ manifest_section() {
 normal_deps=$(manifest_section "$FFI_MANIFEST" '[dependencies]')
 [[ -n $normal_deps ]] || fail "$FFI_MANIFEST has no [dependencies] section to check"
 
-# 1. The mechanism edges stay closed. This is the whole of #851's required
-#    target: no production `nmp-grammar`, `nmp-signer` or `nmp-nip22` edge.
-for forbidden in nmp-grammar nmp-signer nmp-nip22; do
+# 1. The mechanism edges stay closed (#851: no production `nmp-grammar` or
+#    `nmp-signer`), and so does every family the facade owns (#1239).
+forbidden_edges=(nmp-grammar nmp-signer)
+for entry in "${FACADE_OWNED_FAMILIES[@]}" "${FACADE_OWNED_UNCONDITIONAL[@]}"; do
+  forbidden_edges+=("${entry%%:*}")
+done
+for forbidden in "${forbidden_edges[@]}"; do
   if printf '%s\n' "$normal_deps" |
     grep -qE "^[[:space:]]*${forbidden}[[:space:]]*[.=]"; then
     fail "nmp-ffi has a forbidden direct normal dependency: $forbidden"
@@ -73,13 +114,31 @@ done
 printf '%s\n' "$normal_deps" | grep -qE '^[[:space:]]*nmp[[:space:]]*[.=]' ||
   fail "nmp-ffi is missing its canonical nmp dependency"
 
-# 2. The NIP-22 comment vocabulary has ONE owner. `nmp-ffi` reaches it by
-#    turning the facade's own feature on, never by a second edge.
-printf '%s\n' "$normal_deps" |
-  grep -E '^[[:space:]]*nmp[[:space:]]*[.=]' | grep -qF 'nip22' ||
-  fail "nmp-ffi must enable the nmp/nip22 facade feature to project comments"
-grep -qE '^[[:space:]]*nip22[[:space:]]*=' "$FACADE_MANIFEST" ||
-  fail "$FACADE_MANIFEST is missing the nip22 feature that owns NIP-22"
+# 2. Every facade-owned family has ONE owner. `nmp-ffi` reaches each by turning
+#    the facade's own feature on, never by a second edge.
+#
+#    The `nmp = ...` entry is read whole rather than line-by-line: an inline
+#    table and a multi-line one are the same dependency, and a gate that only
+#    understood one spelling would silently pass the other.
+facade_dep_entry=$(printf '%s\n' "$normal_deps" | awk '
+  /^[[:space:]]*nmp[[:space:]]*=/ { collecting = 1 }
+  collecting {
+    print
+    depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+    if (depth <= 0) exit
+  }
+')
+[[ -n $facade_dep_entry ]] || fail "could not read nmp-ffi's nmp dependency entry"
+
+for entry in "${FACADE_OWNED_FAMILIES[@]}"; do
+  crate=${entry%%:*}
+  feature=${entry#*:}
+  feature=${feature%%:*}
+  printf '%s\n' "$facade_dep_entry" | grep -qE "\"${feature}\"" ||
+    fail "nmp-ffi must enable the nmp/${feature} facade feature instead of edging $crate"
+  grep -qE "^[[:space:]]*${feature}[[:space:]]*=" "$FACADE_MANIFEST" ||
+    fail "$FACADE_MANIFEST is missing the ${feature} feature that owns $crate"
+done
 
 # 3. Source audit. Documentation may legitimately name the mechanism crate
 #    whose value is being mirrored, so whole-line Rust comments (`//`, `///`,
@@ -96,13 +155,18 @@ census() {
 }
 strip_comments() { grep -vE '^[^:]*:[0-9]+:[[:space:]]*//' || true; }
 
-# `nmp-nip22` is not a dependency of `nmp-ffi` in ANY section, so no source
-# reference to it can be legitimate -- not even a test one.
-found=$(census '\bnmp_nip22\b' | strip_comments)
-if [[ -n $found ]]; then
-  printf '%s\n' "$found"
-  fail "nmp-ffi production source bypasses nmp::nip22"
-fi
+# No facade-owned family crate is a dependency of `nmp-ffi` in ANY section, so
+# no source reference to one can be legitimate -- not even a test one.
+for entry in "${FACADE_OWNED_FAMILIES[@]}" "${FACADE_OWNED_UNCONDITIONAL[@]}"; do
+  crate=${entry%%:*}
+  module=${entry##*:}
+  underscored=$(printf '%s' "$crate" | tr - _)
+  found=$(census "\\b${underscored}\\b" | strip_comments)
+  if [[ -n $found ]]; then
+    printf '%s\n' "$found"
+    fail "nmp-ffi production source bypasses nmp::${module}"
+  fi
+done
 
 # 4. `nmp-grammar` and `nmp-signer` survive only as DEV dependencies, which the
 #    compiler does not police for the shipped artifact. Every `nmp_grammar::`/
