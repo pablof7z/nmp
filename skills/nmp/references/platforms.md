@@ -58,7 +58,7 @@ swift test
 
 Drop `--sim-only` when a physical-device slice is required. Rebuild the xcframework after a UniFFI surface change.
 
-`swift test` above executes on the macOS host. The build script compiles the iOS Simulator slices, but the package currently has no simulator runtime test target; issue #465 tracks that missing qualification harness.
+`swift test` above executes on the macOS host. The build script compiles the iOS Simulator slices and master packages the full device + simulator + macOS slice set, but the package has no simulator runtime test target, so no headless gate claims iOS runtime behavior. Physical-device qualification remains separate.
 
 Swift `NMPConfig` has `storePath`, `appRelays`, `fallbackRelays`, `allowedLocalRelayHosts`, `torReachable`, `maxRelays` (default 10), and `maxAuthCapabilities` (default 64). It exposes no protocol-provider setting and no worker/task capacity field; the Rust fields it omits are `indexer_relays` and `max_publish_attempts`.
 
