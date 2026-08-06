@@ -115,12 +115,10 @@ jobs:
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
 
       - name: Install checksum-pinned surface tool
-        # Outside the workspace on purpose: `rustup`/`cargo` resolve a
-        # toolchain from `rust-toolchain.toml` in the working directory, and
-        # that file belongs to the proposed head. The installer names its
-        # toolchain explicitly and finds its own definition next to itself, so
-        # this is the last thing keeping the head out of the install (#1186).
-        working-directory: ${{ runner.temp }}/nmp-surface-regeneration
+        # No working-directory and no environment: the installer names every
+        # toolchain explicitly and finds its own toolchain definition next to
+        # itself, so nothing about where it runs decides what it installs
+        # (#1186).
         run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/install-surface-tools.sh
 
       - name: Falsify governance and installer
@@ -252,12 +250,10 @@ jobs:
           fi
 
       - name: Install checksum-pinned surface tool
-        # Outside the workspace on purpose: `rustup`/`cargo` resolve a
-        # toolchain from `rust-toolchain.toml` in the working directory, and
-        # that file belongs to the proposed head. The installer names its
-        # toolchain explicitly and finds its own definition next to itself, so
-        # this is the last thing keeping the head out of the install (#1186).
-        working-directory: ${{ runner.temp }}/nmp-surface-regeneration
+        # No working-directory and no environment: the installer names every
+        # toolchain explicitly and finds its own toolchain definition next to
+        # itself, so nothing about where it runs decides what it installs
+        # (#1186).
         run: ${{ runner.temp }}/nmp-surface-regeneration/scripts/install-surface-tools.sh
 
       - name: Regenerate and verify proposed surfaces

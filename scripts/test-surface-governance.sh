@@ -1179,12 +1179,26 @@ echo "ok - every workflow step runs the command its workflow names"
 # mechanism can be removed with nothing left to fail. That asymmetry is what
 # docs/internals/conventions/protected-path-signoff.md 5 is about, and it is
 # the reason this list exists rather than trusting each new base to be honest.
+#
+# Every needle below is BUILT, never written out whole, because this file is
+# the file being searched: a list of literal needles matches itself, so
+# deleting the thing it guards leaves the list behind to satisfy it. That is
+# not hypothetical -- the first version of this block was written with literal
+# needles and a head that deleted both falsifier sections still passed.
 for surviving_claim in \
   'ok - every workflow step runs the command its workflow names' \
   "ok - the gate runs its own tooling and never the head's" \
   'ok - workflows use least-read permissions and base-only governance bytes'; do
-  grep -Fq "$surviving_claim" "$ROOT/scripts/test-surface-governance.sh" ||
+  grep -Fq "echo \"$surviving_claim\"" "$ROOT/scripts/test-surface-governance.sh" ||
     fail "the proposed falsifier suite no longer claims: $surviving_claim"
+done
+# The claim lines alone could be kept while their assertions were deleted, so
+# the machinery each one summarises has to be present too.
+for surviving_definition in \
+  workflow_default_shell \
+  falsify_head_supplied_tooling_is_never_run; do
+  grep -Fq "$surviving_definition() {" "$ROOT/scripts/test-surface-governance.sh" ||
+    fail "the proposed falsifier suite no longer defines $surviving_definition"
 done
 
 # #1186, at the source: the proposed head's program must not resolve anything
@@ -1209,6 +1223,18 @@ done
 grep -Fq 'PROGRAM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)' \
   "$ROOT/scripts/check-surface-governance.sh" ||
   fail "the proposed checker does not resolve its tooling from where it lives"
+
+# The installer prepares the gate and says nothing about a proposed head, so
+# every way it fails is a malfunction and has to exit 70 under its own prefix.
+# Its own falsifiers run the BASE copy, which is the right claim for them to
+# make and the wrong one for judging a head, so the head's copy is checked
+# here. Before this, a fatal git inside it escaped as exit 128 -- a step that
+# could not run the command it names, reported as neither a verdict nor a
+# legible malfunction.
+grep -Fq 'MALFUNCTION_EXIT=70' "$ROOT/scripts/install-surface-tools.sh" ||
+  fail "the proposed installer does not report its failures as gate malfunctions"
+grep -Fq "surface-tools-malfunction:" "$ROOT/scripts/install-surface-tools.sh" ||
+  fail "the proposed installer does not name its failures as gate malfunctions"
 
 # The falsifier suites are part of the same base-trusted program and had the
 # same defect: this suite used to source the tree under judgment's toolchain

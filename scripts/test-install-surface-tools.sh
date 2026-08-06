@@ -73,3 +73,58 @@ recovery_log="$TMP/recovery.log"
 run_installer "$recovery_log" "$TMP/cargo-recovery" correct
 grep -Fxq 'cargo +nightly-test install --locked --force cargo-public-api@9.9.9' "$recovery_log"
 echo "ok - missing registry cache recovers through pinned locked install"
+
+# The installer takes nothing from its caller, so it must behave identically
+# from any working directory -- including one that is not a Git worktree, which
+# is where CI runs it (#1186). Before this, resolving the toolchain definition
+# through `git rev-parse --show-toplevel` made that exact case die with git's
+# raw exit 128.
+mkdir -p "$TMP/not-a-worktree"
+cwd_log="$TMP/cwd.log"
+(cd "$TMP/not-a-worktree" && run_installer "$cwd_log" "$TMP/cargo-cwd" wrong)
+grep -Fxq 'rustup toolchain install nightly-test --profile minimal' "$cwd_log"
+echo "ok - the installer does not depend on the directory it runs in"
+
+# Nothing the installer does is a statement about a proposed head, so every way
+# it fails is a gate malfunction: exit 70, under its own prefix, never a raw
+# status a reporter cannot classify (#1264, #1170).
+expect_malfunction() {
+  local label=$1 reason=$2
+  shift 2
+  local output status=0
+  output=$("$@" 2>&1) || status=$?
+  if (( status != 70 )); then
+    echo "FAIL: $label exited $status; a malfunction is exit 70" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$output" | grep -Fq "surface-tools-malfunction: $reason"; then
+    echo "FAIL: $label did not name the malfunction: $reason" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  echo "ok - $label"
+}
+
+# A program directory with no toolchain definition beside it.
+mkdir -p "$TMP/no-definition/scripts"
+cp "$SCRIPT_DIR/install-surface-tools.sh" "$TMP/no-definition/scripts/"
+chmod +x "$TMP/no-definition/scripts/install-surface-tools.sh"
+expect_malfunction "a missing toolchain definition is a malfunction" \
+  "this program has no toolchain definition" \
+  env PATH="$TMP/bin:$PATH" CALL_LOG="$TMP/nodef.log" \
+    CARGO_HOME="$TMP/cargo-nodef" VERSION_MODE=wrong \
+    "$TMP/no-definition/scripts/install-surface-tools.sh"
+
+# An unplanned failure inside the installer -- here the pinned toolchain
+# install itself -- is routed the same way rather than escaping as whatever
+# status the failing program chose.
+cat > "$TMP/bin/rustup" <<'SHIM'
+#!/usr/bin/env bash
+exit 128
+SHIM
+chmod +x "$TMP/bin/rustup"
+expect_malfunction "an unplanned failure inside the installer is a malfunction" \
+  "the surface tool install did not complete" \
+  env PATH="$TMP/bin:$PATH" CALL_LOG="$TMP/broken.log" \
+    CARGO_HOME="$TMP/cargo-broken" VERSION_MODE=wrong "$INSTALL"
