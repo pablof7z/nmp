@@ -3098,6 +3098,21 @@ enum Enum {
             ),
         },
         Variant {
+            name: "InvalidReaction",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "#155: an `FfiReaction::Emoji` failed `nmp_nip25::Reaction::emoji`'s\nvalidation. Two states reach here, both of which would otherwise\npublish a reaction whose content says something the caller did not:\nthe empty string, which NIP-25 reads as `+` and therefore as a LIKE,\nand a NIP-30 `:shortcode:`, which needs a companion `emoji` row this\ndoor does not write and would reach every reader as literal colons.",
+            ),
+        },
+        Variant {
             name: "EmptyRelayScope",
             discr: None,
             fields: [],
@@ -4121,6 +4136,51 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "`nmp::NotSentReason` mirror.",
+    ),
+}
+
+enum Enum {
+    name: "FfiReaction",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Like",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "Rendered `+`.",
+            ),
+        },
+        Variant {
+            name: "Dislike",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "Rendered `-`.",
+            ),
+        },
+        Variant {
+            name: "Emoji",
+            discr: None,
+            fields: [
+                Field {
+                    name: "emoji",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "An emoji, which NIP-25 says *\"SHOULD NOT be interpreted as a 'like' or\n'dislike'\"*. Validated on the way in: the empty string is refused\nbecause NIP-25 reads it as `+`, and a NIP-30 `:shortcode:` is refused\nbecause it needs a companion `emoji` row this door does not write.\nBoth arrive as a typed synchronous\n[`crate::convert::FfiError::InvalidReaction`] before any builder\nexists.",
+            ),
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "What a NIP-25 reaction SAYS (`nmp_nip25::Reaction` mirror, #155).\n\nNot a string, because NIP-25 assigns fixed meanings to fixed bytes: *\"A\nreaction with `content` set to `+` or an empty string MUST be interpreted\nas a 'like' or 'upvote'. A reaction with `content` set to `-` MUST be\ninterpreted as a 'dislike' or 'downvote'.\"* A caller passing content by\nhand can therefore spell \"like\" three ways, and can spell it by accident\nwith an empty picker result. These are the spec's own three readings and\nthere is no fourth.",
     ),
 }
 
@@ -9461,6 +9521,93 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_parse_simple_groups_list_tolerant",
     checksum: Some(
         23498,
+    ),
+}
+
+function Function {
+    name: "react_to",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "target",
+            type_: Record {
+                module_path: "nmp_ffi",
+                name: "FfiRow",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+        Argument {
+            name: "reaction",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiReaction",
+            },
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiEventBuilder",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_react_to",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "target",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiRow",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+            FfiArgument {
+                name: "reaction",
+                type_: RustBuffer(
+                    Some(
+                        ExternalFfiMetadata {
+                            name: "FfiReaction",
+                            module_path: "nmp_ffi",
+                        },
+                    ),
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiEventBuilder",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Compose a NIP-25 reaction to `target`.\n\n#155's own report: NMP had no reaction door at all, so both consuming apps\nhand-wrote `kind: 7` with their own `[\"e\", …]` and `[\"p\", …]` rows. What\nthat spelling loses is not the kind — it is everything the one tagging\ndoor fills: the relay hint, the author slot, the `k` row, and the fact that\na reaction to a REPLY must name the reply rather than its thread root.\n\nIt composes SCHEMA ONLY. `reaction` is what the reaction says and never a\nraw content string, because NIP-25 assigns `+`, `-` and the empty string\nfixed meanings and a caller writing content by hand can mean one of them by\naccident.",
+    ),
+    throws: Some(
+        Enum {
+            module_path: "nmp_ffi",
+            name: "FfiError",
+        },
+    ),
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_react_to",
+    checksum: Some(
+        44322,
     ),
 }
 
