@@ -681,6 +681,75 @@ impl<S: EventStore> EngineCore<S> {
         Ok(lanes)
     }
 
+    /// Whether transport still owes this exact attempt a handoff.
+    ///
+    /// `attempt_correlations` is bounded by `MAX_GLOBAL_ATTEMPTS`, so this is
+    /// a scan of at most 32 entries and never a store read.
+    fn handoff_is_outstanding(&self, intent_id: IntentId, ordinal: u64) -> bool {
+        self.attempt_correlations
+            .values()
+            .any(|target| target.lane == Some((intent_id, ordinal)))
+    }
+
+    /// Give back the relay slot held by an attempt whose handoff can never
+    /// arrive. Returns whether the lane actually left flight — `false` both
+    /// for an attempt that is genuinely still waiting and for a reclaim that
+    /// could not commit, because in either case the lane is honestly still in
+    /// flight and still owns its slot.
+    ///
+    /// This is the one owner of a rule boot recovery used to state on its
+    /// own: an `AwaitingHandoff` lane is waiting on exactly one
+    /// `EngineMsg::EventHandoff`, and `on_event_handoff` dispatches those by
+    /// correlation. No correlation naming this attempt means transport's
+    /// one-shot result (#93) has already been consumed — or was never
+    /// submitted by this process at all — so the wait has become a hang. A
+    /// fresh process is merely the case where that set is empty because the
+    /// process is new, which is why generalizing this deleted the boot arm
+    /// rather than adding a second copy of it.
+    ///
+    /// The trigger is a FACT the reducer holds, never elapsed time: nothing
+    /// here consults a clock to decide, and `now` is only the instant the
+    /// replacement attempt becomes eligible. Resending is safe by
+    /// construction — it is the IDENTICAL frozen event, so a relay that did
+    /// receive it dedupes on id.
+    ///
+    /// It emits no receipt fact, deliberately. Nothing was OBSERVED from the
+    /// relay — the attempt is being replaced, not reported on — and a live
+    /// `BackingOff` claim would contradict a receipt whose own attempt
+    /// evidence may be unreadable. The committed transient is the record, and
+    /// reattachment replays it from the store like every other attempt fact.
+    fn reclaim_orphaned_handoff(
+        &mut self,
+        id: ReceiptId,
+        lane: &PublishQueueLane,
+        ordinal: u64,
+        now: Timestamp,
+    ) -> bool {
+        // The guard lives HERE, not at the call sites, because both of them
+        // can see a live attempt: `retry_lane_bootstrap` re-opens an intent's
+        // whole lane set mid-process, and that set may include a relay whose
+        // attempt this process really did submit.
+        if self.handoff_is_outstanding(lane.key.intent_id, ordinal) {
+            return false;
+        }
+        if self
+            .commit_lane_transient(
+                &lane.key,
+                lane.revision,
+                ordinal,
+                now,
+                PublishQueueTransientCause::Interrupted,
+                Some(ORPHANED_HANDOFF_DETAIL.to_string()),
+            )
+            .is_err()
+        {
+            self.retry_scheduler_blocked = true;
+            return false;
+        }
+        self.remove_active_lane(id, &lane.key.relay);
+        true
+    }
+
     /// The only path that allocates durable attempt ordinals. Eligibility is
     /// persisted first; this reducer then applies stable ordering and the
     /// ratified 32-global/1-per-relay caps before committing Started.
@@ -696,6 +765,20 @@ impl<S: EventStore> EngineCore<S> {
         let mut eligible = Vec::new();
         for (id, lane) in lanes {
             match lane.state {
+                // An attempt whose handoff can never arrive gives its relay's
+                // one slot back rather than holding it for the life of the
+                // process (#1316). One that is genuinely still waiting keeps
+                // it — per-relay ordering is the ratified cap, not the bug.
+                PublishQueueLaneState::InFlight {
+                    ordinal,
+                    phase: PublishQueueInFlightPhase::AwaitingHandoff,
+                } => {
+                    if self.reclaim_orphaned_handoff(id, &lane, ordinal, now) {
+                        continue;
+                    }
+                    in_flight = in_flight.saturating_add(1);
+                    in_flight_relays.insert(lane.key.relay.clone());
+                }
                 PublishQueueLaneState::InFlight { .. } => {
                     in_flight = in_flight.saturating_add(1);
                     in_flight_relays.insert(lane.key.relay.clone());
@@ -1291,7 +1374,7 @@ impl<S: EventStore> EngineCore<S> {
     /// from there.
     fn open_bootstrapped_lanes(
         &mut self,
-        _id: ReceiptId,
+        id: ReceiptId,
         signing_pubkey: PublicKey,
         lanes: Vec<PublishQueueLane>,
         effects: &mut Vec<Effect>,
@@ -1309,25 +1392,25 @@ impl<S: EventStore> EngineCore<S> {
                     ordinal,
                     phase: PublishQueueInFlightPhase::AwaitingHandoff,
                 } => {
-                    // An attempt in flight across a process loss is simply
-                    // retried: the resend is the IDENTICAL frozen event, so a
-                    // relay that already took it dedupes on id.
-                    let eligible_at = self.clock;
-                    let _ = self.commit_lane_transient(
-                        &lane.key,
-                        lane.revision,
-                        ordinal,
-                        eligible_at,
-                        PublishQueueTransientCause::Interrupted,
-                        Some("process restarted before handoff resolved".to_string()),
-                    );
+                    // A process that did not submit this attempt holds no
+                    // correlation for it, which is precisely the fact that
+                    // says its handoff can never arrive — the same rule, and
+                    // the same owner, as the mid-process case (#1316).
+                    // Running it HERE rather than leaving it to the
+                    // `schedule_ready` that closes this boot is what lets
+                    // this boot's own deadline sweep promote the replacement
+                    // attempt: the reclaimed lane is eligible as of `now`,
+                    // and the sweep has not run yet. No session is asked for
+                    // — the ordinary eligible path does that, and only once
+                    // the reclaim actually committed, so an obligation whose
+                    // attempt evidence is unreadable still claims nothing.
+                    let now = self.clock;
+                    self.reclaim_orphaned_handoff(id, &lane, ordinal, now);
                 }
                 PublishQueueLaneState::WaitingConnection
                 | PublishQueueLaneState::Eligible { .. }
-                | PublishQueueLaneState::Transient { .. } => {
-                    effects.push(Effect::EnsureWriteRelay(session));
-                }
-                PublishQueueLaneState::InFlight {
+                | PublishQueueLaneState::Transient { .. }
+                | PublishQueueLaneState::InFlight {
                     phase: PublishQueueInFlightPhase::AwaitingAck { .. },
                     ..
                 } => {
