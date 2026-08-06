@@ -70,7 +70,7 @@ fn an_unreachable_explicit_relay_is_accepted_because_the_door_cannot_know() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::WriteAccepted(_))),
+            .any(|e| matches!(e, Effect::WriteAccepted(..))),
         "acceptance cannot validate that a relay exists, so it does not try"
     );
 

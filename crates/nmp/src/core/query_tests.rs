@@ -201,7 +201,7 @@ mod affected_handle_invalidation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::WriteAccepted(id) => Some(*id),
+                Effect::WriteAccepted(id, _) => Some(*id),
                 _ => None,
             })
             .expect("local acceptance emits its receipt");
@@ -274,7 +274,7 @@ mod affected_handle_invalidation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::WriteAccepted(id) => Some(*id),
+                Effect::WriteAccepted(id, _) => Some(*id),
                 _ => None,
             })
             .expect("local acceptance emits its receipt");
@@ -354,7 +354,7 @@ mod affected_handle_invalidation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::WriteAccepted(id) => Some(*id),
+                Effect::WriteAccepted(id, _) => Some(*id),
                 _ => None,
             })
             .expect("replaceable acceptance emits its receipt");
@@ -424,7 +424,7 @@ mod affected_handle_invalidation_tests {
         let receipt = accepted
             .iter()
             .find_map(|effect| match effect {
-                Effect::WriteAccepted(id) => Some(*id),
+                Effect::WriteAccepted(id, _) => Some(*id),
                 _ => None,
             })
             .expect("kind5 acceptance emits its receipt");

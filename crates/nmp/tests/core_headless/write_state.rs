@@ -28,7 +28,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     assert!(
         effects
             .iter()
-            .any(|effect| matches!(effect, Effect::WriteAccepted(rid) if *rid == id)),
+            .any(|effect| matches!(effect, Effect::WriteAccepted(rid, _) if *rid == id)),
         "publish takes custody of the write"
     );
     assert!(
@@ -166,7 +166,7 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
     let signed_receipt = signed_publish
         .iter()
         .find_map(|effect| match effect {
-            Effect::WriteAccepted(id) => Some(*id),
+            Effect::WriteAccepted(id, _) => Some(*id),
             _ => None,
         })
         .unwrap();
@@ -232,7 +232,7 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
         identity: Identity::Explicit(b.public_key()),
         correlation: None,
     }));
-    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(_))));
+    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(..))));
     let (id, generation, template) = find_sign_request(&effects);
     assert_eq!(
         template.pubkey,
@@ -260,7 +260,7 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
         identity: Identity::Active,
         correlation: None,
     }));
-    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(_))));
+    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(..))));
 }
 
 /// #47 falsifier (b), restated for a payload that cannot state an author.
@@ -282,7 +282,7 @@ fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
         correlation: None,
     }));
     assert!(
-        matches!(effects.first(), Some(Effect::WriteAccepted(_))),
+        matches!(effects.first(), Some(Effect::WriteAccepted(..))),
         "a kind and content, published as the active account, is the whole story"
     );
     let (_, _, template) = find_sign_request(&effects);
@@ -330,7 +330,7 @@ fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
         identity: Identity::Explicit(b.public_key()),
         correlation: None,
     }));
-    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(_))));
+    assert!(matches!(effects.first(), Some(Effect::WriteAccepted(..))));
     let (_, _, template) = find_sign_request(&effects);
     assert_eq!(
         template.pubkey,
@@ -501,7 +501,7 @@ fn expired_local_acceptance_is_refused_in_custody_with_no_side_effects() {
         matches!(
             effects.as_slice(),
             [
-                Effect::WriteAccepted(accepted),
+                Effect::WriteAccepted(accepted, _),
                 Effect::EmitReceipt(
                     emitted,
                     WriteFact::Outcome(WriteOutcome::Refused(RefuseReason::AlreadyExpired))
@@ -1084,7 +1084,7 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
     }));
 
     assert!(
-        matches!(effects.first(), Some(Effect::WriteAccepted(_))),
+        matches!(effects.first(), Some(Effect::WriteAccepted(..))),
         "a valid Signed publish must still be taken into custody first"
     );
     assert!(
