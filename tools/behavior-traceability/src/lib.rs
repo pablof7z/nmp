@@ -58,12 +58,15 @@ mod tests {
     /// gap that no runtime test can assert the native live query keeps its
     /// branch storage private and unforgeable. As of #1105,
     /// `ROUTING-REMOVEDROUTES-004/-005/-007` name #1320, the open gap that
-    /// three of the removal contract's claims have no executing proof.
+    /// three of the removal contract's claims have no executing proof. As of
+    /// #1023, `WRITES-PREVIEW-001` through `-014` name #978, the open gap
+    /// that `Engine::preview_route` does not exist yet.
     struct KnownLiveIssues(BTreeMap<u64, IssueState>);
 
     impl KnownLiveIssues {
         fn current() -> Self {
             Self(BTreeMap::from([
+                (978, IssueState::Open),
                 (1215, IssueState::Open),
                 (1253, IssueState::Open),
                 (1320, IssueState::Open),

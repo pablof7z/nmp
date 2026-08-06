@@ -219,8 +219,8 @@ Feature: Which destination failed, and why, one destination at a time
     # event" are different sentences and an app shows different screens for
     # them. A write with no destinations yet has nothing to attribute a
     # delivery failure to, and must not invent one.
-    Given nothing is known yet about Bob's DM relay list
-    When I publish a direct message to Bob
+    Given no relay list has been fetched yet
+    When I publish a note saying "hello"
     Then the receipt reports an open destination set naming no relays
     And the receipt reports no destination as failed
     And the receipt reports no destination at all

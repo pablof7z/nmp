@@ -1,7 +1,7 @@
 Feature: A write that cannot move is parked in the open, and a write that has been refused enough times stops
-  Acceptance cannot know. A DM composed while the app was offline, for a
-  recipient whose relay list has not been fetched yet, is a well-formed
-  obligation that only the world can answer -- later, asynchronously.
+  Acceptance cannot know. A note composed while the app was offline, before
+  any relay list has been fetched, is a well-formed obligation that only the
+  world can answer -- later, asynchronously.
 
   > there's no way to know that at acceptance time in the same way that we
   > can't know if the user says "when you go online publish this to
@@ -68,11 +68,10 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     #   Expire a write parked on an unresolved route after any elapsed time; the ninety-day park must still be held with its destination set still open.
     Scenario: No amount of time abandons a write parked on an unresolved route
       # #1136's surviving claim, and the one this rule exists to protect.
-      # NMP can no more prove a recipient will never publish a relay list than
-      # it can prove they will. Ninety days of not knowing is still not
-      # knowing.
-      Given nothing is known yet about Bob's DM relay list
-      And I published a direct message to Bob and its destination set is still open
+      # NMP can no more prove a relay list will never be published than it can
+      # prove it will. Ninety days of not knowing is still not knowing.
+      Given no relay list has been fetched yet
+      And I published a note and its destination set is still open
       When 90 days pass
       Then the receipt still reports an open destination set naming no relays
       And the intent is still durably held
@@ -87,11 +86,11 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     Scenario: A parked route resumes on its own when the knowledge arrives
       # Park means waiting, and waiting means it can end. Nothing about
       # unparking requires the app to notice, retry or re-publish anything.
-      Given nothing is known yet about Bob's DM relay list
-      And I published a direct message to Bob and its destination set is still open
-      When Bob's DM relay list arrives naming "wss://inbox.bob.example"
-      Then the write is routed to "wss://inbox.bob.example"
-      And the receipt reports a destination set naming "wss://inbox.bob.example"
+      Given no relay list has been fetched yet
+      And I published a note and its destination set is still open
+      When my relay list arrives naming "wss://relay.mine.example" as my write relay
+      Then the write is routed to "wss://relay.mine.example"
+      And the receipt reports a destination set naming "wss://relay.mine.example"
       And the same write is delivered -- not a second copy of it
 
     # nmp:id=WRITES-PARKED-004
@@ -101,14 +100,14 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Drop the park across a restart; an app that reattaches to a persisted receipt id must not be told nothing, which is indistinguishable from data loss.
     Scenario: A park survives a restart and resumes after it
-      Given nothing is known yet about Bob's DM relay list
-      And I published a direct message to Bob and its destination set is still open
+      Given no relay list has been fetched yet
+      And I published a note and its destination set is still open
       When the process stops immediately
       And I reconstruct the engine from the same durable store
       And I reattach to the receipt by its stable id
       Then the receipt reports an open destination set naming no relays
-      When Bob's DM relay list arrives naming "wss://inbox.bob.example"
-      Then the write is routed to "wss://inbox.bob.example"
+      When my relay list arrives naming "wss://relay.mine.example" as my write relay
+      Then the write is routed to "wss://relay.mine.example"
 
   Rule: A missing signer parks with no cap either, and the app is the only other exit
 
@@ -201,12 +200,12 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Park a write whose routing completed with zero relays; "we finished looking and there is nowhere to send this" would be reported as "we are still looking", which no app can act on.
     Scenario: A write whose routing finished with nowhere to go is terminal
-      # This is the scenario that changed. "Settled that Bob has no DM relay
+      # This is the scenario that changed. "Settled that I have no relay
       # list" is knowledge EXHAUSTED, not knowledge missing -- and a write
       # with a closed, empty destination set has nowhere to publish. Saying
       # so is a fact; parking it forever would be a guess dressed as patience.
-      Given the indexers have settled that Bob has no DM relay list
-      When I publish a direct message to Bob
+      Given the indexers have settled that I have no relay list
+      When I publish a note saying "nowhere to go"
       Then the receipt reports a closed destination set naming no relays
       And the receipt reports the write as having no destination
       And the write is never reported as settled
@@ -220,10 +219,10 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     Scenario: Still resolving and resolved-to-nothing are told apart
       # The whole of #1236, dissolved. One flag, not one string: whether
       # resolution can still change its mind.
-      Given nothing is known yet about Bob's DM relay list
-      When I publish a direct message to Bob
+      Given no relay list has been fetched yet
+      When I publish a note saying "still resolving"
       Then the receipt reports an open destination set naming no relays
-      When the indexers settle that Bob has no DM relay list
+      When the indexers settle that I have no relay list
       Then the receipt reports a closed destination set naming no relays
       And the receipt reports the write as having no destination
 
@@ -289,8 +288,8 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Let a timeout produce the same terminal fact as an explicit cancellation; nobody decided, and the app cannot tell its own decision from NMP's guess.
     Scenario: Cancellation is a decision somebody made
-      Given nothing is known yet about Bob's DM relay list
-      And I published a direct message to Bob and its destination set is still open
+      Given no relay list has been fetched yet
+      And I published a note and its destination set is still open
       When I cancel that write
       Then the receipt reports the write as not sent because it was cancelled
       And the intent is no longer held for delivery
