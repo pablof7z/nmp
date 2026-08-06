@@ -388,8 +388,10 @@ impl RedbStore {
     /// disk-full sequence.
     ///
     /// The database handle itself is unchanged: still a bare `Database`,
-    /// still opened exactly once. In-place close/reopen is #895's second
-    /// half and is deliberately not here.
+    /// still opened exactly once, and it stays that way. #895 declined an
+    /// in-place close/reopen door: recovery is dropping this owner and
+    /// opening again, which releases the lock (see `_ownership`'s drop
+    /// order on the struct) and costs no process restart.
     #[cfg(test)]
     pub(super) fn open_with_backend(
         path: impl AsRef<Path>,

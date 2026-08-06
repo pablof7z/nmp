@@ -141,7 +141,9 @@ fn store_with_injectable_backend(
 /// Close a store and open a fresh one over the same storage, with no fault
 /// armed. This is a plain reopen — a new `Database`, a new transactional
 /// memory, redb's header-driven repair — not an in-place recovery door.
-/// `nmp-store` still has none, and #895 defers adding one until #790.
+/// `nmp-store` has none and will not grow one: #895 declined that door
+/// because dropping the owner and opening again IS the recovery, and it
+/// needs no process restart to do it.
 fn reopen_over(dir: &TempDir, name: &str, bytes: &Arc<InMemoryBackend>) -> RedbStore {
     let backend = FaultBackend {
         inner: Arc::clone(bytes),
