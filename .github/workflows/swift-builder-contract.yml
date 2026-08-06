@@ -1,0 +1,42 @@
+# #1240: scripts/build-swift-xcframework.sh cross-compiles for Apple targets
+# whose standard library is installed per toolchain, against the dated nightly
+# rust-toolchain.toml pins. A clean consumer clone that has one without the
+# other meets `error[E0463]: can't find crate for core` and reads it as an NMP
+# API break. The builder is the only place that knows both, so it installs the
+# targets it is about to build for, and this job falsifies a builder that stops.
+#
+# scripts/test-build-swift-xcframework.sh drives the builder against shimmed
+# cargo, rustup, and Xcode tools: content only, no toolchain, no secrets, no
+# macOS runner. The paired end-to-end proof is the macOS qualification job,
+# which no longer installs any target itself.
+
+name: Swift builder contract
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Every step runs through one hardened shell (#1170): GitHub's default `run:`
+# shell honours BASH_ENV, $ENV, profile files, and inherited shell functions,
+# so the command a step names is not necessarily the command that runs.
+defaults:
+  run:
+    shell: bash --noprofile --norc -p -eo pipefail {0}
+
+
+jobs:
+  swift-builder-contract:
+    name: Swift builder installs what it builds for
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Falsify a builder that assumes its Rust targets
+        run: bash scripts/test-build-swift-xcframework.sh
