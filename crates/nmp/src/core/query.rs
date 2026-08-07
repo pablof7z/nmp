@@ -1131,7 +1131,12 @@ impl<S: EventStore> EngineCore<S> {
                 // same terminal the `NEG-ERR`, malformed-payload and
                 // liveness-deadline paths take, reached immediately rather
                 // than 30 seconds after a frame that never left the process.
-                let _ = reason;
+                //
+                // `reason` has no consumer here on purpose: this request's
+                // evidence is already ACTIVE (its open was accepted), so it is
+                // retired by `abandon_sub` rather than refused, exactly as the
+                // other three abandonment paths retire it. The app-visible
+                // consequence is the fallback REQ's own fresh evidence.
                 self.neg_session_fallback_to_req(sub_id.clone(), session, &mut effects);
             }
         }
