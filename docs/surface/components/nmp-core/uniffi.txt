@@ -5270,6 +5270,12 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "FinishedStoredEvents",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
             name: "Connecting",
             discr: None,
             fields: [],
@@ -5313,7 +5319,7 @@ enum Enum {
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp::SourceStatus` mirror (`docs/design/scoped-evidence-49-12-plan.md`\n§4) -- the closed, honest per-source link-status vocabulary for the\nscoped, per-query [`FfiAcquisitionEvidence`] surface. Ratified names,\ncodex-nova-governed: no variant/field may be added beyond this list, and\nno query-level aggregate may ever be added anywhere on\nthis surface.",
+        "`nmp::SourceStatus` mirror (`docs/design/scoped-evidence-49-12-plan.md`\n§4) -- the closed, honest per-source vocabulary for the scoped, per-query\n[`FfiAcquisitionEvidence`] surface. What the ratified names protect is that\nevery state here is ONE SOURCE's own current fact: no query-level\naggregate may ever be added anywhere on this surface, and no variant may\nbe added that reads across sources or claims completeness. A seventh\nper-source state, `FinishedStoredEvents`, was added under #1235 -- the six\ncould not say that a relay had finished answering, so consumers timed it.",
     ),
 }
 

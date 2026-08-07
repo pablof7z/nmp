@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey};
-use nmp_router::RelayPlan;
+use nmp_router::{RelayPlan, SubId};
 use nmp_store::{coverage_key, EventStore, PersistenceError};
 use nostr::{RelayUrl, Timestamp};
 
@@ -60,13 +60,21 @@ pub struct AcquisitionEvidence {
 
 /// One relay's acquisition state for a query's subtree, as two DELIBERATELY
 /// orthogonal facts: a durable PAST fact (`reconciled_through`, a persisted
-/// watermark) and a current LINK fact (`status`). Keeping these independent
-/// is load-bearing — a relay can be currently `Disconnected` while still
-/// carrying a perfectly good `reconciled_through` from before it dropped
-/// (the #49 acceptance criterion "offline cached rows remain usable"): if
-/// the two were one enum, either the link state would shadow the watermark
-/// or the watermark would shadow the link state, and either way the fact
-/// that survives is a lie by omission.
+/// watermark) and a fact about the request on the wire RIGHT NOW (`status`).
+/// Keeping these independent is load-bearing — a relay can be currently
+/// `Disconnected` while still carrying a perfectly good `reconciled_through`
+/// from before it dropped (the #49 acceptance criterion "offline cached rows
+/// remain usable"): if the two were one enum, either the link state would
+/// shadow the watermark or the watermark would shadow the link state, and
+/// either way the fact that survives is a lie by omission.
+///
+/// That axis, not the presence of a watermark, is where
+/// [`SourceStatus::FinishedStoredEvents`] belongs (#1235). Whether this relay
+/// has finished answering is current and dies with the socket, exactly like
+/// every other status; whether it PROVED anything over the query's window is
+/// durable and outlives it. The two are independent in both directions — a
+/// router-bounded request finishes with no watermark, and a watermark from a
+/// prior window is `Some` while a fresh request is still streaming.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEvidence {
     pub relay: RelayUrl,
@@ -79,21 +87,50 @@ pub struct SourceEvidence {
     /// such row yet) — never read as "complete", it is simply the absence
     /// of a fact. Independent of `status`.
     pub reconciled_through: Option<Timestamp>,
-    /// Current link/acquisition status — orthogonal to `reconciled_through`.
+    /// This session's current link and request state — orthogonal to
+    /// `reconciled_through`, and like a socket rather than like a watermark:
+    /// it describes right now, and nothing here survives the connection.
     pub status: SourceStatus,
 }
 
-/// The closed, honest per-source link-status vocabulary. This frame
-/// populates every state below from exact session/generation bookkeeping.
-/// AUTH policy/signer failures are session-local facts; #51 may later add
-/// richer transport error detail without changing this closed status shape.
+/// The closed, honest per-source vocabulary for one session's current link
+/// and request state. This frame populates every state below from exact
+/// session/generation bookkeeping. AUTH policy/signer failures are
+/// session-local facts; #51 may later add richer transport error detail
+/// without changing this closed status shape.
+///
+/// Every member is ONE SOURCE's own fact. Nothing here reads across sources,
+/// and no member may ever be added that does — that is the boundary this
+/// closed shape protects, not the count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceStatus {
     /// The relay is connected and at least one subtree atom this source
-    /// covers has an outstanding REQ — `reconciled_through` may still be
-    /// `Some` from a prior window even while this reads `Requesting` (a
-    /// live subscription's REQ does not close once its first EOSE lands).
+    /// covers is still having its stored events streamed — `reconciled_through`
+    /// may still be `Some` from a prior window even while this reads
+    /// `Requesting`, because a watermark is a durable PAST fact and this is a
+    /// fact about the request on the wire right now.
     Requesting,
+    /// The relay is connected and every wire request covering this query's
+    /// subtree atoms on this session has reached NIP-01's end of stored
+    /// events — the relay has sent everything it had for the question it was
+    /// asked (#1235).
+    ///
+    /// This is a DELIVERY fact about one relay answering one request, and it
+    /// is deliberately none of the things this module refuses to say: it does
+    /// not claim the query is complete, does not claim any other source has
+    /// finished, and does not claim what this relay held. What the relay
+    /// PROVED over the query's window is `reconciled_through` and only that —
+    /// a request the router bounded with a NIP-01 `limit` finishes here while
+    /// earning no watermark at all, which is exactly the pair
+    /// `features/coverage/empty-vs-unknown.feature` distinguishes.
+    ///
+    /// Scoped to the request currently on the wire, like every other variant
+    /// here and unlike `reconciled_through`: a session that finishes and then
+    /// drops reads `Disconnected`, because replay opens a fresh request there
+    /// is nothing yet to have finished. The live subscription itself stays
+    /// open and keeps delivering new events; only its stored-events phase is
+    /// over.
+    FinishedStoredEvents,
     /// A subtree atom this source covers has a planned wire request, but
     /// the relay has never yet completed a connection to deliver it.
     Connecting,
@@ -181,7 +218,11 @@ pub enum ShortfallFact {
 ///   AwaitingChallenge }` when the reducer holds no entry (connected but
 ///   never challenged); `Disconnected` if it has connected before but is
 ///   not connected now; else `Connecting` (planned but never yet
-///   connected).
+///   connected). A session that would read `Requesting` reads
+///   [`SourceStatus::FinishedStoredEvents`] instead once EVERY wire request
+///   absorbing an atom it covers appears in `finished_stored_events` — the
+///   same all-or-nothing scoping `reconciled_through` uses, so one unfinished
+///   request on a session is never hidden by a finished sibling (#1235).
 /// - Sources are returned sorted by session key for deterministic equality.
 pub(crate) fn acquisition_evidence<S: EventStore>(
     subtree_atoms: &BTreeSet<ContextualAtom>,
@@ -190,6 +231,7 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
     connected: &BTreeSet<RelaySessionKey>,
     auth_status: &BTreeMap<RelaySessionKey, SourceStatus>,
     ever_connected: &BTreeSet<RelaySessionKey>,
+    finished_stored_events: &BTreeSet<(RelaySessionKey, SubId)>,
 ) -> Result<AcquisitionEvidence, PersistenceError> {
     if subtree_atoms.is_empty() {
         return Ok(AcquisitionEvidence {
@@ -198,20 +240,28 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         });
     }
 
-    // session -> (every covered atom proven so far?, min proven `through`).
-    let mut per_session: BTreeMap<RelaySessionKey, (bool, Option<Timestamp>)> = BTreeMap::new();
+    // session -> (every covered atom proven so far?, min proven `through`,
+    // every wire request covering an atom so far finished its stored events?).
+    let mut per_session: BTreeMap<RelaySessionKey, (bool, Option<Timestamp>, bool)> =
+        BTreeMap::new();
     let mut shortfall = Vec::new();
 
     for atom in subtree_atoms {
         let key = coverage_key(atom);
         let locally_limited = plan.limited.contains(&key);
-        let covering: Vec<&RelaySessionKey> = plan
+        // Per covering SESSION, whether every one of ITS wire requests that
+        // absorbs this atom has reached end of stored events. A session may
+        // absorb one atom through several requests; the atom is only finished
+        // on that session when all of them are.
+        let covering: Vec<(&RelaySessionKey, bool)> = plan
             .reqs
             .iter()
             .filter_map(|(session, reqs)| {
-                reqs.iter()
-                    .any(|r| r.absorbed.contains(&key))
-                    .then_some(session)
+                let mut absorbing = reqs.iter().filter(|r| r.absorbed.contains(&key)).peekable();
+                absorbing.peek()?;
+                let finished = absorbing
+                    .all(|r| finished_stored_events.contains(&(session.clone(), r.sub_id.clone())));
+                Some((session, finished))
             })
             .collect();
 
@@ -231,8 +281,11 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         }
 
         let window_start = Timestamp::from(atom.filter.since.unwrap_or(0));
-        for session in covering {
-            let entry = per_session.entry(session.clone()).or_insert((true, None));
+        for (session, finished) in covering {
+            let entry = per_session
+                .entry(session.clone())
+                .or_insert((true, None, true));
+            entry.2 &= finished;
             // Coverage rows stay keyed (context-hashed key, relay URL): the
             // access distinction already lives inside `key` itself
             // (`CoverageKey` is a context-inclusive hash), so the store read
@@ -255,7 +308,7 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
 
     let sources = per_session
         .into_iter()
-        .map(|(session, (all_proven, through))| {
+        .map(|(session, (all_proven, through, all_finished))| {
             let status = if connected.contains(&session) {
                 if session.access == AccessContext::Public {
                     SourceStatus::Requesting
@@ -271,6 +324,14 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
                 SourceStatus::Disconnected
             } else {
                 SourceStatus::Connecting
+            };
+            // Only the state that MEANS "stored events are still streaming"
+            // can be displaced by their end. A session still negotiating AUTH,
+            // denied, errored, disconnected, or never yet connected has no
+            // request on the wire to have finished, so its own fact stands.
+            let status = match (status, all_finished) {
+                (SourceStatus::Requesting, true) => SourceStatus::FinishedStoredEvents,
+                (status, _) => status,
             };
             SourceEvidence {
                 relay: session.relay,
@@ -289,6 +350,24 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
 /// evidence shape remains per physical source, so a source appearing in
 /// multiple scopes is folded to its least-proven watermark while explicit
 /// shortfalls are unioned.
+///
+/// [`SourceStatus::FinishedStoredEvents`] folds the same way and for the same
+/// reason (#1235): each scope plans its own wire requests, so one physical
+/// session can have finished one scope's request while another scope's is
+/// still streaming. Reporting the finish would let one scope's completion
+/// answer for a scope nothing has answered — the exact borrowing this merge
+/// exists to prevent. Every other status is a link fact, and one physical
+/// session has one link status.
+/// The LINK half of a status, with the request phase collapsed away. Two
+/// scopes must agree about the socket; they may legitimately disagree about
+/// whether the request each of them planned has finished.
+fn link_status(status: SourceStatus) -> SourceStatus {
+    match status {
+        SourceStatus::FinishedStoredEvents => SourceStatus::Requesting,
+        other => other,
+    }
+}
+
 pub(crate) fn merge_acquisition_evidence(
     parts: impl IntoIterator<Item = AcquisitionEvidence>,
 ) -> AcquisitionEvidence {
@@ -304,10 +383,15 @@ pub(crate) fn merge_acquisition_evidence(
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let current = entry.get_mut();
-                    debug_assert_eq!(
-                        current.status, source.status,
+                    debug_assert!(
+                        link_status(current.status) == link_status(source.status),
                         "one physical session has one current link status"
                     );
+                    if current.status == SourceStatus::FinishedStoredEvents
+                        && source.status == SourceStatus::Requesting
+                    {
+                        current.status = SourceStatus::Requesting;
+                    }
                     current.reconciled_through =
                         match (current.reconciled_through, source.reconciled_through) {
                             (Some(left), Some(right)) => Some(left.min(right)),
@@ -378,6 +462,7 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeSet::new(),
+            &BTreeSet::new(),
         )
         .expect("MemoryStore coverage never fails");
 
@@ -407,6 +492,7 @@ mod tests {
             &MemoryStore::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
+            &BTreeSet::new(),
             &BTreeSet::new(),
         )
         .expect("MemoryStore coverage never fails");
@@ -461,6 +547,7 @@ mod tests {
                 &connected,
                 &BTreeMap::from([(session.clone(), status)]),
                 &connected,
+                &BTreeSet::new(),
             )
             .expect("MemoryStore coverage never fails");
             assert_eq!(evidence.sources[0].status, status);
@@ -473,6 +560,7 @@ mod tests {
             &connected,
             &BTreeMap::new(),
             &connected,
+            &BTreeSet::new(),
         )
         .expect("MemoryStore coverage never fails");
         assert_eq!(

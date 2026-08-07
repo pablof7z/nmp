@@ -116,6 +116,11 @@ class RelayViewsTest {
             listOf(
                 Triple(null, NmpRelayRuntimePresentation.StatusUnavailable, "Status unavailable"),
                 Triple(SourceStatus.Requesting, NmpRelayRuntimePresentation.Requesting, "Requesting"),
+                Triple(
+                    SourceStatus.FinishedStoredEvents,
+                    NmpRelayRuntimePresentation.FinishedStoredEvents,
+                    "Finished stored events",
+                ),
                 Triple(SourceStatus.Connecting, NmpRelayRuntimePresentation.Connecting, "Connecting"),
                 Triple(SourceStatus.Disconnected, NmpRelayRuntimePresentation.Disconnected, "Disconnected"),
                 Triple(

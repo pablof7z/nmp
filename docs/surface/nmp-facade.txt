@@ -997,6 +997,7 @@ pub nmp::SourceStatus::AwaitingAuth::phase: nmp::AuthPhase
 pub nmp::SourceStatus::Connecting
 pub nmp::SourceStatus::Disconnected
 pub nmp::SourceStatus::Error
+pub nmp::SourceStatus::FinishedStoredEvents
 pub nmp::SourceStatus::Requesting
 impl core::clone::Clone for nmp::SourceStatus
 pub fn nmp::SourceStatus::clone(&self) -> nmp::SourceStatus

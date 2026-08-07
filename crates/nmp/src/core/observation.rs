@@ -172,11 +172,31 @@ pub(super) struct ActiveRequestEvidence {
 /// This is deliberately separate from [`ActiveRequestEvidence`]: an EOSE
 /// settles request evidence, but it does not close the relay subscription.
 /// The wire owner remains live until replacement, CLOSE, or exact-session
-/// disconnect.
+/// disconnect. That outliving is exactly why the stored-events phase is
+/// retained HERE (#1235): request evidence is REMOVED when the terminal
+/// arrives, so it can report that a request is outstanding but never that one
+/// finished.
 #[derive(Debug, Clone)]
 pub(super) struct LiveWireRequest {
     pub(super) filter: ConcreteFilter,
     pub(super) handle: TransportRelayHandle,
+    pub(super) stored_events: StoredEvents,
+}
+
+/// Which half of NIP-01's REQ lifecycle the wire request under one
+/// `(session, sub_id)` is in.
+///
+/// `Streaming` carries the exact request revision it is speaking for because
+/// a replacement REQ REUSES this key: a straggler terminal belonging to the
+/// request that was displaced must not mark the live one finished. This is
+/// the wire-owner counterpart of the FIFO intersection rule
+/// `AttributionState::attribute_eose_detailed` enforces for coverage, and it
+/// fails closed the same way — an unrecognised revision leaves the phase
+/// alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoredEvents {
+    Streaming { request_revision: u64 },
+    Finished,
 }
 
 impl ObservationExecutionState {
@@ -352,6 +372,9 @@ impl<S: EventStore> EngineCore<S> {
                     LiveWireRequest {
                         filter: request.filter.clone(),
                         handle,
+                        stored_events: StoredEvents::Streaming {
+                            request_revision: request.request_revision,
+                        },
                     },
                 );
                 self.active_request_evidence.insert(
@@ -397,6 +420,7 @@ impl<S: EventStore> EngineCore<S> {
         let Some(request) = self.active_request_evidence.remove(&send.revision()) else {
             return;
         };
+        self.finish_stored_events(&request);
         for (id, path, filter_revision) in request.targets {
             self.emit_observation_fact(
                 id,
@@ -421,8 +445,48 @@ impl<S: EventStore> EngineCore<S> {
     /// The terminal wire frame still ends this exact request, but exposing
     /// it as [`ObservationFact::RequestSettled`] would let protocol
     /// consumers derive absence from a locally incomplete view.
+    ///
+    /// The stored-events phase is a different claim and does end here (#1235):
+    /// "this relay sent everything it had for this request" is a delivery fact
+    /// that survives a withheld coverage claim intact. A router-bounded REQ is
+    /// the case that separates them — it finishes without ever earning a
+    /// watermark, and reporting neither fact is what left an app with only a
+    /// wall clock to end a bounded read on.
     pub(super) fn retire_request_evidence(&mut self, send: AttributionSendId) {
-        self.active_request_evidence.remove(&send.revision());
+        let Some(request) = self.active_request_evidence.remove(&send.revision()) else {
+            return;
+        };
+        self.finish_stored_events(&request);
+    }
+
+    /// End the stored-events phase of the wire request `request` speaks for,
+    /// and only that one. A live wire owner under this key that belongs to a
+    /// LATER request revision is a replacement, and the terminal being handled
+    /// belongs to the REQ it displaced.
+    fn finish_stored_events(&mut self, request: &ActiveRequestEvidence) {
+        let Some(live) = self
+            .live_wire_requests
+            .get_mut(&(request.session.clone(), request.sub_id.clone()))
+        else {
+            return;
+        };
+        if live.stored_events
+            == (StoredEvents::Streaming {
+                request_revision: request.request_revision,
+            })
+        {
+            live.stored_events = StoredEvents::Finished;
+        }
+    }
+
+    /// Every `(session, sub_id)` whose wire request has reached NIP-01's end
+    /// of stored events, in the shape `evidence::acquisition_evidence` reads.
+    pub(super) fn finished_stored_events(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
+        self.live_wire_requests
+            .iter()
+            .filter(|(_, live)| live.stored_events == StoredEvents::Finished)
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     pub(super) fn close_requests_for_session(

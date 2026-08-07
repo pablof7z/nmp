@@ -94,6 +94,7 @@ final class RelayViewsTests: XCTestCase {
         let cases: [(SourceStatus?, NMPRelayRuntimePresentation, String)] = [
             (nil, .statusUnavailable, "Status unavailable"),
             (.requesting, .requesting, "Requesting"),
+            (.finishedStoredEvents, .finishedStoredEvents, "Finished stored events"),
             (.connecting, .connecting, "Connecting"),
             (.disconnected, .disconnected, "Disconnected"),
             (

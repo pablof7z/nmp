@@ -74,10 +74,19 @@ sealed class AuthPhase {
     }
 }
 
-/** The closed, honest per-source link-status vocabulary
+/** The closed, honest per-source vocabulary
  * (`docs/design/scoped-evidence-49-12-plan.md` §4). */
 sealed class SourceStatus {
     object Requesting : SourceStatus()
+
+    /** This relay reached NIP-01's end of stored events for every request
+     * covering this query on this session: it sent everything it had for the
+     * question it was asked (#1235). A delivery fact about ONE source
+     * answering ONE request -- never a claim that the query is complete, that
+     * another source finished, or that anything was proven over the query's
+     * window. What was proven is `reconciledThrough`, and the two disagree in
+     * both directions. */
+    object FinishedStoredEvents : SourceStatus()
 
     object Connecting : SourceStatus()
 
@@ -93,6 +102,7 @@ sealed class SourceStatus {
         fun from(ffi: FfiSourceStatus): SourceStatus =
             when (ffi) {
                 is FfiSourceStatus.Requesting -> Requesting
+                is FfiSourceStatus.FinishedStoredEvents -> FinishedStoredEvents
                 is FfiSourceStatus.Connecting -> Connecting
                 is FfiSourceStatus.Disconnected -> Disconnected
                 is FfiSourceStatus.AwaitingAuth -> AwaitingAuth(AuthPhase.from(ffi.phase))
@@ -103,10 +113,11 @@ sealed class SourceStatus {
 }
 
 /** One relay's acquisition state for a query's subtree, as two deliberately
- * orthogonal facts: a durable PAST fact (`reconciledThrough`) and a current
- * LINK fact (`status`) -- a relay can be currently `Disconnected` while
- * still carrying a perfectly good `reconciledThrough` from before it
- * dropped (offline cached rows remain usable). */
+ * orthogonal facts: a durable PAST fact (`reconciledThrough`) and a fact about
+ * the request on the wire right now (`status`) -- a relay can be currently
+ * `Disconnected` while still carrying a perfectly good `reconciledThrough`
+ * from before it dropped (offline cached rows remain usable), and
+ * `FinishedStoredEvents` while carrying none at all. */
 data class SourceEvidence(
     val relay: String,
     /** The frozen access identity of the physical session that produced this

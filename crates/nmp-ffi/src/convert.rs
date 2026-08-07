@@ -1480,6 +1480,7 @@ fn auth_phase_to_ffi(p: AuthPhase) -> FfiAuthPhase {
 fn source_status_to_ffi(s: SourceStatus) -> FfiSourceStatus {
     match s {
         SourceStatus::Requesting => FfiSourceStatus::Requesting,
+        SourceStatus::FinishedStoredEvents => FfiSourceStatus::FinishedStoredEvents,
         SourceStatus::Connecting => FfiSourceStatus::Connecting,
         SourceStatus::Disconnected => FfiSourceStatus::Disconnected,
         SourceStatus::AwaitingAuth { phase } => FfiSourceStatus::AwaitingAuth {
@@ -2573,6 +2574,7 @@ mod tests {
         };
         let statuses = [
             SourceStatus::Requesting,
+            SourceStatus::FinishedStoredEvents,
             SourceStatus::Connecting,
             SourceStatus::Disconnected,
             SourceStatus::AwaitingAuth {
@@ -2609,38 +2611,43 @@ mod tests {
             ],
         });
 
-        assert_eq!(ffi.sources.len(), 9);
+        assert_eq!(ffi.sources.len(), 10);
         assert_eq!(ffi.sources[0].status, FfiSourceStatus::Requesting);
         assert_eq!(ffi.sources[0].reconciled_through, Some(10));
-        assert_eq!(ffi.sources[1].status, FfiSourceStatus::Connecting);
+        // A finished source that proved NOTHING over the window. The pair is
+        // the point (#1235): the relay is done answering AND has no watermark,
+        // and neither fact is allowed to stand in for the other.
+        assert_eq!(ffi.sources[1].status, FfiSourceStatus::FinishedStoredEvents);
         assert_eq!(ffi.sources[1].reconciled_through, None);
-        assert_eq!(ffi.sources[2].status, FfiSourceStatus::Disconnected);
+        assert_eq!(ffi.sources[2].status, FfiSourceStatus::Connecting);
+        assert_eq!(ffi.sources[2].reconciled_through, Some(12));
+        assert_eq!(ffi.sources[3].status, FfiSourceStatus::Disconnected);
         assert_eq!(
-            ffi.sources[3].status,
+            ffi.sources[4].status,
             FfiSourceStatus::AwaitingAuth {
                 phase: FfiAuthPhase::AwaitingChallenge
             }
         );
         assert_eq!(
-            ffi.sources[4].status,
+            ffi.sources[5].status,
             FfiSourceStatus::AwaitingAuth {
                 phase: FfiAuthPhase::AwaitingPolicy
             }
         );
         assert_eq!(
-            ffi.sources[5].status,
+            ffi.sources[6].status,
             FfiSourceStatus::AwaitingAuth {
                 phase: FfiAuthPhase::AwaitingSignature
             }
         );
         assert_eq!(
-            ffi.sources[6].status,
+            ffi.sources[7].status,
             FfiSourceStatus::AwaitingAuth {
                 phase: FfiAuthPhase::AwaitingRelayAck
             }
         );
-        assert_eq!(ffi.sources[7].status, FfiSourceStatus::AuthDenied);
-        assert_eq!(ffi.sources[8].status, FfiSourceStatus::Error);
+        assert_eq!(ffi.sources[8].status, FfiSourceStatus::AuthDenied);
+        assert_eq!(ffi.sources[9].status, FfiSourceStatus::Error);
 
         let atom_json = atom.to_nostr().as_json();
         assert_eq!(

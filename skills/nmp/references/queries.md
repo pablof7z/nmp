@@ -38,7 +38,18 @@ outer query; no platform implicitly inherits or reapplies defaults.
 
 Rust subscriptions deliver row deltas plus acquisition evidence. Swift `NMPQuery` and Kotlin's Flow bridge accumulate those deltas and deliver full `RowBatch` snapshots. A `Row` contains the event and the set of relays that *hold* it — not whatever delivered it first — so the set grows as more relays are proven to carry the same event.
 
-`RowBatch.evidence` is a list with one entry per canonical branch, in branch order. Read it by branch index; do not treat it as a single value. Each entry contains per-source `reconciledThrough` and current link status, plus `NoPlannedSource`, `NoResolvedDemand`, or `LocalLimit` shortfalls. `SourceStatus` is `Requesting`, `Connecting`, `Disconnected`, `AwaitingAuth { phase }`, `AuthDenied`, or `Error`, and the AUTH states are populated for `Nip42` sessions. These are scoped facts. They do not prove the Nostr network is complete.
+`RowBatch.evidence` is a list with one entry per canonical branch, in branch order. Read it by branch index; do not treat it as a single value. Each entry contains per-source `reconciledThrough` and current source status, plus `NoPlannedSource`, `NoResolvedDemand`, or `LocalLimit` shortfalls. `SourceStatus` is `Requesting`, `FinishedStoredEvents`, `Connecting`, `Disconnected`, `AwaitingAuth { phase }`, `AuthDenied`, or `Error`, and the AUTH states are populated for `Nip42` sessions. These are scoped facts. They do not prove the Nostr network is complete.
+
+### Ending a bounded read
+
+To take a snapshot once its sources have answered, wait on `FinishedStoredEvents`, never on a timer. It means this relay reached NIP-01's end of stored events for this query's request — it sent everything it had. That is a fact, and it arrives on a frame; a quiet period is a guess that gets slower and wronger as relays do.
+
+Two things it is not:
+
+- **Not a claim that anything was proven.** `reconciledThrough` answers that, and the two disagree in both directions: a request you bounded with a `limit` finishes with no watermark at all, and a watermark from an earlier window is present while a fresh request is still streaming. Read `FinishedStoredEvents` for "nothing more is coming from here", `reconciledThrough` for "this relay proved this window".
+- **Not a query verdict.** It is one source's fact. Rolling several into "the query is done" is your policy and yours alone — decide what a still-`Requesting` relay, a `Disconnected` one, and a shortfall each mean to your screen. NMP will not make that call, and no value on this surface ever will.
+
+A relay that refuses the request, disconnects, or simply never answers has not finished, and no amount of waiting changes that. Bound your own read with a timeout if you need one — that is an app-owned deadline on how long you will wait, not a claim about the relay.
 
 In an app accumulator:
 
