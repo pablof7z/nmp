@@ -91,7 +91,9 @@ fn a_reconnecting_worker_retains_a_bounded_ordinary_outbound_envelope() {
         .expect("parse relay url");
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
-    let handle = pool.ensure_open(&url, Declarer::Ourselves).expect("admitted");
+    let handle = pool
+        .ensure_open(&url, Declarer::Ourselves)
+        .expect("admitted");
 
     let accepted = spam_ordinary_frames(&pool, handle, RETAINED_CEILING_BYTES);
     assert!(
@@ -133,7 +135,9 @@ fn a_connected_peer_that_never_reads_cannot_grow_the_process() {
         nostr::RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("parse slow relay url");
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
-    let handle = pool.ensure_open(&url, Declarer::Ourselves).expect("admitted");
+    let handle = pool
+        .ensure_open(&url, Declarer::Ourselves)
+        .expect("admitted");
 
     let accepted = spam_ordinary_frames(&pool, handle, RETAINED_CEILING_BYTES);
     assert!(accepted >= 1, "at least one frame must be admitted");

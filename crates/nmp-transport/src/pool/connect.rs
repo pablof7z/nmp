@@ -43,10 +43,36 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INBOUND_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_INBOUND_FRAME_BYTES: usize = 1024 * 1024;
 
+/// Ceiling on one outbound frame, symmetric with the inbound ceilings above
+/// and enforced at admission (`pool::worker::WorkerHandle`) rather than here
+/// (issue #506). A frame larger than this can never be handed to a relay, so
+/// refusing it while the caller still holds a typed outcome is the honest
+/// answer; letting it reach [`MAX_OUTBOUND_BUFFER_BYTES`] below would make
+/// every subsequent write fail with a refusal that no caller is waiting for.
+pub(super) const MAX_OUTBOUND_FRAME_BYTES: usize = 1024 * 1024;
+
+/// What tungstenite may hold for a socket whose peer has stopped reading.
+///
+/// Successful `socket.write` is not peer delivery: it means the bytes were
+/// accepted into this buffer. tungstenite 0.29 defaults
+/// `max_write_buffer_size` to `usize::MAX`, so on a stalled peer the buffer
+/// was the sink every bound upstream of it drained into — the worker's own
+/// deque could be capped and the growth would simply move here (issue #506).
+///
+/// Sized so exactly one largest legal frame always fits beside a full
+/// [`OUTBOUND_WRITE_BUFFER_BYTES`] of already-buffered bytes. A frame is
+/// therefore refused only while the buffer genuinely holds unflushed data,
+/// which the worker resolves by flushing — never permanently, which it could
+/// not.
+const OUTBOUND_WRITE_BUFFER_BYTES: usize = 128 * 1024;
+const MAX_OUTBOUND_BUFFER_BYTES: usize = MAX_OUTBOUND_FRAME_BYTES + OUTBOUND_WRITE_BUFFER_BYTES;
+
 fn relay_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(MAX_INBOUND_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_INBOUND_FRAME_BYTES))
+        .write_buffer_size(OUTBOUND_WRITE_BUFFER_BYTES)
+        .max_write_buffer_size(MAX_OUTBOUND_BUFFER_BYTES)
 }
 
 pub(super) type RelaySocket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
@@ -227,6 +253,26 @@ mod tests {
         assert_eq!(config.max_frame_size, Some(MAX_INBOUND_FRAME_BYTES));
         // Compile-time invariant: tighter than tungstenite's own 64 MiB default ceiling.
         const _: () = assert!(MAX_INBOUND_MESSAGE_BYTES < 64 * 1024 * 1024);
+    }
+
+    /// Issue #506 falsifier: the write side needs the same treatment. With
+    /// tungstenite's `usize::MAX` default, a peer that stops reading turns
+    /// this buffer into the sink every upstream bound drains into, so the
+    /// worker's own envelope would bound nothing.
+    #[test]
+    fn relay_websocket_config_bounds_the_write_buffer() {
+        let config = relay_websocket_config();
+        assert_eq!(config.max_write_buffer_size, MAX_OUTBOUND_BUFFER_BYTES);
+        assert_eq!(config.write_buffer_size, OUTBOUND_WRITE_BUFFER_BYTES);
+        // Compile-time invariants. The first is tungstenite's own
+        // construction requirement; the second is what makes a
+        // `WriteBufferFull` refusal always transient — one largest legal
+        // frame fits beside a completely full write buffer, so a refusal
+        // always means "flush first", never "this frame can never be sent".
+        const _: () = assert!(MAX_OUTBOUND_BUFFER_BYTES > OUTBOUND_WRITE_BUFFER_BYTES);
+        const _: () = assert!(
+            MAX_OUTBOUND_BUFFER_BYTES >= MAX_OUTBOUND_FRAME_BYTES + OUTBOUND_WRITE_BUFFER_BYTES
+        );
     }
 
     /// A black-holed address must fail inside the bound, never the OS
