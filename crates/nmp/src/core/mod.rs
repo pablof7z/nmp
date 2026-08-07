@@ -89,6 +89,7 @@ use nmp_store::{
     PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
     PublishQueueTransientCause, ReceiptState, RelayObserved, RemoveQueueEntryOutcome,
+    VerifiedSignature,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,

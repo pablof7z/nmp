@@ -2863,10 +2863,13 @@ impl<S: EventStore> EngineCore<S> {
             return; // duplicate/delayed signer completion after routing.
         }
 
-        if let Err(reason) = Self::validate_signed_template(&pending.frozen, &event) {
-            self.fail_and_compensate(id, reason, effects);
-            return;
-        }
+        let verified = match Self::validate_signed_template(&pending.frozen, &event) {
+            Ok(verified) => verified,
+            Err(reason) => {
+                self.fail_and_compensate(id, reason, effects);
+                return;
+            }
+        };
 
         let mut co_receipts = Vec::new();
         {
@@ -2875,7 +2878,7 @@ impl<S: EventStore> EngineCore<S> {
                 match self
                     .resolver
                     .store_mut()
-                    .promote_signed(intent_id, event.sig)
+                    .promote_signed(intent_id, verified)
                 {
                     Ok(PromoteOutcome::Promoted { co_signed, .. }) => {
                         // The store atomically promotes every exact-duplicate
@@ -3044,10 +3047,15 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// The single Schnorr verification of a signer result (#387), and the
+    /// only place a [`VerifiedSignature`] is minted (#768): the evidence
+    /// `promote_signed` demands cannot exist without this call succeeding,
+    /// so an engine that skipped this check would have nothing to hand the
+    /// store door.
     pub(super) fn validate_signed_template(
         frozen: &SignedEvent,
         signed: &SignedEvent,
-    ) -> Result<(), String> {
+    ) -> Result<VerifiedSignature, String> {
         if signed.id != frozen.id
             || signed.pubkey != frozen.pubkey
             || signed.created_at != frozen.created_at
@@ -3059,8 +3067,7 @@ impl<S: EventStore> EngineCore<S> {
                 "signer returned an event that does not match the accepted template".into(),
             );
         }
-        signed
-            .verify()
+        VerifiedSignature::verify(signed)
             .map_err(|err| format!("signer returned an invalid signature: {err}"))
     }
 

@@ -9,10 +9,17 @@ use nmp_store::{
     PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
     PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
-    PublishQueueTransientCause, RedbStore,
+    PublishQueueTransientCause, RedbStore, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+
+/// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+/// event promoted below is one this fixture just signed itself, so the
+/// verification succeeding is part of the setup, not the property under test.
+fn evidence(signed: &Event) -> VerifiedSignature {
+    VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
 
 fn signed_and_frozen(keys: &Keys, content: &str, created_at: u64) -> (Event, Event) {
     let signed = EventBuilder::new(Kind::TextNote, content)
@@ -64,7 +71,7 @@ fn seed(
         } => (intent_id, receipt_id),
         other => panic!("expected inserted intent, got {other:?}"),
     };
-    store.promote_signed(intent_id, signed.sig).unwrap();
+    store.promote_signed(intent_id, evidence(&signed)).unwrap();
     store
         .record_route_revision(intent_id, BTreeSet::from([relay.clone()]))
         .unwrap();
@@ -464,7 +471,7 @@ fn equal_time_equal_intent_deadlines_use_canonical_relay_order_on_both_backends(
             .unwrap()
             .journaled_intent_id()
             .unwrap();
-        store.promote_signed(intent, signed.sig).unwrap();
+        store.promote_signed(intent, evidence(&signed)).unwrap();
         let relays = BTreeSet::from([
             RelayUrl::parse("wss://z.example").unwrap(),
             RelayUrl::parse("wss://aa.example").unwrap(),
@@ -505,7 +512,7 @@ fn relay_identity_uses_canonical_url_but_preserves_meaningful_path_slashes() {
             .unwrap()
             .journaled_intent_id()
             .unwrap();
-        store.promote_signed(intent, signed.sig).unwrap();
+        store.promote_signed(intent, evidence(&signed)).unwrap();
         let root_plain = RelayUrl::parse("wss://same.example").unwrap();
         let root_slash = RelayUrl::parse("wss://same.example/").unwrap();
         assert_eq!(root_plain, root_slash);

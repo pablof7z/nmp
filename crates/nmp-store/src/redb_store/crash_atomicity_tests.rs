@@ -15,6 +15,13 @@ use wait_timeout::ChildExt;
 use super::*;
 use crate::{sentinel_signature, HandoffEvidence};
 
+/// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+/// event promoted below is one this fixture just signed itself, so the
+/// verification succeeding is part of the setup, not the property under test.
+fn evidence(signed: &Event) -> VerifiedSignature {
+    VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
+
 const WORKER: &str = "redb_store::crash_atomicity_tests::redb_crash_worker";
 const SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const RELAY: &str = "wss://crash-proof.example";
@@ -249,7 +256,7 @@ fn redb_crash_worker() {
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::PromoteBeforeCommit)
                     .expect("open worker store");
             let intent = store.recover_publish_queue().expect("recover delivery")[0].intent_id;
-            let _ = store.promote_signed(intent, signed.sig);
+            let _ = store.promote_signed(intent, evidence(&signed));
         }
         "compensate-before-commit" => {
             let mut store =
@@ -910,7 +917,7 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
             ReceiptState::Accepted
         );
         store
-            .promote_signed(intent, signed.sig)
+            .promote_signed(intent, evidence(&signed))
             .expect("commit promotion");
     }
     let store = RedbStore::open(&path).expect("reopen promoted state");
@@ -935,7 +942,7 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
         let older_outcome = store.accept_write(accept(older)).expect("accept older");
         let older_intent = older_outcome.journaled_intent_id().unwrap();
         store
-            .promote_signed(older_intent, older_signed.sig)
+            .promote_signed(older_intent, evidence(&older_signed))
             .expect("promote older");
         let relay = RelayUrl::parse(RELAY).expect("relay");
         store
@@ -1038,7 +1045,9 @@ fn lane_cursor_detail_deadline_and_close_are_atomic_across_process_death() {
     let intent = {
         let mut store = RedbStore::open(&path).expect("open");
         let (intent, _) = accepted(&mut store);
-        store.promote_signed(intent, signed.sig).expect("promote");
+        store
+            .promote_signed(intent, evidence(&signed))
+            .expect("promote");
         store
             .record_route_revision(intent, BTreeSet::from([relay.clone()]))
             .expect("route");
@@ -1197,7 +1206,9 @@ fn auth_denial_is_not_observable_after_process_death_before_commit() {
     let intent = {
         let mut store = RedbStore::open(&path).expect("open");
         let (intent, _) = accepted(&mut store);
-        store.promote_signed(intent, signed.sig).expect("promote");
+        store
+            .promote_signed(intent, evidence(&signed))
+            .expect("promote");
         store
             .record_route_revision(intent, BTreeSet::from([relay]))
             .expect("route");

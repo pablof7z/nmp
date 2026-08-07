@@ -19,10 +19,17 @@ use std::time::Instant;
 use nmp_grammar::CorrelationToken;
 use nmp_store::{
     sentinel_signature, AcceptWrite, EventStore, HandoffEvidence, IntentSigState,
-    PublishQueueAttemptHandoff, PublishQueuePostHandoffState, RedbStore,
+    PublishQueueAttemptHandoff, PublishQueuePostHandoffState, RedbStore, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use serde::Serialize;
+
+/// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+/// event promoted below is one this fixture just signed itself, so the
+/// verification succeeding is part of the setup, not the property under test.
+fn evidence(signed: &Event) -> VerifiedSignature {
+    VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
 
 struct CountingAllocator;
 
@@ -288,7 +295,7 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
             .expect("accept benchmark write");
         let intent_id = accepted.journaled_intent_id().expect("accepted intent");
         store
-            .promote_signed(intent_id, signed.sig)
+            .promote_signed(intent_id, evidence(&signed))
             .expect("promote benchmark write");
         store
             .record_route_revision(intent_id, (0..relays_per_intent).map(relay).collect())
