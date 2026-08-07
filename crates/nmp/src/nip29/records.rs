@@ -431,7 +431,16 @@ fn availability_at(host: &RelayUrl, evidence: &[AcquisitionEvidence]) -> GroupAv
     if reported().any(|fact| fact.status == SourceStatus::Disconnected) {
         return GroupAvailability::CachedOnly;
     }
-    if reported().all(|fact| fact.status == SourceStatus::Requesting) {
+    // `Requesting` and `FinishedStoredEvents` are the two connected-and-live
+    // states (#1235); which of them a host is in says how far its current
+    // request has got, and `Ready` is about the link plus the watermark
+    // checked above, not about the request phase.
+    if reported().all(|fact| {
+        matches!(
+            fact.status,
+            SourceStatus::Requesting | SourceStatus::FinishedStoredEvents
+        )
+    }) {
         GroupAvailability::Ready
     } else {
         GroupAvailability::Acquiring

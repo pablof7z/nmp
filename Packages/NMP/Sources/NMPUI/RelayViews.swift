@@ -148,6 +148,7 @@ public enum NMPRelayInformationState: Sendable, Equatable {
 public enum NMPRelayRuntimePresentation: Sendable, Hashable {
     case statusUnavailable
     case requesting
+    case finishedStoredEvents
     case connecting
     case disconnected
     case awaitingAuth(phase: AuthPhase)
@@ -158,6 +159,7 @@ public enum NMPRelayRuntimePresentation: Sendable, Hashable {
         switch status {
         case nil: self = .statusUnavailable
         case .requesting: self = .requesting
+        case .finishedStoredEvents: self = .finishedStoredEvents
         case .connecting: self = .connecting
         case .disconnected: self = .disconnected
         case .awaitingAuth(let phase): self = .awaitingAuth(phase: phase)
@@ -170,6 +172,7 @@ public enum NMPRelayRuntimePresentation: Sendable, Hashable {
         switch self {
         case .statusUnavailable: "Status unavailable"
         case .requesting: "Requesting"
+        case .finishedStoredEvents: "Finished stored events"
         case .connecting: "Connecting"
         case .disconnected: "Disconnected"
         case .awaitingAuth(let phase):

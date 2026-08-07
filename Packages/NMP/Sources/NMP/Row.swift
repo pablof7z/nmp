@@ -83,10 +83,18 @@ public enum AuthPhase: Sendable, Hashable {
     }
 }
 
-/// The closed, honest per-source link-status vocabulary
+/// The closed, honest per-source vocabulary
 /// (`docs/design/scoped-evidence-49-12-plan.md` §4).
 public enum SourceStatus: Sendable, Hashable {
     case requesting
+    /// This relay reached NIP-01's end of stored events for every request
+    /// covering this query on this session: it sent everything it had for the
+    /// question it was asked (#1235). A delivery fact about ONE source
+    /// answering ONE request -- never a claim that the query is complete,
+    /// that another source finished, or that anything was proven over the
+    /// query's window. What was proven is `reconciledThrough`, and the two
+    /// disagree in both directions.
+    case finishedStoredEvents
     case connecting
     case disconnected
     case awaitingAuth(phase: AuthPhase)
@@ -96,6 +104,7 @@ public enum SourceStatus: Sendable, Hashable {
     init(_ ffi: FfiSourceStatus) {
         switch ffi {
         case .requesting: self = .requesting
+        case .finishedStoredEvents: self = .finishedStoredEvents
         case .connecting: self = .connecting
         case .disconnected: self = .disconnected
         case .awaitingAuth(let phase): self = .awaitingAuth(phase: AuthPhase(phase))
@@ -106,10 +115,11 @@ public enum SourceStatus: Sendable, Hashable {
 }
 
 /// One relay's acquisition state for a query's subtree, as two deliberately
-/// orthogonal facts: a durable PAST fact (`reconciledThrough`) and a current
-/// LINK fact (`status`) -- a relay can be currently `.disconnected` while
-/// still carrying a perfectly good `reconciledThrough` from before it
-/// dropped (offline cached rows remain usable).
+/// orthogonal facts: a durable PAST fact (`reconciledThrough`) and a fact
+/// about the request on the wire right now (`status`) -- a relay can be
+/// currently `.disconnected` while still carrying a perfectly good
+/// `reconciledThrough` from before it dropped (offline cached rows remain
+/// usable), and `.finishedStoredEvents` while carrying none at all.
 public struct SourceEvidence: Sendable, Hashable {
     public let relay: String
     /// The frozen access identity of the physical session that produced this
