@@ -17,12 +17,27 @@ SCRIPT_PATH=${BASH_SOURCE[0]}
 SCRIPT_DIR=${SCRIPT_PATH%/*}
 [[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
 source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
-require_commands awk dirname grep || exit 2
+require_commands awk dirname git grep || exit 2
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
 fail() { echo "nip29-ownership: $*" >&2; exit 1; }
+
+# The scanned corpus is TRACKED FILES ONLY (#1178). `Packages/` holds
+# gitignored uniffi output, so walking the directory judged the developer's
+# build artifacts alongside their sources: a stale binding from before a rename
+# made this gate report a tombstone violation against text present in no
+# tracked file and in no commit. `scripts/lib/tracked-corpus.sh` carries the
+# enumeration and the reasoning; what matters here is that `tracked_paths` runs
+# at TOP LEVEL (inside `$(...)` a failed enumeration would read as "no
+# violations") and that `census` is what every directory-wide scan below uses.
+#
+# Untracked files are deliberately not scanned: a scratch note under `crates/`
+# is text in no commit, which is the very thing that made this gate
+# untrustworthy. The two per-directory `*.rs` loops further down are the one
+# exception and stay working-tree globs -- see the note above them.
+source "$SCRIPT_DIR/lib/tracked-corpus.sh" || exit 2
 
 required=(
   crates/nmp-nip29/src/context.rs
@@ -70,6 +85,16 @@ fi
 # which is exactly what moving the door up was meant to make unspellable.
 # Whole-line comments are stripped first so the crate's own doc prose (which
 # explains, in words, that it does NOT own `WriteIntent`) does not trip this.
+#
+# This loop and the kind loop below it stay WORKING-TREE globs rather than
+# moving to the tracked corpus, and the reason is load-bearing:
+# `crates/nmp-bdd/src/world/group_surface.rs`'s `gate_rejects_a_kind_branch`
+# proves this gate is not merely green-by-default by writing an untracked
+# `crates/nmp-nip29/src/kind_branch_probe.rs`, running the gate, and deleting
+# it. Restricting these two loops to tracked files would make that negative
+# control silently stop firing -- the exact "narrowed the corpus, narrowed the
+# coverage" failure #1178 warns against. Nothing generated is ever emitted into
+# either directory, so the stale-artifact hazard has no purchase here.
 for source in crates/nmp-nip29/src/*.rs; do
   found=$(grep -vE '^\s*//' "$source" | grep -n 'WriteIntent' || true)
   if [[ -n $found ]]; then
@@ -203,18 +228,25 @@ grep -qF 'scope_stamps_exact_hosts_on_every_nested_nip29_demand' \
 # crate. `tools/nip29-consumer-swift` is a Swift package outside the cargo
 # workspace, so nothing else in the local loop compiles it -- it was found
 # only by macOS CI, which is late.
-tombstones=$(grep -RInE \
+#
+# All four scans below share one enumeration of the same four roots, so
+# widening the corpus is one edit and cannot be done for three scans and
+# forgotten for the fourth.
+tracked_paths "$ROOT" crates Packages skills tools || exit 1
+WORKSPACE_CORPUS=("${TRACKED_PATHS[@]}")
+
+tombstones=$(census "$ROOT" \
   'contextualize_group_event|GroupPublication|group_discovery_demand|groupDiscoveryDemand|pinned_demand|groups_where|groupsWhere' \
-  crates/ Packages/ skills/ tools/ || true)
+  "${WORKSPACE_CORPUS[@]}")
 # #1252 replaced the closed predicate enum with the general query language.
 # The four leaf variants and the predicate-level set algebra are deleted, and
 # their absence is LOAD-BEARING rather than cosmetic: set algebra lives on
 # `GroupIds` alone precisely so `all().minus(...)` is unspellable, and any
 # combinator reappearing on `GroupPredicate` would silently restore the
 # spelling this change proved cannot be honoured on the wire.
-predicate_tombstones=$(grep -RInE \
+predicate_tombstones=$(census "$ROOT" \
   'GroupPredicate::(AnyOf|Combined|MemberListIncludes|AdminListIncludes)|GroupPredicate\.(anyOf|memberListIncludes|adminListIncludes|union|intersect|minus)' \
-  crates/ Packages/ skills/ tools/ || true)
+  "${WORKSPACE_CORPUS[@]}")
 if [[ -n $predicate_tombstones ]]; then
   printf '%s\n' "$predicate_tombstones"
   fail "a deleted NIP-29 predicate leaf or predicate-level combinator reappeared; leaves and set algebra belong to GroupIds"
@@ -228,8 +260,8 @@ fi
 # claim exact current membership/admin state, which 39001/39002 (optional,
 # possibly partial) cannot establish. Bounded so it does not also flag
 # `member_list_includes`/`admin_list_includes`.
-overclaiming=$(grep -RInE '(^|[^A-Za-z0-9_])(member_is|admin_is|memberIs|adminIs)\(' \
-  crates/ Packages/ skills/ tools/ || true)
+overclaiming=$(census "$ROOT" '(^|[^A-Za-z0-9_])(member_is|admin_is|memberIs|adminIs)\(' \
+  "${WORKSPACE_CORPUS[@]}")
 if [[ -n $overclaiming ]]; then
   printf '%s\n' "$overclaiming"
   fail "an overclaiming exact-membership/admin spelling reappeared; use the evidence-scoped name"
@@ -308,9 +340,9 @@ grep -qF 'chat_reply_points_with_e_and_never_q_or_h_or_previous_rows' \
 # Bounded with explicit character classes rather than `\b`, which BSD grep
 # does not honour in ERE: the surviving verb IS spelled `chatReply` in Swift
 # and Kotlin, and an unbounded pattern flags it as its own tombstone.
-retired_c7=$(grep -RInE \
+retired_c7=$(census "$ROOT" \
   'compose_chat_reply|composeChatReply|(^|[^A-Za-z0-9_])ChatReply([^A-Za-z0-9_]|$)|reply_uses_q_and_no_e_p_h_or_previous_rows' \
-  crates/ Packages/ skills/ tools/ || true)
+  "${WORKSPACE_CORPUS[@]}")
 if [[ -n $retired_c7 ]]; then
   printf '%s\n' "$retired_c7"
   fail "the retired C7 q-reply composer or its falsifier reappeared"
@@ -318,16 +350,23 @@ fi
 
 # The superseded monolithic native projection must stay deleted. This source
 # corpus deliberately excludes append-only surface history.
-native_sources=(
-  crates/nmp-ffi/src
-  Packages/NMP/Sources/NMP
-  Packages/NMP/Tests/NMPTests
-  Packages/NMPKotlin/src/main
-  Packages/NMPKotlin/src/test
-)
-found=$(grep -RInE \
+#
+# `Packages/NMP/Sources/NMPFFI` was already left out here because it is
+# generated, but `Packages/NMPKotlin/src/main` is the same hazard wearing a
+# different path: the generated Kotlin binding lands INSIDE it, at
+# `src/main/kotlin/uniffi/nmp_ffi/nmp_ffi.kt`, and every name below
+# (`FfiGroupReplyParent`, `GroupSendIntent`, `NoActiveAccount`) is exactly the
+# kind of symbol uniffi emits. Enumerating the tracked corpus retires both
+# exclusions -- the generated file is not tracked, so it cannot be scanned by
+# accident and no path needs to be remembered by hand.
+tracked_paths "$ROOT" crates/nmp-ffi/src Packages/NMP/Sources/NMP \
+  Packages/NMP/Tests/NMPTests Packages/NMPKotlin/src/main \
+  Packages/NMPKotlin/src/test || exit 1
+NATIVE_CORPUS=("${TRACKED_PATHS[@]}")
+
+found=$(census "$ROOT" \
   'group_content_demand|groupContentDemand|group_message_intent|groupMessageIntent|FfiGroupReplyParent|GroupReplyParent|GroupSendIntent|NoActiveAccount|noActiveAccount' \
-  "${native_sources[@]}" || true)
+  "${NATIVE_CORPUS[@]}")
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
   fail "superseded NIP-29 native surface reappeared"
@@ -345,8 +384,11 @@ fi
 # `author-outbox`, `private-narrow-hex:`, and `nip65-bootstrap-hex:`. The
 # durable vocabulary is `auto` and `explicit-hex:`, and a row spelled any
 # other way is unreadable by the generic rule, not by a per-spelling one.
-dead_spellings=$(grep -RInE 'pinned-host-hex|to-inboxes:|author-outbox|private-narrow-hex|nip65-bootstrap-hex' \
-  crates/nmp-grammar crates/nmp crates/nmp-ffi || true)
+tracked_paths "$ROOT" crates/nmp-grammar crates/nmp crates/nmp-ffi || exit 1
+JOURNAL_CORPUS=("${TRACKED_PATHS[@]}")
+
+dead_spellings=$(census "$ROOT" 'pinned-host-hex|to-inboxes:|author-outbox|private-narrow-hex|nip65-bootstrap-hex' \
+  "${JOURNAL_CORPUS[@]}")
 if [[ -n $dead_spellings ]]; then
   printf '%s\n' "$dead_spellings"
   fail "a removed routing spelling reappeared -- delete it, do not assert it"
