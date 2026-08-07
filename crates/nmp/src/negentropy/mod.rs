@@ -207,6 +207,32 @@ impl Prober {
         Some(ProbedRelay(relay.clone()))
     }
 
+    /// Transport refused this probe's `NEG-OPEN` (issue #775): the frame
+    /// never entered a relay worker's outbound envelope, so nothing about
+    /// `relay` was learned. Retire the pending wire id and return the relay
+    /// to `Unknown` — the one state that says exactly that.
+    ///
+    /// Returning to `Unknown` rather than minting a verdict is the point:
+    /// `Unsupported` would be a claim about the relay that local backpressure
+    /// cannot support, and leaving `Probing` wedges the relay for the whole
+    /// engine lifetime because [`Self::begin_probe`] only ever starts from
+    /// `Unknown`. It cannot spin either — `begin_probe` is reached only from a
+    /// NIP-11 acquisition on a connected, demanded relay, never from a timer.
+    ///
+    /// Returns `true` iff this was one of THIS prober's pending probes.
+    pub fn refuse_probe(&mut self, relay: &RelayUrl, wire_sub_id: &str) -> bool {
+        if self
+            .pending
+            .remove(&(relay.clone(), wire_sub_id.to_string()))
+            .is_some()
+        {
+            self.states.insert(relay.clone(), ProbeState::Unknown);
+            true
+        } else {
+            false
+        }
+    }
+
     /// An inbound `NEG-ERR` for `wire_sub_id` on `relay`: if this was a
     /// pending probe, classify `Unsupported` (cached — never re-probed on
     /// this connection). Returns `true` iff it was.

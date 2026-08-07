@@ -406,13 +406,13 @@ pub use diagnostics::{
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 pub use nmp_network_policy::{Declarer, OnionReachability};
-pub use query::Nip77Frame;
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
 pub use observation::{
     ObservationEvidence, ObservationFact, RequestTerminal, ResolutionCause, ResolvedBindingValue,
 };
+pub use query::Nip77Frame;
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back

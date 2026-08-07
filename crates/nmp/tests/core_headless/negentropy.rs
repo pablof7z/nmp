@@ -1922,11 +1922,11 @@ fn a_refused_neg_open_never_claims_the_request_and_falls_back_immediately() {
         .expect("the candidate EOSE opens reconciliation");
     assert!(
         !opened.iter().any(|effect| matches!(effect,
-            Effect::EmitObservationEvidence(_, evidence)
-                if evidence.iter().any(|item| matches!(
-                    &item.fact,
-                    ObservationFact::RelayRequest { .. }
-                )))),
+        Effect::EmitObservationEvidence(_, evidence)
+            if evidence.iter().any(|item| matches!(
+                &item.fact,
+                ObservationFact::RelayRequest { .. }
+            )))),
         "the reducer must not claim it placed the NEG-OPEN before transport \
          reports the outcome: {opened:?}"
     );
@@ -1945,11 +1945,11 @@ fn a_refused_neg_open_never_claims_the_request_and_falls_back_immediately() {
 
     assert!(
         refused.iter().any(|effect| matches!(effect,
-            Effect::EmitObservationEvidence(_, evidence)
-                if evidence.iter().any(|item| matches!(
-                    &item.fact,
-                    ObservationFact::RelayRefused { relay: url, .. } if url == &relay
-                )))),
+        Effect::EmitObservationEvidence(_, evidence)
+            if evidence.iter().any(|item| matches!(
+                &item.fact,
+                ObservationFact::RelayRefused { relay: url, .. } if url == &relay
+            )))),
         "a refused NIP-77 question is the one thing an app can see, and must be \
          emitted: {refused:?}"
     );
@@ -1967,7 +1967,9 @@ fn a_refused_neg_open_never_claims_the_request_and_falls_back_immediately() {
          close: {refused:?}"
     );
     assert!(
-        !refused.iter().any(|effect| matches!(effect, Effect::Wire(delta)
+        !refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::Wire(delta)
             if delta.ops.iter().any(|(_, ops)| ops.iter().any(
                 |op| matches!(op, WireOp::Close(id) if id == &live_sub_id))))),
         "the already-active live REQ stays open through the fallback: {refused:?}"
@@ -2039,11 +2041,11 @@ fn a_refused_neg_continue_falls_back_without_waiting_for_the_deadline() {
     );
     assert!(
         accepted.iter().any(|effect| matches!(effect,
-            Effect::EmitObservationEvidence(_, evidence)
-                if evidence.iter().any(|item| matches!(
-                    &item.fact,
-                    ObservationFact::RelayRequest { relay: url, .. } if url == &relay
-                )))),
+        Effect::EmitObservationEvidence(_, evidence)
+            if evidence.iter().any(|item| matches!(
+                &item.fact,
+                ObservationFact::RelayRequest { relay: url, .. } if url == &relay
+            )))),
         "an ACCEPTED NEG-OPEN is exactly when the request becomes a placed \
          question: {accepted:?}"
     );
@@ -2105,7 +2107,9 @@ fn a_refused_neg_continue_falls_back_without_waiting_for_the_deadline() {
     assert_ne!(fallback_id, &neg_sub_id);
     assert_eq!(fallback_filter.limit, None);
     assert!(
-        !refused.iter().any(|effect| matches!(effect, Effect::Wire(delta)
+        !refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::Wire(delta)
             if delta.ops.iter().any(|(_, ops)| ops.iter().any(
                 |op| matches!(op, WireOp::Close(id) if id == &live_sub_id))))),
         "the already-active live REQ stays open through the fallback: {refused:?}"

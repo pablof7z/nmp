@@ -1014,19 +1014,15 @@ impl<S: EventStore> EngineCore<S> {
             false,
             EventFailureTarget::ThisSend,
         );
-        let handle = self
-            .slot_to_relay
-            .values()
-            .find_map(|(handle, session)| (session == &public_session).then_some(*handle))
-            .expect("a candidate EOSE can open NEG only on its current connected session");
-        effects.extend(self.on_wire_request_handoff(
-            &public_session,
-            &neg_sub_id,
-            neg_filter.hash(),
-            Some(handle),
-            true,
-            None,
-        ));
+        // The request-evidence record stays PENDING here (issue #775). This
+        // door proves the exact current connected generation -- it is opened
+        // synchronously from that generation's live-candidate EOSE -- but a
+        // connected generation is not an accepted frame: the worker's finite
+        // outbound envelope (#506/#1331) refuses at admission, and that
+        // refusal is materially reachable. Activating the evidence here would
+        // claim NMP had placed a question it may never place. The runtime
+        // reports the real outcome through `on_nip77_handoff`, which either
+        // activates this same record or consumes it as refused.
         self.neg_sessions.insert(
             neg_sub_id.clone(),
             NegSession {
@@ -1070,11 +1066,76 @@ impl<S: EventStore> EngineCore<S> {
         accepted: bool,
         reason: Option<String>,
     ) -> Vec<Effect> {
-        // Deliberately the current behaviour, expressed through the new seam:
-        // `let _ = pool.send(..)`. The falsifiers landing with this commit
-        // fail against it, and the next commit is what makes them pass.
-        let _ = (frame, relay, sub_id, handle, accepted, reason);
-        Vec::new()
+        let mut effects = Vec::new();
+        match (frame, accepted) {
+            // Acceptance means the worker owns the bytes. A probe and a
+            // continuing round have no further reducer state to advance --
+            // they already advanced, and now honestly.
+            (Nip77Frame::Probe, true) | (Nip77Frame::Continue, true) => {}
+            (Nip77Frame::Open, true) => {
+                let Some(session) = self.neg_sessions.get(sub_id) else {
+                    return effects;
+                };
+                let filter_hash = session.filter.hash();
+                let public_session = RelaySessionKey::public(relay.clone());
+                effects.extend(self.on_wire_request_handoff(
+                    &public_session,
+                    sub_id,
+                    filter_hash,
+                    handle,
+                    true,
+                    None,
+                ));
+            }
+            (Nip77Frame::Probe, false) => {
+                if self
+                    .prober
+                    .refuse_probe(relay, &crate::core::wire_sub_id_string(sub_id))
+                {
+                    // The projected capability verdict just moved back to
+                    // `unknown`; it is observable state, so publish it rather
+                    // than waiting for an unrelated recompile.
+                    effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+                }
+            }
+            (Nip77Frame::Open, false) => {
+                let Some(session) = self.neg_sessions.remove(sub_id) else {
+                    return effects;
+                };
+                let filter_hash = session.filter.hash();
+                let public_session = RelaySessionKey::public(relay.clone());
+                // Consume the still-pending request evidence as refused. This
+                // is the one place an app can learn that a NIP-77 question was
+                // never placed, and it is emitted instead of -- never beside --
+                // the `RelayRequest` an accepted handoff would have produced.
+                effects.extend(self.on_wire_request_handoff(
+                    &public_session,
+                    sub_id,
+                    filter_hash,
+                    handle,
+                    false,
+                    Some(reason.unwrap_or_else(|| "transport refused NEG-OPEN".to_string())),
+                ));
+                // No `NEG-CLOSE`: the relay never saw a `NEG-OPEN`, so closing
+                // would be a frame about a session that does not exist -- and
+                // would compete for the very envelope room that was just
+                // refused.
+                self.neg_session_backlog_fallback(sub_id, session, &mut effects);
+            }
+            (Nip77Frame::Continue, false) => {
+                let Some(session) = self.neg_sessions.remove(sub_id) else {
+                    return effects;
+                };
+                // The open WAS accepted, so this reconciliation exists on the
+                // relay and its best-effort `NEG-CLOSE` is warranted -- the
+                // same terminal the `NEG-ERR`, malformed-payload and
+                // liveness-deadline paths take, reached immediately rather
+                // than 30 seconds after a frame that never left the process.
+                let _ = reason;
+                self.neg_session_fallback_to_req(sub_id.clone(), session, &mut effects);
+            }
+        }
+        effects
     }
 
     /// Drive one inbound `NEG-MSG` round for `sub_id`'s live session, if any
