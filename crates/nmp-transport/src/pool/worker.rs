@@ -586,10 +586,15 @@ impl WorkerHandle {
     /// The mio waker fires only on a successful enqueue.
     pub(super) fn push(&self, command: WorkerCommand) -> bool {
         let frame_bytes = match &command {
-            WorkerCommand::Send(frame) => frame.text().len(),
             WorkerCommand::SendDurable { frame, .. }
             | WorkerCommand::SendEphemeral { frame, .. } => frame.len(),
-            WorkerCommand::Shutdown | WorkerCommand::ReleaseInitialRead { .. } => 0,
+            // Ordinary frames cleared this in `push_ordinary`, deliberately
+            // BEFORE charging the envelope: an oversized frame is refused
+            // without ever occupying room that a sendable frame could have
+            // used. Re-checking here would be a second owner of one rule.
+            WorkerCommand::Send(_)
+            | WorkerCommand::Shutdown
+            | WorkerCommand::ReleaseInitialRead { .. } => 0,
         };
         if frame_bytes > MAX_OUTBOUND_FRAME_BYTES {
             return false;
@@ -2097,9 +2102,14 @@ fn is_write_backpressure(error: &tungstenite::Error) -> bool {
 /// immediately, so a blocked generation makes progress on facts (bytes left
 /// the buffer, the socket became writable) rather than by spinning.
 ///
-/// The flush's own failure is deliberately not reported here: a genuinely
-/// broken socket surfaces on the very next write, through the existing
-/// `Broken` path that owns reconnect.
+/// Neither outcome of that flush is reported. Its failure is not, because a
+/// genuinely broken socket surfaces on the very next write through the
+/// existing `Broken` path that owns reconnect. Its SUCCESS is not, because
+/// this call site's own message was refused: reporting `Flushed` would tell
+/// the caller its frame reached the socket, and the keepalive path would
+/// record a ping it never sent. Correlations that the flush did confirm
+/// settle at the next `flush_socket_and_settle` boundary, exactly as they
+/// already did whenever a lane returned `Blocked`.
 fn blocked_after_relieving(socket: &mut RelaySocket) -> FlushResult {
     let _ = socket.flush();
     FlushResult::Blocked
