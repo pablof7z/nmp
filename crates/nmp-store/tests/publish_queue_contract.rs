@@ -20,11 +20,18 @@ use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, CompensateOutcome, EventCursor, EventStore,
     GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin, MemoryStore, PersistenceFault,
     PromoteOutcome, PublishQueueAttemptOutcome, ReceiptState, RedbStore, RefuseReason,
-    RelayObserved, RemoveQueueEntryOutcome, RetractReason, SigState,
+    RelayObserved, RemoveQueueEntryOutcome, RetractReason, SigState, VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, EventId, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+
+/// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+/// event promoted below is one this fixture just signed itself, so the
+/// verification succeeding is part of the setup, not the property under test.
+fn evidence(signed: &Event) -> VerifiedSignature {
+    VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
 
 fn keys() -> Keys {
     Keys::generate()
@@ -121,7 +128,7 @@ fn start_publish_queue_attempt(
     at: u64,
 ) {
     store
-        .promote_signed(intent_id, signed.sig)
+        .promote_signed(intent_id, evidence(&signed))
         .expect("promote before attempt");
     let relay = RelayUrl::parse(relay).expect("attempt relay");
     store
@@ -353,7 +360,7 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
 
     let real_sig = signed_b.sig;
     let promoted = store
-        .promote_signed(intent_b, real_sig)
+        .promote_signed(intent_b, evidence(&signed_b))
         .expect("promote_signed persistence");
     match promoted {
         PromoteOutcome::Promoted { row, .. } => {
@@ -521,7 +528,7 @@ fn pending_row_is_not_gc_evicted_while_intent_open() {
         // Once promoted, it is an ordinary event again — GC-able under the
         // SAME empty claim set.
         store
-            .promote_signed(intent_id, signed.sig)
+            .promote_signed(intent_id, evidence(&signed))
             .expect("promote_signed persistence");
         let report2 = store.gc(&claims).unwrap();
         assert_eq!(
@@ -709,7 +716,7 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
         let older_intent = older.journaled_intent_id().unwrap();
         let older_receipt = older.journaled_receipt_id().unwrap();
         store
-            .promote_signed(older_intent, older_signed.sig)
+            .promote_signed(older_intent, evidence(&older_signed))
             .unwrap();
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
@@ -782,7 +789,7 @@ fn superseded_receipt_and_pruned_publish_queue_survive_redb_reopen() {
         let older_intent = older.journaled_intent_id().unwrap();
         let older_receipt = older.journaled_receipt_id().unwrap();
         store
-            .promote_signed(older_intent, older_signed.sig)
+            .promote_signed(older_intent, evidence(&older_signed))
             .unwrap();
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
@@ -828,7 +835,7 @@ fn a_started_attempt_preserves_the_older_replaceable_obligation() {
         let older_intent = older.journaled_intent_id().unwrap();
         let older_receipt = older.journaled_receipt_id().unwrap();
         store
-            .promote_signed(older_intent, older_signed.sig)
+            .promote_signed(older_intent, evidence(&older_signed))
             .unwrap();
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
@@ -929,7 +936,7 @@ fn recover_attempt_order_is_canonical_and_identical_across_backends() {
         let aa_long = RelayUrl::parse("wss://aa.example/x").unwrap();
         let outcome = do_accept(store, accept(frozen, k.public_key(), 109));
         let intent_id = outcome.journaled_intent_id().unwrap();
-        store.promote_signed(intent_id, signed.sig).unwrap();
+        store.promote_signed(intent_id, evidence(&signed)).unwrap();
         store
             .record_route_revision(
                 intent_id,
@@ -1189,7 +1196,7 @@ fn corrupt_or_unknown_attempt_rows_are_fallible_not_panics() {
         let mut store = RedbStore::open(&path).unwrap();
         let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 104));
         let intent_id = outcome.journaled_intent_id().unwrap();
-        store.promote_signed(intent_id, signed.sig).unwrap();
+        store.promote_signed(intent_id, evidence(&signed)).unwrap();
         store
             .record_route_revision(intent_id, BTreeSet::from([relay.clone()]))
             .unwrap();
@@ -1453,7 +1460,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
         let intent_signed = outcome_a.journaled_intent_id().expect("journaled");
         let receipt_signed_id = outcome_a.journaled_receipt_id().expect("journaled");
         store
-            .promote_signed(intent_signed, signed.sig)
+            .promote_signed(intent_signed, evidence(&signed))
             .expect("promote persistence");
 
         let outcome_b = do_accept(&mut store, accept(frozen_comp, k.public_key(), 200));
@@ -1675,7 +1682,7 @@ fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
         assert!(matches!(outcome2, AcceptOutcome::Duplicate { .. }));
 
         let promoted_dup = store
-            .promote_signed(intent_dup, signed_dup.sig)
+            .promote_signed(intent_dup, evidence(&signed_dup))
             .expect("promote persistence");
         assert!(
             matches!(promoted_dup, PromoteOutcome::Promoted { .. }),
@@ -1692,7 +1699,7 @@ fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
         assert!(matches!(outcome_stale, AcceptOutcome::Stale { .. }));
 
         let promoted_stale = store
-            .promote_signed(intent_stale, signed_old.sig)
+            .promote_signed(intent_stale, evidence(&signed_old))
             .expect("promote persistence");
         match promoted_stale {
             PromoteOutcome::Promoted { row, .. } => {
@@ -2048,7 +2055,7 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
             .is_empty());
 
         let promoted = store
-            .promote_signed(intent, signed_deletion.sig)
+            .promote_signed(intent, evidence(&signed_deletion))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
 
@@ -2267,7 +2274,7 @@ fn target_signs_while_hidden() {
 
         // Sign the TARGET while it is hidden by D's still-open claim.
         let promoted_t = store
-            .promote_signed(intent_t, signed_t.sig)
+            .promote_signed(intent_t, evidence(&signed_t))
             .expect("promote persistence");
         match promoted_t {
             PromoteOutcome::Promoted { row, .. } => {
@@ -2466,7 +2473,7 @@ fn independent_kind5_claims_cancel_then_promote_commit_the_remaining_delete() {
             .is_empty());
 
         let promoted = store
-            .promote_signed(intent_2, signed_2.sig)
+            .promote_signed(intent_2, evidence(&signed_2))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
         assert!(store
@@ -2526,7 +2533,7 @@ fn independent_kind5_claims_promote_then_cancel_preserve_permanent_delete() {
         let intent_2 = outcome_2.journaled_intent_id().expect("journaled");
 
         let promoted = store
-            .promote_signed(intent_1, signed_1.sig)
+            .promote_signed(intent_1, evidence(&signed_1))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
 
@@ -2751,7 +2758,7 @@ fn mixed_e_and_a_tag_kind5_promotion_permanently_deletes_both_targets() {
         }
 
         let promoted = store
-            .promote_signed(intent, signed_delete.sig)
+            .promote_signed(intent, evidence(&signed_delete))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
         assert!(store
@@ -2847,7 +2854,7 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
         // atomically advance A's own routing obligation too (A is a
         // CO-OWNER of the deletion event's own row).
         let promoted_b = store
-            .promote_signed(intent_b, signed_deletion.sig)
+            .promote_signed(intent_b, evidence(&signed_deletion))
             .expect("promote persistence");
         match promoted_b {
             PromoteOutcome::Promoted { co_signed, .. } => {
@@ -2949,7 +2956,7 @@ fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
         );
 
         let promoted_d = store
-            .promote_signed(intent_d, signed_deletion.sig)
+            .promote_signed(intent_d, evidence(&signed_deletion))
             .expect("promote persistence");
         assert!(matches!(promoted_d, PromoteOutcome::Promoted { .. }));
         assert!(
@@ -3301,7 +3308,7 @@ fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
     );
 
     let promoted = store
-        .promote_signed(intent_promote, signed_promote_delete.sig)
+        .promote_signed(intent_promote, evidence(&signed_promote_delete))
         .expect("post-restart promotion");
     assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
     assert!(store
@@ -3602,7 +3609,7 @@ fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
         assert_eq!(signed.id, frozen_id);
 
         let promoted_b = store
-            .promote_signed(intent_b, signed.sig)
+            .promote_signed(intent_b, evidence(&signed))
             .expect("promote persistence");
         match promoted_b {
             PromoteOutcome::Promoted { co_signed, .. } => {
@@ -3710,7 +3717,7 @@ fn duplicate_of_already_signed_local_row_starts_signed() {
         let intent_a = outcome_a.journaled_intent_id().expect("journaled");
 
         let promoted_a = store
-            .promote_signed(intent_a, signed_a.sig)
+            .promote_signed(intent_a, evidence(&signed_a))
             .expect("promote persistence");
         assert!(matches!(promoted_a, PromoteOutcome::Promoted { .. }));
 
@@ -3748,7 +3755,7 @@ fn duplicate_of_already_signed_local_row_starts_signed() {
             .expect("compensate persistence");
         assert!(matches!(compensated_c, CompensateOutcome::AlreadySigned));
         let promoted_c = store
-            .promote_signed(intent_c, signed_a.sig)
+            .promote_signed(intent_c, evidence(&signed_a))
             .expect("promote persistence");
         assert!(matches!(promoted_c, PromoteOutcome::NotFound));
     });
@@ -3872,11 +3879,11 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
         // BOTH owners' own journals were fanned out to Signed -- neither
         // can be promoted or compensated again.
         let promoted_a = store
-            .promote_signed(intent_a, signed_a.sig)
+            .promote_signed(intent_a, evidence(&signed_a))
             .expect("promote persistence");
         assert!(matches!(promoted_a, PromoteOutcome::NotFound));
         let promoted_b = store
-            .promote_signed(intent_b, signed_a.sig)
+            .promote_signed(intent_b, evidence(&signed_a))
             .expect("promote persistence");
         assert!(matches!(promoted_b, PromoteOutcome::NotFound));
         let compensated_a = store
@@ -4138,7 +4145,7 @@ fn reinsert_stashed_collision_with_relay_signed_row_adopts_and_fans_out() {
         // the stashed side, was the one already carrying the real
         // signature.
         let promoted_a = store
-            .promote_signed(intent_a, signed_a.sig)
+            .promote_signed(intent_a, evidence(&signed_a))
             .expect("promote persistence");
         assert!(
             matches!(promoted_a, PromoteOutcome::NotFound),
@@ -4376,7 +4383,7 @@ fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
         let intent = outcome.journaled_intent_id().expect("journaled");
 
         let promoted = store
-            .promote_signed(intent, signed.sig)
+            .promote_signed(intent, evidence(&signed))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
 
@@ -4389,7 +4396,7 @@ fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
         );
 
         let repeat = store
-            .promote_signed(intent, other_signed.sig)
+            .promote_signed(intent, evidence(&other_signed))
             .expect("promote persistence");
         assert!(
             matches!(repeat, PromoteOutcome::NotFound),

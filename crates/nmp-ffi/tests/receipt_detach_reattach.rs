@@ -23,8 +23,16 @@ use nmp_ffi::types::{
 use nmp_store::{
     AcceptWrite, EventStore, HandoffEvidence, IntentSigState, PublishQueueAttemptHandoff,
     PublishQueueAttemptOutcome, PublishQueueLaneKey, PublishQueuePostHandoffState,
-    PublishQueueTransientCause,
+    PublishQueueTransientCause, VerifiedSignature,
 };
+use nostr::Event;
+
+/// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+/// event promoted below is one this fixture just signed itself, so the
+/// verification succeeding is part of the setup, not the property under test.
+fn evidence(signed: &Event) -> VerifiedSignature {
+    VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
 
 async fn next_status(stream: &Arc<NmpReceiptStream>) -> Option<FfiWriteFact> {
     tokio::time::timeout(Duration::from_secs(5), stream.next())
@@ -168,7 +176,7 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
         let intent_id = accepted.journaled_intent_id().expect("intent id");
         let receipt_id = accepted.journaled_receipt_id().expect("receipt id");
         store
-            .promote_signed(intent_id, signed.sig)
+            .promote_signed(intent_id, evidence(&signed))
             .expect("promote fixture");
         store
             .record_route_revision(intent_id, [relay.clone()].into_iter().collect())

@@ -31,10 +31,10 @@ use super::store::RedbStore;
 use super::{
     address_key_for, candidate_wins, AcceptOutcome, AcceptWrite, BTreeMap, BTreeSet,
     CompensateOutcome, EventId, HashMap, HashSet, IntentId, IntentSigState, Kind, LocalOrigin,
-    PersistenceError, PromoteOutcome, Provenance, ReceiptState, RefuseReason, SigState, Signature,
+    PersistenceError, PromoteOutcome, Provenance, ReceiptState, RefuseReason, SigState,
     StoredEvent, Timestamp,
 };
-use crate::RetiredIntent;
+use crate::{RetiredIntent, VerifiedSignature};
 use redb::ReadableTable;
 
 /// Redb half of replaceable-delivery coalescing. Everything here runs inside
@@ -697,8 +697,9 @@ pub(super) fn accept_write(
 pub(super) fn promote_signed(
     store: &mut RedbStore,
     intent_id: IntentId,
-    sig: Signature,
+    verified: VerifiedSignature,
 ) -> Result<PromoteOutcome, PersistenceError> {
+    let sig = verified.signature();
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, _write_txn| {
         let key = intent_key(intent_id);
@@ -713,6 +714,21 @@ pub(super) fn promote_signed(
             Some(intent_bytes) => {
                 let intent_record = decode_intent(&intent_bytes)
                     .map_err(|error| codec_error(&format!("intent {}", intent_id.0), error))?;
+                // Intent binding (#768). `VerifiedSignature` proves one
+                // `Event::verify` succeeded; it does NOT prove the event
+                // it covered is the one THIS intent froze. Everything
+                // below is irreversible — a permanent kind:5 tombstone
+                // most of all — so the match runs before this
+                // transaction touches a single table, and the
+                // `GovernedWrite` is abandoned rather than committed.
+                if verified.event_id() != intent_record.frozen.id {
+                    return Err(PersistenceError::invariant(format!(
+                        "promotion evidence verifies event {} but intent {} froze event {}",
+                        verified.event_id(),
+                        intent_id.0,
+                        intent_record.frozen.id,
+                    )));
+                }
                 // No-second-transition guard (codex-nova finding): a
                 // repeat promotion (e.g. a duplicate signer completion)
                 // must not overwrite an already-Signed row and re-emit

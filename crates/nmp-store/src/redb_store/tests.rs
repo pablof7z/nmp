@@ -356,6 +356,13 @@ fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
     write_txn.commit().unwrap();
 }
 
+/// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+/// event promoted below is one this fixture just signed itself, so the
+/// verification succeeding is part of the setup, not the property under test.
+fn evidence(signed: &Event) -> VerifiedSignature {
+    VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
+
 fn accepted_signed(
     store: &mut RedbStore,
     keys: &nostr::Keys,
@@ -392,7 +399,7 @@ fn accepted_signed(
         .expect("accept fixture intent");
     let intent = outcome.journaled_intent_id().expect("intent id");
     store
-        .promote_signed(intent, signed.sig)
+        .promote_signed(intent, evidence(&signed))
         .expect("promote fixture intent");
     (intent, signed)
 }

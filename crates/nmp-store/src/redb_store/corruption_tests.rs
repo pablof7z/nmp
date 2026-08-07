@@ -34,6 +34,13 @@ use super::postings_store::{
 use super::*;
 use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, IntentSigState, PersistenceFault};
 
+/// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+/// event promoted below is one this fixture just signed itself, so the
+/// verification succeeding is part of the setup, not the property under test.
+fn evidence(signed: &Event) -> VerifiedSignature {
+    VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
+
 const RELAY: &str = "wss://corruption-proof.example";
 
 fn keys() -> Keys {
@@ -292,7 +299,7 @@ fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
             .expect("accept bootstrap fixture");
         let intent = accepted.journaled_intent_id().expect("durable intent");
         store
-            .promote_signed(intent, signed.sig)
+            .promote_signed(intent, evidence(&signed))
             .expect("promote bootstrap fixture");
         store
             .record_route_revision(
@@ -521,7 +528,7 @@ fn promote_reports_a_corrupt_kind5_claim_record() {
     {
         let mut store = fixture.open();
         assert_typed_refusal("promote_signed", || {
-            store.promote_signed(intent_id, deletion.sig)
+            store.promote_signed(intent_id, evidence(&deletion))
         });
     }
     assert_eq!(
