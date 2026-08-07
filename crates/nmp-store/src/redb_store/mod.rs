@@ -37,7 +37,6 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
-use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp};
 use redb::{Database, ReadableTable, TableDefinition};
 #[cfg(test)]
@@ -65,6 +64,7 @@ use crate::{
     PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
     PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
+    VerifiedSignature,
 };
 
 #[cfg(feature = "bench-instrumentation")]
@@ -257,9 +257,9 @@ impl EventStore for RedbStore {
     fn promote_signed(
         &mut self,
         intent_id: IntentId,
-        sig: Signature,
+        verified: VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError> {
-        write_ops::promote_signed(self, intent_id, sig)
+        write_ops::promote_signed(self, intent_id, verified)
     }
 
     fn compensate_write_with_state(

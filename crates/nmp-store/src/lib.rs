@@ -57,11 +57,15 @@
 //! keeps answering for a terminal receipt after its open-work row is gone
 //! (see [`ReceiptState`]'s doc).
 //!
-//! Explicitly out of scope for M3 step A1 (owned by later steps): signature
-//! verification (the `nostr::Event::verify` call an accepted signer result
-//! must pass happens in `nmp-engine`, before `promote_signed` is ever
-//! called), the engine's send-time attribution snapshots (this crate only
-//! stores whatever interval it is told to record).
+//! No store implementation verifies a signature: the one
+//! `nostr::Event::verify` call an accepted signer result must pass happens
+//! on the caller's side, in `nmp-engine`. What it produces is a
+//! [`VerifiedSignature`], the only value `promote_signed` accepts — so the
+//! precondition is carried by a type instead of asserted in prose (#768),
+//! and the door still binds it to the intent's own frozen id before
+//! mutating anything. The engine's send-time attribution snapshots stay out
+//! of scope too (this crate only stores whatever interval it is told to
+//! record).
 
 mod address_key;
 mod binary_event;
@@ -277,6 +281,64 @@ pub fn visible_under_pin<'a>(
 pub fn sentinel_signature() -> Signature {
     Signature::from_slice(&[0u8; 64])
         .expect("64 zero bytes is always a structurally valid (length-checked) schnorr signature")
+}
+
+/// The only thing [`EventStore::promote_signed`] accepts (#768): a
+/// signature that a `nostr::Event::verify` call actually passed, carried
+/// together with the [`EventId`] it was verified against.
+///
+/// `promote_signed` used to take a bare `Signature` plus a doc sentence
+/// telling the caller to have verified it first. A sentence is not a guard:
+/// any store consumer could hand the door a signature belonging to a
+/// different event, or to no event at all, and the production stores would
+/// still replace the sentinel, flip every co-owner to `Signed`, drop the
+/// displaced recovery stash, and — for a pending kind:5 draft — turn
+/// provisional suppression claims into PERMANENT tombstones. That is the
+/// convention-only failure class `docs/bug-class-ledger.md:3-5` rules out,
+/// and the precondition the Destructive-API Gate requires be typed.
+///
+/// The fields are private and [`Self::verify`] is the only constructor, so
+/// the value cannot exist unless one verification succeeded. `Event::verify`
+/// recomputes the NIP-01 id from the body and checks the schnorr signature
+/// against THAT id and pubkey, so [`Self::event_id`] is not a label the
+/// caller chose — it is the identity the signature actually covers. The
+/// store compares it to the intent's own durable frozen id, which is what
+/// binds the evidence to *this* write rather than to merely some valid one.
+///
+/// Verification stays a caller-side act performed exactly once (#387): the
+/// engine's signer-result validation constructs this value and hands it
+/// down, and no store implementation runs a second Schnorr check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedSignature {
+    event_id: EventId,
+    signature: Signature,
+}
+
+impl VerifiedSignature {
+    /// Verify `event` whole — id recomputed from the body, schnorr
+    /// signature checked against that id and `event.pubkey` — and keep the
+    /// proof. `Err` is `nostr`'s own verification failure, unchanged.
+    pub fn verify(event: &Event) -> Result<Self, nostr::event::Error> {
+        event.verify()?;
+        Ok(Self {
+            event_id: event.id,
+            signature: event.sig,
+        })
+    }
+
+    /// The id the signature was verified against. A store door matches this
+    /// against the intent's frozen id before it mutates anything.
+    #[must_use]
+    pub fn event_id(&self) -> EventId {
+        self.event_id
+    }
+
+    /// The verified signature itself — what actually replaces
+    /// [`sentinel_signature`] on the canonical row.
+    #[must_use]
+    pub fn signature(&self) -> Signature {
+        self.signature
+    }
 }
 
 /// Re-freeze `frozen` at `created_at`, re-deriving its NIP-01 id over the
@@ -1886,8 +1948,9 @@ pub trait EventStore {
     /// `MemoryStore` never actually returns `Err` (no I/O).
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError>;
 
-    /// Swap the sentinel signature on `intent_id`'s frozen body for the
-    /// real `sig` and flip the canonical `SigState`/`IntentSigState` to
+    /// Swap the sentinel signature on `intent_id`'s frozen body for
+    /// `verified`'s real one and flip the canonical
+    /// `SigState`/`IntentSigState` to
     /// `Signed`, in the SAME transaction that durably drops the intent's
     /// own `PUBLISH_QUEUE_DISPLACED` stash (R6) and updates its retained receipt.
     /// Keyed by `IntentId`, NOT the frozen event's id (architecture review
@@ -1913,14 +1976,19 @@ pub trait EventStore {
     /// `PUBLISH_QUEUE_INTENTS`/`PUBLISH_QUEUE_RECEIPTS` journal copies; the resulting
     /// signed bytes are still returned so the engine can publish them even
     /// though this intent does not (or no longer) wins any local address.
-    /// The caller must have already validated `sig` against the frozen
-    /// body/pubkey/id (`nostr::Event::verify`) — this door does not
-    /// re-verify (signature verification is explicitly out of scope for
-    /// this crate). Fallible for the same reason `accept_write` is.
+    /// [`VerifiedSignature`] is the whole precondition, typed (#768): it
+    /// cannot be built without one successful `nostr::Event::verify`, and
+    /// this door refuses — [`PersistenceFault::Invariant`], before any
+    /// mutation of any table — unless [`VerifiedSignature::event_id`]
+    /// equals the intent's own durable frozen id. A signature that is
+    /// perfectly valid for a DIFFERENT event is therefore refused here, not
+    /// promoted. No implementation re-verifies: verification happened once,
+    /// on the caller's side, to produce the evidence (#387). Fallible for
+    /// the same reason `accept_write` is.
     fn promote_signed(
         &mut self,
         intent_id: IntentId,
-        sig: Signature,
+        verified: VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError>;
 
     /// Pre-signature compensation only (retraction doc §4.2's "Promotion

@@ -10,7 +10,6 @@ use std::sync::atomic::Ordering;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nostr::filter::MatchEventOptions;
-use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp};
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins, AddressKey};
@@ -27,6 +26,7 @@ use crate::{
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
     PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RefuseReason, RelayObserved, RetiredIntent, RetractReason, SigState, StoredEvent,
+    VerifiedSignature,
 };
 
 /// One `PUBLISH_QUEUE_INTENTS` row (M3 publish-queue unit, crashsafe-accepted-2-3-
@@ -2112,11 +2112,24 @@ impl EventStore for MemoryStore {
     fn promote_signed(
         &mut self,
         intent_id: IntentId,
-        sig: Signature,
+        verified: VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError> {
         let Some(intent_record) = self.publish_queue_intents.get(&intent_id) else {
             return Ok(PromoteOutcome::NotFound);
         };
+        let frozen_id = intent_record.frozen.id;
+        // Intent binding (#768). `VerifiedSignature` proves one
+        // `Event::verify` succeeded; it does NOT prove the event it
+        // covered is the one THIS intent froze. Everything below is
+        // irreversible — a permanent kind:5 tombstone most of all — so the
+        // match runs before a single table is touched.
+        if verified.event_id() != frozen_id {
+            return Err(PersistenceError::invariant(format!(
+                "promotion evidence verifies event {} but intent {} froze event {frozen_id}",
+                verified.event_id(),
+                intent_id.0,
+            )));
+        }
         // No-second-transition guard (codex-nova finding): a repeat
         // promotion (e.g. a duplicate signer completion) must not
         // overwrite an already-Signed row and re-emit `Promoted` — the
@@ -2126,7 +2139,7 @@ impl EventStore for MemoryStore {
         if intent_record.sig_state == IntentSigState::Signed {
             return Ok(PromoteOutcome::NotFound);
         }
-        let frozen_id = intent_record.frozen.id;
+        let sig = verified.signature();
 
         // Architecture review correction (load-bearing): is this intent
         // AMONG the owners of the LIVE row at its own frozen id? A
@@ -3266,6 +3279,13 @@ mod lane_atomicity_tests {
     use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, PersistenceFault};
     use nostr::{EventBuilder, Keys};
 
+    /// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+    /// event promoted below is one this fixture just signed itself, so the
+    /// verification succeeding is part of the setup, not the property under test.
+    fn evidence(signed: &Event) -> VerifiedSignature {
+        VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+    }
+
     fn setup(content: &str) -> (MemoryStore, IntentId, RelayUrl, Event, PublishQueueLane) {
         let keys = Keys::generate();
         let signed = EventBuilder::new(Kind::TextNote, content)
@@ -3297,7 +3317,7 @@ mod lane_atomicity_tests {
             })
             .unwrap();
         let intent = accepted.journaled_intent_id().unwrap();
-        store.promote_signed(intent, signed.sig).unwrap();
+        store.promote_signed(intent, evidence(&signed)).unwrap();
         store
             .record_route_revision(intent, BTreeSet::from([relay.clone()]))
             .unwrap();
