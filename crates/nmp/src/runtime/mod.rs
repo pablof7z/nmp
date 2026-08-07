@@ -2438,6 +2438,55 @@ mod pool_bridge_tests {
         )
     }
 
+    /// Issue #779. The capacity fact must survive the bridge's frame
+    /// coalescing: it arrives interleaved with EVENT traffic, and the batch
+    /// loop's `pending` slot is where a non-`Frame` event that interrupted a
+    /// batch could be dropped instead of forwarded.
+    #[test]
+    fn released_outbound_capacity_reaches_the_reducer_through_a_frame_batch() {
+        let (pool_tx, pool_rx) = cb::bounded(8);
+        let (stop_tx, stop_rx) = cb::bounded(0);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        let session = test_session();
+        pool_tx
+            .send(PoolEvent::Frame {
+                handle,
+                session: session.clone(),
+                frame: event_frame("outbound-capacity"),
+            })
+            .unwrap();
+        pool_tx
+            .send(PoolEvent::OutboundCapacityAvailable {
+                handle,
+                session: session.clone(),
+            })
+            .unwrap();
+        let bridge = thread::spawn(move || {
+            pool_bridge_loop(&pool_rx, &stop_rx, &cmd_tx, 128, usize::MAX, Duration::ZERO)
+        });
+
+        let applied = match cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Cmd::RelayBatch { applied, .. } => applied,
+            _ => panic!("the EVENT must enter the reducer as a relay batch"),
+        };
+        applied.send(()).unwrap();
+        assert!(matches!(
+            cmd_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Cmd::Engine(EngineMsg::RelayOutboundCapacityAvailable(
+                current,
+                ref current_session
+            )) if current == handle && *current_session == session
+        ));
+
+        drop(pool_tx);
+        drop(stop_tx);
+        bridge.join().unwrap();
+    }
+
     #[test]
     fn buffered_auth_batch_is_applied_before_initial_read_release() {
         let (pool_tx, pool_rx) = cb::bounded(8);

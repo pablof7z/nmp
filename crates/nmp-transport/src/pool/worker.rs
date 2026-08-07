@@ -458,11 +458,11 @@ pub(super) enum WorkerEventKind {
         retry_in: Option<Duration>,
     },
     Frame(RelayFrame),
-    /// This worker's finite outbound envelope released room after it had
-    /// refused a frame (issue #779). Edge-triggered by the refusal and
-    /// consumed once, so a worker that never refused anything never emits
-    /// this, and a worker whose envelope stays full emits it no more than
-    /// once per socket write that actually relieved it.
+    /// This worker refused an ordinary frame and has since made outbound
+    /// room again (issue #779). Edge-triggered by the refusal and consumed
+    /// once, so a worker that never refused anything never emits this, and
+    /// one still refusing emits it no more than once per pass through its
+    /// write path.
     OutboundCapacityAvailable,
     /// The one, ever, resolution of a `SendDurable` command's
     /// `AttemptCorrelation` (issue #93). See [`super::PoolEvent::EventHandoff`]
@@ -1570,13 +1570,15 @@ fn run_connected_inner(
             }
         };
 
-        // Issue #779. The flush above is where a socket takes ownership of
-        // ordinary frames and their charge is released, so this is the one
-        // point in the generation where "the envelope refused something and
-        // now has room" can newly become true. Evaluating it here rather
-        // than inside the write loop is also what makes the arm-then-wake
-        // ordering in `WorkerHandle::push_ordinary` sufficient: a refusal
-        // that raced the last release wakes this loop, which re-evaluates.
+        // Issue #779. The drain and flush above are the whole of this
+        // worker's outbound progress -- the drain frees transit slots, the
+        // flush hands frames to the socket and releases their charge -- so
+        // this is the one point in a generation where "refused something,
+        // now has room" can newly become true, for either refusal shape.
+        // Evaluating it here rather than inside the write loop is also what
+        // makes the arm-then-wake ordering in `WorkerHandle::push_ordinary`
+        // sufficient: a refusal that raced the last release wakes this loop,
+        // which re-evaluates.
         if outbound.take_capacity_edge() {
             let _ = event_tx.send(WorkerEvent {
                 slot,

@@ -719,6 +719,24 @@ impl<S: EventStore> EngineCore<S> {
             .is_some_and(|live| live.filter == *filter && live.handle == handle)
     }
 
+    /// True while any NIP-77 phase owns this router subscription: an
+    /// in-flight candidate handoff, a promoted live owner, or an open
+    /// reconciliation. Such a plan entry is not an unowned ordinary REQ —
+    /// #775's send-outcome door reports its frames and takes its own
+    /// fallback — so the #779 capacity edge leaves it alone rather than
+    /// placing the same demand on the wire a second time.
+    pub(super) fn nip77_owns_plan_sub(&self, plan_sub_id: &SubId) -> bool {
+        self.active_nip77_live.contains_key(plan_sub_id)
+            || self
+                .pending_neg_handoffs
+                .values()
+                .any(|handoff| &handoff.plan_sub_id == plan_sub_id)
+            || self
+                .neg_sessions
+                .values()
+                .any(|session| &session.plan_sub_id == plan_sub_id)
+    }
+
     pub(super) fn session_has_live_generation(
         &self,
         session: &RelaySessionKey,

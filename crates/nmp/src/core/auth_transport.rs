@@ -868,15 +868,99 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
-    /// Issue #779, seam only. This does exactly what a refused REQ got before
-    /// the fact existed: nothing. The behaviour commit replaces the body.
+    /// Issue #779. A relay worker refused an ordinary frame and has since
+    /// made outbound room again, so the exact condition that produced the
+    /// refusal is measurably gone. This is the one fact on which a refused,
+    /// still-current REQ may be re-handed off.
+    ///
+    /// It is not a retry, and it remembers nothing. `on_wire_request_handoff`
+    /// keeps no deferred set; this re-runs the reconciliation
+    /// [`Self::on_relay_connected`] already performs — the CURRENT plan for
+    /// this session minus what is live on this EXACT handle — so demand
+    /// withdrawn or replaced since the refusal has nothing to resurrect, an
+    /// accepted request is never sent twice, and there is one replay
+    /// mechanism rather than two.
+    ///
+    /// Bounded by construction rather than by a cap. Transport arms the edge
+    /// only on an actual refusal, and disarming it needs the worker to have
+    /// completed another pass through its write path, so a re-hand that is
+    /// refused again waits on real outbound progress before it can be
+    /// attempted once more; a permanently stalled worker produces no edge at
+    /// all.
     pub(super) fn on_relay_outbound_capacity_available(
         &mut self,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
     ) -> Vec<Effect> {
-        let _ = (handle, session);
-        Vec::new()
+        // The envelope belongs to one worker. A release observed for a
+        // generation this reducer has moved past cannot place frames on the
+        // connection that replaced it.
+        if !self
+            .slot_to_relay
+            .get(&handle.slot)
+            .is_some_and(|(current, current_session)| {
+                *current == handle && *current_session == session
+            })
+        {
+            return Vec::new();
+        }
+        // `slot_to_relay` outlives the socket — it is what a late frame or
+        // disconnect for this generation is still matched against. Released
+        // room reported after the connection ended names a worker that can
+        // no longer write, so the link itself has to be current too.
+        if !self.connected_relays.contains(&session) {
+            return Vec::new();
+        }
+        // #8: a protected session places no REQ until THIS generation has
+        // proven AUTH. Released memory is a fact about an envelope, never
+        // about identity, so it cannot advance that gate.
+        if session.access != AccessContext::Public
+            && self.auth_ready_sessions.get(&session) != Some(&handle)
+        {
+            return Vec::new();
+        }
+        let Some(planned) = self.router.plan().reqs.get(&session).cloned() else {
+            return Vec::new();
+        };
+        let mut reqs = Vec::new();
+        for req in &planned {
+            if self.wire_request_is_live(&session, &req.sub_id, &req.filter, handle) {
+                continue;
+            }
+            // A request whose outcome transport has not reported yet is not
+            // unowned — it is in flight, and re-placing it would put the
+            // same demand on the wire twice with two attribution snapshots.
+            if self
+                .pending_request_evidence
+                .contains_key(&(session.clone(), req.sub_id.clone()))
+            {
+                continue;
+            }
+            // Nor is a plan subscription a NIP-77 phase currently owns.
+            // #775's own door reports that frame's outcome and takes its own
+            // fallback; choosing a reconciliation strategy is a connect-time
+            // or demand-time decision, and released memory is neither.
+            if self.nip77_owns_plan_sub(&req.sub_id) {
+                continue;
+            }
+            self.record_observed_request(
+                &session,
+                &req.sub_id,
+                &req.filter,
+                req.absorbed.clone(),
+                true,
+                EventFailureTarget::ThisSend,
+            );
+            reqs.push(req.clone());
+        }
+        // Unlike a fresh `Connected`, there is no reconnect preamble to
+        // re-establish here, so an empty reconciliation emits nothing at
+        // all: the generation this edge belongs to is the one already
+        // carrying those subscriptions.
+        if reqs.is_empty() {
+            return Vec::new();
+        }
+        vec![Effect::Replay(session, reqs)]
     }
 
     pub(super) fn on_auth_probe_released(

@@ -162,12 +162,16 @@ fn a_connected_peer_that_never_reads_cannot_grow_the_process() {
 fn an_envelope_that_refused_a_frame_reports_the_room_it_later_releases() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stalled relay");
     let port = listener.local_addr().expect("stalled relay address").port();
+    // A channel, not `thread::park`: a spurious unpark would start the peer
+    // reading before the envelope had refused anything, and the test would
+    // fail for a reason that is not the subject.
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
     let peer = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("stalled relay accepts one client");
         let mut socket = tungstenite::accept(stream).expect("stalled relay handshake");
         // Stall: hold the socket open and read nothing, so the worker's
         // writes block and its envelope fills.
-        thread::park();
+        let _ = resume_rx.recv();
         // Resume: drain until the client goes away. Every frame read here is
         // a frame the worker's socket finally accepted, which is exactly the
         // release the engine is waiting on.
@@ -199,7 +203,9 @@ fn an_envelope_that_refused_a_frame_reports_the_room_it_later_releases() {
          without a refusal this test proves nothing"
     );
 
-    peer.thread().unpark();
+    resume_tx
+        .send(())
+        .expect("the stalled peer is still parked on its resume signal");
     let mut released = None;
     while let Ok(event) = rx.recv_timeout(Duration::from_secs(30)) {
         if let PoolEvent::OutboundCapacityAvailable { handle, session } = event {

@@ -213,11 +213,12 @@ fn released_capacity_never_resurrects_a_withdrawn_request() {
     );
 }
 
-/// A stale generation's capacity release is inert. The envelope belongs to a
-/// worker; a release observed for a generation the reducer has moved past
-/// cannot place frames on the connection that replaced it.
+/// A release reported after the link ended is inert. `slot_to_relay` outlives
+/// the socket -- it is what a late frame for this generation is still matched
+/// against -- so identifying the handle is not on its own proof that the
+/// worker can still write.
 #[test]
-fn a_stale_generations_capacity_release_re_hands_nothing() {
+fn a_release_reported_after_the_link_ended_re_hands_nothing() {
     let (mut core, sub_id, _filter, _refused) = refused_request();
     let _ = core.handle(EngineMsg::RelayDisconnected(
         handle(1),
@@ -232,7 +233,35 @@ fn a_stale_generations_capacity_release_re_hands_nothing() {
     assert_eq!(
         replayed_reqs(&effects, &sub_id),
         0,
-        "a superseded handle may not re-hand anything: {effects:?}"
+        "a worker that can no longer write may not re-hand anything: {effects:?}"
+    );
+}
+
+/// A superseded generation's release is inert too, and for a different
+/// reason: the envelope belongs to one worker, and the connection that
+/// replaced it has its own. Its own `Connected` already reconciled the plan.
+#[test]
+fn a_superseded_generations_capacity_release_re_hands_nothing() {
+    let (mut core, sub_id, _filter, _refused) = refused_request();
+    let reconnected = core.handle(EngineMsg::RelayConnected(
+        handle(2),
+        public_session(&relay()),
+    ));
+    assert_eq!(
+        replayed_reqs(&reconnected, &sub_id),
+        1,
+        "the successor generation owns this request now: {reconnected:?}"
+    );
+
+    let effects = core.handle(EngineMsg::RelayOutboundCapacityAvailable(
+        handle(1),
+        public_session(&relay()),
+    ));
+    assert_eq!(
+        replayed_reqs(&effects, &sub_id),
+        0,
+        "a release from the generation that was replaced may not place a \
+         frame on the one that replaced it: {effects:?}"
     );
 }
 
