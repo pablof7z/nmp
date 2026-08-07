@@ -724,18 +724,21 @@ pub struct PoolConfig {
     /// Maximum worker events waiting for the translator. A full queue blocks
     /// the socket worker, propagating pressure back to TCP reads.
     pub ingest_queue_capacity: usize,
-    /// Maximum ordinary outbound commands (`Send`/`SendDurable`) queued per
-    /// relay worker (issue #506's HIGH finding). This is the one pool queue
-    /// that was historically unbounded: a stalled-but-
-    /// connected socket (TCP send window full, so `flush_writes` keeps
-    /// returning `Blocked`) could accumulate an unbounded backlog while
-    /// `Pool::send`/`send_durable` kept reporting success. `pool::worker::
-    /// WorkerHandle::push` now uses `try_send` against this bound, so a
-    /// saturated queue surfaces as the EXISTING "not handed off" backpressure
-    /// signal instead of unbounded memory growth. Reconnect-preamble
-    /// replacement and `Shutdown`/retire are exempt from this cap by
-    /// construction (see those methods' docs), so a full data queue can
-    /// neither retain stale reconnect ownership nor block teardown.
+    /// Maximum outbound commands (`Send`/`SendDurable`) in TRANSIT to one
+    /// relay worker at once (issue #506's HIGH finding). `pool::worker::
+    /// WorkerHandle::push` uses `try_send` against this bound, so a saturated
+    /// channel surfaces as the EXISTING "not handed off" backpressure signal.
+    /// Reconnect-preamble replacement and `Shutdown`/retire are exempt from
+    /// this cap by construction (see those methods' docs), so a full data
+    /// queue can neither retain stale reconnect ownership nor block teardown.
+    ///
+    /// This bounds transit, NOT memory, and for a while it was mistaken for
+    /// both. A running worker drains this channel continuously into its own
+    /// state, so each receive frees a slot and a producer can refill it
+    /// forever. What a stalled or endlessly-redialing relay actually meets is
+    /// `pool::worker`'s finite outbound envelope, which charges a frame from
+    /// admission until a socket accepts it and so spans transit and worker
+    /// retention together.
     pub command_queue_capacity: usize,
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
@@ -937,16 +940,29 @@ impl Pool {
     /// a structural no-op (`false`) — the caller cannot accidentally target
     /// a superseded generation of the same URL.
     ///
-    /// Returns `true` iff the frame was handed to the worker's outbound
-    /// queue — not iff it has been written to the socket. The worker may
-    /// still be dialing; the frame is queued until the socket opens.
+    /// Returns `true` iff the worker accepted the frame into its finite
+    /// outbound envelope — not iff it has been written to the socket, and
+    /// never that a relay received it. The worker may still be dialing; the
+    /// frame is retained until the socket opens.
+    ///
+    /// `false` is local backpressure and nothing else (issue #506): the
+    /// worker is retaining as much ordinary outbound state as it may, the
+    /// transit channel is full, the handle is stale, or the frame is larger
+    /// than any relay could be handed. It never means a relay rejected
+    /// anything — a rejection arrives as an inbound `OK`/`CLOSED`/`NOTICE`
+    /// frame.
+    ///
+    /// Until #506's outbound-memory half this `true` was not a fact about
+    /// memory at all: a running worker drains the transit channel
+    /// continuously into its own uncapped state, so a caller facing a
+    /// stalled relay got `true` forever while the process grew.
     pub fn send(&self, h: RelayHandle, frame: WireFrame) -> bool {
         let WireFrame::Text(text) = frame else {
             return false; // Binary is reserved; no wire-emittable path yet.
         };
         match self.inner.lock() {
             Ok(guard) => match guard.command_tx_for(h) {
-                Some(worker) => worker.push(worker::WorkerCommand::Send(text)),
+                Some(worker) => worker.push_ordinary(text),
                 None => false,
             },
             Err(_) => false,

@@ -26,7 +26,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -44,7 +44,7 @@ use crate::keepalive::{
     apply_resume_gap, KeepaliveAction, KeepaliveState, SuspendGapDetector, SUSPEND_GAP_THRESHOLD,
 };
 
-use super::connect::{open_relay_socket, RelaySocket};
+use super::connect::{open_relay_socket, RelaySocket, MAX_OUTBOUND_FRAME_BYTES};
 use super::frame::classify_message;
 use super::spawn::ThreadSpawner;
 use super::{
@@ -61,9 +61,107 @@ const CONTROL: Token = Token(1);
 /// completion. Public generations do not pay this interval.
 const INITIAL_READ_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
 
+/// The total bytes one relay worker may retain for ordinary outbound frames
+/// — the transit channel and the worker's own not-yet-written deque together,
+/// because a frame is charged when the pool admits it and released only when
+/// a socket accepts it (issue #506).
+///
+/// `PoolConfig::command_queue_capacity` bounds only how many commands may be
+/// in flight *to* the worker. A running worker drains that channel
+/// continuously into worker-local state, so each receive frees a slot and a
+/// producer can refill it forever: the channel bounds transit, never
+/// retention. This is the bound on retention, and it is the one a stalled or
+/// endlessly-redialing relay actually runs into.
+///
+/// Sized to hold a full ordinary working set (a session's REQ/CLOSE traffic
+/// is kilobytes per frame) while staying small enough that the whole relay
+/// cap's worth of simultaneously-stalled workers is bounded host memory.
+const OUTBOUND_ENVELOPE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Charged on top of each frame's own bytes for the `String` header and the
+/// deque slot that hold it. This is also what makes [`OUTBOUND_ENVELOPE_BYTES`]
+/// bound the frame *count*: a zero-length frame still costs this much, so no
+/// stream of tiny frames can grow the deque without bound.
+const FRAME_RETENTION_OVERHEAD_BYTES: usize = 64;
+
+/// The finite retained-bytes envelope shared by one worker's pool handle and
+/// its thread.
+#[derive(Debug)]
+pub(super) struct OutboundEnvelope {
+    capacity: usize,
+    held: AtomicUsize,
+}
+
+impl OutboundEnvelope {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            held: AtomicUsize::new(0),
+        }
+    }
+
+    /// Reserve room for `text` and take ownership of it, or refuse. Refusal
+    /// is the caller's existing typed backpressure outcome; nothing is
+    /// retained, so a refusal can never leave a half-charged frame behind.
+    fn admit(envelope: &Arc<Self>, text: String) -> Option<AdmittedFrame> {
+        let held = text.len() + FRAME_RETENTION_OVERHEAD_BYTES;
+        let mut current = envelope.held.load(Ordering::SeqCst);
+        loop {
+            if current + held > envelope.capacity {
+                return None;
+            }
+            match envelope.held.compare_exchange_weak(
+                current,
+                current + held,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return Some(AdmittedFrame {
+                        text,
+                        held,
+                        envelope: Arc::clone(envelope),
+                    })
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+/// One ordinary outbound frame that currently occupies room in its worker's
+/// [`OutboundEnvelope`].
+///
+/// The room is returned by `Drop`, so there is exactly one release path and
+/// no adjacent flag to forget: the socket accepting the frame drops it, a
+/// refused `try_send` handing the command back drops it, and a worker thread
+/// exiting with frames still queued drops all of them. A frame that is
+/// pushed back after a blocked write is *not* dropped, and stays charged —
+/// which is correct, because the worker is still holding it.
+pub(super) struct AdmittedFrame {
+    text: String,
+    held: usize,
+    envelope: Arc<OutboundEnvelope>,
+}
+
+impl AdmittedFrame {
+    fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl Drop for AdmittedFrame {
+    fn drop(&mut self) {
+        self.envelope.held.fetch_sub(self.held, Ordering::SeqCst);
+    }
+}
+
 /// Command the pool pushes to one relay worker.
 pub(super) enum WorkerCommand {
-    Send(String),
+    /// Ordinary REQ/CLOSE traffic. Carries its envelope reservation (issue
+    /// #506): the bytes are charged before the command exists and released
+    /// when this value is finally dropped, wherever that happens.
+    Send(AdmittedFrame),
     Shutdown,
     /// Open the ordinary outbound gate for one exact connected generation
     /// after the consumer has applied its ordered initial-read edge.
@@ -393,6 +491,11 @@ pub(super) struct WorkerHandle {
     /// the source of truth the worker checks at EVERY drain/wait point; it is
     /// set (and the worker woken) without ever touching the data queue.
     shutdown: Arc<AtomicBool>,
+    /// The finite retained-bytes envelope shared with the worker (issue
+    /// #506). Ordinary frames are charged here on admission and released when
+    /// a socket accepts them, so this — not the transit channel — is what a
+    /// stalled or endlessly-redialing relay runs into.
+    outbound: Arc<OutboundEnvelope>,
     waker: Arc<Mutex<Option<Waker>>>,
     join: Option<JoinHandle<()>>,
 }
@@ -430,22 +533,72 @@ impl WorkerHandle {
         true
     }
 
-    /// Enqueue `command` and wake the worker if it is currently parked in
-    /// `mio::Poll::poll`. Returns `false` if the worker thread is already
-    /// gone (channel disconnected) OR — issue #506's HIGH finding — if the
-    /// bounded outbound queue is currently full: a stalled-but-connected
-    /// relay (TCP send window full, so the worker's `flush_writes` keeps
-    /// returning `Blocked`) must surface backpressure to the caller instead
-    /// of growing this queue without bound. `Pool::send`/`send_durable`
-    /// already have a typed "not handed off" outcome for exactly this case;
-    /// this is the seam that makes it reachable.
+    /// Hand one ordinary REQ/CLOSE frame to the worker, or refuse.
     ///
-    /// A refused enqueue is terminal for the command: both refusal shapes (a
-    /// full bounded queue and a gone worker thread) simply drop it, and every
-    /// caller reports its own typed synchronous refusal. Nothing is retained,
-    /// so a refusal can never leave a half-owned correlation or operation
-    /// behind. The mio waker fires only on a successful enqueue.
+    /// Two bounds have to hold before a `true` here is honest, and until
+    /// issue #506's outbound-memory half only the first existed:
+    ///
+    /// 1. The transit channel must have a free slot. This was PR #511's
+    ///    bound, and on its own it says nothing about memory — a running
+    ///    worker drains this channel continuously into worker-local state,
+    ///    freeing a slot per receive, so a producer can refill it forever.
+    /// 2. The frame's bytes must fit the worker's finite
+    ///    [`OutboundEnvelope`], which spans transit AND worker-local
+    ///    retention because the charge is taken here and released only when
+    ///    a socket accepts the frame. A relay stuck redialing, or connected
+    ///    to a peer that has stopped reading, never releases, so this is the
+    ///    bound it actually meets.
+    ///
+    /// A frame past [`MAX_OUTBOUND_FRAME_BYTES`] is refused outright: no
+    /// relay can be handed it, so reporting that synchronously is the honest
+    /// answer rather than admitting bytes that could only ever be dropped
+    /// later.
+    ///
+    /// A refused enqueue is terminal for the command. Every refusal shape
+    /// drops the frame — releasing its charge with it — and every caller
+    /// reports its own typed synchronous outcome, so a refusal can never
+    /// leave a half-owned correlation or operation behind. `Pool::send`'s
+    /// `false` is now a fact about the whole outbound envelope rather than a
+    /// fact about one intermediate channel.
+    pub(super) fn push_ordinary(&self, text: String) -> bool {
+        if text.len() > MAX_OUTBOUND_FRAME_BYTES {
+            return false;
+        }
+        let Some(frame) = OutboundEnvelope::admit(&self.outbound, text) else {
+            return false;
+        };
+        self.push(WorkerCommand::Send(frame))
+    }
+
+    /// Enqueue a lifecycle or externally-capped command and wake the worker
+    /// if it is currently parked in `mio::Poll::poll`. Returns `false` if the
+    /// worker thread is already gone (channel disconnected), if the bounded
+    /// transit channel is full, or if the frame exceeds what any relay could
+    /// be handed.
+    ///
+    /// The durable and ephemeral lanes are not charged to the ordinary
+    /// envelope: their admission is already capped by their owner (at most 32
+    /// active durable attempts globally, one per relay; one ephemeral
+    /// completion owner per operation), and each already resolves its exact
+    /// correlation on refusal. What they DID lack is the frame ceiling, so
+    /// they take it here.
+    ///
+    /// The mio waker fires only on a successful enqueue.
     pub(super) fn push(&self, command: WorkerCommand) -> bool {
+        let frame_bytes = match &command {
+            WorkerCommand::SendDurable { frame, .. }
+            | WorkerCommand::SendEphemeral { frame, .. } => frame.len(),
+            // Ordinary frames cleared this in `push_ordinary`, deliberately
+            // BEFORE charging the envelope: an oversized frame is refused
+            // without ever occupying room that a sendable frame could have
+            // used. Re-checking here would be a second owner of one rule.
+            WorkerCommand::Send(_)
+            | WorkerCommand::Shutdown
+            | WorkerCommand::ReleaseInitialRead { .. } => 0,
+        };
+        if frame_bytes > MAX_OUTBOUND_FRAME_BYTES {
+            return false;
+        }
         if self.command_tx.try_send(command).is_err() {
             return false;
         }
@@ -530,6 +683,11 @@ pub(super) fn spawn(
     // caller (`PoolInner::spawn_worker`) the same way every other queue
     // knob is.
     let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(command_queue_capacity);
+    // The retention bound the transit channel above is NOT (issue #506's
+    // outbound-memory half). Shared with the thread only so that a frame's
+    // charge outlives the command channel and is released exactly where the
+    // socket accepts the bytes.
+    let outbound = Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES));
     let reconnect_preamble = Arc::new(ReconnectPreambleOwner::default());
     let reconnect_preamble_for_thread = Arc::clone(&reconnect_preamble);
     let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
@@ -572,6 +730,7 @@ pub(super) fn spawn(
         command_tx,
         reconnect_preamble,
         shutdown,
+        outbound,
         waker: waker_slot,
         join: Some(join),
     })
@@ -613,7 +772,7 @@ fn run_worker(
     committed_observations: &super::committed_observations::CommittedObservationCache,
 ) {
     let relay_scope = super::committed_observations::RelayScope::new(&url);
-    let mut pending: VecDeque<String> = VecDeque::new();
+    let mut pending: VecDeque<AdmittedFrame> = VecDeque::new();
     // Durable EVENT tracking (issue #93): entirely separate from `pending`
     // above, and NEVER carried across a reconnect — each `run_connected`
     // call starts these two empty and `resolve_generation_end` drains both
@@ -1040,7 +1199,7 @@ fn resolve_generation_end(
 #[allow(clippy::too_many_arguments)]
 fn wait_before_reconnect(
     command_rx: &Receiver<WorkerCommand>,
-    pending: &mut VecDeque<String>,
+    pending: &mut VecDeque<AdmittedFrame>,
     delay: Duration,
     event_tx: &SyncSender<WorkerEvent>,
     shutdown: &AtomicBool,
@@ -1065,7 +1224,7 @@ fn wait_before_reconnect(
             return true;
         }
         match command_rx.recv_timeout(remaining) {
-            Ok(WorkerCommand::Send(text)) => pending.push_back(text),
+            Ok(WorkerCommand::Send(frame)) => pending.push_back(frame),
             Ok(WorkerCommand::ReleaseInitialRead { .. }) => {}
             Ok(WorkerCommand::SendDurable { correlation, .. }) => {
                 resolve_correlation(
@@ -1100,7 +1259,7 @@ fn run_connected(
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
-    pending: &mut VecDeque<String>,
+    pending: &mut VecDeque<AdmittedFrame>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
     suspend_gap: &mut SuspendGapDetector,
@@ -1157,7 +1316,7 @@ fn run_connected_inner(
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
-    pending: &mut VecDeque<String>,
+    pending: &mut VecDeque<AdmittedFrame>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
     suspend_gap: &mut SuspendGapDetector,
@@ -1468,7 +1627,7 @@ enum Drain {
 #[allow(clippy::too_many_arguments)]
 fn drain_commands(
     command_rx: &Receiver<WorkerCommand>,
-    pending: &mut VecDeque<String>,
+    pending: &mut VecDeque<AdmittedFrame>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
     outbound_released: &mut bool,
@@ -1478,7 +1637,7 @@ fn drain_commands(
 ) -> Drain {
     loop {
         match command_rx.try_recv() {
-            Ok(WorkerCommand::Send(text)) => pending.push_back(text),
+            Ok(WorkerCommand::Send(frame)) => pending.push_back(frame),
             Ok(WorkerCommand::Shutdown) => return Drain::Shutdown,
             Ok(WorkerCommand::ReleaseInitialRead {
                 generation: release_generation,
@@ -1528,7 +1687,7 @@ fn flush_generation_writes(
     outbound_released: bool,
     reconnect_preamble: &Arc<ReconnectPreambleOwner>,
     pending_reconnect_preamble: &mut PendingReconnectPreamble,
-    pending: &mut VecDeque<String>,
+    pending: &mut VecDeque<AdmittedFrame>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
@@ -1579,7 +1738,7 @@ fn flush_generation_writes(
 fn flush_writes(
     reconnect_preamble: &Arc<ReconnectPreambleOwner>,
     pending_reconnect_preamble: &mut PendingReconnectPreamble,
-    pending: &mut VecDeque<String>,
+    pending: &mut VecDeque<AdmittedFrame>,
     durable: &mut VecDeque<(AttemptCorrelation, String)>,
     write_accepted: &mut Vec<AttemptCorrelation>,
     ephemeral: &mut VecDeque<EphemeralFrame>,
@@ -1594,12 +1753,15 @@ fn flush_writes(
     if !matches!(preamble_result, FlushResult::Flushed) {
         return preamble_result;
     }
-    while let Some(text) = pending.pop_front() {
-        match socket.write(Message::Text(text.clone().into())) {
+    while let Some(frame) = pending.pop_front() {
+        match socket.write(Message::Text(frame.text().to_owned().into())) {
+            // Dropping `frame` here is what returns its bytes to the
+            // envelope: the socket has taken ownership of them, so the
+            // worker is no longer retaining them (issue #506).
             Ok(()) => {}
-            Err(error) if is_nonblocking_io(&error) => {
-                pending.push_front(text);
-                return FlushResult::Blocked;
+            Err(error) if is_write_backpressure(&error) => {
+                pending.push_front(frame);
+                return blocked_after_relieving(socket);
             }
             Err(error) => return FlushResult::Broken(error.to_string()),
         }
@@ -1607,9 +1769,9 @@ fn flush_writes(
     while let Some((correlation, text)) = durable.pop_front() {
         match socket.write(Message::Text(text.clone().into())) {
             Ok(()) => write_accepted.push(correlation),
-            Err(error) if is_nonblocking_io(&error) => {
+            Err(error) if is_write_backpressure(&error) => {
                 durable.push_front((correlation, text));
-                return FlushResult::Blocked;
+                return blocked_after_relieving(socket);
             }
             Err(error) => {
                 // This exact frame's OWN write() call failed outright --
@@ -1671,7 +1833,7 @@ fn flush_reconnect_preamble(
                     owner.unflushed_revision = None;
                     resolve_current_transition(&mut owner);
                 }
-                Err(error) if is_nonblocking_io(&error) => return FlushResult::Blocked,
+                Err(error) if is_write_backpressure(&error) => return FlushResult::Blocked,
                 Err(error) => return FlushResult::Broken(error.to_string()),
             }
         }
@@ -1700,12 +1862,17 @@ fn flush_reconnect_preamble(
                         owner.unflushed_revision = None;
                         resolve_current_transition(&mut owner);
                     }
-                    Err(error) if is_nonblocking_io(&error) => return FlushResult::Blocked,
+                    Err(error) if is_write_backpressure(&error) => return FlushResult::Blocked,
                     Err(error) => return FlushResult::Broken(error.to_string()),
                 }
             }
-            Err(error) if is_nonblocking_io(&error) => {
+            Err(error) if is_write_backpressure(&error) => {
                 pending.frames.push_front(text);
+                // Same reason as `blocked_after_relieving`: a
+                // `WriteBufferFull` is refused against the buffer's current
+                // contents, so retrying without moving bytes out of it would
+                // repeat the identical refusal.
+                let _ = socket.flush_replay();
                 return FlushResult::Blocked;
             }
             Err(error) => return FlushResult::Broken(error.to_string()),
@@ -1740,9 +1907,9 @@ fn flush_ephemeral_writes(
     while let Some(pending) = ephemeral.pop_front() {
         match socket.write(Message::Text(pending.frame.clone().into())) {
             Ok(()) => ephemeral_write_accepted.push(pending.target),
-            Err(error) if is_nonblocking_io(&error) => {
+            Err(error) if is_write_backpressure(&error) => {
                 ephemeral.push_front(pending);
-                return FlushResult::Blocked;
+                return blocked_after_relieving(socket);
             }
             Err(error) => {
                 ephemeral.push_front(pending);
@@ -1779,7 +1946,7 @@ fn flush_message(
             slot,
             generation,
         ),
-        Err(error) if is_nonblocking_io(&error) => FlushResult::Blocked,
+        Err(error) if is_write_backpressure(&error) => blocked_after_relieving(socket),
         Err(error) => FlushResult::Broken(error.to_string()),
     }
 }
@@ -1818,7 +1985,7 @@ fn flush_socket_and_settle(
 fn flush_socket(socket: &mut RelaySocket) -> FlushResult {
     match socket.flush() {
         Ok(()) => FlushResult::Flushed,
-        Err(error) if is_nonblocking_io(&error) => FlushResult::Blocked,
+        Err(error) if is_write_backpressure(&error) => FlushResult::Blocked,
         Err(error) => FlushResult::Broken(error.to_string()),
     }
 }
@@ -1908,6 +2075,44 @@ fn is_nonblocking_io(error: &tungstenite::Error) -> bool {
         tungstenite::Error::Io(io)
             if matches!(io.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
     )
+}
+
+/// Both shapes a write takes when the local side cannot accept more bytes
+/// right now (issue #506). Neither says anything about the relay:
+///
+/// - `WouldBlock`/`Interrupted`: the OS socket cannot take more.
+/// - `WriteBufferFull`: tungstenite's own write buffer is at
+///   `max_write_buffer_size`. This became reachable when that ceiling stopped
+///   being `usize::MAX`; the frame is handed straight back, so nothing is
+///   lost by treating it as pressure.
+///
+/// A relay REJECTION never looks like either — it arrives as an inbound
+/// `OK`/`CLOSED`/`NOTICE` frame, not as a local write error.
+fn is_write_backpressure(error: &tungstenite::Error) -> bool {
+    is_nonblocking_io(error) || matches!(error, tungstenite::Error::WriteBufferFull(_))
+}
+
+/// Report local write pressure, having first tried to relieve it.
+///
+/// The flush matters for the `WriteBufferFull` half: tungstenite checks the
+/// buffer ceiling *before* it would otherwise drain the buffer to the
+/// stream, so repeating the same write would repeat the same refusal against
+/// exactly the same buffer contents. Flushing moves whatever the socket will
+/// take, and the caller then waits for writability rather than retrying
+/// immediately, so a blocked generation makes progress on facts (bytes left
+/// the buffer, the socket became writable) rather than by spinning.
+///
+/// Neither outcome of that flush is reported. Its failure is not, because a
+/// genuinely broken socket surfaces on the very next write through the
+/// existing `Broken` path that owns reconnect. Its SUCCESS is not, because
+/// this call site's own message was refused: reporting `Flushed` would tell
+/// the caller its frame reached the socket, and the keepalive path would
+/// record a ping it never sent. Correlations that the flush did confirm
+/// settle at the next `flush_socket_and_settle` boundary, exactly as they
+/// already did whenever a lane returned `Blocked`.
+fn blocked_after_relieving(socket: &mut RelaySocket) -> FlushResult {
+    let _ = socket.flush();
+    FlushResult::Blocked
 }
 
 /// mio readiness wrapper: one `Poll` per connected socket, registered for
@@ -2013,6 +2218,21 @@ mod tests {
 
     const LARGE_FRAME_BYTES: usize = 8 * 1024 * 1024;
     const TEST_EVENT_QUEUE_CAPACITY: usize = 8;
+
+    /// One ordinary frame admitted to a fresh, unshared envelope. These tests
+    /// exercise the drain/flush paths rather than admission, so each frame
+    /// gets its own envelope and no test can accidentally depend on another's
+    /// occupancy. Admission itself is falsified by `tests/outbound_envelope.rs`
+    /// against a real worker.
+    fn admitted(text: &str) -> AdmittedFrame {
+        let envelope = Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES));
+        OutboundEnvelope::admit(&envelope, text.to_string())
+            .expect("a test frame fits a fresh envelope")
+    }
+
+    fn pending_texts(pending: &VecDeque<AdmittedFrame>) -> Vec<&str> {
+        pending.iter().map(AdmittedFrame::text).collect()
+    }
 
     fn test_reconnect_preamble(
         frames: Vec<String>,
@@ -2362,7 +2582,7 @@ mod tests {
         let (mut socket, mut peer) = real_websocket_pair();
         let (command_tx, command_rx) = mpsc::channel();
         command_tx
-            .send(WorkerCommand::Send("public-immediate".to_string()))
+            .send(WorkerCommand::Send(admitted("public-immediate")))
             .unwrap();
         let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
         let waker = Arc::new(Mutex::new(None));
@@ -2619,7 +2839,7 @@ mod tests {
     fn ordinary_outbound_is_held_until_exact_generation_release() {
         let (mut socket, mut peer) = real_websocket_pair();
         let (event_tx, _event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
-        let mut pending = VecDeque::from(["held".to_string()]);
+        let mut pending = VecDeque::from([admitted("held")]);
         let mut durable = VecDeque::new();
         let mut write_accepted = Vec::new();
         let mut ephemeral = VecDeque::new();
@@ -2644,7 +2864,11 @@ mod tests {
             ),
             FlushResult::Flushed
         ));
-        assert_eq!(pending, ["held"], "closed gate cannot consume queued wire");
+        assert_eq!(
+            pending_texts(&pending),
+            ["held"],
+            "closed gate cannot consume queued wire"
+        );
 
         assert!(matches!(
             flush_generation_writes(
@@ -2822,7 +3046,9 @@ mod tests {
                 frame: "first".to_string(),
             })
             .unwrap();
-        command_tx.send(WorkerCommand::Send("req".into())).unwrap();
+        command_tx
+            .send(WorkerCommand::Send(admitted("req")))
+            .unwrap();
         command_tx
             .send(WorkerCommand::SendDurable {
                 generation: 9,
@@ -2867,7 +3093,9 @@ mod tests {
                 frame: "a".to_string(),
             })
             .unwrap();
-        command_tx.send(WorkerCommand::Send("req".into())).unwrap();
+        command_tx
+            .send(WorkerCommand::Send(admitted("req")))
+            .unwrap();
         command_tx
             .send(WorkerCommand::SendDurable {
                 generation: 5,
@@ -2920,6 +3148,7 @@ mod tests {
             command_tx,
             reconnect_preamble,
             shutdown: Arc::clone(&shutdown),
+            outbound: Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES)),
             waker: Arc::clone(&waker_slot),
             // No real worker thread backs this handle in these tests --
             // `retire`/`push` never touch `join` (`retire` only takes it out
@@ -2930,31 +3159,35 @@ mod tests {
         (handle, waker_slot, shutdown)
     }
 
-    /// The HIGH falsifier (issue #506): a stalled-but-connected relay must
-    /// no longer be able to grow its outbound queue without bound.
-    /// `WorkerHandle::push` now uses `try_send` against the bounded channel
-    /// (`PoolConfig::command_queue_capacity`), so a saturated queue reports
+    /// The TRANSIT bound, and only that: `WorkerHandle::push` uses
+    /// `try_send` against the bounded channel
+    /// (`PoolConfig::command_queue_capacity`), so a saturated channel reports
     /// `false` -- the EXACT signal `Pool::send`/`send_durable` already turn
-    /// into "not handed off" backpressure -- instead of silently succeeding
-    /// forever.
+    /// into "not handed off" backpressure.
+    ///
+    /// This receiver never runs, which is the whole reason this test cannot
+    /// say anything about memory (issue #506): a receiver that DOES run frees
+    /// a slot per receive, so a producer refills the channel forever. The
+    /// retention bound that case meets is falsified against a real worker in
+    /// `tests/outbound_envelope.rs`.
     #[test]
     fn push_reports_backpressure_once_the_bounded_queue_is_full() {
         let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(2);
         let (handle, _waker_slot, _shutdown) = test_worker_handle(command_tx);
 
-        assert!(handle.push(WorkerCommand::Send("a".into())));
-        assert!(handle.push(WorkerCommand::Send("b".into())));
+        assert!(handle.push(WorkerCommand::Send(admitted("a"))));
+        assert!(handle.push(WorkerCommand::Send(admitted("b"))));
         assert!(
-            !handle.push(WorkerCommand::Send("c".into())),
+            !handle.push(WorkerCommand::Send(admitted("c"))),
             "a full bounded queue must report backpressure (false), \
              never grow past its configured capacity"
         );
 
         // Draining one slot must free exactly one more `push`.
-        assert!(matches!(command_rx.recv(), Ok(WorkerCommand::Send(text)) if text == "a"));
-        assert!(handle.push(WorkerCommand::Send("d".into())));
+        assert!(matches!(command_rx.recv(), Ok(WorkerCommand::Send(frame)) if frame.text() == "a"));
+        assert!(handle.push(WorkerCommand::Send(admitted("d"))));
         assert!(
-            !handle.push(WorkerCommand::Send("e".into())),
+            !handle.push(WorkerCommand::Send(admitted("e"))),
             "capacity is bounded, not one-shot -- it stays saturated at N \
              in-flight commands"
         );
@@ -2967,7 +3200,7 @@ mod tests {
     fn reconnect_preamble_replacement_survives_a_full_data_queue() {
         let (command_tx, _command_rx) = mpsc::sync_channel::<WorkerCommand>(1);
         let (handle, _waker_slot, _shutdown) = test_worker_handle(command_tx);
-        assert!(handle.push(WorkerCommand::Send("fills-the-data-lane".into())));
+        assert!(handle.push(WorkerCommand::Send(admitted("fills-the-data-lane"))));
 
         assert_eq!(
             handle
@@ -2996,7 +3229,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(1);
         let (handle, _waker_slot, _shutdown) =
             test_worker_handle_with_reconnect_preamble(command_tx, Arc::clone(&owner));
-        assert!(handle.push(WorkerCommand::Send("fills-the-data-lane".into())));
+        assert!(handle.push(WorkerCommand::Send(admitted("fills-the-data-lane"))));
 
         assert_eq!(
             handle
@@ -3009,7 +3242,7 @@ mod tests {
             "the exact-generation replay request is finite owner state, not bounded data"
         );
         assert!(
-            !handle.push(WorkerCommand::Send("still-full".into())),
+            !handle.push(WorkerCommand::Send(admitted("still-full"))),
             "neither owner operation consumed or expanded the bounded ordinary queue"
         );
 
@@ -3376,11 +3609,11 @@ mod tests {
     fn retire_is_non_blocking_when_the_command_queue_is_full_and_undrained() {
         let (command_tx, command_rx) = mpsc::sync_channel::<WorkerCommand>(1);
         command_tx
-            .send(WorkerCommand::Send("only-slot".into()))
+            .send(WorkerCommand::Send(admitted("only-slot")))
             .unwrap();
         assert!(
             command_tx
-                .try_send(WorkerCommand::Send("overflow".into()))
+                .try_send(WorkerCommand::Send(admitted("overflow")))
                 .is_err(),
             "the command queue must be observably full for this falsifier to mean anything"
         );
@@ -3410,7 +3643,7 @@ mod tests {
         // it (and could not have -- the queue was full). The best-effort
         // `Shutdown` nudge was simply dropped, which is safe.
         assert!(
-            matches!(command_rx.recv(), Ok(WorkerCommand::Send(text)) if text == "only-slot"),
+            matches!(command_rx.recv(), Ok(WorkerCommand::Send(frame)) if frame.text() == "only-slot"),
             "the queued data command must survive retirement intact"
         );
 
