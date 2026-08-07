@@ -157,6 +157,10 @@ sealed interface NmpRelayRuntimePresentation {
         override val label = "Requesting"
     }
 
+    data object FinishedStoredEvents : NmpRelayRuntimePresentation {
+        override val label = "Finished stored events"
+    }
+
     data object Connecting : NmpRelayRuntimePresentation {
         override val label = "Connecting"
     }
@@ -191,6 +195,7 @@ sealed interface NmpRelayRuntimePresentation {
             when (status) {
                 null -> StatusUnavailable
                 SourceStatus.Requesting -> Requesting
+                SourceStatus.FinishedStoredEvents -> FinishedStoredEvents
                 SourceStatus.Connecting -> Connecting
                 SourceStatus.Disconnected -> Disconnected
                 is SourceStatus.AwaitingAuth -> AwaitingAuth(status.phase)

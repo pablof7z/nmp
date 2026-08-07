@@ -521,14 +521,17 @@ pub enum FfiRowDelta {
 }
 
 /// `nmp::SourceStatus` mirror (`docs/design/scoped-evidence-49-12-plan.md`
-/// §4) -- the closed, honest per-source link-status vocabulary for the
-/// scoped, per-query [`FfiAcquisitionEvidence`] surface. Ratified names,
-/// codex-nova-governed: no variant/field may be added beyond this list, and
-/// no query-level aggregate may ever be added anywhere on
-/// this surface.
+/// §4) -- the closed, honest per-source vocabulary for the scoped, per-query
+/// [`FfiAcquisitionEvidence`] surface. What the ratified names protect is that
+/// every state here is ONE SOURCE's own current fact: no query-level
+/// aggregate may ever be added anywhere on this surface, and no variant may
+/// be added that reads across sources or claims completeness. A seventh
+/// per-source state, `FinishedStoredEvents`, was added under #1235 -- the six
+/// could not say that a relay had finished answering, so consumers timed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiSourceStatus {
     Requesting,
+    FinishedStoredEvents,
     Connecting,
     Disconnected,
     AwaitingAuth { phase: FfiAuthPhase },

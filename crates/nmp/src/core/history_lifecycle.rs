@@ -1028,6 +1028,7 @@ impl<S: EventStore> EngineCore<S> {
         });
         ordered.truncate(needed);
         let auth_status = self.auth_status_map();
+        let finished_stored_events = self.finished_stored_events();
         let by_branch = self.history_handles_by_branch(id);
         let mut evidence: Vec<AcquisitionEvidence> = Vec::with_capacity(by_branch.len());
         for (branch, handles) in by_branch.into_iter().enumerate() {
@@ -1045,6 +1046,7 @@ impl<S: EventStore> EngineCore<S> {
                 &self.connected_relays,
                 &auth_status,
                 &self.ever_connected_relays,
+                &finished_stored_events,
             )?);
         }
 
