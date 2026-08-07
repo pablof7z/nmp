@@ -412,6 +412,7 @@ use observation::{
 pub use observation::{
     ObservationEvidence, ObservationFact, RequestTerminal, ResolutionCause, ResolvedBindingValue,
 };
+pub use query::Nip77Frame;
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back
