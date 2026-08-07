@@ -948,9 +948,9 @@ impl EventStore for BranchReadFailureStore {
     fn promote_signed(
         &mut self,
         intent_id: IntentId,
-        sig: nostr::secp256k1::schnorr::Signature,
+        verified: nmp_store::VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError> {
-        self.inner.promote_signed(intent_id, sig)
+        self.inner.promote_signed(intent_id, verified)
     }
     fn compensate_write(
         &mut self,

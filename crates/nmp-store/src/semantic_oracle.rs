@@ -21,8 +21,15 @@ use crate::{
     GcRetentionSet, HandoffEvidence, InsertOutcome, IntentId, IntentSigState, MemoryStore,
     PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueLaneKey,
     PublishQueuePostHandoffState, PublishQueueTransientCause, RedbStore, RefuseReason,
-    RelayObserved, StoredEvent,
+    RelayObserved, StoredEvent, VerifiedSignature,
 };
+
+/// The verified, intent-bound evidence `promote_signed` takes (#768). Every
+/// event promoted below is one this fixture just signed itself, so the
+/// verification succeeding is part of the setup, not the property under test.
+fn evidence(signed: &Event) -> VerifiedSignature {
+    VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
 
 const ALICE_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const BOB_SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000002";
@@ -851,7 +858,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
 
     harness
         .store()
-        .promote_signed(publish_intent, signed.sig)
+        .promote_signed(publish_intent, evidence(&signed))
         .unwrap();
     record(
         &mut harness,
@@ -984,7 +991,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     );
     harness
         .store()
-        .promote_signed(edge_intent, fixture.edge_signed.sig)
+        .promote_signed(edge_intent, evidence(&fixture.edge_signed))
         .unwrap();
     harness
         .store()
