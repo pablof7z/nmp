@@ -120,6 +120,19 @@ fn source_at<'a>(evidence: &'a [AcquisitionEvidence], relay: &RelayUrl) -> &'a n
         .unwrap_or_else(|| panic!("{relay} must name a covering source: {evidence:?}"))
 }
 
+/// Whether `relay` currently reports `status`, tolerating its absence.
+///
+/// A predicate, unlike an assertion, is asked of snapshots taken while the
+/// engine is still connecting, so a relay it names may not be a source yet.
+/// Deliberately NOT `source_at`: panicking inside the wait would make the
+/// FIRST frame decide the test rather than the fact it is waiting for.
+fn reports(evidence: &[AcquisitionEvidence], relay: &RelayUrl, status: SourceStatus) -> bool {
+    evidence
+        .iter()
+        .flat_map(|branch| branch.sources.iter())
+        .any(|source| &source.relay == relay && source.status == status)
+}
+
 /// The headline. Two relays are asked the same question at the same moment;
 /// one finishes answering and one never does. Before #1235 both read
 /// `Requesting` with `reconciled_through: None` -- byte-identical evidence for
@@ -141,11 +154,15 @@ async fn a_relay_that_finished_its_request_is_distinguishable_from_one_still_ans
         .observe(query(&[&finished.url, &unfinished.url], None), None)
         .expect("a two-branch pinned read opens");
 
+    // Wait for BOTH facts, not for the first one. The contrast is the whole
+    // scenario, and the two relays connect independently: stopping as soon as
+    // one has finished can catch the other still `Connecting`, which is a true
+    // fact about a race rather than the one being asserted. Both states are
+    // stable once reached -- a `reject_queries` relay stays connected, so it
+    // stays `Requesting` -- so this terminates on facts, not on a clock.
     let evidence = evidence_until(&subscription, |evidence| {
-        evidence
-            .iter()
-            .flat_map(|branch| branch.sources.iter())
-            .any(|source| source.status == SourceStatus::FinishedStoredEvents)
+        reports(evidence, &finished.url, SourceStatus::FinishedStoredEvents)
+            && reports(evidence, &unfinished.url, SourceStatus::Requesting)
     });
 
     let finished_source = source_at(&evidence, &finished.url);
@@ -198,10 +215,7 @@ async fn finishing_a_bounded_request_proves_nothing_and_says_so() {
         .expect("a bounded pinned read opens");
 
     let evidence = evidence_until(&subscription, |evidence| {
-        evidence
-            .iter()
-            .flat_map(|branch| branch.sources.iter())
-            .any(|source| source.status == SourceStatus::FinishedStoredEvents)
+        reports(evidence, &relay.url, SourceStatus::FinishedStoredEvents)
     });
 
     let source = source_at(&evidence, &relay.url);
@@ -239,11 +253,11 @@ async fn an_empty_result_is_never_proven_by_a_source_that_has_not_answered() {
         .observe(query(&[&never_connected, &unfinished.url], None), None)
         .expect("a two-branch pinned read opens");
 
+    // The refusing relay must have got far enough to be refused: a snapshot
+    // taken before it connected would satisfy the negative assertions below
+    // for the wrong reason.
     let evidence = evidence_until(&subscription, |evidence| {
-        evidence
-            .iter()
-            .flat_map(|branch| branch.sources.iter())
-            .any(|source| source.status == SourceStatus::Requesting)
+        reports(evidence, &unfinished.url, SourceStatus::Requesting)
     });
 
     for source in evidence.iter().flat_map(|branch| branch.sources.iter()) {
