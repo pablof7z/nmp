@@ -925,6 +925,16 @@ pub enum EngineMsg {
     /// close must never resurrect the session).
     RelayDisconnected(TransportRelayHandle, RelaySessionKey, DisconnectReason),
     RelayHealth(TransportRelayHandle, RelaySessionKey, RelayHealth),
+    /// This exact worker's finite outbound envelope released room after it
+    /// had refused a frame (#779). The one fact on which a refused,
+    /// still-current REQ may be re-handed off: a socket accepted bytes, so
+    /// the condition that produced the refusal is measurably gone.
+    ///
+    /// Not a retry timer and not a poll. Transport arms this edge on refusal
+    /// and emits it at most once per refusal episode per worker, so a
+    /// permanently stalled relay produces nothing at all and a re-refusal
+    /// simply re-arms it to wait for the next real release.
+    RelayOutboundCapacityAvailable(TransportRelayHandle, RelaySessionKey),
     /// Runtime could not create a required relay worker. Observational only:
     /// current demand remains the retry owner and diagnostics retain the
     /// exact failure instead of silently presenting a merely connecting
@@ -2694,6 +2704,9 @@ impl<S: EventStore> EngineCore<S> {
             }
             EngineMsg::RelayHealth(handle, session, health) => {
                 self.on_relay_health(handle, session, health)
+            }
+            EngineMsg::RelayOutboundCapacityAvailable(handle, session) => {
+                self.on_relay_outbound_capacity_available(handle, session)
             }
             EngineMsg::RelayOpenFailed(session, reason) => {
                 if self

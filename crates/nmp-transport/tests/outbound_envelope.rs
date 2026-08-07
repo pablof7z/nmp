@@ -147,3 +147,75 @@ fn a_connected_peer_that_never_reads_cannot_grow_the_process() {
     peer.thread().unpark();
     let _ = peer.join();
 }
+
+/// Issue #779. `Pool::send`'s `false` is local backpressure, and until this
+/// event existed a consumer had no fact on which to place the refused frame
+/// again — nothing about the relay changed, so the only alternative was a
+/// clock.
+///
+/// The peer here completes the handshake and reads nothing, so the socket's
+/// write side blocks and the envelope fills until it refuses. Then the peer
+/// starts reading: the worker's blocked writes complete, every accepted frame
+/// releases its charge, and the refusal that was armed becomes an
+/// `OutboundCapacityAvailable` for the exact connected generation.
+#[test]
+fn an_envelope_that_refused_a_frame_reports_the_room_it_later_releases() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stalled relay");
+    let port = listener.local_addr().expect("stalled relay address").port();
+    let peer = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("stalled relay accepts one client");
+        let mut socket = tungstenite::accept(stream).expect("stalled relay handshake");
+        // Stall: hold the socket open and read nothing, so the worker's
+        // writes block and its envelope fills.
+        thread::park();
+        // Resume: drain until the client goes away. Every frame read here is
+        // a frame the worker's socket finally accepted, which is exactly the
+        // release the engine is waiting on.
+        while socket.read().is_ok() {}
+    });
+
+    let url =
+        nostr::RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("parse stalled relay url");
+    let (tx, rx) = mpsc::channel::<PoolEvent>();
+    let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
+    let handle = pool
+        .ensure_open(&url, Declarer::Ourselves)
+        .expect("admitted");
+
+    // Fill the envelope on a stalled socket until it actually refuses. This
+    // is the arm: without a refusal there is nothing for a release to report.
+    let frame = "x".repeat(FRAME_BYTES);
+    let mut refused = false;
+    for _ in 0..SEND_ATTEMPTS {
+        if pool.send(handle, WireFrame::Text(frame.clone())) {
+            continue;
+        }
+        refused = true;
+        break;
+    }
+    assert!(
+        refused,
+        "a stalled peer must eventually exhaust the finite outbound envelope; \
+         without a refusal this test proves nothing"
+    );
+
+    peer.thread().unpark();
+    let mut released = None;
+    while let Ok(event) = rx.recv_timeout(Duration::from_secs(30)) {
+        if let PoolEvent::OutboundCapacityAvailable { handle, session } = event {
+            released = Some((handle, session));
+            break;
+        }
+    }
+    let (released_handle, released_session) =
+        released.expect("a refusing envelope that releases room must report it (#779)");
+    assert_eq!(
+        released_handle, handle,
+        "the release belongs to the exact generation whose worker refused"
+    );
+    assert_eq!(released_session.relay, url);
+
+    pool.shutdown();
+    drop(rx);
+    let _ = peer.join();
+}

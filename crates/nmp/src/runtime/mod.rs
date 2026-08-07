@@ -3866,6 +3866,13 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
             operation: operation.0,
             outcome: auth::auth_send_outcome(outcome),
         })),
+        // Issue #779. Forwarded unchanged for the same reason `Connected` is:
+        // the pool's own translator already proved this handle names the
+        // slot's current generation, so the reducer receives an exact
+        // `(handle, session)` it can gate on directly.
+        PoolEvent::OutboundCapacityAvailable { handle, session } => {
+            Some(EngineMsg::RelayOutboundCapacityAvailable(handle, session))
+        }
         PoolEvent::WorkerRetired => None,
     }
 }

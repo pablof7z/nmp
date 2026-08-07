@@ -658,6 +658,25 @@ pub enum PoolEvent {
     /// thread has been joined. The engine uses this edge to retry exact
     /// required demand immediately, without polling a retiring budget.
     WorkerRetired,
+    /// This exact connected generation's worker refused an ordinary frame
+    /// and has since made outbound room again (issue #779).
+    ///
+    /// [`Pool::send`]'s `false` is local backpressure, and until this event
+    /// existed a consumer had no fact on which to place the refused frame
+    /// again: nothing about the relay changed, so the only alternative was a
+    /// clock. This is the same shape as [`Self::WorkerRetired`] — one edge
+    /// the engine uses to retry exact demand immediately, rather than a
+    /// budget it has to poll.
+    ///
+    /// Edge-triggered and armed only by an actual refusal: a worker that has
+    /// never refused a frame never emits this at all, and one still refusing
+    /// emits it no more than once per pass through its write path. A
+    /// consumer whose re-sent frame is refused again therefore waits on more
+    /// real outbound progress, never on a timer.
+    OutboundCapacityAvailable {
+        handle: RelayHandle,
+        session: RelaySessionKey,
+    },
     /// The one, ever, typed result for a durable `EVENT` handoff submitted
     /// via [`Pool::send_durable`] (issue #93). Delivered EXACTLY once per
     /// [`AttemptCorrelation`], unconditionally — never gated on the slot's

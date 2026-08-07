@@ -90,6 +90,22 @@ const FRAME_RETENTION_OVERHEAD_BYTES: usize = 64;
 pub(super) struct OutboundEnvelope {
     capacity: usize,
     held: AtomicUsize,
+    /// Set when this worker actually refused an ordinary frame, cleared when
+    /// the worker reports back that outbound has room again (issue #779).
+    ///
+    /// The refusal is the arm and the worker's next completed drain+flush is
+    /// the disarm, so [`Self::take_capacity_edge`] fires at most once per
+    /// refusal and never at all for a worker that never refused anything.
+    /// That is what paces the consumer's re-handoff on real forward progress
+    /// rather than on a clock: reaching it again needs another refusal AND
+    /// another pass through the worker's write path.
+    ///
+    /// Both refusal shapes arm it, because both strand the caller's frame
+    /// identically and both are cured by the same progress: a full envelope
+    /// is relieved by a socket accepting bytes, and a full transit channel by
+    /// the worker draining it. The one shape that must NOT arm it is an
+    /// oversized frame, which no relay could ever be handed.
+    refused: AtomicBool,
 }
 
 impl OutboundEnvelope {
@@ -97,7 +113,35 @@ impl OutboundEnvelope {
         Self {
             capacity,
             held: AtomicUsize::new(0),
+            refused: AtomicBool::new(false),
         }
+    }
+
+    /// Record that an ordinary frame was refused.
+    ///
+    /// Callers arm this and then wake the worker, in that order. The wake is
+    /// what closes the race where the worker released its last frame between
+    /// [`Self::admit`] deciding to refuse and this store: the worker
+    /// re-evaluates the edge after every wakeup, so a release that happened
+    /// first is still observed rather than lost.
+    fn arm_capacity_edge(&self) {
+        self.refused.store(true, Ordering::SeqCst);
+    }
+
+    /// Consume the edge, if there is one: this worker refused a frame and now
+    /// has room. Worker-thread only, and read after a drain+flush, so a
+    /// refusal by a full transit channel is answered by the same call.
+    ///
+    /// `held < capacity` is the whole predicate. A stricter threshold would
+    /// be a fabricated number, and it is not needed: if the consumer's
+    /// re-handed frame does not fit, it is refused, which re-arms this and
+    /// costs another pass through the write path before the next edge.
+    /// Nothing spins, because every cycle needs real outbound progress.
+    fn take_capacity_edge(&self) -> bool {
+        if self.held.load(Ordering::SeqCst) >= self.capacity {
+            return false;
+        }
+        self.refused.swap(false, Ordering::SeqCst)
     }
 
     /// Reserve room for `text` and take ownership of it, or refuse. Refusal
@@ -414,6 +458,12 @@ pub(super) enum WorkerEventKind {
         retry_in: Option<Duration>,
     },
     Frame(RelayFrame),
+    /// This worker's finite outbound envelope released room after it had
+    /// refused a frame (issue #779). Edge-triggered by the refusal and
+    /// consumed once, so a worker that never refused anything never emits
+    /// this, and a worker whose envelope stays full emits it no more than
+    /// once per socket write that actually relieved it.
+    OutboundCapacityAvailable,
     /// The one, ever, resolution of a `SendDurable` command's
     /// `AttemptCorrelation` (issue #93). See [`super::PoolEvent::EventHandoff`]
     /// for the delivery contract (never gated on generation/slot staleness
@@ -561,13 +611,33 @@ impl WorkerHandle {
     /// `false` is now a fact about the whole outbound envelope rather than a
     /// fact about one intermediate channel.
     pub(super) fn push_ordinary(&self, text: String) -> bool {
+        // Oversized is permanent: no relay could ever be handed this frame,
+        // so no amount of released room cures it and arming the capacity
+        // edge here would promise a recovery that cannot happen.
         if text.len() > MAX_OUTBOUND_FRAME_BYTES {
             return false;
         }
         let Some(frame) = OutboundEnvelope::admit(&self.outbound, text) else {
+            self.arm_capacity_edge();
             return false;
         };
-        self.push(WorkerCommand::Send(frame))
+        if self.push(WorkerCommand::Send(frame)) {
+            return true;
+        }
+        // The refused command dropped its frame on the way out, returning
+        // the charge with it. A full transit channel is cured by the same
+        // fact a full envelope is -- the worker draining and writing -- so
+        // both refusal shapes arm the one edge (issue #779).
+        self.arm_capacity_edge();
+        false
+    }
+
+    /// Arm the outbound capacity edge and wake the worker so it re-evaluates
+    /// it. Order matters: arming first is what makes a release that raced
+    /// this refusal observable on the wakeup instead of lost (issue #779).
+    fn arm_capacity_edge(&self) {
+        self.outbound.arm_capacity_edge();
+        self.wake();
     }
 
     /// Enqueue a lifecycle or externally-capped command and wake the worker
@@ -688,6 +758,7 @@ pub(super) fn spawn(
     // charge outlives the command channel and is released exactly where the
     // socket accepts the bytes.
     let outbound = Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES));
+    let outbound_for_thread = Arc::clone(&outbound);
     let reconnect_preamble = Arc::new(ReconnectPreambleOwner::default());
     let reconnect_preamble_for_thread = Arc::clone(&reconnect_preamble);
     let waker_slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
@@ -712,6 +783,7 @@ pub(super) fn spawn(
                     reconnect_preamble_for_thread,
                     waker_for_thread,
                     &shutdown_for_thread,
+                    &outbound_for_thread,
                     keepalive_idle,
                     keepalive_pong_timeout,
                     reconnect_delay_initial,
@@ -763,6 +835,7 @@ fn run_worker(
     reconnect_preamble: Arc<ReconnectPreambleOwner>,
     waker_slot: Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
+    outbound: &Arc<OutboundEnvelope>,
     keepalive_idle: Duration,
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
@@ -860,6 +933,7 @@ fn run_worker(
                     &command_rx,
                     &waker_slot,
                     shutdown,
+                    outbound,
                     &mut pending,
                     &mut socket,
                     &mut keepalive,
@@ -1259,6 +1333,7 @@ fn run_connected(
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
+    outbound: &Arc<OutboundEnvelope>,
     pending: &mut VecDeque<AdmittedFrame>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
@@ -1281,6 +1356,7 @@ fn run_connected(
         command_rx,
         waker_slot,
         shutdown,
+        outbound,
         pending,
         socket,
         keepalive,
@@ -1316,6 +1392,7 @@ fn run_connected_inner(
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
+    outbound: &Arc<OutboundEnvelope>,
     pending: &mut VecDeque<AdmittedFrame>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
@@ -1492,6 +1569,21 @@ fn run_connected_inner(
                 }
             }
         };
+
+        // Issue #779. The flush above is where a socket takes ownership of
+        // ordinary frames and their charge is released, so this is the one
+        // point in the generation where "the envelope refused something and
+        // now has room" can newly become true. Evaluating it here rather
+        // than inside the write loop is also what makes the arm-then-wake
+        // ordering in `WorkerHandle::push_ordinary` sufficient: a refusal
+        // that raced the last release wakes this loop, which re-evaluates.
+        if outbound.take_capacity_edge() {
+            let _ = event_tx.send(WorkerEvent {
+                slot,
+                generation,
+                kind: WorkerEventKind::OutboundCapacityAvailable,
+            });
+        }
 
         // Resume-gap heuristic (issue #4): always observe this iteration's
         // wall-clock reading (so the detector's baseline never goes stale
@@ -2234,6 +2326,59 @@ mod tests {
         pending.iter().map(AdmittedFrame::text).collect()
     }
 
+    /// Issue #779. The capacity edge is armed by a refusal and by nothing
+    /// else, so ordinary traffic through a healthy envelope reports nothing
+    /// however much of it there is. Without this the consumer would be handed
+    /// one event per socket write — a busy loop wearing a fact's clothes.
+    #[test]
+    fn an_envelope_that_never_refused_reports_no_capacity_edge() {
+        let envelope = Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES));
+        for _ in 0..64 {
+            let frame = OutboundEnvelope::admit(&envelope, "x".repeat(1024))
+                .expect("a small frame fits a fresh envelope");
+            drop(frame);
+            assert!(
+                !envelope.take_capacity_edge(),
+                "a release with nothing armed is not an edge"
+            );
+        }
+    }
+
+    /// One refusal buys exactly one report, and only once there is room. A
+    /// second read finds nothing, so a consumer cannot be woken twice for one
+    /// refusal, and a still-full envelope cannot report room it does not have.
+    #[test]
+    fn one_refusal_yields_exactly_one_capacity_edge_once_there_is_room() {
+        // Exactly two frames' worth, so the envelope is FULL rather than
+        // merely tight -- `take_capacity_edge`'s predicate is "any room at
+        // all", and this test is about the case where there is none.
+        let envelope = Arc::new(OutboundEnvelope::new(
+            2 * (1024 + FRAME_RETENTION_OVERHEAD_BYTES),
+        ));
+        let held = OutboundEnvelope::admit(&envelope, "x".repeat(1024)).expect("the first fits");
+        let _second =
+            OutboundEnvelope::admit(&envelope, "x".repeat(1024)).expect("the second fits");
+        assert!(
+            OutboundEnvelope::admit(&envelope, "x".repeat(1024)).is_none(),
+            "the third frame must not fit"
+        );
+        envelope.arm_capacity_edge();
+        assert!(
+            !envelope.take_capacity_edge(),
+            "a full envelope has released nothing yet"
+        );
+
+        drop(held);
+        assert!(
+            envelope.take_capacity_edge(),
+            "the refusal is armed and the room is back"
+        );
+        assert!(
+            !envelope.take_capacity_edge(),
+            "one refusal reports once; a second read must find nothing"
+        );
+    }
+
     fn test_reconnect_preamble(
         frames: Vec<String>,
     ) -> (Arc<ReconnectPreambleOwner>, PendingReconnectPreamble) {
@@ -2615,6 +2760,7 @@ mod tests {
                 &command_rx,
                 &worker_waker,
                 &shutdown,
+                &Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES)),
                 &mut pending,
                 &mut socket,
                 &mut keepalive,
@@ -2692,6 +2838,7 @@ mod tests {
                 &command_rx,
                 &worker_waker,
                 &shutdown,
+                &Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES)),
                 &mut pending,
                 &mut socket,
                 &mut keepalive,
@@ -2798,6 +2945,7 @@ mod tests {
                 &command_rx,
                 &worker_waker,
                 &shutdown,
+                &Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES)),
                 &mut pending,
                 &mut socket,
                 &mut keepalive,

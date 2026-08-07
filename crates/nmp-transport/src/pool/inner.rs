@@ -1127,6 +1127,22 @@ fn apply_worker_event_with_verdict(
                 }
             }
         }
+        WorkerEventKind::OutboundCapacityAvailable => {
+            // Issue #779. Gated exactly like `Frame`: the released room
+            // belongs to ONE connected generation's worker, and a consumer
+            // re-sending on the strength of a superseded generation's
+            // release would be placing frames on a connection that is gone.
+            if !same_worker || event.generation != state.generation {
+                return None;
+            }
+            Some(PoolEvent::OutboundCapacityAvailable {
+                handle: RelayHandle {
+                    slot: event.slot,
+                    generation: event.generation,
+                },
+                session: state.session.clone(),
+            })
+        }
         WorkerEventKind::InitialReadCompleted => {
             if !same_worker || event.generation != state.generation {
                 return None;

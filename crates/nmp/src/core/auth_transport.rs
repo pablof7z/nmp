@@ -868,6 +868,17 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
+    /// Issue #779, seam only. This does exactly what a refused REQ got before
+    /// the fact existed: nothing. The behaviour commit replaces the body.
+    pub(super) fn on_relay_outbound_capacity_available(
+        &mut self,
+        handle: TransportRelayHandle,
+        session: RelaySessionKey,
+    ) -> Vec<Effect> {
+        let _ = (handle, session);
+        Vec::new()
+    }
+
     pub(super) fn on_auth_probe_released(
         &mut self,
         handle: TransportRelayHandle,

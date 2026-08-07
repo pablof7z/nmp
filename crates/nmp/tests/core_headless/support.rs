@@ -1135,6 +1135,8 @@ mod optimistic_publish_projection;
 mod persistence_failures;
 #[path = "real_corpus_benchmark.rs"]
 mod real_corpus_benchmark;
+#[path = "relay_outbound_capacity.rs"]
+mod relay_outbound_capacity;
 #[path = "stalled_writes.rs"]
 mod stalled_writes;
 #[path = "state_maintenance.rs"]
