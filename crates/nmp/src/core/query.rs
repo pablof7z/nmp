@@ -546,6 +546,7 @@ impl<S: EventStore> EngineCore<S> {
         acquisition: &HandleAcquisition,
     ) -> Result<AcquisitionEvidence, PersistenceError> {
         let auth_status = self.auth_status_map();
+        let finished_stored_events = self.finished_stored_events();
         let mut parts = Vec::with_capacity(scopes.len());
         for ((atoms, _), decision) in scopes.into_iter().zip(&acquisition.scopes) {
             let plan = decision
@@ -558,6 +559,7 @@ impl<S: EventStore> EngineCore<S> {
                 &self.connected_relays,
                 &auth_status,
                 &self.ever_connected_relays,
+                &finished_stored_events,
             )?);
         }
         if parts.is_empty() {

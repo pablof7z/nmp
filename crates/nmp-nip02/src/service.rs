@@ -138,8 +138,14 @@ fn availability(active: Option<PublicKey>, evidence: &[AcquisitionEvidence]) -> 
         return FollowAvailability::CachedOnly;
     }
 
+    // `Requesting` and `FinishedStoredEvents` are the two connected-and-live
+    // states (#1235); `Ready` is about the link plus the watermark, not about
+    // how far the current request has got.
     if sources().all(|source| {
-        source.status == SourceStatus::Requesting && source.reconciled_through.is_some()
+        matches!(
+            source.status,
+            SourceStatus::Requesting | SourceStatus::FinishedStoredEvents
+        ) && source.reconciled_through.is_some()
     }) && shortfall().next().is_none()
     {
         FollowAvailability::Ready
