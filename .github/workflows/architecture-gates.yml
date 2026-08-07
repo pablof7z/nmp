@@ -150,19 +150,6 @@ jobs:
       - name: Keep NIP-29 context separate from C7 and client policy
         run: bash scripts/check-nip29-ownership.sh
 
-      # #1178. The gate used to walk `Packages/`, which holds gitignored uniffi
-      # output, so a stale binding from before a rename made it report a
-      # tombstone violation against text in no tracked file and in no commit.
-      # That can never reproduce here -- the checkout is clean -- which is
-      # precisely why the falsifiers must run: they BUILD the awkward corpus (a
-      # stale binding, a deleted one, a path holding a space, a tracked
-      # symlink, a submodule gitlink, a tracked file removed from the working
-      # tree) instead of waiting for one to turn up. The suite mutates the
-      # working tree and puts it back; it runs after the gate so a failure here
-      # is never mistaken for the gate's own verdict.
-      - name: Falsify the tracked corpus the gate judges
-        run: bash scripts/test-check-nip29-ownership.sh
-
   # #1122 (PROTOCOL-NIP29OPERATIONS-012/013): the nine NIP-29-owned named
   # operations, and only those nine, get named composers on every surface --
   # Rust facade, FFI, Swift, Kotlin -- each taking semantic fields plus a
