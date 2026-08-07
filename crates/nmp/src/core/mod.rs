@@ -406,6 +406,7 @@ pub use diagnostics::{
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 pub use nmp_network_policy::{Declarer, OnionReachability};
+pub use query::Nip77Frame;
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };

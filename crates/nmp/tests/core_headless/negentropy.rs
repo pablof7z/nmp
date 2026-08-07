@@ -29,6 +29,33 @@ fn connect_and_prove_nip77<S: EventStore>(core: &mut EngineCore<S>, relay: &Rela
     ));
 }
 
+/// Drive the exact edge the runtime drives when a relay worker ACCEPTS a
+/// `NEG-OPEN` into its finite outbound envelope (#775).
+///
+/// The reducer holds this reconciliation's request evidence PENDING until the
+/// outcome is known, because a connected generation is not an accepted frame.
+/// Any headless test that later expects the reconciliation to settle therefore
+/// has to place the frame the way production does -- the same discipline
+/// `on_wire_request_handoff` already imposes on an ordinary REQ.
+fn accept_neg_open<S: EventStore>(
+    core: &mut EngineCore<S>,
+    slot: u32,
+    relay: &RelayUrl,
+    neg_sub_id: &SubId,
+) -> Vec<Effect> {
+    core.on_nip77_handoff(
+        Nip77Frame::Open,
+        relay,
+        neg_sub_id,
+        Some(RelayHandle {
+            slot,
+            generation: 1,
+        }),
+        true,
+        None,
+    )
+}
+
 /// Drive a real server-side negentropy responder until the reducer opens the
 /// id-targeted missing-event REQ. This keeps the failure test below on the
 /// real reconciliation protocol rather than fabricating its internal state.
@@ -534,6 +561,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
             _ => None,
         })
         .expect("the live EOSE barrier must open Negentropy");
+    let _ = accept_neg_open(&mut core, 0, &relay0, &neg_sub_id);
     assert!(
         !has_request_terminal(&effects, RequestTerminal::Eose),
         "the limit:0 barrier opens NEG but does not settle the request"
@@ -685,6 +713,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
             _ => None,
         })
         .expect("empty broad shape opens NEG after its live barrier");
+    let _ = accept_neg_open(&mut core, 0, &relay0, &empty_neg_id);
     let mut empty_storage = NegentropyStorageVector::new();
     empty_storage.seal().unwrap();
     let mut empty_relay = RawNegentropy::owned(empty_storage, 0).unwrap();
@@ -1760,4 +1789,332 @@ fn a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose() {
          {served:?}"
     );
     let _ = core.handle(EngineMsg::Unsubscribe(a_handle));
+}
+
+// ---- transport refusal of a NIP-77 frame (#775) -------------------------
+//
+// `Pool::send` returns `false` when a relay worker refuses a frame at
+// admission. #1331 made that refusal a fact about the worker's whole finite
+// outbound envelope rather than one intermediate channel, so it is materially
+// reachable: a relay that is redialing, or connected to a peer that has
+// stopped reading, refuses every ordinary frame. The runtime used to discard
+// it (`let _ = pool.send(..)`) at all three NIP-77 effects while the reducer
+// state that produced the frame had already advanced. These drive the exact
+// door the runtime drives, `EngineCore::on_nip77_handoff`.
+
+/// A relay reachable enough to have its probe REFUSED locally is a relay NMP
+/// has learned nothing about. Leaving it `Probing` wedges it for the whole
+/// engine lifetime -- `Prober::begin_probe` only ever starts from `Unknown`
+/// and there is no probe deadline -- so the relay silently never gets NIP-77
+/// again, and diagnostics report `probing` forever.
+#[test]
+fn a_refused_probe_returns_the_relay_to_unknown_and_retires_its_wire_id() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    req_for(&effects, &relay);
+
+    let connected = connect(&mut core, 0, &relay);
+    let probe_sub = connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartProbe(url, sub_id, ..) if url == &relay => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("connecting a demanded, never-probed relay starts a capability probe");
+    assert_eq!(
+        core.diagnostics_snapshot().relays[0].nip77_behavior,
+        "probing",
+        "the probe is outstanding until transport reports its outcome"
+    );
+
+    // The exact edge the runtime reaches when `Pool::send` refuses the frame.
+    let refused = core.on_nip77_handoff(
+        Nip77Frame::Probe,
+        &relay,
+        &probe_sub,
+        Some(RelayHandle {
+            slot: 0,
+            generation: 1,
+        }),
+        false,
+        Some("transport send refused NIP-77 frame".to_string()),
+    );
+
+    assert_eq!(
+        core.diagnostics_snapshot().relays[0].nip77_behavior,
+        "unknown",
+        "a frame that never left the process cannot leave the relay classified"
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
+        "the changed capability verdict is observable state and must be published: {refused:?}"
+    );
+
+    // The retired wire id can no longer be satisfied: a frame arriving under
+    // it (a straggler, or a relay answering a NEG-OPEN nobody sent) must not
+    // mint behavioral proof.
+    let straggler = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        neg_msg_frame(&wire_sub_string(&probe_sub), "6100"),
+    ));
+    assert_eq!(
+        core.diagnostics_snapshot().relays[0].nip77_behavior,
+        "unknown",
+        "a retired probe's wire id cannot mint behavioral proof: {straggler:?}"
+    );
+}
+
+/// A refused `NEG-OPEN` must not be reported to the app as a placed request,
+/// and must fall back immediately rather than waiting out the 30-second
+/// silent-relay deadline for a frame that never reached a socket.
+#[test]
+fn a_refused_neg_open_never_claims_the_request_and_falls_back_immediately() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    req_for(&initial, &relay);
+    connect_and_prove_nip77(&mut core, &relay);
+
+    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
+    let (live_sub_id, live_filter) = req_for(&candidate, &relay);
+    let live_sub_id = live_sub_id.clone();
+    assert_eq!(live_filter.limit, Some(0));
+
+    let opened = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&live_sub_id)),
+    ));
+    let neg_sub_id = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, sub_id, ..) => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("the candidate EOSE opens reconciliation");
+    assert!(
+        !opened.iter().any(|effect| matches!(effect,
+            Effect::EmitObservationEvidence(_, evidence)
+                if evidence.iter().any(|item| matches!(
+                    &item.fact,
+                    ObservationFact::RelayRequest { .. }
+                )))),
+        "the reducer must not claim it placed the NEG-OPEN before transport \
+         reports the outcome: {opened:?}"
+    );
+
+    let refused = core.on_nip77_handoff(
+        Nip77Frame::Open,
+        &relay,
+        &neg_sub_id,
+        Some(RelayHandle {
+            slot: 0,
+            generation: 1,
+        }),
+        false,
+        Some("transport send refused NIP-77 frame".to_string()),
+    );
+
+    assert!(
+        refused.iter().any(|effect| matches!(effect,
+            Effect::EmitObservationEvidence(_, evidence)
+                if evidence.iter().any(|item| matches!(
+                    &item.fact,
+                    ObservationFact::RelayRefused { relay: url, .. } if url == &relay
+                )))),
+        "a refused NIP-77 question is the one thing an app can see, and must be \
+         emitted: {refused:?}"
+    );
+    let (fallback_id, fallback_filter) = req_for(&refused, &relay);
+    assert_ne!(fallback_id, &neg_sub_id);
+    assert_ne!(fallback_id, &live_sub_id);
+    assert_eq!(fallback_filter.limit, None);
+    assert_eq!(fallback_filter.since, None);
+    assert_eq!(fallback_filter.until, None);
+    assert!(
+        !refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::NegClose(..))),
+        "the relay never saw a NEG-OPEN, so there is no reconciliation to \
+         close: {refused:?}"
+    );
+    assert!(
+        !refused.iter().any(|effect| matches!(effect, Effect::Wire(delta)
+            if delta.ops.iter().any(|(_, ops)| ops.iter().any(
+                |op| matches!(op, WireOp::Close(id) if id == &live_sub_id))))),
+        "the already-active live REQ stays open through the fallback: {refused:?}"
+    );
+
+    // Nothing is left for the liveness sweep to rediscover 30 seconds later.
+    let swept = core.handle(EngineMsg::Tick(Timestamp::from(31u64)));
+    assert!(
+        !swept
+            .iter()
+            .any(|effect| matches!(effect, Effect::NegClose(_, id) if id == &neg_sub_id)),
+        "the refusal already retired this reconciliation; the deadline has \
+         nothing left to find: {swept:?}"
+    );
+}
+
+/// A refused continuing `NEG-MSG` retires only that reconciliation, at once.
+/// The reconciler has already consumed the relay's message and advanced, so
+/// the exchange cannot be resumed -- but the relay did open this session, so
+/// the best-effort `NEG-CLOSE` is still warranted.
+#[test]
+fn a_refused_neg_continue_falls_back_without_waiting_for_the_deadline() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [relay.clone()])
+        .with_outbound_routes(b.public_key(), [relay.clone()]);
+    let mut core = new_core(dir);
+
+    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    req_for(&initial, &relay);
+    connect_and_prove_nip77(&mut core, &relay);
+
+    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
+    let (live_sub_id, _) = req_for(&candidate, &relay);
+    let live_sub_id = live_sub_id.clone();
+    let opened = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&live_sub_id)),
+    ));
+    let (neg_sub_id, initial_hex) = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegOpen(_, sub_id, _, hex) => Some((sub_id.clone(), hex.clone())),
+            _ => None,
+        })
+        .expect("the candidate EOSE opens reconciliation");
+    let accepted = core.on_nip77_handoff(
+        Nip77Frame::Open,
+        &relay,
+        &neg_sub_id,
+        Some(RelayHandle {
+            slot: 0,
+            generation: 1,
+        }),
+        true,
+        None,
+    );
+    assert!(
+        accepted.iter().any(|effect| matches!(effect,
+            Effect::EmitObservationEvidence(_, evidence)
+                if evidence.iter().any(|item| matches!(
+                    &item.fact,
+                    ObservationFact::RelayRequest { relay: url, .. } if url == &relay
+                )))),
+        "an ACCEPTED NEG-OPEN is exactly when the request becomes a placed \
+         question: {accepted:?}"
+    );
+
+    // A real reconciliation round that does NOT finish: the responder holds
+    // far more than one bounded frame can carry, so its first answer leaves
+    // the exchange mid-flight and the reducer emits a continuing NEG-MSG.
+    let mut storage = ::negentropy::NegentropyStorageVector::new();
+    for index in 0u32..4000 {
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&index.to_be_bytes());
+        storage
+            .insert(u64::from(index) + 1, ::negentropy::Id::from_byte_array(id))
+            .expect("insert responder item");
+    }
+    storage.seal().expect("seal responder storage");
+    let mut responder =
+        ::negentropy::Negentropy::borrowed(&storage, 4096).expect("construct bounded responder");
+    let response = responder
+        .reconcile(&hex::decode(&initial_hex).expect("decode initial message"))
+        .expect("server-side reconciliation");
+    let stepped = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        neg_msg_frame(&wire_sub_string(&neg_sub_id), &hex::encode(response)),
+    ));
+    let continuing = stepped
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::NegMsg(_, sub_id, _) => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("a reconciliation round in progress emits a continuing NEG-MSG");
+    assert_eq!(continuing, neg_sub_id);
+
+    let refused = core.on_nip77_handoff(
+        Nip77Frame::Continue,
+        &relay,
+        &neg_sub_id,
+        Some(RelayHandle {
+            slot: 0,
+            generation: 1,
+        }),
+        false,
+        Some("transport send refused NIP-77 frame".to_string()),
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::NegClose(url, id)
+                if url == &relay && id == &neg_sub_id)),
+        "the relay really did open this reconciliation, so it is closed \
+         best-effort: {refused:?}"
+    );
+    let (fallback_id, fallback_filter) = req_for(&refused, &relay);
+    assert_ne!(fallback_id, &neg_sub_id);
+    assert_eq!(fallback_filter.limit, None);
+    assert!(
+        !refused.iter().any(|effect| matches!(effect, Effect::Wire(delta)
+            if delta.ops.iter().any(|(_, ops)| ops.iter().any(
+                |op| matches!(op, WireOp::Close(id) if id == &live_sub_id))))),
+        "the already-active live REQ stays open through the fallback: {refused:?}"
+    );
+    let swept = core.handle(EngineMsg::Tick(Timestamp::from(31u64)));
+    assert!(
+        !swept
+            .iter()
+            .any(|effect| matches!(effect, Effect::NegClose(_, id) if id == &neg_sub_id)),
+        "the refusal already retired this reconciliation: {swept:?}"
+    );
 }

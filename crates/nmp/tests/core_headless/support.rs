@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
-    ObservationFact, ObservationId, PublishError, ReceiptId, RequestTerminal, RowDelta,
+    Nip77Frame, ObservationFact, ObservationId, PublishError, ReceiptId, RequestTerminal, RowDelta,
     ShortfallFact, SourceEvidence, SourceStatus,
 };
 use nmp::mechanism::publish_queue::{

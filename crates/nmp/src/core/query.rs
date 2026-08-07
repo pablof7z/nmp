@@ -11,6 +11,25 @@ use super::*;
 /// delivered state; it is never handed to a caller or an effect directly.
 type ObservationProjection = (BTreeMap<EventId, Row>, Vec<AcquisitionEvidence>);
 
+/// Which NIP-77 frame the runtime attempted to hand to a relay worker, for
+/// [`EngineCore::on_nip77_handoff`] (issue #775).
+///
+/// Closed and exhaustive: each variant names the exact reducer state that
+/// advanced before the frame existed, and therefore the exact state a
+/// transport refusal has to consume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nip77Frame {
+    /// `Effect::StartProbe` -- a capability probe's throwaway `NEG-OPEN`.
+    /// The prober moved the relay to `Probing` and recorded a pending wire id.
+    Probe,
+    /// `Effect::NegOpen` -- a real reconciliation's opening `NEG-OPEN`. A
+    /// `NegSession` and a pending request-evidence record exist.
+    Open,
+    /// `Effect::NegMsg` -- the next round of an already-open reconciliation.
+    /// The reconciler has already consumed the relay's message and advanced.
+    Continue,
+}
+
 impl<S: EventStore> EngineCore<S> {
     /// Mint a NIP-77 role wire id nobody has ever been handed before (#932).
     ///
@@ -995,11 +1014,6 @@ impl<S: EventStore> EngineCore<S> {
             false,
             EventFailureTarget::ThisSend,
         );
-        // NEG-OPEN has no asynchronous REQ-handoff callback. Reaching this
-        // door already proves the exact current connected generation: it is
-        // opened synchronously from that generation's live-candidate EOSE.
-        // Activate the same generic request-evidence record here so NEG-DONE
-        // can settle the actual sent question, not the limit:0 barrier.
         let handle = self
             .slot_to_relay
             .values()
@@ -1026,6 +1040,41 @@ impl<S: EventStore> EngineCore<S> {
             },
         );
         effects.push(Effect::NegOpen(probed, neg_sub_id, neg_filter, initial_hex));
+    }
+
+    /// The one door every NIP-77 outbound frame's transport outcome returns
+    /// through (issue #775).
+    ///
+    /// `Pool::send`'s `false` is local backpressure and nothing else: the
+    /// worker's finite outbound envelope refused the frame at admission, the
+    /// handle is stale, or no session could be opened at all. It is never a
+    /// statement about the relay. Before this door the runtime discarded it
+    /// (`let _ = pool.send(..)`) at all three NIP-77 effects, so reducer state
+    /// that had already advanced past the send stayed advanced: a probe sat in
+    /// `Probing` for the engine's lifetime, and a reconciliation waited out the
+    /// 30-second silent-relay deadline for a frame that never left the process.
+    ///
+    /// `handle` is the exact Public generation the frame was attempted on, or
+    /// `None` when no session could be opened. It is read only on acceptance.
+    ///
+    /// Public only through the doc-hidden mechanism surface, exactly like
+    /// [`Self::on_wire_request_handoff`], so headless reducer falsifiers drive
+    /// the same edge the runtime does.
+    #[doc(hidden)]
+    pub fn on_nip77_handoff(
+        &mut self,
+        frame: Nip77Frame,
+        relay: &RelayUrl,
+        sub_id: &SubId,
+        handle: Option<TransportRelayHandle>,
+        accepted: bool,
+        reason: Option<String>,
+    ) -> Vec<Effect> {
+        // Deliberately the current behaviour, expressed through the new seam:
+        // `let _ = pool.send(..)`. The falsifiers landing with this commit
+        // fail against it, and the next commit is what makes them pass.
+        let _ = (frame, relay, sub_id, handle, accepted, reason);
+        Vec::new()
     }
 
     /// Drive one inbound `NEG-MSG` round for `sub_id`'s live session, if any
@@ -1313,7 +1362,24 @@ impl<S: EventStore> EngineCore<S> {
         effects: &mut Vec<Effect>,
     ) {
         effects.push(Effect::NegClose(session.relay.clone(), sub_id.clone()));
-        self.abandon_sub(&sub_id);
+        self.neg_session_backlog_fallback(&sub_id, session, effects);
+    }
+
+    /// The fallback itself, without the best-effort `NEG-CLOSE`: retire the
+    /// reconciliation's own subscription and take the ordinary unlimited
+    /// backlog REQ.
+    ///
+    /// Split out because a reconciliation whose `NEG-OPEN` transport REFUSED
+    /// has no session on the relay to close (issue #775) -- every other caller
+    /// is abandoning a reconciliation the relay really did open, and keeps the
+    /// `NEG-CLOSE`.
+    fn neg_session_backlog_fallback(
+        &mut self,
+        sub_id: &SubId,
+        session: NegSession,
+        effects: &mut Vec<Effect>,
+    ) {
+        self.abandon_sub(sub_id);
         let owner = session.plan_sub_id.clone();
         self.start_backlog_req(
             session.plan_sub_id,

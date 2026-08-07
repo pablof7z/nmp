@@ -98,7 +98,7 @@ use nmp_transport::{
 pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, AuthSendCompletion, DiagnosticsSnapshot, Effect, EngineCore,
-    EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId,
+    EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, Nip77Frame,
     ObservationEvidence, ObservationId, ObservationOpen, PublishError, ReattachOutcome, ReceiptId,
     RelayAdmissionPolicy, Row, RowDelta,
 };
@@ -6016,26 +6016,71 @@ fn dispatch_effect(
             // its synchronous reply. There is no receipt stream to fan out.
         }
         Effect::StartProbe(url, sub_id, filter, initial_hex) => {
-            let Ok(handle) = pool.ensure_open(&url, core.dial_declarer(&url)) else {
-                return;
-            };
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
-            let _ = pool.send(handle, WireFrame::Text(text));
+            let report = nip77_send(core, pool, &url, text);
+            let followups = core.on_nip77_handoff(
+                Nip77Frame::Probe,
+                &url,
+                &sub_id,
+                report.handle,
+                report.accepted,
+                report.reason,
+            );
+            dispatch_effects(
+                core,
+                followups,
+                pool,
+                row_channels,
+                history_channels,
+                diag_channels,
+                registry,
+                runtime,
+            );
         }
         Effect::NegOpen(probed, sub_id, filter, initial_hex) => {
             let relay = probed.url().clone();
-            let Ok(handle) = pool.ensure_open(&relay, core.dial_declarer(&relay)) else {
-                return;
-            };
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
-            let _ = pool.send(handle, WireFrame::Text(text));
+            let report = nip77_send(core, pool, &relay, text);
+            let followups = core.on_nip77_handoff(
+                Nip77Frame::Open,
+                &relay,
+                &sub_id,
+                report.handle,
+                report.accepted,
+                report.reason,
+            );
+            dispatch_effects(
+                core,
+                followups,
+                pool,
+                row_channels,
+                history_channels,
+                diag_channels,
+                registry,
+                runtime,
+            );
         }
         Effect::NegMsg(relay, sub_id, message_hex) => {
-            let Ok(handle) = pool.ensure_open(&relay, core.dial_declarer(&relay)) else {
-                return;
-            };
             let text = neg_msg_frame_text(&sub_id, message_hex);
-            let _ = pool.send(handle, WireFrame::Text(text));
+            let report = nip77_send(core, pool, &relay, text);
+            let followups = core.on_nip77_handoff(
+                Nip77Frame::Continue,
+                &relay,
+                &sub_id,
+                report.handle,
+                report.accepted,
+                report.reason,
+            );
+            dispatch_effects(
+                core,
+                followups,
+                pool,
+                row_channels,
+                history_channels,
+                diag_channels,
+                registry,
+                runtime,
+            );
         }
         Effect::NegClose(relay, sub_id) => {
             let Ok(handle) = pool.ensure_open(&relay, core.dial_declarer(&relay)) else {
@@ -6044,6 +6089,46 @@ fn dispatch_effect(
             let text = neg_close_frame_text(&sub_id);
             let _ = pool.send(handle, WireFrame::Text(text));
         }
+    }
+}
+
+/// What placing one NIP-77 frame on the Public session for `relay` actually
+/// achieved, for `EngineCore::on_nip77_handoff` (issue #775).
+///
+/// Deliberately the same shape as [`RequestHandoffReport`]: a NIP-77 frame's
+/// transport outcome is the same kind of fact an ordinary REQ's is, and the
+/// reducer consumes both through a door of its own rather than the runtime
+/// deciding anything.
+struct Nip77SendReport {
+    handle: Option<nmp_transport::RelayHandle>,
+    accepted: bool,
+    reason: Option<String>,
+}
+
+/// Place `text` on `relay`'s Public session and report the exact outcome.
+///
+/// The two local refusals are kept distinct because they are different facts
+/// about this process: no session could be opened at all, versus a worker that
+/// exists and refused the frame at admission because its finite outbound
+/// envelope is full (#506/#1331). Neither is ever a statement about the relay.
+fn nip77_send<S: EventStore>(
+    core: &EngineCore<S>,
+    pool: &Pool,
+    relay: &RelayUrl,
+    text: String,
+) -> Nip77SendReport {
+    let Ok(handle) = pool.ensure_open(relay, core.dial_declarer(relay)) else {
+        return Nip77SendReport {
+            handle: None,
+            accepted: false,
+            reason: Some("transport could not open session for NIP-77 frame".to_string()),
+        };
+    };
+    let accepted = pool.send(handle, WireFrame::Text(text));
+    Nip77SendReport {
+        handle: Some(handle),
+        accepted,
+        reason: (!accepted).then(|| "transport send refused NIP-77 frame".to_string()),
     }
 }
 
