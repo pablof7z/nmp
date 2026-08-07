@@ -757,12 +757,26 @@ fn restart(args: Args) -> Result<(), String> {
             .iter()
             .flat_map(|branch| branch.sources.iter())
             .collect();
+        // Either connected-and-live state proves the reconnect resubscribed
+        // (#1235). `FinishedStoredEvents` proves strictly more -- it asked
+        // AND was answered -- so demanding `Requesting` alone would wait for
+        // the engine to be SLOWER than it is.
         sources.len() >= 2
-            && sources
-                .iter()
-                .all(|source| source.status == SourceStatus::Requesting)
+            && sources.iter().all(|source| {
+                matches!(
+                    source.status,
+                    SourceStatus::Requesting | SourceStatus::FinishedStoredEvents
+                )
+            })
     })?;
-    println!("PROOF restart_reconnected relays=2 statuses=Requesting");
+    println!(
+        "PROOF restart_reconnected relays=2 statuses={:?}",
+        observed
+            .evidence
+            .iter()
+            .flat_map(|branch| branch.sources.iter().map(|source| source.status))
+            .collect::<Vec<_>>()
+    );
     println!("PASS restart");
     drop(subscription);
     context.shutdown();

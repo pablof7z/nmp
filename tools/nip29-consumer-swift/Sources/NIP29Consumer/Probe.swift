@@ -329,10 +329,15 @@ enum Probe {
                     try signalReady(args.readyFile)
                     print("PROOF swift_restart_offline cached_rows=\(rows(batch, kind: 9).count) shared_sources=2 persisted_watermarks=true statuses=\(sources.map(\.status))")
                 }
+                // Either connected-and-live state proves the reconnect
+                // resubscribed (#1235). `.finishedStoredEvents` proves
+                // strictly more -- it asked AND was answered -- so demanding
+                // `.requesting` alone would wait for the engine to be SLOWER
+                // than it is.
                 if offlineProved,
                    sources.count >= 2,
-                   sources.allSatisfy({ $0.status == .requesting }) {
-                    print("PROOF swift_restart_reconnected relays=2 statuses=requesting")
+                   sources.allSatisfy({ $0.status == .requesting || $0.status == .finishedStoredEvents }) {
+                    print("PROOF swift_restart_reconnected relays=2 statuses=\(sources.map(\.status))")
                     return ()
                 }
             }
