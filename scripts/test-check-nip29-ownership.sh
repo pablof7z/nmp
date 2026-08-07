@@ -289,6 +289,11 @@ write_generated "$BANNED_SWIFT" "$BANNED_KOTLIN"
 run_gate
 ((GATE_STATUS == 0)) ||
   fail "a stale generated binding still decides the verdict -- $GATE_OUTPUT"
+[[ $GATE_OUTPUT == "$VERDICT_WITH_BINDINGS" ]] ||
+  fail "a stale generated binding changed what the gate SAID, without changing
+       whether it passed:
+       clean bindings: $VERDICT_WITH_BINDINGS
+       stale ones:     $GATE_OUTPUT"
 pass
 
 # ---- falsifier 3, second half: bindings absent ---------------------------
