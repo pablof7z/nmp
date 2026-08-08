@@ -30,9 +30,11 @@
 //!   read-only projection of a compiled plan.
 //! - `wire_id` — structural-signature matching: which previously-allocated
 //!   wire subscription token a newly-compiled filter continues (#899).
-//! - `router` — `Router`: `compile(demand, dir) -> WireDelta`, owning
-//!   `prev_plan` + diagnostics + the wire-token mint counter.
+//! - `router` / `admission` — `Router`: whole-demand invalidation plus
+//!   pending-only immutable admission, owning the running plan, diagnostics,
+//!   and wire-token mint counter.
 
+mod admission;
 mod budget;
 mod coalesce;
 mod component;
@@ -56,7 +58,9 @@ pub use facts::{
     test_relay, AuthorRouteState, AuthorRoutes, FixtureRoutingFacts, Lane, LanedRelay, PublicKey,
     RelayUrl, RoutingFacts,
 };
-pub use plan::{diff_plans, BudgetShortfall, RelayPlan, SubId, WireDelta, WireOp, WireReq};
+pub use plan::{
+    diff_plans, BudgetShortfall, DemandKey, RelayPlan, SubId, WireDelta, WireOp, WireReq,
+};
 pub use route::{RouteKind, RouteProvenance, Skeleton};
 pub use router::Router;
 pub use solver::{solve, Coverage, CoverageInput, Shortfall, ShortfallReason};

@@ -106,11 +106,11 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let effects_a = core.handle(EngineMsg::Subscribe(literal_query(&[1], &me_hex)));
-    let sub0 = sub_id_for(&effects_a, &relay0).clone();
-
-    let effects_b = core.handle(EngineMsg::Subscribe(literal_query(&[1], &friend_hex)));
-    let sub1 = sub_id_for(&effects_b, &relay1).clone();
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(&[1], &me_hex)));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(&[1], &friend_hex)));
+    let admitted = core.handle(EngineMsg::FlushWireAdmission);
+    let sub0 = sub_id_for(&admitted, &relay0).clone();
+    let sub1 = sub_id_for(&admitted, &relay1).clone();
 
     // ---- before any event: real sub counts + exact wire filters ---------
     let snap = core.diagnostics_snapshot();
@@ -250,7 +250,8 @@ fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactiv
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(&[1], &me_hex)));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(&[1], &me_hex)));
+    let effects = core.handle(EngineMsg::FlushWireAdmission);
     let sub0 = sub_id_for(&effects, &relay0).clone();
 
     let snap = core.diagnostics_snapshot();
@@ -299,7 +300,8 @@ fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
     connect(&mut core, 0, &relay);
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(&[9999], &a_hex)));
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(&[9999], &b_hex)));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(&[9999], &b_hex)));
+    let effects = core.handle(EngineMsg::FlushWireAdmission);
     let sub = sub_id_for(&effects, &relay).clone();
 
     let before = core.diagnostics_snapshot();
@@ -314,10 +316,8 @@ fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
     assert!(entry.coverage[0].coverage.is_none());
 
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(25)));
-    // The same sub-id has two in-flight REQs: the original single-author
-    // request and its author-union overwrite. The first EOSE can only credit
-    // their safe intersection (A); the second terminates the wide request
-    // and credits both absorbed atom keys.
+    // Both pending atoms were admitted in one immutable request, so one EOSE
+    // proves both absorbed keys.
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -326,21 +326,6 @@ fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
         RelaySessionKey::public(relay.clone()),
         eose_frame(&wire_sub_string(&sub)),
     ));
-    assert!(
-        core.diagnostics_snapshot().relays[0].coverage[0]
-            .coverage
-            .is_none(),
-        "one absorbed atom is still unproven after only the older REQ's EOSE"
-    );
-    let _ = core.handle(EngineMsg::RelayFrame(
-        RelayHandle {
-            slot: 0,
-            generation: 1,
-        },
-        RelaySessionKey::public(relay.clone()),
-        eose_frame(&wire_sub_string(&sub)),
-    ));
-
     let after = core.diagnostics_snapshot();
     assert_eq!(
         after.relays[0].coverage[0].coverage,

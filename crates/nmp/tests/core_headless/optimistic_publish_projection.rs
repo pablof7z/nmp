@@ -153,7 +153,7 @@ fn open<S: EventStore>(
     core: &mut EngineCore<S>,
     query: LiveQuery,
 ) -> (ObservationId, Projected, Vec<Effect>) {
-    let effects = core.handle(EngineMsg::Subscribe(query));
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(query));
     let handle = subscribed_handle(&effects);
     let mut projected = Projected::default();
     projected.fold(&effects, handle);

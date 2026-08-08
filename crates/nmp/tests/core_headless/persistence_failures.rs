@@ -260,7 +260,7 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
     // proving the degrade is specific to the failing ingest door.
     let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -320,7 +320,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
 
     let _ = connect(&mut core, 0, &relay);
     let _ = connect(&mut core, 1, &healthy_relay);
-    let failed_subscribed = core.handle(EngineMsg::Subscribe(literal_query(
+    let failed_subscribed = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));
@@ -328,7 +328,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         let (sub_id, filter) = req_for_kind(&failed_subscribed, &relay, 1);
         (sub_id.clone(), filter.clone())
     };
-    let healthy_subscribed = core.handle(EngineMsg::Subscribe(literal_query(
+    let healthy_subscribed = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[2],
         &healthy_author.public_key().to_hex(),
     )));
@@ -498,8 +498,8 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         10,
     );
 
-    let _ = core.handle(EngineMsg::Subscribe(public_query));
-    let _ = core.handle(EngineMsg::Subscribe(protected_query));
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(public_query));
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(protected_query));
 
     let public_connected = connect(&mut core, 0, &relay);
     let public_request = public_connected
@@ -633,11 +633,11 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         .is_some());
 }
 
-/// An EVENT on an overwritten wire id cannot identify which outstanding REQ
-/// revision emitted it, so every owner already in that exact FIFO is
-/// poisoned. A revision sent after the failure is not retroactively poisoned.
+/// A failed EVENT commit poisons only the immutable request that delivered
+/// it. Independent requests admitted before or after that failure retain
+/// their own attribution and can still earn coverage.
 #[test]
-fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
+fn failed_event_commit_poisons_only_its_immutable_request() {
     let a = Keys::generate();
     let b = Keys::generate();
     let c = Keys::generate();
@@ -649,21 +649,18 @@ fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
     let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
     connect(&mut core, 0, &relay);
 
-    let first = core.handle(EngineMsg::Subscribe(literal_query(
+    let first = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     let first_sub = req_for(&first, &relay).0.clone();
-    let second = core.handle(EngineMsg::Subscribe(literal_query(
+    let second = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
     let second_sub = req_for(&second, &relay).0.clone();
-    assert_eq!(
-        first_sub, second_sub,
-        "the filter widening reuses one wire FIFO"
-    );
-    let wire = wire_sub_string(&first_sub);
+    assert_ne!(first_sub, second_sub, "sent requests are immutable");
+    let first_wire = wire_sub_string(&first_sub);
 
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
     let failed = core.handle(EngineMsg::RelayFrame(
@@ -673,8 +670,8 @@ fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
         },
         public_session(&relay),
         event_frame(
-            &wire,
-            nmp_resolver::testkit::kind1(&a, "ambiguous failed revision", 100),
+            &first_wire,
+            nmp_resolver::testkit::kind1(&a, "failed immutable request", 100),
         ),
     ));
     assert!(failed
@@ -682,68 +679,51 @@ fn failed_event_commit_poisons_only_the_then_current_wire_fifo_revisions() {
         .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
             if snapshot.store_degraded.is_some())));
 
-    let third = core.handle(EngineMsg::Subscribe(literal_query(
+    let third = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &c.public_key().to_hex(),
     )));
     let third_sub = req_for(&third, &relay).0.clone();
-    assert_eq!(
-        first_sub, third_sub,
-        "the post-failure widening is a later revision of the same wire FIFO"
-    );
+    assert_ne!(first_sub, third_sub);
+    assert_ne!(second_sub, third_sub);
 
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     let atom_c = ctx_atom(cf(&[1], &[&c.public_key().to_hex()]));
-    for now in [600u64, 700] {
-        let _ = core.handle(EngineMsg::Tick(Timestamp::from(now)));
-        let poisoned = core.handle(EngineMsg::RelayFrame(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            public_session(&relay),
-            eose_frame(&wire),
-        ));
-        assert!(
-            !poisoned
-                .iter()
-                .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-            "both revisions present at the failed EVENT stay poisoned: {poisoned:?}"
-        );
-        assert_eq!(
-            core.get_coverage(&atom_a, &relay).expect("coverage peek"),
-            None
-        );
-        assert_eq!(
-            core.get_coverage(&atom_b, &relay).expect("coverage peek"),
-            None
-        );
-        assert_eq!(
-            core.get_coverage(&atom_c, &relay).expect("coverage peek"),
-            None
-        );
-    }
-
-    let _ = core.handle(EngineMsg::Tick(Timestamp::from(800u64)));
-    let later = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(600u64)));
+    let poisoned = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
         },
         public_session(&relay),
-        eose_frame(&wire),
+        eose_frame(&first_wire),
     ));
     assert!(
-        later
+        !poisoned
             .iter()
             .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the revision recorded after the failure remains eligible: {later:?}"
+        "the failed request stays poisoned: {poisoned:?}"
     );
-    assert!(core
-        .get_coverage(&atom_a, &relay)
-        .expect("coverage peek")
-        .is_some());
+
+    for (now, request) in [(700u64, &second_sub), (800u64, &third_sub)] {
+        let _ = core.handle(EngineMsg::Tick(Timestamp::from(now)));
+        let healthy = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            public_session(&relay),
+            eose_frame(&wire_sub_string(request)),
+        ));
+        assert!(healthy
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))));
+    }
+    assert_eq!(
+        core.get_coverage(&atom_a, &relay).expect("coverage peek"),
+        None
+    );
     assert!(core
         .get_coverage(&atom_b, &relay)
         .expect("coverage peek")
@@ -780,7 +760,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         }))),
         ..Filter::default()
     });
-    let _ = core.handle(EngineMsg::Subscribe(my_follows));
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(my_follows));
     let connected = connect(&mut core, 0, &relay);
     let request = connected
         .iter()
@@ -857,12 +837,19 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
     let store = FailIngestStore::coverage_armed(batch_sizes.clone());
     let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
 
-    for author in [&a, &b, &healthy] {
-        let _ = core.handle(EngineMsg::Subscribe(literal_query(
-            &[1],
-            &author.public_key().to_hex(),
-        )));
-    }
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &a.public_key().to_hex(),
+    )));
+    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &b.public_key().to_hex(),
+    )));
+    let _ = core.handle(EngineMsg::FlushWireAdmission);
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
+        &[1],
+        &healthy.public_key().to_hex(),
+    )));
     let failed_connect = connect(&mut core, 0, &failed_relay);
     let failed_request = failed_connect
         .iter()
@@ -1900,21 +1887,21 @@ fn a_failing_store_read_makes_the_next_deadline_a_typed_error_not_a_false_none()
     faults.set(false);
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
     assert_eq!(core.next_deadline().expect("the peek answers again"), None);
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));
 }
 
-/// #763 falsifier: opening a query while the coverage peek fails refuses the
-/// observation and degrades — it never opens one whose evidence says the
-/// sources have proven nothing.
+/// #763 under deferred relay admission: the cache seed is accepted before a
+/// relay plan exists. If the post-admission coverage projection fails, the
+/// engine degrades without replacing that seed with fabricated relay proof.
 ///
 /// `AcquisitionEvidence::sources[..].reconciled_through == None` is a claim
 /// about what a relay has proven. A store that could not be read has
 /// established no such thing, so it must not be able to render as one.
 #[test]
-fn a_failing_coverage_peek_refuses_the_open_instead_of_reporting_nothing_proven() {
+fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
@@ -1927,7 +1914,7 @@ fn a_failing_coverage_peek_refuses_the_open_instead_of_reporting_nothing_proven(
     let _ = connect(&mut core, 0, &relay);
 
     faults.set(true);
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));
@@ -1937,17 +1924,19 @@ fn a_failing_coverage_peek_refuses_the_open_instead_of_reporting_nothing_proven(
             .any(|e| matches!(e, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())),
         "a failed coverage peek must surface the #122 degrade fact, got {effects:?}"
     );
-    assert!(
-        !effects
+    assert_eq!(
+        effects
             .iter()
-            .any(|effect| matches!(effect, Effect::EmitRows(..))),
-        "a refused open delivers no evidence frame at all, got {effects:?}"
+            .filter(|effect| matches!(effect, Effect::EmitRows(..)))
+            .count(),
+        1,
+        "the immediate cache seed stands; failed post-admission evidence must not overwrite it"
     );
 
-    // And the engine is still usable: healing the store lets the very same
-    // subscribe succeed, evidence and all.
+    // And the engine is still usable: healing the store lets another exact
+    // observer attach to the already-running request.
     faults.set(false);
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));
@@ -1980,7 +1969,7 @@ fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
         10,
     );
     let _ = connect(&mut core, 0, &relay);
-    let opened = core.handle(EngineMsg::Subscribe(literal_query(
+    let opened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));
@@ -2030,7 +2019,7 @@ fn a_diagnostics_snapshot_built_over_a_failing_store_says_so() {
         10,
     );
     let _ = connect(&mut core, 0, &relay);
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));

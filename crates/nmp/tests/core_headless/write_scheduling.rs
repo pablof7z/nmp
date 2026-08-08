@@ -99,7 +99,7 @@ fn challenged_author_relay_suppresses_event_until_exact_auth_ready() {
         generation: 1,
     };
     let mut core = new_core(FixtureRoutingFacts::new());
-    let owned = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+    let owned = core.handle_and_flush(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
         author.public_key(),
         1,
@@ -167,7 +167,7 @@ fn auth_required_session_reconnect_cannot_publish_before_fresh_generation_auth()
         generation: 2,
     };
     let mut core = new_core(FixtureRoutingFacts::new());
-    let subscribed = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+    let subscribed = core.handle_and_flush(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
         author.public_key(),
         1,
@@ -225,7 +225,7 @@ fn stale_auth_probe_release_after_reconnect_cannot_wake_current_generation() {
         generation: 2,
     };
     let mut core = new_core(FixtureRoutingFacts::new());
-    let subscribed = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+    let subscribed = core.handle_and_flush(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
         author.public_key(),
         1,

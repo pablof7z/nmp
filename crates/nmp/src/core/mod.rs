@@ -30,6 +30,8 @@
 //! (`nmp-store`) only stores whatever interval it is handed.
 
 mod admission;
+#[cfg(test)]
+mod admission_tests;
 mod attribution;
 #[cfg(test)]
 mod auth_core_headless;
@@ -57,7 +59,7 @@ mod write;
 #[cfg(test)]
 mod write_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-instrumentation"))]
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -886,6 +888,9 @@ pub enum AuthEffect {
 /// The read/write/frame vocabulary the reducer consumes (plan §3.4).
 pub enum EngineMsg {
     Subscribe(LiveQuery),
+    /// Execute relay-bound demand admitted during the current short cohort.
+    /// Runtime owns the monotonic deadline; the reducer owns this transition.
+    FlushWireAdmission,
     Unsubscribe(ObservationId),
     SubscribeHistory(HistoryQuery),
     /// Declaratively raise this window's row target to at least `usize`,
@@ -1019,6 +1024,9 @@ pub(crate) struct CoreObservationOwnershipCensus {
 /// judgment.
 #[derive(Debug)]
 pub enum Effect {
+    /// Arm one first-arrival-anchored wire-admission deadline. Repeated arms
+    /// while a deadline is pending do not extend it.
+    ArmWireAdmission,
     /// Update the transport's volatile exact-observation eligibility only
     /// from durable post-commit facts. Invalidations are applied before
     /// publications by the cache.
@@ -1898,13 +1906,13 @@ pub struct EngineCore<S: EventStore> {
     /// [`EngineConfig::max_publish_attempts`](crate::EngineConfig). Counts
     /// observations, never wall-clock.
     max_publish_attempts: u64,
-    /// Test-only work counters for the affected-handle invalidation
-    /// falsifier. Production pays no field or increment cost.
-    #[cfg(test)]
+    /// Opt-in work counters for lifecycle attribution. Ordinary production
+    /// builds pay no field or increment cost.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     projection_store_queries: Cell<u64>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     router_compiles: Cell<u64>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     history_store_queries: Cell<u64>,
     #[cfg(test)]
     history_rows_examined: Cell<u64>,
@@ -2015,11 +2023,11 @@ impl<S: EventStore> EngineCore<S> {
             transport_degraded: None,
             retry_scheduler_blocked: false,
             max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             projection_store_queries: Cell::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             router_compiles: Cell::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             history_store_queries: Cell::new(0),
             #[cfg(test)]
             history_rows_examined: Cell::new(0),
@@ -2674,6 +2682,7 @@ impl<S: EventStore> EngineCore<S> {
         self.retry_scheduler_blocked = false;
         let mut effects = match msg {
             EngineMsg::Subscribe(query) => self.on_subscribe(query),
+            EngineMsg::FlushWireAdmission => self.flush_wire_admission(),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
             EngineMsg::SubscribeHistory(query) => self.on_subscribe_history(query),
             EngineMsg::RequestRows(id, at_least) => self.on_request_rows(id, at_least),
@@ -2845,6 +2854,26 @@ impl<S: EventStore> EngineCore<S> {
 
 #[cfg(feature = "bench-instrumentation")]
 impl EngineCore<nmp_store::RedbStore> {
+    /// Reset reducer lifecycle counters independently from Redb's row-work
+    /// counters so a benchmark can attribute admission and projection work.
+    #[doc(hidden)]
+    pub fn bench_reset_lifecycle_work(&self) {
+        self.projection_store_queries.set(0);
+        self.router_compiles.set(0);
+        self.history_store_queries.set(0);
+    }
+
+    /// `(ordinary projection reads, router compiles, history projection
+    /// reads)` since the last lifecycle reset.
+    #[doc(hidden)]
+    pub fn bench_lifecycle_work(&self) -> (u64, u64, u64) {
+        (
+            self.projection_store_queries.get(),
+            self.router_compiles.get(),
+            self.history_store_queries.get(),
+        )
+    }
+
     /// Benchmark-only access to the store work counters used by the
     /// million-row scale proofs. Not an application/store API.
     #[doc(hidden)]
@@ -2855,6 +2884,18 @@ impl EngineCore<nmp_store::RedbStore> {
     #[doc(hidden)]
     pub fn bench_query_work(&self) -> (u64, u64, u64) {
         self.resolver.store().query_work()
+    }
+
+    /// Coverage-table point reads are counted separately from event
+    /// projection rows because diagnostics and freshness evidence use them.
+    #[doc(hidden)]
+    pub fn bench_reset_coverage_reads(&self) {
+        self.resolver.store().reset_coverage_reads();
+    }
+
+    #[doc(hidden)]
+    pub fn bench_coverage_reads(&self) -> u64 {
+        self.resolver.store().coverage_reads()
     }
 
     /// Drive the production committed-delta path without constructing a

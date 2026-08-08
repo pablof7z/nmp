@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    fold_byte, fold_context, AccessContext, ConcreteFilter, DescriptorHash, RelaySessionKey,
-    SourceAuthority,
+    fold_byte, fold_context, AccessContext, ConcreteFilter, ContextualAtom, DescriptorHash,
+    RelaySessionKey, SourceAuthority,
 };
-use nmp_store::CoverageKey;
+use nmp_store::{coverage_key, CoverageKey};
 
 use crate::facts::RelayUrl;
 use crate::route::{RouteProvenance, Skeleton};
@@ -31,6 +31,40 @@ use crate::route::{RouteProvenance, Skeleton};
 /// the filter's author-erased [`Skeleton`], which is precisely why two filters
 /// differing only in `authors` collided onto one subscription (#899).
 pub type SkeletonHash = DescriptorHash;
+
+/// Exact application demand identity for relay admission and withdrawal.
+///
+/// Durable [`CoverageKey`] deliberately erases `since`, `until`, and
+/// `limit`, because those values describe the interval proven by EOSE rather
+/// than a different durable selection. Relay lifecycle cannot erase them: an
+/// already-running live request does not backfill a newly-requested older
+/// page, and a bounded request is not interchangeable with an unbounded one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct DemandKey {
+    coverage: CoverageKey,
+    since: Option<u64>,
+    until: Option<u64>,
+    limit: Option<usize>,
+}
+
+impl DemandKey {
+    pub fn for_atom(atom: &ContextualAtom) -> Self {
+        Self::from_filter(coverage_key(atom), &atom.filter)
+    }
+
+    pub(crate) fn from_filter(coverage: CoverageKey, filter: &ConcreteFilter) -> Self {
+        Self {
+            coverage,
+            since: filter.since,
+            until: filter.until,
+            limit: filter.limit,
+        }
+    }
+
+    pub fn coverage(self) -> CoverageKey {
+        self.coverage
+    }
+}
 
 /// Domain byte separating an ALLOCATED token's derivation from every DERIVED
 /// id sharing this type. Folded in before the counter, so an allocated token
@@ -141,6 +175,10 @@ pub struct WireReq {
     pub source: SourceAuthority,
     pub provenance: Vec<RouteProvenance>,
     pub absorbed: BTreeSet<CoverageKey>,
+    /// Exact demand owners carried by this immutable request. Unlike
+    /// `absorbed`, these retain the request window/count and therefore own
+    /// admission reuse and withdrawal.
+    pub owners: BTreeSet<DemandKey>,
 }
 
 /// One session's per-relay subscription-budget shortfall (#931): what the
@@ -175,6 +213,9 @@ pub struct RelayPlan {
     /// atom fresh, and `acquisition_evidence` reports it to the app as
     /// `ShortfallFact::LocalLimit`.
     pub limited: BTreeSet<CoverageKey>,
+    /// Exact limited demand identities. `limited` remains the window-erased
+    /// evidence projection; admission retries and lifecycle use this set.
+    pub limited_demands: BTreeSet<DemandKey>,
     /// Distinct relay candidates refused ENTIRELY — by the whole-demand
     /// ceiling, or by a relay advertising zero concurrent subscriptions.
     /// This is diagnostics evidence, not a second routing input: only `reqs`
@@ -290,6 +331,7 @@ mod tests {
             source: SourceAuthority::AuthorOutboxes,
             provenance: Vec::new(),
             absorbed: BTreeSet::new(),
+            owners: BTreeSet::new(),
         };
         RelayPlan {
             reqs: BTreeMap::from([(RelaySessionKey::public(relay), vec![req])]),
@@ -351,6 +393,7 @@ mod tests {
                 source: SourceAuthority::AuthorOutboxes,
                 provenance: Vec::new(),
                 absorbed: BTreeSet::new(),
+                owners: BTreeSet::new(),
             }],
         );
 

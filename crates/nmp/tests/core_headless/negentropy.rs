@@ -145,7 +145,7 @@ fn negentropy_local_snapshot_is_scoped_to_the_reconciling_relay() {
         );
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &original_author.public_key().to_hex(),
     )));
@@ -182,7 +182,7 @@ fn negentropy_local_snapshot_is_scoped_to_the_reconciling_relay() {
         event_frame(&wire_sub_string(&relay_a_sub), shared.clone()),
     ));
 
-    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+    let widened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &widening_author.public_key().to_hex(),
     )));
@@ -238,7 +238,7 @@ fn unprobed_relay_never_routes_to_negentropy() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -256,7 +256,7 @@ fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let subscribed = core.handle(EngineMsg::Subscribe(literal_query(
+    let subscribed = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -305,7 +305,7 @@ fn explicit_nip11_negative_suppresses_probe_without_minting_behavioral_proof() {
     assert_eq!(relay.nip77_behavior, "unknown");
 
     let _ = core.handle(EngineMsg::Unsubscribe(handle));
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -326,7 +326,7 @@ fn positive_nip11_advertisement_starts_probe_but_is_not_behavioral_proof() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -364,7 +364,7 @@ fn absent_supported_nips_is_proven_document_unknown_not_explicit_negative() {
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -404,7 +404,7 @@ fn nip11_diagnostics_freshness_expires_from_engine_clock_without_another_acquisi
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -477,7 +477,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // Bootstrap: a's kind:1 atom -- the relay is `Unknown` at this point
     // (probing can only start once SOME demand causes a connection), so
     // this is unavoidably a plain REQ.
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -510,7 +510,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // b's kind:1 atom widens the SAME (kind:1) skeleton -- same sub-id,
     // now the relay is Supported and the widened filter is broad
     // (unlimited), so it first opens a distinct live REQ with `limit:0`.
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -690,7 +690,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // A second broad shape where both sides are empty settles directly at
     // NEG completion: no backfill REQ is invented, and the terminal is still
     // NIP-77 rather than the live-first barrier's EOSE.
-    let empty_shape = core.handle(EngineMsg::Subscribe(literal_query(
+    let empty_shape = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[2],
         &b.public_key().to_hex(),
     )));
@@ -761,7 +761,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         limit: Some(1),
         ..Filter::default()
     });
-    let effects = core.handle(EngineMsg::Subscribe(limited));
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(limited));
     req_for(&effects, &relay0); // must still be a plain REQ.
     assert!(
         !effects.iter().any(|e| matches!(e, Effect::NegOpen(..))),
@@ -786,11 +786,11 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         .with_outbound_routes(healthy.public_key(), [healthy_relay.clone()]);
     let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[2],
         &healthy.public_key().to_hex(),
     )));
@@ -815,7 +815,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         })
         .expect("the concurrent healthy request is already in flight");
 
-    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+    let widened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -928,7 +928,7 @@ fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -956,7 +956,7 @@ fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
     ));
 
     let b = Keys::generate();
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1001,7 +1001,7 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
         .with_outbound_routes(b.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1027,7 +1027,7 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
         neg_msg_frame(&probe_wire, "6100"),
     ));
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1086,14 +1086,14 @@ fn neg_err_falls_back_without_closing_the_active_live_req() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     req_for(&initial, &relay);
     connect_and_prove_nip77(&mut core, &relay);
 
-    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+    let candidate = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1157,13 +1157,13 @@ fn live_eose_timeout_uses_a_distinct_backlog_and_keeps_overlap_until_proven() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     let prior_live_id = req_for(&initial, &relay).0.clone();
     connect_and_prove_nip77(&mut core, &relay);
-    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+    let candidate = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1186,8 +1186,8 @@ fn live_eose_timeout_uses_a_distinct_backlog_and_keeps_overlap_until_proven() {
         )));
 
     // EOSE for the later full request proves backlog delivery and ordered
-    // processing. It closes the one-shot + predecessor, never the live
-    // candidate that owns future delivery.
+    // processing. It closes the one-shot, but independent immutable live
+    // requests remain open.
     let completed = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -1203,7 +1203,7 @@ fn live_eose_timeout_uses_a_distinct_backlog_and_keeps_overlap_until_proven() {
                 |op| matches!(op, WireOp::Close(id) if id == &backlog_id)
             ))
         )));
-    assert!(completed
+    assert!(!completed
         .iter()
         .any(|effect| matches!(effect, Effect::Wire(delta)
             if delta.ops.iter().any(|(_, ops)| ops.iter().any(
@@ -1230,12 +1230,12 @@ fn reconnect_repeats_live_first_and_only_the_fresh_generation_eose_opens_neg() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     connect_and_prove_nip77(&mut core, &relay);
-    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+    let candidate = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1307,13 +1307,14 @@ fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     let a_handle = subscribed_handle(&initial);
+    let a_live_id = req_for(&initial, &relay).0.clone();
     connect_and_prove_nip77(&mut core, &relay);
-    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+    let widened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1335,14 +1336,17 @@ fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
         })
         .expect("candidate EOSE opens repair");
 
-    // Removing b starts an overlap-safe replacement for a-only demand and
-    // cancels the in-flight NEG. Removing the final a owner then closes both
-    // that replacement candidate and the still-active predecessor.
+    // Removing b cancels only b's independent handoff. It never replaces
+    // a's already-running request. Removing the final a owner closes that
+    // incumbent.
     let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
     assert!(narrowed.iter().any(|effect| matches!(effect,
         Effect::NegClose(url, id) if url == &relay && id == &neg_id
     )));
-    let replacement_id = req_for(&narrowed, &relay).0.clone();
+    assert!(wire_closes(&narrowed, &relay).contains(&live_id));
+    assert!(narrowed.iter().all(|effect| !matches!(effect,
+        Effect::Wire(delta) if delta.ops.iter().any(|(_, ops)| ops.iter().any(|op| matches!(op, WireOp::Req(..))))
+    )));
     let closed = core.handle(EngineMsg::Unsubscribe(a_handle));
     let closed_ids: BTreeSet<SubId> = closed
         .iter()
@@ -1356,8 +1360,7 @@ fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
             WireOp::Req(..) => None,
         })
         .collect();
-    assert!(closed_ids.contains(&live_id));
-    assert!(closed_ids.contains(&replacement_id));
+    assert!(closed_ids.contains(&a_live_id));
     assert_eq!(core.diagnostics_snapshot().relays.len(), 0);
 }
 
@@ -1378,7 +1381,7 @@ fn live_eose_timeout_fallback_then_full_withdrawal_closes_orphaned_candidate() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let subscribed = core.handle(EngineMsg::Subscribe(literal_query(
+    let subscribed = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1465,13 +1468,11 @@ fn live_eose_timeout_fallback_then_full_withdrawal_closes_orphaned_candidate() {
     );
 }
 
-/// Same leak, but demand is SUPERSEDED (narrowed) rather than fully
-/// withdrawn while the plan sits in the live-EOSE-timeout fallback. The
-/// narrowing itself runs through `begin_neg_handoff` ->
-/// `cancel_nip77_repair_for_plan`, the exact call site of the fix -- distinct
-/// from the full-withdrawal path's `close_nip77_plan`.
+/// The same leak with another immutable request still active. Withdrawing
+/// one demand must close that demand's fallback owners without disturbing
+/// its sibling request.
 #[test]
-fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
+fn live_eose_timeout_withdrawal_closes_only_its_orphaned_candidate() {
     let a = Keys::generate();
     let b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay0.example.com").unwrap();
@@ -1480,13 +1481,13 @@ fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     let a_handle = subscribed_handle(&initial);
     connect_and_prove_nip77(&mut core, &relay);
-    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+    let widened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1494,18 +1495,17 @@ fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
     let live_sub_id = req_for(&widened, &relay).0.clone();
 
     // No candidate EOSE arrives before the liveness deadline -- same
-    // fallback as above, but this plan still has two demand owners.
+    // fallback as above, with a's independent request still live.
     let timed_out = core.handle(EngineMsg::Tick(Timestamp::from(30u64)));
     let (backlog_id, _) = req_for(&timed_out, &relay);
     let backlog_id = backlog_id.clone();
 
-    // Narrowing back to a-only demand supersedes the still-parked
-    // fallback via `begin_neg_handoff`'s own
-    // `cancel_nip77_repair_for_plan` call -- it must close the orphaned
-    // candidate too, not just the backlog REQ.
+    // Withdrawing b closes b's parked candidate and backlog. It must not
+    // synthesize a replacement for unchanged a.
     let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
-    let replacement_id = req_for(&narrowed, &relay).0.clone();
-    assert_ne!(replacement_id, live_sub_id);
+    assert!(narrowed.iter().all(|effect| !matches!(effect,
+        Effect::Wire(delta) if delta.ops.iter().any(|(_, ops)| ops.iter().any(|op| matches!(op, WireOp::Req(..))))
+    )));
     let narrowed_closed: BTreeSet<SubId> = narrowed
         .iter()
         .filter_map(|effect| match effect {
@@ -1520,12 +1520,12 @@ fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
         .collect();
     assert!(
         narrowed_closed.contains(&live_sub_id),
-        "superseding demand mid-fallback must close the orphaned live \
+        "withdrawing demand mid-fallback must close the orphaned live \
          candidate REQ, or it leaks on the wire forever: {narrowed:?}"
     );
     assert!(
         narrowed_closed.contains(&backlog_id),
-        "the backlog fallback REQ itself must still close on supersession: {narrowed:?}"
+        "the backlog fallback REQ itself must close on withdrawal: {narrowed:?}"
     );
 
     // A late EOSE on the orphaned candidate's wire id must never mint
@@ -1542,7 +1542,7 @@ fn live_eose_timeout_fallback_then_supersession_closes_orphaned_candidate() {
         !late
             .iter()
             .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "a late EOSE on a superseded, orphaned candidate must never mint \
+        "a late EOSE on a withdrawn, orphaned candidate must never mint \
          phantom coverage: {late:?}"
     );
 
@@ -1585,17 +1585,16 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     let _ = subscribed_handle(&initial);
     connect_and_prove_nip77(&mut core, &relay);
 
-    // Widening to a+b starts a live-first handoff; letting its liveness
-    // deadline expire parks an unlimited backlog REQ carrying both authors'
-    // coverage keys.
-    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+    // A later immutable b request starts its own live-first handoff; letting
+    // its liveness deadline expire parks an unlimited b-only backlog REQ.
+    let widened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1608,16 +1607,14 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         "the backlog fallback is unlimited, so its EOSE really does earn coverage"
     );
 
-    // Narrowing back to a-only supersedes that whole repair phase: the
-    // backlog REQ is closed and its attribution discarded, its EOSE still
-    // potentially in flight. Re-widening and expiring again re-derives the
-    // SAME role for the SAME plan id and the SAME filter.
+    // Withdrawing b closes that repair phase and discards its attribution.
+    // Reopening b creates a new plan/request incarnation.
     let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
     assert!(
         wire_closes(&narrowed, &relay).contains(&first_backlog),
         "narrowing must close the superseded backlog REQ: {narrowed:?}"
     );
-    let rewidened = core.handle(EngineMsg::Subscribe(literal_query(
+    let rewidened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -1683,10 +1680,11 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         "the reopened request's own EOSE must still record coverage -- \
          exact attribution, not dead attribution: {served:?}"
     );
-    assert!(core
-        .get_coverage(&atom_a, &relay)
-        .expect("coverage peek")
-        .is_some());
+    assert_eq!(
+        core.get_coverage(&atom_a, &relay).expect("coverage peek"),
+        None,
+        "b's independent backlog cannot credit a"
+    );
     assert!(core
         .get_coverage(&atom_b, &relay)
         .expect("coverage peek")
@@ -1709,26 +1707,26 @@ fn a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     let a_handle = subscribed_handle(&initial);
     connect_and_prove_nip77(&mut core, &relay);
 
-    let widened = core.handle(EngineMsg::Subscribe(literal_query(
+    let widened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
     let b_handle = subscribed_handle(&widened);
-    let candidate_ab = req_for(&widened, &relay).0.clone();
+    let candidate_b = req_for(&widened, &relay).0.clone();
     let opened = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
         },
         public_session(&relay),
-        eose_frame(&wire_sub_string(&candidate_ab)),
+        eose_frame(&wire_sub_string(&candidate_b)),
     ));
     assert!(
         opened
@@ -1737,21 +1735,18 @@ fn a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose() {
         "the candidate's own EOSE is the barrier that opens reconciliation"
     );
 
-    // Narrow to a-only: a replacement candidate goes out and is never
-    // acknowledged. Re-widening closes and discards it; narrowing again
-    // re-derives the identical role/plan/filter triple.
+    // Withdrawing b closes its candidate/reconciliation without rewriting
+    // a. Reopening b derives the same logical role under a fresh plan id.
     let narrowed = core.handle(EngineMsg::Unsubscribe(b_handle));
-    let candidate_a = req_for(&narrowed, &relay).0.clone();
-    let rewidened = core.handle(EngineMsg::Subscribe(literal_query(
+    assert!(wire_closes(&narrowed, &relay).contains(&candidate_b));
+    let rewidened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
-    let b_handle_again = subscribed_handle(&rewidened);
-    let narrowed_again = core.handle(EngineMsg::Unsubscribe(b_handle_again));
-    let reopened_candidate = req_for(&narrowed_again, &relay).0.clone();
+    let reopened_candidate = req_for(&rewidened, &relay).0.clone();
 
     assert_ne!(
-        reopened_candidate, candidate_a,
+        reopened_candidate, candidate_b,
         "a reopened live candidate must never reuse a closed candidate's \
          subscription id"
     );
@@ -1762,7 +1757,7 @@ fn a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose() {
             generation: 1,
         },
         public_session(&relay),
-        eose_frame(&wire_sub_string(&candidate_a)),
+        eose_frame(&wire_sub_string(&candidate_b)),
     ));
     assert!(
         !stale
@@ -1814,7 +1809,7 @@ fn a_refused_probe_returns_the_relay_to_unknown_and_retires_its_wire_id() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1890,14 +1885,14 @@ fn a_refused_neg_open_never_claims_the_request_and_falls_back_immediately() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     req_for(&initial, &relay);
     connect_and_prove_nip77(&mut core, &relay);
 
-    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+    let candidate = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
@@ -2000,14 +1995,14 @@ fn a_refused_neg_continue_falls_back_without_waiting_for_the_deadline() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let initial = core.handle(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     req_for(&initial, &relay);
     connect_and_prove_nip77(&mut core, &relay);
 
-    let candidate = core.handle(EngineMsg::Subscribe(literal_query(
+    let candidate = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));

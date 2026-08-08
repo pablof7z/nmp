@@ -158,7 +158,6 @@ impl<S: EventStore> EngineCore<S> {
         for branch in &branches {
             self.reconcile_observation_resolution(*branch, ResolutionCause::Initial, &mut effects);
         }
-        self.recompile(&mut effects);
         // The opening evidence frame reads coverage, so it can fail the same
         // way the canonical row projection above can (#763). It is the last
         // fallible step of the open, and it refuses the open rather than
@@ -175,18 +174,13 @@ impl<S: EventStore> EngineCore<S> {
                     let _delta = self.resolver.unsubscribe(*branch);
                     self.handles.remove(branch);
                 }
-                self.recompile(&mut effects);
-                self.refresh_all_observations(&mut effects);
-                self.refresh_all_histories(&mut effects);
                 self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
         };
-        // A wire-contributing query can change the capped greedy source plan
-        // for every existing query. A suppressed query leaves that plan
-        // untouched but still needs its initial cache/evidence frame.
-        self.refresh_all_observations_except(observation, &mut effects);
-        self.refresh_all_histories(&mut effects);
+        if self.wire_admission_needed() {
+            effects.push(Effect::ArmWireAdmission);
+        }
         let seed = self
             .apply_observation_projection(observation, current, evidence)
             .expect("a new observation has no prior projection and always yields one seed");
@@ -246,11 +240,7 @@ impl<S: EventStore> EngineCore<S> {
             let _delta = self.resolver.unsubscribe(branch);
             self.handles.remove(&branch);
         }
-        self.recompile(&mut effects);
-        // Removing one query can free capped-plan capacity and therefore
-        // change the planned sources of every surviving handle.
-        self.refresh_all_observations(&mut effects);
-        self.refresh_all_histories(&mut effects);
+        self.withdraw_wire_demand(&mut effects);
         effects
     }
 
@@ -265,7 +255,7 @@ impl<S: EventStore> EngineCore<S> {
     /// Ledger #8 remains structural: only a `ProbedRelay` token can enter
     /// [`Self::begin_neg_handoff`].
     pub(super) fn recompile(&mut self, effects: &mut Vec<Effect>) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "bench-instrumentation"))]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
         let demand = self.wire_demand();
@@ -283,6 +273,70 @@ impl<S: EventStore> EngineCore<S> {
         let wire_delta: WireDelta =
             self.router
                 .compile(&admitted_demand, &self.routing_facts, self.compile_budget());
+        self.apply_router_plan_delta(previous_plan, wire_delta, effects);
+    }
+
+    /// Compile exactly the currently-uncovered logical demand as one pending
+    /// cohort. Existing plan requests are coverage inputs, never merge or
+    /// identity candidates, so this transition cannot rewrite them.
+    pub(super) fn flush_wire_admission(&mut self) -> Vec<Effect> {
+        let demand = self.wire_demand();
+        let covered = Self::planned_demand_keys(self.router.plan());
+        let pending: BTreeSet<_> = demand
+            .iter()
+            .filter(|atom| {
+                let key = nmp_router::DemandKey::for_atom(atom);
+                !covered.contains(&key) || self.router.plan().limited_demands.contains(&key)
+            })
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            return Vec::new();
+        }
+
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.router_compiles
+            .set(self.router_compiles.get().saturating_add(1));
+        self.attribution.observe_demand(demand.iter());
+        self.attribution.prune_shapes(demand.iter());
+        let admitted = self.admit_projected_routing_evidence(&pending);
+        let previous_plan = self.router.plan().clone();
+        let budget = self.compile_budget();
+        let wire_delta = self.router.admit(&admitted, &self.routing_facts, budget);
+        let changed = Self::changed_plan_coverage(&previous_plan, self.router.plan());
+        let mut effects = Vec::new();
+        self.apply_router_plan_delta(previous_plan, wire_delta, &mut effects);
+        self.refresh_evidence_for_coverage_keys(&changed, &mut effects);
+        effects
+    }
+
+    pub(super) fn withdraw_wire_demand(&mut self, effects: &mut Vec<Effect>) {
+        let demand = self.wire_demand();
+        self.attribution.observe_demand(demand.iter());
+        self.attribution.prune_shapes(demand.iter());
+        let previous_plan = self.router.plan().clone();
+        let previous_diagnostics = self.router.diagnostics().clone();
+        let budget = self.compile_budget();
+        let wire_delta = self.router.withdraw(&demand, budget);
+        let changed = Self::changed_plan_coverage(&previous_plan, self.router.plan());
+        let plan_or_diagnostics_changed = !wire_delta.ops.is_empty()
+            || !changed.is_empty()
+            || self.router.diagnostics() != &previous_diagnostics;
+        if plan_or_diagnostics_changed {
+            self.apply_router_plan_delta(previous_plan, wire_delta, effects);
+            self.refresh_evidence_for_coverage_keys(&changed, effects);
+        }
+        if self.wire_admission_needed() {
+            effects.push(Effect::ArmWireAdmission);
+        }
+    }
+
+    fn apply_router_plan_delta(
+        &mut self,
+        previous_plan: RelayPlan,
+        wire_delta: WireDelta,
+        effects: &mut Vec<Effect>,
+    ) {
         let planned = &self.router.plan().reqs;
         // NIP-11 evidence is retained for any URL that appears as SOME
         // planned session's relay (#8): the document is per-URL evidence,
@@ -429,6 +483,105 @@ impl<S: EventStore> EngineCore<S> {
 
         if !kept.is_empty() {
             effects.push(Effect::Wire(WireDelta { ops: kept }));
+        }
+    }
+
+    fn planned_demand_keys(plan: &RelayPlan) -> BTreeSet<nmp_router::DemandKey> {
+        plan.reqs
+            .values()
+            .flatten()
+            .flat_map(|request| request.owners.iter().copied())
+            .collect()
+    }
+
+    pub(super) fn wire_admission_needed(&self) -> bool {
+        let covered = Self::planned_demand_keys(self.router.plan());
+        self.wire_demand().iter().any(|atom| {
+            let key = nmp_router::DemandKey::for_atom(atom);
+            !covered.contains(&key) || self.router.plan().limited_demands.contains(&key)
+        })
+    }
+
+    fn plan_coverage_assignments(
+        plan: &RelayPlan,
+    ) -> BTreeMap<CoverageKey, (bool, BTreeSet<(RelaySessionKey, SubId)>)> {
+        let mut assignments = BTreeMap::new();
+        for (session, requests) in &plan.reqs {
+            for request in requests {
+                for key in &request.absorbed {
+                    assignments
+                        .entry(*key)
+                        .or_insert_with(|| (false, BTreeSet::new()))
+                        .1
+                        .insert((session.clone(), request.sub_id.clone()));
+                }
+            }
+        }
+        for key in &plan.limited {
+            assignments
+                .entry(*key)
+                .or_insert_with(|| (false, BTreeSet::new()))
+                .0 = true;
+        }
+        assignments
+    }
+
+    fn changed_plan_coverage(previous: &RelayPlan, next: &RelayPlan) -> BTreeSet<CoverageKey> {
+        let previous = Self::plan_coverage_assignments(previous);
+        let next = Self::plan_coverage_assignments(next);
+        previous
+            .keys()
+            .chain(next.keys())
+            .filter(|key| previous.get(*key) != next.get(*key))
+            .copied()
+            .collect()
+    }
+
+    fn refresh_evidence_for_coverage_keys(
+        &mut self,
+        keys: &BTreeSet<CoverageKey>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if keys.is_empty() {
+            return;
+        }
+        let observations: BTreeSet<_> = self
+            .handles
+            .iter()
+            .filter_map(|(handle, state)| {
+                self.wire_atoms_for_handle(*handle, &state.acquisition)
+                    .iter()
+                    .any(|atom| keys.contains(&nmp_store::coverage_key(atom)))
+                    .then_some(state.observation)
+            })
+            .collect();
+        let histories: BTreeSet<_> = self
+            .histories
+            .iter()
+            .filter_map(|(history, state)| {
+                state
+                    .handle_ids
+                    .iter()
+                    .copied()
+                    .any(|handle| {
+                        let branch = state.branch_of.get(&handle).copied().unwrap_or_default();
+                        state
+                            .acquisitions_by_branch
+                            .get(branch)
+                            .is_some_and(|acquisition| {
+                                self.wire_atoms_for_handle(handle, acquisition)
+                                    .iter()
+                                    .any(|atom| keys.contains(&nmp_store::coverage_key(atom)))
+                            })
+                    })
+                    .then_some(*history)
+            })
+            .collect();
+        for id in observations {
+            self.refresh_observation_evidence(id, effects);
+        }
+        for id in histories {
+            self.refresh_history_evidence(id, effects);
         }
     }
 
@@ -1463,22 +1616,6 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    pub(super) fn refresh_all_observations_except(
-        &mut self,
-        except: ObservationId,
-        effects: &mut Vec<Effect>,
-    ) {
-        let ids: Vec<ObservationId> = self
-            .observations
-            .keys()
-            .copied()
-            .filter(|id| *id != except)
-            .collect();
-        for id in ids {
-            self.refresh_observation(id, effects);
-        }
-    }
-
     /// Refresh only acquisition evidence after a coverage-only mutation.
     /// Coverage cannot change canonical rows, so a complete projection can
     /// retain its remembered row set and avoid reopening the store's event
@@ -2193,7 +2330,7 @@ impl<S: EventStore> EngineCore<S> {
         let row_limit = effective_row_limit(&root_atoms);
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             self.projection_store_queries
                 .set(self.projection_store_queries.get().saturating_add(1));
             let filter = atom.to_nostr();

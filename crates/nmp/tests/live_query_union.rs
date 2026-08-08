@@ -69,6 +69,20 @@ fn core_over(store: MemoryStore) -> EngineCore<MemoryStore> {
     EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10)
 }
 
+/// Cross the explicit pending-admission boundary while keeping these
+/// headless falsifiers deterministic. The runtime owns the 30 ms timer; core
+/// tests drive the corresponding message directly.
+fn handle_and_flush<S: EventStore>(core: &mut EngineCore<S>, msg: EngineMsg) -> Vec<Effect> {
+    let mut effects = core.handle(msg);
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ArmWireAdmission))
+    {
+        effects.extend(core.handle(EngineMsg::FlushWireAdmission));
+    }
+    effects
+}
+
 fn selection() -> Filter {
     selection_of(KIND)
 }
@@ -242,10 +256,10 @@ fn branch_sources_are_never_flattened_into_one_pinned_set() {
     let (a, b) = (relay("a"), relay("b"));
     let mut core = core();
 
-    let effects = core.handle(EngineMsg::Subscribe(union_of(
-        [host_branch(&a), host_branch(&b)],
-        None,
-    )));
+    let effects = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(union_of([host_branch(&a), host_branch(&b)], None)),
+    );
     let id = observation(&effects);
     let mut projection = Projection::default();
     projection.apply(&effects, id);
@@ -305,7 +319,7 @@ fn equal_branches_keep_independent_evidence_entries() {
         "policy-distinct branches are not duplicates"
     );
 
-    let effects = core.handle(EngineMsg::Subscribe(query));
+    let effects = handle_and_flush(&mut core, EngineMsg::Subscribe(query));
     let id = observation(&effects);
     let mut projection = Projection::default();
     projection.apply(&effects, id);
@@ -354,7 +368,7 @@ fn per_branch_evidence_is_indexed_by_canonical_branch_order() {
             .collect();
 
         let mut core = core();
-        let effects = core.handle(EngineMsg::Subscribe(query.clone()));
+        let effects = handle_and_flush(&mut core, EngineMsg::Subscribe(query.clone()));
         let id = observation(&effects);
         let mut projection = Projection::default();
         projection.apply(&effects, id);
@@ -401,7 +415,7 @@ fn an_unplannable_branch_reports_its_own_shortfall() {
         .position(|branch| branch == &unroutable)
         .expect("the unroutable branch survives canonicalization");
 
-    let effects = core.handle(EngineMsg::Subscribe(query));
+    let effects = handle_and_flush(&mut core, EngineMsg::Subscribe(query));
     let id = observation(&effects);
     let mut projection = Projection::default();
     projection.apply(&effects, id);
@@ -443,18 +457,23 @@ fn rows_union_by_event_id_with_merged_provenance() {
     let both = store_event(&mut store, &keys, 200, "shared", &[&a, &b]);
     let mut core = core_over(store);
 
-    let effects = core.handle(EngineMsg::Subscribe(union_of(
-        [host_branch(&a), host_branch(&b)],
-        None,
-    )));
+    let effects = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(union_of([host_branch(&a), host_branch(&b)], None)),
+    );
     let id = observation(&effects);
     let mut projection = Projection::default();
     projection.apply(&effects, id);
 
     assert_eq!(
-        projection.frames, 1,
-        "one observation delivers ONE coherent frame for its whole branch set, \
-         never one frame per branch"
+        frames(&effects, id)
+            .into_iter()
+            .filter(|(deltas, _)| !deltas.is_empty())
+            .count(),
+        1,
+        "one observation delivers ONE coherent row frame for its whole branch \
+         set, never one frame per branch; the later evidence-only frame records \
+         completion of pending wire admission"
     );
     assert_eq!(
         projection.rows.keys().copied().collect::<BTreeSet<_>>(),
@@ -487,10 +506,10 @@ fn the_aggregate_bound_is_applied_after_the_union() {
     let older = store_event(&mut store, &keys, 199, "b-older", &[&b]);
     let mut core = core_over(store);
 
-    let effects = core.handle(EngineMsg::Subscribe(union_of(
-        [host_branch(&a), host_branch(&b)],
-        Some(2),
-    )));
+    let effects = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(union_of([host_branch(&a), host_branch(&b)], Some(2))),
+    );
     let id = observation(&effects);
     let mut projection = Projection::default();
     projection.apply(&effects, id);
@@ -538,10 +557,10 @@ fn a_reactive_change_moves_every_branch_in_one_frame() {
         .expect("a reactive pinned demand is constructible")
     };
 
-    let effects = core.handle(EngineMsg::Subscribe(union_of(
-        [reactive(&a), reactive(&b)],
-        None,
-    )));
+    let effects = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(union_of([reactive(&a), reactive(&b)], None)),
+    );
     let id = observation(&effects);
 
     let account = Keys::generate();
@@ -570,14 +589,17 @@ fn cancelling_a_union_keeps_work_a_sibling_observation_still_owns() {
     let (a, b) = (relay("a"), relay("b"));
     let mut core = core();
 
-    let composite = core.handle(EngineMsg::Subscribe(union_of(
-        [host_branch(&a), host_branch(&b)],
-        None,
-    )));
+    let composite = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(union_of([host_branch(&a), host_branch(&b)], None)),
+    );
     let composite_id = observation(&composite);
 
     // An unrelated observation independently requires branch A's exact demand.
-    let unrelated = core.handle(EngineMsg::Subscribe(LiveQuery::single(host_branch(&a))));
+    let unrelated = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(LiveQuery::single(host_branch(&a))),
+    );
     let unrelated_id = observation(&unrelated);
     assert_ne!(composite_id, unrelated_id);
 
@@ -681,11 +703,14 @@ fn a_window_bounds_the_union_globally() {
     }
     let mut core = core_over(store);
 
-    let effects = core.handle(EngineMsg::SubscribeHistory(HistoryQuery::new(
-        union_of([host_branch(&a), host_branch(&b)], None),
-        2,
-        6,
-    )));
+    let effects = handle_and_flush(
+        &mut core,
+        EngineMsg::SubscribeHistory(HistoryQuery::new(
+            union_of([host_branch(&a), host_branch(&b)], None),
+            2,
+            6,
+        )),
+    );
     let batch = effects
         .iter()
         .find_map(|effect| match effect {
@@ -772,10 +797,10 @@ fn only_the_branch_tells_two_identical_resolver_facts_apart() {
     // Two branches differing ONLY in pinned host: same selection, so both
     // resolve a byte-identical concrete filter at the same path, same
     // revision, same fingerprint, same cause.
-    let effects = core.handle(EngineMsg::Subscribe(union_of(
-        [host_branch(&a), host_branch(&b)],
-        None,
-    )));
+    let effects = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(union_of([host_branch(&a), host_branch(&b)], None)),
+    );
     let id = observation(&effects);
     let trace: Vec<&ObservationEvidence> = effects
         .iter()
@@ -1067,7 +1092,10 @@ fn a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed() {
     );
     // ...and hands relay "a" a REQ on the very next recompile, which an
     // unrelated observation over relay "c" forces.
-    let later = core.handle(EngineMsg::Subscribe(LiveQuery::single(host_branch(&c))));
+    let later = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(LiveQuery::single(host_branch(&c))),
+    );
     assert_eq!(
         requested_relays(&later),
         BTreeSet::from([c]),
@@ -1096,13 +1124,16 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
     let mut core =
         EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
 
-    let opened = core.handle(EngineMsg::Subscribe(union_of(
-        [
-            host_branch_of_kind(&a, KIND),
-            host_branch_of_kind(&b, OTHER_KIND),
-        ],
-        None,
-    )));
+    let opened = handle_and_flush(
+        &mut core,
+        EngineMsg::Subscribe(union_of(
+            [
+                host_branch_of_kind(&a, KIND),
+                host_branch_of_kind(&b, OTHER_KIND),
+            ],
+            None,
+        )),
+    );
     let id = observation(&opened);
     let mut projection = Projection::default();
     projection.apply(&opened, id);
@@ -1225,7 +1256,7 @@ fn each_redeclared_branch_decides_freshness_from_its_own_stored_coverage() {
         .iter()
         .position(|branch| branch == &max_age_branch(&a, &keys))
         .expect("the covered branch survives canonicalization");
-    let effects = restarted.handle(EngineMsg::Subscribe(query));
+    let effects = handle_and_flush(&mut restarted, EngineMsg::Subscribe(query));
 
     assert_eq!(
         requested_relays(&effects),

@@ -9,7 +9,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(literal_query(
+    core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -57,7 +57,7 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(literal_query(
+    core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[0],
         &a.public_key().to_hex(),
     )));
@@ -184,7 +184,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     let a = Keys::generate();
     let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(literal_query(
+    core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -202,7 +202,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
         Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::AwaitingSigner { pubkey }))
             if *rid == id && *pubkey == a.public_key()
     )));
-    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+    let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -391,7 +391,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     assert!(!all_row_deltas(&rejected)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == signed.id)));
-    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+    let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -405,7 +405,7 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
     let a = Keys::generate();
     let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(literal_query(
+    core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[0],
         &a.public_key().to_hex(),
     )));
@@ -467,7 +467,7 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
     assert!(all_row_deltas(&newest_cancel)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == base_id)));
-    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+    let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[0],
         &a.public_key().to_hex(),
     )));
@@ -485,7 +485,7 @@ fn expired_local_acceptance_is_refused_in_custody_with_no_side_effects() {
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
-    core.handle(EngineMsg::Subscribe(literal_query(
+    core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -891,7 +891,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     let a = Keys::generate();
     let mut core = EngineCore::new(FailOnceCompensationStore::new(), 10);
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(literal_query(
+    core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -916,7 +916,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
         receipt_statuses(&published).is_empty(),
         "the accepted write has learned nothing yet -- least of all a terminal"
     );
-    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+    let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -942,7 +942,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
     let a = Keys::generate();
     let mut core = EngineCore::new(FailOnceCompensationStore::new(), 10);
     activate(&mut core, &a);
-    core.handle(EngineMsg::Subscribe(literal_query(
+    core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -972,7 +972,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
         "the accepted write has learned nothing yet -- least of all a terminal"
     );
 
-    let fresh = core.handle(EngineMsg::Subscribe(literal_query(
+    let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
