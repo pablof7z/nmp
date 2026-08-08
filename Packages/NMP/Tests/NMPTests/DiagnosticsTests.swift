@@ -64,10 +64,9 @@ final class DiagnosticsTests: XCTestCase {
 
     /// Subscribing to a literal-author query with no author route or
     /// operator policy leaves the router with nowhere to route the atom.
-    /// The snapshot must
-    /// report zero relays (never a fabricated one) AND must count the
-    /// author as genuinely uncovered, both real numbers read off the
-    /// running engine.
+    /// Pending relay admission may make the immediate snapshot precede that
+    /// routing decision; the first settled snapshot must report zero relays
+    /// (never a fabricated one) AND count the author as genuinely uncovered.
     func testObserveDiagnosticsNeverFabricatesARelayForAnUnroutableAuthor() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
@@ -76,12 +75,16 @@ final class DiagnosticsTests: XCTestCase {
         let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([hexPubkey])))
 
         let diagnostics = try engine.observeDiagnostics()
-        let snapshot = await Self.firstSnapshot(from: diagnostics, timeoutSeconds: 5)
+        let snapshot = await Self.firstSnapshot(
+            from: diagnostics,
+            timeoutSeconds: 5,
+            matching: { $0.uncoveredAuthorCount == 1 }
+        )
         diagnostics.cancel()
         query.cancel()
 
         guard let snapshot else {
-            return XCTFail("expected an immediate diagnostics snapshot")
+            return XCTFail("expected relay admission to settle in diagnostics")
         }
 
         XCTAssertEqual(snapshot.relays.count, 0)
@@ -94,12 +97,14 @@ final class DiagnosticsTests: XCTestCase {
     /// Races the stream's first snapshot against a hard timeout so this test
     /// can never hang.
     private static func firstSnapshot(
-        from diagnostics: NMPDiagnostics, timeoutSeconds: UInt64
+        from diagnostics: NMPDiagnostics,
+        timeoutSeconds: UInt64,
+        matching predicate: @escaping @Sendable (DiagnosticsSnapshot) -> Bool = { _ in true }
     ) async -> DiagnosticsSnapshot? {
         await withTaskGroup(of: DiagnosticsSnapshot?.self) { group in
             group.addTask {
                 do {
-                    for try await snapshot in diagnostics {
+                    for try await snapshot in diagnostics where predicate(snapshot) {
                         return snapshot
                     }
                 } catch {

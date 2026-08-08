@@ -268,7 +268,7 @@ impl Study {
     fn subscribe(&mut self, relays: &[RelayUrl], label: &str) -> StepCount {
         let effects = self
             .core
-            .handle(EngineMsg::Subscribe(group_state_of_my_admin_groups(relays)));
+            .handle_and_flush(EngineMsg::Subscribe(group_state_of_my_admin_groups(relays)));
         self.ledger.record(label, &effects)
     }
 
@@ -801,7 +801,7 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
     let me = Keys::generate();
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
     let mut authors_ledger = WireLedger::for_kinds(&[1]);
-    let effects = core.handle(EngineMsg::Subscribe(posts_by_my_follows(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(posts_by_my_follows(
         std::slice::from_ref(&r0),
     )));
     authors_ledger.record("subscribe", &effects);
@@ -908,7 +908,7 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
     let me = Keys::generate();
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
 
-    core.handle(EngineMsg::Subscribe(posts_by_my_follows(
+    core.handle_and_flush(EngineMsg::Subscribe(posts_by_my_follows(
         std::slice::from_ref(&r0),
     )));
     let mut delivered_rows = 0usize;

@@ -147,7 +147,9 @@ fn core_with_relays(
 }
 
 fn subscribe<S: EventStore>(core: &mut EngineCore<S>, query: LiveQuery) -> Vec<Effect> {
-    core.handle(EngineMsg::Subscribe(query))
+    let mut effects = core.handle(EngineMsg::Subscribe(query));
+    effects.extend(core.handle(EngineMsg::FlushWireAdmission));
+    effects
 }
 
 fn reqs(effects: &[Effect]) -> usize {
@@ -217,13 +219,22 @@ fn wire_id(effects: &[Effect]) -> String {
 }
 
 fn initial(effects: &[Effect]) -> (ObservationId, Vec<RowDelta>, Vec<AcquisitionEvidence>) {
-    effects
+    let (id, rows, _) = effects
         .iter()
         .find_map(|effect| match effect {
             Effect::EmitRows(id, rows, evidence) => Some((*id, rows.clone(), evidence.clone())),
             _ => None,
         })
-        .unwrap()
+        .unwrap();
+    let evidence = effects
+        .iter()
+        .rev()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(effect_id, _, evidence) if *effect_id == id => Some(evidence.clone()),
+            _ => None,
+        })
+        .unwrap();
+    (id, rows, evidence)
 }
 
 fn record<S: EventStore>(store: &mut S, atom: &ContextualAtom, relay: &RelayUrl, through: u64) {

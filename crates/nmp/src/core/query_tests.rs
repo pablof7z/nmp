@@ -1484,7 +1484,7 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        let wire = wire_id(&opened);
+        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission));
         core.projection_store_queries.set(0);
 
         let effects = eose(&mut core, transport, session, wire);
@@ -1522,7 +1522,7 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        let wire = wire_id(&opened);
+        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission));
         let remembered = core.histories[&id].last_rows.clone();
         core.history_store_queries.set(0);
 

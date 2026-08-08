@@ -13,7 +13,7 @@ use crate::facts::{Lane, PublicKey};
 use crate::plan::RelayPlan;
 use crate::solver::Shortfall;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayDiagnostics {
     pub session: RelaySessionKey,
     /// Concurrent subscriptions currently open on this session. THE durable
@@ -42,7 +42,7 @@ pub struct RelayDiagnostics {
     pub subid_length_rejects_our_ids: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Diagnostics {
     pub per_session: BTreeMap<RelaySessionKey, RelayDiagnostics>,
     pub uncovered_authors: BTreeMap<PublicKey, Shortfall>,

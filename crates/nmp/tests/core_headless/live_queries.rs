@@ -9,7 +9,7 @@ fn subscribe_opens_wire_for_resolved_demand() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
     let mut core = new_core(dir);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -46,7 +46,7 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
     });
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
-    let _ = core.handle(EngineMsg::Subscribe(my_follows));
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(my_follows));
 
     // B's kind:1 post arrives UNSOLICITED (before B is ever followed) --
     // the store holds it, but it matches no handle's root atoms yet.
@@ -126,7 +126,7 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -226,7 +226,7 @@ fn limited_handle_projects_only_the_n_newest_of_m_matches() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle(EngineMsg::Subscribe(limited_literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(limited_literal_query(
         &[1],
         &a.public_key().to_hex(),
         3,
@@ -286,7 +286,7 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(Filter {
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Literal(BTreeSet::from([
             a.public_key().to_hex(),
@@ -335,7 +335,7 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle(EngineMsg::Subscribe(limited_literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(limited_literal_query(
         &[1],
         &a.public_key().to_hex(),
         2,
@@ -414,7 +414,7 @@ fn retracting_top_n_member_pulls_in_next_newest() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle(EngineMsg::Subscribe(limited_literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(limited_literal_query(
         &[1],
         &a.public_key().to_hex(),
         2,
@@ -497,7 +497,7 @@ fn unlimited_handle_projects_every_match() {
     connect(&mut core, 0, &relay0);
 
     // `literal_query` carries no limit (limit: None).
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -539,7 +539,7 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
     connect(&mut core, 0, &relay0);
 
     let atom = cf(&[3], &[&a.public_key().to_hex()]);
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[3],
         &a.public_key().to_hex(),
     )));
@@ -614,7 +614,7 @@ fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
     )
     .expect("Public over an author-bearing selection is legal (#106)");
 
-    let effects = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(demand)));
     let (sub_id, _f) = req_for(&effects, &relay0);
     let wire = wire_sub_string(sub_id);
 
@@ -668,7 +668,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
 
     // Seed the store: an ordinary AuthorOutboxes subscribe pulls the event
     // in from relay_other, giving it Row.sources == {relay_other}.
-    let outbox_effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let outbox_effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -710,7 +710,8 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     let mut strict_demand = agnostic_demand.clone();
     strict_demand.cache = nmp_grammar::CacheMode::Strict;
 
-    let effects_agnostic = core.handle(EngineMsg::Subscribe(LiveQuery::single(agnostic_demand)));
+    let effects_agnostic =
+        core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(agnostic_demand)));
 
     // Wire contacts ONLY the declared pinned relay for this new atom --
     // never relay_other (no re-req there at all: nothing about that atom
@@ -737,7 +738,8 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     // The Strict handle dedups onto the SAME graph/wire (no new Req at
     // relay_pinned), yet must NOT see the row: its provenance ({relay_other})
     // is disjoint from the pinned set ({relay_pinned}).
-    let effects_strict = core.handle(EngineMsg::Subscribe(LiveQuery::single(strict_demand)));
+    let effects_strict =
+        core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(strict_demand)));
     assert!(
         !effects_strict
             .iter()
@@ -820,7 +822,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     )
     .expect("nonempty pinned relay set is legal");
 
-    let effects1 = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand1)));
+    let effects1 = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(demand1)));
     let id1 = effects1
         .iter()
         .find_map(|e| match e {
@@ -837,7 +839,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
         "demand1's Pinned({{relay1}}) atom must never touch relay2"
     );
 
-    let effects2 = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand2)));
+    let effects2 = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(demand2)));
     let id2 = effects2
         .iter()
         .find_map(|e| match e {
@@ -912,7 +914,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
 // ---- the EOSE-overwrite-race rule (ruling §2) ---------------------------
 
 #[test]
-fn eose_overwrite_race_credits_only_the_intersection() {
+fn eose_for_one_immutable_request_credits_only_that_requests_demand() {
     let a = Keys::generate();
     let e_key = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
@@ -922,35 +924,29 @@ fn eose_overwrite_race_credits_only_the_intersection() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    // First subscribe: sends REQ(sub, {authors:{a}}) -- snapshot1 absorbs
-    // {h_a} only.
-    let effects1 = core.handle(EngineMsg::Subscribe(literal_query(
+    // First admission sends one immutable request for a.
+    let effects1 = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
     let (sub_id, _f) = req_for(&effects1, &relay0);
     let sub_id = sub_id.clone();
-    let wire = wire_sub_string(&sub_id);
+    let first_wire = wire_sub_string(&sub_id);
 
-    // Second subscribe (same skeleton, same relay): the union widens the
-    // SAME sub_id's filter to {a, e} -- an OVERWRITING REQ, snapshot2
-    // absorbs {h_a, h_e}, pushed onto the SAME FIFO alongside snapshot1.
-    let effects2 = core.handle(EngineMsg::Subscribe(literal_query(
+    // A later admission cannot rewrite it. It sends an independent request
+    // for e even though the relay and filter skeleton are compatible.
+    let effects2 = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &e_key.public_key().to_hex(),
     )));
     let (sub_id2, filter2) = req_for(&effects2, &relay0);
-    assert_eq!(sub_id2, &sub_id, "same skeleton must reuse the sub id");
+    assert_ne!(sub_id2, &sub_id, "a sent request is immutable");
     assert_eq!(
         filter2.authors,
-        Some(BTreeSet::from([
-            a.public_key().to_hex(),
-            e_key.public_key().to_hex()
-        ]))
+        Some(BTreeSet::from([e_key.public_key().to_hex()]))
     );
 
-    // A straggler EOSE for the sub now arrives, while BOTH snapshots are
-    // outstanding.
+    // EOSE is attributed by the immutable request id.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -958,7 +954,7 @@ fn eose_overwrite_race_credits_only_the_intersection() {
             generation: 1,
         },
         public_session(&relay0),
-        eose_frame(&wire),
+        eose_frame(&first_wire),
     ));
 
     let atom_a = cf(&[1], &[&a.public_key().to_hex()]);
@@ -967,16 +963,16 @@ fn eose_overwrite_race_credits_only_the_intersection() {
         core.get_coverage(&ctx_atom(atom_a.clone()), &relay0)
             .expect("coverage peek")
             .is_some(),
-        "a is in BOTH outstanding snapshots -- must be credited"
+        "the first request proves a"
     );
     assert!(
         core.get_coverage(&ctx_atom(atom_e.clone()), &relay0)
             .expect("coverage peek")
             .is_none(),
-        "e is only in the newer snapshot -- the straggler EOSE must NOT credit it"
+        "the first request cannot credit the independent e request"
     );
 
-    // The next EOSE (for the newer, still-outstanding snapshot) credits e.
+    // EOSE for the second request credits e.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(200u64)));
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -984,13 +980,13 @@ fn eose_overwrite_race_credits_only_the_intersection() {
             generation: 1,
         },
         public_session(&relay0),
-        eose_frame(&wire),
+        eose_frame(&wire_sub_string(sub_id2)),
     ));
     assert!(
         core.get_coverage(&ctx_atom(atom_e.clone()), &relay0)
             .expect("coverage peek")
             .is_some(),
-        "the second EOSE must credit the still-outstanding snapshot's atoms"
+        "the second request's EOSE must credit its own atom"
     );
 }
 
@@ -1010,7 +1006,7 @@ fn limited_fetch_never_records_coverage() {
         limit: Some(500),
         ..Filter::default()
     });
-    let effects = core.handle(EngineMsg::Subscribe(limited_query));
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(limited_query));
     let (sub_id, filter) = req_for(&effects, &relay0);
     assert_eq!(filter.limit, Some(500));
     let wire = wire_sub_string(sub_id);
@@ -1058,7 +1054,7 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let subscribed = core.handle(EngineMsg::Subscribe(literal_query(
+    let subscribed = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1071,7 +1067,7 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
         "withdrawing the only demand owner must close its request: {withdrawn:?}"
     );
 
-    let redemanded = core.handle(EngineMsg::Subscribe(literal_query(
+    let redemanded = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1137,7 +1133,7 @@ fn source_for<'a>(
 }
 
 fn evidence_from(effects: &[Effect], id: ObservationId) -> Option<&[AcquisitionEvidence]> {
-    effects.iter().find_map(|e| match e {
+    effects.iter().rev().find_map(|e| match e {
         Effect::EmitRows(hid, _, ev) if *hid == id => Some(ev.as_slice()),
         _ => None,
     })
@@ -1152,7 +1148,7 @@ fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
         ..Filter::default()
     });
 
-    let effects = core.handle(EngineMsg::Subscribe(unresolved));
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(unresolved));
     let evidence = effects
         .iter()
         .find_map(|effect| match effect {
@@ -1171,7 +1167,7 @@ fn resolved_atom_without_a_planned_relay_reports_no_planned_source() {
     let atom = cf(&[9999], &[&a.public_key().to_hex()]);
     let mut core = new_core(FixtureRoutingFacts::new());
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[9999],
         &a.public_key().to_hex(),
     )));
@@ -1197,7 +1193,7 @@ fn equal_evidence_on_reconnect_does_not_spuriously_emit_rows() {
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[9999],
         &a.public_key().to_hex(),
     )));
@@ -1231,7 +1227,7 @@ fn equal_evidence_on_reconnect_does_not_spuriously_emit_rows() {
 }
 
 #[test]
-fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
+fn later_handle_lifetimes_do_not_rewrite_a_surviving_incumbent() {
     let a = Keys::generate();
     let b = Keys::generate();
     let r1 = RelayUrl::parse("wss://r1.example.com").unwrap();
@@ -1242,7 +1238,7 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
         .with_outbound_routes(b.public_key(), [r1.clone(), r2.clone()]);
     let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 2);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[9999],
         &a.public_key().to_hex(),
     )));
@@ -1263,7 +1259,7 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
         BTreeSet::from([r2.clone(), r3.clone()])
     );
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[9999],
         &b.public_key().to_hex(),
     )));
@@ -1275,29 +1271,33 @@ fn surviving_handle_evidence_tracks_plan_changes_from_other_handle_lifetimes() {
         })
         .next()
         .expect("the second subscription must emit its own initial batch");
-    let a_while_b_is_live = evidence_from(&effects, a_id)
-        .expect("adding B changes A's capped current plan and must refresh A");
+    assert!(
+        evidence_from(&effects, a_id).is_none(),
+        "admitting B must not rewrite or re-emit A"
+    );
+    let b_while_live = evidence_from(&effects, b_id).expect("B receives admitted evidence");
     assert_eq!(
-        a_while_b_is_live[0]
+        b_while_live[0]
             .sources
             .iter()
             .map(|source| source.relay.clone())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([r2.clone()]),
-        "the shared r2 plus lexicographically earlier r1 exhaust the cap while B is live"
+        "B may use the incumbent r2 session but cannot displace A's r3 session"
     );
 
     let effects = core.handle(EngineMsg::Unsubscribe(b_id));
-    let a_after_b_is_removed = evidence_from(&effects, a_id)
-        .expect("removing B frees cap for r3 and must refresh surviving A");
-    assert_eq!(
-        a_after_b_is_removed[0]
-            .sources
-            .iter()
-            .map(|source| source.relay.clone())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([r2, r3])
+    assert!(
+        evidence_from(&effects, a_id).is_none(),
+        "withdrawing B must not re-emit unchanged A"
     );
+    let planned_relays: BTreeSet<_> = core
+        .diagnostics_snapshot()
+        .relays
+        .into_iter()
+        .map(|relay| relay.relay)
+        .collect();
+    assert_eq!(planned_relays, BTreeSet::from([r2, r3]));
 }
 
 /// The direct #12 fix falsifier: two independently-covering relays for the
@@ -1316,7 +1316,7 @@ fn per_source_evidence_reflects_each_relays_own_proof_independently() {
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1406,7 +1406,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
     });
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
-    let effects = core.handle(EngineMsg::Subscribe(my_follows));
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(my_follows));
     let id = effects
         .iter()
         .find_map(|e| match e {
@@ -1510,7 +1510,7 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1579,7 +1579,7 @@ fn stale_disconnect_cannot_erase_a_reopened_slot_generation() {
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1669,7 +1669,7 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1709,7 +1709,7 @@ fn permanently_failed_relay_never_re_ensures_and_records_terminal_diagnostics() 
     // not touch that path at all.
     let mut core_transient =
         new_core(FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]));
-    let _ = core_transient.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core_transient.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -1754,7 +1754,7 @@ fn set_active_pubkey_reroots_and_recompiles() {
     });
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
-    let effects = core.handle(EngineMsg::Subscribe(whoami));
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(whoami));
     req_for(&effects, &relay_a); // demand is currently for `a`.
 
     let effects = core.handle(EngineMsg::SetActivePubkey(Some(b.public_key())));

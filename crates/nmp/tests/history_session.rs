@@ -62,17 +62,28 @@ fn seeded(count: usize) -> (EngineCore<MemoryStore>, Keys, RelayUrl, Vec<Event>)
     )
 }
 
+fn handle_and_flush(core: &mut EngineCore<MemoryStore>, message: EngineMsg) -> Vec<Effect> {
+    let mut effects = core.handle(message);
+    effects.extend(core.handle(EngineMsg::FlushWireAdmission));
+    effects
+}
+
 fn returned(effects: &[Effect]) -> (HistorySessionId, HistoryBatch) {
     effects
         .iter()
-        .rev()
         .find_map(|effect| match effect {
-            Effect::EmitHistory(id, batch)
-                if matches!(batch.load, WindowLoad::Idle | WindowLoad::Returned { .. }) =>
-            {
+            Effect::EmitHistory(id, batch) if matches!(batch.load, WindowLoad::Returned { .. }) => {
                 Some((*id, batch.clone()))
             }
             _ => None,
+        })
+        .or_else(|| {
+            effects.iter().find_map(|effect| match effect {
+                Effect::EmitHistory(id, batch) if batch.load == WindowLoad::Idle => {
+                    Some((*id, batch.clone()))
+                }
+                _ => None,
+            })
         })
         .expect("window operation emits a current batch")
 }
@@ -126,7 +137,7 @@ fn assert_canonical_snapshot(batch: &HistoryBatch, max_rows: usize) {
 #[test]
 fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() {
     let (mut core, keys, relay, events) = seeded(13);
-    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
+    let opened = handle_and_flush(&mut core, EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
     let (id, first) = returned(&opened);
     assert_eq!(first.deltas.len(), 5);
     assert_eq!(first.rows.len(), 5);
@@ -140,7 +151,7 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
         effect,
         Effect::HistoryLoadResult(session, Ok(())) if *session == id
     )));
-    let second_effects = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let second_effects = handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
     let (_, second) = returned(&second_effects);
     assert_eq!(second.load, WindowLoad::Returned { added: 5 });
     assert_eq!(second.rows.len(), 10);
@@ -183,7 +194,7 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
             .iter()
             .any(|effect| matches!(effect, Effect::EmitHistory(session, _) if *session == id)));
         // No pending load and the window is unchanged.
-        assert!(core.handle(EngineMsg::CommitHistoryLoad(id)).is_empty());
+        assert!(handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id)).is_empty());
     }
 
     // Raise the target to the ceiling (13). The tie-second is already proven,
@@ -193,7 +204,7 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
         effect,
         Effect::HistoryLoadResult(session, Ok(())) if *session == id
     )));
-    let third_effects = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let third_effects = handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
     let (_, third) = returned(&third_effects);
     assert_eq!(third.load, WindowLoad::Returned { added: 3 });
     assert_eq!(third.rows.len(), 13);
@@ -213,7 +224,7 @@ fn coordinated_session_walks_three_same_second_pages_without_gap_or_duplicate() 
 fn at_bound_is_a_delivered_frame_fact_not_an_error() {
     let (mut core, keys, _relay, _events) = seeded(4);
     // initial == max == 4: the window opens already at its ceiling.
-    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 4, 4)));
+    let opened = handle_and_flush(&mut core, EngineMsg::SubscribeHistory(query(&keys, 4, 4)));
     let id = open(&opened);
 
     let at_bound = core.handle(EngineMsg::RequestRows(id, 10));
@@ -227,7 +238,7 @@ fn at_bound_is_a_delivered_frame_fact_not_an_error() {
         .any(|effect| matches!(effect, Effect::HistoryLoadResult(_, Err(_)))));
 
     // The AtBound beat is delivered through the normal staged commit path.
-    let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let committed = handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
     let beat = committed
         .iter()
         .find_map(|effect| match effect {
@@ -247,7 +258,7 @@ fn at_bound_is_a_delivered_frame_fact_not_an_error() {
 #[test]
 fn request_rows_during_in_flight_advance_converges_after_commit() {
     let (mut core, keys, _relay, _events) = seeded(13);
-    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
+    let opened = handle_and_flush(&mut core, EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
     let id = open(&opened);
 
     // Stage an advance toward 10, but do NOT commit yet.
@@ -266,7 +277,7 @@ fn request_rows_during_in_flight_advance_converges_after_commit() {
 
     // Committing the in-flight advance delivers its 10-row frame AND auto-stages
     // the continuation toward the raised target of 13.
-    let commit_one = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let commit_one = handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
     let (_, first) = returned(&commit_one);
     assert_eq!(first.rows.len(), 10);
     assert!(commit_one.iter().any(|effect| matches!(
@@ -275,13 +286,13 @@ fn request_rows_during_in_flight_advance_converges_after_commit() {
     )));
 
     // Committing the auto-staged continuation converges the window to 13.
-    let commit_two = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let commit_two = handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
     let (_, converged) = returned(&commit_two);
     assert_eq!(converged.rows.len(), 13);
     assert_eq!(converged.load, WindowLoad::Returned { added: 3 });
 
     // Fully converged: a further commit is a no-op.
-    assert!(core.handle(EngineMsg::CommitHistoryLoad(id)).is_empty());
+    assert!(handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id)).is_empty());
 }
 
 /// Unsubscribing a window releases every wire subscription the session placed
@@ -290,10 +301,10 @@ fn request_rows_during_in_flight_advance_converges_after_commit() {
 #[test]
 fn unsubscribe_releases_every_session_subscription() {
     let (mut core, keys, relay, _events) = seeded(13);
-    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
+    let opened = handle_and_flush(&mut core, EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
     let id = open(&opened);
     core.handle(EngineMsg::RequestRows(id, 10));
-    core.handle(EngineMsg::CommitHistoryLoad(id));
+    handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
 
     let withdrawn = core.handle(EngineMsg::UnsubscribeHistory(id));
     let closes = withdrawn
@@ -380,7 +391,10 @@ fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
         FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay.clone()]);
     let mut core = EngineCore::new_with_fixture_routing_facts(store, directory, 10);
 
-    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 1000)));
+    let opened = handle_and_flush(
+        &mut core,
+        EngineMsg::SubscribeHistory(query(&keys, 5, 1000)),
+    );
     let id = open(&opened);
 
     let mut live_subs = BTreeSet::new();
@@ -396,7 +410,7 @@ fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
         // Drive the auto-staged continuation to convergence, exactly as the
         // runtime commit loop does, folding every advance's wire ops.
         loop {
-            let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+            let committed = handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
             if committed.is_empty() {
                 break;
             }
@@ -439,13 +453,13 @@ fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
 fn dense_boundary_tie_subscription_survives_same_second_advances() {
     // 13 rows all at second 100: every advance keeps second 100 the boundary.
     let (mut core, keys, relay, _events) = seeded(13);
-    let opened = core.handle(EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
+    let opened = handle_and_flush(&mut core, EngineMsg::SubscribeHistory(query(&keys, 5, 13)));
     let id = open(&opened);
 
     // First advance opens the tie-second REQ for second 100 (since==until==100,
     // no limit) alongside an older-range REQ. Capture the tie subscription id.
     core.handle(EngineMsg::RequestRows(id, 10));
-    let first = core.handle(EngineMsg::CommitHistoryLoad(id));
+    let first = handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
     let tie_sub = first
         .iter()
         .filter_map(|effect| match effect {
@@ -493,7 +507,7 @@ fn dense_boundary_tie_subscription_survives_same_second_advances() {
     };
     scan(&staged);
     loop {
-        let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
+        let committed = handle_and_flush(&mut core, EngineMsg::CommitHistoryLoad(id));
         if committed.is_empty() {
             break;
         }

@@ -1,10 +1,9 @@
-//! [`Router`] — the entry point (M2 plan §2.7, §4.1). Full-recompile-then-
-//! diff, not delta-threading: `compile` recomputes the whole per-relay plan
-//! from the engine's CURRENT demand set each call, diffs it against the
-//! previous plan, stores the new plan + diagnostics, and returns the
-//! surgical wire delta. This also discharges M1 nit #2 by construction: a
-//! withdrawn atom simply vanishes from `demand`, so the next `compile`
-//! emits its `Close` (see `dropped_handle_close_reaches_wire`, test 15).
+//! [`Router`] — the per-relay planning owner (M2 plan §2.7, §4.1).
+//! [`Router::compile`] is the whole-demand invalidation path for changed
+//! routing facts or reactive roots. Ordinary app opens use
+//! [`Router::admit`]: compile one unsent cohort without rewriting running
+//! requests. Both paths share the same routing/coalescing compiler and wire
+//! token namespace.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +17,7 @@ use crate::budget::CompileBudget;
 use crate::coalesce::RuleRegistry;
 use crate::diag::{self, Diagnostics};
 use crate::facts::{PublicKey, RelayUrl, RoutingFacts};
-use crate::plan::{diff_plans, BudgetShortfall, RelayPlan, SubId, WireDelta, WireReq};
+use crate::plan::{diff_plans, BudgetShortfall, DemandKey, RelayPlan, SubId, WireDelta, WireReq};
 use crate::route::{self, AtomClass, RouteKind, RouteProvenance, Skeleton};
 use crate::solver::{self, CoverageInput, Shortfall, ShortfallReason};
 use crate::wire_id;
@@ -52,9 +51,13 @@ fn apply_global_relay_cap(
     bag: &mut SessionBag,
     cap: usize,
     uncovered_authors: &mut BTreeMap<PublicKey, Shortfall>,
-) -> (BTreeSet<CoverageKey>, BTreeSet<RelaySessionKey>) {
+) -> (
+    BTreeSet<CoverageKey>,
+    BTreeSet<DemandKey>,
+    BTreeSet<RelaySessionKey>,
+) {
     if bag.len() <= cap {
-        return (BTreeSet::new(), BTreeSet::new());
+        return (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
     }
 
     let mut ranked: Vec<(RelaySessionKey, usize)> = bag
@@ -84,11 +87,17 @@ fn apply_global_relay_cap(
         .collect();
 
     let mut limited = BTreeSet::new();
+    let mut limited_demands = BTreeSet::new();
     let mut cap_limited_authors = BTreeSet::new();
     for session in &refused {
         if let Some(by_source) = bag.get(session) {
-            for (_, provenance, absorbed) in by_source.values().flatten() {
+            for (filter, provenance, absorbed) in by_source.values().flatten() {
                 limited.extend(absorbed.iter().copied());
+                limited_demands.extend(
+                    absorbed
+                        .iter()
+                        .map(|key| DemandKey::from_filter(*key, filter)),
+                );
                 for route in provenance {
                     if route.route_kind == RouteKind::Coverage {
                         cap_limited_authors.extend(route.covers_authors.iter().cloned());
@@ -131,7 +140,7 @@ fn apply_global_relay_cap(
     }
 
     bag.retain(|session, _| selected.contains(session));
-    (limited, refused)
+    (limited, limited_demands, refused)
 }
 
 /// Cut `session_reqs` down to `allowed` subscriptions, returning the ones
@@ -211,8 +220,8 @@ fn push_routes(
 
 pub struct Router {
     rules: RuleRegistry,
-    prev_plan: RelayPlan,
-    last_diag: Diagnostics,
+    pub(crate) prev_plan: RelayPlan,
+    pub(crate) last_diag: Diagnostics,
     /// Monotonic wire-token mint counter (#899). Never reset and never
     /// rewound, so no token is recycled within this `Router`'s lifetime.
     /// Deliberately NOT seeded randomly: the whole crate is a pure function of
@@ -236,9 +245,10 @@ impl Router {
         }
     }
 
-    /// THE entry point. Recompile the whole per-relay plan from `demand`,
-    /// diff vs the previous plan, store the new plan + diagnostics, return
-    /// the surgical wire delta.
+    /// Recompile the whole per-relay plan from `demand`, diff vs the previous
+    /// plan, store the new plan + diagnostics, and return the surgical wire
+    /// delta. Use this when existing demand may genuinely need rerouting;
+    /// ordinary pending app admission uses [`Self::admit`].
     ///
     /// `budget` carries every bound this compile plans within
     /// ([`CompileBudget`]): the operator's whole-demand relay ceiling, and
@@ -493,7 +503,7 @@ impl Router {
         // materialized bag. Nothing removed here can reach coalescing, the
         // plan, or the wire; its contextual coverage keys remain as exact
         // local-limit evidence.
-        let (mut limited, mut refused_sessions) =
+        let (mut limited, mut limited_demands, mut refused_sessions) =
             apply_global_relay_cap(&mut bag, budget.relay_cap(), &mut uncovered_authors);
 
         // Step 5 + 6: per relay, PER CONTEXT PARTITION, dedup + widen-only
@@ -550,12 +560,19 @@ impl Router {
                 });
 
                 session_reqs.extend(merged.into_iter().zip(assigned).map(
-                    |((filter, provenance, absorbed), sub_id)| WireReq {
-                        sub_id,
-                        filter,
-                        source: source.clone(),
-                        provenance,
-                        absorbed,
+                    |((filter, provenance, absorbed), sub_id)| {
+                        let owners = absorbed
+                            .iter()
+                            .map(|key| DemandKey::from_filter(*key, &filter))
+                            .collect();
+                        WireReq {
+                            sub_id,
+                            filter,
+                            source: source.clone(),
+                            provenance,
+                            absorbed,
+                            owners,
+                        }
                     },
                 ));
             }
@@ -582,6 +599,7 @@ impl Router {
                     );
                     for req in &refused {
                         limited.extend(req.absorbed.iter().copied());
+                        limited_demands.extend(req.owners.iter().copied());
                     }
                     subscription_shortfalls.insert(
                         session.clone(),
@@ -629,6 +647,7 @@ impl Router {
         let next_plan = RelayPlan {
             reqs,
             limited,
+            limited_demands,
             refused_sessions,
             subscription_shortfalls,
         };

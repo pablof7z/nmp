@@ -9,7 +9,7 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
     let session = signer_session(&relay, signer.public_key());
     let mut core = new_core(FixtureRoutingFacts::new());
 
-    let first = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+    let first = core.handle_and_flush(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
         signer.public_key(),
         1,
@@ -34,7 +34,7 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
     let connected = core.handle(EngineMsg::RelayConnected(generation_one, session.clone()));
     assert_no_protected_req(&connected, &session);
 
-    let second = core.handle(EngineMsg::Subscribe(protected_pinned_query(
+    let second = core.handle_and_flush(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
         signer.public_key(),
         2,

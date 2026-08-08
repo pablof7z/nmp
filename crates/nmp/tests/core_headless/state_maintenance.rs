@@ -18,7 +18,7 @@ fn root_query_emits_removed_on_delete() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -78,7 +78,7 @@ fn expiry_emits_removed_via_manual_tick() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -141,7 +141,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
         "a fresh core tracks no expiring events and no open neg session"
     );
 
-    let _ = core.handle(EngineMsg::Subscribe(literal_query(
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
@@ -186,7 +186,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
         public_session(&relay0),
         neg_msg_frame(&probe_wire, "6100"),
     ));
-    let effects = core.handle(EngineMsg::Subscribe(literal_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));

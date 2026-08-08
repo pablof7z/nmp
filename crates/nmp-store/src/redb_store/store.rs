@@ -89,6 +89,10 @@ pub struct RedbStore {
     /// Canonical binary event values dereferenced for borrowed post-filtering.
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) query_event_values: AtomicU64,
+    /// Coverage-table point reads, kept separate from event projection work
+    /// so lifecycle benchmarks can attribute diagnostics cost exactly.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) coverage_reads: AtomicU64,
     /// Benchmark-only ceiling: governed commits skip persistence barriers.
     /// Ordinary builds cannot construct a store with this set.
     #[cfg(feature = "bench-instrumentation")]
@@ -561,6 +565,8 @@ impl RedbStore {
             query_index_rows: AtomicU64::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             query_event_values: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            coverage_reads: AtomicU64::new(0),
             #[cfg(feature = "bench-instrumentation")]
             benchmark_durability: _benchmark_durability,
             #[cfg(test)]
@@ -653,6 +659,16 @@ impl RedbStore {
             self.query_event_values.load(Ordering::Relaxed),
             self.examined_rows.load(Ordering::Relaxed),
         )
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub fn reset_coverage_reads(&self) {
+        self.coverage_reads.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub fn coverage_reads(&self) -> u64 {
+        self.coverage_reads.load(Ordering::Relaxed)
     }
 
     /// The current coverage-key schema prefix, mirroring `CoverageKey`'s own
