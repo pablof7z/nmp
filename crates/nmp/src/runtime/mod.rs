@@ -7,9 +7,9 @@
 //!   thread — see `engine_loop`'s doc and
 //!   `docs/design/retraction-and-negative-deltas.md` §3.3, #39): with no
 //!   deadline pending it blocks on plain `recv()`; with one pending it
-//!   `recv_timeout`s exactly until `core::EngineCore::next_deadline()`, and a
-//!   timeout dispatches `EngineMsg::Tick` (NIP-40 expiry + the neg-liveness
-//!   sweep) before re-arming from the freshly-recomputed deadline — for
+//!   `recv_timeout`s exactly until the earliest reducer, NIP-11, or pending
+//!   wire-admission deadline. A timeout dispatches only the due owner before
+//!   re-arming from the freshly-recomputed minimum — for
 //!   every command it calls `EngineCore::handle`/`::tick` and dispatches the
 //!   returned `core::Effect`s to `nmp_transport::Pool::send`, the
 //!   `nmp_signer` capability, and the app-facing channels;
@@ -126,6 +126,7 @@ pub use row_channel::{AsyncRowsReceiver, RowsReceiver};
 /// one-shot grace window, not polling; the eventual document still updates
 /// diagnostics/cache after the behavioral probe has begun.
 const NIP11_DECISION_GRACE: Duration = Duration::from_millis(250);
+const WIRE_ADMISSION_WINDOW: Duration = Duration::from_millis(30);
 
 #[derive(Clone)]
 struct EnginePoolSink {
@@ -2960,7 +2961,8 @@ mod relay_worker_reconciliation_tests {
         let signer = Keys::generate().public_key();
         let protected_read = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
         let mut core = EngineCore::new(MemoryStore::new(), 1);
-        let effects = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
+        let mut effects = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
+        effects.extend(core.handle(EngineMsg::FlushWireAdmission));
         assert!(effects.iter().any(
             |effect| matches!(effect, Effect::EnsureReadRelay(session) if session == &protected_read)
         ));
@@ -3007,6 +3009,7 @@ mod relay_worker_reconciliation_tests {
             .unwrap();
         let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let wire_admission = RefCell::new(WireAdmissionState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
@@ -3017,6 +3020,7 @@ mod relay_worker_reconciliation_tests {
             relay_information: &relay_information,
             runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
+            wire_admission: &wire_admission,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
@@ -3024,7 +3028,7 @@ mod relay_worker_reconciliation_tests {
             nip65: &nip65,
         };
 
-        let first = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
+        let mut first = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
         let first_id = first
             .iter()
             .find_map(|effect| match effect {
@@ -3032,6 +3036,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("first subscription handle");
+        first.extend(core.handle(EngineMsg::FlushWireAdmission));
         assert_eq!(
             first
                 .iter()
@@ -3060,7 +3065,7 @@ mod relay_worker_reconciliation_tests {
             .expect("ordinary effect dispatch opens the protected worker");
         assert_eq!(pool.live_session_handle(&session), Some(first_transport));
 
-        let second = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 2)));
+        let mut second = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 2)));
         let second_id = second
             .iter()
             .find_map(|effect| match effect {
@@ -3068,6 +3073,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("second subscription handle");
+        second.extend(core.handle(EngineMsg::FlushWireAdmission));
         dispatch_core_effects(
             &mut core,
             second,
@@ -3132,6 +3138,7 @@ mod relay_worker_reconciliation_tests {
             .unwrap();
         let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let wire_admission = RefCell::new(WireAdmissionState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
@@ -3142,6 +3149,7 @@ mod relay_worker_reconciliation_tests {
             relay_information: &relay_information,
             runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
+            wire_admission: &wire_admission,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
@@ -3157,6 +3165,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("protected subscription handle");
+        core.handle(EngineMsg::FlushWireAdmission);
 
         dispatch_relay_open_failure(
             &mut core,
@@ -3291,6 +3300,7 @@ mod relay_worker_reconciliation_tests {
             .unwrap();
         let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let wire_admission = RefCell::new(WireAdmissionState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
@@ -3301,6 +3311,7 @@ mod relay_worker_reconciliation_tests {
             relay_information: &relay_information,
             runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
+            wire_admission: &wire_admission,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
@@ -3308,7 +3319,7 @@ mod relay_worker_reconciliation_tests {
             nip65: &nip65,
         };
 
-        let first = core.handle(EngineMsg::Subscribe(query(&author_a)));
+        let mut first = core.handle(EngineMsg::Subscribe(query(&author_a)));
         let first_id = first
             .iter()
             .find_map(|effect| match effect {
@@ -3316,6 +3327,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("subscription emits its initial rows");
+        first.extend(core.handle(EngineMsg::FlushWireAdmission));
         dispatch_core_effects(
             &mut core,
             first,
@@ -3344,7 +3356,8 @@ mod relay_worker_reconciliation_tests {
             "a relay with no read or write owner must release its slot"
         );
 
-        let replacement = core.handle(EngineMsg::Subscribe(query(&author_b)));
+        let mut replacement = core.handle(EngineMsg::Subscribe(query(&author_b)));
+        replacement.extend(core.handle(EngineMsg::FlushWireAdmission));
         dispatch_core_effects(
             &mut core,
             replacement,
@@ -3428,6 +3441,7 @@ mod relay_worker_reconciliation_tests {
             .unwrap();
         let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+        let wire_admission = RefCell::new(WireAdmissionState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
@@ -3438,6 +3452,7 @@ mod relay_worker_reconciliation_tests {
             relay_information: &relay_information,
             runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
+            wire_admission: &wire_admission,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
@@ -3903,11 +3918,37 @@ struct DispatchRuntime<'a> {
     relay_information: &'a RelayInformationService,
     runtime: &'a tokio::runtime::Handle,
     nip11_decisions: &'a RefCell<Nip11DecisionState>,
+    wire_admission: &'a RefCell<WireAdmissionState>,
     auth_policies: &'a RefCell<auth::AuthPolicyRegistry>,
     auth_tasks: &'a RefCell<auth::AuthTaskRegistry>,
     receipt_deliveries: &'a RefCell<ReceiptDeliveryRegistry>,
     #[cfg(feature = "nip65")]
     nip65: &'a RefCell<crate::nip65::RuntimeAssembly>,
+}
+
+#[derive(Default)]
+struct WireAdmissionState {
+    deadline: Option<Instant>,
+}
+
+impl WireAdmissionState {
+    fn arm(&mut self, now: Instant) {
+        if self.deadline.is_none() {
+            self.deadline = Some(now + WIRE_ADMISSION_WINDOW);
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if !self.deadline.is_some_and(|deadline| deadline <= now) {
+            return false;
+        }
+        self.deadline = None;
+        true
+    }
 }
 
 #[derive(Default)]
@@ -4006,6 +4047,32 @@ mod nip11_decision_tests {
     }
 }
 
+#[cfg(test)]
+mod wire_admission_tests {
+    use super::*;
+
+    #[test]
+    fn window_is_anchored_to_first_arrival_and_rearms_for_the_next_cohort() {
+        let now = Instant::now();
+        let first_deadline = now + WIRE_ADMISSION_WINDOW;
+        let mut state = WireAdmissionState::default();
+
+        state.arm(now);
+        state.arm(now + WIRE_ADMISSION_WINDOW - Duration::from_millis(1));
+
+        assert_eq!(state.next_deadline(), Some(first_deadline));
+        assert!(!state.take_due(first_deadline - Duration::from_nanos(1)));
+        assert!(state.take_due(first_deadline));
+        assert_eq!(state.next_deadline(), None);
+
+        state.arm(first_deadline + Duration::from_millis(1));
+        assert_eq!(
+            state.next_deadline(),
+            Some(first_deadline + Duration::from_millis(1) + WIRE_ADMISSION_WINDOW)
+        );
+    }
+}
+
 /// The three wires the engine thread owns, and the one thing they have in
 /// common: each is a way for something OUTSIDE the reducer to reach it. The
 /// commands an app sends (`cmd_rx`), the ones the runtime posts to itself
@@ -4026,11 +4093,11 @@ struct EngineWiring<'a> {
 /// `cmd_rx` (D8) until `Cmd::Shutdown`.
 ///
 /// The deadline-armed driver (§3.3, #39): every iteration re-reads the core
-/// and NIP-11 decision deadlines, then waits for their exact minimum. A
-/// command that introduces an earlier deadline re-arms naturally on the next
-/// iteration; there is no polling or sleeper. `None` blocks on plain
-/// `recv()`. A timeout fires only the due owners: reducer `Tick` for
-/// persisted deadlines and/or NIP-11 fallback, then recomputes the minimum.
+/// plus the NIP-11 and wire-admission deadlines, then waits for their exact
+/// minimum. A command that introduces an earlier deadline re-arms naturally
+/// on the next iteration; there is no polling or sleeper. `None` blocks on
+/// plain `recv()`. A timeout fires only the due owners, then recomputes the
+/// minimum.
 fn engine_loop<S>(
     store: S,
     routing_facts: crate::core::RoutingFactStore,
@@ -4083,11 +4150,13 @@ fn engine_loop<S>(
     let mut next_sign_event_id = 1u64;
     let mut sign_event_cancellations: HashMap<u64, ActiveSignEvent> = HashMap::new();
     let nip11_decisions = RefCell::new(Nip11DecisionState::default());
+    let wire_admission = RefCell::new(WireAdmissionState::default());
     let dispatch_runtime = DispatchRuntime {
         self_inbox,
         relay_information: &relay_information,
         runtime: runtime_handle,
         nip11_decisions: &nip11_decisions,
+        wire_admission: &wire_admission,
         auth_policies: &auth_policies,
         auth_tasks: &auth_tasks,
         receipt_deliveries: &receipt_deliveries,
@@ -4141,10 +4210,17 @@ fn engine_loop<S>(
             .borrow()
             .next_deadline()
             .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let wire_admission_wait = wire_admission
+            .borrow()
+            .next_deadline()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
         let wait = if shutting_down {
             None
         } else {
-            [core_wait, nip11_wait].into_iter().flatten().min()
+            [core_wait, nip11_wait, wire_admission_wait]
+                .into_iter()
+                .flatten()
+                .min()
         };
         let cmd = match wait {
             None => match cmd_rx.recv() {
@@ -4162,6 +4238,19 @@ fn engine_loop<S>(
                         .take_due_fallbacks(Instant::now())
                     {
                         let effects = core.handle(EngineMsg::RelayInformationResolved(url, None));
+                        dispatch_core_effects(
+                            &mut core,
+                            effects,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                    }
+                    if wire_admission.borrow_mut().take_due(Instant::now()) {
+                        let effects = core.handle(EngineMsg::FlushWireAdmission);
                         dispatch_core_effects(
                             &mut core,
                             effects,
@@ -5658,6 +5747,9 @@ fn dispatch_effect(
     runtime: DispatchRuntime<'_>,
 ) {
     match effect {
+        Effect::ArmWireAdmission => {
+            runtime.wire_admission.borrow_mut().arm(Instant::now());
+        }
         Effect::AuthorRouteNeedsChanged(needs) => {
             #[cfg(feature = "nip65")]
             {

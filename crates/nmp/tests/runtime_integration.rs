@@ -521,13 +521,64 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     relay_b.shutdown();
 }
 
-/// #1075: one accepted `(session, sub-id, filter, transport generation)`
-/// remains the live wire owner until replacement, close, or disconnect.
-/// Recompiling the same plan cannot make the relay rescan it, while a changed
-/// filter still replaces in place and a fresh connection generation replays
-/// the current request exactly once.
+/// #1341: the production runtime, not a caller-side sleep, owns the short
+/// first-arrival-anchored admission deadline. Two compatible queries issued
+/// back-to-back must reach the relay as one combined request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unchanged_same_generation_req_is_suppressed_and_reconnect_replays_once() {
+async fn runtime_admission_deadline_groups_a_rapid_query_burst() {
+    let relay_config = RelayConfig {
+        advertised_limits: Some(AdvertisedLimits::default()),
+        ..RelayConfig::default()
+    };
+    let relay = ScriptedRelay::start(&relay_config).await;
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        10,
+        PoolConfig::default(),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
+    )
+    .expect("spawn runtime");
+
+    let (alice, _alice_rows) = handle
+        .subscribe(pinned_tag_value(&relay.url, "alice"))
+        .expect("open first pending query");
+    let (bob, _bob_rows) = handle
+        .subscribe(pinned_tag_value(&relay.url, "bob"))
+        .expect("join second pending query to the same cohort");
+
+    relay
+        .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
+        .await;
+    let record = relay.wire_record();
+    let requests = record.reqs_naming_tag('p');
+    assert_eq!(
+        requests.len(),
+        1,
+        "the runtime deadline must admit the rapid compatible burst once: {record:#?}"
+    );
+    assert_eq!(
+        requests[0].tag_values('p'),
+        BTreeSet::from(["alice".to_string(), "bob".to_string()]),
+        "the one admitted request must cover every pending value"
+    );
+
+    handle.unsubscribe(alice);
+    handle.unsubscribe(bob);
+    handle.shutdown();
+    engine_thread.join();
+    relay.shutdown();
+}
+
+/// #1075/#1341: one accepted `(session, sub-id, filter, transport generation)`
+/// remains immutable until close or disconnect. A later admission cohort may
+/// reuse exact existing coverage or open a sibling request, but cannot rewrite
+/// an accepted request. A fresh connection generation replays every current
+/// request exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     let relay_config = RelayConfig {
         // Explicit NIP-11 evidence that NIP-77 is unsupported keeps this
         // NIP-01 ownership test out of capability-probe handoffs.
@@ -580,9 +631,9 @@ async fn unchanged_same_generation_req_is_suppressed_and_reconnect_replays_once(
         "the dialing-generation handoff is the original request, not a replay"
     );
 
-    let (second, _second_rows) = handle
+    let (second, second_rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "bob"))
-        .expect("widen the current request");
+        .expect("open a later admission cohort");
     relay
         .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
         .await;
@@ -591,40 +642,40 @@ async fn unchanged_same_generation_req_is_suppressed_and_reconnect_replays_once(
     assert_eq!(
         widened_reqs.len(),
         2,
-        "a changed filter must produce exactly one replacement REQ: {widened:#?}"
+        "later uncovered demand must produce exactly one sibling REQ: {widened:#?}"
     );
-    assert_eq!(
+    assert_ne!(
         widened_reqs[0].sub_id, widened_reqs[1].sub_id,
-        "the stable router id must replace in place"
+        "an accepted request is immutable; a later cohort gets a sibling id"
     );
     assert!(
-        widened_reqs[1].replaces,
-        "the changed filter must replace the live request, not open a sibling"
+        !widened_reqs[1].replaces,
+        "ordinary later demand must not replace an already-sent request"
     );
     assert!(
         widened.redundant_reqs().is_empty(),
         "no byte-identical request may be resent on the unchanged generation: \
          {widened:#?}"
     );
-    let replacement_evidence = drain_relay_request_evidence(&first_rows);
+    let second_evidence = drain_relay_request_evidence(&second_rows);
     assert_eq!(
-        replacement_evidence.len(),
+        second_evidence.len(),
         1,
-        "one changed replacement must mint exactly one new request incarnation: \
-         {replacement_evidence:#?}"
+        "one later cohort must mint exactly one sibling request incarnation: \
+         {second_evidence:#?}"
     );
-    assert!(!replacement_evidence[0].2);
+    assert!(!second_evidence[0].2);
     assert_eq!(
-        replacement_evidence[0].0, initial_evidence[0].0,
-        "a changed filter replaces on the same transport generation"
+        second_evidence[0].0, initial_evidence[0].0,
+        "the sibling opens on the same transport generation"
     );
     assert_ne!(
-        replacement_evidence[0].1, initial_evidence[0].1,
-        "a real replacement owns a fresh request revision"
+        second_evidence[0].1, initial_evidence[0].1,
+        "independent requests own independent revisions"
     );
     assert_ne!(
-        replacement_evidence[0].3, initial_evidence[0].3,
-        "only a genuinely changed filter may replace the live request"
+        second_evidence[0].3, initial_evidence[0].3,
+        "the sibling request carries only its own cohort's filter"
     );
 
     let relay_port = relay.port();
@@ -640,33 +691,46 @@ async fn unchanged_same_generation_req_is_suppressed_and_reconnect_replays_once(
     let replay = replacement.wire_record();
     assert_eq!(
         replay.reqs_naming_tag('p').len(),
-        1,
-        "the fresh generation must receive exactly one replay: {replay:#?}"
+        2,
+        "the fresh generation must replay both immutable requests once: {replay:#?}"
     );
     assert!(
         replay.redundant_reqs().is_empty(),
         "reconnect replay itself must have one owner: {replay:#?}"
     );
-    let replay_evidence = drain_relay_request_evidence(&first_rows);
+    let mut replay_evidence = drain_relay_request_evidence(&first_rows);
+    replay_evidence.extend(drain_relay_request_evidence(&second_rows));
     assert_eq!(
         replay_evidence.len(),
-        1,
-        "one reconnect wire REQ must mint exactly one replay incarnation: \
+        2,
+        "two current wire REQs must mint exactly two replay incarnations: \
          {replay_evidence:#?}"
     );
-    assert!(replay_evidence[0].2);
-    assert_ne!(
-        replay_evidence[0].0, replacement_evidence[0].0,
-        "reconnect replay must name the fresh transport generation"
-    );
-    assert_ne!(
-        replay_evidence[0].1, replacement_evidence[0].1,
-        "reconnect replay must own a fresh request revision"
-    );
+    assert!(replay_evidence.iter().all(|evidence| evidence.2));
+    let original_filters =
+        BTreeSet::from([initial_evidence[0].3.clone(), second_evidence[0].3.clone()]);
     assert_eq!(
-        replay_evidence[0].3, replacement_evidence[0].3,
-        "reconnect replays the unchanged current filter"
+        replay_evidence
+            .iter()
+            .map(|evidence| evidence.3.clone())
+            .collect::<BTreeSet<_>>(),
+        original_filters,
+        "reconnect replays each unchanged current filter exactly once"
     );
+    for evidence in &replay_evidence {
+        assert_ne!(
+            evidence.0, initial_evidence[0].0,
+            "reconnect replay must name the fresh transport generation"
+        );
+        assert_ne!(
+            evidence.1, initial_evidence[0].1,
+            "reconnect replay must own a fresh request revision"
+        );
+        assert_ne!(
+            evidence.1, second_evidence[0].1,
+            "reconnect replay must own a fresh request revision"
+        );
+    }
 
     handle.unsubscribe(first);
     handle.unsubscribe(second);

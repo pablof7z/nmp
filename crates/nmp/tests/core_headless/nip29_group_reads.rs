@@ -45,11 +45,12 @@ fn h_tagged_event(signer: &Keys, group_id: &str, created_at: u64) -> nostr::Even
 fn evidence_of(effects: &[Effect]) -> Vec<AcquisitionEvidence> {
     effects
         .iter()
+        .rev()
         .find_map(|effect| match effect {
             Effect::EmitRows(_, _, evidence) => Some(evidence.clone()),
             _ => None,
         })
-        .expect("subscribe emits its initial acquisition evidence")
+        .expect("subscribe and admission emit acquisition evidence")
 }
 
 fn rows_of(effects: &[Effect]) -> Vec<RowDelta> {
@@ -75,7 +76,7 @@ fn two_group_ids_on_the_same_host_stay_separated_by_h_at_the_wire() {
     let mut core = new_core(FixtureRoutingFacts::new());
     connect(&mut core, 0, &host);
 
-    let effects = core.handle(EngineMsg::Subscribe(group_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(group_query(
         &host,
         "photographers",
         &[GROUP_KIND],
@@ -144,7 +145,7 @@ fn a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbo
     let mut core = new_core(dir);
     activate(&mut core, &author);
 
-    let effects = core.handle(EngineMsg::Subscribe(group_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(group_query(
         &group_host,
         "photographers",
         &[GROUP_KIND],
@@ -202,7 +203,7 @@ fn an_unproven_host_never_presents_a_group_read_as_authoritatively_empty() {
     // `nested_max_age_uses_inner_scoped_coverage_only` both use for the same
     // "never yet connected" fact on the read side.
 
-    let effects = core.handle(EngineMsg::Subscribe(group_query(
+    let effects = core.handle_and_flush(EngineMsg::Subscribe(group_query(
         &host,
         "photographers",
         &[GROUP_KIND],

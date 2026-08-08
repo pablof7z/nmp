@@ -19,6 +19,8 @@ issues:
   - "#900 AuthorUnion narrows an unconstrained authors filter"
   - "the tag axis has no merge rule (§3.4)"
   - "#933 per-EOSE delta subscriptions — measured, analysed, NOT BUILT (§11)"
+  - "#1340 observation admission no longer reprojects every sibling"
+  - "#1341 pending app demand is grouped before immutable relay admission"
 ---
 
 # Subscription identity, grouping, and relay limits
@@ -35,8 +37,9 @@ down. Read §5 first if you only want the failure modes.
 behaviour; sections marked OPEN are unresolved. §7's design is now built —
 §7.1 as `nmp_router::StructuralUnion`, §7.2 as `nmp_router::wire_id` — and
 §6's per-relay subscription budget is built as `nmp_router::CompileBudget`.
-What remains unbuilt is §8.1b/§8.2. §11 is a design pass whose verdict is
-NOT to build (#933), with the measurement that supports it.
+What remains unbuilt is §8.1b/§8.2 and #933's coverage-driven derived-demand
+growth. The 10ms app-admission cohort in §1 and §11.5 is built; it is not the
+per-EOSE mechanism #933 describes.
 
 ---
 
@@ -45,13 +48,13 @@ NOT to build (#933), with the measurement that supports it.
 ```
 app declares a query
    ↓
-resolver   → demand atoms          (relay-agnostic; one per resolved value)
+resolver   → demand atoms + immediate local projection
    ↓
-router     → routing, partitioning, MERGING, identity minting
+pending admission (10ms from first uncovered app demand)
    ↓
-diff_plans → previous plan vs next plan → Req / Close ops
+router     → route and MERGE only that unsent cohort, per relay/context/source
    ↓
-engine     → attribution snapshots, negentropy diversion
+admission  → append immutable REQs, or attach to exact active coverage
    ↓
 transport  → one REQ frame per filter, on a socket
 ```
@@ -68,18 +71,28 @@ and never coalesces outbound REQs. The final emission is
 `WireOp::Req`**. `Router::compile` step 5 is the only place filters are ever
 combined.
 
-**The router recompiles everything, every time.** `Router::compile`
-(`crates/nmp-router/src/router.rs`) is documented as "THE entry point — recompile
-the whole per-relay plan from `demand`, diff vs the previous plan." It is not
-incremental. There is no batching window and no debounce: aggregation is
-recomputed on every demand mutation, over whatever demand is live at that
-instant.
+**App admission and global replanning are different transitions.** Opening an
+observation reads only that observation's canonical local projection. If an
+active REQ already carries its exact `CoverageKey`, the new observation simply
+attaches to it. Otherwise the first uncovered app request arms a 10ms,
+first-arrival-anchored deadline. More compatible observations may join that
+pending cohort without extending the deadline. When it expires, NMP routes the
+cohort and coalesces it inside each `(RelaySessionKey, SourceAuthority)`
+partition.
 
-That second fact is worth internalising because it answers a question people ask
-repeatedly: *how long can pass between two subscriptions before they stop being
-combined?* No time at all, and also forever — timing is irrelevant. Measured
-against a live relay, opening subscriptions 0ms, 50ms and 250ms apart produces
-byte-identical wire traffic.
+REQs become immutable when admitted. A later cohort never widens, narrows,
+renames, or closes a still-useful incumbent; it opens additional REQs for the
+coverage still missing. Withdrawal closes a shared REQ only after its last
+active absorbed key is gone. This avoids paying the relay to rerun a broad
+query merely because another screen element appeared.
+
+`Router::compile` still performs a whole-demand replan when the world actually
+invalidates routing -- for example an active-account reroot, route-directory
+change, or relay-budget change. Those transitions may genuinely move existing
+demand between sessions. Their old and new plans are compared by exact
+`(session, sub-id, limited)` coverage assignment, and only affected
+observations refresh acquisition evidence. A plan-only change never rereads
+unrelated event rows.
 
 ---
 
@@ -149,9 +162,13 @@ per relay, per access context, per source — then calls `coalesce_with` within
 each partition. Coalescing is **equal-context-only**: two atoms differing in
 `AccessContext` or `SourceAuthority` never merge, and never share an id.
 
-Coalescing runs over the **whole engine's live atom set**, not per query. Two
-unrelated subscriptions that happen to produce compatible filters on the same
-relay will be combined.
+During ordinary app admission, coalescing runs over the **pending cohort**, not
+per query and not over already-sent requests. Two unrelated observations that
+arrive in the same cohort and land in the same relay/context/source partition
+can therefore combine. Existing REQs participate only through their exact
+absorbed coverage keys: they can satisfy a new observation, but are never
+merge candidates. A true routing invalidation still uses the whole-demand
+compiler described in §1.
 
 ### 3.3 The rule as shipped
 
@@ -910,9 +927,12 @@ across the whole engine suite confirmed the old collision branch never fired.
   would make collisions structurally impossible. But EOSE and CLOSE are
   per-subscription, so a list coarsens per-filter completion and forbids
   independent teardown. At most a bandwidth optimisation; not an identity fix.
-- **Debounce / batching windows.** Measured to buy nothing: there is no time
-  window to widen, regrouping costs one in-place REQ, and a re-served event
-  produces zero additional row deltas because canonical dedup absorbs it.
+- **Sliding debounce or batching below the router.** Still rejected. A sliding
+  deadline can starve under a steady arrival stream, and batching resolver
+  atoms destroys their coverage identity. The built admission window is
+  different: fixed at 10ms from the first uncovered app request, delays only
+  unsent wire work, and groups only after routing inside a relay/context/source
+  partition. Cache projection is immediate and sent REQs stay immutable.
 
 ---
 
@@ -973,12 +993,18 @@ cargo run -p nmp --example tag_fanout_live -- ws://localhost:10547 20 0 both
 
 ## 11. What a widening subscription costs — MEASURED; #933 NOT BUILT
 
-§3.4's collapse made a growing value set into ONE subscription widened in
-place. That trade has a price nobody had put a number on: NIP-01 says a REQ
-carrying an existing sub-id REPLACES that subscription, so the relay re-runs
-the whole query and re-serves every event it already served. #933 proposed
-paying it back — keep the incumbent, and open a small second subscription
-carrying only the newly discovered values.
+Whole-demand replanning can make a growing *derived* value set into one
+subscription widened in place. That trade has a price nobody had put a number
+on: NIP-01 says a REQ carrying an existing sub-id REPLACES that subscription,
+so the relay re-runs the whole query and re-serves every event it already
+served. #933 proposed paying it back for derived growth — keep the incumbent,
+and open a small second subscription carrying only the newly discovered
+values.
+
+Ordinary app observation admission no longer takes that path. The 10ms cohort
+groups unsent work, then freezes each admitted REQ; later uncovered app cohorts
+append another REQ. #933 remains about value-set growth produced *inside an
+already-running derived query*, especially across EOSE/RTT boundaries.
 
 This section is the design pass #933 asked for. The verdict is **do not build
 it**, and the reason is not that the saving is small — the saving is large,
@@ -1030,9 +1056,10 @@ table itself.
 the number of values drives it — a set that resolves in one step wastes
 nothing at all, and the same set arriving one value at a time wastes 90%.
 
-**The step count is a recompile-granularity artifact, not a property of the
-demand — and where a real workload sits in that bracket is NOT measured
-here.** §1: the router recompiles on every demand mutation, with no debounce.
+**The step count is a derived-demand recompile-granularity artifact, not a
+property of the demand — and where a real workload sits in that bracket is NOT
+measured here.** §1's app-admission cohort does not govern resolver changes
+caused by ingested rows; those still enter the whole-demand invalidation path.
 `derived_tag_fanout.rs` case D records that derived resolution is driven by
 INGESTED ROWS, not by EOSE, which is what produces the `1`×20 row. But that
 case feeds events one at a time into a headless core. The live runtime does
@@ -1219,38 +1246,33 @@ app. It also has a clean in-router answer, since the split and the budget
 would live in the same compile step: when `planned + 1 > allowed`, emit
 today's unfloored merged filter for that session and degrade to overwrite.
 
-### 11.5 The cheaper change — which collects the BURST regime and nothing else
+### 11.5 The cheaper change — BUILT for app-admission bursts
 
-The `1`×20 row is 90% waste, and §11.1 established that the driver is the
-number of RECOMPILES, not the demand. §8.3 rejected debounce — but read the
-reason: *"there is no time window to widen, regrouping costs one in-place
-REQ, and a re-served event produces zero additional row deltas because
-canonical dedup absorbs it."* Every clause of that is a CLIENT-correctness
-argument. It was decided before any relay-bandwidth number existed, and the
-number is 2.90 MB versus 285 KB.
+The common interactive burst is not derived growth. A render pass asks for a
+set of independent live queries -- for example many kind:0 avatar profiles --
+one call at a time. Sending each call immediately creates one narrow REQ before
+the next call exists. Replanning all live demand after each call groups them,
+but repeatedly rewrites already-running subscriptions and, before #1340, also
+reread every sibling's canonical rows.
 
-Widening the recompile boundary moves the `1`×20 row onto the `5,3,…` row at
-**zero** extra subscriptions, zero coverage rework, and no new identity
-namespace. It touches one thing (when a recompile fires) instead of five
-(floors, coverage intervals, an out-of-plan emission path, diagnostics, and
-the negentropy loop). The remaining derived-live residue in §8.1c is already
-asking for a deterministic recompile boundary for an unrelated reason, so the
-two want the same seam.
+#1340/#1341 split that lifecycle into three explicit facts:
 
-**But it only reaches growth that arrives inside the window.** The engine
-already collapses same-batch bursts (§11.1), so the reachable ground is
-growth spaced by less than a widened `max_engine_batch_wait` — and the
-schedules that hurt most in practice are spaced by RTTs or by minutes:
-multi-relay staggered discovery, or a live-tail set gaining a member at a
-time. Those are untouched by any window an interactive client can tolerate.
-An EOSE-anchored boundary reaches further (defer growth recompiles until the
-REVEALING subscription EOSEs — #933's own "per-EOSE" granularity applied to
-the other side of the pipe), at the cost of a new failure mode: a relay that
-never EOSEs would delay growth indefinitely without a timeout, and §8's case
-D exists because misbehaving relays do exactly that.
+1. Project the new observation from cache immediately and read no sibling.
+2. If exact active coverage already exists, attach locally with no compile.
+3. Otherwise hold only the unsent relay demand for 10ms from its first
+   arrival, route/coalesce that cohort once, and append immutable REQs.
 
-So this is the right FIRST move against the measured number, not a universal
-substitute for #933. Nothing here proposes taking it either.
+The timer is not a sliding debounce, does not sit in the resolver, and does
+not postpone cache delivery. Its grouping locus is the router's existing
+per-relay/context/source partition, so two queries are never combined merely
+because they happened to arrive together. Cancellation before the deadline
+removes the pending demand without producing a REQ.
+
+This collects the app-admission burst regime and removes the quadratic local
+projection sweep. It does **not** collect derived values revealed by relay
+events after an observation is already running. Those can be spaced by RTTs
+or minutes, and an interactive admission window cannot cover them. An
+EOSE-anchored mechanism reaches that different regime and remains #933.
 
 ### 11.6 Verdict
 

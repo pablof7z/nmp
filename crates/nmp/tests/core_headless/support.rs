@@ -39,6 +39,21 @@ use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, Unsig
 
 use std::collections::BTreeSet;
 
+/// Most headless integration scenarios model a completed admission boundary,
+/// not the runtime timer itself. Keep that boundary explicit so admission
+/// window tests can exercise the two reducer turns separately.
+trait HeadlessAdmission {
+    fn handle_and_flush(&mut self, message: EngineMsg) -> Vec<Effect>;
+}
+
+impl<S: EventStore> HeadlessAdmission for EngineCore<S> {
+    fn handle_and_flush(&mut self, message: EngineMsg) -> Vec<Effect> {
+        let mut effects = self.handle(message);
+        effects.extend(self.handle(EngineMsg::FlushWireAdmission));
+        effects
+    }
+}
+
 fn effect_row_delta_count(effects: &[Effect]) -> usize {
     effects
         .iter()

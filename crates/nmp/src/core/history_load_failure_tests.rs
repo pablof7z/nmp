@@ -568,6 +568,7 @@ fn assert_only_refusal_diagnostic(effects: &[Effect], expected: &str) {
 fn assert_plan_unchanged(actual: &RelayPlan, expected: &RelayPlan) {
     assert_eq!(actual.reqs, expected.reqs);
     assert_eq!(actual.limited, expected.limited);
+    assert_eq!(actual.limited_demands, expected.limited_demands);
     assert_eq!(actual.refused_sessions, expected.refused_sessions);
     assert_eq!(
         actual.subscription_shortfalls,
@@ -991,6 +992,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
             _ => None,
         })
         .unwrap();
+    core.handle(EngineMsg::FlushWireAdmission);
     let selected = core.router.plan().reqs.keys().next().unwrap().clone();
     let relay_handle = TransportRelayHandle {
         slot: 7,

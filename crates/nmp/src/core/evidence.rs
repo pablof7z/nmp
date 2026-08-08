@@ -417,7 +417,7 @@ pub(crate) fn merge_acquisition_evidence(
 mod tests {
     use super::*;
     use nmp_grammar::{AccessContext, SourceAuthority};
-    use nmp_router::{SubId, WireReq};
+    use nmp_router::{DemandKey, SubId, WireReq};
     use nmp_store::MemoryStore;
     use nostr::Keys;
 
@@ -445,6 +445,7 @@ mod tests {
             source: atom.source.clone(),
             provenance: Vec::new(),
             absorbed: BTreeSet::from([key]),
+            owners: BTreeSet::from([DemandKey::for_atom(&atom)]),
         };
         let plan = RelayPlan {
             reqs: BTreeMap::from([(RelaySessionKey::public(relay.clone()), vec![req])]),
@@ -520,6 +521,7 @@ mod tests {
                     source: atom.source.clone(),
                     provenance: Vec::new(),
                     absorbed: BTreeSet::from([key]),
+                    owners: BTreeSet::from([DemandKey::for_atom(&atom)]),
                 }],
             )]),
             ..RelayPlan::default()

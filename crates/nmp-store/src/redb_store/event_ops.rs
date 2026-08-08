@@ -22,6 +22,8 @@ use super::{
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, feature = "bench-instrumentation"))]
+use std::sync::atomic::Ordering;
 
 /// The `coverage` table's JSON value: the window-erased shape the row was
 /// recorded against (needed so `gc` can test event-shape matches — see
@@ -546,6 +548,8 @@ pub(super) fn get_coverage(
     key: CoverageKey,
     relay: &RelayUrl,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    store.coverage_reads.fetch_add(1, Ordering::Relaxed);
     let row_key = RedbStore::coverage_row_key(key, relay);
     let read_txn = store.db.begin_read().map_err(persist_err)?;
     let coverage = read_txn.open_table(COVERAGE).map_err(persist_err)?;

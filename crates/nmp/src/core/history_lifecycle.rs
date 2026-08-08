@@ -100,9 +100,6 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
 
-        self.recompile(&mut effects);
-        self.refresh_all_observations(&mut effects);
-        self.refresh_all_histories_except(id, &mut effects);
         // The opening evidence frame reads coverage and refuses the open on a
         // failed read (#763), the same unwind the canonical row projection
         // above takes -- a window is installed whole or not at all, and a
@@ -121,13 +118,13 @@ impl<S: EventStore> EngineCore<S> {
                     self.history_by_handle.remove(&handle_id);
                     let _ = self.resolver.unsubscribe(handle_id);
                 }
-                self.recompile(&mut effects);
-                self.refresh_all_observations(&mut effects);
-                self.refresh_all_histories(&mut effects);
                 self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
         };
+        if self.wire_admission_needed() {
+            effects.push(Effect::ArmWireAdmission);
+        }
         let seed = self
             .apply_history_projection(id, current, evidence, WindowLoad::Idle)
             .expect("a new history session has no prior projection and always yields one seed");
@@ -157,9 +154,7 @@ impl<S: EventStore> EngineCore<S> {
             let _ = self.resolver.unsubscribe(handle.id());
         }
         let mut effects = Vec::new();
-        self.recompile(&mut effects);
-        self.refresh_all_observations(&mut effects);
-        self.refresh_all_histories(&mut effects);
+        self.withdraw_wire_demand(&mut effects);
         effects
     }
 
@@ -541,9 +536,7 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         let mut effects = Vec::new();
-        self.recompile(&mut effects);
-        self.refresh_all_observations(&mut effects);
-        self.refresh_all_histories_except(id, &mut effects);
+        self.withdraw_wire_demand(&mut effects);
 
         let (made_progress, target, len, has_boundary) = {
             let state = self
@@ -686,22 +679,6 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    pub(super) fn refresh_all_histories_except(
-        &mut self,
-        except: HistorySessionId,
-        effects: &mut Vec<Effect>,
-    ) {
-        let ids: Vec<_> = self
-            .histories
-            .keys()
-            .copied()
-            .filter(|id| *id != except)
-            .collect();
-        for id in ids {
-            self.refresh_history(id, WindowLoad::Idle, effects);
-        }
-    }
-
     pub(super) fn history_batch(
         &mut self,
         id: HistorySessionId,
@@ -794,7 +771,11 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    fn refresh_history_evidence(&mut self, id: HistorySessionId, effects: &mut Vec<Effect>) {
+    pub(super) fn refresh_history_evidence(
+        &mut self,
+        id: HistorySessionId,
+        effects: &mut Vec<Effect>,
+    ) {
         let Some(state) = self.histories.get(&id) else {
             return;
         };
@@ -872,7 +853,7 @@ impl<S: EventStore> EngineCore<S> {
             };
             for mut atom in self.resolver.root_atoms(*live) {
                 atom.limit = None;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.history_store_queries
                     .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
@@ -981,7 +962,7 @@ impl<S: EventStore> EngineCore<S> {
             };
             for mut atom in self.resolver.root_atoms(*live) {
                 atom.limit = None;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 self.history_store_queries
                     .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
@@ -1284,7 +1265,7 @@ impl<S: EventStore> EngineCore<S> {
         if visible_removals > 0 {
             let boundary =
                 original_boundary.expect("a visible removal implies a prior canonical boundary");
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             self.history_store_queries
                 .set(self.history_store_queries.get().saturating_add(1));
             let queried = match pinned_relays.as_ref() {
