@@ -112,7 +112,7 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
     let observation = observation_id(&opened);
-    let flushed = core.handle(EngineMsg::FlushWireAdmission);
+    let flushed = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let (_, sub_id, filter, first_attempt) = only_request(&flushed);
     let awaiting_index = flushed
         .iter()
@@ -249,7 +249,7 @@ fn nip77_candidate_status_projects_its_role_id_to_the_live_plan_request() {
     let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
     let observation = observation_id(&opened);
 
-    let flushed = core.handle(EngineMsg::FlushWireAdmission);
+    let flushed = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let (_, candidate_sub_id, _, attempt_id) = only_request(&flushed);
     let plan_sub_id = core.router.plan().reqs[&session][0].sub_id.clone();
     assert_ne!(candidate_sub_id, plan_sub_id);

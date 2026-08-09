@@ -64,7 +64,7 @@ fn seeded(count: usize) -> (EngineCore<MemoryStore>, Keys, RelayUrl, Vec<Event>)
 
 fn handle_and_flush(core: &mut EngineCore<MemoryStore>, message: EngineMsg) -> Vec<Effect> {
     let mut effects = core.handle(message);
-    effects.extend(core.handle(EngineMsg::FlushWireAdmission));
+    effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
     effects
 }
 

@@ -50,7 +50,7 @@ trait HeadlessAdmission {
 impl<S: EventStore> HeadlessAdmission for EngineCore<S> {
     fn handle_and_flush(&mut self, message: EngineMsg) -> Vec<Effect> {
         let mut effects = self.handle(message);
-        effects.extend(self.handle(EngineMsg::FlushWireAdmission));
+        effects.extend(self.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         effects
     }
 }

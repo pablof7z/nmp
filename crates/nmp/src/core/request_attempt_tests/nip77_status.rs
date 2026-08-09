@@ -29,7 +29,7 @@ impl Nip77StatusFixture {
         let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
         let observation = observation_id(&opened);
 
-        let flushed = core.handle(EngineMsg::FlushWireAdmission);
+        let flushed = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
         let (_, candidate_sub_id, _, candidate_attempt) = only_request(&flushed);
         let plan_sub_id = core.router.plan().reqs[&session][0].sub_id.clone();
         assert_ne!(candidate_sub_id, plan_sub_id);

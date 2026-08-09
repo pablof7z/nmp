@@ -305,7 +305,7 @@ fn wire_ops(effects: &[Effect]) -> Vec<&WireOp> {
 }
 
 fn flush<S: EventStore>(core: &mut EngineCore<S>) -> Vec<Effect> {
-    core.handle(EngineMsg::FlushWireAdmission)
+    core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)))
 }
 
 fn current_attempt<S: EventStore>(
@@ -406,6 +406,8 @@ fn relay_request_targets(effects: &[Effect]) -> BTreeSet<(ObservationId, String,
 mod claim_detach;
 #[path = "admission_tests/claim_transfer_retry.rs"]
 mod claim_transfer_retry;
+#[path = "admission_tests/clock.rs"]
+mod clock;
 #[path = "admission_tests/cohort.rs"]
 mod cohort;
 #[path = "admission_tests/completion_transfer.rs"]

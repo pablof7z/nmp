@@ -108,7 +108,7 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(&[1], &me_hex)));
     let _ = core.handle(EngineMsg::Subscribe(literal_query(&[1], &friend_hex)));
-    let admitted = core.handle(EngineMsg::FlushWireAdmission);
+    let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let sub0 = sub_id_for(&admitted, &relay0).clone();
     let sub1 = sub_id_for(&admitted, &relay1).clone();
 
@@ -252,7 +252,7 @@ fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactiv
     connect(&mut core, 0, &relay0);
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(&[1], &me_hex)));
-    let effects = core.handle(EngineMsg::FlushWireAdmission);
+    let effects = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let sub0 = sub_id_for(&effects, &relay0).clone();
 
     let snap = core.diagnostics_snapshot();
@@ -311,7 +311,7 @@ fn coalesced_wire_diagnostics_reads_coverage_claims_atom_evidence() {
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(&[9999], &a_hex)));
     let _ = core.handle(EngineMsg::Subscribe(literal_query(&[9999], &b_hex)));
-    let effects = core.handle(EngineMsg::FlushWireAdmission);
+    let effects = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let sub = sub_id_for(&effects, &relay).clone();
 
     let before = core.diagnostics_snapshot();

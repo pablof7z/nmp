@@ -900,8 +900,11 @@ pub enum AuthEffect {
 pub enum EngineMsg {
     Subscribe(LiveQuery),
     /// Execute relay-bound demand admitted during the current short cohort.
-    /// Runtime owns the monotonic deadline; the reducer owns this transition.
-    FlushWireAdmission,
+    /// Runtime owns the monotonic deadline and supplies wall-clock truth for
+    /// liveness state minted by this transition; the reducer owns both the
+    /// admission transition and those stamps. This advances clock truth but
+    /// never runs deadline maintenance.
+    FlushWireAdmission(Timestamp),
     Unsubscribe(ObservationId),
     SubscribeHistory(HistoryQuery),
     /// Declaratively raise this window's row target to at least `usize`,
@@ -3295,6 +3298,14 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
+    /// Advance reducer wall-clock truth without executing any deadline work.
+    /// Runtime does this once at command boundaries; due expiry, retry, and
+    /// liveness work remain exclusively owned by [`Self::tick`] and
+    /// [`Self::next_deadline`].
+    pub(crate) fn advance_clock(&mut self, now: Timestamp) {
+        self.clock = now;
+    }
+
     /// The earliest wall-clock instant at which [`Self::tick`] must run for
     /// something to actually happen (retraction-and-negative-deltas.md
     /// §3.2): the min over every deadline source this reducer currently
@@ -3381,7 +3392,7 @@ impl<S: EventStore> EngineCore<S> {
         self.retry_scheduler_blocked = false;
         let mut effects = match msg {
             EngineMsg::Subscribe(query) => self.on_subscribe(query),
-            EngineMsg::FlushWireAdmission => self.flush_wire_admission(),
+            EngineMsg::FlushWireAdmission(now) => self.flush_wire_admission(now),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
             EngineMsg::SubscribeHistory(query) => self.on_subscribe_history(query),
             EngineMsg::RequestRows(id, at_least) => self.on_request_rows(id, at_least),
