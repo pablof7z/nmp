@@ -249,6 +249,10 @@ Properties, against D8's letter and spirit:
 - A past-due deadline yields a zero timeout → immediate tick. Cold start: the first
   loop iteration reads the persisted index, so events that expired while the process
   was dead retract at boot through the identical path.
+- If `recv_timeout` returns a queued command at the exact instant the armed core
+  deadline becomes due, the loop consumes that deadline before dispatching the
+  command. A command can neither postpone maintenance nor open a view over rows
+  whose already-reached expiration has not been applied.
 - `EngineMsg::Tick` stays a plain message — every expiry behavior remains headlessly
   testable against a synthetic clock, with the runtime driver tested separately (spawn,
   insert an event expiring in 100ms, assert `Removed` arrives with no further input).

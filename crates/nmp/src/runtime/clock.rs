@@ -1,10 +1,10 @@
 //! The engine thread's ONE wall-clock reading.
 //!
-//! `EngineCore` never reads a clock: its `clock` field is whatever the last
-//! `EngineMsg::Tick(now)` carried, and every acceptance stamp, expiry sweep
-//! and retry deadline is computed against that one number. The runtime is
-//! what supplies it -- historically as a bare `Timestamp::now()` at each of
-//! the handful of sites that dispatch a `Tick`.
+//! `EngineCore` never reads a clock. Runtime supplies wall-clock truth either
+//! as an explicit `EngineMsg::Tick(now)` when deadline maintenance must run,
+//! or as a cheap clock advance/current-time argument for a transition that
+//! only needs to stamp or compare facts. Expiry, retry, and liveness sweeps
+//! remain exclusive to `Tick`.
 //!
 //! That left the reducer's notion of "now" reachable only through the real
 //! system clock, which is fine for production and impossible for a spec.
@@ -89,6 +89,14 @@ impl EngineClock {
             UNPINNED => Timestamp::now(),
             secs => Timestamp::from_secs(secs),
         }
+    }
+
+    /// Change the clock value without delivering a tick. Runtime scheduling
+    /// tests use this to model a command winning the channel/deadline race;
+    /// production harnesses must use [`Self::set`] so stated time is acted on.
+    #[cfg(test)]
+    pub(super) fn pin_silently(&self, at: Timestamp) {
+        self.pinned.store(at.as_secs(), Ordering::Relaxed);
     }
 
     /// State what time it is, and let the engine act on it.

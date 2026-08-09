@@ -920,6 +920,14 @@ enum Cmd {
     ObservationOwnershipCensus {
         reply: Sender<ObservationOwnershipCensus>,
     },
+    /// Hold the reducer inside one command turn so a test can observe whether
+    /// a simultaneously-due core deadline ran before command dispatch.
+    #[cfg(test)]
+    DeadlineRaceProbe {
+        at: Timestamp,
+        entered: Sender<()>,
+        release: Receiver<()>,
+    },
     CancelWrite {
         id: ReceiptId,
         reply: Sender<Result<CancelWriteOutcome, CancelWriteError>>,
@@ -4073,6 +4081,9 @@ mod wire_admission_tests {
     }
 }
 
+#[cfg(test)]
+mod observation_clock_tests;
+
 /// The three wires the engine thread owns, and the one thing they have in
 /// common: each is a way for something OUTSIDE the reducer to reach it. The
 /// commands an app sends (`cmd_rx`), the ones the runtime posts to itself
@@ -4188,8 +4199,11 @@ fn engine_loop<S>(
         // wait then falls back to the plain `recv()`, and the next message
         // re-reads the deadline -- so a failing store cannot spin this loop
         // either.
-        let core_wait = match core.next_deadline() {
-            Ok(deadline) => deadline.map(|deadline| duration_until(deadline, clock.now())),
+        let (core_deadline, core_wait) = match core.next_deadline() {
+            Ok(deadline) => (
+                deadline,
+                deadline.map(|deadline| duration_until(deadline, clock.now())),
+            ),
             Err(error) => {
                 let mut effects = Vec::new();
                 core.degrade_store(error, &mut effects);
@@ -4203,7 +4217,7 @@ fn engine_loop<S>(
                     &registry,
                     dispatch_runtime,
                 );
-                None
+                (None, None)
             }
         };
         let nip11_wait = nip11_decisions
@@ -4304,6 +4318,35 @@ fn engine_loop<S>(
                 Err(RecvTimeoutError::Disconnected) => break,
             },
         };
+        #[cfg(test)]
+        if let Cmd::DeadlineRaceProbe { at, .. } = &cmd {
+            // Model the exact boundary where the command and an armed core
+            // deadline become ready together. The normal `EngineClock::set`
+            // deliberately queues its own Tick, which would pre-order the
+            // test instead of exercising recv_timeout's command-winning arm.
+            clock.pin_silently(*at);
+        }
+        let command_wall_now = clock.now();
+        let command_is_tick = matches!(&cmd, Cmd::Engine(EngineMsg::Tick(_)));
+        if !shutting_down
+            && !command_is_tick
+            && core_deadline.is_some_and(|deadline| deadline <= command_wall_now)
+        {
+            // `recv_timeout` may return a queued command at the exact instant
+            // its timeout also becomes ready. Deadline truth wins that race:
+            // consume the already-armed work once, then dispatch the command.
+            let effects = core.handle(EngineMsg::Tick(command_wall_now));
+            dispatch_core_effects(
+                &mut core,
+                effects,
+                &pool,
+                &mut row_channels,
+                &mut history_channels,
+                &mut diag_channels,
+                &registry,
+                dispatch_runtime,
+            );
+        }
         if shutting_down {
             match cmd {
                 Cmd::AuthTaskReleased(release) => {
@@ -4441,6 +4484,8 @@ fn engine_loop<S>(
                 Cmd::ExemptSignEventDrain(op_id) => {
                     sign_event_cancellations.remove(&op_id);
                 }
+                #[cfg(test)]
+                Cmd::DeadlineRaceProbe { .. } => {}
                 Cmd::Engine(_)
                 | Cmd::RelayInformationFetched { .. }
                 | Cmd::RelayWorkerRetired
@@ -4498,17 +4543,7 @@ fn engine_loop<S>(
                     relay_frame_needs_wall_clock(frame)
                         && core.is_current_transport_session(*handle, session)
                 }) {
-                    let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                    dispatch_core_effects(
-                        &mut core,
-                        tick_effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    );
+                    core.advance_clock(command_wall_now);
                 }
                 let mut ordinary = Vec::new();
                 let mut committed = Vec::new();
@@ -4987,6 +5022,13 @@ fn engine_loop<S>(
                     history_channels: history_channels.len(),
                 });
             }
+            #[cfg(test)]
+            Cmd::DeadlineRaceProbe {
+                entered, release, ..
+            } => {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
             Cmd::PublishQueueEntries { reply } => {
                 let _ = reply.send(core.publish_queue_entries().map_err(|error| {
                     RemoveQueueEntryError::PersistenceFailed {
@@ -5025,22 +5067,10 @@ fn engine_loop<S>(
                 registration,
                 reply,
             } => {
-                // Deliver any wall-clock transition before calculating a
-                // correlation retry's retained page. Otherwise the replay
-                // would already include that transition, then registering
-                // its fresh observer before dispatching the Tick effect would
-                // deliver the same fact to it a second time.
-                let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                dispatch_core_effects(
-                    &mut core,
-                    tick_effects,
-                    &pool,
-                    &mut row_channels,
-                    &mut history_channels,
-                    &mut diag_channels,
-                    &registry,
-                    dispatch_runtime,
-                );
+                // Due transitions were consumed at the command boundary
+                // above. Publishing needs current acceptance/deadline stamps,
+                // but advancing that truth must not rerun maintenance.
+                core.advance_clock(command_wall_now);
                 let mut publish_effects = core.handle(EngineMsg::Publish(intent));
                 let result = publish_result(&publish_effects);
                 let replay = take_publish_replay(&mut publish_effects);
@@ -5086,26 +5116,14 @@ fn engine_loop<S>(
                 );
             }
             Cmd::Subscribe { query, reply } => {
-                let mut tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                let (id, seed, mut effects) = match core.open_observation(query) {
-                    ObservationOpen::Opened {
-                        id,
-                        seed,
-                        mut effects,
-                    } => {
-                        tick_effects.append(&mut effects);
-                        (id, seed, tick_effects)
-                    }
-                    ObservationOpen::Refused {
-                        reason,
-                        mut effects,
-                    } => {
-                        tick_effects.append(&mut effects);
+                let (id, seed, mut effects) = match core.open_observation(query, command_wall_now) {
+                    ObservationOpen::Opened { id, seed, effects } => (id, seed, effects),
+                    ObservationOpen::Refused { reason, effects } => {
                         let _ =
                             reply.send(Err(EngineThreadError::ObservationUnavailable { reason }));
                         dispatch_core_effects(
                             &mut core,
-                            tick_effects,
+                            effects,
                             &pool,
                             &mut row_channels,
                             &mut history_channels,
@@ -5149,36 +5167,25 @@ fn engine_loop<S>(
                 );
             }
             Cmd::SubscribeHistory { query, reply } => {
-                let mut tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                let (id, seed, mut effects) = match core.open_history_observation(query) {
-                    ObservationOpen::Opened {
-                        id,
-                        seed,
-                        mut effects,
-                    } => {
-                        tick_effects.append(&mut effects);
-                        (id, seed, tick_effects)
-                    }
-                    ObservationOpen::Refused {
-                        reason,
-                        mut effects,
-                    } => {
-                        tick_effects.append(&mut effects);
-                        let _ =
-                            reply.send(Err(EngineThreadError::ObservationUnavailable { reason }));
-                        dispatch_core_effects(
-                            &mut core,
-                            tick_effects,
-                            &pool,
-                            &mut row_channels,
-                            &mut history_channels,
-                            &mut diag_channels,
-                            &registry,
-                            dispatch_runtime,
-                        );
-                        continue;
-                    }
-                };
+                let (id, seed, mut effects) =
+                    match core.open_history_observation(query, command_wall_now) {
+                        ObservationOpen::Opened { id, seed, effects } => (id, seed, effects),
+                        ObservationOpen::Refused { reason, effects } => {
+                            let _ = reply
+                                .send(Err(EngineThreadError::ObservationUnavailable { reason }));
+                            dispatch_core_effects(
+                                &mut core,
+                                effects,
+                                &pool,
+                                &mut row_channels,
+                                &mut history_channels,
+                                &mut diag_channels,
+                                &registry,
+                                dispatch_runtime,
+                            );
+                            continue;
+                        }
+                    };
                 let (history_tx, history_rx) = latest_channel();
                 history_channels.insert(id, history_tx);
                 if reply
@@ -5303,17 +5310,7 @@ fn engine_loop<S>(
                 if relay_frame_needs_wall_clock(&frame)
                     && core.is_current_transport_session(handle, &session)
                 {
-                    let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                    dispatch_core_effects(
-                        &mut core,
-                        tick_effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    );
+                    core.advance_clock(command_wall_now);
                 }
                 let effects = core.handle(EngineMsg::RelayFrame(handle, session, frame));
                 dispatch_core_effects(

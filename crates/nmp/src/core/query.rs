@@ -65,6 +65,7 @@ impl<S: EventStore> EngineCore<S> {
     pub(crate) fn open_observation(
         &mut self,
         query: LiveQuery,
+        now: Timestamp,
     ) -> ObservationOpen<ObservationId, RowsSeed> {
         let mut effects = Vec::new();
         // Graph construction can read the store (a `Derived` binding resolves
@@ -94,7 +95,7 @@ impl<S: EventStore> EngineCore<S> {
         let mut acquisitions = Vec::with_capacity(opened.len());
         for index in 0..opened.len() {
             let (id, freshness) = (opened[index].id(), opened[index].freshness());
-            match self.decide_handle_acquisition(id, freshness) {
+            match self.decide_handle_acquisition(id, freshness, now) {
                 Ok(acquisition) => acquisitions.push(acquisition),
                 Err(error) => {
                     for handle in opened {
@@ -201,7 +202,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.heed_relays(relays.iter().cloned());
             }
         }
-        match self.open_observation(query) {
+        match self.open_observation(query, self.clock) {
             ObservationOpen::Opened {
                 id,
                 seed,
@@ -674,6 +675,7 @@ impl<S: EventStore> EngineCore<S> {
         &self,
         id: HandleId,
         root_freshness: Freshness,
+        now: Timestamp,
     ) -> Result<HandleAcquisition, PersistenceError> {
         let mut scopes = self.resolver.demand_scopes(id);
         if let Some((_, freshness)) = scopes.first_mut() {
@@ -701,7 +703,7 @@ impl<S: EventStore> EngineCore<S> {
                     let plan = candidate_plan
                         .as_ref()
                         .expect("a MaxAge scope built the candidate plan");
-                    if self.plan_is_fresh_for(&atoms, plan, seconds)? {
+                    if self.plan_is_fresh_for(&atoms, plan, seconds, now)? {
                         ScopeAcquisition::CoverageSatisfied(plan.clone())
                     } else {
                         ScopeAcquisition::Live
@@ -757,11 +759,12 @@ impl<S: EventStore> EngineCore<S> {
         atoms: &BTreeSet<ContextualAtom>,
         plan: &RelayPlan,
         max_age_seconds: u64,
+        now: Timestamp,
     ) -> Result<bool, PersistenceError> {
         if atoms.is_empty() {
             return Ok(false);
         }
-        let cutoff = Timestamp::from(self.clock.as_secs().saturating_sub(max_age_seconds));
+        let cutoff = Timestamp::from(now.as_secs().saturating_sub(max_age_seconds));
         for atom in atoms {
             let key = nmp_store::coverage_key(atom);
             if plan.limited.contains(&key) {

@@ -445,7 +445,7 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
     );
 
     control.fail_query("second branch graph construction failed");
-    let effects = match core.open_observation(query) {
+    let effects = match core.open_observation(query, Timestamp::from(0u64)) {
         ObservationOpen::Refused { reason, effects } => {
             assert!(
                 reason.contains("second branch graph construction failed"),
@@ -468,7 +468,7 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
     );
 
     assert!(matches!(
-        core.open_observation(LiveQuery::single(first)),
+        core.open_observation(LiveQuery::single(first), Timestamp::from(0u64)),
         ObservationOpen::Opened { .. }
     ));
 }
@@ -591,10 +591,11 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
         facts,
         1,
     );
-    let existing_id = match core.open_observation(routed_query(existing_author, 1)) {
-        ObservationOpen::Opened { id, .. } => id,
-        ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
-    };
+    let existing_id =
+        match core.open_observation(routed_query(existing_author, 1), Timestamp::from(0u64)) {
+            ObservationOpen::Opened { id, .. } => id,
+            ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
+        };
     let baseline_census = core.observation_ownership_census();
     let baseline_demand = core.active_demand();
     let baseline_plan = core.router.plan().clone();
@@ -609,13 +610,14 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
     };
 
     control.fail_query("candidate ordinary projection failed");
-    let effects = match core.open_observation(routed_query(candidate_author, 2)) {
-        ObservationOpen::Refused { reason, effects } => {
-            assert!(reason.contains("candidate ordinary projection failed"));
-            effects
-        }
-        ObservationOpen::Opened { .. } => panic!("injected projection failure was ignored"),
-    };
+    let effects =
+        match core.open_observation(routed_query(candidate_author, 2), Timestamp::from(0u64)) {
+            ObservationOpen::Refused { reason, effects } => {
+                assert!(reason.contains("candidate ordinary projection failed"));
+                effects
+            }
+            ObservationOpen::Opened { .. } => panic!("injected projection failure was ignored"),
+        };
 
     assert_only_refusal_diagnostic(
         &effects,
@@ -641,7 +643,7 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
     );
 
     assert!(matches!(
-        core.open_observation(routed_query(candidate_author, 2)),
+        core.open_observation(routed_query(candidate_author, 2), Timestamp::from(0u64)),
         ObservationOpen::Opened { .. }
     ));
 }
@@ -661,11 +663,10 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
         facts,
         1,
     );
-    let existing_id = match core.open_history_observation(HistoryQuery::new(
-        routed_query(existing_author, 1),
-        1,
-        2,
-    )) {
+    let existing_id = match core.open_history_observation(
+        HistoryQuery::new(routed_query(existing_author, 1), 1, 2),
+        Timestamp::from(0u64),
+    ) {
         ObservationOpen::Opened { id, .. } => id,
         ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
     };
@@ -676,11 +677,10 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     let baseline_history = snapshot(&core, existing_id);
 
     control.fail_query("candidate history projection failed");
-    let effects = match core.open_history_observation(HistoryQuery::new(
-        routed_query(candidate_author, 2),
-        1,
-        2,
-    )) {
+    let effects = match core.open_history_observation(
+        HistoryQuery::new(routed_query(candidate_author, 2), 1, 2),
+        Timestamp::from(0u64),
+    ) {
         ObservationOpen::Refused { reason, effects } => {
             assert!(reason.contains("candidate history projection failed"));
             effects
@@ -707,7 +707,10 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     );
 
     assert!(matches!(
-        core.open_history_observation(HistoryQuery::new(routed_query(candidate_author, 2), 1, 2,)),
+        core.open_history_observation(
+            HistoryQuery::new(routed_query(candidate_author, 2), 1, 2),
+            Timestamp::from(0u64),
+        ),
         ObservationOpen::Opened { .. }
     ));
 }

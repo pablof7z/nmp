@@ -54,6 +54,11 @@ handle therefore becomes `Live` rather than claiming suppression from a
 special bounded-past rule. No broader bounded-window freshness semantics are
 implied by `MaxAge` today.
 
+The runtime passes the observation command's current wall time directly into
+this one opening decision. It does not advance reducer clock state or run the
+deadline-maintenance transition merely because a query opened. `Live` and
+`CacheOnly` skip the comparison entirely.
+
 Freshness is coverage of the question, not event presence. A recently covered
 empty result is fresh. `MaxAge` deliberately accepts that a newer replaceable
 event may exist remotely within the tolerated interval. A satisfied handle

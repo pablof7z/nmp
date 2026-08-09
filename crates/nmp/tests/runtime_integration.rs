@@ -128,14 +128,14 @@ fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
     )
 }
 
-/// #565 product-path falsifier: `Freshness::MaxAge` is decided once when
-/// the runtime processes `Cmd::Subscribe`, so that command must first tick
-/// `EngineCore` to the current wall clock. The stored coverage below is
-/// fresh relative to the core's zero initial clock but stale relative to
-/// reality. A missing pre-subscribe tick would therefore suppress all wire
-/// work; the real TCP accept proves the stale handle became `Live` instead.
+/// #565/#1344 product-path falsifier: `Freshness::MaxAge` is decided once when
+/// the runtime processes `Cmd::Subscribe`, using that command's current wall
+/// time directly. The stored coverage below is fresh relative to the core's
+/// zero initial clock but stale relative to reality. Reusing reducer clock
+/// state would therefore suppress all wire work; the real TCP accept proves
+/// the stale handle became `Live` instead, without turning open into a Tick.
 #[test]
-fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
+fn subscribe_uses_current_wall_clock_for_the_one_time_max_age_decision() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind capture relay");
     listener
         .set_nonblocking(true)
@@ -213,7 +213,7 @@ fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
     };
     assert!(
         connected,
-        "stale MaxAge coverage must become Live after Cmd::Subscribe advances the core to wall time"
+        "stale MaxAge coverage must become Live from Cmd::Subscribe's current wall time"
     );
 
     handle.shutdown();

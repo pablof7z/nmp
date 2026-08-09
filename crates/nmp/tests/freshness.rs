@@ -255,7 +255,7 @@ fn tick<S: EventStore>(core: &mut EngineCore<S>, now: u64) {
 fn fresh_cached_profile_uses_coverage_and_zero_wire() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://fresh.example").unwrap();
-    let profile = event(&keys, 90_000);
+    let profile = event(&keys, 1);
     let mut store = MemoryStore::new();
     store
         .insert(
@@ -271,6 +271,10 @@ fn fresh_cached_profile_uses_coverage_and_zero_wire() {
     );
     let mut core = core(store, &keys, &relay);
     tick(&mut core, 100_000);
+    assert!(
+        profile.created_at < Timestamp::from(100_000u64 - 14_400),
+        "the cached document itself is deliberately older than MaxAge"
+    );
 
     let effects = subscribe(
         &mut core,
@@ -297,7 +301,14 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://age.example").unwrap();
     let demand_atom = atom(&keys, SourceAuthority::AuthorOutboxes);
+    let stale_profile = event(&keys, 1);
     let mut stale_store = MemoryStore::new();
+    stale_store
+        .insert(
+            stale_profile.clone(),
+            RelayObserved::new(relay.clone(), Timestamp::from(82_000u64)),
+        )
+        .unwrap();
     record(&mut stale_store, &demand_atom, &relay, 82_000);
     let mut stale = core(stale_store, &keys, &relay);
     tick(&mut stale, 100_000);
@@ -305,7 +316,32 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
         &mut stale,
         query(&keys, Freshness::MaxAge { seconds: 14_400 }),
     );
+    let (_, stale_rows, _) = initial(&stale_effects);
     assert_eq!(reqs(&stale_effects), 1);
+    assert!(stale_rows
+        .iter()
+        .any(|row| matches!(row, RowDelta::Added(row) if row.event.id == stale_profile.id)));
+
+    let missing_profile = event(&keys, 2);
+    let mut missing_store = MemoryStore::new();
+    missing_store
+        .insert(
+            missing_profile.clone(),
+            RelayObserved::new(relay.clone(), Timestamp::from(99_000u64)),
+        )
+        .unwrap();
+    let mut missing = core(missing_store, &keys, &relay);
+    tick(&mut missing, 100_000);
+    let missing_effects = subscribe(
+        &mut missing,
+        query(&keys, Freshness::MaxAge { seconds: 14_400 }),
+    );
+    let (_, missing_rows, _) = initial(&missing_effects);
+    assert_eq!(reqs(&missing_effects), 1);
+    assert!(missing_rows
+        .iter()
+        .any(|row| matches!(row, RowDelta::Added(row) if row.event.id == missing_profile.id)));
+
     let mut live = core(MemoryStore::new(), &keys, &relay);
     tick(&mut live, 100_000);
     let live_effects = subscribe(&mut live, query(&keys, Freshness::Live));

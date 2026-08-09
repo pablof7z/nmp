@@ -2512,10 +2512,12 @@ impl<S: EventStore> EngineCore<S> {
         snapshot
     }
 
-    /// A pure clock update PLUS two deadline sweeps: NIP-40 expiry
+    /// The one deadline-maintenance transition: advance clock truth, then
+    /// execute NIP-40 expiry
     /// (retraction-and-negative-deltas.md §3.2 — drains `store.expire_due`
     /// and retracts every row past its deadline) and the negentropy
-    /// liveness-deadline sweep (plan §6 E, harvest `nmp-nip77`'s "30s
+    /// and the negentropy liveness-deadline sweep (plan §6 E, harvest
+    /// `nmp-nip77`'s "30s
     /// liveness-deadline REQ fallback"): any reconciliation session open
     /// longer than [`NEG_LIVENESS_DEADLINE_SECS`] against `now` is
     /// abandoned in favor of a plain REQ for the same (unfloored/unlimited)
@@ -2612,6 +2614,14 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         effects
+    }
+
+    /// Advance reducer wall-clock truth without executing any deadline work.
+    /// Runtime calls this only for transitions whose facts are stamped at the
+    /// instant they arrive; due expiry/retry/liveness work remains exclusively
+    /// owned by [`Self::tick`] and [`Self::next_deadline`].
+    pub(crate) fn advance_clock(&mut self, now: Timestamp) {
+        self.clock = now;
     }
 
     /// The earliest wall-clock instant at which [`Self::tick`] must run for
