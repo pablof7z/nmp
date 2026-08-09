@@ -22,6 +22,25 @@ use crate::route::{self, AtomClass, RouteKind, RouteProvenance, Skeleton};
 use crate::solver::{self, CoverageInput, Shortfall, ShortfallReason};
 use crate::wire_id;
 
+pub(crate) type RequestKey = (RelaySessionKey, SubId);
+
+/// Exact work performed by ordinary delta-driven withdrawal. Structural
+/// counters make the 10k contract deterministic on every machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WithdrawalWork {
+    pub dropped_atoms: u64,
+    pub request_edges_touched: u64,
+    pub requests_closed: u64,
+    pub physical_coverage_edges_released: u64,
+    pub diagnostic_rebuilds: u64,
+}
+
+pub struct WithdrawalOutcome {
+    pub wire: WireDelta,
+    pub changed_coverage: BTreeSet<CoverageKey>,
+    pub diagnostics_changed: bool,
+}
+
 /// The equal-context-only coalescing gate (Fable D, "locus fixed"): two
 /// atoms only ever share wire work if their FULL context matches. Bagged
 /// and coalesced entirely inside `Router::compile` -- `coalesce.rs` itself
@@ -232,6 +251,11 @@ pub struct Router {
     /// of `fold_byte` calls rather than a JSON encode plus BLAKE3 each time.
     /// Carries no filter meaning -- see `SubId::allocate`.
     mint_root: nmp_grammar::DescriptorHash,
+    pub(crate) active_demands: BTreeMap<DemandKey, ContextualAtom>,
+    pub(crate) requests_by_demand: BTreeMap<DemandKey, BTreeSet<RequestKey>>,
+    pub(crate) active_by_request: BTreeMap<RequestKey, usize>,
+    pub(crate) active_outbox_authors: BTreeMap<PublicKey, usize>,
+    pub(crate) withdrawal_work: WithdrawalWork,
 }
 
 impl Router {
@@ -242,7 +266,61 @@ impl Router {
             last_diag: Diagnostics::default(),
             next_token: 0,
             mint_root: ConcreteFilter::default().hash(),
+            active_demands: BTreeMap::new(),
+            requests_by_demand: BTreeMap::new(),
+            active_by_request: BTreeMap::new(),
+            active_outbox_authors: BTreeMap::new(),
+            withdrawal_work: WithdrawalWork::default(),
         }
+    }
+
+    pub(crate) fn rebuild_active_indexes(
+        &mut self,
+        demand: impl IntoIterator<Item = ContextualAtom>,
+    ) {
+        self.active_demands = demand
+            .into_iter()
+            .map(|atom| (DemandKey::for_atom(&atom), atom))
+            .collect();
+        self.requests_by_demand.clear();
+        self.active_by_request.clear();
+        for (session, requests) in &self.prev_plan.reqs {
+            for request in requests {
+                let request_key = (session.clone(), request.sub_id.clone());
+                let mut active = 0;
+                for demand in &request.covered_demands {
+                    self.requests_by_demand
+                        .entry(*demand)
+                        .or_default()
+                        .insert(request_key.clone());
+                    active += usize::from(self.active_demands.contains_key(demand));
+                }
+                self.active_by_request.insert(request_key, active);
+            }
+        }
+        self.active_outbox_authors.clear();
+        for atom in self.active_demands.values() {
+            if let AtomClass::Coverage { authors, .. } = route::classify(&atom.filter, &atom.source)
+            {
+                for author in authors {
+                    *self.active_outbox_authors.entry(author).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn reset_withdrawal_work(&mut self) {
+        self.withdrawal_work = WithdrawalWork::default();
+    }
+
+    #[doc(hidden)]
+    pub fn withdrawal_work(&self) -> WithdrawalWork {
+        self.withdrawal_work
+    }
+
+    pub fn physically_covers(&self, demand: DemandKey) -> bool {
+        self.requests_by_demand.contains_key(&demand)
     }
 
     /// Recompile the whole per-relay plan from `demand`, diff vs the previous
@@ -561,7 +639,7 @@ impl Router {
 
                 session_reqs.extend(merged.into_iter().zip(assigned).map(
                     |((filter, provenance, absorbed), sub_id)| {
-                        let owners = absorbed
+                        let covered_demands = absorbed
                             .iter()
                             .map(|key| DemandKey::from_filter(*key, &filter))
                             .collect();
@@ -571,7 +649,7 @@ impl Router {
                             source: source.clone(),
                             provenance,
                             absorbed,
-                            owners,
+                            covered_demands,
                         }
                     },
                 ));
@@ -599,7 +677,7 @@ impl Router {
                     );
                     for req in &refused {
                         limited.extend(req.absorbed.iter().copied());
-                        limited_demands.extend(req.owners.iter().copied());
+                        limited_demands.extend(req.covered_demands.iter().copied());
                     }
                     subscription_shortfalls.insert(
                         session.clone(),
@@ -662,6 +740,7 @@ impl Router {
             self.rules.dropped_rules().to_vec(),
         );
         self.prev_plan = next_plan;
+        self.rebuild_active_indexes(demand.iter().cloned());
         delta
     }
 

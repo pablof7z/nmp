@@ -10,18 +10,10 @@ use nmp_grammar::{ContextualAtom, RelaySessionKey};
 
 use crate::budget::CompileBudget;
 use crate::diag;
-use crate::facts::{PublicKey, RoutingFacts};
-use crate::plan::{diff_plans, BudgetShortfall, DemandKey, RelayPlan, WireDelta, WireOp, WireReq};
+use crate::facts::RoutingFacts;
+use crate::plan::{BudgetShortfall, DemandKey, RelayPlan, WireDelta, WireOp, WireReq};
 use crate::route::{self, AtomClass};
-use crate::Router;
-
-fn owned(plan: &RelayPlan) -> BTreeSet<DemandKey> {
-    plan.reqs
-        .values()
-        .flatten()
-        .flat_map(|request| request.owners.iter().copied())
-        .collect()
-}
+use crate::{Router, WithdrawalOutcome};
 
 fn owned_by_session(plan: &RelayPlan) -> BTreeMap<RelaySessionKey, BTreeSet<DemandKey>> {
     plan.reqs
@@ -31,21 +23,10 @@ fn owned_by_session(plan: &RelayPlan) -> BTreeMap<RelaySessionKey, BTreeSet<Dema
                 session.clone(),
                 requests
                     .iter()
-                    .flat_map(|request| request.owners.iter().copied())
+                    .flat_map(|request| request.covered_demands.iter().copied())
                     .collect(),
             )
         })
-        .collect()
-}
-
-fn active_outbox_authors(demand: &BTreeSet<ContextualAtom>) -> BTreeSet<PublicKey> {
-    demand
-        .iter()
-        .filter_map(|atom| match route::classify(&atom.filter, &atom.source) {
-            AtomClass::Coverage { authors, .. } => Some(authors),
-            AtomClass::Supplemental { .. } | AtomClass::Exact(_) => None,
-        })
-        .flatten()
         .collect()
 }
 
@@ -77,15 +58,21 @@ impl Router {
         budget: impl Into<CompileBudget>,
     ) -> WireDelta {
         let budget = budget.into();
-        let already_owned = owned(&self.prev_plan);
         let pending: BTreeSet<_> = cohort
             .iter()
             .filter(|atom| {
                 let key = DemandKey::for_atom(atom);
-                !already_owned.contains(&key) || self.prev_plan.limited_demands.contains(&key)
+                !self.requests_by_demand.contains_key(&key)
+                    || self.prev_plan.limited_demands.contains(&key)
             })
             .cloned()
             .collect();
+        for atom in cohort {
+            self.active_demands
+                .insert(DemandKey::for_atom(atom), atom.clone());
+        }
+        let active: Vec<_> = self.active_demands.values().cloned().collect();
+        self.rebuild_active_indexes(active.clone());
         if pending.is_empty() {
             return WireDelta::default();
         }
@@ -100,6 +87,7 @@ impl Router {
         let candidate_diag = std::mem::take(&mut self.last_diag);
         self.prev_plan = running_plan;
         self.last_diag = running_diag;
+        self.rebuild_active_indexes(active.clone());
 
         // A partially-limited atom may already be served on one of its
         // required sessions. Remove only that session/key pair from the
@@ -110,14 +98,14 @@ impl Router {
         candidate.reqs.retain(|session, requests| {
             if let Some(running) = running_by_session.get(session) {
                 for request in requests.iter_mut() {
-                    request.owners.retain(|key| !running.contains(key));
+                    request.covered_demands.retain(|key| !running.contains(key));
                     request.absorbed = request
-                        .owners
+                        .covered_demands
                         .iter()
                         .map(|owner| owner.coverage())
                         .collect();
                 }
-                requests.retain(|request| !request.owners.is_empty());
+                requests.retain(|request| !request.covered_demands.is_empty());
             }
             !requests.is_empty()
         });
@@ -144,7 +132,7 @@ impl Router {
                 candidate.limited_demands.extend(
                     refused
                         .iter()
-                        .flat_map(|request| request.owners.iter().copied()),
+                        .flat_map(|request| request.covered_demands.iter().copied()),
                 );
             }
             candidate.refused_sessions.insert(session);
@@ -184,7 +172,7 @@ impl Router {
             candidate.limited_demands.extend(
                 refused
                     .iter()
-                    .flat_map(|request| request.owners.iter().copied()),
+                    .flat_map(|request| request.covered_demands.iter().copied()),
             );
             candidate.subscription_shortfalls.insert(
                 session.clone(),
@@ -251,6 +239,7 @@ impl Router {
             uncovered,
             candidate_diag.dropped_merge_rules,
         );
+        self.rebuild_active_indexes(active);
 
         WireDelta {
             ops: admitted
@@ -270,29 +259,118 @@ impl Router {
         }
     }
 
-    /// Withdraw inactive demand without narrowing or replacing a request
-    /// that still serves at least one active coverage key.
+    /// Consume exact resolver-style closes without inspecting any sibling
+    /// demand. A physical request closes only when its incremental active
+    /// owner count reaches zero; its immutable coverage proof is released
+    /// only with that request.
     pub fn withdraw(
         &mut self,
-        active_demand: &BTreeSet<ContextualAtom>,
+        closing_atoms: impl IntoIterator<Item = ContextualAtom>,
         budget: impl Into<CompileBudget>,
-    ) -> WireDelta {
+    ) -> WithdrawalOutcome {
         let budget = budget.into();
-        let active_keys: BTreeSet<_> = active_demand.iter().map(DemandKey::for_atom).collect();
-        let previous = self.prev_plan.clone();
-        self.prev_plan.reqs.retain(|_, requests| {
-            requests.retain(|request| !request.owners.is_disjoint(&active_keys));
-            !requests.is_empty()
-        });
-        self.prev_plan
-            .limited_demands
-            .retain(|key| active_keys.contains(key));
-        self.prev_plan.limited = self
-            .prev_plan
-            .limited_demands
-            .iter()
-            .map(|key| key.coverage())
-            .collect();
+        let mut closing = BTreeSet::new();
+        let mut limited_changed = false;
+        let mut changed_coverage = BTreeSet::new();
+        for atom in closing_atoms {
+            self.withdrawal_work.dropped_atoms =
+                self.withdrawal_work.dropped_atoms.saturating_add(1);
+            let key = DemandKey::for_atom(&atom);
+            let Some(active_atom) = self.active_demands.remove(&key) else {
+                continue;
+            };
+            if let AtomClass::Coverage { authors, .. } =
+                route::classify(&active_atom.filter, &active_atom.source)
+            {
+                for author in authors {
+                    let remove = self
+                        .active_outbox_authors
+                        .get_mut(&author)
+                        .is_some_and(|count| {
+                            *count = count.saturating_sub(1);
+                            *count == 0
+                        });
+                    if remove {
+                        self.active_outbox_authors.remove(&author);
+                    }
+                }
+            }
+            for request in self
+                .requests_by_demand
+                .get(&key)
+                .cloned()
+                .unwrap_or_default()
+            {
+                self.withdrawal_work.request_edges_touched =
+                    self.withdrawal_work.request_edges_touched.saturating_add(1);
+                let count = self
+                    .active_by_request
+                    .get_mut(&request)
+                    .expect("physical demand edge names a live request");
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    closing.insert(request);
+                }
+            }
+            if self.prev_plan.limited_demands.remove(&key) {
+                limited_changed = true;
+                let coverage = key.coverage();
+                changed_coverage.insert(coverage);
+                if !self
+                    .prev_plan
+                    .limited_demands
+                    .iter()
+                    .any(|remaining| remaining.coverage() == coverage)
+                {
+                    self.prev_plan.limited.remove(&coverage);
+                }
+            }
+        }
+
+        let mut wire_by_session: BTreeMap<RelaySessionKey, Vec<WireOp>> = BTreeMap::new();
+        let mut touched_sessions = BTreeSet::new();
+        for (session, sub_id) in closing {
+            let request_key = (session.clone(), sub_id.clone());
+            let mut released = BTreeSet::new();
+            if let Some(requests) = self.prev_plan.reqs.get_mut(&session) {
+                requests.retain(|request| {
+                    if request.sub_id == sub_id {
+                        released.extend(request.covered_demands.iter().copied());
+                        changed_coverage.extend(request.absorbed.iter().copied());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if requests.is_empty() {
+                    self.prev_plan.reqs.remove(&session);
+                }
+            }
+            if released.is_empty() {
+                continue;
+            }
+            self.withdrawal_work.requests_closed =
+                self.withdrawal_work.requests_closed.saturating_add(1);
+            self.withdrawal_work.physical_coverage_edges_released = self
+                .withdrawal_work
+                .physical_coverage_edges_released
+                .saturating_add(released.len() as u64);
+            for demand in released {
+                if let Some(requests) = self.requests_by_demand.get_mut(&demand) {
+                    requests.remove(&request_key);
+                    if requests.is_empty() {
+                        self.requests_by_demand.remove(&demand);
+                    }
+                }
+            }
+            self.active_by_request.remove(&request_key);
+            touched_sessions.insert(session.clone());
+            wire_by_session
+                .entry(session)
+                .or_default()
+                .push(WireOp::Close(sub_id));
+        }
+
         self.prev_plan
             .subscription_shortfalls
             .retain(|session, _| self.prev_plan.reqs.contains_key(session));
@@ -300,16 +378,26 @@ impl Router {
             self.prev_plan.reqs.contains_key(session)
                 || self.prev_plan.subscription_shortfalls.contains_key(session)
         });
-
-        let active_authors = active_outbox_authors(active_demand);
-        let mut uncovered = self.last_diag.uncovered_authors.clone();
-        uncovered.retain(|author, _| active_authors.contains(author));
-        self.last_diag = diag::build(
-            &self.prev_plan,
-            &budget,
-            uncovered,
-            self.last_diag.dropped_merge_rules.clone(),
-        );
-        diff_plans(&previous, &self.prev_plan)
+        let diagnostics_changed = !touched_sessions.is_empty() || limited_changed;
+        if diagnostics_changed {
+            self.last_diag
+                .uncovered_authors
+                .retain(|author, _| self.active_outbox_authors.contains_key(author));
+            diag::refresh_sessions(
+                &mut self.last_diag,
+                &self.prev_plan,
+                &budget,
+                &touched_sessions,
+            );
+            self.withdrawal_work.diagnostic_rebuilds =
+                self.withdrawal_work.diagnostic_rebuilds.saturating_add(1);
+        }
+        WithdrawalOutcome {
+            wire: WireDelta {
+                ops: wire_by_session.into_iter().collect(),
+            },
+            changed_coverage,
+            diagnostics_changed,
+        }
     }
 }

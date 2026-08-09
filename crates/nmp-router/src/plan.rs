@@ -175,10 +175,11 @@ pub struct WireReq {
     pub source: SourceAuthority,
     pub provenance: Vec<RouteProvenance>,
     pub absorbed: BTreeSet<CoverageKey>,
-    /// Exact demand owners carried by this immutable request. Unlike
-    /// `absorbed`, these retain the request window/count and therefore own
-    /// admission reuse and withdrawal.
-    pub owners: BTreeSet<DemandKey>,
+    /// Exact demand identities this immutable physical request covers.
+    /// Unlike `absorbed`, these retain the request window/count. They never
+    /// shrink: current active ownership lives in the router's incremental
+    /// reverse index, separately from this admission-time coverage proof.
+    pub covered_demands: BTreeSet<DemandKey>,
 }
 
 /// One session's per-relay subscription-budget shortfall (#931): what the
@@ -331,7 +332,7 @@ mod tests {
             source: SourceAuthority::AuthorOutboxes,
             provenance: Vec::new(),
             absorbed: BTreeSet::new(),
-            owners: BTreeSet::new(),
+            covered_demands: BTreeSet::new(),
         };
         RelayPlan {
             reqs: BTreeMap::from([(RelaySessionKey::public(relay), vec![req])]),
@@ -393,7 +394,7 @@ mod tests {
                 source: SourceAuthority::AuthorOutboxes,
                 provenance: Vec::new(),
                 absorbed: BTreeSet::new(),
-                owners: BTreeSet::new(),
+                covered_demands: BTreeSet::new(),
             }],
         );
 

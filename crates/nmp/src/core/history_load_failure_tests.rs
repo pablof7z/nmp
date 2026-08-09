@@ -473,6 +473,146 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
     ));
 }
 
+/// #1165/#1342: a failed graph build must not swallow handle drops drained
+/// before the failing read, and reporting the refusal consumes that batch
+/// exactly once.
+#[test]
+fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
+    let control = ReadFailureControl::default();
+    let mut resolver =
+        ResolverEngine::new(FailingReadStore::new(MemoryStore::new(), control.clone()));
+    let first = nmp_grammar::Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1])),
+        ..Filter::default()
+    });
+    let first_handle = match resolver.subscribe(first) {
+        SubscribeOutcome::Opened { handle, .. } => handle,
+        SubscribeOutcome::Refused { error, .. } => panic!("fixture open refused: {error}"),
+    };
+    drop(first_handle);
+
+    let failing = nmp_grammar::Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([2])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner: nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([3])),
+                ..Filter::default()
+            }),
+            project: Selector::Tag("p".to_owned()),
+        }))),
+        ..Filter::default()
+    });
+    control.fail_query("failed after draining pending drops");
+    let delta = match resolver.subscribe(failing) {
+        SubscribeOutcome::Refused { error, delta } => {
+            assert!(error
+                .to_string()
+                .contains("failed after draining pending drops"));
+            delta
+        }
+        SubscribeOutcome::Opened { .. } => panic!("injected graph failure was ignored"),
+    };
+    assert_eq!(delta.ops.len(), 1);
+    assert!(matches!(
+        &delta.ops[0],
+        DemandOp::Close(atom) if atom.filter.kinds == Some(BTreeSet::from([1]))
+    ));
+    assert!(
+        resolver.poll_pending_drops().is_empty(),
+        "the refused outcome owns the drained close; polling cannot report it twice"
+    );
+}
+
+#[test]
+fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close() {
+    for graph_refusal in [true, false] {
+        let control = ReadFailureControl::default();
+        let relay = RelayUrl::parse("wss://refused-open-withdrawal.example").unwrap();
+        let mut core = EngineCore::new(
+            FailingReadStore::new(MemoryStore::new(), control.clone()),
+            4,
+        );
+        let mut first = nmp_grammar::Demand::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        });
+        first.source = SourceAuthority::Pinned(BTreeSet::from([relay]));
+        first.freshness = Freshness::Live;
+        let observation = match core.open_observation(LiveQuery::single(first)) {
+            ObservationOpen::Opened { id, .. } => id,
+            ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
+        };
+        let opened = core.flush_wire_admission();
+        let sub_id = opened
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Wire(delta) => Some(delta),
+                _ => None,
+            })
+            .flat_map(|delta| delta.ops.iter().flat_map(|(_, ops)| ops))
+            .find_map(|op| match op {
+                WireOp::Req(sub_id, _) => Some(sub_id.clone()),
+                WireOp::Close(_) => None,
+            })
+            .expect("fixture admission opens one wire request");
+
+        // Model the exact #1165 seam: the owning resolver handle is dropped,
+        // so its close is pending inside the resolver, while core's exact wire
+        // index still records the request the next outcome must withdraw.
+        let branch = core.observations[&observation].branches[0];
+        core.observations.remove(&observation);
+        drop(core.handles.remove(&branch));
+
+        let failing = if graph_refusal {
+            nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([2])),
+                authors: Some(Binding::Derived(Box::new(Derived {
+                    inner: nmp_grammar::Demand::from_filter(Filter {
+                        kinds: Some(BTreeSet::from([3])),
+                        ..Filter::default()
+                    }),
+                    project: Selector::Tag("p".to_owned()),
+                }))),
+                ..Filter::default()
+            })
+        } else {
+            nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([2])),
+                ..Filter::default()
+            })
+        };
+        let refusal = if graph_refusal { "graph" } else { "projection" };
+        control.fail_query(&format!(
+            "{refusal} refused after draining pending wire owner"
+        ));
+        let effects = match core.open_observation(LiveQuery::single(failing)) {
+            ObservationOpen::Refused { reason, effects } => {
+                assert!(reason.contains(&format!(
+                    "{refusal} refused after draining pending wire owner"
+                )));
+                effects
+            }
+            ObservationOpen::Opened { .. } => panic!("injected {refusal} failure was ignored"),
+        };
+        let closes: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Wire(delta) => Some(delta),
+                _ => None,
+            })
+            .flat_map(|delta| delta.ops.iter().flat_map(|(_, ops)| ops))
+            .filter_map(|op| match op {
+                WireOp::Close(closed) => Some(closed),
+                WireOp::Req(_, _) => None,
+            })
+            .collect();
+        assert_eq!(closes, vec![&sub_id], "{refusal} refusal");
+        assert!(core.router.plan().reqs.is_empty());
+        assert!(core.resolver.poll_pending_drops().is_empty());
+        assert!(core.flush_wire_admission().is_empty());
+    }
+}
+
 #[test]
 fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() {
     {

@@ -18,6 +18,21 @@ fn query(relay: &RelayUrl, value: &str, freshness: Freshness) -> LiveQuery {
     LiveQuery::single(demand)
 }
 
+fn bounded_query(relay: &RelayUrl, value: &str) -> LiveQuery {
+    let mut demand = Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([0u16])),
+        tags: BTreeMap::from([(
+            IndexedTagName::new('p').unwrap(),
+            Binding::Literal(BTreeSet::from([value.to_owned()])),
+        )]),
+        limit: Some(25),
+        ..Filter::default()
+    });
+    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    demand.freshness = Freshness::Live;
+    LiveQuery::single(demand)
+}
+
 fn observation_id(effects: &[Effect]) -> ObservationId {
     effects
         .iter()
@@ -75,12 +90,19 @@ fn compatible_pending_observations_compile_once_into_one_relay_request() {
     let relay = RelayUrl::parse("wss://admission-group.example").unwrap();
     let mut core = EngineCore::new(MemoryStore::new(), 20);
 
-    core.handle(EngineMsg::Subscribe(query(
+    let alice = core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
         Freshness::Live,
     )));
-    core.handle(EngineMsg::Subscribe(query(&relay, "bob", Freshness::Live)));
+    let bob = core.handle(EngineMsg::Subscribe(query(&relay, "bob", Freshness::Live)));
+    assert_ne!(observation_id(&alice), observation_id(&bob));
+    for opened in [&alice, &bob] {
+        assert!(opened.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitRows(_, _, evidence) if evidence.len() == 1
+        )));
+    }
     assert_eq!(core.router_compiles.get(), 0);
 
     let flushed = flush(&mut core);
@@ -243,6 +265,7 @@ fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
     );
 
     core.projection_store_queries.set(0);
+    core.router.reset_withdrawal_work();
     let mut diagnostics = 0;
     for observation in observations {
         diagnostics += core
@@ -252,10 +275,89 @@ fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
             .count();
     }
     assert_eq!(core.projection_store_queries.get(), 0);
+    let work = core.router.withdrawal_work();
+    assert_eq!(work.dropped_atoms, 207);
+    assert_eq!(work.request_edges_touched, 207);
+    assert_eq!(work.requests_closed, 1);
+    assert_eq!(work.physical_coverage_edges_released, 207);
+    assert_eq!(work.diagnostic_rebuilds, 1);
     assert_eq!(
         diagnostics, 1,
         "only the final owner changes the immutable relay plan"
     );
+}
+
+#[test]
+fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
+    let relay = RelayUrl::parse("wss://admission-shared-10k.example").unwrap();
+    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut observations = Vec::with_capacity(10_000);
+    for _ in 0..10_000 {
+        observations.push(observation_id(
+            &core.handle(EngineMsg::Subscribe(bounded_query(&relay, "same-owner"))),
+        ));
+    }
+    assert_eq!(
+        observations.iter().copied().collect::<BTreeSet<_>>().len(),
+        10_000
+    );
+    let admitted = flush(&mut core);
+    assert_eq!(
+        wire_ops(&admitted)
+            .into_iter()
+            .filter(|op| matches!(op, WireOp::Req(_, _)))
+            .count(),
+        1
+    );
+
+    core.projection_store_queries.set(0);
+    core.router_compiles.set(0);
+    core.withdrawal_handle_detaches.set(0);
+    core.resolver_delta_ops_consumed.set(0);
+    core.router.reset_withdrawal_work();
+    for observation in observations.iter().take(9_999) {
+        let effects = core.handle(EngineMsg::Unsubscribe(*observation));
+        assert!(wire_ops(&effects).is_empty());
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))));
+    }
+
+    let non_final = core.router.withdrawal_work();
+    assert_eq!(core.withdrawal_handle_detaches.get(), 9_999);
+    assert_eq!(core.resolver_delta_ops_consumed.get(), 0);
+    assert_eq!(non_final.dropped_atoms, 0);
+    assert_eq!(non_final.request_edges_touched, 0);
+    assert_eq!(non_final.requests_closed, 0);
+    assert_eq!(non_final.diagnostic_rebuilds, 0);
+    assert_eq!(core.projection_store_queries.get(), 0);
+    assert_eq!(core.router_compiles.get(), 0);
+
+    let final_effects = core.handle(EngineMsg::Unsubscribe(observations[9_999]));
+    assert_eq!(
+        wire_ops(&final_effects)
+            .into_iter()
+            .filter(|op| matches!(op, WireOp::Close(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        final_effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::EmitDiagnostics(_)))
+            .count(),
+        1
+    );
+    let final_work = core.router.withdrawal_work();
+    assert_eq!(core.withdrawal_handle_detaches.get(), 10_000);
+    assert_eq!(core.resolver_delta_ops_consumed.get(), 1);
+    assert_eq!(final_work.dropped_atoms, 1);
+    assert_eq!(final_work.request_edges_touched, 1);
+    assert_eq!(final_work.requests_closed, 1);
+    assert_eq!(final_work.physical_coverage_edges_released, 1);
+    assert_eq!(final_work.diagnostic_rebuilds, 1);
+    assert_eq!(core.projection_store_queries.get(), 0);
+    assert_eq!(core.router_compiles.get(), 0);
 }
 
 #[test]

@@ -445,7 +445,7 @@ mod tests {
             source: atom.source.clone(),
             provenance: Vec::new(),
             absorbed: BTreeSet::from([key]),
-            owners: BTreeSet::from([DemandKey::for_atom(&atom)]),
+            covered_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
         };
         let plan = RelayPlan {
             reqs: BTreeMap::from([(RelaySessionKey::public(relay.clone()), vec![req])]),
@@ -521,7 +521,7 @@ mod tests {
                     source: atom.source.clone(),
                     provenance: Vec::new(),
                     absorbed: BTreeSet::from([key]),
-                    owners: BTreeSet::from([DemandKey::for_atom(&atom)]),
+                    covered_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
                 }],
             )]),
             ..RelayPlan::default()

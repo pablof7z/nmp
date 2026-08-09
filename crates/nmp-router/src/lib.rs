@@ -62,5 +62,5 @@ pub use plan::{
     diff_plans, BudgetShortfall, DemandKey, RelayPlan, SubId, WireDelta, WireOp, WireReq,
 };
 pub use route::{RouteKind, RouteProvenance, Skeleton};
-pub use router::Router;
+pub use router::{Router, WithdrawalOutcome, WithdrawalWork};
 pub use solver::{solve, Coverage, CoverageInput, Shortfall, ShortfallReason};

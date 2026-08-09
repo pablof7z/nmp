@@ -70,13 +70,13 @@ use nostr::{
 };
 
 use nmp_grammar::{
-    fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash, Freshness,
-    Identity, LiveQuery, RelaySessionKey, RoutingEvidence, SourceAuthority, WriteIntent,
-    WritePayload, WriteRouting,
+    fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
+    DescriptorHash, Freshness, Identity, LiveQuery, RelaySessionKey, RoutingEvidence,
+    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine,
-    HandleId, LocalAcceptResult, QueryHandle, RelayIngestError,
+    HandleId, LocalAcceptResult, QueryHandle, RelayIngestError, SubscribeOutcome,
 };
 use nmp_router::{
     AdvertisedRelayLimits, AuthorRouteState, AuthorRoutes, CompileBudget, RelayPlan, Router,
@@ -1001,6 +1001,19 @@ pub(crate) struct RowsSeed {
     pub(crate) evidence: Vec<AcquisitionEvidence>,
 }
 
+/// Deterministic ordinary-withdrawal work counters for scale harnesses.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoreWithdrawalWork {
+    pub handles_detached: u64,
+    pub resolver_delta_ops_consumed: u64,
+    pub exact_atoms_closed: u64,
+    pub request_edges_touched: u64,
+    pub requests_closed: u64,
+    pub physical_coverage_edges_released: u64,
+    pub diagnostic_refreshes: u64,
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoreObservationOwnershipCensus {
@@ -1230,6 +1243,7 @@ struct ObservationState {
 /// observation handle. The vector follows the resolver's stable structural
 /// Demand order (root first), so reactive value changes update the atoms
 /// without overwriting which boundary owns which policy decision.
+#[derive(Clone)]
 struct HandleAcquisition {
     scopes: Vec<ScopeAcquisition>,
 }
@@ -1238,6 +1252,7 @@ struct HandleAcquisition {
 /// represented by variants, never a teardown bool: only `Live` contributes
 /// that boundary's current atoms to the router; a coverage-satisfied scope
 /// retains the exact plan that justified suppression.
+#[derive(Clone)]
 enum ScopeAcquisition {
     Live,
     CoverageSatisfied(RelayPlan),
@@ -1635,6 +1650,21 @@ pub struct EngineCore<S: EventStore> {
     /// Per-BRANCH bookkeeping for every live observation branch, keyed by
     /// the resolver handle that owns it.
     handles: HashMap<HandleId, BranchState>,
+    /// Immutable per-handle live-wire atoms plus exact active owner counts.
+    /// Ordinary withdrawal consults only the departing handle and these
+    /// reverse counts; it never reconstructs sibling demand.
+    wire_atoms_by_handle: HashMap<HandleId, BTreeSet<ContextualAtom>>,
+    wire_owner_counts: BTreeMap<nmp_router::DemandKey, (ContextualAtom, usize)>,
+    /// Exact reverse edge used only when a resolver call reports a handle
+    /// drop that happened before core could run its ordinary detach path.
+    wire_handles_by_atom: BTreeMap<nmp_router::DemandKey, BTreeSet<HandleId>>,
+    /// Resolver-reported final closes wait until the current open transaction
+    /// has attached any replacement live owner. That lets close+open of the
+    /// same atom reattach to retained physical coverage without wire churn.
+    pending_resolver_wire_closes: BTreeMap<nmp_router::DemandKey, ContextualAtom>,
+    /// Active exact demand not yet covered on every required physical
+    /// session. Refused opens stay here until a real close frees capacity.
+    pending_wire_atoms: BTreeMap<nmp_router::DemandKey, ContextualAtom>,
     /// Per-OBSERVATION delivered projection, keyed by the id every mailbox
     /// and cancellation uses.
     observations: HashMap<ObservationId, ObservationState>,
@@ -1914,6 +1944,10 @@ pub struct EngineCore<S: EventStore> {
     router_compiles: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     history_store_queries: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    withdrawal_handle_detaches: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    resolver_delta_ops_consumed: Cell<u64>,
     #[cfg(test)]
     history_rows_examined: Cell<u64>,
     #[cfg(test)]
@@ -1974,6 +2008,11 @@ impl<S: EventStore> EngineCore<S> {
             routing_facts,
             cap,
             handles: HashMap::new(),
+            wire_atoms_by_handle: HashMap::new(),
+            wire_owner_counts: BTreeMap::new(),
+            wire_handles_by_atom: BTreeMap::new(),
+            pending_resolver_wire_closes: BTreeMap::new(),
+            pending_wire_atoms: BTreeMap::new(),
             observations: HashMap::new(),
             next_observation_id: 0,
             histories: HashMap::new(),
@@ -2029,6 +2068,10 @@ impl<S: EventStore> EngineCore<S> {
             router_compiles: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             history_store_queries: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            withdrawal_handle_detaches: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            resolver_delta_ops_consumed: Cell::new(0),
             #[cfg(test)]
             history_rows_examined: Cell::new(0),
             #[cfg(test)]
@@ -2872,6 +2915,29 @@ impl EngineCore<nmp_store::RedbStore> {
             self.router_compiles.get(),
             self.history_store_queries.get(),
         )
+    }
+
+    /// Reset exact delta-withdrawal counters independently of projection and
+    /// storage work.
+    #[doc(hidden)]
+    pub fn bench_reset_withdrawal_work(&mut self) {
+        self.withdrawal_handle_detaches.set(0);
+        self.resolver_delta_ops_consumed.set(0);
+        self.router.reset_withdrawal_work();
+    }
+
+    #[doc(hidden)]
+    pub fn bench_withdrawal_work(&self) -> CoreWithdrawalWork {
+        let router = self.router.withdrawal_work();
+        CoreWithdrawalWork {
+            handles_detached: self.withdrawal_handle_detaches.get(),
+            resolver_delta_ops_consumed: self.resolver_delta_ops_consumed.get(),
+            exact_atoms_closed: router.dropped_atoms,
+            request_edges_touched: router.request_edges_touched,
+            requests_closed: router.requests_closed,
+            physical_coverage_edges_released: router.physical_coverage_edges_released,
+            diagnostic_refreshes: router.diagnostic_rebuilds,
+        }
     }
 
     /// Benchmark-only access to the store work counters used by the
