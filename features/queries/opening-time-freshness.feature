@@ -27,6 +27,16 @@ Feature: Opening-time freshness is separate from deadline maintenance
       Then no store expiration sweep runs
       And no publication retry or reconciliation liveness sweep runs
 
+    # nmp:id=QUERIES-FRESHNESS-CLOCK-011
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::fresh_max_age_reads_each_coverage_row_once
+    # nmp:falsifier=Read fresh coverage once for the decision and again for the opening frame; one satisfied observation performs two identical store reads.
+    Scenario: A fresh max-age opening reuses its exact coverage proof
+      Given persisted relay coverage satisfies a max-age query
+      When the app opens that query
+      Then each assigned coverage row is read once
+      And the opening evidence retains the watermark that justified no wire
+
   Rule: A due deadline wins a race with an app command
 
     # nmp:id=QUERIES-FRESHNESS-CLOCK-003

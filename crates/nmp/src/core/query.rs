@@ -1666,8 +1666,12 @@ impl<S: EventStore> EngineCore<S> {
                     let plan = candidate_plan
                         .as_ref()
                         .expect("a MaxAge scope built the candidate plan");
-                    if self.plan_is_fresh_for(&atoms, plan, seconds, now)? {
-                        ScopeAcquisition::CoverageSatisfied(plan.clone())
+                    let evidence = self.opening_coverage_evidence_for(&atoms, plan)?;
+                    if self.plan_is_fresh_for(&evidence, seconds, now) {
+                        ScopeAcquisition::CoverageSatisfied {
+                            plan: plan.clone(),
+                            evidence,
+                        }
                     } else {
                         ScopeAcquisition::Live
                     }
@@ -1688,6 +1692,10 @@ impl<S: EventStore> EngineCore<S> {
         let awaiting_requests = self.awaiting_request_keys();
         let mut parts = Vec::with_capacity(scopes.len());
         for ((atoms, _), decision) in scopes.into_iter().zip(&acquisition.scopes) {
+            if let Some(evidence) = decision.opening_evidence() {
+                parts.push(evidence.clone());
+                continue;
+            }
             let plan = decision
                 .evidence_plan()
                 .unwrap_or_else(|| self.router.plan());
@@ -1702,14 +1710,7 @@ impl<S: EventStore> EngineCore<S> {
                     finished_stored_events: &finished_stored_events,
                     placed_requests: &placed_requests,
                     awaiting_requests: &awaiting_requests,
-                    acquisition: match decision {
-                        ScopeAcquisition::CoverageSatisfied(_) => {
-                            evidence::EvidenceAcquisition::CoverageSatisfied
-                        }
-                        ScopeAcquisition::Live | ScopeAcquisition::CacheOnly(_) => {
-                            evidence::EvidenceAcquisition::Live
-                        }
-                    },
+                    acquisition: evidence::EvidenceAcquisition::Live,
                 },
             )?);
         }
@@ -1722,67 +1723,52 @@ impl<S: EventStore> EngineCore<S> {
         Ok(evidence::merge_acquisition_evidence(parts))
     }
 
-    /// Unanimous current-assignment freshness. Presence of a matching event
-    /// is deliberately irrelevant: a coverage row proves the question was
-    /// checked, so an empty cached result can satisfy `MaxAge` too.
-    ///
-    /// Fallible (#763), and not merely for tidiness: `false` here means
-    /// "the cache is not fresh enough, go to the network", which is a real
-    /// decision made about real coverage rows. A store read that could not
-    /// answer has decided nothing, so it leaves through `Err` and the caller
-    /// degrades — it never gets to vote `false`.
-    pub(super) fn plan_is_fresh_for(
+    /// Read the exact evidence used for the one-time MaxAge decision. Retaining
+    /// this snapshot prevents the opening frame from rereading the same rows
+    /// and preserves the historical watermark that justified suppression.
+    fn opening_coverage_evidence_for(
         &self,
         atoms: &BTreeSet<ContextualAtom>,
         plan: &RelayPlan,
+    ) -> Result<AcquisitionEvidence, PersistenceError> {
+        let auth_status = self.auth_status_map();
+        let finished_stored_events = self.finished_stored_events();
+        let placed_requests = self.placed_request_keys();
+        let awaiting_requests = self.awaiting_request_keys();
+        evidence::acquisition_evidence(
+            atoms,
+            plan,
+            evidence::AcquisitionEvidenceContext {
+                store: self.resolver.store(),
+                connected: &self.connected_relays,
+                auth_status: &auth_status,
+                ever_connected: &self.ever_connected_relays,
+                finished_stored_events: &finished_stored_events,
+                placed_requests: &placed_requests,
+                awaiting_requests: &awaiting_requests,
+                acquisition: evidence::EvidenceAcquisition::CoverageSatisfied,
+            },
+        )
+    }
+
+    /// Unanimous current-assignment freshness over the already-read opening
+    /// evidence. Presence of a matching event is deliberately irrelevant: a
+    /// coverage row proves the question was checked, so an empty cached result
+    /// can satisfy `MaxAge` too.
+    pub(super) fn plan_is_fresh_for(
+        &self,
+        evidence: &AcquisitionEvidence,
         max_age_seconds: u64,
         now: Timestamp,
-    ) -> Result<bool, PersistenceError> {
-        if atoms.is_empty() {
-            return Ok(false);
-        }
+    ) -> bool {
         let cutoff = Timestamp::from(now.as_secs().saturating_sub(max_age_seconds));
-        for atom in atoms {
-            if plan
-                .limited_demands
-                .contains(&nmp_router::DemandKey::for_atom(atom))
-            {
-                return Ok(false);
-            }
-            let claims = nmp_store::coverage_claim_atoms(atom);
-            if claims.is_empty() {
-                return Ok(false);
-            }
-            let floor = Timestamp::from(atom.filter.since.unwrap_or(0));
-            for claim in claims {
-                let key = nmp_store::coverage_key(&claim);
-                let covering: Vec<&RelaySessionKey> = plan
-                    .reqs
-                    .iter()
-                    .filter_map(|(session, reqs)| {
-                        reqs.iter()
-                            .any(|request| request.coverage_claims.contains(&key))
-                            .then_some(session)
-                    })
-                    .collect();
-                if covering.is_empty() {
-                    return Ok(false);
-                }
-                for session in covering {
-                    let proven = self
-                        .resolver
-                        .store()
-                        .get_coverage(key, &session.relay)?
-                        .is_some_and(|interval| {
-                            interval.from <= floor && interval.through >= cutoff
-                        });
-                    if !proven {
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-        Ok(true)
+        !evidence.sources.is_empty()
+            && evidence.shortfall.is_empty()
+            && evidence.sources.iter().all(|source| {
+                source
+                    .reconciled_through
+                    .is_some_and(|through| through >= cutoff)
+            })
     }
 
     /// Gate every network-sourced selector hint/provenance URL before it can

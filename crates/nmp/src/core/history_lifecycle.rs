@@ -701,7 +701,8 @@ impl<S: EventStore> EngineCore<S> {
         let needs_live = state.acquisitions_by_branch.iter().any(|acquisition| {
             !matches!(
                 acquisition.root(),
-                Some(ScopeAcquisition::CoverageSatisfied(_)) | Some(ScopeAcquisition::CacheOnly(_))
+                Some(ScopeAcquisition::CoverageSatisfied { .. })
+                    | Some(ScopeAcquisition::CacheOnly(_))
             )
         });
         let live = needs_live.then(|| self.shadow_plan_for(self.wire_demand()));
@@ -709,7 +710,7 @@ impl<S: EventStore> EngineCore<S> {
             .acquisitions_by_branch
             .iter()
             .map(|acquisition| match acquisition.root() {
-                Some(ScopeAcquisition::CoverageSatisfied(plan))
+                Some(ScopeAcquisition::CoverageSatisfied { plan, .. })
                 | Some(ScopeAcquisition::CacheOnly(plan)) => plan.clone(),
                 _ => live
                     .clone()
@@ -1108,7 +1109,7 @@ impl<S: EventStore> EngineCore<S> {
                     placed_requests: &placed_requests,
                     awaiting_requests: &awaiting_requests,
                     acquisition: match self.histories[&id].acquisitions_by_branch[branch].root() {
-                        Some(ScopeAcquisition::CoverageSatisfied(_)) => {
+                        Some(ScopeAcquisition::CoverageSatisfied { .. }) => {
                             evidence::EvidenceAcquisition::CoverageSatisfied
                         }
                         Some(ScopeAcquisition::Live)

@@ -299,7 +299,7 @@ pub struct GraphSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionNodeSnapshot {
     pub path: String,
-    pub kind: ResolutionNodeKind,
+    pub node_type: ResolutionNodeKind,
 }
 
 /// Current authoritative value of one resolver graph node.

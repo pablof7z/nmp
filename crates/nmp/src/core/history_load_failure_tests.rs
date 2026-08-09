@@ -527,7 +527,7 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
 }
 
 #[test]
-fn evidence_projection_refusal_releases_the_candidate_request_target_index() {
+fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
     let control = StoreFailureControl::default();
     let relay = RelayUrl::parse("wss://request-target-refusal.example").unwrap();
     let filter = Filter {
@@ -559,7 +559,10 @@ fn evidence_projection_refusal_releases_the_candidate_request_target_index() {
         .unwrap();
     let mut core = EngineCore::new(ControlledFailureStore::new(store, control.clone()), 20);
     core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
-    control.fail_coverage_after(1, "opening evidence coverage failed");
+    // MaxAge now uses this one read for both its freshness decision and the
+    // opening frame. Fail that sole authority and prove the candidate graph
+    // unwinds before any request-target ownership can escape.
+    control.fail_coverage_after(0, "opening evidence coverage failed");
 
     let refusal = core.open_observation(LiveQuery::single(demand), Timestamp::from(100u64));
     match refusal {

@@ -89,7 +89,7 @@ pub(crate) enum RefusalKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RefusalOwner {
-    pub(crate) kind: RefusalKind,
+    pub(crate) refusal_kind: RefusalKind,
     pub(crate) request: Option<SubId>,
 }
 

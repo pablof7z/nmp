@@ -804,7 +804,7 @@ impl<S: EventStore> EngineCore<S> {
         let mut evidence = Vec::new();
         let mut current_targets = BTreeMap::new();
         for node in snapshot {
-            match node.kind {
+            match node.node_type {
                 ResolutionNodeKind::Reactive { field, values } => {
                     let values = resolved_values(values);
                     let fingerprint = value_fingerprint(&values);
