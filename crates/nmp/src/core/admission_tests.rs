@@ -1,8 +1,12 @@
 //! Admission-window and surgical lifecycle falsifiers for #1340/#1341.
 
+use std::borrow::Cow;
+
 use super::*;
+use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
 use nmp_grammar::{Binding, Demand, Filter, IndexedTagName};
 use nmp_store::MemoryStore;
+use nostr::SubscriptionId;
 
 fn query(relay: &RelayUrl, value: &str, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::from_filter(Filter {
@@ -39,8 +43,36 @@ fn wire_ops(effects: &[Effect]) -> Vec<&WireOp> {
         .collect()
 }
 
+fn prove_nip77<S: EventStore>(
+    core: &mut EngineCore<S>,
+    relay: &RelayUrl,
+    transport: TransportRelayHandle,
+    now: Timestamp,
+) -> RelaySessionKey {
+    let session = RelaySessionKey::public(relay.clone());
+    core.advance_clock(now);
+    let mut connected = core.handle(EngineMsg::RelayConnected(transport, session.clone()));
+    connected.extend(core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None)));
+    let probe_sub_id = connected
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartProbe(url, sub_id, ..) if url == relay => Some(sub_id.clone()),
+            _ => None,
+        })
+        .expect("the demanded relay starts a behavioral NIP-77 probe");
+    core.handle(EngineMsg::RelayFrame(
+        transport,
+        session.clone(),
+        RelayFrame::from(RelayMessage::NegMsg {
+            subscription_id: Cow::Owned(SubscriptionId::new(probe_sub_id.1.to_string())),
+            message: Cow::Borrowed("6100"),
+        }),
+    ));
+    session
+}
+
 fn flush(core: &mut EngineCore<MemoryStore>) -> Vec<Effect> {
-    core.handle(EngineMsg::FlushWireAdmission)
+    core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)))
 }
 
 #[test]
@@ -133,6 +165,102 @@ fn later_uncovered_demand_opens_a_second_req_without_replacing_the_running_one()
     assert_eq!(
         core.router.plan().reqs[&RelaySessionKey::public(relay)].len(),
         2
+    );
+}
+
+/// #1344 fix-up: the delayed admission boundary, rather than the app's
+/// earlier subscribe call, owns the timestamp of any NIP-77 liveness state it
+/// creates. Advancing that stamp must remain a cheap clock assignment: it is
+/// not permission to run expiry, retry, or liveness maintenance.
+#[test]
+fn nip77_liveness_is_anchored_to_admission_time_without_maintenance() {
+    let relay = RelayUrl::parse("wss://admission-clock.example").unwrap();
+    let old_time = Timestamp::from(100u64);
+    let admission_time = Timestamp::from(10_000u64);
+    let faults = LaneFaults::default();
+    let store = FaultyLaneStore::new(MemoryStore::new(), faults.clone());
+    let mut core = EngineCore::new(store, 20);
+
+    core.handle(EngineMsg::Subscribe(query(
+        &relay,
+        "alice",
+        Freshness::Live,
+    )));
+    core.handle(EngineMsg::FlushWireAdmission(old_time));
+
+    let transport = TransportRelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    prove_nip77(&mut core, &relay, transport, old_time);
+
+    core.handle(EngineMsg::Subscribe(query(&relay, "bob", Freshness::Live)));
+    let admitted = core.handle(EngineMsg::FlushWireAdmission(admission_time));
+    assert!(wire_ops(&admitted)
+        .into_iter()
+        .any(|op| matches!(op, WireOp::Req(_, filter) if filter.limit == Some(0))));
+    assert_eq!(
+        core.next_deadline().expect("deadline read"),
+        Some(admission_time + NEG_LIVENESS_DEADLINE_SECS),
+        "the fresh handoff gets its full liveness window from actual admission"
+    );
+    assert_eq!(
+        faults.maintenance_sweeps(),
+        0,
+        "stamping admission time must not execute deadline maintenance"
+    );
+}
+
+/// #1344 fix-up: reconnect replay can enter the same live-first NIP-77
+/// handoff without an admission flush. That transition owns its event time
+/// explicitly too; a long idle period must not spend the new generation's
+/// liveness window before the socket has even connected.
+#[test]
+fn nip77_reconnect_liveness_is_anchored_to_connect_time_without_maintenance() {
+    let relay = RelayUrl::parse("wss://reconnect-clock.example").unwrap();
+    let old_time = Timestamp::from(100u64);
+    let connect_time = Timestamp::from(10_000u64);
+    let faults = LaneFaults::default();
+    let store = FaultyLaneStore::new(MemoryStore::new(), faults.clone());
+    let mut core = EngineCore::new(store, 20);
+
+    core.handle(EngineMsg::Subscribe(query(
+        &relay,
+        "alice",
+        Freshness::Live,
+    )));
+    core.handle(EngineMsg::FlushWireAdmission(old_time));
+    let first = TransportRelayHandle {
+        slot: 0,
+        generation: 1,
+    };
+    let session = prove_nip77(&mut core, &relay, first, old_time);
+    core.handle(EngineMsg::RelayDisconnected(
+        first,
+        session.clone(),
+        DisconnectReason::Error,
+    ));
+
+    core.advance_clock(connect_time);
+    let reconnected = core.handle(EngineMsg::RelayConnected(
+        TransportRelayHandle {
+            slot: 0,
+            generation: 2,
+        },
+        session,
+    ));
+    assert!(wire_ops(&reconnected)
+        .into_iter()
+        .any(|op| matches!(op, WireOp::Req(_, filter) if filter.limit == Some(0))));
+    assert_eq!(
+        core.next_deadline().expect("deadline read"),
+        Some(connect_time + NEG_LIVENESS_DEADLINE_SECS),
+        "the fresh generation gets its full liveness window from connect"
+    );
+    assert_eq!(
+        faults.maintenance_sweeps(),
+        0,
+        "stamping connect time must not execute deadline maintenance"
     );
 }
 

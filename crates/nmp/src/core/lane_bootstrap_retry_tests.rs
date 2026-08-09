@@ -127,6 +127,60 @@ fn durable_worker_oracle<S: EventStore>(core: &EngineCore<S>) -> BTreeSet<RelayS
 
 // ---- falsifiers --------------------------------------------------------
 
+/// #1344 fix-up: a durable lane parked on `WaitingConnection` may wake after
+/// a long idle period. The attempt it starts must use current command time,
+/// not the reducer's last maintenance time, and updating that stamp must not
+/// run an expiry/retry sweep of its own.
+#[test]
+fn waiting_connection_attempt_is_anchored_to_connect_time_without_maintenance() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://waiting-connection-clock.example.com").unwrap();
+    let old_time = Timestamp::from(100u64);
+    let connect_time = Timestamp::from(10_000u64);
+    let faults = LaneFaults::default();
+    let store = FaultyLaneStore::new(MemoryStore::new(), faults.clone());
+    let mut core = EngineCore::new(store, 10);
+    core.advance_clock(old_time);
+
+    let (receipt, _, parked) =
+        publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 706);
+    assert!(!parked
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    let intent = core.pending[&receipt].intent_id;
+    let session = session_for(&relay, &author);
+    let handle = TransportRelayHandle {
+        slot: 9,
+        generation: 1,
+    };
+
+    core.advance_clock(connect_time);
+    let connected = core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+    assert!(!connected
+        .iter()
+        .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+    let ready = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+    assert!(ready.iter().any(
+        |effect| matches!(effect, Effect::PublishEvent(candidate, _, _) if candidate == &session)
+    ));
+    let attempts = core
+        .resolver
+        .store()
+        .recover_attempt_details(intent)
+        .expect("attempt-detail recovery");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].started_at,
+        Some(connect_time),
+        "the first attempt starts when its connection arrives, not at stale maintenance time"
+    );
+    assert_eq!(
+        faults.maintenance_sweeps(),
+        0,
+        "updating command-time truth must not run deadline maintenance"
+    );
+}
+
 /// The headline #1000 regression, once per durability classification.
 ///
 /// A bootstrap that fails and then recovers must cost nothing permanent: the

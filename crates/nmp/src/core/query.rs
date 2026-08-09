@@ -280,7 +280,11 @@ impl<S: EventStore> EngineCore<S> {
     /// Compile exactly the currently-uncovered logical demand as one pending
     /// cohort. Existing plan requests are coverage inputs, never merge or
     /// identity candidates, so this transition cannot rewrite them.
-    pub(super) fn flush_wire_admission(&mut self) -> Vec<Effect> {
+    pub(super) fn flush_wire_admission(&mut self, now: Timestamp) -> Vec<Effect> {
+        // Admission is the exact transition that may mint a NIP-77 handoff
+        // and its liveness deadline. Carry runtime wall truth into that stamp
+        // without turning an admission boundary into a maintenance sweep.
+        self.advance_clock(now);
         let demand = self.wire_demand();
         let covered = Self::planned_demand_keys(self.router.plan());
         let pending: BTreeSet<_> = demand

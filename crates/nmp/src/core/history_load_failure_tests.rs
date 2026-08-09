@@ -995,7 +995,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
             _ => None,
         })
         .unwrap();
-    core.handle(EngineMsg::FlushWireAdmission);
+    core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let selected = core.router.plan().reqs.keys().next().unwrap().clone();
     let relay_handle = TransportRelayHandle {
         slot: 7,

@@ -86,3 +86,40 @@ Feature: Opening-time freshness is separate from deadline maintenance
       When an app command becomes ready at exactly the same instant
       Then the event is retracted before the command is dispatched
       And the deadline is consumed exactly once
+
+  Rule: Delayed wire admission owns the liveness time it creates
+
+    # nmp:id=QUERIES-FRESHNESS-CLOCK-008
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::nip77_liveness_is_anchored_to_admission_time_without_maintenance
+    # nmp:falsifier=Leave reducer clock truth at its old value when the delayed admission flush creates a NIP-77 handoff; its liveness deadline is immediately stale instead of one full window after admission.
+    Scenario: A delayed NIP-77 handoff gets a full liveness window
+      Given the reducer's last maintenance time is old
+      And a broad live query is waiting for admission on a behaviorally proven NIP-77 relay
+      When the pending cohort is admitted at the current wall time
+      Then the handoff deadline is one full liveness window after admission
+      And stamping the admission time runs no deadline maintenance
+
+    # nmp:id=QUERIES-FRESHNESS-CLOCK-009
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::nip77_reconnect_liveness_is_anchored_to_connect_time_without_maintenance
+    # nmp:falsifier=Replay a proven NIP-77 request after a long idle without advancing cheap clock truth; the new generation inherits an already-stale liveness deadline and immediately falls back.
+    Scenario: A reconnected NIP-77 relay gets a fresh liveness window
+      Given a planned broad request belongs to a behaviorally proven NIP-77 relay
+      And the reducer's last maintenance time is old
+      When a fresh relay generation connects at the current wall time
+      Then its handoff deadline is one full liveness window after connection
+      And stamping the connection time runs no deadline maintenance
+
+  Rule: Command-time truth is separate from deadline maintenance
+
+    # nmp:id=QUERIES-FRESHNESS-CLOCK-010
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::waiting_connection_attempt_is_anchored_to_connect_time_without_maintenance
+    # nmp:falsifier=Wake a durable lane after a long idle without advancing cheap clock truth; its persisted attempt starts at the old maintenance time instead of the current command time.
+    Scenario: A parked durable write starts at current command time
+      Given a durable write is waiting for its relay connection
+      And the reducer's last maintenance time is old
+      When its relay connects at the current wall time
+      Then the persisted attempt starts at the connection time
+      And advancing command-time truth runs no deadline maintenance

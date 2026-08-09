@@ -78,7 +78,7 @@ fn handle_and_flush<S: EventStore>(core: &mut EngineCore<S>, msg: EngineMsg) -> 
         .iter()
         .any(|effect| matches!(effect, Effect::ArmWireAdmission))
     {
-        effects.extend(core.handle(EngineMsg::FlushWireAdmission));
+        effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
     }
     effects
 }

@@ -889,8 +889,11 @@ pub enum AuthEffect {
 pub enum EngineMsg {
     Subscribe(LiveQuery),
     /// Execute relay-bound demand admitted during the current short cohort.
-    /// Runtime owns the monotonic deadline; the reducer owns this transition.
-    FlushWireAdmission,
+    /// Runtime owns the monotonic deadline and supplies wall-clock truth for
+    /// liveness state minted by this transition; the reducer owns both the
+    /// admission transition and those stamps. This advances clock truth but
+    /// never runs deadline maintenance.
+    FlushWireAdmission(Timestamp),
     Unsubscribe(ObservationId),
     SubscribeHistory(HistoryQuery),
     /// Declaratively raise this window's row target to at least `usize`,
@@ -2692,7 +2695,7 @@ impl<S: EventStore> EngineCore<S> {
         self.retry_scheduler_blocked = false;
         let mut effects = match msg {
             EngineMsg::Subscribe(query) => self.on_subscribe(query),
-            EngineMsg::FlushWireAdmission => self.flush_wire_admission(),
+            EngineMsg::FlushWireAdmission(now) => self.flush_wire_admission(now),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
             EngineMsg::SubscribeHistory(query) => self.on_subscribe_history(query),
             EngineMsg::RequestRows(id, at_least) => self.on_request_rows(id, at_least),
