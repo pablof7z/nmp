@@ -29,11 +29,11 @@ Feature: Relay work waits briefly for compatible pending demand
     # nmp:evidence=rust:nmp::later_uncovered_demand_opens_a_second_req_without_replacing_the_running_one
     # nmp:evidence=rust:nmp-router::one_pending_cohort_coalesces_but_a_later_cohort_never_rewrites_it
     # nmp:falsifier=Admit uncovered demand by widening or replacing an already-sent request; the wire delta contains a close or loses the incumbent request.
-    Scenario: A later uncovered query opens another request
-      Given an earlier admission cohort already has a running relay request
-      When a later cohort asks for compatible but uncovered demand
+    Scenario: A second admission wave opens another request
+      Given an earlier admission wave already sent a running relay request
+      When a second admission wave asks for compatible but uncovered demand
       Then the earlier request stays byte-for-byte unchanged
-      And the later cohort opens an additional request
+      And the second wave opens an additional request
       And no close is sent for the earlier request
 
     # nmp:id=ROUTING-PENDING-003
@@ -41,9 +41,9 @@ Feature: Relay work waits briefly for compatible pending demand
     # nmp:evidence=rust:nmp::duplicate_running_demand_attaches_without_compile_or_sibling_projection
     # nmp:evidence=rust:nmp-router::exact_running_coverage_makes_repeated_admission_a_noop
     # nmp:falsifier=Treat exact active coverage as pending; the duplicate query recompiles, reads a sibling projection, or emits another REQ.
-    Scenario: A query already covered by a running request only attaches locally
-      Given a running request already covers the exact logical demand
-      When another observation asks for that demand
+    Scenario: Exact demand attaches locally after its request was sent
+      Given an earlier admission wave already sent a request covering the exact logical demand
+      When another independent observation asks for that demand
       Then it receives its own cached projection immediately
       And NMP emits no relay request and performs no router compile
 
@@ -75,3 +75,15 @@ Feature: Relay work waits briefly for compatible pending demand
       And it reads no sibling projection or coverage and emits no wire or diagnostics frame
       And the final owner emits exactly one close for each physical request
       And detached exact demand can reattach to a still-running covering request without a new REQ
+
+    # nmp:id=ROUTING-PENDING-006
+    # nmp:status=built
+    # nmp:evidence=rust:nmp-router::withdrawing_the_final_routeless_outbox_owner_retracts_its_diagnostic
+    # nmp:evidence=rust:nmp::withdrawing_the_final_routeless_observation_emits_its_diagnostic_retraction
+    # nmp:falsifier=Gate diagnostic refresh only on a physical request close; final withdrawal of routeless outbox demand leaves its author falsely reported as uncovered or emits no retraction frame.
+    Scenario: Final routeless ownership retracts its diagnostic without wire work
+      Given one live observation owns outbox demand with no candidate relay
+      And diagnostics report its author as uncovered
+      When that observation withdraws its final exact ownership
+      Then no relay request or close is emitted
+      And the uncovered-author diagnostic is removed in the same reducer call
