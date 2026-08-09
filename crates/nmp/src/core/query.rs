@@ -75,11 +75,17 @@ impl<S: EventStore> EngineCore<S> {
         let mut opened: Vec<QueryHandle> = Vec::new();
         for branch in query.branches() {
             match self.resolver.subscribe(branch.clone()) {
-                Ok((handle, _delta)) => opened.push(handle),
-                Err(error) => {
+                SubscribeOutcome::Opened { handle, delta } => {
+                    self.consume_resolver_delta(delta);
+                    opened.push(handle);
+                }
+                SubscribeOutcome::Refused { error, delta } => {
+                    self.consume_resolver_delta(delta);
                     for handle in opened {
-                        let _ = self.resolver.unsubscribe(handle.id());
+                        let delta = self.resolver.unsubscribe(handle.id());
+                        self.consume_resolver_delta(delta);
                     }
+                    self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("canonical query resolution failed: {error}");
                     self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
@@ -98,8 +104,10 @@ impl<S: EventStore> EngineCore<S> {
                 Ok(acquisition) => acquisitions.push(acquisition),
                 Err(error) => {
                     for handle in opened {
-                        let _ = self.resolver.unsubscribe(handle.id());
+                        let delta = self.resolver.unsubscribe(handle.id());
+                        self.consume_resolver_delta(delta);
                     }
+                    self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("query freshness decision failed: {error}");
                     self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
@@ -148,8 +156,10 @@ impl<S: EventStore> EngineCore<S> {
                 self.observations.remove(&observation);
                 for branch in &branches {
                     drop(self.handles.remove(branch));
-                    let _ = self.resolver.unsubscribe(*branch);
+                    let delta = self.resolver.unsubscribe(*branch);
+                    self.consume_resolver_delta(delta);
                 }
+                self.flush_consumed_resolver_closes(&mut effects);
                 self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
@@ -171,13 +181,20 @@ impl<S: EventStore> EngineCore<S> {
                 let reason = format!("acquisition evidence projection failed: {error}");
                 self.observations.remove(&observation);
                 for branch in &branches {
-                    let _delta = self.resolver.unsubscribe(*branch);
+                    let delta = self.resolver.unsubscribe(*branch);
+                    self.consume_resolver_delta(delta);
                     self.handles.remove(branch);
                 }
+                self.flush_consumed_resolver_closes(&mut effects);
                 self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
         };
+        for branch in &branches {
+            let acquisition = self.handles[branch].acquisition.clone();
+            self.attach_wire_handle(*branch, &acquisition);
+        }
+        self.flush_consumed_resolver_closes(&mut effects);
         if self.wire_admission_needed() {
             effects.push(Effect::ArmWireAdmission);
         }
@@ -236,11 +253,15 @@ impl<S: EventStore> EngineCore<S> {
                 fact: ObservationFact::Withdrawn,
             }],
         ));
+        let mut closing = Vec::new();
         for branch in state.branches {
-            let _delta = self.resolver.unsubscribe(branch);
+            closing.extend(self.detach_wire_handle(branch));
+            let resolver_delta = self.resolver.unsubscribe(branch);
+            self.consume_resolver_delta(resolver_delta);
             self.handles.remove(&branch);
         }
-        self.withdraw_wire_demand(&mut effects);
+        self.flush_consumed_resolver_closes(&mut effects);
+        self.withdraw_wire_demand(closing, &mut effects);
         effects
     }
 
@@ -258,6 +279,7 @@ impl<S: EventStore> EngineCore<S> {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
+        self.rebuild_wire_ownership();
         let demand = self.wire_demand();
         self.attribution.observe_demand(demand.iter());
         // Finding E3 (epic #507): prune `shape_by_key` against the SAME
@@ -274,22 +296,14 @@ impl<S: EventStore> EngineCore<S> {
             self.router
                 .compile(&admitted_demand, &self.routing_facts, self.compile_budget());
         self.apply_router_plan_delta(previous_plan, wire_delta, effects);
+        self.refresh_pending_wire_atoms();
     }
 
     /// Compile exactly the currently-uncovered logical demand as one pending
     /// cohort. Existing plan requests are coverage inputs, never merge or
     /// identity candidates, so this transition cannot rewrite them.
     pub(super) fn flush_wire_admission(&mut self) -> Vec<Effect> {
-        let demand = self.wire_demand();
-        let covered = Self::planned_demand_keys(self.router.plan());
-        let pending: BTreeSet<_> = demand
-            .iter()
-            .filter(|atom| {
-                let key = nmp_router::DemandKey::for_atom(atom);
-                !covered.contains(&key) || self.router.plan().limited_demands.contains(&key)
-            })
-            .cloned()
-            .collect();
+        let pending: BTreeSet<_> = self.pending_wire_atoms.values().cloned().collect();
         if pending.is_empty() {
             return Vec::new();
         }
@@ -297,6 +311,7 @@ impl<S: EventStore> EngineCore<S> {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
+        let demand = self.wire_demand();
         self.attribution.observe_demand(demand.iter());
         self.attribution.prune_shapes(demand.iter());
         let admitted = self.admit_projected_routing_evidence(&pending);
@@ -307,25 +322,28 @@ impl<S: EventStore> EngineCore<S> {
         let mut effects = Vec::new();
         self.apply_router_plan_delta(previous_plan, wire_delta, &mut effects);
         self.refresh_evidence_for_coverage_keys(&changed, &mut effects);
+        self.refresh_pending_wire_atoms();
         effects
     }
 
-    pub(super) fn withdraw_wire_demand(&mut self, effects: &mut Vec<Effect>) {
-        let demand = self.wire_demand();
-        self.attribution.observe_demand(demand.iter());
-        self.attribution.prune_shapes(demand.iter());
-        let previous_plan = self.router.plan().clone();
-        let previous_diagnostics = self.router.diagnostics().clone();
-        let budget = self.compile_budget();
-        let wire_delta = self.router.withdraw(&demand, budget);
-        let changed = Self::changed_plan_coverage(&previous_plan, self.router.plan());
-        let plan_or_diagnostics_changed = !wire_delta.ops.is_empty()
-            || !changed.is_empty()
-            || self.router.diagnostics() != &previous_diagnostics;
-        if plan_or_diagnostics_changed {
-            self.apply_router_plan_delta(previous_plan, wire_delta, effects);
-            self.refresh_evidence_for_coverage_keys(&changed, effects);
+    pub(super) fn withdraw_wire_demand(
+        &mut self,
+        closing_atoms: Vec<ContextualAtom>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if closing_atoms.is_empty() {
+            return;
         }
+        let budget = self.compile_budget();
+        let withdrawal = self.router.withdraw(closing_atoms, budget);
+        if !withdrawal.wire.ops.is_empty()
+            || !withdrawal.changed_coverage.is_empty()
+            || withdrawal.diagnostics_changed
+        {
+            self.apply_router_plan_delta(RelayPlan::default(), withdrawal.wire, effects);
+            self.refresh_evidence_for_coverage_keys(&withdrawal.changed_coverage, effects);
+        }
+        self.refresh_pending_wire_atoms();
         if self.wire_admission_needed() {
             effects.push(Effect::ArmWireAdmission);
         }
@@ -486,20 +504,8 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    fn planned_demand_keys(plan: &RelayPlan) -> BTreeSet<nmp_router::DemandKey> {
-        plan.reqs
-            .values()
-            .flatten()
-            .flat_map(|request| request.owners.iter().copied())
-            .collect()
-    }
-
     pub(super) fn wire_admission_needed(&self) -> bool {
-        let covered = Self::planned_demand_keys(self.router.plan());
-        self.wire_demand().iter().any(|atom| {
-            let key = nmp_router::DemandKey::for_atom(atom);
-            !covered.contains(&key) || self.router.plan().limited_demands.contains(&key)
-        })
+        !self.pending_wire_atoms.is_empty()
     }
 
     fn plan_coverage_assignments(
@@ -590,29 +596,155 @@ impl<S: EventStore> EngineCore<S> {
     /// Demand scopes still own their graph and cache projection, but their
     /// atoms are absent from this wire truth.
     pub(super) fn wire_demand(&self) -> BTreeSet<ContextualAtom> {
-        let ordinary = self
-            .handles
-            .iter()
-            .flat_map(|(id, state)| self.wire_atoms_for_handle(*id, &state.acquisition));
-        let history = self
-            .histories
+        self.wire_owner_counts
             .values()
-            .flat_map(|state| state.handle_ids.iter().copied())
-            .flat_map(|id| {
-                let state = self
-                    .histories
-                    .get(&self.history_by_handle[&id])
-                    .expect("history handle maps to a live session");
-                // A window handle contributes wire work under ITS OWN
-                // branch's opening-time decision, never a sibling branch's.
-                let branch = state.branch_of.get(&id).copied().unwrap_or_default();
-                state
-                    .acquisitions_by_branch
-                    .get(branch)
-                    .map(|acquisition| self.wire_atoms_for_handle(id, acquisition))
-                    .unwrap_or_default()
-            });
-        ordinary.chain(history).collect()
+            .map(|(atom, _)| atom.clone())
+            .collect()
+    }
+
+    pub(super) fn attach_wire_handle(&mut self, id: HandleId, acquisition: &HandleAcquisition) {
+        let atoms = self.wire_atoms_for_handle(id, acquisition);
+        for atom in &atoms {
+            let key = nmp_router::DemandKey::for_atom(atom);
+            self.wire_handles_by_atom.entry(key).or_default().insert(id);
+            let entry = self
+                .wire_owner_counts
+                .entry(key)
+                .or_insert_with(|| (atom.clone(), 0));
+            entry.1 = entry.1.saturating_add(1);
+            if entry.1 == 1 {
+                self.pending_resolver_wire_closes.remove(&key);
+                if !self.router.physically_covers(key)
+                    || self.router.plan().limited_demands.contains(&key)
+                {
+                    self.pending_wire_atoms.insert(key, atom.clone());
+                }
+            }
+        }
+        self.wire_atoms_by_handle.insert(id, atoms);
+    }
+
+    pub(super) fn detach_wire_handle(&mut self, id: HandleId) -> Vec<ContextualAtom> {
+        let mut closing = Vec::new();
+        let atoms = self.wire_atoms_by_handle.remove(&id).unwrap_or_default();
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.withdrawal_handle_detaches
+            .set(self.withdrawal_handle_detaches.get().saturating_add(1));
+        for atom in atoms {
+            let key = nmp_router::DemandKey::for_atom(&atom);
+            if let Some(handles) = self.wire_handles_by_atom.get_mut(&key) {
+                handles.remove(&id);
+                if handles.is_empty() {
+                    self.wire_handles_by_atom.remove(&key);
+                }
+            }
+            let Some((_, count)) = self.wire_owner_counts.get_mut(&key) else {
+                continue;
+            };
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.wire_owner_counts.remove(&key);
+                self.pending_wire_atoms.remove(&key);
+                self.pending_resolver_wire_closes.remove(&key);
+                closing.push(atom);
+            }
+        }
+        closing
+    }
+
+    /// Consume one resolver outcome exactly once.
+    ///
+    /// Resolver ownership and live-wire ownership are deliberately different:
+    /// cache-only handles own resolver atoms but never own relay work. The
+    /// ordinary path therefore detaches by handle above. This recovery path
+    /// handles the one fact only a drained pending-drop delta can reveal: a
+    /// resolver handle disappeared before core ran that detach. Reverse edges
+    /// remove only owners of the reported atom; no sibling census is needed.
+    pub(super) fn consume_resolver_delta(&mut self, delta: DemandDelta) {
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.resolver_delta_ops_consumed.set(
+            self.resolver_delta_ops_consumed
+                .get()
+                .saturating_add(delta.ops.len() as u64),
+        );
+        for op in delta.ops {
+            let DemandOp::Close(atom) = op else {
+                continue;
+            };
+            let key = nmp_router::DemandKey::for_atom(&atom);
+            let Some(stale_handles) = self.wire_handles_by_atom.remove(&key) else {
+                continue;
+            };
+            for handle in stale_handles {
+                let remove_handle =
+                    self.wire_atoms_by_handle
+                        .get_mut(&handle)
+                        .is_some_and(|atoms| {
+                            atoms.remove(&atom);
+                            atoms.is_empty()
+                        });
+                if remove_handle {
+                    self.wire_atoms_by_handle.remove(&handle);
+                }
+            }
+            self.wire_owner_counts.remove(&key);
+            self.pending_wire_atoms.remove(&key);
+            self.pending_resolver_wire_closes.insert(key, atom);
+        }
+    }
+
+    /// Finish one resolver transaction after replacement handles, if any,
+    /// have attached. An exact live replacement canceled its pending close in
+    /// `attach_wire_handle`; only genuinely ownerless atoms reach the router.
+    pub(super) fn flush_consumed_resolver_closes(&mut self, effects: &mut Vec<Effect>) {
+        let closing = std::mem::take(&mut self.pending_resolver_wire_closes)
+            .into_values()
+            .collect();
+        self.withdraw_wire_demand(closing, effects);
+    }
+
+    fn rebuild_wire_ownership(&mut self) {
+        let mut contributions = Vec::new();
+        for (id, state) in &self.handles {
+            contributions.push((*id, self.wire_atoms_for_handle(*id, &state.acquisition)));
+        }
+        for state in self.histories.values() {
+            for id in &state.handle_ids {
+                let branch = state.branch_of.get(id).copied().unwrap_or_default();
+                if let Some(acquisition) = state.acquisitions_by_branch.get(branch) {
+                    contributions.push((*id, self.wire_atoms_for_handle(*id, acquisition)));
+                }
+            }
+        }
+        self.wire_atoms_by_handle.clear();
+        self.wire_owner_counts.clear();
+        self.wire_handles_by_atom.clear();
+        self.pending_resolver_wire_closes.clear();
+        for (id, atoms) in contributions {
+            for atom in &atoms {
+                let key = nmp_router::DemandKey::for_atom(atom);
+                self.wire_handles_by_atom.entry(key).or_default().insert(id);
+                let entry = self
+                    .wire_owner_counts
+                    .entry(key)
+                    .or_insert_with(|| (atom.clone(), 0));
+                entry.1 = entry.1.saturating_add(1);
+            }
+            self.wire_atoms_by_handle.insert(id, atoms);
+        }
+        self.refresh_pending_wire_atoms();
+    }
+
+    fn refresh_pending_wire_atoms(&mut self) {
+        self.pending_wire_atoms = self
+            .wire_owner_counts
+            .iter()
+            .filter(|(key, _)| {
+                !self.router.physically_covers(**key)
+                    || self.router.plan().limited_demands.contains(*key)
+            })
+            .map(|(key, (atom, _))| (*key, atom.clone()))
+            .collect();
     }
 
     fn wire_atoms_for_handle(

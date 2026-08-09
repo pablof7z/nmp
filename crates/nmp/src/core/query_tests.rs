@@ -1297,10 +1297,10 @@ mod affected_handle_invalidation_tests {
     #[test]
     fn resolver_internal_handle_is_filtered_before_any_projection_read() {
         let mut core = EngineCore::new(MemoryStore::new(), 20);
-        let (internal, _delta) = core
-            .resolver
-            .subscribe(room_query(1).branches()[0].clone())
-            .unwrap();
+        let internal = match core.resolver.subscribe(room_query(1).branches()[0].clone()) {
+            SubscribeOutcome::Opened { handle, .. } => handle,
+            SubscribeOutcome::Refused { error, .. } => panic!("resolver refused: {error}"),
+        };
         core.projection_store_queries.set(0);
 
         let mut effects = Vec::new();

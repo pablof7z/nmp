@@ -214,6 +214,23 @@ pub struct QueryHandle {
     pending_drops: Weak<RefCell<Vec<HandleId>>>,
 }
 
+/// Closed result of opening one resolver branch.
+///
+/// A refusal still carries every pending handle-drop transition drained at
+/// the start of the call.  Callers therefore cannot accidentally lose a
+/// withdrawal merely because graph construction failed after the drain
+/// (#1165).
+pub enum SubscribeOutcome {
+    Opened {
+        handle: QueryHandle,
+        delta: DemandDelta,
+    },
+    Refused {
+        error: PersistenceError,
+        delta: DemandDelta,
+    },
+}
+
 impl QueryHandle {
     pub fn id(&self) -> HandleId {
         self.id
@@ -531,10 +548,7 @@ impl<S: EventStore> Engine<S> {
 
     // ---- subscribe / unsubscribe (M1 plan §4) ---------------------------
 
-    pub fn subscribe(
-        &mut self,
-        branch: Demand,
-    ) -> Result<(QueryHandle, DemandDelta), PersistenceError> {
+    pub fn subscribe(&mut self, branch: Demand) -> SubscribeOutcome {
         let drop_delta = self.drain_pending_drops();
         let handle_id = self.alloc_handle();
         let key = AcquisitionKey::from(&branch);
@@ -565,7 +579,10 @@ impl<S: EventStore> Engine<S> {
                 freshness,
                 pending_drops: Rc::downgrade(&self.pending_drops),
             };
-            return Ok((handle, merge_deltas(drop_delta, acc.into_delta())));
+            return SubscribeOutcome::Opened {
+                handle,
+                delta: merge_deltas(drop_delta, acc.into_delta()),
+            };
         }
 
         let (source, access) = branch.atom_context();
@@ -577,7 +594,10 @@ impl<S: EventStore> Engine<S> {
                     self.graph.discard_allocated_after(graph_checkpoint);
                     self.reactive_nodes
                         .retain(|node_id| *node_id <= graph_checkpoint);
-                    return Err(error);
+                    return SubscribeOutcome::Refused {
+                        error,
+                        delta: drop_delta,
+                    };
                 }
             };
         self.descriptor_to_root.insert(key.clone(), root);
@@ -600,7 +620,10 @@ impl<S: EventStore> Engine<S> {
             freshness,
             pending_drops: Rc::downgrade(&self.pending_drops),
         };
-        Ok((handle, merge_deltas(drop_delta, acc.into_delta())))
+        SubscribeOutcome::Opened {
+            handle,
+            delta: merge_deltas(drop_delta, acc.into_delta()),
+        }
     }
 
     pub fn unsubscribe(&mut self, id: HandleId) -> DemandDelta {

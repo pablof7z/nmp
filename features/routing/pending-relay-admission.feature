@@ -1,9 +1,10 @@
 Feature: Relay work waits briefly for compatible pending demand
-  An app can discover many live queries in one render pass. Their cached rows
-  are local facts and return immediately. Only unsent relay work waits: the
-  first uncovered query opens a 30ms cohort, compatible queries joining that
-  cohort are routed and coalesced together, and the resulting REQs become
-  immutable once admitted.
+  An app may own thousands of independent observations; it never has to batch,
+  shard, or pre-aggregate them for NMP. Each observation keeps its own local
+  projection, evidence, and cancellation. Only unsent relay work waits: the
+  first uncovered observation opens a 30ms cohort, NMP groups compatible relay
+  demand behind that boundary, and the resulting REQs become immutable once
+  admitted.
 
   Rule: A pending cohort delays wire work, never cache delivery
 
@@ -13,12 +14,12 @@ Feature: Relay work waits briefly for compatible pending demand
     # nmp:evidence=rust:nmp::compatible_pending_observations_compile_once_into_one_relay_request
     # nmp:evidence=rust:nmp::window_is_anchored_to_first_arrival_and_rearms_for_the_next_cohort
     # nmp:evidence=rust:nmp::runtime_admission_deadline_groups_a_rapid_query_burst
-    # nmp:falsifier=Delay the opening cache frame, slide the deadline on each arrival, or compile each compatible query separately; one of the three timing and grouping proofs fails.
-    Scenario: Several avatars entering together cause one grouped relay request
-      Given several avatars need replaceable profiles from the same relay
-      When their live queries open inside one 30ms admission cohort
-      Then every avatar receives its current cached profile immediately
-      And the cohort produces one relay request carrying every pending author
+    # nmp:falsifier=Collapse app-owned observations into one cancellation, delay an observation's local frame, slide the deadline on each arrival, or compile each compatible observation separately; the independent identities, local seeds, timing, or grouped wire proof fails.
+    Scenario: Independent avatar observations cause one grouped relay request
+      Given several independently cancellable avatar observations need profiles from the same relay
+      When those observations open inside one 30ms admission cohort
+      Then every observation receives its own local projection and evidence immediately
+      And NMP alone groups their compatible relay demand into one request
       And later arrivals cannot extend the cohort's first-arrival deadline
 
   Rule: Sent requests are immutable admission facts
@@ -59,3 +60,18 @@ Feature: Relay work waits briefly for compatible pending demand
       Then only each newly opened observation reads its own canonical rows
       And plan changes refresh acquisition evidence only for affected demand
       And closing observations does not reread surviving rows
+
+    # nmp:id=ROUTING-PENDING-005
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work
+    # nmp:evidence=rust:nmp-router::withdrawal_keeps_a_shared_immutable_req_until_its_last_key_leaves
+    # nmp:evidence=rust:nmp-router::ten_thousand_shared_keys_do_only_delta_edges_plus_one_physical_close
+    # nmp:falsifier=Reconstruct sibling demand, couple independent cancellations, shrink physical coverage, or close before the last exact owner leaves; the 10k identities, structural work counters, local reattach proof, or exact wire-close count fails.
+    Scenario: Independent observations withdraw by exact owner delta
+      Given ten thousand independently cancellable observations share bounded demand covered by immutable relay requests
+      When each observation withdraws through its own cancellation
+      Then each non-final withdrawal touches only its departing exact ownership edge
+      And it leaves sibling projections and evidence unchanged
+      And it reads no sibling projection or coverage and emits no wire or diagnostics frame
+      And the final owner emits exactly one close for each physical request
+      And detached exact demand can reattach to a still-running covering request without a new REQ

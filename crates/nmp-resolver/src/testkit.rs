@@ -12,7 +12,7 @@ use nmp_grammar::{ConcreteFilter, ContextualAtom, DemandDelta};
 use nmp_store::{sentinel_signature, AcceptOutcome, AcceptWrite, IntentSigState, MemoryStore};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
-use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle};
+use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle, SubscribeOutcome};
 
 /// The scripted "fake relay" harness: `Engine<MemoryStore>` plus the
 /// pass-through calls the contract tests drive.
@@ -40,9 +40,12 @@ impl Harness {
     }
 
     pub fn subscribe(&mut self, q: nmp_grammar::Demand) -> (QueryHandle, DemandDelta) {
-        self.engine
-            .subscribe(q)
-            .expect("query persistence (MemoryStore never fails a door)")
+        match self.engine.subscribe(q) {
+            SubscribeOutcome::Opened { handle, delta } => (handle, delta),
+            SubscribeOutcome::Refused { error, .. } => {
+                panic!("query persistence (MemoryStore never fails a door): {error}")
+            }
+        }
     }
 
     /// Withdraw a subscription. Not in the plan's illustrative `Harness`

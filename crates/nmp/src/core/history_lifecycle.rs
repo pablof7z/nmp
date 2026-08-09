@@ -17,11 +17,17 @@ impl<S: EventStore> EngineCore<S> {
         let mut handles = Vec::new();
         for branch in query.initial_demands() {
             match self.resolver.subscribe(branch) {
-                Ok((handle, _)) => handles.push(handle),
-                Err(error) => {
+                SubscribeOutcome::Opened { handle, delta } => {
+                    self.consume_resolver_delta(delta);
+                    handles.push(handle);
+                }
+                SubscribeOutcome::Refused { error, delta } => {
+                    self.consume_resolver_delta(delta);
                     for handle in handles {
-                        let _ = self.resolver.unsubscribe(handle.id());
+                        let delta = self.resolver.unsubscribe(handle.id());
+                        self.consume_resolver_delta(delta);
                     }
+                    self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("canonical history resolution failed: {error}");
                     self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
@@ -39,8 +45,10 @@ impl<S: EventStore> EngineCore<S> {
                 Ok(acquisition) => acquisitions_by_branch.push(acquisition),
                 Err(error) => {
                     for handle in handles {
-                        let _ = self.resolver.unsubscribe(handle.id());
+                        let delta = self.resolver.unsubscribe(handle.id());
+                        self.consume_resolver_delta(delta);
                     }
+                    self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("history freshness decision failed: {error}");
                     self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
@@ -93,8 +101,10 @@ impl<S: EventStore> EngineCore<S> {
                     .unwrap_or_default();
                 for handle_id in withdrawn {
                     self.history_by_handle.remove(&handle_id);
-                    let _ = self.resolver.unsubscribe(handle_id);
+                    let delta = self.resolver.unsubscribe(handle_id);
+                    self.consume_resolver_delta(delta);
                 }
+                self.flush_consumed_resolver_closes(&mut effects);
                 self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
@@ -116,12 +126,27 @@ impl<S: EventStore> EngineCore<S> {
                     .unwrap_or_default();
                 for handle_id in withdrawn {
                     self.history_by_handle.remove(&handle_id);
-                    let _ = self.resolver.unsubscribe(handle_id);
+                    let delta = self.resolver.unsubscribe(handle_id);
+                    self.consume_resolver_delta(delta);
                 }
+                self.flush_consumed_resolver_closes(&mut effects);
                 self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
         };
+        let attachments: Vec<_> = {
+            let state = &self.histories[&id];
+            state
+                .live_handle_ids
+                .iter()
+                .enumerate()
+                .map(|(branch, handle)| (*handle, state.acquisitions_by_branch[branch].clone()))
+                .collect()
+        };
+        for (handle, acquisition) in attachments {
+            self.attach_wire_handle(handle, &acquisition);
+        }
+        self.flush_consumed_resolver_closes(&mut effects);
         if self.wire_admission_needed() {
             effects.push(Effect::ArmWireAdmission);
         }
@@ -149,12 +174,16 @@ impl<S: EventStore> EngineCore<S> {
         let Some(state) = self.histories.remove(&id) else {
             return Vec::new();
         };
+        let mut effects = Vec::new();
+        let mut closing = Vec::new();
         for handle in state.handles {
             self.history_by_handle.remove(&handle.id());
-            let _ = self.resolver.unsubscribe(handle.id());
+            closing.extend(self.detach_wire_handle(handle.id()));
+            let resolver_delta = self.resolver.unsubscribe(handle.id());
+            self.consume_resolver_delta(resolver_delta);
         }
-        let mut effects = Vec::new();
-        self.withdraw_wire_demand(&mut effects);
+        self.flush_consumed_resolver_closes(&mut effects);
+        self.withdraw_wire_demand(closing, &mut effects);
         effects
     }
 
@@ -337,11 +366,17 @@ impl<S: EventStore> EngineCore<S> {
         );
         for (branch, demand, kind) in staged {
             match self.resolver.subscribe(demand) {
-                Ok((handle, _)) => opened.push((branch, handle, kind)),
-                Err(error) => {
+                SubscribeOutcome::Opened { handle, delta } => {
+                    self.consume_resolver_delta(delta);
+                    opened.push((branch, handle, kind));
+                }
+                SubscribeOutcome::Refused { error, delta } => {
+                    self.consume_resolver_delta(delta);
                     for (_, handle, _) in opened {
-                        let _ = self.resolver.unsubscribe(handle.id());
+                        let delta = self.resolver.unsubscribe(handle.id());
+                        self.consume_resolver_delta(delta);
                     }
+                    self.flush_consumed_resolver_closes(&mut effects);
                     self.degrade_store(error, &mut effects);
                     effects.extend(self.on_rollback_history_load(id));
                     effects.push(Effect::HistoryLoadResult(
@@ -376,6 +411,25 @@ impl<S: EventStore> EngineCore<S> {
                     .push(handle_id);
             }
         }
+
+        let attachments: Vec<_> = {
+            let state = &self.histories[&id];
+            state
+                .pending_load
+                .as_ref()
+                .expect("load remains staged after resolver handles open")
+                .opened_handle_ids
+                .iter()
+                .filter_map(|handle| {
+                    let branch = state.branch_of.get(handle).copied()?;
+                    Some((*handle, state.acquisitions_by_branch.get(branch)?.clone()))
+                })
+                .collect()
+        };
+        for (handle, acquisition) in attachments {
+            self.attach_wire_handle(handle, &acquisition);
+        }
+        self.flush_consumed_resolver_closes(&mut effects);
 
         // Build the prospective plan without touching live router,
         // attribution, diagnostics, other projections, or delivery.
@@ -462,6 +516,7 @@ impl<S: EventStore> EngineCore<S> {
         {
             return Vec::new();
         }
+        let mut effects = Vec::new();
 
         // #486: retire the historical tie/older acquisitions the session no
         // longer needs, so a deep scroll of K advances never accumulates O(K)
@@ -516,10 +571,13 @@ impl<S: EventStore> EngineCore<S> {
                 .map(|(handle, _)| *handle)
                 .collect()
         };
+        let mut withdrawn = Vec::new();
         if !superseded.is_empty() {
             for handle_id in &superseded {
                 self.history_by_handle.remove(handle_id);
-                let _ = self.resolver.unsubscribe(*handle_id);
+                withdrawn.extend(self.detach_wire_handle(*handle_id));
+                let resolver_delta = self.resolver.unsubscribe(*handle_id);
+                self.consume_resolver_delta(resolver_delta);
             }
             let state = self
                 .histories
@@ -535,8 +593,8 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        let mut effects = Vec::new();
-        self.withdraw_wire_demand(&mut effects);
+        self.flush_consumed_resolver_closes(&mut effects);
+        self.withdraw_wire_demand(withdrawn, &mut effects);
 
         let (made_progress, target, len, has_boundary) = {
             let state = self
@@ -581,10 +639,14 @@ impl<S: EventStore> EngineCore<S> {
             return Vec::new();
         };
 
+        let mut effects = Vec::new();
         let opened: BTreeSet<_> = pending.opened_handle_ids.iter().copied().collect();
+        let mut withdrawn = Vec::new();
         for handle_id in &opened {
             self.history_by_handle.remove(handle_id);
-            let _ = self.resolver.unsubscribe(*handle_id);
+            withdrawn.extend(self.detach_wire_handle(*handle_id));
+            let resolver_delta = self.resolver.unsubscribe(*handle_id);
+            self.consume_resolver_delta(resolver_delta);
         }
         let state = self
             .histories
@@ -613,7 +675,9 @@ impl<S: EventStore> EngineCore<S> {
         state.last_evidence = pending.prior_evidence;
         state.projection_complete = pending.prior_projection_complete;
 
-        Vec::new()
+        self.flush_consumed_resolver_closes(&mut effects);
+        self.withdraw_wire_demand(withdrawn, &mut effects);
+        effects
     }
 
     /// Compile the resolver's current (possibly staged-history) demand into

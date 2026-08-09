@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use nmp_grammar::{Binding, Demand, Derived, Filter, IndexedTagName, Selector};
-use nmp_resolver::Engine;
+use nmp_resolver::{Engine, SubscribeOutcome};
 use nmp_store::RedbStore;
 
 fn profile_query(room: &str, limit: usize) -> Demand {
@@ -65,9 +65,12 @@ fn main() {
         let store = RedbStore::open(&path).expect("open benchmark store");
         let mut engine = Engine::new(store);
         let started = Instant::now();
-        let (_handle, _delta) = engine
-            .subscribe(profile_query(&room, limit))
-            .expect("subscribe bounded Derived query");
+        let (_handle, _delta) = match engine.subscribe(profile_query(&room, limit)) {
+            SubscribeOutcome::Opened { handle, delta } => (handle, delta),
+            SubscribeOutcome::Refused { error, .. } => {
+                panic!("subscribe bounded Derived query: {error}")
+            }
+        };
         samples.push(started.elapsed());
         demand_atoms = engine.active_demand().len();
         graph_nodes = engine.graph_snapshot().nodes.len();

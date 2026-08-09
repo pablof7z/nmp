@@ -41,3 +41,18 @@ Feature: Observation opening is all-or-nothing
       When the initial canonical view is unreadable before shutdown takes ownership
       Then the app receives ObservationUnavailable and no reply is dropped
       But an observation attempted after shutdown receives EngineClosed
+
+  Rule: Resolver drops survive every opening refusal
+
+    # nmp:id=QUERIES-OPENING-004
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::resolver_refusal_carries_the_pending_drop_delta_exactly_once
+    # nmp:evidence=rust:nmp::each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close
+    # nmp:evidence=rust:nmp::a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it
+    # nmp:falsifier=Return a bare persistence error or discard the carried delta after draining pending handle drops; one refusal arm misses its same-call close or a later poll reports it twice.
+    Scenario: An opening refusal still reports earlier dropped demand
+      Given a resolver handle was dropped before another observation begins opening
+      When the new observation refuses during graph construction or initial projection
+      Then the resolver outcome carries the already-drained close delta
+      And that close is consumed in the same reducer call
+      And no later poll can report the same close again

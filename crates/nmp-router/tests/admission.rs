@@ -37,6 +37,14 @@ fn reqs(delta: &nmp_router::WireDelta) -> usize {
         .count()
 }
 
+fn withdraw(
+    router: &mut Router,
+    atoms: impl IntoIterator<Item = ContextualAtom>,
+    cap: usize,
+) -> nmp_router::WireDelta {
+    router.withdraw(atoms, cap).wire
+}
+
 #[test]
 fn one_pending_cohort_coalesces_but_a_later_cohort_never_rewrites_it() {
     let relay = RelayUrl::parse("wss://router-admission.example").unwrap();
@@ -94,7 +102,7 @@ fn a_live_request_does_not_absorb_a_later_windowed_backfill() {
         reqs(&router.admit(&BTreeSet::from([live.clone()]), &facts, 20)),
         1
     );
-    let backfill = router.admit(&BTreeSet::from([older]), &facts, 20);
+    let backfill = router.admit(&BTreeSet::from([older.clone()]), &facts, 20);
     assert_eq!(reqs(&backfill), 1);
     assert!(backfill
         .ops
@@ -103,7 +111,7 @@ fn a_live_request_does_not_absorb_a_later_windowed_backfill() {
         .all(|op| !matches!(op, WireOp::Close(_))));
     assert_eq!(router.plan().reqs.values().flatten().count(), 2);
 
-    let retired = router.withdraw(&BTreeSet::from([live]), 20);
+    let retired = withdraw(&mut router, [older], 20);
     assert_eq!(
         retired
             .ops
@@ -125,11 +133,23 @@ fn withdrawal_keeps_a_shared_immutable_req_until_its_last_key_leaves() {
     let bob = atom(&relay, "bob");
     router.admit(&BTreeSet::from([alice.clone(), bob.clone()]), &facts, 20);
 
-    let keep_bob = router.withdraw(&BTreeSet::from([bob]), 20);
+    router.reset_withdrawal_work();
+    let keep_bob = withdraw(&mut router, [alice.clone()], 20);
     assert!(keep_bob.ops.is_empty());
     assert_eq!(router.plan().reqs.values().flatten().count(), 1);
+    assert_eq!(router.withdrawal_work().dropped_atoms, 1);
+    assert_eq!(router.withdrawal_work().request_edges_touched, 1);
+    assert_eq!(router.withdrawal_work().requests_closed, 0);
+    assert_eq!(router.withdrawal_work().diagnostic_rebuilds, 0);
 
-    let close = router.withdraw(&BTreeSet::new(), 20);
+    let reattached = router.admit(&BTreeSet::from([alice.clone()]), &facts, 20);
+    assert!(
+        reattached.ops.is_empty(),
+        "immutable physical coverage must be reusable without REQ"
+    );
+
+    let _ = withdraw(&mut router, [alice], 20);
+    let close = withdraw(&mut router, [bob], 20);
     assert_eq!(
         close
             .ops
@@ -151,14 +171,17 @@ fn a_refused_pending_atom_is_admitted_after_an_incumbent_releases_the_relay_cap(
     let first = atom(&first_relay, "alice");
     let second = atom(&second_relay, "bob");
 
-    assert_eq!(reqs(&router.admit(&BTreeSet::from([first]), &facts, 1)), 1);
+    assert_eq!(
+        reqs(&router.admit(&BTreeSet::from([first.clone()]), &facts, 1)),
+        1
+    );
     assert_eq!(
         reqs(&router.admit(&BTreeSet::from([second.clone()]), &facts, 1)),
         0
     );
     assert_eq!(router.plan().limited.len(), 1);
 
-    let close = router.withdraw(&BTreeSet::from([second.clone()]), 1);
+    let close = withdraw(&mut router, [first], 1);
     assert_eq!(
         close
             .ops
@@ -172,6 +195,40 @@ fn a_refused_pending_atom_is_admitted_after_an_incumbent_releases_the_relay_cap(
     assert_eq!(reqs(&admitted), 1);
     assert!(router.plan().limited.is_empty());
     assert!(router.plan().refused_sessions.is_empty());
+}
+
+#[test]
+fn ten_thousand_shared_keys_do_only_delta_edges_plus_one_physical_close() {
+    let relay = RelayUrl::parse("wss://router-10k-withdraw.example").unwrap();
+    let facts = FixtureRoutingFacts::new();
+    let mut router = Router::new(RuleRegistry::default_widen_only());
+    let demand: BTreeSet<_> = (0..10_000)
+        .map(|index| atom(&relay, &format!("owner-{index:05}")))
+        .collect();
+    let physical_requests = reqs(&router.admit(&demand, &facts, 20));
+    assert!(
+        physical_requests < 50,
+        "the 10k atoms should remain coalesced"
+    );
+
+    router.reset_withdrawal_work();
+    let mut close_count = 0;
+    for atom in demand {
+        close_count += withdraw(&mut router, [atom], 20)
+            .ops
+            .iter()
+            .flat_map(|(_, ops)| ops)
+            .filter(|op| matches!(op, WireOp::Close(_)))
+            .count();
+    }
+
+    let work = router.withdrawal_work();
+    assert_eq!(close_count, physical_requests);
+    assert_eq!(work.dropped_atoms, 10_000);
+    assert_eq!(work.request_edges_touched, 10_000);
+    assert_eq!(work.requests_closed, physical_requests as u64);
+    assert_eq!(work.physical_coverage_edges_released, 10_000);
+    assert_eq!(work.diagnostic_rebuilds, physical_requests as u64);
 }
 
 #[test]

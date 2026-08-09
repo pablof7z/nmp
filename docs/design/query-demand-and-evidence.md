@@ -113,6 +113,22 @@ change. These properties may not:
 - withdrawn demand closes only when no other descriptor still requires it;
 - no content kind receives a privileged engine branch.
 
+### Physical coverage and active ownership are different facts
+
+An admitted `WireReq` freezes the exact demand identities it physically
+covers. That coverage proof is immutable for the request's lifetime: a later
+withdrawal does not narrow the filter or erase the proof, so detached exact
+demand can reattach locally while a sibling keeps the request running.
+
+Current ownership is a separate incremental index. Each live handle records
+only its wire-contributing atoms; exact owner counts turn handle attachment
+and detachment into 0-to-1 opens and 1-to-0 closes. The router maps each exact
+demand key directly to the physical requests that cover it. Ordinary teardown
+therefore consumes the close delta once, touches no sibling handle or coverage
+row, and closes a request only when its final active exact owner leaves.
+Whole-demand reconstruction remains reserved for genuine invalidation such as
+reactive resolution or routing-fact changes.
+
 ### Projected values carry routing evidence
 
 `Tag("e")`, `Tag("a")`, and `Tag("p")` project a `(value, routing evidence)`
