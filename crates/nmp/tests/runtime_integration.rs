@@ -604,6 +604,12 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     let (first, first_rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "alice"))
         .expect("open first query");
+    assert!(
+        relay
+            .wait_query_count_for_kind(1, 1, Duration::from_secs(5))
+            .await,
+        "the relay must independently witness the first kind:1 REQ before quiescence"
+    );
     relay
         .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
         .await;
@@ -634,6 +640,12 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     let (second, second_rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "bob"))
         .expect("open a later admission cohort");
+    assert!(
+        relay
+            .wait_query_count_for_kind(1, 2, Duration::from_secs(5))
+            .await,
+        "the relay must witness the later sibling REQ before quiescence"
+    );
     relay
         .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
         .await;
@@ -682,8 +694,10 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     relay.disconnect().await;
     let replacement = ScriptedRelay::start_on_port(relay_port, &relay_config).await;
     assert!(
-        replacement.wait_contacted(Duration::from_secs(10)).await,
-        "the transport must reconnect to the same relay address"
+        replacement
+            .wait_query_count_for_kind(1, 2, Duration::from_secs(10))
+            .await,
+        "the fresh relay generation must independently witness both replayed kind:1 REQs"
     );
     replacement
         .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))

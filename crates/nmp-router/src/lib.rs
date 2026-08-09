@@ -35,17 +35,21 @@
 //!   and wire-token mint counter.
 
 mod admission;
+#[cfg(test)]
+mod admission_delta_tests;
 mod budget;
 mod coalesce;
 mod component;
 mod deliver;
 mod diag;
 mod facts;
+mod ownership;
 mod plan;
 mod route;
 mod router;
 mod solver;
 mod wire_id;
+mod withdrawal;
 
 pub use budget::{AdvertisedRelayLimits, CompileBudget, WIRE_SUB_ID_CHARS};
 pub use coalesce::{
@@ -58,9 +62,14 @@ pub use facts::{
     test_relay, AuthorRouteState, AuthorRoutes, FixtureRoutingFacts, Lane, LanedRelay, PublicKey,
     RelayUrl, RoutingFacts,
 };
+pub use ownership::{
+    AdmissionOutcome, AdmissionWork, CompileOutcome, FullMetadataWork, RequestMetadataRemoval,
+    RequestMetadataUpdate, RequestReplacement, RouterOwnershipCensus, WithdrawalOutcome,
+    WithdrawalWork,
+};
 pub use plan::{
     diff_plans, BudgetShortfall, DemandKey, RelayPlan, SubId, WireDelta, WireOp, WireReq,
 };
 pub use route::{RouteKind, RouteProvenance, Skeleton};
-pub use router::{Router, WithdrawalOutcome, WithdrawalWork};
+pub use router::Router;
 pub use solver::{solve, Coverage, CoverageInput, Shortfall, ShortfallReason};

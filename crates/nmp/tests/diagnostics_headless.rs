@@ -233,9 +233,10 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
 
 /// Per-filter coverage (M5 plan §1.1's "coverage per (filter, relay)"):
 /// unproven (`None`) before any EOSE, a proven interval (`Some`) immediately
-/// after -- and an `EmitDiagnostics` fires from the EOSE arm itself (which
-/// never calls `recompile()`), proving the diagnostic surface observes
-/// coverage change points that are not a recompile. Diagnostics is engine-
+/// after. The EOSE arm marks diagnostics dirty without eagerly materializing
+/// a snapshot; the next on-demand read sees the proven interval. This proves
+/// the diagnostic surface observes coverage change points that are not a
+/// recompile while preserving lazy snapshot delivery. Diagnostics is engine-
 /// global and intentionally distinct from the query-facing
 /// `AcquisitionEvidence` surface (`docs/design/scoped-evidence-49-12-plan.md`
 /// §4) -- this asserts its own local fact (`Option<CoverageInterval>`), not
@@ -274,10 +275,19 @@ fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactiv
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::EmitDiagnostics(_))),
-        "EOSE must push EmitDiagnostics even though this arm never calls recompile()"
+            .any(|e| matches!(e, Effect::DiagnosticsChanged)),
+        "EOSE must mark diagnostics dirty even though this arm never calls recompile()"
+    );
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::EmitDiagnostics(_))),
+        "EOSE must not eagerly build a diagnostics snapshot: {effects:?}"
     );
 
+    // This is the same materialization door used for immediate observer
+    // registration; lazy delivery must not weaken the independent coverage
+    // fact itself.
     let snap = core.diagnostics_snapshot();
     let r0 = snap.relays.iter().find(|r| r.relay == relay0).unwrap();
     assert!(
@@ -287,7 +297,7 @@ fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactiv
 }
 
 #[test]
-fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
+fn coalesced_wire_diagnostics_reads_coverage_claims_atom_evidence() {
     let a = Keys::generate();
     let b = Keys::generate();
     let a_hex = a.public_key().to_hex();
@@ -317,7 +327,7 @@ fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
 
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(25)));
     // Both pending atoms were admitted in one immutable request, so one EOSE
-    // proves both absorbed keys.
+    // proves both coverage_claims keys.
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -333,6 +343,6 @@ fn coalesced_wire_diagnostics_reads_absorbed_atom_evidence() {
             from: Timestamp::from(0),
             through: Timestamp::from(25),
         }),
-        "the wide request is proven through the common interval of its absorbed narrow atoms"
+        "the wide request is proven through the common interval of its coverage_claims narrow atoms"
     );
 }

@@ -444,16 +444,16 @@ pub(crate) fn stalled_write_id(intent_id: u64, frozen: &EventId) -> String {
 
 /// The exact common interval proven for a (possibly coalesced) wire request.
 /// Attribution persists evidence under every narrow atom key in
-/// `WireReq::absorbed`, never under the widened filter's own hash. A wide
+/// `WireReq::coverage_claims`, never under the widened filter's own hash. A wide
 /// coalesced request is therefore proven only over the
-/// intersection shared by ALL absorbed atoms; an absent atom row or disjoint
+/// intersection shared by ALL coverage_claims atoms; an absent atom row or disjoint
 /// intervals yields `None` rather than fabricating a wire-filter watermark.
 fn request_coverage(
     relay: &RelayUrl,
     req: &WireReq,
     get_coverage: &impl Fn(&RelayUrl, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
-    let mut keys = req.absorbed.iter().copied();
+    let mut keys = req.coverage_claims.iter().copied();
     let Some(first_key) = keys.next() else {
         return Ok(None);
     };

@@ -4,10 +4,11 @@
 //! This measures the RELAY's side of the trade, so it speaks NIP-01 directly
 //! rather than going through `Engine`. What NMP puts on the socket when a
 //! value set grows is already measured elsewhere
-//! (`crates/nmp/examples/tag_fanout_live.rs`): one subscription id, one
-//! overwriting REQ per growth step, carrying the cumulative value set. This
-//! probe takes that as given and asks the next question — how many events
-//! does the relay re-send because of it, and how many bytes is that.
+//! (`crates/nmp/examples/tag_fanout_live.rs`). This historical comparison
+//! deliberately sends same-id overwrites directly to a relay; current NMP
+//! byte-changing requests instead use fresh accepted-open-before-close
+//! successors. The probe isolates the relay re-serve cost that motivated
+//! #933 rather than reproducing today's Router transition.
 //!
 //! ```text
 //! nak serve --port 10547
@@ -21,8 +22,8 @@
 //!
 //! Two strategies are run against the same seeded relay, back to back:
 //!
-//! - `overwrite` — today's behaviour. One subscription id; each step sends a
-//!   REQ carrying every value discovered so far.
+//! - `overwrite` — the removed historical baseline. One subscription id;
+//!   each step sends a REQ carrying every value discovered so far.
 //! - `delta` — #933's proposal. The first subscription stays open untouched;
 //!   each later step opens a SEPARATE subscription carrying only that step's
 //!   new values.
@@ -113,7 +114,7 @@ fn main() {
     );
     println!();
 
-    // --- strategy: overwrite in place (today) ---------------------------
+    // --- strategy: historical overwrite-in-place baseline ---------------
     let mut socket = open(&url);
     let mut cumulative: BTreeSet<usize> = BTreeSet::new();
     let mut next_value = 0usize;

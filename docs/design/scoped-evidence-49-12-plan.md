@@ -151,8 +151,23 @@ subtree):
 ```rust
 pub struct AcquisitionEvidence { pub sources: Vec<SourceEvidence>, pub shortfall: Vec<ShortfallFact> }
 pub struct SourceEvidence { pub relay: RelayUrl, pub reconciled_through: Option<Timestamp>, pub status: SourceStatus }
-pub enum SourceStatus { Requesting, Connecting, Disconnected, AwaitingAuth { phase: AuthPhase }, AuthDenied, Error }
-pub enum AuthPhase { AwaitingPolicy, AwaitingSignature }
+pub enum SourceStatus {
+    Requesting,
+    FinishedStoredEvents,
+    AwaitingRequest,
+    CoverageSatisfied,
+    Connecting,
+    Disconnected,
+    AwaitingAuth { phase: AuthPhase },
+    AuthDenied,
+    Error,
+}
+pub enum AuthPhase {
+    AwaitingChallenge,
+    AwaitingPolicy,
+    AwaitingSignature,
+    AwaitingRelayAck,
+}
 pub enum ShortfallFact { NoPlannedSource { atom: ConcreteFilter }, NoResolvedDemand, LocalLimit { atom: ConcreteFilter } }
 ```
 
@@ -163,17 +178,20 @@ current link status are orthogonal facts, so a relay can read
 snapshot (the #49 "offline cached rows remain usable" acceptance criterion).
 `AuthDenied` is its own top-level `SourceStatus`, never a phase of
 `AwaitingAuth` (an enum that could express "awaiting-but-already-denied" would
-be a representable non-state); `AuthPhase` keeps only `AwaitingPolicy`/
-`AwaitingSignature` — no `Authenticated`/`Denied` phase, since an authenticated
-source is just `Requesting`/carrying a `reconciled_through`.
+be a representable non-state). `AuthPhase` names only the four outstanding
+AUTH phases; completion, denial, and error remain top-level acquisition
+states.
 
-Population in this frame (U1+U2 only, Rust core): `Requesting` (connected,
-outstanding REQ), `Connecting` (planned, never yet connected this process),
-and `Disconnected` (was connected, now dropped) are ALL populated — folded
-from `EngineCore`'s own `connected_relays`/`ever_connected_relays` sets
-(additive bookkeeping alongside the pre-existing `slot_to_url`, updated in
-`on_relay_connected`/`on_relay_disconnected`). `AwaitingAuth`/`AuthDenied`
-(#8) and `Error` (#51) remain reserved/unpopulated, as §2.1 already specified.
+Population in the current implementation is exact and closed. `Requesting`
+requires an accepted local request that is streaming; `FinishedStoredEvents`
+requires that accepted request to reach EOSE. `AwaitingRequest` covers the
+locally pending handoff and owned retry backoff before acceptance.
+`CoverageSatisfied` belongs to a fresh MaxAge scope that owns no wire work and
+is deliberately independent of link state. Live scopes use
+`Connecting`/`Disconnected` until connected and ready, the four
+`AwaitingAuth` phases while protected work is parked, `AuthDenied` for exact
+denial, and `Error` for an exact source-local failure. No state is a
+query-level completeness claim.
 
 **#12 falsifiers landed** (`crates/nmp-engine/tests/core_headless.rs`):
 `derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_outer`
@@ -463,33 +481,38 @@ pub struct SourceAcquisition {
     /// this source covers (min over them, iff every one has a row with
     /// from <= window floor). None = unproven. NOT "complete".
     pub reconciled_through: Option<Timestamp>,
-    /// Current link/acquisition status — orthogonal to the watermark.
+    /// Effective current acquisition state — orthogonal to the watermark.
     pub status: SourceStatus,
 }
 
 pub enum SourceStatus {
-    Requesting,    // sub open (pre- or post-proof; the watermark says which)
+    Requesting,              // exact local request accepted and streaming
+    FinishedStoredEvents,    // accepted request reached EOSE
+    AwaitingRequest,         // local handoff pending or retry scheduled
+    CoverageSatisfied,       // fresh MaxAge scope; no wire request needed
     Connecting,
     Disconnected,  // + Some(reconciled_through) == the contract's "cached-only"
-    AwaitingAuth { phase: AuthPhase },  // #8, reserved
-    AuthDenied,                          // #8, reserved
+    AwaitingAuth { phase: AuthPhase },
+    AuthDenied,
     Error,
 }
-pub enum AuthPhase { AwaitingPolicy, AwaitingSignature }
+pub enum AuthPhase {
+    AwaitingChallenge,
+    AwaitingPolicy,
+    AwaitingSignature,
+    AwaitingRelayAck,
+}
 ```
 
 (Exact spellings are the builder's; the split, the corrected AUTH vocabulary,
-and closedness are not.) Population honesty, resolving the reserved-variant
-concern raised in review: this frame populates `reconciled_through`,
-`Requesting`, and `shortfall` from `plan`+`store` as §2.1 says — **and also
-`Connecting`/`Disconnected`**, because the core already owns that state
-(`EngineMsg::RelayConnected/RelayDisconnected`, the slot map at
-`core/mod.rs:259-261`); folding it is a read, not new plumbing. That leaves
-exactly `AwaitingAuth`/`AuthDenied` reserved (named landing issue: #8) and
-`Error` reserved-or-folded per what transport actually surfaces today. Rule:
-every ratified variant is either populated in this PR or documented reserved
-with a named issue — no vocabulary that nothing can ever emit and no issue
-will ever populate.
+and closedness are not.) Population honesty: `Requesting` is emitted only
+after exact local placement is accepted; a planned attempt or owned retry is
+`AwaitingRequest`; accepted EOSE is `FinishedStoredEvents`; and a fresh
+MaxAge scope suppressed from wire work is `CoverageSatisfied`, regardless of
+link state. Live scopes populate `Connecting`, `Disconnected`, the four
+`AwaitingAuth` phases, `AuthDenied`, and exact source-local `Error` from the
+core's session/generation state. The durable `reconciled_through` field stays
+orthogonal to every one of these effective current acquisition states.
 
 ### Contract validation
 

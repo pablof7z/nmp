@@ -994,7 +994,9 @@ pub enum nmp::SourceStatus
 pub nmp::SourceStatus::AuthDenied
 pub nmp::SourceStatus::AwaitingAuth
 pub nmp::SourceStatus::AwaitingAuth::phase: nmp::AuthPhase
+pub nmp::SourceStatus::AwaitingRequest
 pub nmp::SourceStatus::Connecting
+pub nmp::SourceStatus::CoverageSatisfied
 pub nmp::SourceStatus::Disconnected
 pub nmp::SourceStatus::Error
 pub nmp::SourceStatus::FinishedStoredEvents

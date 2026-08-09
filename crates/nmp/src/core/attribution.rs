@@ -15,10 +15,15 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use nmp_grammar::{ConcreteFilter, ContextualAtom, RelaySessionKey};
-use nmp_router::SubId;
-use nmp_store::{coverage_key, CoverageInterval, CoverageKey};
+use nmp_grammar::{ContextualAtom, DescriptorHash, RelaySessionKey};
+use nmp_router::{DemandKey, SubId};
+use nmp_store::{coverage_claim_atoms, coverage_key, CoverageInterval, CoverageKey};
 use nostr::Timestamp;
+
+mod completion;
+mod wire;
+
+pub(crate) use wire::wire_sub_id_string;
 
 /// One send-time snapshot (ruling §2): what a single outgoing REQ (or NEG
 /// session) proves, captured at the moment it was sent — never re-derived
@@ -27,7 +32,8 @@ use nostr::Timestamp;
 struct AttributionSnapshot {
     send_id: AttributionSendId,
     event_failure_target: AttributionSendId,
-    absorbed: BTreeSet<CoverageKey>,
+    coverage_claims: BTreeSet<CoverageKey>,
+    filter_hash: DescriptorHash,
     floor: Option<Timestamp>,
     until: Option<Timestamp>,
     coverage_authority: CoverageAuthority,
@@ -67,7 +73,6 @@ enum CoverageAuthority {
 pub(crate) enum CoveragePoison {
     LimitedRequest,
     EventCommitFailed,
-    CoverageCommitFailed,
     MissingShape,
 }
 
@@ -84,23 +89,59 @@ impl CoverageAuthority {
 /// door either commits every claim or retires it without a claim.
 #[derive(Debug)]
 pub(crate) struct CompletedAttribution {
+    sub_id: SubId,
     send_id: AttributionSendId,
+    filter_hash: DescriptorHash,
     coverage_authority: CoverageAuthority,
-    claims: Vec<(CoverageKey, CoverageInterval)>,
+    claims: Vec<CompletedCoverageClaim>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CompletedCoverageClaim {
+    pub(crate) key: CoverageKey,
+    pub(crate) atom: ContextualAtom,
+    pub(crate) interval: CoverageInterval,
 }
 
 impl CompletedAttribution {
+    pub(crate) fn sub_id(&self) -> &SubId {
+        &self.sub_id
+    }
+
     pub(crate) fn send_id(&self) -> AttributionSendId {
         self.send_id
     }
 
-    pub(crate) fn eligible_claims(&self) -> Option<&[(CoverageKey, CoverageInterval)]> {
-        matches!(self.coverage_authority, CoverageAuthority::Eligible)
-            .then_some(self.claims.as_slice())
+    pub(crate) fn filter_hash(&self) -> DescriptorHash {
+        self.filter_hash
     }
 
-    pub(crate) fn poison(&mut self, reason: CoveragePoison) {
-        self.coverage_authority.poison(reason);
+    /// Exact interval proven by this one physical generation, before durable
+    /// rows merge it with older history. Absent means the completion was
+    /// poisoned, empty, or did not carry one unanimous generation interval.
+    pub(crate) fn eligible_generation_interval(&self) -> Option<CoverageInterval> {
+        if !matches!(self.coverage_authority, CoverageAuthority::Eligible) {
+            return None;
+        }
+        let first = self.claims.first()?.interval;
+        self.claims
+            .iter()
+            .all(|claim| claim.interval == first)
+            .then_some(first)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn eligible_claims(&self) -> Option<Vec<(CoverageKey, CoverageInterval)>> {
+        matches!(self.coverage_authority, CoverageAuthority::Eligible).then(|| {
+            self.claims
+                .iter()
+                .map(|claim| (claim.key, claim.interval))
+                .collect()
+        })
+    }
+
+    pub(crate) fn into_eligible_claims(self) -> Option<Vec<CompletedCoverageClaim>> {
+        matches!(self.coverage_authority, CoverageAuthority::Eligible).then_some(self.claims)
     }
 }
 
@@ -128,14 +169,26 @@ pub(crate) struct AttributionState {
     /// context-inclusive hash, so retaining only the selection shape would
     /// no longer be enough to reconstruct the right key at EOSE time).
     /// `EngineCore` only ever has a `CoverageKey` at attribution time (from
-    /// `WireReq::absorbed`), so it must retain the FULL atom separately to
+    /// `WireReq::coverage_claims`), so it must retain the FULL atom separately to
     /// be able to call that door at all. Pruned each recompile by
     /// [`Self::prune_shapes`] (mirroring `EngineCore`'s own
     /// `nip11_information` pruning in `core/mod.rs::recompile`) against the
     /// union of the current `active_demand()` and every `CoverageKey` still
-    /// `absorbed` by an outstanding `inflight` snapshot — see that method's
+    /// `coverage_claims` by an outstanding `inflight` snapshot — see that method's
     /// doc for why both sets are required.
     shape_by_key: HashMap<CoverageKey, ContextualAtom>,
+    /// Exact logical demand identities currently retaining each shape.
+    /// Multiple windowed DemandKeys may share one window-erased CoverageKey.
+    active_demands: BTreeSet<DemandKey>,
+    active_shape_owner_counts: HashMap<CoverageKey, usize>,
+    /// Immutable router-plan requests retain every claim shape until their
+    /// exact physical CLOSE, independently of active logical owners and
+    /// transport-generation snapshots.
+    live_request_claims: HashMap<SubId, BTreeSet<CoverageKey>>,
+    live_shape_owner_counts: HashMap<CoverageKey, usize>,
+    /// Outstanding send-time snapshots retaining each shape after its active
+    /// demand has left. Counts make completion/discard an exact-key update.
+    inflight_shape_owner_counts: HashMap<CoverageKey, usize>,
 }
 
 impl AttributionState {
@@ -154,16 +207,30 @@ impl AttributionState {
         demand: impl IntoIterator<Item = &'a ContextualAtom>,
     ) {
         for atom in demand {
-            self.shape_by_key
-                .entry(coverage_key(atom))
-                .or_insert_with(|| atom.clone());
+            self.observe_atom(atom);
         }
     }
 
-    /// The retained atom for `key`, if any atom carrying it has ever been
-    /// observed via [`Self::observe_demand`].
-    pub(crate) fn shape_of(&self, key: CoverageKey) -> Option<ContextualAtom> {
-        self.shape_by_key.get(&key).cloned()
+    pub(crate) fn observe_atom(&mut self, atom: &ContextualAtom) {
+        let demand = DemandKey::for_atom(atom);
+        if !self.active_demands.insert(demand) {
+            return;
+        }
+        for claim in coverage_claim_atoms(atom) {
+            let key = coverage_key(&claim);
+            self.shape_by_key.entry(key).or_insert(claim);
+            *self.active_shape_owner_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    pub(crate) fn release_atom(&mut self, atom: &ContextualAtom) {
+        let demand = DemandKey::for_atom(atom);
+        if !self.active_demands.remove(&demand) {
+            return;
+        }
+        for claim in coverage_claim_atoms(atom) {
+            self.release_active_shape_owner(coverage_key(&claim));
+        }
     }
 
     /// Prune `shape_by_key` down to keys still reachable from SOMEWHERE
@@ -178,14 +245,14 @@ impl AttributionState {
     /// A key is still reachable, and MUST be retained, if EITHER:
     /// - it is `coverage_key(atom)` for some atom in the CURRENT `demand`
     ///   (the same set [`Self::observe_demand`] was just called with), or
-    /// - it is still `absorbed` by some snapshot outstanding in `inflight`.
+    /// - it is still `coverage_claims` by some snapshot outstanding in `inflight`.
     ///
     /// The second clause is load-bearing, not defensive: `attribute_eose`
     /// intersects EVERY still-outstanding snapshot on a sub (ruling §2,
     /// see its own doc), and a sub's outstanding snapshots can span
     /// multiple recompiles -- an atom can leave `active_demand()` (the
     /// resolver moves on) while its already-sent REQ is still awaiting
-    /// EOSE, and that REQ's `absorbed` keys must keep resolving via
+    /// EOSE, and that REQ's `coverage_claims` keys must keep resolving via
     /// `shape_of` whenever that EOSE (or NEG-MSG completion) finally
     /// arrives, arbitrarily many recompiles later. Pruning against
     /// `demand` alone would silently turn that later `shape_of` lookup
@@ -199,285 +266,229 @@ impl AttributionState {
         &mut self,
         demand: impl IntoIterator<Item = &'a ContextualAtom>,
     ) {
-        let mut live: BTreeSet<CoverageKey> = demand.into_iter().map(coverage_key).collect();
-        for fifo in self.inflight.values() {
-            live.extend(fifo.iter().flat_map(|snap| snap.absorbed.iter().copied()));
+        let mut active_demands = BTreeSet::new();
+        let mut active_shape_owner_counts = HashMap::new();
+        for atom in demand {
+            let demand = DemandKey::for_atom(atom);
+            active_demands.insert(demand);
+            for claim in coverage_claim_atoms(atom) {
+                let key = coverage_key(&claim);
+                *active_shape_owner_counts.entry(key).or_insert(0) += 1;
+                self.shape_by_key.entry(key).or_insert(claim);
+            }
         }
-        self.shape_by_key.retain(|key, _| live.contains(key));
+        self.active_demands = active_demands;
+        self.active_shape_owner_counts = active_shape_owner_counts;
+        self.shape_by_key.retain(|key, _| {
+            self.active_shape_owner_counts.contains_key(key)
+                || self.live_shape_owner_counts.contains_key(key)
+                || self.inflight_shape_owner_counts.contains_key(key)
+        });
     }
 
-    /// Record a send-time snapshot for a REQ just placed on the wire for
-    /// `sub_id` on `session`, whose (possibly coalesced) filter is `filter`
-    /// and which absorbs `absorbed` narrow atoms (from the `WireReq` this
-    /// REQ was materialized from — ruling §2's containment rule, already
-    /// discharged by `nmp-router::coalesce`).
-    pub(crate) fn record_send(
+    /// Install or replace the immutable claim set retained by one planned
+    /// physical request. Replaying the same request is idempotent.
+    pub(crate) fn retain_live_request_claims(
         &mut self,
-        session: &RelaySessionKey,
         sub_id: &SubId,
-        filter: &ConcreteFilter,
-        absorbed: BTreeSet<CoverageKey>,
-        event_failure_target: EventFailureTarget,
-    ) -> AttributionSendId {
-        let send_id = AttributionSendId(self.next_send_id);
-        self.next_send_id = self.next_send_id.wrapping_add(1);
-        let snapshot = AttributionSnapshot {
-            send_id,
-            event_failure_target: match event_failure_target {
-                EventFailureTarget::ThisSend => send_id,
-                EventFailureTarget::Correlated(send_id) => send_id,
-            },
-            absorbed,
-            floor: filter.since.map(Timestamp::from),
-            until: filter.until.map(Timestamp::from),
-            coverage_authority: if filter.limit.is_some() {
-                CoverageAuthority::Poisoned(CoveragePoison::LimitedRequest)
-            } else {
-                CoverageAuthority::Eligible
-            },
-        };
-        self.inflight
-            .entry(sub_id.clone())
-            .or_default()
-            .push_back(snapshot);
-        self.sub_id_by_wire.insert(
-            (session.clone(), wire_sub_id_string(sub_id)),
-            sub_id.clone(),
-        );
-        send_id
+        claims: BTreeSet<CoverageKey>,
+    ) {
+        let previous = self
+            .live_request_claims
+            .insert(sub_id.clone(), claims.clone())
+            .unwrap_or_default();
+        for key in claims.difference(&previous) {
+            *self.live_shape_owner_counts.entry(*key).or_insert(0) += 1;
+        }
+        for key in previous.difference(&claims) {
+            self.release_live_shape_owner(*key);
+        }
     }
 
-    /// Monotonically poison every request that could have emitted an EVENT
-    /// under this exact physical session and wire subscription FIFO.
-    ///
-    /// An overwritten NIP-01 subscription id cannot identify which outstanding
-    /// revision emitted the EVENT, so the exact honest target is the union of
-    /// the failure targets already present in this FIFO. A later send recorded
-    /// after this call is untouched.
-    pub(crate) fn poison_event_commit_failure(
+    /// Add exact claim owners to an existing immutable request without
+    /// revisiting its incumbent claim set.
+    pub(crate) fn retain_added_live_request_claims(
         &mut self,
-        session: &RelaySessionKey,
-        wire_sub_id: &str,
+        sub_id: &SubId,
+        added: &BTreeSet<CoverageKey>,
     ) {
-        let Some(sub_id) = self
-            .sub_id_by_wire
-            .get(&(session.clone(), wire_sub_id.to_string()))
+        let retained = self.live_request_claims.entry(sub_id.clone()).or_default();
+        for key in added {
+            if retained.insert(*key) {
+                *self.live_shape_owner_counts.entry(*key).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// Release exact local claim ownership from a still-running immutable
+    /// request. Callers separately shrink the current pending/accepted
+    /// attribution generation: immutable wire bytes do not make a departed
+    /// local owner eligible for a later coverage claim.
+    pub(crate) fn release_live_request_claims_delta(
+        &mut self,
+        sub_id: &SubId,
+        removed: &BTreeSet<CoverageKey>,
+    ) {
+        let mut empty = false;
+        let mut released = Vec::new();
+        if let Some(retained) = self.live_request_claims.get_mut(sub_id) {
+            for key in removed {
+                if retained.remove(key) {
+                    released.push(*key);
+                }
+            }
+            empty = retained.is_empty();
+        }
+        if empty {
+            self.live_request_claims.remove(sub_id);
+        }
+        for key in released {
+            self.release_live_shape_owner(key);
+        }
+    }
+
+    /// Attach newly-owned contained claims to the current identical-filter
+    /// request generation without rewriting wire bytes or mutating an older
+    /// overwritten FIFO revision.
+    pub(crate) fn extend_current_request_claims(
+        &mut self,
+        sub_id: &SubId,
+        filter_hash: DescriptorHash,
+        added_claims: BTreeSet<CoverageKey>,
+    ) -> (bool, BTreeSet<CoverageKey>, bool) {
+        let previous = self.live_request_claims.get(sub_id);
+        let had_previous_claims = previous.is_some_and(|claims| !claims.is_empty());
+        let added: BTreeSet<_> = added_claims
+            .into_iter()
+            .filter(|key| previous.is_none_or(|claims| !claims.contains(key)))
+            .collect();
+        let current_matches = self
+            .inflight
+            .get(sub_id)
+            .and_then(VecDeque::back)
+            .is_some_and(|current| current.filter_hash == filter_hash);
+        if !current_matches {
+            return (had_previous_claims, added, false);
+        }
+        self.retain_added_live_request_claims(sub_id, &added);
+        self.extend_current_send_claims(sub_id, filter_hash, &added);
+        (had_previous_claims, added, true)
+    }
+
+    /// Extend only the exact current send-time snapshot. NIP-77 role
+    /// generations are children of an immutable router-plan request: their
+    /// claim-shape lifetime is owned by the plan record, not by a second
+    /// child-level live-request claim set.
+    pub(crate) fn extend_current_send_claims(
+        &mut self,
+        sub_id: &SubId,
+        filter_hash: DescriptorHash,
+        added: &BTreeSet<CoverageKey>,
+    ) -> bool {
+        let current_matches = self
+            .inflight
+            .get(sub_id)
+            .and_then(VecDeque::back)
+            .is_some_and(|current| current.filter_hash == filter_hash);
+        if !current_matches {
+            return false;
+        }
+        let current = self
+            .inflight
+            .get_mut(sub_id)
+            .and_then(VecDeque::back_mut)
+            .expect("the matching current request snapshot remains live");
+        for key in added {
+            if current.coverage_claims.insert(*key) {
+                *self.inflight_shape_owner_counts.entry(*key).or_insert(0) += 1;
+            }
+        }
+        true
+    }
+
+    /// Remove claims that no current local owner contributes from the exact
+    /// pending/accepted generation for a byte-identical physical request.
+    /// Older overwritten FIFO revisions are immutable and deliberately left
+    /// alone; `back_mut` is the same current-generation boundary used by the
+    /// additive metadata path above.
+    pub(crate) fn remove_current_send_claims(
+        &mut self,
+        sub_id: &SubId,
+        filter_hash: DescriptorHash,
+        removed: &BTreeSet<CoverageKey>,
+    ) -> bool {
+        let current_matches = self
+            .inflight
+            .get(sub_id)
+            .and_then(VecDeque::back)
+            .is_some_and(|current| current.filter_hash == filter_hash);
+        if !current_matches {
+            return false;
+        }
+        let current = self
+            .inflight
+            .get_mut(sub_id)
+            .and_then(VecDeque::back_mut)
+            .expect("the matching current request snapshot remains live");
+        let released: Vec<_> = removed
+            .iter()
+            .copied()
+            .filter(|key| current.coverage_claims.remove(key))
+            .collect();
+        for key in released {
+            let count = self
+                .inflight_shape_owner_counts
+                .get_mut(&key)
+                .expect("every current request claim owns an inflight shape ref");
+            *count = count
+                .checked_sub(1)
+                .expect("an inflight request claim refcount cannot be zero");
+            if *count == 0 {
+                self.inflight_shape_owner_counts.remove(&key);
+            }
+            self.remove_unowned_shape(key);
+        }
+        true
+    }
+
+    pub(crate) fn claim_shape(&self, key: CoverageKey) -> Option<ContextualAtom> {
+        self.shape_by_key.get(&key).cloned()
+    }
+
+    pub(crate) fn discard_send_revision(&mut self, sub_id: &SubId, revision: u64) {
+        let Some(fifo) = self.inflight.get_mut(sub_id) else {
+            return;
+        };
+        let Some(position) = fifo
+            .iter()
+            .position(|snapshot| snapshot.send_id.revision() == revision)
         else {
             return;
         };
-        let Some(fifo) = self.inflight.get(sub_id) else {
+        let snapshot = fifo.remove(position).unwrap();
+        if fifo.is_empty() {
+            self.inflight.remove(sub_id);
+        }
+        self.release_snapshot(&snapshot);
+    }
+
+    pub(crate) fn has_inflight(&self, sub_id: &SubId) -> bool {
+        self.inflight
+            .get(sub_id)
+            .is_some_and(|snapshots| !snapshots.is_empty())
+    }
+
+    pub(crate) fn discard_wire_mapping(&mut self, session: &RelaySessionKey, sub_id: &SubId) {
+        self.sub_id_by_wire
+            .remove(&(session.clone(), wire_sub_id_string(sub_id)));
+    }
+
+    pub(crate) fn release_live_request_claims(&mut self, sub_id: &SubId) {
+        let Some(claims) = self.live_request_claims.remove(sub_id) else {
             return;
         };
-        let targets: BTreeSet<_> = fifo
-            .iter()
-            .map(|snapshot| snapshot.event_failure_target)
-            .collect();
-        for snapshots in self.inflight.values_mut() {
-            for snapshot in snapshots {
-                if targets.contains(&snapshot.send_id) {
-                    snapshot
-                        .coverage_authority
-                        .poison(CoveragePoison::EventCommitFailed);
-                }
-            }
+        for key in claims {
+            self.release_live_shape_owner(key);
         }
     }
-
-    /// Resolve a wire subscription-id string back to the `SubId`
-    /// `record_send` registered it under, if any (the same map
-    /// `attribute_eose` itself reads at EOSE time). Exposed so `EngineCore`
-    /// can route an inbound `NEG-MSG`/`NEG-ERR` (which only ever carries the
-    /// wire string, never a `SubId`) back to the right in-flight negentropy
-    /// session -- the identical lookup `attribute_eose` performs internally
-    /// for EOSE, reused rather than re-implemented (plan §6 E).
-    pub(crate) fn sub_id_for_wire(
-        &self,
-        session: &RelaySessionKey,
-        wire_sub_id: &str,
-    ) -> Option<SubId> {
-        self.sub_id_by_wire
-            .get(&(session.clone(), wire_sub_id.to_string()))
-            .cloned()
-    }
-
-    /// Disconnect / pool generation bump (ruling §2 fail-safe): clear every
-    /// outstanding snapshot and wire-id mapping for `session`. A replayed sub
-    /// on the new generation calls [`Self::record_send`] again and gets a
-    /// fresh snapshot; the pool translator (transport, C) guarantees a
-    /// stale-generation frame never reaches `EngineCore` at all, so this is
-    /// the only clearing path attribution needs. Scoped to the EXACT session:
-    /// dropping the URL's other access contexts' snapshots here would erase
-    /// coverage FIFOs for physical connections that never dropped.
-    pub(crate) fn clear_session(&mut self, session: &RelaySessionKey) {
-        let stale: BTreeSet<SubId> = self
-            .sub_id_by_wire
-            .iter()
-            .filter_map(|((key, _), sub_id)| (key == session).then_some(sub_id.clone()))
-            .collect();
-        self.inflight.retain(|sub_id, _| !stale.contains(sub_id));
-        self.sub_id_by_wire.retain(|(key, _), _| key != session);
-    }
-
-    /// Discard every outstanding snapshot and wire lookup for one exact
-    /// internal subscription id. NIP-77 uses this when a reconciliation or
-    /// temporary backlog request is superseded/abandoned before it can earn
-    /// coverage. These ids are role-derived and never shared with the live
-    /// REQ, so removing the whole FIFO is exact rather than a best-effort
-    /// "pop the newest" convention.
-    ///
-    /// Dropping the wire mapping outright is only SAFE because no later
-    /// incarnation can re-register the same string (#932): NIP-77 role ids
-    /// carry an engine-minted reincarnation (`core::nip77_role_sub_id`) and
-    /// planned ids are allocated tokens the router never recycles within a
-    /// session (`nmp_router::SubId::allocate`). Were a discarded string ever
-    /// re-registered, the FRESH FIFO underneath it would be popped by a
-    /// straggler EOSE belonging to the request that was closed -- crediting
-    /// durable coverage for a request the relay has not finished serving.
-    pub(crate) fn discard_sub(&mut self, sub_id: &SubId) {
-        self.inflight.remove(sub_id);
-        self.sub_id_by_wire
-            .retain(|_, mapped_sub_id| mapped_sub_id != sub_id);
-    }
-
-    /// Attribute an EOSE arriving on `session` for wire subscription id
-    /// `wire_sub_id` at engine clock `eose_time`. Returns one
-    /// `(CoverageKey, CoverageInterval)` pair per attributed atom — empty
-    /// if the sub is unknown, its FIFO is empty (fail-safe: never
-    /// reconstruct from the current plan), or every outstanding snapshot on
-    /// it is `limited` (poisoned: record nothing for ANY key this EOSE
-    /// might otherwise have proven).
-    ///
-    /// THE load-bearing rule (ruling §2): attribution is the INTERSECTION
-    /// of every snapshot currently outstanding on this sub — never just the
-    /// newest — because an overwriting REQ reuses the same `SubId` (M2
-    /// `plan.rs`) and a relay may EOSE an in-flight straggler for an OLDER
-    /// REQ after a newer one has already been sent. Crediting only the
-    /// current snapshot would attribute atoms the actual terminating REQ
-    /// never asked for. The oldest snapshot is popped unconditionally
-    /// afterward (one REQ, one EOSE, FIFO order) — whether or not this call
-    /// recorded anything.
-    #[cfg(test)]
-    pub(crate) fn attribute_eose(
-        &mut self,
-        session: &RelaySessionKey,
-        wire_sub_id: &str,
-        eose_time: Timestamp,
-    ) -> Vec<(CoverageKey, CoverageInterval)> {
-        self.attribute_eose_detailed(session, wire_sub_id, eose_time)
-            .and_then(|completed| completed.eligible_claims().map(|claims| claims.to_vec()))
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn attribute_eose_detailed(
-        &mut self,
-        session: &RelaySessionKey,
-        wire_sub_id: &str,
-        eose_time: Timestamp,
-    ) -> Option<CompletedAttribution> {
-        let sub_id = self
-            .sub_id_by_wire
-            .get(&(session.clone(), wire_sub_id.to_string()))
-            .cloned()?;
-        let fifo = self.inflight.get_mut(&sub_id)?;
-        if fifo.is_empty() {
-            return None;
-        }
-
-        let coverage_authority = fifo
-            .iter()
-            .find_map(|snapshot| match snapshot.coverage_authority {
-                CoverageAuthority::Eligible => None,
-                poisoned @ CoverageAuthority::Poisoned(_) => Some(poisoned),
-            })
-            .unwrap_or(CoverageAuthority::Eligible);
-        let mut result = Vec::new();
-        let mut attributed: Option<BTreeSet<CoverageKey>> = None;
-        let mut max_floor = Timestamp::from(0u64);
-        let mut min_until = eose_time;
-        for snap in fifo.iter() {
-            attributed = Some(match attributed {
-                None => snap.absorbed.clone(),
-                Some(acc) => acc.intersection(&snap.absorbed).cloned().collect(),
-            });
-            if let Some(f) = snap.floor {
-                max_floor = max_floor.max(f);
-            }
-            if let Some(u) = snap.until {
-                min_until = min_until.min(u);
-            }
-        }
-        let through = eose_time.min(min_until);
-        let interval = CoverageInterval::new(max_floor, through);
-        if let Some(keys) = attributed {
-            result.extend(keys.into_iter().map(|k| (k, interval)));
-        }
-
-        let completed = fifo
-            .pop_front()
-            .expect("non-empty attribution FIFO checked above");
-        Some(CompletedAttribution {
-            send_id: completed.send_id,
-            coverage_authority,
-            claims: result,
-        })
-    }
-
-    /// Attribute a completion that is structurally correlated to one exact
-    /// send. This is the NEG counterpart to [`Self::attribute_eose`]: unlike
-    /// an overwritten REQ's ambiguous EOSE, a live `NegSession` retains the
-    /// identity returned by [`Self::record_send`], so later live-tail sends
-    /// sharing its wire subscription id must not narrow the completed NEG's
-    /// coverage window. `completion_time` is captured when NEG finishes,
-    /// even when credit is deferred until a backfill EOSE proves ingestion.
-    pub(crate) fn attribute_correlated_completion(
-        &mut self,
-        session: &RelaySessionKey,
-        wire_sub_id: &str,
-        send_id: AttributionSendId,
-        completion_time: Timestamp,
-    ) -> Option<CompletedAttribution> {
-        let sub_id = self
-            .sub_id_by_wire
-            .get(&(session.clone(), wire_sub_id.to_string()))
-            .cloned()?;
-        let fifo = self.inflight.get_mut(&sub_id)?;
-        let position = fifo
-            .iter()
-            .position(|snapshot| snapshot.send_id == send_id)?;
-        let snapshot = fifo
-            .remove(position)
-            .expect("position came from this exact attribution FIFO");
-
-        let from = snapshot.floor.unwrap_or_else(|| Timestamp::from(0u64));
-        let through = snapshot
-            .until
-            .map_or(completion_time, |until| completion_time.min(until));
-        let interval = CoverageInterval::new(from, through);
-        Some(CompletedAttribution {
-            send_id: snapshot.send_id,
-            coverage_authority: snapshot.coverage_authority,
-            claims: snapshot
-                .absorbed
-                .into_iter()
-                .map(|key| (key, interval))
-                .collect(),
-        })
-    }
-}
-
-/// The wire-format `subscription_id` string `EngineCore` sends a REQ under
-/// for `sub_id`: the hex `Display` of its `SubId.1` digest — 64 lowercase hex
-/// characters, exactly NIP-01's `subscription_id` cap, never prefixed and
-/// never truncated. This is an internal implementation detail EngineCore owns
-/// end-to-end (recorded at send time in `sub_id_by_wire`, read back at EOSE
-/// time from the same map) — nothing else in the M3 crate graph has committed
-/// to a different convention, so no other component's contract depends on
-/// this exact format.
-///
-/// Since #899 a PLANNED sub's digest is an allocated opaque token, not a hash
-/// of its filter (`nmp-router`'s `SubId::allocate`), so nothing here — or
-/// anywhere else — may re-derive a wire id from a filter. The map is the only
-/// authority in both directions, which it already was.
-pub(crate) fn wire_sub_id_string(sub_id: &SubId) -> String {
-    sub_id.1.to_string()
 }

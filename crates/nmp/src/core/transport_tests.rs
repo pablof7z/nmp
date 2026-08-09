@@ -77,6 +77,7 @@ mod relay_session_key_tests {
             AccessContext::Public,
         );
         let mut attribution = AttributionState::new();
+        attribution.observe_atom(&atom);
         let completed_send = attribution.record_send(
             &session,
             &sub_id,
@@ -84,13 +85,21 @@ mod relay_session_key_tests {
             BTreeSet::from([key]),
             EventFailureTarget::ThisSend,
         );
+        let replay_filter = ConcreteFilter {
+            since: Some(100),
+            ..filter.clone()
+        };
+        let replay_sub_id = SubId::for_wire(
+            session.relay.clone(),
+            &replay_filter,
+            &SourceAuthority::Public,
+            AccessContext::Public,
+        );
+        assert_ne!(sub_id, replay_sub_id, "changed bytes require a fresh id");
         attribution.record_send(
             &session,
-            &sub_id,
-            &ConcreteFilter {
-                since: Some(100),
-                ..filter.clone()
-            },
+            &replay_sub_id,
+            &replay_filter,
             BTreeSet::from([key]),
             EventFailureTarget::ThisSend,
         );
@@ -115,7 +124,7 @@ mod relay_session_key_tests {
         assert_eq!(
             attribution.attribute_eose(
                 &session,
-                &wire_sub_id_string(&sub_id),
+                &wire_sub_id_string(&replay_sub_id),
                 Timestamp::from(200u64),
             ),
             vec![(

@@ -171,7 +171,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
     let (probe_sub, ..) = connect_effects
         .iter()
         .find_map(|e| match e {
-            Effect::StartProbe(url, sub_id, filter, hex) if url == &relay0 => {
+            Effect::StartProbe(_, url, sub_id, filter, hex) if url == &relay0 => {
                 Some((sub_id.clone(), filter.clone(), hex.clone()))
             }
             _ => None,

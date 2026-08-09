@@ -705,6 +705,8 @@ fn direct_status_name(status: SourceStatus) -> String {
     match status {
         SourceStatus::Requesting => "requesting".to_string(),
         SourceStatus::FinishedStoredEvents => "finished_stored_events".to_string(),
+        SourceStatus::AwaitingRequest => "awaiting_request".to_string(),
+        SourceStatus::CoverageSatisfied => "coverage_satisfied".to_string(),
         SourceStatus::Connecting => "connecting".to_string(),
         SourceStatus::Disconnected => "disconnected".to_string(),
         SourceStatus::AwaitingAuth { phase } => match phase {
@@ -722,6 +724,8 @@ fn ffi_status_name(status: FfiSourceStatus) -> String {
     match status {
         FfiSourceStatus::Requesting => "requesting".to_string(),
         FfiSourceStatus::FinishedStoredEvents => "finished_stored_events".to_string(),
+        FfiSourceStatus::AwaitingRequest => "awaiting_request".to_string(),
+        FfiSourceStatus::CoverageSatisfied => "coverage_satisfied".to_string(),
         FfiSourceStatus::Connecting => "connecting".to_string(),
         FfiSourceStatus::Disconnected => "disconnected".to_string(),
         FfiSourceStatus::AwaitingAuth { phase } => match phase {

@@ -70,7 +70,7 @@ fn core_over(store: MemoryStore) -> EngineCore<MemoryStore> {
 }
 
 /// Cross the explicit pending-admission boundary while keeping these
-/// headless falsifiers deterministic. The runtime owns the 30 ms timer; core
+/// headless falsifiers deterministic. The runtime owns the 10 ms timer; core
 /// tests drive the corresponding message directly.
 fn handle_and_flush<S: EventStore>(core: &mut EngineCore<S>, msg: EngineMsg) -> Vec<Effect> {
     let mut effects = core.handle(msg);

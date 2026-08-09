@@ -46,7 +46,7 @@ fn dropped_handle_close_reaches_wire() {
     assert_eq!(demand_open.len(), 1);
     let opening_delta = router.compile(&demand_open, &dir, 10);
     assert!(
-        !opening_delta.ops.is_empty(),
+        !opening_delta.wire.ops.is_empty(),
         "the initial compile must open a REQ on the author's write relays"
     );
     let opened_sub_ids: BTreeSet<_> = router
@@ -82,6 +82,7 @@ fn dropped_handle_close_reaches_wire() {
 
     let closing_delta = router.compile(&demand_after_drop, &dir, 10);
     let closed_sub_ids: BTreeSet<_> = closing_delta
+        .wire
         .ops
         .iter()
         .flat_map(|(_, ops)| ops.iter())

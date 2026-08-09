@@ -1,8 +1,8 @@
 Feature: An accepted unchanged request is not sent twice
   An accepted request owns its exact subscription id, filter, and transport
-  generation until it is closed or disconnected. Later demand cannot rewrite
-  same plan therefore leaves the wire quiet; reconnecting a fresh generation
-  it; reconnecting a fresh generation replays each current request exactly once.
+  generation until it is closed or disconnected. An exact unchanged plan
+  leaves the wire quiet; uncovered later work opens an immutable sibling.
+  Reconnecting a fresh generation replays each current request exactly once.
 
   Background:
     Given I am logged in as my own account

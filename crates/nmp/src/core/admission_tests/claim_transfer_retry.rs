@@ -1,0 +1,305 @@
+//! claim transfer retry admission proofs.
+
+use super::*;
+
+#[test]
+fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure() {
+    let relay = RelayUrl::parse("wss://post-eose-transfer-retry.example").unwrap();
+    let session = RelaySessionKey::public(relay.clone());
+    let incumbent = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1, 2])),
+            since: Some(100),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let added = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            since: Some(100),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let incumbent_claim = coverage_key(&incumbent);
+    let added_claim = coverage_key(&added);
+    let old = CoverageInterval::new(Timestamp::from(0), Timestamp::from(99));
+    let generation = CoverageInterval::new(Timestamp::from(100), Timestamp::from(200));
+    let mut memory = MemoryStore::new();
+    memory
+        .record_coverage(&[(added.clone(), relay.clone(), old)])
+        .unwrap();
+    let control = StoreFailureControl::default();
+    let mut core = EngineCore::new(ControlledFailureStore::new(memory, control.clone()), 20);
+    core.attribution.observe_atom(&incumbent);
+    core.attribution.observe_atom(&added);
+    let sub_id = SubId::for_wire(
+        relay.clone(),
+        &incumbent.filter,
+        &incumbent.source,
+        incumbent.access,
+    );
+    core.attribution
+        .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
+    core.live_wire_requests.insert(
+        (session.clone(), sub_id.clone()),
+        LiveWireRequest {
+            filter: incumbent.filter.clone(),
+            evidence_sub_id: sub_id.clone(),
+            handle: TransportRelayHandle {
+                slot: 77,
+                generation: 1,
+            },
+            stored_events: super::observation::StoredEvents::Finished {
+                request_revision: 9,
+                committed_interval: Some(generation),
+            },
+        },
+    );
+
+    control.fail_coverage_write("one-shot post-EOSE transfer failure");
+    let mut failed = Vec::new();
+    core.apply_request_metadata_updates(
+        &[nmp_router::RequestMetadataUpdate {
+            session: session.clone(),
+            sub_id: sub_id.clone(),
+            filter_hash: incumbent.filter.hash(),
+            added_coverage_claims: BTreeSet::from([added_claim]),
+            added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+        }],
+        &mut failed,
+    );
+    assert_eq!(core.pending_request_claim_transfers.len(), 1);
+    assert_eq!(
+        core.bench_ownership_census()
+            .pending_request_claim_transfer_jobs,
+        1
+    );
+    assert_eq!(
+        core.bench_ownership_census()
+            .pending_request_claim_transfer_claims,
+        1
+    );
+    assert!(!failed.iter().any(|effect| matches!(
+        effect,
+        Effect::RecordCoverage(..) | Effect::EmitObservationEvidence(..)
+    )));
+    assert_eq!(
+        core.resolver
+            .store()
+            .get_coverage(added_claim, &relay)
+            .unwrap(),
+        Some(old),
+        "failure cannot mutate durable coverage or publish freshness"
+    );
+    assert_eq!(core.request_claim_transfer_attempts.get(), 1);
+    assert_eq!(core.request_claim_transfer_claims_attempted.get(), 1);
+    assert_eq!(core.request_claim_transfer_failures.get(), 1);
+    assert_eq!(core.request_claim_transfer_commits.get(), 0);
+    core.attribution.release_atom(&added);
+
+    core.retry_scheduler_blocked = true;
+    let due = core
+        .next_deadline()
+        .unwrap()
+        .expect("the failed transfer owns a bounded retry deadline");
+    let retried = core.tick(due);
+    assert!(core.pending_request_claim_transfers.is_empty());
+    assert_eq!(core.request_claim_transfer_attempts.get(), 2);
+    assert_eq!(core.request_claim_transfer_claims_attempted.get(), 2);
+    assert_eq!(core.request_claim_transfer_failures.get(), 1);
+    assert_eq!(core.request_claim_transfer_commits.get(), 1);
+    assert!(retried.iter().any(|effect| matches!(
+        effect,
+        Effect::RecordCoverage(key, recorded_relay, interval)
+            if *key == added_claim && recorded_relay == &relay && *interval == generation
+    )));
+    assert!(!retried
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitObservationEvidence(..))));
+    assert_eq!(
+        core.resolver
+            .store()
+            .get_coverage(added_claim, &relay)
+            .unwrap(),
+        Some(CoverageInterval::new(
+            Timestamp::from(0),
+            Timestamp::from(200)
+        )),
+        "the store may merge rows, but the transfer itself records only the current generation"
+    );
+    assert!(core.pending_request_claim_transfers.is_empty());
+
+    core.live_wire_requests.remove(&(session, sub_id.clone()));
+    core.attribution.release_live_request_claims(&sub_id);
+    core.attribution.release_atom(&incumbent);
+    assert_eq!(
+        core.bench_ownership_census(),
+        CoreOwnershipCensus::default()
+    );
+}
+
+#[test]
+fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
+    let relay = RelayUrl::parse("wss://post-eose-transfer-superseded.example").unwrap();
+    let session = RelaySessionKey::public(relay.clone());
+    let incumbent = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1, 2])),
+            since: Some(100),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let added = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            since: Some(100),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let incumbent_claim = coverage_key(&incumbent);
+    let added_claim = coverage_key(&added);
+    let control = StoreFailureControl::default();
+    let mut core = EngineCore::new(
+        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+        20,
+    );
+    core.attribution.observe_atom(&incumbent);
+    core.attribution.observe_atom(&added);
+    let sub_id = SubId::for_wire(
+        relay.clone(),
+        &incumbent.filter,
+        &incumbent.source,
+        incumbent.access,
+    );
+    core.attribution
+        .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
+    core.record_observed_request(RequestSend {
+        session: &session,
+        sub_id: &sub_id,
+        filter: &incumbent.filter,
+        coverage_claims: BTreeSet::from([incumbent_claim]),
+        owner_demands: BTreeSet::from([DemandKey::for_atom(&incumbent)]),
+        replay: false,
+        event_failure_target: EventFailureTarget::ThisSend,
+    });
+    let first_transport = TransportRelayHandle {
+        slot: 80,
+        generation: 1,
+    };
+    core.slot_to_relay
+        .insert(first_transport.slot, (first_transport, session.clone()));
+    accept_request(
+        &mut core,
+        &session,
+        &sub_id,
+        incumbent.filter.hash(),
+        first_transport,
+    );
+    core.clock = Timestamp::from(200u64);
+    core.on_relay_frame(
+        first_transport,
+        session.clone(),
+        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+            nostr::SubscriptionId::new(wire_sub_id_string(&sub_id)),
+        ))),
+    );
+
+    control.fail_coverage_write("leave the first exact transfer pending");
+    core.apply_request_metadata_updates(
+        &[nmp_router::RequestMetadataUpdate {
+            session: session.clone(),
+            sub_id: sub_id.clone(),
+            filter_hash: incumbent.filter.hash(),
+            added_coverage_claims: BTreeSet::from([added_claim]),
+            added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+        }],
+        &mut Vec::new(),
+    );
+    assert_eq!(core.pending_request_claim_transfers.len(), 1);
+    assert_eq!(core.request_claim_transfer_attempts.get(), 1);
+
+    core.record_observed_request(RequestSend {
+        session: &session,
+        sub_id: &sub_id,
+        filter: &incumbent.filter,
+        coverage_claims: BTreeSet::from([incumbent_claim, added_claim]),
+        owner_demands: BTreeSet::from([
+            DemandKey::for_atom(&incumbent),
+            DemandKey::for_atom(&added),
+        ]),
+        replay: true,
+        event_failure_target: EventFailureTarget::ThisSend,
+    });
+    let transport = TransportRelayHandle {
+        slot: 80,
+        generation: 2,
+    };
+    core.slot_to_relay
+        .insert(transport.slot, (transport, session.clone()));
+    accept_request(
+        &mut core,
+        &session,
+        &sub_id,
+        incumbent.filter.hash(),
+        transport,
+    );
+    core.clock = Timestamp::from(250u64);
+    let eose = core.on_relay_frame(
+        transport,
+        session.clone(),
+        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+            nostr::SubscriptionId::new(wire_sub_id_string(&sub_id)),
+        ))),
+    );
+
+    assert!(eose.iter().any(|effect| matches!(
+        effect,
+        Effect::RecordCoverage(key, recorded_relay, interval)
+            if *key == added_claim
+                && recorded_relay == &relay
+                && *interval == CoverageInterval::new(Timestamp::from(100), Timestamp::from(250))
+    )));
+    assert!(core.pending_request_claim_transfers.is_empty());
+    assert_eq!(core.request_claim_transfer_attempts.get(), 1);
+    let census = core.bench_ownership_census();
+    assert_eq!(census.attribution_live_shape_keys, 2);
+    assert_eq!(census.attribution_live_shape_refs, 2);
+    core.retry_scheduler_blocked = true;
+    assert_eq!(core.next_deadline().unwrap(), None);
+    core.tick(Timestamp::from(300u64));
+    assert_eq!(core.request_claim_transfer_attempts.get(), 1);
+    assert_eq!(
+        core.resolver
+            .store()
+            .get_coverage(added_claim, &relay)
+            .unwrap(),
+        Some(CoverageInterval::new(
+            Timestamp::from(100),
+            Timestamp::from(250)
+        ))
+    );
+
+    core.live_wire_requests
+        .remove(&(session.clone(), sub_id.clone()));
+    core.attribution.release_live_request_claims(&sub_id);
+    core.abandon_sub(&sub_id);
+    core.slot_to_relay.remove(&transport.slot);
+    core.attribution.release_atom(&incumbent);
+    core.attribution.release_atom(&added);
+    assert_eq!(
+        core.bench_ownership_census(),
+        CoreOwnershipCensus::default()
+    );
+}

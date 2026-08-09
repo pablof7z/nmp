@@ -321,6 +321,9 @@ class EvidenceMappingTest {
                 sources =
                     listOf(
                         source("wss://requesting.example", 10uL, FfiSourceStatus.Requesting),
+                        source("wss://finished.example", 11uL, FfiSourceStatus.FinishedStoredEvents),
+                        source("wss://awaiting.example", null, FfiSourceStatus.AwaitingRequest),
+                        source("wss://satisfied.example", 12uL, FfiSourceStatus.CoverageSatisfied),
                         source("wss://connecting.example", null, FfiSourceStatus.Connecting),
                         source("wss://disconnected.example", 20uL, FfiSourceStatus.Disconnected),
                         source(
@@ -348,19 +351,23 @@ class EvidenceMappingTest {
         assertEquals(raw.sources.map { it.relay }, evidence.sources.map { it.relay })
         assertTrue(evidence.sources[0].status === SourceStatus.Requesting)
         assertEquals(10uL, evidence.sources[0].reconciledThrough)
-        assertTrue(evidence.sources[1].status === SourceStatus.Connecting)
-        assertNull(evidence.sources[1].reconciledThrough)
-        assertTrue(evidence.sources[2].status === SourceStatus.Disconnected)
+        assertTrue(evidence.sources[1].status === SourceStatus.FinishedStoredEvents)
+        assertTrue(evidence.sources[2].status === SourceStatus.AwaitingRequest)
+        assertNull(evidence.sources[2].reconciledThrough)
+        assertTrue(evidence.sources[3].status === SourceStatus.CoverageSatisfied)
+        assertTrue(evidence.sources[4].status === SourceStatus.Connecting)
+        assertNull(evidence.sources[4].reconciledThrough)
+        assertTrue(evidence.sources[5].status === SourceStatus.Disconnected)
         assertTrue(
-            (evidence.sources[3].status as SourceStatus.AwaitingAuth).phase ===
+            (evidence.sources[6].status as SourceStatus.AwaitingAuth).phase ===
                 AuthPhase.AwaitingPolicy,
         )
         assertTrue(
-            (evidence.sources[4].status as SourceStatus.AwaitingAuth).phase ===
+            (evidence.sources[7].status as SourceStatus.AwaitingAuth).phase ===
                 AuthPhase.AwaitingSignature,
         )
-        assertTrue(evidence.sources[5].status === SourceStatus.AuthDenied)
-        assertTrue(evidence.sources[6].status === SourceStatus.Error)
+        assertTrue(evidence.sources[8].status === SourceStatus.AuthDenied)
+        assertTrue(evidence.sources[9].status === SourceStatus.Error)
         assertEquals(ShortfallFact.NoPlannedSource("no-source-filter"), evidence.shortfall[0])
         assertTrue(evidence.shortfall[1] === ShortfallFact.NoResolvedDemand)
         assertEquals(ShortfallFact.LocalLimit("limited-filter"), evidence.shortfall[2])

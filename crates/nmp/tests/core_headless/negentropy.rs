@@ -1,5 +1,6 @@
 use super::persistence_failures::FailIngestStore;
 use super::*;
+use nmp_grammar::{Demand, Derived, Freshness, Selector};
 
 // ---- negentropy selection and fallback ---------------------------------
 
@@ -12,13 +13,25 @@ fn neg_err_frame(sub: &str) -> RelayFrame {
 
 fn connect_and_prove_nip77<S: EventStore>(core: &mut EngineCore<S>, relay: &RelayUrl) {
     let effects = connect(core, 0, relay);
-    let probe_sub = effects
+    let (probe_attempt, probe_sub) = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::StartProbe(url, sub_id, ..) if url == relay => Some(sub_id),
+            Effect::StartProbe(attempt, url, sub_id, ..) if url == relay => {
+                Some((*attempt, sub_id))
+            }
             _ => None,
         })
         .expect("connected demanded relay must start its NIP-77 probe");
+    core.on_nip77_handoff(
+        Nip77Frame::Probe,
+        RequestHandoffOutcome::Accepted {
+            attempt_id: probe_attempt,
+            handle: RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+        },
+    );
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -27,6 +40,138 @@ fn connect_and_prove_nip77<S: EventStore>(core: &mut EngineCore<S>, relay: &Rela
         public_session(relay),
         neg_msg_frame(&wire_sub_string(probe_sub), "6100"),
     ));
+}
+
+fn wire_attempt_id(
+    effects: &[Effect],
+    session: &RelaySessionKey,
+    sub_id: &SubId,
+    filter: &ConcreteFilter,
+) -> RequestAttemptId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Wire(delta) => delta
+                .ops
+                .iter()
+                .any(|(candidate, ops)| {
+                    candidate == session
+                        && ops.iter().any(|op| {
+                            matches!(op, WireOp::Req(id, candidate_filter)
+                                if id == sub_id && candidate_filter == filter)
+                        })
+                })
+                .then(|| delta.attempt_id(session, sub_id, filter)),
+            _ => None,
+        })
+        .expect("the emitted request carries its exact attempt identity")
+}
+
+fn nip77_attempt_id(effects: &[Effect], frame: Nip77Frame, sub_id: &SubId) -> RequestAttemptId {
+    effects
+        .iter()
+        .find_map(|effect| match (frame, effect) {
+            (Nip77Frame::Probe, Effect::StartProbe(attempt, _, id, ..)) if id == sub_id => {
+                Some(*attempt)
+            }
+            (Nip77Frame::Open, Effect::NegOpen(attempt, _, id, ..)) if id == sub_id => {
+                Some(*attempt)
+            }
+            (Nip77Frame::Continue, Effect::NegMsg(attempt, _, id, ..)) if id == sub_id => {
+                Some(*attempt)
+            }
+            _ => None,
+        })
+        .expect("the emitted NIP-77 frame carries its exact attempt identity")
+}
+
+fn pinned_profile_query(relay: &RelayUrl, author: &Keys) -> LiveQuery {
+    let mut demand = Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([0u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([author
+            .public_key()
+            .to_hex()]))),
+        ..Filter::default()
+    });
+    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    demand.freshness = Freshness::Live;
+    LiveQuery::single(demand)
+}
+
+fn nested_same_profile_query(
+    relay: &RelayUrl,
+    author: &Keys,
+    outer_freshness: Freshness,
+) -> LiveQuery {
+    let mut inner = Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([0u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([author
+            .public_key()
+            .to_hex()]))),
+        ..Filter::default()
+    });
+    inner.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    inner.freshness = Freshness::Live;
+    let mut outer = Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([0u16])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner,
+            project: Selector::Authors,
+        }))),
+        ..Filter::default()
+    });
+    outer.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    outer.freshness = outer_freshness;
+    LiveQuery::single(outer)
+}
+
+fn profile_atom(relay: &RelayUrl, author: &Keys) -> ContextualAtom {
+    ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(BTreeSet::from([author.public_key().to_hex()])),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
+}
+
+fn request_fact_targets(effects: &[Effect]) -> BTreeSet<(ObservationId, String)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitObservationEvidence(observation, evidence) => {
+                Some((*observation, evidence.as_slice()))
+            }
+            _ => None,
+        })
+        .flat_map(|(observation, evidence)| {
+            evidence.iter().filter_map(move |item| match &item.fact {
+                ObservationFact::RelayRequest { path, .. } => Some((observation, path.clone())),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+fn refused_fact_targets(effects: &[Effect]) -> BTreeSet<(ObservationId, String)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitObservationEvidence(observation, evidence) => {
+                Some((*observation, evidence.as_slice()))
+            }
+            _ => None,
+        })
+        .flat_map(|(observation, evidence)| {
+            evidence.iter().filter_map(move |item| match &item.fact {
+                ObservationFact::RequestDeferred { path, .. } => Some((observation, path.clone())),
+                _ => None,
+            })
+        })
+        .collect()
 }
 
 /// Drive the exact edge the runtime drives when a relay worker ACCEPTS a
@@ -40,19 +185,18 @@ fn connect_and_prove_nip77<S: EventStore>(core: &mut EngineCore<S>, relay: &Rela
 fn accept_neg_open<S: EventStore>(
     core: &mut EngineCore<S>,
     slot: u32,
-    relay: &RelayUrl,
     neg_sub_id: &SubId,
+    opened: &[Effect],
 ) -> Vec<Effect> {
     core.on_nip77_handoff(
         Nip77Frame::Open,
-        relay,
-        neg_sub_id,
-        Some(RelayHandle {
-            slot,
-            generation: 1,
-        }),
-        true,
-        None,
+        RequestHandoffOutcome::Accepted {
+            attempt_id: nip77_attempt_id(opened, Nip77Frame::Open, neg_sub_id),
+            handle: RelayHandle {
+                slot,
+                generation: 1,
+            },
+        },
     )
 }
 
@@ -66,7 +210,7 @@ fn finish_neg_with_remote_event<S: EventStore>(
     neg_sub_id: &SubId,
     initial_hex: &str,
     remote: &nostr::Event,
-) -> SubId {
+) -> (SubId, ConcreteFilter, RequestAttemptId) {
     let mut storage = ::negentropy::NegentropyStorageVector::new();
     storage
         .insert(
@@ -102,7 +246,11 @@ fn finish_neg_with_remote_event<S: EventStore>(
                                     .as_ref()
                                     .is_some_and(|ids| ids.contains(&remote.id.to_hex())) =>
                             {
-                                Some(sub_id.clone())
+                                Some((
+                                    sub_id.clone(),
+                                    filter.clone(),
+                                    delta.attempt_id(session, sub_id, filter),
+                                ))
                             }
                             _ => None,
                         })
@@ -116,12 +264,177 @@ fn finish_neg_with_remote_event<S: EventStore>(
         client_hex = effects
             .iter()
             .find_map(|effect| match effect {
-                Effect::NegMsg(url, sub_id, next) if url == relay && sub_id == neg_sub_id => {
+                Effect::NegMsg(_, url, sub_id, next) if url == relay && sub_id == neg_sub_id => {
                     Some(next.clone())
                 }
                 _ => None,
             })
             .expect("reconciliation either continues or opens missing-id backfill");
+    }
+}
+
+#[test]
+fn nip77_candidate_and_fallback_target_only_the_current_wire_participating_scope() {
+    for outer_freshness in [Freshness::CacheOnly, Freshness::MaxAge { seconds: 60 }] {
+        for accept_neg in [false, true] {
+            let author = Keys::generate();
+            let primer = Keys::generate();
+            let relay = RelayUrl::parse("wss://neg-request-target-scope.example.com").unwrap();
+            let directory = FixtureRoutingFacts::new()
+                .with_outbound_routes(primer.public_key(), [relay.clone()]);
+            let mut store = MemoryStore::new();
+            store
+                .insert(
+                    UnsignedEvent::new(
+                        author.public_key(),
+                        Timestamp::from(10u64),
+                        Kind::Metadata,
+                        Vec::new(),
+                        "{}",
+                    )
+                    .sign_with_keys(&author)
+                    .expect("sign fixture profile"),
+                    RelayObserved::new(relay.clone(), Timestamp::from(10u64)),
+                )
+                .expect("seed fixture profile");
+            if matches!(outer_freshness, Freshness::MaxAge { .. }) {
+                store
+                    .record_coverage(&[(
+                        profile_atom(&relay, &author),
+                        relay.clone(),
+                        CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+                    )])
+                    .expect("seed fresh outer coverage");
+            }
+            let mut core = EngineCore::new_with_fixture_routing_facts(store, directory, 10);
+            core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
+            let primer_opened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
+                &[1],
+                &primer.public_key().to_hex(),
+            )));
+            let primer_observation = subscribed_handle(&primer_opened);
+            req_for(&primer_opened, &relay);
+            connect_and_prove_nip77(&mut core, &relay);
+
+            let nested_opened = core.handle_and_flush(EngineMsg::Subscribe(
+                nested_same_profile_query(&relay, &author, outer_freshness),
+            ));
+            let first_nested = subscribed_handle(&nested_opened);
+            let (candidate_id, candidate_filter) = req_for_kind(&nested_opened, &relay, 0);
+            let candidate_id = candidate_id.clone();
+            let candidate_filter = candidate_filter.clone();
+            assert_eq!(candidate_filter.limit, Some(0));
+            let candidate_attempt = wire_attempt_id(
+                &nested_opened,
+                &public_session(&relay),
+                &candidate_id,
+                &candidate_filter,
+            );
+            assert_eq!(
+                request_fact_targets(&core.on_wire_request_handoff(
+                    RequestHandoffOutcome::Accepted {
+                        attempt_id: candidate_attempt,
+                        handle: RelayHandle {
+                            slot: 0,
+                            generation: 1,
+                        },
+                    },
+                )),
+                BTreeSet::from([(first_nested, "$.authors.inner".to_string())])
+            );
+
+            let candidate_eose = core.handle(EngineMsg::RelayFrame(
+                RelayHandle {
+                    slot: 0,
+                    generation: 1,
+                },
+                public_session(&relay),
+                eose_frame(&wire_sub_string(&candidate_id)),
+            ));
+            let neg_sub_id = candidate_eose
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::NegOpen(_, _, sub_id, ..) => Some(sub_id.clone()),
+                    _ => None,
+                })
+                .expect("the limit:0 candidate barrier opens reconciliation");
+
+            let standing = subscribed_handle(
+                &core.handle_and_flush(EngineMsg::Subscribe(pinned_profile_query(&relay, &author))),
+            );
+            core.handle(EngineMsg::Unsubscribe(first_nested));
+            let mut current_nested = subscribed_handle(&core.handle_and_flush(
+                EngineMsg::Subscribe(nested_same_profile_query(&relay, &author, outer_freshness)),
+            ));
+            core.handle(EngineMsg::Unsubscribe(standing));
+
+            let neg_attempt = nip77_attempt_id(&candidate_eose, Nip77Frame::Open, &neg_sub_id);
+            let neg_outcome = core.on_nip77_handoff(
+                Nip77Frame::Open,
+                if accept_neg {
+                    RequestHandoffOutcome::Accepted {
+                        attempt_id: neg_attempt,
+                        handle: RelayHandle {
+                            slot: 0,
+                            generation: 1,
+                        },
+                    }
+                } else {
+                    RequestHandoffOutcome::Refused {
+                        attempt_id: neg_attempt,
+                        cause: LocalSendRefusal::SessionUnavailable,
+                    }
+                },
+            );
+            if accept_neg {
+                assert_eq!(
+                    request_fact_targets(&neg_outcome),
+                    BTreeSet::from([(current_nested, "$.authors.inner".to_string())])
+                );
+            } else {
+                assert_eq!(
+                    refused_fact_targets(&neg_outcome),
+                    BTreeSet::from([(current_nested, "$.authors.inner".to_string())])
+                );
+                let (fallback_id, fallback_filter) = req_for_kind(&neg_outcome, &relay, 0);
+                let fallback_id = fallback_id.clone();
+                let fallback_filter = fallback_filter.clone();
+                assert_eq!(fallback_filter.limit, None);
+                let fallback_attempt = wire_attempt_id(
+                    &neg_outcome,
+                    &public_session(&relay),
+                    &fallback_id,
+                    &fallback_filter,
+                );
+
+                let standing =
+                    subscribed_handle(&core.handle_and_flush(EngineMsg::Subscribe(
+                        pinned_profile_query(&relay, &author),
+                    )));
+                core.handle(EngineMsg::Unsubscribe(current_nested));
+                current_nested = subscribed_handle(&core.handle_and_flush(EngineMsg::Subscribe(
+                    nested_same_profile_query(&relay, &author, outer_freshness),
+                )));
+                core.handle(EngineMsg::Unsubscribe(standing));
+                assert_eq!(
+                    request_fact_targets(&core.on_wire_request_handoff(
+                        RequestHandoffOutcome::Accepted {
+                            attempt_id: fallback_attempt,
+                            handle: RelayHandle {
+                            slot: 0,
+                            generation: 1,
+                            },
+                        },
+                    )),
+                    BTreeSet::from([(current_nested, "$.authors.inner".to_string())]),
+                    "the fallback resolves targets after detach/reopen rather than retaining the refused owner"
+                );
+            }
+
+            core.handle(EngineMsg::Unsubscribe(current_nested));
+            core.handle(EngineMsg::Unsubscribe(primer_observation));
+            assert!(core.active_demand().is_empty());
+        }
     }
 }
 
@@ -155,7 +468,7 @@ fn negentropy_local_snapshot_is_scoped_to_the_reconciling_relay() {
     let relay_b_probe = relay_b_connected
         .iter()
         .find_map(|effect| match effect {
-            Effect::StartProbe(url, sub_id, ..) if url == &relay_b => Some(sub_id.clone()),
+            Effect::StartProbe(_, url, sub_id, ..) if url == &relay_b => Some(sub_id.clone()),
             _ => None,
         })
         .expect("relay B begins its NIP-77 capability probe");
@@ -198,7 +511,7 @@ fn negentropy_local_snapshot_is_scoped_to_the_reconciling_relay() {
     let (neg_sub_id, initial_hex) = opened
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, sub_id, _, initial_hex) => {
+            Effect::NegOpen(_, _, sub_id, _, initial_hex) => {
                 Some((sub_id.clone(), initial_hex.clone()))
             }
             _ => None,
@@ -208,7 +521,7 @@ fn negentropy_local_snapshot_is_scoped_to_the_reconciling_relay() {
     let backfill =
         finish_neg_with_remote_event(&mut core, 1, &relay_b, &neg_sub_id, &initial_hex, &shared);
     assert_ne!(
-        backfill, relay_b_live,
+        backfill.0, relay_b_live,
         "relay B must request the shared id because NMP has not observed its copy"
     );
 }
@@ -344,7 +657,7 @@ fn positive_nip11_advertisement_starts_probe_but_is_not_behavioral_proof() {
     ));
     assert!(resolved
         .iter()
-        .any(|effect| matches!(effect, Effect::StartProbe(url, ..) if url == &relay0)));
+        .any(|effect| matches!(effect, Effect::StartProbe(_, url, ..) if url == &relay0)));
     assert!(!resolved
         .iter()
         .any(|effect| matches!(effect, Effect::NegOpen(..))));
@@ -382,7 +695,7 @@ fn absent_supported_nips_is_proven_document_unknown_not_explicit_negative() {
     ));
     assert!(resolved
         .iter()
-        .any(|effect| matches!(effect, Effect::StartProbe(url, ..) if url == &relay0)));
+        .any(|effect| matches!(effect, Effect::StartProbe(_, url, ..) if url == &relay0)));
     let relay = core
         .diagnostics_snapshot()
         .relays
@@ -487,7 +800,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     let (probe_sub, ..) = connect_effects
         .iter()
         .find_map(|e| match e {
-            Effect::StartProbe(url, sub_id, filter, hex) if url == &relay0 => {
+            Effect::StartProbe(_, url, sub_id, filter, hex) if url == &relay0 => {
                 Some((sub_id.clone(), filter.clone(), hex.clone()))
             }
             _ => None,
@@ -507,8 +820,8 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         neg_msg_frame(&probe_wire, "6100"),
     ));
 
-    // b's kind:1 atom widens the SAME (kind:1) skeleton -- same sub-id,
-    // now the relay is Supported and the widened filter is broad
+    // b's kind:1 atom widens the same logical plan component under a fresh
+    // successor id. The relay is now Supported and the widened filter is broad
     // (unlimited), so it first opens a distinct live REQ with `limit:0`.
     let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -555,13 +868,13 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     let (neg_sub_id, initial_neg_hex) = effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, sub_id, _, initial_hex) => {
+            Effect::NegOpen(_, _, sub_id, _, initial_hex) => {
                 Some((sub_id.clone(), initial_hex.clone()))
             }
             _ => None,
         })
         .expect("the live EOSE barrier must open Negentropy");
-    let _ = accept_neg_open(&mut core, 0, &relay0, &neg_sub_id);
+    let _ = accept_neg_open(&mut core, 0, &neg_sub_id, &effects);
     assert!(
         !has_request_terminal(&effects, RequestTerminal::Eose),
         "the limit:0 barrier opens NEG but does not settle the request"
@@ -636,7 +949,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
             neg_msg_frame(&wire_sub_string(&neg_sub_id), &hex::encode(relay_reply)),
         ));
         if let Some(next) = round.iter().find_map(|effect| match effect {
-            Effect::NegMsg(url, id, next) if url == &relay0 && id == &neg_sub_id => {
+            Effect::NegMsg(_, url, id, next) if url == &relay0 && id == &neg_sub_id => {
                 Some(next.clone())
             }
             _ => None,
@@ -709,11 +1022,11 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     let (empty_neg_id, mut empty_client_message) = opened_empty
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, id, _, initial) => Some((id.clone(), initial.clone())),
+            Effect::NegOpen(_, _, id, _, initial) => Some((id.clone(), initial.clone())),
             _ => None,
         })
         .expect("empty broad shape opens NEG after its live barrier");
-    let _ = accept_neg_open(&mut core, 0, &relay0, &empty_neg_id);
+    let _ = accept_neg_open(&mut core, 0, &empty_neg_id, &opened_empty);
     let mut empty_storage = NegentropyStorageVector::new();
     empty_storage.seal().unwrap();
     let mut empty_relay = RawNegentropy::owned(empty_storage, 0).unwrap();
@@ -730,7 +1043,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
             neg_msg_frame(&wire_sub_string(&empty_neg_id), &hex::encode(reply)),
         ));
         if let Some(next) = round.iter().find_map(|effect| match effect {
-            Effect::NegMsg(url, id, next) if url == &relay0 && id == &empty_neg_id => {
+            Effect::NegMsg(_, url, id, next) if url == &relay0 && id == &empty_neg_id => {
                 Some(next.clone())
             }
             _ => None,
@@ -819,7 +1132,21 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         &[1],
         &b.public_key().to_hex(),
     )));
-    let candidate = req_for(&widened, &relay).0.clone();
+    let (candidate, candidate_filter) = req_for(&widened, &relay);
+    let candidate = candidate.clone();
+    let candidate_filter = candidate_filter.clone();
+    core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+        attempt_id: wire_attempt_id(
+            &widened,
+            &public_session(&relay),
+            &candidate,
+            &candidate_filter,
+        ),
+        handle: RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+    });
     let opened = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -831,16 +1158,53 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
     let (neg_sub_id, initial_hex) = opened
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, sub_id, _, initial_hex) => {
+            Effect::NegOpen(_, _, sub_id, _, initial_hex) => {
                 Some((sub_id.clone(), initial_hex.clone()))
             }
             _ => None,
         })
         .expect("candidate EOSE opens the real NEG session");
+    accept_neg_open(&mut core, 0, &neg_sub_id, &opened);
 
     let missing = nmp_resolver::testkit::kind1(&b, "missing from local store", 100);
-    let backfill =
+    let (backfill, backfill_filter, backfill_attempt) =
         finish_neg_with_remote_event(&mut core, 0, &relay, &neg_sub_id, &initial_hex, &missing);
+    core.on_wire_request_handoff(RequestHandoffOutcome::Refused {
+        attempt_id: backfill_attempt,
+        cause: LocalSendRefusal::SessionUnavailable,
+    });
+    let stray = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&backfill)),
+    ));
+    assert!(
+        !stray
+            .iter()
+            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+        "a refused ids-only request has no wire eligibility: {stray:?}"
+    );
+    let due = core
+        .next_deadline()
+        .unwrap()
+        .expect("missing-id retry deadline");
+    let retried = core.handle(EngineMsg::Tick(due));
+    let retry_attempt = wire_attempt_id(
+        &retried,
+        &public_session(&relay),
+        &backfill,
+        &backfill_filter,
+    );
+    core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+        attempt_id: retry_attempt,
+        handle: RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+    });
     let backfill_wire = wire_sub_string(&backfill);
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
     let failed = core.handle(EngineMsg::RelayFrame(
@@ -938,7 +1302,7 @@ fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
     let (probe_sub, ..) = connect_effects
         .iter()
         .find_map(|e| match e {
-            Effect::StartProbe(url, sub_id, filter, hex) if url == &relay0 => {
+            Effect::StartProbe(_, url, sub_id, filter, hex) if url == &relay0 => {
                 Some((sub_id.clone(), filter.clone(), hex.clone()))
             }
             _ => None,
@@ -1011,7 +1375,7 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
     let (probe_sub, ..) = connect_effects
         .iter()
         .find_map(|e| match e {
-            Effect::StartProbe(url, sub_id, filter, hex) if url == &relay0 => {
+            Effect::StartProbe(_, url, sub_id, filter, hex) if url == &relay0 => {
                 Some((sub_id.clone(), filter.clone(), hex.clone()))
             }
             _ => None,
@@ -1045,7 +1409,7 @@ fn stale_negentropy_session_falls_back_to_req_after_the_liveness_deadline() {
     let neg_sub_id = effects
         .iter()
         .find_map(|e| match e {
-            Effect::NegOpen(_, sub_id, ..) => Some(sub_id.clone()),
+            Effect::NegOpen(_, _, sub_id, ..) => Some(sub_id.clone()),
             _ => None,
         })
         .expect("the candidate EOSE must open a negentropy session");
@@ -1111,7 +1475,7 @@ fn neg_err_falls_back_without_closing_the_active_live_req() {
     let neg_sub_id = opened
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, sub_id, ..) => Some(sub_id.clone()),
+            Effect::NegOpen(_, _, sub_id, ..) => Some(sub_id.clone()),
             _ => None,
         })
         .expect("candidate EOSE opens NEG");
@@ -1230,15 +1594,17 @@ fn reconnect_repeats_live_first_and_only_the_fresh_generation_eose_opens_neg() {
         .with_outbound_routes(b.public_key(), [relay.clone()]);
     let mut core = new_core(dir);
 
-    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
+    let a_observation = subscribed_handle(&initial);
     connect_and_prove_nip77(&mut core, &relay);
     let candidate = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &b.public_key().to_hex(),
     )));
+    let b_observation = subscribed_handle(&candidate);
     let old_live_id = req_for(&candidate, &relay).0.clone();
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -1270,6 +1636,22 @@ fn reconnect_repeats_live_first_and_only_the_fresh_generation_eose_opens_neg() {
     let (fresh_live_id, fresh_filter) = req_for(&reconnected, &relay);
     let fresh_live_id = fresh_live_id.clone();
     assert_eq!(fresh_filter.limit, Some(0));
+    #[cfg(feature = "bench-instrumentation")]
+    {
+        let fresh_candidates = reconnected
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Wire(delta) => Some(delta),
+                _ => None,
+            })
+            .flat_map(|delta| delta.ops.iter().flat_map(|(_, ops)| ops))
+            .filter(|op| matches!(op, WireOp::Req(_, filter) if filter.limit == Some(0)))
+            .count();
+        let census = core.bench_ownership_census();
+        assert_eq!(census.pending_neg_handoffs, fresh_candidates);
+        assert_eq!(census.pending_neg_plan_edges, fresh_candidates);
+        assert_eq!(census.pending_neg_plan_keys, fresh_candidates);
+    }
     assert!(!reconnected
         .iter()
         .any(|effect| matches!(effect, Effect::NegOpen(..))));
@@ -1295,6 +1677,14 @@ fn reconnect_repeats_live_first_and_only_the_fresh_generation_eose_opens_neg() {
     assert!(fresh
         .iter()
         .any(|effect| matches!(effect, Effect::NegOpen(..))));
+
+    core.handle(EngineMsg::Unsubscribe(b_observation));
+    core.handle(EngineMsg::Unsubscribe(a_observation));
+    #[cfg(feature = "bench-instrumentation")]
+    assert_eq!(
+        core.bench_ownership_census(),
+        nmp::mechanism::core::CoreOwnershipCensus::default()
+    );
 }
 
 #[test]
@@ -1331,7 +1721,7 @@ fn withdrawing_all_demand_closes_live_candidate_and_every_repair_owner() {
     let neg_id = opened
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, id, ..) => Some(id.clone()),
+            Effect::NegOpen(_, _, id, ..) => Some(id.clone()),
             _ => None,
         })
         .expect("candidate EOSE opens repair");
@@ -1569,7 +1959,7 @@ fn live_eose_timeout_withdrawal_closes_only_its_orphaned_candidate() {
 ///
 /// The backlog fallback role is the sharpest instance because it is
 /// deliberately UNLIMITED (so nothing poisons it) and carries the demand's
-/// real absorbed keys (so its EOSE genuinely earns coverage).
+/// real coverage_claims keys (so its EOSE genuinely earns coverage).
 ///
 /// Both legs matter. The stale EOSE must credit NOTHING, and the reopened
 /// request's OWN EOSE must still credit normally -- an "exact attribution"
@@ -1819,7 +2209,7 @@ fn a_refused_probe_returns_the_relay_to_unknown_and_retires_its_wire_id() {
     let probe_sub = connected
         .iter()
         .find_map(|effect| match effect {
-            Effect::StartProbe(url, sub_id, ..) if url == &relay => Some(sub_id.clone()),
+            Effect::StartProbe(_, url, sub_id, ..) if url == &relay => Some(sub_id.clone()),
             _ => None,
         })
         .expect("connecting a demanded, never-probed relay starts a capability probe");
@@ -1832,14 +2222,10 @@ fn a_refused_probe_returns_the_relay_to_unknown_and_retires_its_wire_id() {
     // The exact edge the runtime reaches when `Pool::send` refuses the frame.
     let refused = core.on_nip77_handoff(
         Nip77Frame::Probe,
-        &relay,
-        &probe_sub,
-        Some(RelayHandle {
-            slot: 0,
-            generation: 1,
-        }),
-        false,
-        Some("transport send refused NIP-77 frame".to_string()),
+        RequestHandoffOutcome::Refused {
+            attempt_id: nip77_attempt_id(&connected, Nip77Frame::Probe, &probe_sub),
+            cause: LocalSendRefusal::SessionUnavailable,
+        },
     );
 
     assert_eq!(
@@ -1850,8 +2236,8 @@ fn a_refused_probe_returns_the_relay_to_unknown_and_retires_its_wire_id() {
     assert!(
         refused
             .iter()
-            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
-        "the changed capability verdict is observable state and must be published: {refused:?}"
+            .any(|effect| matches!(effect, Effect::DiagnosticsChanged)),
+        "the changed capability verdict must mark the lazy diagnostics projection dirty: {refused:?}"
     );
 
     // The retired wire id can no longer be satisfied: a frame arriving under
@@ -1911,7 +2297,7 @@ fn a_refused_neg_open_never_claims_the_request_and_falls_back_immediately() {
     let neg_sub_id = opened
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, sub_id, ..) => Some(sub_id.clone()),
+            Effect::NegOpen(_, _, sub_id, ..) => Some(sub_id.clone()),
             _ => None,
         })
         .expect("the candidate EOSE opens reconciliation");
@@ -1928,14 +2314,10 @@ fn a_refused_neg_open_never_claims_the_request_and_falls_back_immediately() {
 
     let refused = core.on_nip77_handoff(
         Nip77Frame::Open,
-        &relay,
-        &neg_sub_id,
-        Some(RelayHandle {
-            slot: 0,
-            generation: 1,
-        }),
-        false,
-        Some("transport send refused NIP-77 frame".to_string()),
+        RequestHandoffOutcome::Refused {
+            attempt_id: nip77_attempt_id(&opened, Nip77Frame::Open, &neg_sub_id),
+            cause: LocalSendRefusal::SessionUnavailable,
+        },
     );
 
     assert!(
@@ -1943,7 +2325,7 @@ fn a_refused_neg_open_never_claims_the_request_and_falls_back_immediately() {
         Effect::EmitObservationEvidence(_, evidence)
             if evidence.iter().any(|item| matches!(
                 &item.fact,
-                ObservationFact::RelayRefused { relay: url, .. } if url == &relay
+                ObservationFact::RequestDeferred { relay: url, .. } if url == &relay
             )))),
         "a refused NIP-77 question is the one thing an app can see, and must be \
          emitted: {refused:?}"
@@ -2019,20 +2401,19 @@ fn a_refused_neg_continue_falls_back_without_waiting_for_the_deadline() {
     let (neg_sub_id, initial_hex) = opened
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegOpen(_, sub_id, _, hex) => Some((sub_id.clone(), hex.clone())),
+            Effect::NegOpen(_, _, sub_id, _, hex) => Some((sub_id.clone(), hex.clone())),
             _ => None,
         })
         .expect("the candidate EOSE opens reconciliation");
     let accepted = core.on_nip77_handoff(
         Nip77Frame::Open,
-        &relay,
-        &neg_sub_id,
-        Some(RelayHandle {
-            slot: 0,
-            generation: 1,
-        }),
-        true,
-        None,
+        RequestHandoffOutcome::Accepted {
+            attempt_id: nip77_attempt_id(&opened, Nip77Frame::Open, &neg_sub_id),
+            handle: RelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+        },
     );
     assert!(
         accepted.iter().any(|effect| matches!(effect,
@@ -2073,7 +2454,7 @@ fn a_refused_neg_continue_falls_back_without_waiting_for_the_deadline() {
     let continuing = stepped
         .iter()
         .find_map(|effect| match effect {
-            Effect::NegMsg(_, sub_id, _) => Some(sub_id.clone()),
+            Effect::NegMsg(_, _, sub_id, _) => Some(sub_id.clone()),
             _ => None,
         })
         .expect("a reconciliation round in progress emits a continuing NEG-MSG");
@@ -2081,14 +2462,10 @@ fn a_refused_neg_continue_falls_back_without_waiting_for_the_deadline() {
 
     let refused = core.on_nip77_handoff(
         Nip77Frame::Continue,
-        &relay,
-        &neg_sub_id,
-        Some(RelayHandle {
-            slot: 0,
-            generation: 1,
-        }),
-        false,
-        Some("transport send refused NIP-77 frame".to_string()),
+        RequestHandoffOutcome::Refused {
+            attempt_id: nip77_attempt_id(&stepped, Nip77Frame::Continue, &neg_sub_id),
+            cause: LocalSendRefusal::SessionUnavailable,
+        },
     );
     assert!(
         refused

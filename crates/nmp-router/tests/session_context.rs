@@ -56,14 +56,14 @@ fn authorless_public_a_b_are_three_exact_session_plans() {
         .reqs
         .values()
         .flatten()
-        .flat_map(|req| req.absorbed.iter().copied())
+        .flat_map(|req| req.coverage_claims.iter().copied())
         .collect::<BTreeSet<_>>();
     assert_eq!(coverage.len(), 3);
 
     router.compile(&demand, &FixtureRoutingFacts::new(), 2);
     assert_eq!(router.plan().reqs.len(), 2);
     assert_eq!(router.plan().refused_sessions.len(), 1);
-    assert_eq!(router.plan().limited.len(), 1);
+    assert_eq!(router.plan().limited_demands.len(), 1);
 }
 
 #[test]

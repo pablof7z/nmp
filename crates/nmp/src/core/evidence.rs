@@ -28,8 +28,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey};
-use nmp_router::{RelayPlan, SubId};
-use nmp_store::{coverage_key, EventStore, PersistenceError};
+use nmp_router::{RelayPlan, SubId, WireReq};
+use nmp_store::{coverage_claim_atoms, coverage_key, EventStore, PersistenceError};
 use nostr::{RelayUrl, Timestamp};
 
 /// Compact acquisition evidence for one query snapshot, scoped to THIS
@@ -60,7 +60,7 @@ pub struct AcquisitionEvidence {
 
 /// One relay's acquisition state for a query's subtree, as two DELIBERATELY
 /// orthogonal facts: a durable PAST fact (`reconciled_through`, a persisted
-/// watermark) and a fact about the request on the wire RIGHT NOW (`status`).
+/// watermark) and its effective CURRENT acquisition state (`status`).
 /// Keeping these independent is load-bearing — a relay can be currently
 /// `Disconnected` while still carrying a perfectly good `reconciled_through`
 /// from before it dropped (the #49 acceptance criterion "offline cached rows
@@ -70,11 +70,13 @@ pub struct AcquisitionEvidence {
 ///
 /// That axis, not the presence of a watermark, is where
 /// [`SourceStatus::FinishedStoredEvents`] belongs (#1235). Whether this relay
-/// has finished answering is current and dies with the socket, exactly like
-/// every other status; whether it PROVED anything over the query's window is
-/// durable and outlives it. The two are independent in both directions — a
-/// router-bounded request finishes with no watermark, and a watermark from a
-/// prior window is `Some` while a fresh request is still streaming.
+/// has finished answering is current and connection-scoped; whether it PROVED
+/// anything over the query's window is durable and outlives it. The two are
+/// independent in both directions — a router-bounded request finishes with no
+/// watermark, and a watermark from a prior window is `Some` while a fresh
+/// request is still streaming. [`SourceStatus::CoverageSatisfied`] is also a
+/// current acquisition state, but is deliberately link-independent because a
+/// fresh frozen scope owns no wire work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEvidence {
     pub relay: RelayUrl,
@@ -87,14 +89,15 @@ pub struct SourceEvidence {
     /// such row yet) — never read as "complete", it is simply the absence
     /// of a fact. Independent of `status`.
     pub reconciled_through: Option<Timestamp>,
-    /// This session's current link and request state — orthogonal to
-    /// `reconciled_through`, and like a socket rather than like a watermark:
-    /// it describes right now, and nothing here survives the connection.
+    /// This source's effective current acquisition state, orthogonal to
+    /// `reconciled_through`: link, AUTH, and request placement for live work,
+    /// or link-independent [`SourceStatus::CoverageSatisfied`] for a fresh
+    /// frozen scope that owns no wire work.
     pub status: SourceStatus,
 }
 
-/// The closed, honest per-source vocabulary for one session's current link
-/// and request state. This frame populates every state below from exact
+/// The closed, honest per-source vocabulary for one source's effective
+/// current acquisition state. This frame populates every state below from exact
 /// session/generation bookkeeping. AUTH policy/signer failures are
 /// session-local facts; #51 may later add richer transport error detail
 /// without changing this closed status shape.
@@ -131,6 +134,14 @@ pub enum SourceStatus {
     /// open and keeps delivering new events; only its stored-events phase is
     /// over.
     FinishedStoredEvents,
+    /// A REQ exists as a reducer-owned dispatch attempt, but the transport
+    /// has not yet accepted it. The relay socket may already be connected;
+    /// this is request-placement truth, not connection state.
+    AwaitingRequest,
+    /// This frozen MaxAge scope was satisfied from durable coverage at open
+    /// time and owns no local send attempt. It is intentionally not a link or
+    /// request-placement claim; `reconciled_through` carries the durable fact.
+    CoverageSatisfied,
     /// A subtree atom this source covers has a planned wire request, but
     /// the relay has never yet completed a connection to deliver it.
     Connecting,
@@ -149,6 +160,13 @@ pub enum SourceStatus {
     /// The exact session's current AUTH policy/signer/send operation failed.
     /// This is not an aggregate relay-health judgment.
     Error,
+}
+
+/// Opening-time acquisition policy for one immutable Demand scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvidenceAcquisition {
+    Live,
+    CoverageSatisfied,
 }
 
 /// #8: the AUTH negotiation phases worth surfacing while awaiting proof.
@@ -188,6 +206,17 @@ pub enum ShortfallFact {
     LocalLimit { atom: ConcreteFilter },
 }
 
+pub(crate) struct AcquisitionEvidenceContext<'a, S> {
+    pub(crate) store: &'a S,
+    pub(crate) connected: &'a BTreeSet<RelaySessionKey>,
+    pub(crate) auth_status: &'a BTreeMap<RelaySessionKey, SourceStatus>,
+    pub(crate) ever_connected: &'a BTreeSet<RelaySessionKey>,
+    pub(crate) finished_stored_events: &'a BTreeSet<(RelaySessionKey, SubId)>,
+    pub(crate) placed_requests: &'a BTreeSet<(RelaySessionKey, SubId)>,
+    pub(crate) awaiting_requests: &'a BTreeSet<(RelaySessionKey, SubId)>,
+    pub(crate) acquisition: EvidenceAcquisition,
+}
+
 /// Compute `subtree_atoms`' [`AcquisitionEvidence`] against `plan` (each
 /// atom's current covering SESSION set — the sessions whose compiled
 /// `WireReq` absorbs that atom's key), `store` (each `(atom, relay)`'s
@@ -211,14 +240,16 @@ pub enum ShortfallFact {
 /// - For each session that covers at least one subtree atom:
 ///   `reconciled_through = Some(min over covered atoms' proven `through`)`
 ///   IFF every atom it covers has a proven row (`from <= window floor`),
-///   else `None`. `status` for a connected Public session is `Requesting`;
-///   a connected PROTECTED session reads the AUTH reducer's own per-session
-///   truth from `auth_status` (exact phase, `AuthDenied`, `Error`, or
-///   `Requesting` once ready), defaulting to `AwaitingAuth {
-///   AwaitingChallenge }` when the reducer holds no entry (connected but
-///   never challenged); `Disconnected` if it has connected before but is
-///   not connected now; else `Connecting` (planned but never yet
-///   connected). A session that would read `Requesting` reads
+///   else `None`. A scope whose acquisition decision suppressed wire work is
+///   [`SourceStatus::CoverageSatisfied`] independently of link state. For a
+///   Live connected Public session, any exact pending attempt/retry is
+///   [`SourceStatus::AwaitingRequest`], every required accepted placement is
+///   `Requesting`, and a planned request with neither owner is `Error`.
+///   Connected PROTECTED sessions retain their exact AUTH phase until ready,
+///   then use the same placement reducer; absent AUTH state defaults to
+///   `AwaitingAuth { AwaitingChallenge }`. A non-connected session is
+///   `Disconnected` after a prior connection and otherwise `Connecting`.
+///   A session that would read `Requesting` reads
 ///   [`SourceStatus::FinishedStoredEvents`] instead once EVERY wire request
 ///   absorbing an atom it covers appears in `finished_stored_events` — the
 ///   same all-or-nothing scoping `reconciled_through` uses, so one unfinished
@@ -227,12 +258,18 @@ pub enum ShortfallFact {
 pub(crate) fn acquisition_evidence<S: EventStore>(
     subtree_atoms: &BTreeSet<ContextualAtom>,
     plan: &RelayPlan,
-    store: &S,
-    connected: &BTreeSet<RelaySessionKey>,
-    auth_status: &BTreeMap<RelaySessionKey, SourceStatus>,
-    ever_connected: &BTreeSet<RelaySessionKey>,
-    finished_stored_events: &BTreeSet<(RelaySessionKey, SubId)>,
+    context: AcquisitionEvidenceContext<'_, S>,
 ) -> Result<AcquisitionEvidence, PersistenceError> {
+    let AcquisitionEvidenceContext {
+        store,
+        connected,
+        auth_status,
+        ever_connected,
+        finished_stored_events,
+        placed_requests,
+        awaiting_requests,
+        acquisition,
+    } = context;
     if subtree_atoms.is_empty() {
         return Ok(AcquisitionEvidence {
             sources: Vec::new(),
@@ -241,29 +278,16 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
     }
 
     // session -> (every covered atom proven so far?, min proven `through`,
-    // every wire request covering an atom so far finished its stored events?).
-    let mut per_session: BTreeMap<RelaySessionKey, (bool, Option<Timestamp>, bool)> =
+    // every request finished, every request locally placed, any local
+    // attempt/retry owner awaiting placement).
+    let mut per_session: BTreeMap<RelaySessionKey, (bool, Option<Timestamp>, bool, bool, bool)> =
         BTreeMap::new();
     let mut shortfall = Vec::new();
 
     for atom in subtree_atoms {
-        let key = coverage_key(atom);
-        let locally_limited = plan.limited.contains(&key);
-        // Per covering SESSION, whether every one of ITS wire requests that
-        // absorbs this atom has reached end of stored events. A session may
-        // absorb one atom through several requests; the atom is only finished
-        // on that session when all of them are.
-        let covering: Vec<(&RelaySessionKey, bool)> = plan
-            .reqs
-            .iter()
-            .filter_map(|(session, reqs)| {
-                let mut absorbing = reqs.iter().filter(|r| r.absorbed.contains(&key)).peekable();
-                absorbing.peek()?;
-                let finished = absorbing
-                    .all(|r| finished_stored_events.contains(&(session.clone(), r.sub_id.clone())));
-                Some((session, finished))
-            })
-            .collect();
+        let locally_limited = plan
+            .limited_demands
+            .contains(&nmp_router::DemandKey::for_atom(atom));
 
         if locally_limited {
             shortfall.push(ShortfallFact::LocalLimit {
@@ -271,78 +295,122 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
             });
         }
 
-        if covering.is_empty() {
-            if !locally_limited {
-                shortfall.push(ShortfallFact::NoPlannedSource {
-                    atom: atom.filter.clone(),
-                });
-            }
-            continue;
-        }
-
         let window_start = Timestamp::from(atom.filter.since.unwrap_or(0));
-        for (session, finished) in covering {
-            let entry = per_session
-                .entry(session.clone())
-                .or_insert((true, None, true));
-            entry.2 &= finished;
-            // Coverage rows stay keyed (context-hashed key, relay URL): the
-            // access distinction already lives inside `key` itself
-            // (`CoverageKey` is a context-inclusive hash), so the store read
-            // needs only the session's relay.
-            // `?`, never a `_ =>` arm folding the error in with the misses
-            // (#763). `reconciled_through: None` is this function telling an
-            // app "this source has proven nothing over your window", and a
-            // store that could not be read has not established that.
-            match store.get_coverage(key, &session.relay)? {
-                Some(interval) if interval.from <= window_start => {
-                    entry.1 = Some(match entry.1 {
-                        None => interval.through,
-                        Some(cur) => cur.min(interval.through),
-                    });
-                }
-                _ => entry.0 = false,
+        let claims = coverage_claim_atoms(atom);
+        let mut missing_claim_source = claims.is_empty();
+        for claim in claims {
+            let key = coverage_key(&claim);
+            let covering: Vec<(&RelaySessionKey, bool, bool, bool)> = plan
+                .reqs
+                .iter()
+                .filter_map(|(session, reqs)| {
+                    let claiming: Vec<_> = reqs
+                        .iter()
+                        .filter(|request| request.coverage_claims.contains(&key))
+                        .collect();
+                    (!claiming.is_empty()).then(|| {
+                        let request_key =
+                            |request: &&WireReq| (session.clone(), request.sub_id.clone());
+                        let finished = claiming
+                            .iter()
+                            .all(|request| finished_stored_events.contains(&request_key(request)));
+                        let placed = claiming
+                            .iter()
+                            .all(|request| placed_requests.contains(&request_key(request)));
+                        let awaiting = claiming
+                            .iter()
+                            .any(|request| awaiting_requests.contains(&request_key(request)));
+                        (session, finished, placed, awaiting)
+                    })
+                })
+                .collect();
+            if covering.is_empty() {
+                missing_claim_source = true;
+                continue;
             }
+            for (session, finished, placed, awaiting) in covering {
+                let entry = per_session
+                    .entry(session.clone())
+                    .or_insert((true, None, true, true, false));
+                entry.2 &= finished;
+                entry.3 &= placed;
+                entry.4 |= awaiting;
+                match store.get_coverage(key, &session.relay)? {
+                    Some(interval) if interval.from <= window_start => {
+                        entry.1 = Some(match entry.1 {
+                            None => interval.through,
+                            Some(cur) => cur.min(interval.through),
+                        });
+                    }
+                    _ => entry.0 = false,
+                }
+            }
+        }
+        if missing_claim_source && !locally_limited {
+            shortfall.push(ShortfallFact::NoPlannedSource {
+                atom: atom.filter.clone(),
+            });
         }
     }
 
     let sources = per_session
         .into_iter()
-        .map(|(session, (all_proven, through, all_finished))| {
-            let status = if connected.contains(&session) {
-                if session.access == AccessContext::Public {
-                    SourceStatus::Requesting
+        .map(
+            |(session, (all_proven, through, all_finished, all_placed, any_awaiting))| {
+                let status = if acquisition == EvidenceAcquisition::CoverageSatisfied {
+                    SourceStatus::CoverageSatisfied
+                } else if connected.contains(&session) {
+                    if session.access == AccessContext::Public {
+                        request_placement_status(all_placed, any_awaiting)
+                    } else {
+                        match auth_status.get(&session).copied().unwrap_or(
+                            SourceStatus::AwaitingAuth {
+                                phase: AuthPhase::AwaitingChallenge,
+                            },
+                        ) {
+                            SourceStatus::Requesting => {
+                                request_placement_status(all_placed, any_awaiting)
+                            }
+                            status => status,
+                        }
+                    }
+                } else if ever_connected.contains(&session) {
+                    SourceStatus::Disconnected
                 } else {
-                    auth_status
-                        .get(&session)
-                        .copied()
-                        .unwrap_or(SourceStatus::AwaitingAuth {
-                            phase: AuthPhase::AwaitingChallenge,
-                        })
+                    SourceStatus::Connecting
+                };
+                // Only the state that MEANS "stored events are still streaming"
+                // can be displaced by their end. A session still negotiating AUTH,
+                // denied, errored, disconnected, or never yet connected has no
+                // request on the wire to have finished, so its own fact stands.
+                let status = match (status, all_finished) {
+                    (SourceStatus::Requesting, true) => SourceStatus::FinishedStoredEvents,
+                    (status, _) => status,
+                };
+                SourceEvidence {
+                    relay: session.relay,
+                    access: session.access,
+                    reconciled_through: if all_proven { through } else { None },
+                    status,
                 }
-            } else if ever_connected.contains(&session) {
-                SourceStatus::Disconnected
-            } else {
-                SourceStatus::Connecting
-            };
-            // Only the state that MEANS "stored events are still streaming"
-            // can be displaced by their end. A session still negotiating AUTH,
-            // denied, errored, disconnected, or never yet connected has no
-            // request on the wire to have finished, so its own fact stands.
-            let status = match (status, all_finished) {
-                (SourceStatus::Requesting, true) => SourceStatus::FinishedStoredEvents,
-                (status, _) => status,
-            };
-            SourceEvidence {
-                relay: session.relay,
-                access: session.access,
-                reconciled_through: if all_proven { through } else { None },
-                status,
-            }
-        })
+            },
+        )
         .collect();
 
     Ok(AcquisitionEvidence { sources, shortfall })
+}
+
+fn request_placement_status(all_placed: bool, any_awaiting: bool) -> SourceStatus {
+    if any_awaiting {
+        SourceStatus::AwaitingRequest
+    } else if all_placed {
+        SourceStatus::Requesting
+    } else {
+        // A planned request with neither a live placement nor an exact local
+        // attempt/retry owner is an internal liveness failure, not a socket
+        // connection fact.
+        SourceStatus::Error
+    }
 }
 
 /// Combine independently-planned Demand scopes into one query snapshot
@@ -361,10 +429,23 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
 /// The LINK half of a status, with the request phase collapsed away. Two
 /// scopes must agree about the socket; they may legitimately disagree about
 /// whether the request each of them planned has finished.
-fn link_status(status: SourceStatus) -> SourceStatus {
-    match status {
-        SourceStatus::FinishedStoredEvents => SourceStatus::Requesting,
-        other => other,
+fn merge_source_status(left: SourceStatus, right: SourceStatus) -> SourceStatus {
+    use SourceStatus::{
+        AwaitingRequest, CoverageSatisfied, Error, FinishedStoredEvents, Requesting,
+    };
+    if left == right {
+        return left;
+    }
+    match (left, right) {
+        (CoverageSatisfied, other) | (other, CoverageSatisfied) => other,
+        (Error, _) | (_, Error) => Error,
+        (AwaitingRequest, Requesting | FinishedStoredEvents)
+        | (Requesting | FinishedStoredEvents, AwaitingRequest) => AwaitingRequest,
+        (Requesting, FinishedStoredEvents) | (FinishedStoredEvents, Requesting) => Requesting,
+        // One physical session cannot simultaneously have different
+        // connection/auth states. Preserve a closed, conservative error
+        // rather than choosing one scope's incompatible story.
+        _ => Error,
     }
 }
 
@@ -383,15 +464,7 @@ pub(crate) fn merge_acquisition_evidence(
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let current = entry.get_mut();
-                    debug_assert!(
-                        link_status(current.status) == link_status(source.status),
-                        "one physical session has one current link status"
-                    );
-                    if current.status == SourceStatus::FinishedStoredEvents
-                        && source.status == SourceStatus::Requesting
-                    {
-                        current.status = SourceStatus::Requesting;
-                    }
+                    current.status = merge_source_status(current.status, source.status);
                     current.reconciled_through =
                         match (current.reconciled_through, source.reconciled_through) {
                             (Some(left), Some(right)) => Some(left.min(right)),
@@ -443,13 +516,14 @@ mod tests {
             sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access),
             filter: atom.filter.clone(),
             source: atom.source.clone(),
-            provenance: Vec::new(),
-            absorbed: BTreeSet::from([key]),
-            covered_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
+            provenance: BTreeSet::new(),
+            coverage_claims: BTreeSet::from([key]),
+            owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
+            coverage_assignments: BTreeSet::new(),
         };
         let plan = RelayPlan {
             reqs: BTreeMap::from([(RelaySessionKey::public(relay.clone()), vec![req])]),
-            limited: BTreeSet::from([key]),
+            limited_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
             refused_sessions: BTreeSet::from([RelaySessionKey::public(
                 RelayUrl::parse("wss://refused.example").unwrap(),
             )]),
@@ -459,11 +533,16 @@ mod tests {
         let evidence = acquisition_evidence(
             &BTreeSet::from([atom.clone()]),
             &plan,
-            &MemoryStore::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeSet::new(),
-            &BTreeSet::new(),
+            AcquisitionEvidenceContext {
+                store: &MemoryStore::new(),
+                connected: &BTreeSet::new(),
+                auth_status: &BTreeMap::new(),
+                ever_connected: &BTreeSet::new(),
+                finished_stored_events: &BTreeSet::new(),
+                placed_requests: &BTreeSet::new(),
+                awaiting_requests: &BTreeSet::new(),
+                acquisition: EvidenceAcquisition::Live,
+            },
         )
         .expect("MemoryStore coverage never fails");
 
@@ -478,9 +557,8 @@ mod tests {
     #[test]
     fn a_fully_refused_atom_reports_limit_not_no_source() {
         let atom = atom();
-        let key = coverage_key(&atom);
         let plan = RelayPlan {
-            limited: BTreeSet::from([key]),
+            limited_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
             refused_sessions: BTreeSet::from([RelaySessionKey::public(
                 RelayUrl::parse("wss://refused.example").unwrap(),
             )]),
@@ -490,11 +568,16 @@ mod tests {
         let evidence = acquisition_evidence(
             &BTreeSet::from([atom.clone()]),
             &plan,
-            &MemoryStore::new(),
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeSet::new(),
-            &BTreeSet::new(),
+            AcquisitionEvidenceContext {
+                store: &MemoryStore::new(),
+                connected: &BTreeSet::new(),
+                auth_status: &BTreeMap::new(),
+                ever_connected: &BTreeSet::new(),
+                finished_stored_events: &BTreeSet::new(),
+                placed_requests: &BTreeSet::new(),
+                awaiting_requests: &BTreeSet::new(),
+                acquisition: EvidenceAcquisition::Live,
+            },
         )
         .expect("MemoryStore coverage never fails");
 
@@ -519,14 +602,16 @@ mod tests {
                     sub_id: SubId::for_wire(relay, &atom.filter, &atom.source, atom.access),
                     filter: atom.filter.clone(),
                     source: atom.source.clone(),
-                    provenance: Vec::new(),
-                    absorbed: BTreeSet::from([key]),
-                    covered_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
+                    provenance: BTreeSet::new(),
+                    coverage_claims: BTreeSet::from([key]),
+                    owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
+                    coverage_assignments: BTreeSet::new(),
                 }],
             )]),
             ..RelayPlan::default()
         };
         let connected = BTreeSet::from([session.clone()]);
+        let placed = BTreeSet::from([(session.clone(), plan.reqs[&session][0].sub_id.clone())]);
         let cases = [
             SourceStatus::AwaitingAuth {
                 phase: AuthPhase::AwaitingPolicy,
@@ -545,11 +630,16 @@ mod tests {
             let evidence = acquisition_evidence(
                 &BTreeSet::from([atom.clone()]),
                 &plan,
-                &MemoryStore::new(),
-                &connected,
-                &BTreeMap::from([(session.clone(), status)]),
-                &connected,
-                &BTreeSet::new(),
+                AcquisitionEvidenceContext {
+                    store: &MemoryStore::new(),
+                    connected: &connected,
+                    auth_status: &BTreeMap::from([(session.clone(), status)]),
+                    ever_connected: &connected,
+                    finished_stored_events: &BTreeSet::new(),
+                    placed_requests: &placed,
+                    awaiting_requests: &BTreeSet::new(),
+                    acquisition: EvidenceAcquisition::Live,
+                },
             )
             .expect("MemoryStore coverage never fails");
             assert_eq!(evidence.sources[0].status, status);
@@ -558,11 +648,16 @@ mod tests {
         let waiting = acquisition_evidence(
             &BTreeSet::from([atom]),
             &plan,
-            &MemoryStore::new(),
-            &connected,
-            &BTreeMap::new(),
-            &connected,
-            &BTreeSet::new(),
+            AcquisitionEvidenceContext {
+                store: &MemoryStore::new(),
+                connected: &connected,
+                auth_status: &BTreeMap::new(),
+                ever_connected: &connected,
+                finished_stored_events: &BTreeSet::new(),
+                placed_requests: &BTreeSet::new(),
+                awaiting_requests: &BTreeSet::new(),
+                acquisition: EvidenceAcquisition::Live,
+            },
         )
         .expect("MemoryStore coverage never fails");
         assert_eq!(
@@ -571,5 +666,73 @@ mod tests {
                 phase: AuthPhase::AwaitingChallenge
             }
         );
+    }
+
+    #[test]
+    fn coverage_satisfied_scope_never_borrows_request_placement_or_link_state() {
+        let atom = atom();
+        let relay = RelayUrl::parse("wss://coverage-satisfied.example").unwrap();
+        let session = RelaySessionKey::public(relay.clone());
+        let plan = RelayPlan {
+            reqs: BTreeMap::from([(
+                session,
+                vec![WireReq {
+                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.source, atom.access),
+                    filter: atom.filter.clone(),
+                    source: atom.source.clone(),
+                    provenance: BTreeSet::new(),
+                    coverage_claims: BTreeSet::from([coverage_key(&atom)]),
+                    owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
+                    coverage_assignments: BTreeSet::new(),
+                }],
+            )]),
+            ..RelayPlan::default()
+        };
+        let evidence = acquisition_evidence(
+            &BTreeSet::from([atom]),
+            &plan,
+            AcquisitionEvidenceContext {
+                store: &MemoryStore::new(),
+                connected: &BTreeSet::new(),
+                auth_status: &BTreeMap::new(),
+                ever_connected: &BTreeSet::new(),
+                finished_stored_events: &BTreeSet::new(),
+                placed_requests: &BTreeSet::new(),
+                awaiting_requests: &BTreeSet::new(),
+                acquisition: EvidenceAcquisition::CoverageSatisfied,
+            },
+        )
+        .unwrap();
+        assert_eq!(evidence.sources[0].status, SourceStatus::CoverageSatisfied);
+    }
+
+    #[test]
+    fn mixed_scope_request_phase_uses_the_most_conservative_live_truth() {
+        let source = |status| AcquisitionEvidence {
+            sources: vec![SourceEvidence {
+                relay: RelayUrl::parse("wss://phase-lattice.example").unwrap(),
+                access: AccessContext::Public,
+                reconciled_through: Some(Timestamp::from(5u64)),
+                status,
+            }],
+            shortfall: Vec::new(),
+        };
+        let phases = [
+            SourceStatus::CoverageSatisfied,
+            SourceStatus::FinishedStoredEvents,
+            SourceStatus::Requesting,
+            SourceStatus::AwaitingRequest,
+        ];
+        for ordered in [phases.to_vec(), phases.into_iter().rev().collect()] {
+            let merged = merge_acquisition_evidence(ordered.into_iter().map(source));
+            assert_eq!(merged.sources[0].status, SourceStatus::AwaitingRequest);
+        }
+        for ordered in [
+            vec![SourceStatus::Error, SourceStatus::AwaitingRequest],
+            vec![SourceStatus::AwaitingRequest, SourceStatus::Error],
+        ] {
+            let merged = merge_acquisition_evidence(ordered.into_iter().map(source));
+            assert_eq!(merged.sources[0].status, SourceStatus::Error);
+        }
     }
 }

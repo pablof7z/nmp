@@ -130,8 +130,9 @@ impl Graph {
     }
 
     pub(crate) fn resolution_snapshot(&self, root: NodeId) -> Vec<ResolutionNodeSnapshot> {
+        let mut next_scope = 1;
         let mut out = Vec::new();
-        self.snapshot_filter(root, "$", &mut out);
+        self.snapshot_filter(root, "$", 0, &mut next_scope, &mut out);
         out
     }
 
@@ -139,6 +140,8 @@ impl Graph {
         &self,
         filter_id: NodeId,
         path: &str,
+        scope: usize,
+        next_scope: &mut usize,
         out: &mut Vec<ResolutionNodeSnapshot>,
     ) {
         let filter = self.filter_data(filter_id);
@@ -148,11 +151,12 @@ impl Graph {
                 FieldSlot::Ids => "ids".to_string(),
                 FieldSlot::Tag(name) => format!("tag({name})"),
             };
-            self.snapshot_binding(*binding_id, &format!("{path}.{field}"), out);
+            self.snapshot_binding(*binding_id, &format!("{path}.{field}"), next_scope, out);
         }
         out.push(ResolutionNodeSnapshot {
             path: path.to_string(),
             kind: ResolutionNodeKind::Filter {
+                scope,
                 atoms: filter.cached_atoms.iter().cloned().collect(),
             },
         });
@@ -162,6 +166,7 @@ impl Graph {
         &self,
         binding_id: NodeId,
         path: &str,
+        next_scope: &mut usize,
         out: &mut Vec<ResolutionNodeSnapshot>,
     ) {
         let values = |set: &ResolvedSet| {
@@ -186,7 +191,9 @@ impl Graph {
                 },
             }),
             Node::Derived(node) => {
-                self.snapshot_filter(node.inner, &format!("{path}.inner"), out);
+                let scope = *next_scope;
+                *next_scope = next_scope.saturating_add(1);
+                self.snapshot_filter(node.inner, &format!("{path}.inner"), scope, next_scope, out);
                 out.push(ResolutionNodeSnapshot {
                     path: path.to_string(),
                     kind: ResolutionNodeKind::Derived {
@@ -196,7 +203,12 @@ impl Graph {
             }
             Node::SetOp(node) => {
                 for (index, operand) in node.operands.iter().enumerate() {
-                    self.snapshot_binding(*operand, &format!("{path}.operand({index})"), out);
+                    self.snapshot_binding(
+                        *operand,
+                        &format!("{path}.operand({index})"),
+                        next_scope,
+                        out,
+                    );
                 }
                 out.push(ResolutionNodeSnapshot {
                     path: path.to_string(),
@@ -564,6 +576,7 @@ impl Graph {
 mod destination_tests {
     use super::*;
     use crate::types::Element;
+    use nmp_grammar::{Selector, SetAlgebra};
 
     fn filter_with_literal_slot(
         slot: FieldSlot,
@@ -628,5 +641,97 @@ mod destination_tests {
         );
         let _ = wide.to_nostr();
         let _ = atoms.iter().next().unwrap().filter.to_nostr();
+    }
+
+    #[test]
+    fn snapshot_scopes_are_per_traversal_occurrence_even_when_a_filter_node_is_shared() {
+        let mut graph = Graph::default();
+        let root = graph.alloc_id();
+        let set_op = graph.alloc_id();
+        let live_derived = graph.alloc_id();
+        let cache_derived = graph.alloc_id();
+        let shared_inner = graph.alloc_id();
+        graph.insert(
+            shared_inner,
+            Node::Filter(FilterNodeData {
+                kinds: Some(BTreeSet::from([0])),
+                since: None,
+                until: None,
+                limit: None,
+                bound: Vec::new(),
+                cached_atoms: BTreeSet::new(),
+                source: SourceAuthority::Public,
+                access: AccessContext::Public,
+            }),
+            ParentLink::DerivedInner(live_derived),
+            2,
+        );
+        for (id, freshness) in [
+            (live_derived, Freshness::Live),
+            (cache_derived, Freshness::CacheOnly),
+        ] {
+            graph.insert(
+                id,
+                Node::Derived(DerivedNode {
+                    inner: shared_inner,
+                    project: Selector::Authors,
+                    cache: CacheMode::Agnostic,
+                    freshness,
+                    cached: ResolvedSet::new(),
+                }),
+                ParentLink::SetOpOperand(set_op),
+                1,
+            );
+        }
+        graph.insert(
+            set_op,
+            Node::SetOp(SetOpNode {
+                op: SetAlgebra::Union,
+                operands: vec![live_derived, cache_derived],
+                cached: ResolvedSet::new(),
+            }),
+            ParentLink::FilterField(root),
+            1,
+        );
+        graph.insert(
+            root,
+            Node::Filter(FilterNodeData {
+                kinds: Some(BTreeSet::from([1])),
+                since: None,
+                until: None,
+                limit: None,
+                bound: vec![(FieldSlot::Authors, set_op)],
+                cached_atoms: BTreeSet::new(),
+                source: SourceAuthority::Public,
+                access: AccessContext::Public,
+            }),
+            ParentLink::Root,
+            0,
+        );
+
+        let scoped_paths: Vec<_> = graph
+            .resolution_snapshot(root)
+            .into_iter()
+            .filter_map(|node| match node.kind {
+                ResolutionNodeKind::Filter { scope, .. } => Some((node.path, scope)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            scoped_paths,
+            [
+                ("$.authors.operand(0).inner".to_string(), 1),
+                ("$.authors.operand(1).inner".to_string(), 2),
+                ("$".to_string(), 0),
+            ]
+        );
+        assert_eq!(
+            graph
+                .demand_scopes(root)
+                .into_iter()
+                .map(|(_, freshness)| freshness)
+                .collect::<Vec<_>>(),
+            [Freshness::Live, Freshness::Live, Freshness::CacheOnly]
+        );
     }
 }

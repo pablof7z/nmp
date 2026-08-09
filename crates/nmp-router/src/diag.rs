@@ -4,12 +4,16 @@
 //! authors, dropped merge rules, and what each relay advertised about its own
 //! limits.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, RelaySessionKey};
 
+#[cfg(test)]
 use crate::budget::CompileBudget;
 use crate::facts::{Lane, PublicKey};
+#[cfg(test)]
 use crate::plan::RelayPlan;
 use crate::solver::Shortfall;
 
@@ -60,6 +64,7 @@ pub struct Diagnostics {
     pub dropped_merge_rules: Vec<&'static str>,
 }
 
+#[cfg(test)]
 pub(crate) fn build(
     plan: &RelayPlan,
     budget: &CompileBudget,
@@ -108,56 +113,4 @@ pub(crate) fn build(
         sessions_refused_by_subscription_budget: refused_by_budget,
         dropped_merge_rules,
     }
-}
-
-/// Refresh only sessions whose physical request set changed during ordinary
-/// delta withdrawal. Global refusal counts are scalar projections over the
-/// bounded refusal maps; untouched session diagnostics are retained byte for
-/// byte.
-pub(crate) fn refresh_sessions(
-    diagnostics: &mut Diagnostics,
-    plan: &RelayPlan,
-    budget: &CompileBudget,
-    touched: &BTreeSet<RelaySessionKey>,
-) {
-    for session in touched {
-        let Some(reqs) = plan.reqs.get(session) else {
-            diagnostics.per_session.remove(session);
-            continue;
-        };
-        let mut by_lane: BTreeMap<Lane, usize> = BTreeMap::new();
-        let mut authors_served: BTreeSet<PublicKey> = BTreeSet::new();
-        let mut filters = Vec::new();
-        for req in reqs {
-            filters.push(req.filter.clone());
-            for provenance in &req.provenance {
-                *by_lane.entry(provenance.lane).or_insert(0) += 1;
-                authors_served.extend(provenance.covers_authors.iter().cloned());
-            }
-        }
-        diagnostics.per_session.insert(
-            session.clone(),
-            RelayDiagnostics {
-                session: session.clone(),
-                wire_sub_count: reqs.len(),
-                by_lane,
-                authors_served: authors_served.len(),
-                filters,
-                subscription_budget: budget.max_subscriptions(&session.relay),
-                subscriptions_refused: plan
-                    .subscription_shortfalls
-                    .get(session)
-                    .map_or(0, |shortfall| shortfall.refused),
-                subid_length_limit: budget.max_subid_length(&session.relay),
-                subid_length_rejects_our_ids: budget.rejects_our_subscription_ids(&session.relay),
-            },
-        );
-    }
-    let refused_by_budget = plan
-        .refused_sessions
-        .iter()
-        .filter(|session| plan.subscription_shortfalls.contains_key(*session))
-        .count();
-    diagnostics.sessions_refused_by_cap = plan.refused_sessions.len() - refused_by_budget;
-    diagnostics.sessions_refused_by_subscription_budget = refused_by_budget;
 }

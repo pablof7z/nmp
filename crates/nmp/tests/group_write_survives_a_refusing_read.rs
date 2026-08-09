@@ -21,10 +21,11 @@
 //!   (b) host A's refusal reaches the app as an explicit PER-HOST fact:
 //!       `Frame::execution` carries an `ObservationFact::RelayClosed`
 //!       (facade kind `"relay_closed"`) naming host A and the relay's own
-//!       CLOSED reason string, AND host A's `AcquisitionEvidence` source
-//!       entry never accumulates a `reconciled_through` watermark -- the
-//!       type's own documented meaning of "unproven", never silently
-//!       upgraded to "complete";
+//!       CLOSED reason string, host A's connected Public source reads
+//!       `SourceStatus::Error` after that exact request is retired, AND it
+//!       never accumulates a `reconciled_through` watermark -- the type's own
+//!       documented meaning of "unproven", never silently upgraded to
+//!       "complete";
 //!   (c) the join request reaches the door and is acked by both hosts --
 //!       `RelayConfig::reject_queries` refuses reads only; the SAME hosts'
 //!       write policy is untouched, so writing into a group you cannot read
@@ -43,26 +44,22 @@
 //! `RelayClosed` observation fact this test asserts on.
 //!
 //! `CLOSED` does not drop the transport session -- host A's connection stays
-//! up, so `crates/nmp/src/core/evidence.rs::acquisition_evidence` keeps
-//! reporting its session `SourceStatus::Requesting` (a connected Public
-//! session, exactly per that function's own documented status derivation)
-//! for as long as the router keeps a covering REQ planned there. There is no
-//! `SourceStatus::Refused` in the closed vocabulary
-//! (`crates/nmp/src/core/evidence.rs`'s `SourceStatus` doc: `Error` is
-//! reserved for an AUTH session's own policy/signer/send failure, not a
-//! transport-level relay refusal). The honest, provable per-host fact for a
-//! REFUSED read is therefore the pair this test checks: an explicit
-//! `relay_closed` execution fact naming the host and its wire reason, plus
-//! an `AcquisitionEvidence` source entry that never advances past
-//! `reconciled_through: None` -- never a special "refused" status enum
-//! value, and never a lie that the read completed.
+//! up -- but it does retire the exact accepted request. The router still
+//! plans that source while the reducer has neither a live placement nor an
+//! owned local retry, so a connected Public source truthfully reads
+//! `SourceStatus::Error`; a dropped session would instead read
+//! `Disconnected`. There is no invented `SourceStatus::Refused` variant.
+//! The honest, provable per-host facts are therefore the explicit
+//! `relay_closed` execution fact naming the host and its wire reason, the
+//! connected source's `Error` state, and `reconciled_through: None` -- never
+//! a lie that the read completed or proved an empty result.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use nmp::{
-    nip29, AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey, RelayState, Row,
-    RowDelta, SourceStatus, Subscription, WriteFact,
+    nip29, AccessContext, AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey,
+    RelayState, Row, RowDelta, SourceStatus, Subscription, WriteFact,
 };
 use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -334,7 +331,7 @@ async fn a_join_request_is_delivered_while_the_same_groups_read_reports_one_host
                 .evidence
                 .iter()
                 .flat_map(|entry| entry.sources.iter())
-                .any(|source| source.relay == host_a.url)
+                .any(|source| source.relay == host_a.url && source.status == SourceStatus::Error)
     });
 
     // (a) host B's row surfaces normally, sourced from host B -- the group
@@ -372,11 +369,16 @@ async fn a_join_request_is_delivered_while_the_same_groups_read_reports_one_host
         .find(|source| source.relay == host_a.url)
         .expect("host A still names a covering source for this query's subtree");
     assert_eq!(
+        host_a_source.access,
+        AccessContext::Public,
+        "the refused read remains scoped to the connected Public session"
+    );
+    assert_eq!(
         host_a_source.status,
-        SourceStatus::Requesting,
-        "host A's session stays connected (CLOSED does not drop the transport); \
-         SourceStatus has no dedicated \"refused\" variant, so the honest per-source fact \
-         here is an outstanding, never-settling request -- see this file's module doc"
+        SourceStatus::Error,
+        "CLOSED retires the accepted request without dropping host A's Public transport; \
+         a dropped transport would read Disconnected, while this connected plan now has \
+         neither a live placement nor an owned retry"
     );
     assert_eq!(
         host_a_source.reconciled_through, None,

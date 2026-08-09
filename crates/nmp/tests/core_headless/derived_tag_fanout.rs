@@ -19,9 +19,9 @@
 //! opened N wire subscriptions carrying one value each, while the SAME
 //! derived binding in the `authors` slot collapsed onto one. Both halves of
 //! that asymmetry are gone -- the merge rule folds the per-value atoms
-//! (#900/§7.1) and allocated wire tokens carry the widened filter forward in
-//! place (#899/§7.2) -- so what each ledger now pins is the collapsed shape,
-//! and the tag/author contrast in G has become an equality.
+//! (#900/§7.1). A byte-changing widened filter now receives a fresh token;
+//! exact local acceptance closes its predecessor, so the steady state remains
+//! one current request per relay without same-id overwrite (#774).
 //!
 //! Run the narrated ledgers with:
 //! `cargo test -p nmp --test core_headless derived_tag_fanout -- --nocapture`
@@ -121,9 +121,55 @@ fn d_values(filter: &ConcreteFilter) -> Vec<String> {
 struct StepCount {
     /// REQs minting a sub-id not previously live — a genuinely new socket sub.
     opened: usize,
-    /// REQs re-using a live sub-id — NIP-01 in-place filter replacement.
+    /// REQs re-using a live sub-id. Byte-changing requests must keep this zero.
     replaced: usize,
     closed: usize,
+}
+
+/// Drive the same exact local-acceptance boundary as the runtime, then append
+/// its effects after the offered REQs. A byte-changing successor is therefore
+/// visible as `REQ(new)` followed by `CLOSE(old)`, never as a same-id rewrite.
+fn accept_requests<S: EventStore>(
+    core: &mut EngineCore<S>,
+    handles: &BTreeMap<RelaySessionKey, RelayHandle>,
+    offered: &[Effect],
+) -> Vec<Effect> {
+    let attempts = offered
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta),
+            _ => None,
+        })
+        .flat_map(|delta| {
+            delta.ops.iter().flat_map(move |(session, ops)| {
+                ops.iter().filter_map(move |op| match op {
+                    WireOp::Req(sub_id, filter) => {
+                        Some((delta.attempt_id(session, sub_id, filter), handles[session]))
+                    }
+                    WireOp::Close(_) => None,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    attempts
+        .into_iter()
+        .flat_map(|(attempt_id, handle)| {
+            core.on_wire_request_handoff(RequestHandoffOutcome::Accepted { attempt_id, handle })
+        })
+        .collect()
+}
+
+fn record_accepted_step<S: EventStore>(
+    core: &mut EngineCore<S>,
+    handles: &BTreeMap<RelaySessionKey, RelayHandle>,
+    ledger: &mut WireLedger,
+    label: &str,
+    mut effects: Vec<Effect>,
+) -> StepCount {
+    let accepted = accept_requests(core, handles, &effects);
+    effects.extend(accepted);
+    ledger.record(label, &effects)
 }
 
 /// Tracks live wire subscriptions and cumulative wire traffic across a run,
@@ -240,6 +286,7 @@ impl WireLedger {
 
 struct Study {
     core: EngineCore<MemoryStore>,
+    handles: BTreeMap<RelaySessionKey, RelayHandle>,
     me: Keys,
     group_author: Keys,
     ledger: WireLedger,
@@ -251,13 +298,22 @@ impl Study {
     /// pubkey set, but NOT yet subscribed.
     fn new(relays: &[RelayUrl]) -> Self {
         let mut core = new_core(FixtureRoutingFacts::new());
+        let mut handles = BTreeMap::new();
         for (slot, relay) in relays.iter().enumerate() {
             connect(&mut core, slot as u32, relay);
+            handles.insert(
+                public_session(relay),
+                RelayHandle {
+                    slot: slot as u32,
+                    generation: 1,
+                },
+            );
         }
         let me = Keys::generate();
         core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
         Self {
             core,
+            handles,
             me,
             group_author: Keys::generate(),
             ledger: WireLedger::for_kinds(&OUTER_KINDS),
@@ -269,7 +325,13 @@ impl Study {
         let effects = self
             .core
             .handle_and_flush(EngineMsg::Subscribe(group_state_of_my_admin_groups(relays)));
-        self.ledger.record(label, &effects)
+        record_accepted_step(
+            &mut self.core,
+            &self.handles,
+            &mut self.ledger,
+            label,
+            effects,
+        )
     }
 
     /// Deliver one kind:39001 naming `me` an admin of `group`, arriving on
@@ -297,7 +359,13 @@ impl Study {
             public_session(relay),
             event_frame(sub, event),
         ));
-        self.ledger.record(label, &effects)
+        record_accepted_step(
+            &mut self.core,
+            &self.handles,
+            &mut self.ledger,
+            label,
+            effects,
+        )
     }
 
     /// Ingest without recording — used to warm the store BEFORE subscribing,
@@ -329,7 +397,13 @@ impl Study {
             public_session(relay),
             eose_frame(&wire_sub_string(sub)),
         ));
-        self.ledger.record(label, &effects)
+        record_accepted_step(
+            &mut self.core,
+            &self.handles,
+            &mut self.ledger,
+            label,
+            effects,
+        )
     }
 
     /// The live INNER sub-id (kinds:[39001]) — the one a relay EOSEs to
@@ -384,11 +458,11 @@ fn probe_single_inner_value_reaches_the_wire_as_one_req() {
 /// INVERTED. This asserted `opened: 1` per value and five live outer subs
 /// each carrying a singleton `#d` -- the fan-out. Each newly resolved value
 /// is now a ONE-COMPONENT difference from the filter already live, so it is
-/// coalesced into it and the wire sees a single REPLACING REQ on the same
-/// token: `replaced: 1`, nothing opened, nothing closed, one live sub whose
-/// `#d` array grows to five.
+/// coalesced into it and offered under a fresh token. Exact local acceptance
+/// then closes the predecessor: `opened: 1`, `closed: 1`, and one current
+/// outer sub whose `#d` array grows to five.
 #[test]
-fn a_incremental_growth_widens_one_sub_in_place_with_zero_churn() {
+fn a_incremental_growth_uses_fresh_successors_and_one_current_sub() {
     let r0 = relay(0);
     let mut study = Study::new(std::slice::from_ref(&r0));
     study.subscribe(std::slice::from_ref(&r0), "subscribe");
@@ -405,15 +479,15 @@ fn a_incremental_growth_widens_one_sub_in_place_with_zero_churn() {
             }
         } else {
             StepCount {
-                opened: 0,
-                replaced: 1,
-                closed: 0,
+                opened: 1,
+                replaced: 0,
+                closed: 1,
             }
         };
         assert_eq!(
             step, expected,
-            "after the first value, each new derived value must REPLACE the live \
-             outer sub in place -- never open another, never close one"
+            "after the first value, each byte-changing request must open a fresh \
+             successor and close its predecessor only after local acceptance"
         );
         assert_eq!(
             study.ledger.live_outer_count(),
@@ -429,13 +503,14 @@ fn a_incremental_growth_widens_one_sub_in_place_with_zero_churn() {
 
     assert_eq!(study.ledger.live_outer_count(), 1);
     assert_eq!(
-        study.ledger.total.closed, 0,
-        "growth must never close an existing sub"
+        study.ledger.total.closed, 4,
+        "each accepted byte-changing successor retires exactly one predecessor"
     );
     assert_eq!(
-        study.ledger.total.opened, 2,
-        "one inner sub plus ONE outer sub -- that is the whole steady state"
+        study.ledger.total.opened, 6,
+        "one inner sub plus five fresh outer generations were offered"
     );
+    assert_eq!(study.ledger.total.replaced, 0);
     // ONE outer sub carrying all five #d values -- the collapse, measured.
     assert_eq!(
         study.ledger.live_outer(),
@@ -495,15 +570,13 @@ fn b_warm_cache_resolves_the_whole_set_in_one_recompile() {
 /// A grows one at a time from cold and B resolves five at once, but nothing
 /// covered the join between them, which is the shape a real app has
 /// constantly: a catalog is already known, and then one more entry appears.
-/// `features/routing/subscription-collapse.feature`'s "Learning about one more
-/// group replaces the subscription in place" exercises exactly this against a
-/// live engine, and it was the one scenario that would not stay green.
+/// The feature-level contract exercises exactly this against a live engine.
 ///
 /// What must hold is what A already proves for the cold path: the sixth value
-/// is a ONE-COMPONENT difference from the live five-value filter, so it
-/// replaces that filter on its own token. One REQ, no open, no close.
+/// is a ONE-COMPONENT difference from the live five-value filter, so it opens
+/// under a fresh token; acceptance then retires the predecessor.
 #[test]
-fn b2_one_more_value_after_a_warm_set_replaces_in_place() {
+fn b2_one_more_value_after_a_warm_set_uses_a_fresh_successor() {
     let r0 = relay(0);
     let mut study = Study::new(std::slice::from_ref(&r0));
     for n in 1..=5 {
@@ -528,17 +601,17 @@ fn b2_one_more_value_after_a_warm_set_replaces_in_place() {
     assert_eq!(
         step,
         StepCount {
-            opened: 0,
-            replaced: 1,
-            closed: 0
+            opened: 1,
+            replaced: 0,
+            closed: 1
         },
-        "the sixth value must REPLACE the live outer filter in place -- opening \
-         a second sub (or closing and reopening) is the churn this design \
-         exists to remove"
+        "the sixth value must use a fresh successor, with the predecessor \
+         retained until exact local acceptance"
     );
     assert_eq!(study.ledger.live_outer_count(), 1);
     assert_eq!(study.ledger.widest_outer(), 6);
-    assert_eq!(study.ledger.total.closed, 0);
+    assert_eq!(study.ledger.total.closed, 1);
+    assert_eq!(study.ledger.total.replaced, 0);
 }
 
 // ---- C. growth before vs after EOSE ------------------------------------
@@ -563,8 +636,7 @@ fn c_growth_after_inner_eose_behaves_identically_to_growth_before() {
 
     // The two steps are no longer identical, and the difference is the
     // collapse rather than EOSE: the FIRST value opens the outer sub, the
-    // second widens it in place. What must not differ is the WIRE COST, and
-    // it does not -- one message either way.
+    // second opens a fresh successor and its acceptance closes the old one.
     assert_eq!(
         before,
         StepCount {
@@ -577,13 +649,13 @@ fn c_growth_after_inner_eose_behaves_identically_to_growth_before() {
     assert_eq!(
         after,
         StepCount {
-            opened: 0,
-            replaced: 1,
-            closed: 0
+            opened: 1,
+            replaced: 0,
+            closed: 1
         },
         "EOSE on the inner sub must not change how a newly resolved derived \
-         value reaches the wire: the second value widens in place, exactly as \
-         it would have pre-EOSE (see test A, where no EOSE happens at all)"
+         value reaches the wire: the second value uses the same accepted \
+         successor transition as it would have pre-EOSE"
     );
     assert_eq!(
         study.ledger.live_outer_count(),
@@ -591,7 +663,8 @@ fn c_growth_after_inner_eose_behaves_identically_to_growth_before() {
         "both values are served by ONE outer sub"
     );
     assert_eq!(study.ledger.widest_outer(), 2);
-    assert_eq!(study.ledger.total.closed, 0);
+    assert_eq!(study.ledger.total.closed, 1);
+    assert_eq!(study.ledger.total.replaced, 0);
 }
 
 // ---- D. a relay that streams but never EOSEs ---------------------------
@@ -635,7 +708,8 @@ fn d_never_eosing_relay_still_serves_every_value() {
         "a never-EOSEing relay must not stall derived resolution -- every value \
          must be in the live filter without any end-of-stored-events signal"
     );
-    assert_eq!(study.ledger.total.closed, 0);
+    assert_eq!(study.ledger.total.closed, 3);
+    assert_eq!(study.ledger.total.replaced, 0);
 }
 
 // ---- E. two relays, interleaved ----------------------------------------
@@ -670,7 +744,8 @@ fn e_values_arriving_across_two_relays_collapse_per_relay_not_per_value() {
 
     // Four distinct groups, two pinned relays. The fan-out WAS per (value,
     // relay) -- the multiplicative cost. It is now one sub per relay.
-    assert_eq!(study.ledger.total.closed, 0);
+    assert_eq!(study.ledger.total.closed, 6);
+    assert_eq!(study.ledger.total.replaced, 0);
     assert_eq!(
         study.ledger.live_outer_count(),
         2,
@@ -732,10 +807,11 @@ fn f_fifty_values_are_one_outer_sub() {
         50,
         "that one subscription carries every value"
     );
-    assert_eq!(study.ledger.total.closed, 0);
+    assert_eq!(study.ledger.total.closed, 49);
+    assert_eq!(study.ledger.total.replaced, 0);
     assert_eq!(
-        study.ledger.total.opened, 2,
-        "one inner sub, one outer sub -- growth costs replacements, not opens"
+        study.ledger.total.opened, 51,
+        "one inner sub plus fifty fresh outer generations were offered"
     );
 }
 
@@ -780,8 +856,8 @@ fn posts_by_my_follows(relays: &[RelayUrl]) -> LiveQuery {
 /// time, twice: once with the binding in `authors`, once in a tag slot. Same
 /// engine, same growth, same relay, same pinned source.
 ///
-/// This was the decisive asymmetry: `authors` collapsed to one sub replaced
-/// in place while a tag slot opened one sub per value, because the registry
+/// This was the decisive asymmetry: `authors` collapsed to one current sub
+/// while a tag slot opened one sub per value, because the registry
 /// held an author rule and no tag rule, and because `Skeleton::of` erased
 /// `authors` and nothing else. The asymmetry was always mechanical rather
 /// than semantic -- a value list is a CHOICE in either slot -- and both
@@ -800,11 +876,24 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
     connect(&mut core, 0, &r0);
     let me = Keys::generate();
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
+    let handles = BTreeMap::from([(
+        public_session(&r0),
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+    )]);
     let mut authors_ledger = WireLedger::for_kinds(&[1]);
     let effects = core.handle_and_flush(EngineMsg::Subscribe(posts_by_my_follows(
         std::slice::from_ref(&r0),
     )));
-    authors_ledger.record("subscribe", &effects);
+    record_accepted_step(
+        &mut core,
+        &handles,
+        &mut authors_ledger,
+        "subscribe",
+        effects,
+    );
 
     let follows: Vec<Keys> = (0..5).map(|_| Keys::generate()).collect();
     for n in 1..=5 {
@@ -820,7 +909,13 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
                 nmp_resolver::testkit::kind3(&me, &list, 100 + n as u64),
             ),
         ));
-        authors_ledger.record(&format!("follow #{n} (authors slot)"), &effects);
+        record_accepted_step(
+            &mut core,
+            &handles,
+            &mut authors_ledger,
+            &format!("follow #{n} (authors slot)"),
+            effects,
+        );
     }
     authors_ledger.report("G1. derived binding in the AUTHORS slot, 5 values");
     let authors_live_outer = authors_ledger.live_outer_count();
@@ -882,8 +977,10 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
     );
     assert_eq!(
         study.ledger.total.closed, authors_ledger.total.closed,
-        "...and neither slot closes anything as it grows"
+        "...and both slots retire the same number of accepted predecessors"
     );
+    assert_eq!(authors_ledger.total.replaced, 0);
+    assert_eq!(study.ledger.total.replaced, 0);
 }
 
 // ---- I. what a regrouping REQ actually costs ---------------------------
@@ -891,7 +988,7 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
 /// I — the hidden cost of collapsing subscriptions, and the bound on it.
 ///
 /// No wire filter this router builds ever carries `since` (verified: nothing
-/// in `nmp-router` sets it). So a REQ that replaces a live sub's filter makes
+/// in `nmp-router` sets it). So a fresh successor carrying a wider filter makes
 /// the relay re-serve its whole stored set for the NEW filter — including
 /// every event already delivered under the old one. That is the real cost of
 /// regrouping, and it is invisible to a ledger that counts wire messages.
@@ -901,23 +998,31 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
 /// collapsing subscriptions is a bandwidth question only — which is what
 /// makes debounce an optimization rather than a correctness requirement.
 #[test]
-fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
+fn i_re_served_events_after_a_successor_cost_bandwidth_but_never_rows() {
     let r0 = relay(0);
     let mut core = new_core(FixtureRoutingFacts::new());
     connect(&mut core, 0, &r0);
     let me = Keys::generate();
     core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
 
-    core.handle_and_flush(EngineMsg::Subscribe(posts_by_my_follows(
+    let handles = BTreeMap::from([(
+        public_session(&r0),
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+    )]);
+    let subscribed = core.handle_and_flush(EngineMsg::Subscribe(posts_by_my_follows(
         std::slice::from_ref(&r0),
     )));
+    let _ = accept_requests(&mut core, &handles, &subscribed);
     let mut delivered_rows = 0usize;
 
     let follows: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
     let mut posts = Vec::new();
     for (n, author) in follows.iter().enumerate() {
-        // Follow one more author — this REPLACES the live sub's filter in
-        // place, which is exactly when a real relay re-serves.
+        // Follow one more author — this opens a wider successor, whose exact
+        // local acceptance retires the predecessor.
         let list: Vec<nostr::PublicKey> = follows[..=n].iter().map(|k| k.public_key()).collect();
         let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
@@ -931,6 +1036,8 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
             ),
         ));
         delivered_rows += effect_row_delta_count(&effects);
+        let accepted = accept_requests(&mut core, &handles, &effects);
+        delivered_rows += effect_row_delta_count(&accepted);
         let post = nmp_resolver::testkit::kind1(author, "post", 300 + n as u64);
         posts.push(post.clone());
         let effects = core.handle(EngineMsg::RelayFrame(
@@ -962,7 +1069,7 @@ fn i_re_served_events_after_a_replacement_cost_bandwidth_but_never_rows() {
 
     let rows_after = delivered_rows;
 
-    println!("\n=== I. cost of a re-serve after filter replacement ===");
+    println!("\n=== I. cost of a re-serve after an accepted successor ===");
     println!("distinct posts:              {}", posts.len());
     println!("row deltas before re-serve:  {rows_before}");
     println!("row deltas after re-serve:   {rows_after}");

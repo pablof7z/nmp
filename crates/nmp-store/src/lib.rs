@@ -70,6 +70,7 @@
 mod address_key;
 mod binary_event;
 mod coverage;
+mod coverage_claims;
 mod memory_store;
 mod persistent_store_lifetime;
 mod redb_store;
@@ -80,6 +81,7 @@ mod semantic_oracle;
 pub mod ingest_attribution;
 
 pub use coverage::{coverage_key, CoverageInterval, CoverageKey, GcReport, GcRetentionSet};
+pub use coverage_claims::coverage_claim_atoms;
 pub use memory_store::MemoryStore;
 pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
 pub use redb_store::RedbStore;

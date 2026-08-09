@@ -3,6 +3,8 @@
 //! This module owns subscription lifetimes, router recompilation, discovery,
 //! NIP-77 handoff/repair, and committed-store mutations projected to observers.
 
+use super::attribution::CompletedCoverageClaim;
+use super::observation::StoredEvents;
 use super::*;
 
 /// One observation's merged current row set plus its per-BRANCH acquisition
@@ -10,6 +12,35 @@ use super::*;
 /// snapshot `refresh_observation` diffs against the observation's own last
 /// delivered state; it is never handed to a caller or an effect directly.
 type ObservationProjection = (BTreeMap<EventId, Row>, Vec<AcquisitionEvidence>);
+
+/// Canonical durable claim identities for one exact logical atom. Lifecycle
+/// ownership remains keyed by the original `DemandKey`; only coverage
+/// refresh expands multi-author outbox atoms to their per-author claims.
+fn coverage_claim_keys(atom: &ContextualAtom) -> BTreeSet<CoverageKey> {
+    nmp_store::coverage_claim_atoms(atom)
+        .iter()
+        .map(nmp_store::coverage_key)
+        .collect()
+}
+
+fn release_ref<K: Ord + Copy>(refs: &mut BTreeMap<K, usize>, key: K) -> bool {
+    let remove = refs.get_mut(&key).is_some_and(|count| {
+        *count = count
+            .checked_sub(1)
+            .expect("per-handle ownership refcount cannot underflow");
+        *count == 0
+    });
+    if remove {
+        refs.remove(&key);
+    }
+    remove
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PlanDeltaMode {
+    Full,
+    Incremental,
+}
 
 /// Which NIP-77 frame the runtime attempted to hand to a relay worker, for
 /// [`EngineCore::on_nip77_handoff`] (issue #775).
@@ -31,6 +62,16 @@ pub enum Nip77Frame {
 }
 
 impl<S: EventStore> EngineCore<S> {
+    /// The sole EngineCore authority crossing the durable coverage-write
+    /// boundary. Callers own completion or retry policy, but every path
+    /// commits one request-scoped batch atomically through this door.
+    fn record_request_coverage_batch(
+        &mut self,
+        batch: &[(ContextualAtom, RelayUrl, CoverageInterval)],
+    ) -> Result<(), PersistenceError> {
+        self.resolver.store_mut().record_coverage(batch)
+    }
+
     /// Mint a NIP-77 role wire id nobody has ever been handed before (#932).
     ///
     /// Every call advances [`Self::next_nip77_incarnation`], so re-deriving a
@@ -155,6 +196,7 @@ impl<S: EventStore> EngineCore<S> {
                 let reason = format!("canonical row projection failed: {error}");
                 self.observations.remove(&observation);
                 for branch in &branches {
+                    self.remove_request_targets_for_handle(*branch);
                     drop(self.handles.remove(branch));
                     let delta = self.resolver.unsubscribe(*branch);
                     self.consume_resolver_delta(delta);
@@ -183,6 +225,7 @@ impl<S: EventStore> EngineCore<S> {
                 for branch in &branches {
                     let delta = self.resolver.unsubscribe(*branch);
                     self.consume_resolver_delta(delta);
+                    self.remove_request_targets_for_handle(*branch);
                     self.handles.remove(branch);
                 }
                 self.flush_consumed_resolver_closes(&mut effects);
@@ -190,11 +233,15 @@ impl<S: EventStore> EngineCore<S> {
                 return ObservationOpen::Refused { reason, effects };
             }
         };
+        let mut diagnostics_changed = false;
         for branch in &branches {
             let acquisition = self.handles[branch].acquisition.clone();
-            self.attach_wire_handle(*branch, &acquisition);
+            diagnostics_changed |= self.attach_wire_handle(*branch, &acquisition, &mut effects);
         }
         self.flush_consumed_resolver_closes(&mut effects);
+        if diagnostics_changed {
+            effects.push(Effect::DiagnosticsChanged);
+        }
         if self.wire_admission_needed() {
             effects.push(Effect::ArmWireAdmission);
         }
@@ -258,6 +305,7 @@ impl<S: EventStore> EngineCore<S> {
             closing.extend(self.detach_wire_handle(branch));
             let resolver_delta = self.resolver.unsubscribe(branch);
             self.consume_resolver_delta(resolver_delta);
+            self.remove_request_targets_for_handle(branch);
             self.handles.remove(&branch);
         }
         self.flush_consumed_resolver_closes(&mut effects);
@@ -281,9 +329,15 @@ impl<S: EventStore> EngineCore<S> {
             .set(self.router_compiles.get().saturating_add(1));
         self.rebuild_wire_ownership();
         let demand = self.wire_demand();
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.attribution_atoms_rebuilt.set(
+            self.attribution_atoms_rebuilt
+                .get()
+                .saturating_add(demand.len() as u64),
+        );
         self.attribution.observe_demand(demand.iter());
         // Finding E3 (epic #507): prune `shape_by_key` against the SAME
-        // `demand` just observed above, plus every key still `absorbed` by
+        // `demand` just observed above, plus every key still `coverage_claims` by
         // an outstanding attribution snapshot (see `prune_shapes`'s own
         // doc for why the latter is required) -- mirrors the
         // `nip11_information.retain(..)` a few lines below, in the same
@@ -291,12 +345,35 @@ impl<S: EventStore> EngineCore<S> {
         // (`planned`/`demand`) recompile just established.
         self.attribution.prune_shapes(demand.iter());
         let admitted_demand = self.admit_projected_routing_evidence(&demand);
-        let previous_plan = self.router.plan().clone();
-        let wire_delta: WireDelta =
+        let outcome =
             self.router
                 .compile(&admitted_demand, &self.routing_facts, self.compile_budget());
-        self.apply_router_plan_delta(previous_plan, wire_delta, effects);
+        let transferred_claims =
+            self.apply_request_metadata_updates(&outcome.request_metadata_updates, effects);
+        let mut plan_effects = Vec::new();
+        self.apply_router_plan_delta(
+            &outcome.replacements,
+            outcome.wire,
+            PlanDeltaMode::Full,
+            &mut plan_effects,
+        );
+        let mut wire_effects = Vec::new();
+        for effect in plan_effects {
+            if matches!(effect, Effect::Wire(_)) {
+                wire_effects.push(effect);
+            } else {
+                effects.push(effect);
+            }
+        }
+        self.refresh_evidence_for_coverage_keys(&transferred_claims, effects);
         self.refresh_pending_wire_atoms();
+        self.refresh_all_observations(effects);
+        self.refresh_all_histories(effects);
+        // Runtime may feed a local handoff outcome back synchronously while
+        // dispatching `Wire`. Publish this full recompile's pre-handoff
+        // AwaitingRequest truth first, matching incremental admission,
+        // reconnect, and protected-auth replay ordering.
+        effects.extend(wire_effects);
     }
 
     /// Compile exactly the currently-uncovered logical demand as one pending
@@ -311,19 +388,465 @@ impl<S: EventStore> EngineCore<S> {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
-        let demand = self.wire_demand();
-        self.attribution.observe_demand(demand.iter());
-        self.attribution.prune_shapes(demand.iter());
-        let admitted = self.admit_projected_routing_evidence(&pending);
-        let previous_plan = self.router.plan().clone();
+        let admitted = self.admit_pending_projected_routing_evidence(&pending);
         let budget = self.compile_budget();
-        let wire_delta = self.router.admit(&admitted, &self.routing_facts, budget);
-        let changed = Self::changed_plan_coverage(&previous_plan, self.router.plan());
+        let outcome = self.router.admit(&admitted, &self.routing_facts, budget);
         let mut effects = Vec::new();
-        self.apply_router_plan_delta(previous_plan, wire_delta, &mut effects);
-        self.refresh_evidence_for_coverage_keys(&changed, &mut effects);
-        self.refresh_pending_wire_atoms();
+        let transferred_claims =
+            self.apply_request_metadata_updates(&outcome.request_metadata_updates, &mut effects);
+        let mut plan_effects = Vec::new();
+        self.apply_router_plan_delta(
+            &BTreeSet::new(),
+            outcome.wire,
+            PlanDeltaMode::Incremental,
+            &mut plan_effects,
+        );
+        let mut wire_effects = Vec::new();
+        for effect in plan_effects {
+            if matches!(effect, Effect::Wire(_)) {
+                wire_effects.push(effect);
+            } else {
+                effects.push(effect);
+            }
+        }
+        if outcome.diagnostics_changed {
+            effects.push(Effect::DiagnosticsChanged);
+        }
+        self.refresh_evidence_for_coverage_keys(&outcome.changed_coverage, &mut effects);
+        self.refresh_evidence_for_coverage_keys(&transferred_claims, &mut effects);
+        self.reconcile_pending_wire_cohort(&pending);
+        // Runtime can synchronously feed a local handoff outcome while
+        // dispatching `Wire`. Publish the pre-handoff AwaitingRequest snapshot
+        // first so that callback's Requesting truth cannot be followed by a
+        // stale outer-turn AwaitingRequest regression.
+        effects.extend(wire_effects);
         effects
+    }
+
+    pub(super) fn apply_request_metadata_updates(
+        &mut self,
+        updates: &[nmp_router::RequestMetadataUpdate],
+        effects: &mut Vec<Effect>,
+    ) -> BTreeSet<CoverageKey> {
+        let mut transferred_claims = BTreeSet::new();
+        for update in updates {
+            self.extend_request_attempt_metadata(update);
+            self.extend_plan_execution_metadata(update);
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.request_owner_entries_examined.set(
+                self.request_owner_entries_examined
+                    .get()
+                    .saturating_add(update.added_owner_demands.len() as u64),
+            );
+            self.extend_current_request_owner_demands(
+                &update.session,
+                &update.sub_id,
+                update.filter_hash,
+                &update.added_owner_demands,
+            );
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.request_claim_entries_examined.set(
+                self.request_claim_entries_examined
+                    .get()
+                    .saturating_add(update.added_coverage_claims.len() as u64),
+            );
+            let (had_previous_claims, added, extended_current) =
+                self.attribution.extend_current_request_claims(
+                    &update.sub_id,
+                    update.filter_hash,
+                    update.added_coverage_claims.clone(),
+                );
+            if !extended_current {
+                transferred_claims.extend(self.transfer_finished_request_claims(
+                    &update.session,
+                    &update.sub_id,
+                    update.filter_hash,
+                    had_previous_claims,
+                    &added,
+                    effects,
+                ));
+            }
+        }
+        transferred_claims
+    }
+
+    pub(super) fn apply_request_metadata_removals(
+        &mut self,
+        removals: &[nmp_router::RequestMetadataRemoval],
+    ) {
+        for removal in removals {
+            let detachable_claims: BTreeSet<_> = removal
+                .removed_coverage_claims
+                .iter()
+                .filter(|claim| {
+                    !self
+                        .router
+                        .physical_request_claims(&removal.session, &removal.sub_id)
+                        .is_some_and(|physical| physical.contains(claim))
+                })
+                .copied()
+                .collect();
+            self.remove_request_attempt_metadata(removal);
+            if let Some(metadata) = self.plan_execution_metadata.get_mut(&removal.sub_id) {
+                if metadata.filter.hash() == removal.filter_hash {
+                    metadata
+                        .coverage_claims
+                        .retain(|claim| !removal.removed_coverage_claims.contains(claim));
+                    metadata
+                        .owner_demands
+                        .retain(|demand| !removal.removed_owner_demands.contains(demand));
+                }
+            }
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.request_owner_entries_examined.set(
+                self.request_owner_entries_examined
+                    .get()
+                    .saturating_add(removal.removed_owner_demands.len() as u64),
+            );
+            self.remove_current_request_owner_demands(
+                &removal.session,
+                &removal.sub_id,
+                removal.filter_hash,
+                &removal.removed_owner_demands,
+            );
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.request_claim_entries_examined.set(
+                self.request_claim_entries_examined
+                    .get()
+                    .saturating_add(removal.removed_coverage_claims.len() as u64),
+            );
+            self.attribution
+                .release_live_request_claims_delta(&removal.sub_id, &detachable_claims);
+            self.attribution.remove_current_send_claims(
+                &removal.sub_id,
+                removal.filter_hash,
+                &detachable_claims,
+            );
+        }
+    }
+
+    pub(super) fn install_plan_execution_metadata(
+        &mut self,
+        sub_id: SubId,
+        filter: ConcreteFilter,
+        coverage_claims: BTreeSet<CoverageKey>,
+        owner_demands: BTreeSet<nmp_router::DemandKey>,
+    ) {
+        self.plan_execution_metadata.insert(
+            sub_id,
+            PlanExecutionMetadata {
+                filter,
+                coverage_claims,
+                owner_demands,
+            },
+        );
+    }
+
+    fn extend_plan_execution_metadata(&mut self, update: &nmp_router::RequestMetadataUpdate) {
+        let filter = {
+            let Some(metadata) = self.plan_execution_metadata.get_mut(&update.sub_id) else {
+                return;
+            };
+            if metadata.filter.hash() != update.filter_hash {
+                return;
+            }
+            metadata
+                .coverage_claims
+                .extend(update.added_coverage_claims.iter().copied());
+            metadata
+                .owner_demands
+                .extend(update.added_owner_demands.iter().copied());
+            metadata.filter.clone()
+        };
+
+        let pending_handoffs = self
+            .pending_neg_handoffs_by_plan
+            .get(&update.sub_id)
+            .cloned()
+            .unwrap_or_default();
+        let has_pending_handoffs = !pending_handoffs.is_empty();
+        for child in pending_handoffs {
+            let Some(handoff) = self.pending_neg_handoffs.get(&child) else {
+                continue;
+            };
+            let filter_hash = ConcreteFilter {
+                limit: Some(0),
+                ..handoff.filter.clone()
+            }
+            .hash();
+            self.extend_nip77_role_generation(&update.session, &child, filter_hash, update);
+        }
+
+        let neg_sessions = self
+            .neg_sessions_by_plan
+            .get(&update.sub_id)
+            .cloned()
+            .unwrap_or_default();
+        let has_neg_sessions = !neg_sessions.is_empty();
+        for child in neg_sessions {
+            let Some(filter_hash) = self.neg_sessions.get(&child).map(|role| role.filter.hash())
+            else {
+                continue;
+            };
+            self.extend_nip77_role_generation(&update.session, &child, filter_hash, update);
+        }
+
+        let backfills = self
+            .pending_backfills_by_plan
+            .get(&update.sub_id)
+            .cloned()
+            .unwrap_or_default();
+        let has_backfills = !backfills.is_empty();
+        for child in backfills {
+            let Some(role) = self.pending_backfills.get(&child) else {
+                continue;
+            };
+            let erased_hash = ConcreteFilter {
+                since: None,
+                until: None,
+                limit: None,
+                ..filter.clone()
+            }
+            .hash();
+            let targets = match role {
+                TemporaryReq::MissingIds { neg_sub_id, .. } => {
+                    vec![(neg_sub_id.clone(), erased_hash)]
+                }
+                TemporaryReq::Backlog { .. } => vec![(child.clone(), erased_hash)],
+                TemporaryReq::BacklogActivatesLive { live_sub_id, .. } => {
+                    let live_filter_hash = ConcreteFilter {
+                        limit: Some(0),
+                        ..filter.clone()
+                    }
+                    .hash();
+                    vec![
+                        (live_sub_id.clone(), live_filter_hash),
+                        (child.clone(), erased_hash),
+                    ]
+                }
+            };
+            for (target, filter_hash) in targets {
+                self.extend_nip77_role_generation(&update.session, &target, filter_hash, update);
+            }
+        }
+
+        let has_active_live = self.active_nip77_live.contains_key(&update.sub_id);
+        if has_pending_handoffs || has_neg_sessions || has_backfills || has_active_live {
+            self.attribution
+                .retain_added_live_request_claims(&update.sub_id, &update.added_coverage_claims);
+        }
+    }
+
+    fn extend_nip77_role_generation(
+        &mut self,
+        session: &RelaySessionKey,
+        sub_id: &SubId,
+        filter_hash: DescriptorHash,
+        update: &nmp_router::RequestMetadataUpdate,
+    ) {
+        self.extend_current_request_owner_demands(
+            session,
+            sub_id,
+            filter_hash,
+            &update.added_owner_demands,
+        );
+        self.attribution.extend_current_send_claims(
+            sub_id,
+            filter_hash,
+            &update.added_coverage_claims,
+        );
+    }
+
+    fn transfer_finished_request_claims(
+        &mut self,
+        session: &RelaySessionKey,
+        sub_id: &SubId,
+        filter_hash: DescriptorHash,
+        had_previous_claims: bool,
+        added: &BTreeSet<CoverageKey>,
+        effects: &mut Vec<Effect>,
+    ) -> BTreeSet<CoverageKey> {
+        if !had_previous_claims || added.is_empty() {
+            return BTreeSet::new();
+        }
+        let Some(live) = self
+            .live_wire_requests
+            .get(&(session.clone(), sub_id.clone()))
+            .cloned()
+        else {
+            return BTreeSet::new();
+        };
+        if live.filter.hash() != filter_hash || live.filter.limit.is_some() {
+            return BTreeSet::new();
+        }
+        let StoredEvents::Finished {
+            request_revision,
+            committed_interval: Some(interval),
+        } = live.stored_events
+        else {
+            return BTreeSet::new();
+        };
+        let Some(claims): Option<BTreeMap<_, _>> = added
+            .iter()
+            .map(|key| self.attribution.claim_shape(*key).map(|atom| (*key, atom)))
+            .collect()
+        else {
+            return BTreeSet::new();
+        };
+        let key = (session.clone(), sub_id.clone());
+        let should_attempt =
+            if let Some(pending) = self.pending_request_claim_transfers.get_mut(&key) {
+                if pending.filter_hash != filter_hash {
+                    return BTreeSet::new();
+                }
+                pending.request_revision = request_revision;
+                pending.interval = interval;
+                pending.claims.extend(claims);
+                pending.due <= self.clock
+            } else {
+                self.pending_request_claim_transfers.insert(
+                    key.clone(),
+                    PendingRequestClaimTransfer {
+                        session: session.clone(),
+                        sub_id: sub_id.clone(),
+                        request_revision,
+                        filter_hash,
+                        interval,
+                        claims,
+                        due: self.clock,
+                        failures: 0,
+                    },
+                );
+                true
+            };
+        if should_attempt {
+            self.attempt_request_claim_transfer(&key, effects)
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    fn attempt_request_claim_transfer(
+        &mut self,
+        key: &(RelaySessionKey, SubId),
+        effects: &mut Vec<Effect>,
+    ) -> BTreeSet<CoverageKey> {
+        let Some(mut pending) = self.pending_request_claim_transfers.remove(key) else {
+            return BTreeSet::new();
+        };
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        {
+            self.request_claim_transfer_attempts
+                .set(self.request_claim_transfer_attempts.get().saturating_add(1));
+            self.request_claim_transfer_claims_attempted.set(
+                self.request_claim_transfer_claims_attempted
+                    .get()
+                    .saturating_add(pending.claims.len() as u64),
+            );
+        }
+        let batch: Vec<_> = pending
+            .claims
+            .values()
+            .cloned()
+            .map(|atom| (atom, pending.session.relay.clone(), pending.interval))
+            .collect();
+        if let Err(error) = self.record_request_coverage_batch(&batch) {
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.request_claim_transfer_failures
+                .set(self.request_claim_transfer_failures.get().saturating_add(1));
+            pending.failures = pending.failures.saturating_add(1);
+            pending.due = self.clock + bootstrap_retry_delay_secs(pending.failures);
+            self.pending_request_claim_transfers
+                .insert(key.clone(), pending);
+            self.degrade_store(error, effects);
+            return BTreeSet::new();
+        }
+
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.request_claim_transfer_commits
+            .set(self.request_claim_transfer_commits.get().saturating_add(1));
+
+        let committed: BTreeSet<_> = pending.claims.keys().copied().collect();
+        let still_current = self
+            .live_wire_requests
+            .get(&(pending.session.clone(), pending.sub_id.clone()))
+            .is_some_and(|live| {
+                live.filter.hash() == pending.filter_hash
+                    && matches!(
+                        live.stored_events,
+                        StoredEvents::Finished {
+                            request_revision,
+                            ..
+                        } if request_revision == pending.request_revision
+                    )
+            });
+        if still_current {
+            self.attribution
+                .retain_added_live_request_claims(&pending.sub_id, &committed);
+        }
+        effects.extend(committed.iter().map(|claim| {
+            Effect::RecordCoverage(*claim, pending.session.relay.clone(), pending.interval)
+        }));
+        committed
+    }
+
+    pub(super) fn retry_due_request_claim_transfers(
+        &mut self,
+        now: Timestamp,
+        effects: &mut Vec<Effect>,
+    ) {
+        let due: Vec<_> = self
+            .pending_request_claim_transfers
+            .iter()
+            .filter_map(|(key, pending)| (pending.due <= now).then_some(key.clone()))
+            .collect();
+        for key in due {
+            let committed = self.attempt_request_claim_transfer(&key, effects);
+            self.refresh_evidence_for_coverage_keys(&committed, effects);
+        }
+    }
+
+    fn cancel_request_claim_transfers(
+        &mut self,
+        session: &RelaySessionKey,
+        sub_id: &SubId,
+        replacement_filter: Option<DescriptorHash>,
+    ) {
+        self.pending_request_claim_transfers.retain(|_, pending| {
+            pending.session != *session
+                || pending.sub_id != *sub_id
+                || replacement_filter == Some(pending.filter_hash)
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) fn reconcile_request_claim_transfers_for_wire_delta(
+        &mut self,
+        wire_delta: &WireDelta,
+    ) {
+        self.reconcile_request_claim_transfers_except(wire_delta, &BTreeSet::new());
+    }
+
+    fn reconcile_request_claim_transfers_except(
+        &mut self,
+        wire_delta: &WireDelta,
+        deferred_closes: &BTreeSet<(RelaySessionKey, SubId)>,
+    ) {
+        for (session, ops) in &wire_delta.ops {
+            for op in ops {
+                match op {
+                    WireOp::Req(sub_id, filter) => {
+                        self.cancel_request_claim_transfers(session, sub_id, Some(filter.hash()))
+                    }
+                    WireOp::Close(sub_id)
+                        if !deferred_closes.contains(&(session.clone(), sub_id.clone())) =>
+                    {
+                        self.cancel_request_claim_transfers(session, sub_id, None)
+                    }
+                    WireOp::Close(_) => {}
+                }
+            }
+        }
     }
 
     pub(super) fn withdraw_wire_demand(
@@ -336,11 +859,20 @@ impl<S: EventStore> EngineCore<S> {
         }
         let budget = self.compile_budget();
         let withdrawal = self.router.withdraw(closing_atoms, budget);
+        self.apply_request_metadata_removals(&withdrawal.request_metadata_removals);
         if !withdrawal.wire.ops.is_empty()
             || !withdrawal.changed_coverage.is_empty()
             || withdrawal.diagnostics_changed
         {
-            self.apply_router_plan_delta(RelayPlan::default(), withdrawal.wire, effects);
+            self.apply_router_plan_delta(
+                &BTreeSet::new(),
+                withdrawal.wire,
+                PlanDeltaMode::Incremental,
+                effects,
+            );
+            if withdrawal.diagnostics_changed {
+                effects.push(Effect::DiagnosticsChanged);
+            }
             self.refresh_evidence_for_coverage_keys(&withdrawal.changed_coverage, effects);
         }
         if self.wire_admission_needed() {
@@ -348,55 +880,136 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    fn apply_router_plan_delta(
+    pub(super) fn apply_router_plan_delta(
         &mut self,
-        previous_plan: RelayPlan,
+        replacements: &BTreeSet<nmp_router::RequestReplacement>,
         wire_delta: WireDelta,
+        mode: PlanDeltaMode,
         effects: &mut Vec<Effect>,
     ) {
+        for replacement in replacements {
+            let mut replacement = replacement.clone();
+            if let Some(inherited) = self.take_request_replacement(&replacement.prior_sub_id) {
+                self.cancel_replacement_successor_work(&replacement.prior_sub_id, effects);
+                replacement.prior_sub_id = inherited.prior_sub_id;
+            }
+            self.insert_request_replacement(replacement);
+        }
+        let transition_priors: BTreeSet<_> = replacements
+            .iter()
+            .map(|replacement| {
+                (
+                    replacement.session.clone(),
+                    replacement.prior_sub_id.clone(),
+                )
+            })
+            .collect();
+        self.reconcile_request_claim_transfers_except(&wire_delta, &transition_priors);
         let planned = &self.router.plan().reqs;
-        // NIP-11 evidence is retained for any URL that appears as SOME
-        // planned session's relay (#8): the document is per-URL evidence,
-        // and a URL planned only under a protected session still keeps its
-        // document current for the moment its Public session is planned too.
-        self.nip11_information
-            .retain(|relay, _| planned.keys().any(|session| &session.relay == relay));
-        // Finding E4 (epic #507): `events_by_session_kind` is bumped once
-        // per inbound EVENT (`on_relay_frame`/`on_relay_frames`) but was
-        // never pruned when a session permanently left the plan/directory,
-        // growing unbounded across relay churn. `diagnostics::build` only
-        // ever reads it via `.get(session)` for `session in
-        // &diag.per_session`, and `diag.per_session` is itself built
-        // straight off `plan.reqs` (`nmp-router`'s `diag::build`) -- i.e.
-        // exactly `planned` here -- so no live reader ever consults an
-        // entry outside this set. Safe to prune against the SAME
-        // "still-planned" key set as `nip11_information` just above.
-        self.events_by_session_kind
-            .retain(|session, _| planned.contains_key(session));
-        // Protected REQs stay parked until the exact current AUTH epoch is
-        // ready, but the relay worker must already exist so the server can
-        // deliver the challenge that makes readiness possible. Plan keys are
-        // unique, so this emits at most one idempotent acquisition edge per
-        // current protected session on each recompile. Exact runtime worker
-        // reconciliation still owns withdrawal and closes the worker as soon
-        // as the final read/write owner disappears.
-        effects.extend(
-            planned
-                .keys()
-                .filter(|session| {
-                    session.access != AccessContext::Public
-                        && !self.auth_ready_sessions.contains_key(*session)
-                })
-                .cloned()
-                .map(Effect::EnsureReadRelay),
-        );
+        match mode {
+            PlanDeltaMode::Full => {
+                self.planned_read_sessions = planned.keys().cloned().collect();
+                self.planned_read_session_counts_by_relay.clear();
+                for session in planned.keys() {
+                    *self
+                        .planned_read_session_counts_by_relay
+                        .entry(session.relay.clone())
+                        .or_insert(0) += 1;
+                }
+                self.nip11_information.retain(|relay, _| {
+                    self.planned_read_session_counts_by_relay
+                        .contains_key(relay)
+                });
+                self.events_by_session_kind
+                    .retain(|session, _| planned.contains_key(session));
+                effects.extend(
+                    planned
+                        .keys()
+                        .filter(|session| {
+                            session.access != AccessContext::Public
+                                && !self.auth_ready_sessions.contains_key(*session)
+                        })
+                        .cloned()
+                        .map(Effect::EnsureReadRelay),
+                );
+            }
+            PlanDeltaMode::Incremental => {
+                let touched: BTreeSet<_> = wire_delta
+                    .ops
+                    .iter()
+                    .map(|(session, _)| session.clone())
+                    .collect();
+                for session in touched {
+                    let planned_now = planned.contains_key(&session);
+                    let tracked = self.planned_read_sessions.contains(&session);
+                    if planned_now && !tracked {
+                        self.planned_read_sessions.insert(session.clone());
+                        *self
+                            .planned_read_session_counts_by_relay
+                            .entry(session.relay.clone())
+                            .or_insert(0) += 1;
+                        if session.access != AccessContext::Public
+                            && !self.auth_ready_sessions.contains_key(&session)
+                        {
+                            effects.push(Effect::EnsureReadRelay(session));
+                        }
+                    } else if !planned_now && tracked {
+                        self.planned_read_sessions.remove(&session);
+                        self.events_by_session_kind.remove(&session);
+                        if let Some(count) = self
+                            .planned_read_session_counts_by_relay
+                            .get_mut(&session.relay)
+                        {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                self.planned_read_session_counts_by_relay
+                                    .remove(&session.relay);
+                                self.nip11_information.remove(&session.relay);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // `router.compile()` above ALWAYS finalizes `prev_plan`/`last_diag`
         // for the full current demand, regardless of whether anything
         // actually changed on the wire (see `Router::compile`'s own body) —
         // so diagnostics is pushed unconditionally here (M5 plan §1.2 step
         // 3: "push it at the end of recompile()"), even on the early return
         // below for a no-op wire delta.
-        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        if matches!(mode, PlanDeltaMode::Full) {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        }
+        for (session, ops) in &wire_delta.ops {
+            for op in ops {
+                match op {
+                    WireOp::Req(sub_id, filter) => {
+                        let claims = self
+                            .router
+                            .request_claims(session, sub_id)
+                            .unwrap_or_default();
+                        let owner_demands = self
+                            .router
+                            .request_demands(session, sub_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        self.install_plan_execution_metadata(
+                            sub_id.clone(),
+                            filter.clone(),
+                            claims.clone(),
+                            owner_demands,
+                        );
+                        self.attribution.retain_live_request_claims(sub_id, claims);
+                    }
+                    WireOp::Close(sub_id) => {
+                        self.plan_execution_metadata.remove(sub_id);
+                        if !transition_priors.contains(&(session.clone(), sub_id.clone())) {
+                            self.attribution.release_live_request_claims(sub_id);
+                        }
+                    }
+                }
+            }
+        }
         if wire_delta.ops.is_empty() {
             return;
         }
@@ -418,28 +1031,15 @@ impl<S: EventStore> EngineCore<S> {
             for op in ops {
                 match op {
                     WireOp::Req(sub_id, filter) => {
-                        // Union across EVERY planned req carrying this
-                        // sub-id, never the first match. The router now
-                        // guarantees at most one (`Router::compile`'s
-                        // release-mode injectivity assert, #899), so this is
-                        // a fold over exactly one entry today. Taking the
-                        // FIRST match is what turned that router-side
-                        // invariant into a SILENT under-credit here: any
-                        // second entry's coverage keys were simply never
-                        // attributed, so its atoms refetched forever. Folding
-                        // instead of picking means this door reports the truth
-                        // about whatever the plan actually holds, rather than
-                        // depending on an invariant proved somewhere else.
-                        let absorbed: BTreeSet<CoverageKey> = self
+                        let coverage_claims = self
                             .router
-                            .plan()
-                            .reqs
-                            .get(session)
-                            .into_iter()
-                            .flatten()
-                            .filter(|r| &r.sub_id == sub_id)
-                            .flat_map(|r| r.absorbed.iter().copied())
-                            .collect();
+                            .request_claims(session, sub_id)
+                            .unwrap_or_default();
+                        let owner_demands = self
+                            .router
+                            .request_demands(session, sub_id)
+                            .cloned()
+                            .unwrap_or_default();
 
                         // "Small exact result" (a `limit`) always stays REQ
                         // -- a bounded, terminating fetch is not what
@@ -456,40 +1056,48 @@ impl<S: EventStore> EngineCore<S> {
                             self.prober.probed(&session.relay),
                         ) {
                             (true, Some(probed)) => {
-                                let prior_live_sub_id =
-                                    self.active_nip77_live.get(sub_id).cloned().or_else(|| {
-                                        previous_plan
-                                            .reqs
-                                            .get(session)
-                                            .is_some_and(|reqs| {
-                                                reqs.iter().any(|req| &req.sub_id == sub_id)
-                                            })
-                                            .then(|| sub_id.clone())
+                                let prior_live_sub_id = self
+                                    .pending_request_replacements
+                                    .get(sub_id)
+                                    .and_then(|transition| {
+                                        self.active_nip77_live
+                                            .get(&transition.prior_sub_id)
+                                            .cloned()
                                     });
                                 self.begin_neg_handoff(
                                     probed,
                                     sub_id.clone(),
                                     prior_live_sub_id,
                                     filter.clone(),
-                                    absorbed,
                                     effects,
                                 );
                             }
                             _ => {
-                                self.record_observed_request(
-                                    session,
-                                    sub_id,
-                                    filter,
-                                    absorbed,
-                                    false,
-                                    EventFailureTarget::ThisSend,
+                                self.record_observed_request_with_purpose(
+                                    RequestSend {
+                                        session,
+                                        sub_id,
+                                        filter,
+                                        coverage_claims,
+                                        owner_demands,
+                                        replay: false,
+                                        event_failure_target: EventFailureTarget::ThisSend,
+                                    },
+                                    RequestAttemptPurpose::Ordinary,
                                 );
                                 kept_ops.push(op.clone());
                             }
                         }
                     }
                     WireOp::Close(sub_id) => {
-                        kept_ops.extend(self.close_nip77_plan(sub_id, effects));
+                        if transition_priors.contains(&(session.clone(), sub_id.clone())) {
+                            continue;
+                        }
+                        if self.pending_request_replacements.contains_key(sub_id) {
+                            self.cancel_request_replacement(sub_id, effects);
+                        } else {
+                            kept_ops.extend(self.close_nip77_plan(sub_id, effects));
+                        }
                     }
                 }
             }
@@ -499,7 +1107,9 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         if !kept.is_empty() {
-            effects.push(Effect::Wire(WireDelta { ops: kept }));
+            effects.push(Effect::Wire(
+                self.attempted_wire_delta(WireDelta { ops: kept }),
+            ));
         }
     }
 
@@ -507,81 +1117,51 @@ impl<S: EventStore> EngineCore<S> {
         !self.pending_wire_atoms.is_empty()
     }
 
-    fn plan_coverage_assignments(
-        plan: &RelayPlan,
-    ) -> BTreeMap<CoverageKey, (bool, BTreeSet<(RelaySessionKey, SubId)>)> {
-        let mut assignments = BTreeMap::new();
-        for (session, requests) in &plan.reqs {
-            for request in requests {
-                for key in &request.absorbed {
-                    assignments
-                        .entry(*key)
-                        .or_insert_with(|| (false, BTreeSet::new()))
-                        .1
-                        .insert((session.clone(), request.sub_id.clone()));
-                }
-            }
-        }
-        for key in &plan.limited {
-            assignments
-                .entry(*key)
-                .or_insert_with(|| (false, BTreeSet::new()))
-                .0 = true;
-        }
-        assignments
-    }
-
-    fn changed_plan_coverage(previous: &RelayPlan, next: &RelayPlan) -> BTreeSet<CoverageKey> {
-        let previous = Self::plan_coverage_assignments(previous);
-        let next = Self::plan_coverage_assignments(next);
-        previous
-            .keys()
-            .chain(next.keys())
-            .filter(|key| previous.get(*key) != next.get(*key))
-            .copied()
-            .collect()
-    }
-
-    fn refresh_evidence_for_coverage_keys(
+    pub(super) fn refresh_evidence_for_coverage_keys(
         &mut self,
         keys: &BTreeSet<CoverageKey>,
         effects: &mut Vec<Effect>,
     ) {
-        if keys.is_empty() {
+        self.refresh_evidence_for_coverage_and_demand_keys(keys, &BTreeSet::new(), effects);
+    }
+
+    pub(super) fn refresh_evidence_for_coverage_and_demand_keys(
+        &mut self,
+        coverage_keys: &BTreeSet<CoverageKey>,
+        demand_keys: &BTreeSet<nmp_router::DemandKey>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if coverage_keys.is_empty() && demand_keys.is_empty() {
             return;
         }
-        let observations: BTreeSet<_> = self
-            .handles
+        let mut candidates: BTreeSet<_> = coverage_keys
             .iter()
-            .filter_map(|(handle, state)| {
-                self.wire_atoms_for_handle(*handle, &state.acquisition)
-                    .iter()
-                    .any(|atom| keys.contains(&nmp_store::coverage_key(atom)))
-                    .then_some(state.observation)
-            })
+            .filter_map(|key| self.wire_handles_by_coverage.get(key))
+            .flatten()
+            .copied()
             .collect();
-        let histories: BTreeSet<_> = self
-            .histories
-            .iter()
-            .filter_map(|(history, state)| {
-                state
-                    .handle_ids
-                    .iter()
-                    .copied()
-                    .any(|handle| {
-                        let branch = state.branch_of.get(&handle).copied().unwrap_or_default();
-                        state
-                            .acquisitions_by_branch
-                            .get(branch)
-                            .is_some_and(|acquisition| {
-                                self.wire_atoms_for_handle(handle, acquisition)
-                                    .iter()
-                                    .any(|atom| keys.contains(&nmp_store::coverage_key(atom)))
-                            })
-                    })
-                    .then_some(*history)
-            })
-            .collect();
+        candidates.extend(
+            demand_keys
+                .iter()
+                .filter_map(|key| self.wire_handles_by_demand.get(key))
+                .flatten()
+                .copied(),
+        );
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.evidence_candidates_examined.set(
+            self.evidence_candidates_examined
+                .get()
+                .saturating_add(candidates.len() as u64),
+        );
+        let mut observations = BTreeSet::new();
+        let mut histories = BTreeSet::new();
+        for handle in candidates {
+            if let Some(state) = self.handles.get(&handle) {
+                observations.insert(state.observation);
+            } else if let Some(history) = self.history_by_handle.get(&handle) {
+                histories.insert(*history);
+            }
+        }
         for id in observations {
             self.refresh_observation_evidence(id, effects);
         }
@@ -601,51 +1181,191 @@ impl<S: EventStore> EngineCore<S> {
             .collect()
     }
 
-    pub(super) fn attach_wire_handle(&mut self, id: HandleId, acquisition: &HandleAcquisition) {
-        let atoms = self.wire_atoms_for_handle(id, acquisition);
-        for atom in &atoms {
-            let key = nmp_router::DemandKey::for_atom(atom);
-            self.wire_handles_by_atom.entry(key).or_default().insert(id);
-            let entry = self
-                .wire_owner_counts
-                .entry(key)
-                .or_insert_with(|| (atom.clone(), 0));
-            entry.1 = entry.1.saturating_add(1);
-            if entry.1 == 1 {
-                self.pending_resolver_wire_closes.remove(&key);
-                if !self.router.physically_covers(key)
-                    || self.router.plan().limited_demands.contains(&key)
-                {
-                    self.pending_wire_atoms.insert(key, atom.clone());
-                }
+    #[cfg(test)]
+    pub(super) fn retain_wire_atom_owner(&mut self, atom: &ContextualAtom) -> bool {
+        self.retain_wire_atom_owner_with_effects(atom, &mut Vec::new())
+    }
+
+    fn retain_wire_atom_owner_with_effects(
+        &mut self,
+        atom: &ContextualAtom,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        let key = nmp_router::DemandKey::for_atom(atom);
+        let evidence = self
+            .wire_routing_evidence_owner_counts
+            .entry(key)
+            .or_default();
+        let mut evidence_grew = false;
+        for fact in &atom.routing_evidence {
+            let count = evidence.entry(fact.clone()).or_insert(0);
+            evidence_grew |= *count == 0;
+            *count += 1;
+        }
+        let effective_evidence = evidence.keys().cloned().collect();
+        let entry = self
+            .wire_owner_counts
+            .entry(key)
+            .or_insert_with(|| (atom.clone(), 0));
+        entry.1 = entry.1.saturating_add(1);
+        entry.0.routing_evidence = effective_evidence;
+        let first_owner = entry.1 == 1;
+        let effective_atom = entry.0.clone();
+
+        self.router.activate(effective_atom.clone());
+        let mut metadata_diagnostics_changed = false;
+        if first_owner {
+            self.attribution.observe_atom(&effective_atom);
+            self.pending_resolver_wire_closes.remove(&key);
+            if let Some(outcome) = self.router.reactivate_covered_atom(&effective_atom) {
+                let transferred =
+                    self.apply_request_metadata_updates(&outcome.request_metadata_updates, effects);
+                self.refresh_evidence_for_coverage_keys(&transferred, effects);
+                metadata_diagnostics_changed |= outcome.diagnostics_changed;
+                self.pending_wire_atoms.remove(&key);
+            } else if self.router.admission_incomplete(key) {
+                self.pending_wire_atoms.insert(key, effective_atom.clone());
             }
+        } else if (evidence_grew && self.router.admission_incomplete(key))
+            || self.pending_wire_atoms.contains_key(&key)
+        {
+            self.pending_wire_atoms.insert(key, effective_atom.clone());
+        }
+        let rejected_before = self.discovered_private_relays_rejected;
+        self.admit_pending_projected_routing_evidence(&BTreeSet::from([effective_atom]));
+        metadata_diagnostics_changed || self.discovered_private_relays_rejected != rejected_before
+    }
+
+    /// Release one exact owner's contribution. Returns the final effective
+    /// atom only when the logical `DemandKey` became ownerless.
+    pub(super) fn release_wire_atom_owner(
+        &mut self,
+        atom: &ContextualAtom,
+    ) -> Option<ContextualAtom> {
+        let key = nmp_router::DemandKey::for_atom(atom);
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.routing_evidence_owner_keys_touched.set(
+            self.routing_evidence_owner_keys_touched
+                .get()
+                .saturating_add(1),
+        );
+
+        let effective_evidence = self
+            .wire_routing_evidence_owner_counts
+            .get_mut(&key)
+            .map(|evidence| {
+                for fact in &atom.routing_evidence {
+                    if let Some(count) = evidence.get_mut(fact) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            evidence.remove(fact);
+                        }
+                    }
+                }
+                evidence.keys().cloned().collect()
+            })
+            .unwrap_or_default();
+
+        let (effective_atom, count) = self.wire_owner_counts.get_mut(&key)?;
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            let final_atom = effective_atom.clone();
+            self.attribution.release_atom(&final_atom);
+            self.release_rejected_projected_evidence(key);
+            self.wire_owner_counts.remove(&key);
+            self.wire_routing_evidence_owner_counts.remove(&key);
+            self.pending_wire_atoms.remove(&key);
+            self.pending_resolver_wire_closes.remove(&key);
+            return Some(final_atom);
+        }
+
+        effective_atom.routing_evidence = effective_evidence;
+        let effective_atom = effective_atom.clone();
+        self.router.activate(effective_atom.clone());
+        if self.pending_wire_atoms.contains_key(&key) {
+            self.pending_wire_atoms.insert(key, effective_atom.clone());
+        }
+        self.admit_pending_projected_routing_evidence(&BTreeSet::from([effective_atom]));
+        None
+    }
+
+    pub(super) fn attach_wire_handle(
+        &mut self,
+        id: HandleId,
+        acquisition: &HandleAcquisition,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        let atoms = self.wire_atoms_for_handle(id, acquisition);
+        let mut diagnostics_changed = false;
+        let mut demand_refs = BTreeMap::new();
+        let mut coverage_refs = BTreeMap::new();
+        for atom in &atoms {
+            let demand = nmp_router::DemandKey::for_atom(atom);
+            *demand_refs.entry(demand).or_insert(0) += 1;
+            self.wire_handles_by_demand
+                .entry(demand)
+                .or_default()
+                .insert(id);
+            for claim_key in coverage_claim_keys(atom) {
+                *coverage_refs.entry(claim_key).or_insert(0) += 1;
+                self.wire_handles_by_coverage
+                    .entry(claim_key)
+                    .or_default()
+                    .insert(id);
+            }
+            self.wire_handles_by_atom
+                .entry(atom.clone())
+                .or_default()
+                .insert(id);
+            diagnostics_changed |= self.retain_wire_atom_owner_with_effects(atom, effects);
         }
         self.wire_atoms_by_handle.insert(id, atoms);
+        self.wire_demand_refs_by_handle.insert(id, demand_refs);
+        self.wire_coverage_refs_by_handle.insert(id, coverage_refs);
+        self.activate_request_targets_for_handle(id);
+        diagnostics_changed
     }
 
     pub(super) fn detach_wire_handle(&mut self, id: HandleId) -> Vec<ContextualAtom> {
         let mut closing = Vec::new();
+        self.deactivate_request_targets_for_handle(id);
         let atoms = self.wire_atoms_by_handle.remove(&id).unwrap_or_default();
+        let demand_refs = self
+            .wire_demand_refs_by_handle
+            .remove(&id)
+            .unwrap_or_default();
+        let coverage_refs = self
+            .wire_coverage_refs_by_handle
+            .remove(&id)
+            .unwrap_or_default();
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.withdrawal_handle_detaches
             .set(self.withdrawal_handle_detaches.get().saturating_add(1));
-        for atom in atoms {
-            let key = nmp_router::DemandKey::for_atom(&atom);
-            if let Some(handles) = self.wire_handles_by_atom.get_mut(&key) {
+        for demand in demand_refs.keys() {
+            if let Some(handles) = self.wire_handles_by_demand.get_mut(demand) {
                 handles.remove(&id);
                 if handles.is_empty() {
-                    self.wire_handles_by_atom.remove(&key);
+                    self.wire_handles_by_demand.remove(demand);
                 }
             }
-            let Some((_, count)) = self.wire_owner_counts.get_mut(&key) else {
-                continue;
-            };
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.wire_owner_counts.remove(&key);
-                self.pending_wire_atoms.remove(&key);
-                self.pending_resolver_wire_closes.remove(&key);
-                closing.push(atom);
+        }
+        for claim_key in coverage_refs.keys() {
+            if let Some(handles) = self.wire_handles_by_coverage.get_mut(claim_key) {
+                handles.remove(&id);
+                if handles.is_empty() {
+                    self.wire_handles_by_coverage.remove(claim_key);
+                }
+            }
+        }
+        for atom in atoms {
+            if let Some(handles) = self.wire_handles_by_atom.get_mut(&atom) {
+                handles.remove(&id);
+                if handles.is_empty() {
+                    self.wire_handles_by_atom.remove(&atom);
+                }
+            }
+            if let Some(final_atom) = self.release_wire_atom_owner(&atom) {
+                closing.push(final_atom);
             }
         }
         closing
@@ -671,24 +1391,68 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             };
             let key = nmp_router::DemandKey::for_atom(&atom);
-            let Some(stale_handles) = self.wire_handles_by_atom.remove(&key) else {
+            let Some(stale_handles) = self.wire_handles_by_atom.remove(&atom) else {
                 continue;
             };
+            let mut released_owners = 0usize;
             for handle in stale_handles {
-                let remove_handle =
-                    self.wire_atoms_by_handle
+                let departing_claims = coverage_claim_keys(&atom);
+                let (removed, remove_handle) = self
+                    .wire_atoms_by_handle
+                    .get_mut(&handle)
+                    .map(|atoms| {
+                        let removed = atoms.remove(&atom);
+                        (removed, atoms.is_empty())
+                    })
+                    .unwrap_or_default();
+                if !removed {
+                    continue;
+                }
+                #[cfg(any(test, feature = "bench-instrumentation"))]
+                self.resolver_owner_keys_touched.set(
+                    self.resolver_owner_keys_touched
+                        .get()
+                        .saturating_add(1 + departing_claims.len() as u64),
+                );
+                released_owners += usize::from(removed);
+                let demand_released = self
+                    .wire_demand_refs_by_handle
+                    .get_mut(&handle)
+                    .is_some_and(|refs| release_ref(refs, key));
+                if demand_released {
+                    self.deactivate_request_targets_for_handle_demand(handle, key);
+                    if let Some(handles) = self.wire_handles_by_demand.get_mut(&key) {
+                        handles.remove(&handle);
+                        if handles.is_empty() {
+                            self.wire_handles_by_demand.remove(&key);
+                        }
+                    }
+                }
+                for claim_key in departing_claims {
+                    let coverage_released = self
+                        .wire_coverage_refs_by_handle
                         .get_mut(&handle)
-                        .is_some_and(|atoms| {
-                            atoms.remove(&atom);
-                            atoms.is_empty()
-                        });
+                        .is_some_and(|refs| release_ref(refs, claim_key));
+                    if coverage_released {
+                        if let Some(handles) = self.wire_handles_by_coverage.get_mut(&claim_key) {
+                            handles.remove(&handle);
+                            if handles.is_empty() {
+                                self.wire_handles_by_coverage.remove(&claim_key);
+                            }
+                        }
+                    }
+                }
                 if remove_handle {
                     self.wire_atoms_by_handle.remove(&handle);
+                    self.wire_demand_refs_by_handle.remove(&handle);
+                    self.wire_coverage_refs_by_handle.remove(&handle);
                 }
             }
-            self.wire_owner_counts.remove(&key);
-            self.pending_wire_atoms.remove(&key);
-            self.pending_resolver_wire_closes.insert(key, atom);
+            for _ in 0..released_owners {
+                if let Some(final_atom) = self.release_wire_atom_owner(&atom) {
+                    self.pending_resolver_wire_closes.insert(key, final_atom);
+                }
+            }
         }
     }
 
@@ -716,20 +1480,66 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         self.wire_atoms_by_handle.clear();
+        self.wire_demand_refs_by_handle.clear();
+        self.wire_coverage_refs_by_handle.clear();
         self.wire_owner_counts.clear();
+        self.wire_routing_evidence_owner_counts.clear();
         self.wire_handles_by_atom.clear();
+        self.wire_handles_by_coverage.clear();
+        self.wire_handles_by_demand.clear();
+        self.request_targets_by_demand.clear();
+        self.active_request_targets_by_handle_demand.clear();
         self.pending_resolver_wire_closes.clear();
         for (id, atoms) in contributions {
+            let mut demand_refs = BTreeMap::new();
+            let mut coverage_refs = BTreeMap::new();
             for atom in &atoms {
                 let key = nmp_router::DemandKey::for_atom(atom);
-                self.wire_handles_by_atom.entry(key).or_default().insert(id);
+                *demand_refs.entry(key).or_insert(0) += 1;
+                self.wire_handles_by_atom
+                    .entry(atom.clone())
+                    .or_default()
+                    .insert(id);
+                self.wire_handles_by_demand
+                    .entry(key)
+                    .or_default()
+                    .insert(id);
+                for claim_key in coverage_claim_keys(atom) {
+                    *coverage_refs.entry(claim_key).or_insert(0) += 1;
+                    self.wire_handles_by_coverage
+                        .entry(claim_key)
+                        .or_default()
+                        .insert(id);
+                }
                 let entry = self
                     .wire_owner_counts
                     .entry(key)
                     .or_insert_with(|| (atom.clone(), 0));
                 entry.1 = entry.1.saturating_add(1);
+                let evidence = self
+                    .wire_routing_evidence_owner_counts
+                    .entry(key)
+                    .or_default();
+                for fact in &atom.routing_evidence {
+                    *evidence.entry(fact.clone()).or_insert(0) += 1;
+                }
             }
             self.wire_atoms_by_handle.insert(id, atoms);
+            self.wire_demand_refs_by_handle.insert(id, demand_refs);
+            self.wire_coverage_refs_by_handle.insert(id, coverage_refs);
+        }
+        let ordinary_handles: Vec<_> = self.request_targets_by_handle.keys().copied().collect();
+        for id in ordinary_handles {
+            self.activate_request_targets_for_handle(id);
+        }
+        for (key, (atom, _)) in &mut self.wire_owner_counts {
+            atom.routing_evidence = self
+                .wire_routing_evidence_owner_counts
+                .get(key)
+                .into_iter()
+                .flat_map(BTreeMap::keys)
+                .cloned()
+                .collect();
         }
         self.refresh_pending_wire_atoms();
     }
@@ -744,12 +1554,24 @@ impl<S: EventStore> EngineCore<S> {
         self.pending_wire_atoms = self
             .wire_owner_counts
             .iter()
-            .filter(|(key, _)| {
-                !self.router.physically_covers(**key)
-                    || self.router.plan().limited_demands.contains(*key)
-            })
+            .filter(|(key, _)| self.router.admission_incomplete(**key))
             .map(|(key, (atom, _))| (*key, atom.clone()))
             .collect();
+    }
+
+    fn reconcile_pending_wire_cohort(&mut self, cohort: &BTreeSet<ContextualAtom>) {
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.pending_cohort_atoms_reconciled.set(
+            self.pending_cohort_atoms_reconciled
+                .get()
+                .saturating_add(cohort.len() as u64),
+        );
+        for atom in cohort {
+            let key = nmp_router::DemandKey::for_atom(atom);
+            if !self.router.plan().limited_demands.contains(&key) {
+                self.pending_wire_atoms.remove(&key);
+            }
+        }
     }
 
     fn wire_atoms_for_handle(
@@ -777,7 +1599,7 @@ impl<S: EventStore> EngineCore<S> {
     /// identifying entirely unrelated filters. That is benign only because
     /// every consumer of a retained shadow plan (`plan_is_fresh_for`, and
     /// `acquisition_evidence` via a scope's retained evaluation plan)
-    /// reads sessions, `absorbed`, and `limited` — never `sub_id`. Correlating
+    /// reads sessions, `coverage_claims`, and `limited` — never `sub_id`. Correlating
     /// a shadow plan's `sub_id` with a live one would alias silently; if that
     /// is ever needed, give this router its own token namespace first.
     pub(super) fn shadow_plan_for(&self, demand: BTreeSet<ContextualAtom>) -> RelayPlan {
@@ -856,6 +1678,8 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Result<AcquisitionEvidence, PersistenceError> {
         let auth_status = self.auth_status_map();
         let finished_stored_events = self.finished_stored_events();
+        let placed_requests = self.placed_request_keys();
+        let awaiting_requests = self.awaiting_request_keys();
         let mut parts = Vec::with_capacity(scopes.len());
         for ((atoms, _), decision) in scopes.into_iter().zip(&acquisition.scopes) {
             let plan = decision
@@ -864,11 +1688,23 @@ impl<S: EventStore> EngineCore<S> {
             parts.push(evidence::acquisition_evidence(
                 &atoms,
                 plan,
-                self.resolver.store(),
-                &self.connected_relays,
-                &auth_status,
-                &self.ever_connected_relays,
-                &finished_stored_events,
+                evidence::AcquisitionEvidenceContext {
+                    store: self.resolver.store(),
+                    connected: &self.connected_relays,
+                    auth_status: &auth_status,
+                    ever_connected: &self.ever_connected_relays,
+                    finished_stored_events: &finished_stored_events,
+                    placed_requests: &placed_requests,
+                    awaiting_requests: &awaiting_requests,
+                    acquisition: match decision {
+                        ScopeAcquisition::CoverageSatisfied(_) => {
+                            evidence::EvidenceAcquisition::CoverageSatisfied
+                        }
+                        ScopeAcquisition::Live | ScopeAcquisition::CacheOnly(_) => {
+                            evidence::EvidenceAcquisition::Live
+                        }
+                    },
+                },
             )?);
         }
         if parts.is_empty() {
@@ -900,31 +1736,42 @@ impl<S: EventStore> EngineCore<S> {
         }
         let cutoff = Timestamp::from(self.clock.as_secs().saturating_sub(max_age_seconds));
         for atom in atoms {
-            let key = nmp_store::coverage_key(atom);
-            if plan.limited.contains(&key) {
+            if plan
+                .limited_demands
+                .contains(&nmp_router::DemandKey::for_atom(atom))
+            {
                 return Ok(false);
             }
-            let covering: Vec<&RelaySessionKey> = plan
-                .reqs
-                .iter()
-                .filter_map(|(session, reqs)| {
-                    reqs.iter()
-                        .any(|request| request.absorbed.contains(&key))
-                        .then_some(session)
-                })
-                .collect();
-            if covering.is_empty() {
+            let claims = nmp_store::coverage_claim_atoms(atom);
+            if claims.is_empty() {
                 return Ok(false);
             }
             let floor = Timestamp::from(atom.filter.since.unwrap_or(0));
-            for session in covering {
-                let proven = self
-                    .resolver
-                    .store()
-                    .get_coverage(key, &session.relay)?
-                    .is_some_and(|interval| interval.from <= floor && interval.through >= cutoff);
-                if !proven {
+            for claim in claims {
+                let key = nmp_store::coverage_key(&claim);
+                let covering: Vec<&RelaySessionKey> = plan
+                    .reqs
+                    .iter()
+                    .filter_map(|(session, reqs)| {
+                        reqs.iter()
+                            .any(|request| request.coverage_claims.contains(&key))
+                            .then_some(session)
+                    })
+                    .collect();
+                if covering.is_empty() {
                     return Ok(false);
+                }
+                for session in covering {
+                    let proven = self
+                        .resolver
+                        .store()
+                        .get_coverage(key, &session.relay)?
+                        .is_some_and(|interval| {
+                            interval.from <= floor && interval.through >= cutoff
+                        });
+                    if !proven {
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -943,51 +1790,130 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         demand: &BTreeSet<ContextualAtom>,
     ) -> BTreeSet<ContextualAtom> {
-        let mut rejected_now = BTreeSet::new();
-        let admitted = demand
-            .iter()
-            .cloned()
-            .map(|mut atom| {
-                let atom_selection = atom.filter.hash();
-                atom.routing_evidence.retain(|evidence| {
-                    let admitted = self
-                        .admission
-                        .admits(&evidence.relay, super::Declarer::SomeoneElse)
-                        .is_ok();
-                    if !admitted {
-                        rejected_now.insert((atom_selection, evidence.clone()));
-                    }
-                    admitted
-                });
-                atom
-            })
+        let active: BTreeSet<_> = demand.iter().map(nmp_router::DemandKey::for_atom).collect();
+        let stale: Vec<_> = self
+            .rejected_projected_evidence_by_demand
+            .keys()
+            .filter(|key| !active.contains(key))
+            .copied()
             .collect();
-        let newly_rejected = rejected_now
-            .difference(&self.rejected_projected_evidence)
-            .count() as u64;
-        self.discovered_private_relays_rejected = self
-            .discovered_private_relays_rejected
-            .saturating_add(newly_rejected);
-        self.rejected_projected_evidence = rejected_now;
+        for key in stale {
+            self.release_rejected_projected_evidence(key);
+        }
+        self.admit_pending_projected_routing_evidence(demand)
+    }
+
+    pub(super) fn admit_pending_projected_routing_evidence(
+        &mut self,
+        demand: &BTreeSet<ContextualAtom>,
+    ) -> BTreeSet<ContextualAtom> {
+        let mut admitted = BTreeSet::new();
+        for atom in demand {
+            let key = nmp_router::DemandKey::for_atom(atom);
+            let atom_selection = atom.filter.hash();
+            let mut projected = atom.clone();
+            let mut rejected = BTreeSet::new();
+            projected.routing_evidence.retain(|evidence| {
+                let accepted = self
+                    .admission
+                    .admits(&evidence.relay, super::Declarer::SomeoneElse)
+                    .is_ok();
+                if !accepted {
+                    rejected.insert((atom_selection, evidence.clone()));
+                }
+                accepted
+            });
+            self.replace_rejected_projected_evidence(key, rejected);
+            admitted.insert(projected);
+        }
         admitted
+    }
+
+    fn replace_rejected_projected_evidence(
+        &mut self,
+        demand: nmp_router::DemandKey,
+        rejected: BTreeSet<(DescriptorHash, RoutingEvidence)>,
+    ) {
+        let previous = self
+            .rejected_projected_evidence_by_demand
+            .remove(&demand)
+            .unwrap_or_default();
+        for fact in previous.difference(&rejected) {
+            if let Some(count) = self.rejected_projected_evidence_owner_counts.get_mut(fact) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.rejected_projected_evidence_owner_counts.remove(fact);
+                }
+            }
+        }
+        for fact in rejected.difference(&previous) {
+            let count = self
+                .rejected_projected_evidence_owner_counts
+                .entry(fact.clone())
+                .or_insert(0);
+            if *count == 0 {
+                self.discovered_private_relays_rejected =
+                    self.discovered_private_relays_rejected.saturating_add(1);
+            }
+            *count = count.saturating_add(1);
+        }
+        if !rejected.is_empty() {
+            self.rejected_projected_evidence_by_demand
+                .insert(demand, rejected);
+        }
+    }
+
+    pub(super) fn release_rejected_projected_evidence(&mut self, demand: nmp_router::DemandKey) {
+        let Some(rejected) = self.rejected_projected_evidence_by_demand.remove(&demand) else {
+            return;
+        };
+        for fact in rejected {
+            if let Some(count) = self.rejected_projected_evidence_owner_counts.get_mut(&fact) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.rejected_projected_evidence_owner_counts.remove(&fact);
+                }
+            }
+        }
     }
 
     /// One exact request is abandoned. It may no longer earn coverage or
     /// produce a settlement fact.
     pub(super) fn abandon_sub(&mut self, sub_id: &SubId) {
+        self.retire_request_attempts_for_sub(sub_id);
         self.attribution.discard_sub(sub_id);
-        self.active_request_evidence
-            .retain(|_, request| request.sub_id != *sub_id);
-        self.live_wire_requests
-            .retain(|(_, candidate), _| candidate != sub_id);
+        let session = RelaySessionKey::new(sub_id.0.clone(), sub_id.2);
+        self.cancel_request_claim_transfers(&session, sub_id, None);
+        let key = (session, sub_id.clone());
+        self.pending_request_evidence.remove(&key);
+        if let Some(revisions) = self.active_request_revisions_by_sub.remove(&key) {
+            for revision in revisions {
+                self.active_request_evidence.remove(&revision);
+            }
+        }
+        self.live_wire_requests.remove(&key);
     }
 
     /// A session dropped. Every attributed request on it is dead; replay
     /// creates fresh request revisions after reconnect.
     pub(super) fn abandon_session_subs(&mut self, session: &RelaySessionKey) {
+        self.retire_request_attempts_for_session(session);
         self.attribution.clear_session(session);
-        self.active_request_evidence
-            .retain(|_, request| request.session != *session);
+        self.pending_request_evidence
+            .retain(|(candidate, _), _| candidate != session);
+        let keys: Vec<_> = self
+            .active_request_revisions_by_sub
+            .keys()
+            .filter(|(candidate, _)| candidate == session)
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(revisions) = self.active_request_revisions_by_sub.remove(&key) {
+                for revision in revisions {
+                    self.active_request_evidence.remove(&revision);
+                }
+            }
+        }
         self.live_wire_requests
             .retain(|(candidate, _), _| candidate != session);
     }
@@ -1019,6 +1945,66 @@ impl<S: EventStore> EngineCore<S> {
             .any(|((candidate, _), live)| candidate == session && live.handle == handle)
     }
 
+    fn insert_pending_neg_handoff(&mut self, sub_id: SubId, handoff: PendingNegHandoff) {
+        self.pending_neg_handoffs_by_plan
+            .entry(handoff.plan_sub_id.clone())
+            .or_default()
+            .insert(sub_id.clone());
+        self.pending_neg_handoffs.insert(sub_id, handoff);
+    }
+
+    pub(super) fn take_pending_neg_handoff(&mut self, sub_id: &SubId) -> Option<PendingNegHandoff> {
+        let handoff = self.pending_neg_handoffs.remove(sub_id)?;
+        let plan = handoff.plan_sub_id.clone();
+        if let Some(children) = self.pending_neg_handoffs_by_plan.get_mut(&plan) {
+            children.remove(sub_id);
+            if children.is_empty() {
+                self.pending_neg_handoffs_by_plan.remove(&plan);
+            }
+        }
+        Some(handoff)
+    }
+
+    fn insert_neg_session(&mut self, sub_id: SubId, session: NegSession) {
+        self.neg_sessions_by_plan
+            .entry(session.plan_sub_id.clone())
+            .or_default()
+            .insert(sub_id.clone());
+        self.neg_sessions.insert(sub_id, session);
+    }
+
+    pub(super) fn take_neg_session(&mut self, sub_id: &SubId) -> Option<NegSession> {
+        let session = self.neg_sessions.remove(sub_id)?;
+        let plan = session.plan_sub_id.clone();
+        if let Some(children) = self.neg_sessions_by_plan.get_mut(&plan) {
+            children.remove(sub_id);
+            if children.is_empty() {
+                self.neg_sessions_by_plan.remove(&plan);
+            }
+        }
+        Some(session)
+    }
+
+    fn insert_pending_backfill(&mut self, sub_id: SubId, request: TemporaryReq) {
+        self.pending_backfills_by_plan
+            .entry(request.plan_sub_id().clone())
+            .or_default()
+            .insert(sub_id.clone());
+        self.pending_backfills.insert(sub_id, request);
+    }
+
+    pub(super) fn take_pending_backfill(&mut self, sub_id: &SubId) -> Option<TemporaryReq> {
+        let request = self.pending_backfills.remove(sub_id)?;
+        let plan = request.plan_sub_id().clone();
+        if let Some(children) = self.pending_backfills_by_plan.get_mut(&plan) {
+            children.remove(sub_id);
+            if children.is_empty() {
+                self.pending_backfills_by_plan.remove(&plan);
+            }
+        }
+        Some(request)
+    }
+
     /// Start the gap-free NIP-77 handoff (#563). This function can only be
     /// called with a behaviorally-minted [`ProbedRelay`]. It sends a distinct
     /// candidate live REQ with `limit:0`, keeps the prior live REQ open, and
@@ -1030,19 +2016,13 @@ impl<S: EventStore> EngineCore<S> {
         plan_sub_id: SubId,
         prior_live_sub_id: Option<SubId>,
         filter: ConcreteFilter,
-        absorbed: BTreeSet<CoverageKey>,
         effects: &mut Vec<Effect>,
     ) {
         let stale_closes = self.cancel_nip77_repair_for_plan(&plan_sub_id, effects);
         if !stale_closes.is_empty() {
-            effects.push(Effect::Wire(WireDelta {
+            effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                 ops: vec![(RelaySessionKey::public(probed.url().clone()), stale_closes)],
-            }));
-        }
-
-        if let Some(prior) = prior_live_sub_id.as_ref() {
-            self.active_nip77_live
-                .insert(plan_sub_id.clone(), prior.clone());
+            })));
         }
 
         let live_filter = ConcreteFilter {
@@ -1051,15 +2031,26 @@ impl<S: EventStore> EngineCore<S> {
         };
         let live_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_LIVE_ROLE, &live_filter);
         let public_session = RelaySessionKey::public(probed.url().clone());
-        self.record_observed_request(
-            &public_session,
-            &live_sub_id,
-            &live_filter,
-            absorbed.clone(),
-            false,
-            EventFailureTarget::ThisSend,
+        let metadata = self
+            .plan_execution_metadata
+            .get(&plan_sub_id)
+            .cloned()
+            .expect("a NIP-77 role is derived from an installed plan request");
+        self.record_observed_request_with_purpose(
+            RequestSend {
+                session: &public_session,
+                sub_id: &live_sub_id,
+                filter: &live_filter,
+                coverage_claims: metadata.coverage_claims,
+                owner_demands: metadata.owner_demands,
+                replay: false,
+                event_failure_target: EventFailureTarget::ThisSend,
+            },
+            RequestAttemptPurpose::Nip77LiveCandidate {
+                plan_sub_id: plan_sub_id.clone(),
+            },
         );
-        self.pending_neg_handoffs.insert(
+        self.insert_pending_neg_handoff(
             live_sub_id.clone(),
             PendingNegHandoff {
                 probed,
@@ -1067,14 +2058,13 @@ impl<S: EventStore> EngineCore<S> {
                 live_sub_id: live_sub_id.clone(),
                 prior_live_sub_id,
                 filter,
-                absorbed,
                 started_at: self.clock,
             },
         );
-        effects.push(Effect::Wire(WireDelta {
+        effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
             ops: vec![(public_session, vec![WireOp::Req(live_sub_id, live_filter)])],
-        }));
-        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        })));
+        effects.push(Effect::DiagnosticsChanged);
     }
 
     /// Withdraw every pending/repair phase belonging to one semantic router
@@ -1088,28 +2078,36 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Vec<WireOp> {
         let mut closes = BTreeSet::new();
 
-        let pending: Vec<SubId> = self
-            .pending_neg_handoffs
-            .iter()
-            .filter(|(_, handoff)| &handoff.plan_sub_id == plan_sub_id)
-            .map(|(live_id, _)| live_id.clone())
-            .collect();
+        let pending = self
+            .pending_neg_handoffs_by_plan
+            .remove(plan_sub_id)
+            .unwrap_or_default();
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.nip77_plan_children_touched.set(
+            self.nip77_plan_children_touched
+                .get()
+                .saturating_add(pending.len() as u64),
+        );
         for live_id in pending {
             self.pending_neg_handoffs.remove(&live_id);
             self.abandon_sub(&live_id);
             closes.insert(live_id);
         }
 
-        let neg_ids: Vec<SubId> = self
-            .neg_sessions
-            .iter()
-            .filter(|(_, session)| &session.plan_sub_id == plan_sub_id)
-            .map(|(neg_id, _)| neg_id.clone())
-            .collect();
-        for neg_id in &neg_ids {
-            if let Some(session) = self.neg_sessions.remove(neg_id) {
-                self.abandon_sub(neg_id);
-                effects.push(Effect::NegClose(session.relay, neg_id.clone()));
+        let neg_ids = self
+            .neg_sessions_by_plan
+            .remove(plan_sub_id)
+            .unwrap_or_default();
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.nip77_plan_children_touched.set(
+            self.nip77_plan_children_touched
+                .get()
+                .saturating_add(neg_ids.len() as u64),
+        );
+        for neg_id in neg_ids {
+            if let Some(session) = self.neg_sessions.remove(&neg_id) {
+                self.abandon_sub(&neg_id);
+                effects.push(Effect::NegClose(session.relay, neg_id));
             }
         }
 
@@ -1133,20 +2131,16 @@ impl<S: EventStore> EngineCore<S> {
         plan_sub_id: &SubId,
         closes: &mut BTreeSet<SubId>,
     ) {
-        let temporary: Vec<SubId> = self
-            .pending_backfills
-            .iter()
-            .filter(|(_, request)| match request {
-                TemporaryReq::MissingIds {
-                    plan_sub_id: owner, ..
-                }
-                | TemporaryReq::Backlog { plan_sub_id: owner }
-                | TemporaryReq::BacklogActivatesLive {
-                    plan_sub_id: owner, ..
-                } => owner == plan_sub_id,
-            })
-            .map(|(sub_id, _)| sub_id.clone())
-            .collect();
+        let temporary = self
+            .pending_backfills_by_plan
+            .remove(plan_sub_id)
+            .unwrap_or_default();
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.nip77_plan_children_touched.set(
+            self.nip77_plan_children_touched
+                .get()
+                .saturating_add(temporary.len() as u64),
+        );
         for sub_id in temporary {
             match self.pending_backfills.remove(&sub_id) {
                 Some(TemporaryReq::MissingIds { neg_sub_id, .. }) => {
@@ -1216,6 +2210,152 @@ impl<S: EventStore> EngineCore<S> {
         closes.into_iter().map(WireOp::Close).collect()
     }
 
+    fn retire_nip77_roles_for_replacement(
+        &mut self,
+        plan_sub_id: &SubId,
+        effects: &mut Vec<Effect>,
+    ) -> Vec<WireOp> {
+        let mut closes: BTreeSet<_> = self
+            .cancel_nip77_repair_for_plan(plan_sub_id, effects)
+            .into_iter()
+            .filter_map(|op| match op {
+                WireOp::Close(sub_id) => Some(sub_id),
+                WireOp::Req(..) => None,
+            })
+            .collect();
+        if let Some(active) = self.active_nip77_live.remove(plan_sub_id) {
+            self.abandon_sub(&active);
+            closes.insert(active);
+        }
+        closes.into_iter().map(WireOp::Close).collect()
+    }
+
+    fn insert_request_replacement(&mut self, replacement: nmp_router::RequestReplacement) {
+        self.request_replacements_by_session
+            .entry(replacement.session.clone())
+            .or_default()
+            .insert(replacement.next_sub_id.clone());
+        let prior = self
+            .pending_request_replacements
+            .insert(replacement.next_sub_id.clone(), replacement);
+        assert!(
+            prior.is_none(),
+            "one successor owns one replacement transition"
+        );
+    }
+
+    fn take_request_replacement(
+        &mut self,
+        successor: &SubId,
+    ) -> Option<nmp_router::RequestReplacement> {
+        let replacement = self.pending_request_replacements.remove(successor)?;
+        if let Some(successors) = self
+            .request_replacements_by_session
+            .get_mut(&replacement.session)
+        {
+            successors.remove(successor);
+            if successors.is_empty() {
+                self.request_replacements_by_session
+                    .remove(&replacement.session);
+            }
+        }
+        Some(replacement)
+    }
+
+    fn cancel_replacement_successor_work(&mut self, successor: &SubId, effects: &mut Vec<Effect>) {
+        let session = RelaySessionKey::new(successor.0.clone(), successor.2);
+        let closes = self.cancel_nip77_repair_for_plan(successor, effects);
+        self.abandon_sub(successor);
+        self.attribution.release_live_request_claims(successor);
+        self.plan_execution_metadata.remove(successor);
+        self.cancel_request_claim_transfers(&session, successor, None);
+        if !closes.is_empty() {
+            effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
+                ops: vec![(session, closes)],
+            })));
+        }
+    }
+
+    fn retire_replacement_predecessor(
+        &mut self,
+        replacement: nmp_router::RequestReplacement,
+        effects: &mut Vec<Effect>,
+    ) {
+        let had_nip77_roles = self
+            .pending_neg_handoffs_by_plan
+            .contains_key(&replacement.prior_sub_id)
+            || self
+                .neg_sessions_by_plan
+                .contains_key(&replacement.prior_sub_id)
+            || self
+                .pending_backfills_by_plan
+                .contains_key(&replacement.prior_sub_id)
+            || self
+                .active_nip77_live
+                .contains_key(&replacement.prior_sub_id);
+        let mut closes: BTreeSet<_> = self
+            .retire_nip77_roles_for_replacement(&replacement.prior_sub_id, effects)
+            .into_iter()
+            .filter_map(|op| match op {
+                WireOp::Close(sub_id) => Some(sub_id),
+                WireOp::Req(..) => None,
+            })
+            .collect();
+        if !had_nip77_roles {
+            closes.insert(replacement.prior_sub_id.clone());
+        }
+        self.abandon_sub(&replacement.prior_sub_id);
+        self.attribution
+            .release_live_request_claims(&replacement.prior_sub_id);
+        self.plan_execution_metadata
+            .remove(&replacement.prior_sub_id);
+        self.cancel_request_claim_transfers(&replacement.session, &replacement.prior_sub_id, None);
+        if !closes.is_empty() {
+            effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
+                ops: vec![(
+                    replacement.session,
+                    closes.into_iter().map(WireOp::Close).collect(),
+                )],
+            })));
+        }
+    }
+
+    pub(super) fn complete_request_replacement(
+        &mut self,
+        successor: &SubId,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(replacement) = self.take_request_replacement(successor) else {
+            return;
+        };
+        self.retire_replacement_predecessor(replacement, effects);
+    }
+
+    fn cancel_request_replacement(&mut self, successor: &SubId, effects: &mut Vec<Effect>) {
+        let Some(replacement) = self.take_request_replacement(successor) else {
+            return;
+        };
+        self.cancel_replacement_successor_work(successor, effects);
+        self.retire_replacement_predecessor(replacement, effects);
+    }
+
+    pub(super) fn abandon_request_replacements_for_session(&mut self, session: &RelaySessionKey) {
+        let successors = self
+            .request_replacements_by_session
+            .remove(session)
+            .unwrap_or_default();
+        for successor in successors {
+            let Some(replacement) = self.pending_request_replacements.remove(&successor) else {
+                continue;
+            };
+            self.attribution
+                .release_live_request_claims(&replacement.prior_sub_id);
+            self.plan_execution_metadata
+                .remove(&replacement.prior_sub_id);
+            self.cancel_request_claim_transfers(session, &replacement.prior_sub_id, None);
+        }
+    }
+
     /// The candidate live REQ's EOSE is the handoff barrier. Promote it to
     /// the only active live owner, retire the overlapped predecessor, then
     /// and only then snapshot local holdings and open Negentropy.
@@ -1226,15 +2366,20 @@ impl<S: EventStore> EngineCore<S> {
     ) {
         self.active_nip77_live
             .insert(handoff.plan_sub_id.clone(), handoff.live_sub_id.clone());
-        if let Some(prior) = handoff.prior_live_sub_id.as_ref() {
+        if self
+            .pending_request_replacements
+            .contains_key(&handoff.plan_sub_id)
+        {
+            self.complete_request_replacement(&handoff.plan_sub_id, effects);
+        } else if let Some(prior) = handoff.prior_live_sub_id.as_ref() {
             if prior != &handoff.live_sub_id {
                 self.abandon_sub(prior);
-                effects.push(Effect::Wire(WireDelta {
+                effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                     ops: vec![(
                         RelaySessionKey::public(handoff.probed.url().clone()),
                         vec![WireOp::Close(prior.clone())],
                     )],
-                }));
+                })));
             }
         }
         self.open_neg_session(handoff, effects);
@@ -1253,7 +2398,6 @@ impl<S: EventStore> EngineCore<S> {
             probed,
             plan_sub_id,
             filter,
-            absorbed,
             ..
         } = handoff;
 
@@ -1279,7 +2423,6 @@ impl<S: EventStore> EngineCore<S> {
                 self.start_backlog_req(
                     plan_sub_id,
                     neg_filter,
-                    absorbed,
                     TemporaryReq::Backlog { plan_sub_id: owner },
                     effects,
                 );
@@ -1296,13 +2439,24 @@ impl<S: EventStore> EngineCore<S> {
         let neg_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
 
         let public_session = RelaySessionKey::public(probed.url().clone());
-        let attribution_send = self.record_observed_request(
-            &public_session,
-            &neg_sub_id,
-            &neg_filter,
-            absorbed.clone(),
-            false,
-            EventFailureTarget::ThisSend,
+        let metadata = self
+            .plan_execution_metadata
+            .get(&plan_sub_id)
+            .cloned()
+            .expect("a NEG role is derived from an installed plan request");
+        let (attribution_send, attempt_id) = self.record_observed_request_with_purpose(
+            RequestSend {
+                session: &public_session,
+                sub_id: &neg_sub_id,
+                filter: &neg_filter,
+                coverage_claims: metadata.coverage_claims,
+                owner_demands: metadata.owner_demands,
+                replay: false,
+                event_failure_target: EventFailureTarget::ThisSend,
+            },
+            RequestAttemptPurpose::Nip77Open {
+                plan_sub_id: plan_sub_id.clone(),
+            },
         );
         // The request-evidence record stays PENDING here (issue #775). This
         // door proves the exact current connected generation -- it is opened
@@ -1313,19 +2467,24 @@ impl<S: EventStore> EngineCore<S> {
         // claim NMP had placed a question it may never place. The runtime
         // reports the real outcome through `on_nip77_handoff`, which either
         // activates this same record or consumes it as refused.
-        self.neg_sessions.insert(
+        self.insert_neg_session(
             neg_sub_id.clone(),
             NegSession {
                 plan_sub_id,
                 relay: probed.url().clone(),
                 filter: neg_filter.clone(),
-                absorbed,
                 attribution_send,
                 started_at: self.clock,
                 reconciler,
             },
         );
-        effects.push(Effect::NegOpen(probed, neg_sub_id, neg_filter, initial_hex));
+        effects.push(Effect::NegOpen(
+            attempt_id,
+            probed,
+            neg_sub_id,
+            neg_filter,
+            initial_hex,
+        ));
     }
 
     /// The one door every NIP-77 outbound frame's transport outcome returns
@@ -1350,70 +2509,61 @@ impl<S: EventStore> EngineCore<S> {
     pub fn on_nip77_handoff(
         &mut self,
         frame: Nip77Frame,
-        relay: &RelayUrl,
-        sub_id: &SubId,
-        handle: Option<TransportRelayHandle>,
-        accepted: bool,
-        reason: Option<String>,
+        outcome: RequestHandoffOutcome,
     ) -> Vec<Effect> {
+        let Some(attempt) = self.request_attempts.get(&outcome.attempt_id()).cloned() else {
+            return Vec::new();
+        };
+        let relay = attempt.session.relay.clone();
+        let sub_id = attempt.sub_id.clone();
+        let accepted = matches!(outcome, RequestHandoffOutcome::Accepted { .. });
         let mut effects = Vec::new();
         match (frame, accepted) {
             // Acceptance means the worker owns the bytes. A probe and a
             // continuing round have no further reducer state to advance --
             // they already advanced, and now honestly.
-            (Nip77Frame::Probe, true) | (Nip77Frame::Continue, true) => {}
+            (Nip77Frame::Probe, true) | (Nip77Frame::Continue, true) => {
+                self.take_request_attempt(&outcome);
+            }
             (Nip77Frame::Open, true) => {
-                let Some(session) = self.neg_sessions.get(sub_id) else {
+                let Some(_session) = self.neg_sessions.get(&sub_id) else {
                     return effects;
                 };
-                let filter_hash = session.filter.hash();
-                let public_session = RelaySessionKey::public(relay.clone());
-                effects.extend(self.on_wire_request_handoff(
-                    &public_session,
-                    sub_id,
-                    filter_hash,
-                    handle,
-                    true,
-                    None,
-                ));
+                effects.extend(self.on_wire_request_handoff(outcome));
             }
             (Nip77Frame::Probe, false) => {
+                self.take_request_attempt(&outcome);
                 if self
                     .prober
-                    .refuse_probe(relay, &crate::core::wire_sub_id_string(sub_id))
+                    .refuse_probe(&relay, &crate::core::wire_sub_id_string(&sub_id))
                 {
                     // The projected capability verdict just moved back to
                     // `unknown`; it is observable state, so publish it rather
                     // than waiting for an unrelated recompile.
-                    effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+                    effects.push(Effect::DiagnosticsChanged);
                 }
             }
             (Nip77Frame::Open, false) => {
-                let Some(session) = self.neg_sessions.remove(sub_id) else {
+                let Some(session) = self.take_neg_session(&sub_id) else {
                     return effects;
                 };
-                let filter_hash = session.filter.hash();
-                let public_session = RelaySessionKey::public(relay.clone());
                 // Consume the still-pending request evidence as refused. This
                 // is the one place an app can learn that a NIP-77 question was
                 // never placed, and it is emitted instead of -- never beside --
                 // the `RelayRequest` an accepted handoff would have produced.
-                effects.extend(self.on_wire_request_handoff(
-                    &public_session,
-                    sub_id,
-                    filter_hash,
-                    handle,
-                    false,
-                    Some(reason.unwrap_or_else(|| "transport refused NEG-OPEN".to_string())),
-                ));
+                let (handoff_effects, _) = self.consume_wire_request_handoff(outcome);
+                effects.extend(handoff_effects);
                 // No `NEG-CLOSE`: the relay never saw a `NEG-OPEN`, so closing
                 // would be a frame about a session that does not exist -- and
                 // would compete for the very envelope room that was just
                 // refused.
-                self.neg_session_backlog_fallback(sub_id, session, &mut effects);
+                let mut fallback_effects = Vec::new();
+                self.neg_session_backlog_fallback(&sub_id, session, &mut fallback_effects);
+                effects.extend(fallback_effects);
             }
             (Nip77Frame::Continue, false) => {
-                let Some(session) = self.neg_sessions.remove(sub_id) else {
+                self.take_request_attempt(&outcome);
+                let Some(session) = self.take_neg_session(&sub_id) else {
                     return effects;
                 };
                 // The open WAS accepted, so this reconciliation exists on the
@@ -1427,7 +2577,7 @@ impl<S: EventStore> EngineCore<S> {
                 // retired by `abandon_sub` rather than refused, exactly as the
                 // other three abandonment paths retire it. The app-visible
                 // consequence is the fallback REQ's own fresh evidence.
-                self.neg_session_fallback_to_req(sub_id.clone(), session, &mut effects);
+                self.neg_session_fallback_to_req(sub_id, session, &mut effects);
             }
         }
         effects
@@ -1447,15 +2597,29 @@ impl<S: EventStore> EngineCore<S> {
         let Some(session) = self.neg_sessions.get_mut(&sub_id) else {
             return;
         };
+        let filter = session.filter.clone();
+        let filter_hash = filter.hash();
         let step = session.reconciler.step(message_hex);
         match step {
             Ok(NegStep::Continue(next_hex)) => {
-                effects.push(Effect::NegMsg(relay, sub_id, next_hex));
+                let attempt_id = self.mint_request_attempt(RequestAttemptState {
+                    session: RelaySessionKey::public(relay.clone()),
+                    sub_id: sub_id.clone(),
+                    filter_hash,
+                    filter,
+                    coverage_claims: BTreeSet::new(),
+                    owner_demands: BTreeSet::new(),
+                    replay: false,
+                    event_failure_target: EventFailureTarget::ThisSend,
+                    request_revision: None,
+                    retry_failures: 0,
+                    purpose: RequestAttemptPurpose::Nip77Continue,
+                });
+                effects.push(Effect::NegMsg(attempt_id, relay, sub_id, next_hex));
             }
             Ok(NegStep::Done(need_ids)) => {
                 let session = self
-                    .neg_sessions
-                    .remove(&sub_id)
+                    .take_neg_session(&sub_id)
                     .expect("just matched via get_mut above -- still present");
                 self.finish_neg_session(sub_id, relay, session, need_ids, effects);
             }
@@ -1465,7 +2629,7 @@ impl<S: EventStore> EngineCore<S> {
                 // back to a plain REQ for the same filter -- the same
                 // recovery path as the liveness-deadline/NEG-ERR cases,
                 // never a silent read-gap.
-                if let Some(session) = self.neg_sessions.remove(&sub_id) {
+                if let Some(session) = self.take_neg_session(&sub_id) {
                     self.neg_session_fallback_to_req(sub_id, session, effects);
                 }
             }
@@ -1502,16 +2666,24 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::NegClose(relay.clone(), sub_id.clone()));
 
         if need_ids.is_empty() {
-            if self.credit_neg_coverage(&sub_id, attribution_send, completed_at, &relay, effects) {
+            let committed_coverage =
+                self.credit_neg_coverage(&sub_id, attribution_send, completed_at, &relay, effects);
+            let terminal_demands = if committed_coverage.is_some() {
                 self.emit_request_settled(
                     attribution_send,
                     completed_at,
                     RequestTerminal::Nip77,
                     effects,
-                );
+                )
             } else {
-                self.retire_request_evidence(attribution_send);
-            }
+                self.retire_request_evidence(attribution_send)
+            };
+            let committed_coverage = committed_coverage.unwrap_or_default();
+            self.refresh_evidence_for_coverage_and_demand_keys(
+                &committed_coverage,
+                &terminal_demands,
+                effects,
+            );
             self.abandon_sub(&sub_id);
         } else {
             let backfill = ConcreteFilter {
@@ -1522,12 +2694,18 @@ impl<S: EventStore> EngineCore<S> {
             // any live Demand (#106): no `authors` binding at all, so
             // `Public`/`Public` is the exact context `Demand::from_filter`'s
             // static default would assign an authorless filter -- and this
-            // sub carries no coverage credit of its own anyway (`absorbed`
+            // sub carries no coverage credit of its own anyway (`coverage_claims`
             // is empty below; its typed `TemporaryReq::MissingIds` owner
             // unlocks `sub_id`'s credit at EOSE).
             let backfill_sub =
                 self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_MISSING_ROLE, &backfill);
-            self.pending_backfills.insert(
+            let missing_plan = plan_sub_id.clone();
+            let evidence_demands = self
+                .plan_execution_metadata
+                .get(&missing_plan)
+                .map(|metadata| metadata.owner_demands.clone())
+                .expect("a missing-id role is derived from an installed plan request");
+            self.insert_pending_backfill(
                 backfill_sub.clone(),
                 TemporaryReq::MissingIds {
                     plan_sub_id,
@@ -1537,25 +2715,37 @@ impl<S: EventStore> EngineCore<S> {
                 },
             );
             // No coverage credit of its OWN for this one-shot id-set fetch
-            // -- `absorbed` is deliberately empty; it targets exactly the
+            // -- `coverage_claims` is deliberately empty; it targets exactly the
             // ids negentropy already proved, it is not itself a proof over
             // any atom's shape (the credit it unlocks is `sub_id`'s).
-            self.record_observed_request(
-                &RelaySessionKey::public(relay.clone()),
-                &backfill_sub,
-                &backfill,
-                BTreeSet::new(),
-                false,
-                EventFailureTarget::Correlated(attribution_send),
+            let public_session = RelaySessionKey::public(relay.clone());
+            self.record_observed_request_with_purpose(
+                RequestSend {
+                    session: &public_session,
+                    sub_id: &backfill_sub,
+                    filter: &backfill,
+                    coverage_claims: BTreeSet::new(),
+                    owner_demands: BTreeSet::new(),
+                    replay: false,
+                    event_failure_target: EventFailureTarget::Correlated(attribution_send),
+                },
+                RequestAttemptPurpose::Nip77MissingIds {
+                    plan_sub_id: missing_plan,
+                },
             );
-            effects.push(Effect::Wire(WireDelta {
+            self.refresh_evidence_for_coverage_and_demand_keys(
+                &BTreeSet::new(),
+                &evidence_demands,
+                effects,
+            );
+            effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                 ops: vec![(
                     RelaySessionKey::public(relay.clone()),
                     vec![WireOp::Req(backfill_sub, backfill)],
                 )],
-            }));
+            })));
         }
-        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        effects.push(Effect::DiagnosticsChanged);
     }
 
     /// Attribute the exact NEG send-time snapshot that completed. Unlike an
@@ -1569,7 +2759,7 @@ impl<S: EventStore> EngineCore<S> {
         completed_at: Timestamp,
         relay: &RelayUrl,
         effects: &mut Vec<Effect>,
-    ) -> bool {
+    ) -> Option<BTreeSet<CoverageKey>> {
         // Negentropy sessions are opened exclusively on the Public session
         // (#8), so their credit resolves through the same Public-session
         // attribution key `open_neg_session` recorded under.
@@ -1579,11 +2769,8 @@ impl<S: EventStore> EngineCore<S> {
             attribution_send,
             completed_at,
         );
-        let settled = attributed
-            .is_some_and(|completed| self.persist_attributed_completion(completed, relay, effects));
-        self.refresh_all_observation_evidence(effects);
-        self.refresh_all_history_evidence(effects);
-        settled
+        attributed
+            .and_then(|completed| self.persist_attributed_completion(completed, relay, effects))
     }
 
     /// The one facts-before-claims persistence door shared by ordinary EOSE
@@ -1593,36 +2780,108 @@ impl<S: EventStore> EngineCore<S> {
     /// after that whole transaction commits.
     pub(super) fn persist_attributed_completion(
         &mut self,
-        mut completed: CompletedAttribution,
+        completed: CompletedAttribution,
         relay: &RelayUrl,
         effects: &mut Vec<Effect>,
-    ) -> bool {
-        let Some(claims) = completed.eligible_claims().map(|claims| claims.to_vec()) else {
-            return false;
-        };
+    ) -> Option<BTreeSet<CoverageKey>> {
+        let completed_sub_id = completed.sub_id().clone();
+        let completed_send = completed.send_id();
+        let completed_filter_hash = completed.filter_hash();
+        let committed_interval = completed.eligible_generation_interval();
+        let claims = completed.into_eligible_claims()?;
         if claims.is_empty() {
-            return true;
+            return Some(BTreeSet::new());
         }
 
         let mut batch = Vec::with_capacity(claims.len());
-        for (key, interval) in &claims {
-            let Some(atom) = self.attribution.shape_of(*key) else {
-                completed.poison(CoveragePoison::MissingShape);
-                return false;
-            };
-            batch.push((atom, relay.clone(), *interval));
+        for claim in &claims {
+            batch.push((claim.atom.clone(), relay.clone(), claim.interval));
         }
 
-        if let Err(error) = self.resolver.store_mut().record_coverage(&batch) {
-            completed.poison(CoveragePoison::CoverageCommitFailed);
+        if let Err(error) = self.record_request_coverage_batch(&batch) {
             self.degrade_store(error, effects);
-            return false;
+            return None;
         }
 
-        for (key, interval) in claims {
-            effects.push(Effect::RecordCoverage(key, relay.clone(), interval));
+        let session = RelaySessionKey::new(completed_sub_id.0.clone(), completed_sub_id.2);
+        self.retire_request_claim_transfer_covered_by_completion(
+            &session,
+            &completed_sub_id,
+            completed_send.revision(),
+            completed_filter_hash,
+            &claims,
+        );
+        if let Some(live) = self
+            .live_wire_requests
+            .get_mut(&(session, completed_sub_id))
+        {
+            if let StoredEvents::Streaming {
+                request_revision,
+                committed_interval: live_interval,
+            } = &mut live.stored_events
+            {
+                if *request_revision == completed_send.revision() {
+                    *live_interval = committed_interval;
+                }
+            }
         }
-        true
+
+        let mut committed = BTreeSet::new();
+        for claim in claims {
+            committed.insert(claim.key);
+            effects.push(Effect::RecordCoverage(
+                claim.key,
+                relay.clone(),
+                claim.interval,
+            ));
+        }
+        Some(committed)
+    }
+
+    fn retire_request_claim_transfer_covered_by_completion(
+        &mut self,
+        session: &RelaySessionKey,
+        sub_id: &SubId,
+        request_revision: u64,
+        filter_hash: DescriptorHash,
+        completed_claims: &[CompletedCoverageClaim],
+    ) {
+        let key = (session.clone(), sub_id.clone());
+        let Some(pending) = self.pending_request_claim_transfers.get(&key) else {
+            return;
+        };
+        let superseded = pending.filter_hash == filter_hash
+            && request_revision > pending.request_revision
+            && pending.claims.keys().all(|key| {
+                completed_claims.iter().any(|claim| {
+                    claim.key == *key
+                        && claim.interval.from <= pending.interval.from
+                        && claim.interval.through >= pending.interval.through
+                })
+            });
+        if !superseded {
+            return;
+        }
+        let pending = self
+            .pending_request_claim_transfers
+            .remove(&key)
+            .expect("the checked transfer remains pending");
+        let still_current = self.live_wire_requests.get(&key).is_some_and(|live| {
+            live.filter.hash() == filter_hash
+                && matches!(
+                    live.stored_events,
+                    StoredEvents::Streaming {
+                        request_revision: live_revision,
+                        ..
+                    } if live_revision == request_revision
+                )
+        });
+        if still_current {
+            self.attribution.retain_added_live_request_claims(
+                sub_id,
+                &pending.claims.keys().copied().collect(),
+            );
+        }
     }
 
     /// Start one unlimited one-shot backlog REQ under a role-separated id.
@@ -1631,7 +2890,6 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         plan_sub_id: SubId,
         filter: ConcreteFilter,
-        absorbed: BTreeSet<CoverageKey>,
         request: TemporaryReq,
         effects: &mut Vec<Effect>,
     ) {
@@ -1658,21 +2916,38 @@ impl<S: EventStore> EngineCore<S> {
         let mut ops: Vec<WireOp> = displaced.into_iter().map(WireOp::Close).collect();
         let backlog_sub_id =
             self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_FALLBACK_ROLE, &filter);
-        self.pending_backfills
-            .insert(backlog_sub_id.clone(), request);
-        self.record_observed_request(
-            &RelaySessionKey::public(relay.clone()),
-            &backlog_sub_id,
-            &filter,
-            absorbed,
-            false,
-            EventFailureTarget::ThisSend,
+        self.insert_pending_backfill(backlog_sub_id.clone(), request);
+        let metadata = self
+            .plan_execution_metadata
+            .get(&plan_sub_id)
+            .cloned()
+            .expect("a fallback role is derived from an installed plan request");
+        let evidence_demands = metadata.owner_demands.clone();
+        let public_session = RelaySessionKey::public(relay.clone());
+        self.record_observed_request_with_purpose(
+            RequestSend {
+                session: &public_session,
+                sub_id: &backlog_sub_id,
+                filter: &filter,
+                coverage_claims: metadata.coverage_claims,
+                owner_demands: metadata.owner_demands,
+                replay: false,
+                event_failure_target: EventFailureTarget::ThisSend,
+            },
+            RequestAttemptPurpose::Nip77Backlog {
+                plan_sub_id: plan_sub_id.clone(),
+            },
+        );
+        self.refresh_evidence_for_coverage_and_demand_keys(
+            &BTreeSet::new(),
+            &evidence_demands,
+            effects,
         );
         ops.push(WireOp::Req(backlog_sub_id, filter));
-        effects.push(Effect::Wire(WireDelta {
+        effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
             ops: vec![(RelaySessionKey::public(relay), ops)],
-        }));
-        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        })));
+        effects.push(Effect::DiagnosticsChanged);
     }
 
     /// A relay that accepted `limit:0` but never sent its barrier EOSE must
@@ -1690,14 +2965,12 @@ impl<S: EventStore> EngineCore<S> {
             live_sub_id,
             prior_live_sub_id,
             filter,
-            absorbed,
             ..
         } = handoff;
         let owner = plan_sub_id.clone();
         self.start_backlog_req(
             plan_sub_id,
             filter,
-            absorbed,
             TemporaryReq::BacklogActivatesLive {
                 plan_sub_id: owner,
                 live_sub_id,
@@ -1740,7 +3013,6 @@ impl<S: EventStore> EngineCore<S> {
         self.start_backlog_req(
             session.plan_sub_id,
             session.filter,
-            session.absorbed,
             TemporaryReq::Backlog { plan_sub_id: owner },
             effects,
         );
@@ -1757,6 +3029,7 @@ impl<S: EventStore> EngineCore<S> {
     /// Coverage cannot change canonical rows, so a complete projection can
     /// retain its remembered row set and avoid reopening the store's event
     /// indexes. An incomplete projection still falls back to the full oracle.
+    #[cfg(test)]
     pub(super) fn refresh_all_observation_evidence(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<ObservationId> = self.observations.keys().copied().collect();
         for id in ids {
@@ -1867,7 +3140,8 @@ impl<S: EventStore> EngineCore<S> {
                 );
             }
         }
-        if demand_changed || force_recompile {
+        let recompiled = demand_changed || force_recompile;
+        if recompiled {
             self.recompile(effects);
         }
         #[cfg(feature = "bench-instrumentation")]
@@ -1875,22 +3149,26 @@ impl<S: EventStore> EngineCore<S> {
 
         #[cfg(feature = "bench-instrumentation")]
         let phase_started = std::time::Instant::now();
-        if demand_changed || force_broad_refresh {
-            self.refresh_all_observations(effects);
-        } else {
-            self.apply_committed_row_changes(affected.iter().copied(), &row_changes, effects);
+        if !recompiled {
+            if force_broad_refresh {
+                self.refresh_all_observations(effects);
+            } else {
+                self.apply_committed_row_changes(affected.iter().copied(), &row_changes, effects);
+            }
         }
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::committed_live_projection(phase_started.elapsed());
 
         #[cfg(feature = "bench-instrumentation")]
         let phase_started = std::time::Instant::now();
-        if demand_changed || force_broad_refresh {
-            self.refresh_all_histories(effects);
-        } else {
-            for id in affected_histories {
-                if !self.try_apply_committed_history_row_changes(id, &row_changes, effects) {
-                    self.refresh_history(id, WindowLoad::Idle, effects);
+        if !recompiled {
+            if force_broad_refresh {
+                self.refresh_all_histories(effects);
+            } else {
+                for id in affected_histories {
+                    if !self.try_apply_committed_history_row_changes(id, &row_changes, effects) {
+                        self.refresh_history(id, WindowLoad::Idle, effects);
+                    }
                 }
             }
         }
