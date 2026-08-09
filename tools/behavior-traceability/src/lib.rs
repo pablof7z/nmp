@@ -60,7 +60,8 @@ mod tests {
     /// `ROUTING-REMOVEDROUTES-004/-005/-007` name #1320, the open gap that
     /// three of the removal contract's claims have no executing proof. As of
     /// #1023, `WRITES-PREVIEW-001` through `-014` name #978, the open gap
-    /// that `Engine::preview_route` does not exist yet.
+    /// that `Engine::preview_route` does not exist yet. `ROUTING-PHYSICAL-002`
+    /// and `-003` name #1341, the open exact-residual/composite-coverage gap.
     struct KnownLiveIssues(BTreeMap<u64, IssueState>);
 
     impl KnownLiveIssues {
@@ -70,6 +71,7 @@ mod tests {
                 (1215, IssueState::Open),
                 (1253, IssueState::Open),
                 (1320, IssueState::Open),
+                (1341, IssueState::Open),
             ]))
         }
     }

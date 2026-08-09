@@ -38,6 +38,8 @@ mod auth_core_headless;
 mod auth_transport;
 mod diagnostics;
 mod evidence;
+#[cfg(all(test, feature = "bench-instrumentation"))]
+mod freshness_snapshot_tests;
 #[cfg(test)]
 mod handoff_starvation_tests;
 mod history;
@@ -1459,11 +1461,14 @@ struct HandleAcquisition {
 /// One Demand boundary's freshness decision. Lifecycle ownership is
 /// represented by variants, never a teardown bool: only `Live` contributes
 /// that boundary's current atoms to the router; a coverage-satisfied scope
-/// retains the exact plan that justified suppression.
+/// retains the exact plan and opening evidence that justified suppression.
 #[derive(Clone)]
 enum ScopeAcquisition {
     Live,
-    CoverageSatisfied(RelayPlan),
+    CoverageSatisfied {
+        plan: RelayPlan,
+        evidence: AcquisitionEvidence,
+    },
     CacheOnly(RelayPlan),
 }
 
@@ -1474,8 +1479,15 @@ impl ScopeAcquisition {
 
     fn evidence_plan(&self) -> Option<&RelayPlan> {
         match self {
-            Self::CoverageSatisfied(plan) | Self::CacheOnly(plan) => Some(plan),
+            Self::CoverageSatisfied { plan, .. } | Self::CacheOnly(plan) => Some(plan),
             Self::Live => None,
+        }
+    }
+
+    fn opening_evidence(&self) -> Option<&AcquisitionEvidence> {
+        match self {
+            Self::CoverageSatisfied { evidence, .. } => Some(evidence),
+            Self::Live | Self::CacheOnly(_) => None,
         }
     }
 }

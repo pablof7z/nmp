@@ -86,7 +86,7 @@ impl Router {
                     demand,
                     session.clone(),
                     RefusalOwner {
-                        kind: RefusalKind::RelayCap,
+                        refusal_kind: RefusalKind::RelayCap,
                         request: None,
                     },
                 );
@@ -107,7 +107,7 @@ impl Router {
                     demand,
                     session.clone(),
                     RefusalOwner {
-                        kind: RefusalKind::SubscriptionBudget,
+                        refusal_kind: RefusalKind::SubscriptionBudget,
                         request: Some(request.sub_id.clone()),
                     },
                 );
@@ -152,7 +152,7 @@ impl Router {
                 self.refused_owner_counts_by_session.remove(&session);
             }
             if let Some(sub_id) = owner.request {
-                debug_assert_eq!(owner.kind, RefusalKind::SubscriptionBudget);
+                debug_assert_eq!(owner.refusal_kind, RefusalKind::SubscriptionBudget);
                 let request_key = (session.clone(), sub_id);
                 let remove_request = self
                     .refused_request_owner_counts
@@ -193,7 +193,7 @@ impl Router {
         &mut self,
         session: RelaySessionKey,
         request: &WireReq,
-        kind: RefusalKind,
+        refusal_kind: RefusalKind,
     ) {
         for (demand, author) in &request.coverage_assignments {
             self.refused_coverage_assignments_by_demand
@@ -201,7 +201,8 @@ impl Router {
                 .or_default()
                 .insert(*author);
         }
-        let request_id = (kind == RefusalKind::SubscriptionBudget).then(|| request.sub_id.clone());
+        let request_id =
+            (refusal_kind == RefusalKind::SubscriptionBudget).then(|| request.sub_id.clone());
         if let Some(sub_id) = &request_id {
             self.refused_request_owner_counts.insert(
                 (session.clone(), sub_id.clone()),
@@ -214,7 +215,7 @@ impl Router {
                 *demand,
                 session.clone(),
                 RefusalOwner {
-                    kind,
+                    refusal_kind,
                     request: request_id.clone(),
                 },
             );

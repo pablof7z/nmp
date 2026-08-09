@@ -613,7 +613,7 @@ fn derived_scalar_values(engine: &Engine<MemoryStore>, handle: HandleId) -> BTre
     engine
         .resolution_snapshot(handle)
         .into_iter()
-        .find_map(|node| match node.kind {
+        .find_map(|node| match node.node_type {
             ResolutionNodeKind::Derived { values } => Some(
                 values
                     .into_iter()

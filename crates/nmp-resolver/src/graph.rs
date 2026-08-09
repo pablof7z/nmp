@@ -155,7 +155,7 @@ impl Graph {
         }
         out.push(ResolutionNodeSnapshot {
             path: path.to_string(),
-            kind: ResolutionNodeKind::Filter {
+            node_type: ResolutionNodeKind::Filter {
                 scope,
                 atoms: filter.cached_atoms.iter().cloned().collect(),
             },
@@ -185,7 +185,7 @@ impl Graph {
             Node::Literal(_) => {}
             Node::Reactive(node) => out.push(ResolutionNodeSnapshot {
                 path: path.to_string(),
-                kind: ResolutionNodeKind::Reactive {
+                node_type: ResolutionNodeKind::Reactive {
                     field: node.field,
                     values: values(&node.cached),
                 },
@@ -196,7 +196,7 @@ impl Graph {
                 self.snapshot_filter(node.inner, &format!("{path}.inner"), scope, next_scope, out);
                 out.push(ResolutionNodeSnapshot {
                     path: path.to_string(),
-                    kind: ResolutionNodeKind::Derived {
+                    node_type: ResolutionNodeKind::Derived {
                         values: values(&node.cached),
                     },
                 });
@@ -212,7 +212,7 @@ impl Graph {
                 }
                 out.push(ResolutionNodeSnapshot {
                     path: path.to_string(),
-                    kind: ResolutionNodeKind::SetOp {
+                    node_type: ResolutionNodeKind::SetOp {
                         values: values(&node.cached),
                     },
                 });
@@ -712,7 +712,7 @@ mod destination_tests {
         let scoped_paths: Vec<_> = graph
             .resolution_snapshot(root)
             .into_iter()
-            .filter_map(|node| match node.kind {
+            .filter_map(|node| match node.node_type {
                 ResolutionNodeKind::Filter { scope, .. } => Some((node.path, scope)),
                 _ => None,
             })
