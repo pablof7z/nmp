@@ -343,7 +343,6 @@ impl<S: EventStore> EngineCore<S> {
             self.apply_router_plan_delta(RelayPlan::default(), withdrawal.wire, effects);
             self.refresh_evidence_for_coverage_keys(&withdrawal.changed_coverage, effects);
         }
-        self.refresh_pending_wire_atoms();
         if self.wire_admission_needed() {
             effects.push(Effect::ArmWireAdmission);
         }
@@ -736,6 +735,12 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     fn refresh_pending_wire_atoms(&mut self) {
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.pending_atoms_rebuilt.set(
+            self.pending_atoms_rebuilt
+                .get()
+                .saturating_add(self.wire_owner_counts.len() as u64),
+        );
         self.pending_wire_atoms = self
             .wire_owner_counts
             .iter()

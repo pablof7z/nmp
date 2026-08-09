@@ -251,6 +251,98 @@ fn cancelling_a_pending_observation_before_flush_sends_nothing() {
 }
 
 #[test]
+fn closing_an_incumbent_rearms_an_already_pending_limited_atom_without_a_rebuild() {
+    let first_relay = RelayUrl::parse("wss://admission-cap-first.example").unwrap();
+    let second_relay = RelayUrl::parse("wss://admission-cap-second.example").unwrap();
+    let mut core = EngineCore::new(MemoryStore::new(), 1);
+    let first = observation_id(&core.handle(EngineMsg::Subscribe(query(
+        &first_relay,
+        "alice",
+        Freshness::Live,
+    ))));
+    assert_eq!(
+        wire_ops(&flush(&mut core))
+            .into_iter()
+            .filter(|op| matches!(op, WireOp::Req(_, _)))
+            .count(),
+        1
+    );
+    core.handle(EngineMsg::Subscribe(query(
+        &second_relay,
+        "bob",
+        Freshness::Live,
+    )));
+    assert!(wire_ops(&flush(&mut core)).is_empty());
+    assert_eq!(core.pending_wire_atoms.len(), 1);
+
+    core.pending_atoms_rebuilt.set(0);
+    let released = core.handle(EngineMsg::Unsubscribe(first));
+
+    assert_eq!(
+        wire_ops(&released)
+            .into_iter()
+            .filter(|op| matches!(op, WireOp::Close(_)))
+            .count(),
+        1
+    );
+    assert!(released
+        .iter()
+        .any(|effect| matches!(effect, Effect::ArmWireAdmission)));
+    assert_eq!(core.pending_atoms_rebuilt.get(), 0);
+    assert_eq!(core.pending_wire_atoms.len(), 1);
+    assert_eq!(
+        wire_ops(&flush(&mut core))
+            .into_iter()
+            .filter(|op| matches!(op, WireOp::Req(_, _)))
+            .count(),
+        1
+    );
+    assert!(core.pending_wire_atoms.is_empty());
+}
+
+#[test]
+fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() {
+    let relay = RelayUrl::parse("wss://admission-pending-withdraw-10k.example").unwrap();
+    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut observations = Vec::with_capacity(10_000);
+    for index in 0..10_000 {
+        observations.push(observation_id(&core.handle(EngineMsg::Subscribe(query(
+            &relay,
+            &format!("pending-{index:05}"),
+            Freshness::Live,
+        )))));
+    }
+    assert_eq!(core.pending_wire_atoms.len(), 10_000);
+
+    core.projection_store_queries.set(0);
+    core.router_compiles.set(0);
+    core.withdrawal_handle_detaches.set(0);
+    core.resolver_delta_ops_consumed.set(0);
+    core.pending_atoms_rebuilt.set(0);
+    core.router.reset_withdrawal_work();
+    for observation in observations {
+        let effects = core.handle(EngineMsg::Unsubscribe(observation));
+        assert!(wire_ops(&effects).is_empty());
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))));
+    }
+
+    let router = core.router.withdrawal_work();
+    assert_eq!(core.withdrawal_handle_detaches.get(), 10_000);
+    assert_eq!(core.resolver_delta_ops_consumed.get(), 10_000);
+    assert_eq!(router.dropped_atoms, 10_000);
+    assert_eq!(router.request_edges_touched, 0);
+    assert_eq!(router.requests_closed, 0);
+    assert_eq!(router.physical_coverage_edges_released, 0);
+    assert_eq!(router.diagnostic_rebuilds, 0);
+    assert_eq!(core.projection_store_queries.get(), 0);
+    assert_eq!(core.router_compiles.get(), 0);
+    assert_eq!(core.pending_atoms_rebuilt.get(), 0);
+    assert!(core.pending_wire_atoms.is_empty());
+}
+
+#[test]
 fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
     let relay = RelayUrl::parse("wss://admission-scale.example").unwrap();
     let mut core = EngineCore::new(MemoryStore::new(), 20);
@@ -330,6 +422,7 @@ fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
     core.router_compiles.set(0);
     core.withdrawal_handle_detaches.set(0);
     core.resolver_delta_ops_consumed.set(0);
+    core.pending_atoms_rebuilt.set(0);
     core.router.reset_withdrawal_work();
     for observation in observations.iter().take(9_999) {
         let effects = core.handle(EngineMsg::Unsubscribe(*observation));
@@ -342,6 +435,7 @@ fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
     let non_final = core.router.withdrawal_work();
     assert_eq!(core.withdrawal_handle_detaches.get(), 9_999);
     assert_eq!(core.resolver_delta_ops_consumed.get(), 0);
+    assert_eq!(core.pending_atoms_rebuilt.get(), 0);
     assert_eq!(non_final.dropped_atoms, 0);
     assert_eq!(non_final.request_edges_touched, 0);
     assert_eq!(non_final.requests_closed, 0);
@@ -367,6 +461,7 @@ fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
     let final_work = core.router.withdrawal_work();
     assert_eq!(core.withdrawal_handle_detaches.get(), 10_000);
     assert_eq!(core.resolver_delta_ops_consumed.get(), 1);
+    assert_eq!(core.pending_atoms_rebuilt.get(), 0);
     assert_eq!(final_work.dropped_atoms, 1);
     assert_eq!(final_work.request_edges_touched, 1);
     assert_eq!(final_work.requests_closed, 1);

@@ -87,3 +87,14 @@ Feature: Relay work waits briefly for compatible pending demand
       When that observation withdraws its final exact ownership
       Then no relay request or close is emitted
       And the uncovered-author diagnostic is removed in the same reducer call
+
+    # nmp:id=ROUTING-PENDING-007
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand
+    # nmp:falsifier=Reconstruct the pending cohort after each exact pre-admission cancellation; the structural counter reports surviving pending atoms rebuilt even though no relay plan changed.
+    Scenario: Pre-admission cancellation removes only its pending ownership
+      Given distinct compatible observations are pending and no request has been sent
+      When one observation cancels before the admission boundary
+      Then only its exact pending atom is removed
+      And surviving pending demand is neither inspected nor reconstructed
+      And no store read, router compile, diagnostic frame, or wire operation occurs

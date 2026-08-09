@@ -1007,6 +1007,7 @@ pub(crate) struct RowsSeed {
 pub struct CoreWithdrawalWork {
     pub handles_detached: u64,
     pub resolver_delta_ops_consumed: u64,
+    pub pending_atoms_rebuilt: u64,
     pub exact_atoms_closed: u64,
     pub request_edges_touched: u64,
     pub requests_closed: u64,
@@ -1948,6 +1949,8 @@ pub struct EngineCore<S: EventStore> {
     withdrawal_handle_detaches: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     resolver_delta_ops_consumed: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pending_atoms_rebuilt: Cell<u64>,
     #[cfg(test)]
     history_rows_examined: Cell<u64>,
     #[cfg(test)]
@@ -2072,6 +2075,8 @@ impl<S: EventStore> EngineCore<S> {
             withdrawal_handle_detaches: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             resolver_delta_ops_consumed: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            pending_atoms_rebuilt: Cell::new(0),
             #[cfg(test)]
             history_rows_examined: Cell::new(0),
             #[cfg(test)]
@@ -2923,6 +2928,7 @@ impl EngineCore<nmp_store::RedbStore> {
     pub fn bench_reset_withdrawal_work(&mut self) {
         self.withdrawal_handle_detaches.set(0);
         self.resolver_delta_ops_consumed.set(0);
+        self.pending_atoms_rebuilt.set(0);
         self.router.reset_withdrawal_work();
     }
 
@@ -2932,6 +2938,7 @@ impl EngineCore<nmp_store::RedbStore> {
         CoreWithdrawalWork {
             handles_detached: self.withdrawal_handle_detaches.get(),
             resolver_delta_ops_consumed: self.resolver_delta_ops_consumed.get(),
+            pending_atoms_rebuilt: self.pending_atoms_rebuilt.get(),
             exact_atoms_closed: router.dropped_atoms,
             request_edges_touched: router.request_edges_touched,
             requests_closed: router.requests_closed,
