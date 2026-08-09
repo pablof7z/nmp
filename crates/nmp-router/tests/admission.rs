@@ -6,7 +6,7 @@ use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, RelaySessionKey, SourceAuthority,
 };
 use nmp_router::{FixtureRoutingFacts, Router, RuleRegistry, WireOp};
-use nostr::RelayUrl;
+use nostr::{Keys, PublicKey, RelayUrl};
 
 fn atom(relay: &RelayUrl, value: &str) -> ContextualAtom {
     atom_on(BTreeSet::from([relay.clone()]), value)
@@ -23,6 +23,19 @@ fn atom_on(relays: BTreeSet<RelayUrl>, value: &str) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         source: SourceAuthority::Pinned(relays),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
+}
+
+fn routeless_outbox_atom(author: PublicKey) -> ContextualAtom {
+    ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(BTreeSet::from([author.to_hex()])),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::AuthorOutboxes,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -160,6 +173,29 @@ fn withdrawal_keeps_a_shared_immutable_req_until_its_last_key_leaves() {
         1
     );
     assert!(router.plan().reqs.is_empty());
+}
+
+#[test]
+fn withdrawing_the_final_routeless_outbox_owner_retracts_its_diagnostic() {
+    let facts = FixtureRoutingFacts::new();
+    let mut router = Router::new(RuleRegistry::default_widen_only());
+    let author = Keys::generate().public_key();
+    let demand = routeless_outbox_atom(author);
+
+    let admitted = router.admit(&BTreeSet::from([demand.clone()]), &facts, 20);
+    assert!(admitted.ops.is_empty());
+    assert!(router.diagnostics().uncovered_authors.contains_key(&author));
+
+    router.reset_withdrawal_work();
+    let withdrawn = router.withdraw([demand], 20);
+
+    assert!(withdrawn.wire.ops.is_empty());
+    assert!(withdrawn.changed_coverage.is_empty());
+    assert!(withdrawn.diagnostics_changed);
+    assert!(!router.diagnostics().uncovered_authors.contains_key(&author));
+    assert_eq!(router.withdrawal_work().request_edges_touched, 0);
+    assert_eq!(router.withdrawal_work().requests_closed, 0);
+    assert_eq!(router.withdrawal_work().diagnostic_rebuilds, 1);
 }
 
 #[test]

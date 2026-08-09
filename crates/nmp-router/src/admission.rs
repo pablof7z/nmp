@@ -271,6 +271,7 @@ impl Router {
         let budget = budget.into();
         let mut closing = BTreeSet::new();
         let mut limited_changed = false;
+        let mut uncovered_authors_changed = false;
         let mut changed_coverage = BTreeSet::new();
         for atom in closing_atoms {
             self.withdrawal_work.dropped_atoms =
@@ -292,6 +293,8 @@ impl Router {
                         });
                     if remove {
                         self.active_outbox_authors.remove(&author);
+                        uncovered_authors_changed |=
+                            self.last_diag.uncovered_authors.remove(&author).is_some();
                     }
                 }
             }
@@ -378,11 +381,9 @@ impl Router {
             self.prev_plan.reqs.contains_key(session)
                 || self.prev_plan.subscription_shortfalls.contains_key(session)
         });
-        let diagnostics_changed = !touched_sessions.is_empty() || limited_changed;
+        let diagnostics_changed =
+            !touched_sessions.is_empty() || limited_changed || uncovered_authors_changed;
         if diagnostics_changed {
-            self.last_diag
-                .uncovered_authors
-                .retain(|author, _| self.active_outbox_authors.contains_key(author));
             diag::refresh_sessions(
                 &mut self.last_diag,
                 &self.prev_plan,

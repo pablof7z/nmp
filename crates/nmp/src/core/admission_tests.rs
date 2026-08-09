@@ -3,6 +3,7 @@
 use super::*;
 use nmp_grammar::{Binding, Demand, Filter, IndexedTagName};
 use nmp_store::MemoryStore;
+use nostr::Keys;
 
 fn query(relay: &RelayUrl, value: &str, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::from_filter(Filter {
@@ -31,6 +32,21 @@ fn bounded_query(relay: &RelayUrl, value: &str) -> LiveQuery {
     demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
     demand.freshness = Freshness::Live;
     LiveQuery::single(demand)
+}
+
+fn routeless_outbox_query(author: PublicKey) -> LiveQuery {
+    LiveQuery::single(
+        Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+                ..Filter::default()
+            },
+            SourceAuthority::AuthorOutboxes,
+            AccessContext::Public,
+        )
+        .unwrap(),
+    )
 }
 
 fn observation_id(effects: &[Effect]) -> ObservationId {
@@ -358,6 +374,26 @@ fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
     assert_eq!(final_work.diagnostic_rebuilds, 1);
     assert_eq!(core.projection_store_queries.get(), 0);
     assert_eq!(core.router_compiles.get(), 0);
+}
+
+#[test]
+fn withdrawing_the_final_routeless_observation_emits_its_diagnostic_retraction() {
+    let author = Keys::generate().public_key();
+    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let opened = core.handle(EngineMsg::Subscribe(routeless_outbox_query(author)));
+    let observation = observation_id(&opened);
+    let admitted = flush(&mut core);
+    assert!(wire_ops(&admitted).is_empty());
+    assert_eq!(core.diagnostics_snapshot().uncovered_author_count, 1);
+
+    let withdrawn = core.handle(EngineMsg::Unsubscribe(observation));
+
+    assert!(wire_ops(&withdrawn).is_empty());
+    assert!(withdrawn.iter().any(|effect| {
+        matches!(effect, Effect::EmitDiagnostics(snapshot)
+            if snapshot.uncovered_author_count == 0)
+    }));
+    assert_eq!(core.diagnostics_snapshot().uncovered_author_count, 0);
 }
 
 #[test]
