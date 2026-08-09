@@ -1015,6 +1015,27 @@ pub struct CoreWithdrawalWork {
     pub diagnostic_refreshes: u64,
 }
 
+/// Exact local ownership retained by the reducer after a lifecycle step.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoreOwnershipCensus {
+    pub observations: usize,
+    pub branch_handles: usize,
+    pub history_sessions: usize,
+    pub history_handles: usize,
+    pub resolver_active_atoms: usize,
+    pub pending_wire_atoms: usize,
+    pub pending_resolver_wire_closes: usize,
+    pub wire_handles: usize,
+    pub wire_owner_keys: usize,
+    pub wire_reverse_owner_keys: usize,
+    pub active_physical_requests: usize,
+    pub pending_execution_owners: usize,
+    pub active_execution_owners: usize,
+    pub live_wire_owners: usize,
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoreObservationOwnershipCensus {
@@ -2292,6 +2313,27 @@ impl<S: EventStore> EngineCore<S> {
     /// `nmp_resolver::Engine::active_demand()` exactly.
     pub fn active_demand(&self) -> BTreeSet<ContextualAtom> {
         self.wire_demand()
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[doc(hidden)]
+    pub fn bench_ownership_census(&self) -> CoreOwnershipCensus {
+        CoreOwnershipCensus {
+            observations: self.observations.len(),
+            branch_handles: self.handles.len(),
+            history_sessions: self.histories.len(),
+            history_handles: self.history_by_handle.len(),
+            resolver_active_atoms: self.active_demand().len(),
+            pending_wire_atoms: self.pending_wire_atoms.len(),
+            pending_resolver_wire_closes: self.pending_resolver_wire_closes.len(),
+            wire_handles: self.wire_atoms_by_handle.len(),
+            wire_owner_keys: self.wire_owner_counts.len(),
+            wire_reverse_owner_keys: self.wire_handles_by_atom.len(),
+            active_physical_requests: self.router.plan().reqs.values().map(Vec::len).sum(),
+            pending_execution_owners: self.pending_request_evidence.len(),
+            active_execution_owners: self.active_request_evidence.len(),
+            live_wire_owners: self.live_wire_requests.len(),
+        }
     }
 
     #[cfg(test)]

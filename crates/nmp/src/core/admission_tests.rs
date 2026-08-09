@@ -340,6 +340,10 @@ fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() 
     assert_eq!(core.router_compiles.get(), 0);
     assert_eq!(core.pending_atoms_rebuilt.get(), 0);
     assert!(core.pending_wire_atoms.is_empty());
+    assert_eq!(
+        core.bench_ownership_census(),
+        CoreOwnershipCensus::default()
+    );
 }
 
 #[test]
