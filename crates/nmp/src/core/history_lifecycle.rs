@@ -143,10 +143,14 @@ impl<S: EventStore> EngineCore<S> {
                 .map(|(branch, handle)| (*handle, state.acquisitions_by_branch[branch].clone()))
                 .collect()
         };
+        let mut diagnostics_changed = false;
         for (handle, acquisition) in attachments {
-            self.attach_wire_handle(handle, &acquisition);
+            diagnostics_changed |= self.attach_wire_handle(handle, &acquisition, &mut effects);
         }
         self.flush_consumed_resolver_closes(&mut effects);
+        if diagnostics_changed {
+            effects.push(Effect::DiagnosticsChanged);
+        }
         if self.wire_admission_needed() {
             effects.push(Effect::ArmWireAdmission);
         }
@@ -426,10 +430,14 @@ impl<S: EventStore> EngineCore<S> {
                 })
                 .collect()
         };
+        let mut diagnostics_changed = false;
         for (handle, acquisition) in attachments {
-            self.attach_wire_handle(handle, &acquisition);
+            diagnostics_changed |= self.attach_wire_handle(handle, &acquisition, &mut effects);
         }
         self.flush_consumed_resolver_closes(&mut effects);
+        if diagnostics_changed {
+            effects.push(Effect::DiagnosticsChanged);
+        }
 
         // Build the prospective plan without touching live router,
         // attribution, diagnostics, other projections, or delivery.
@@ -736,6 +744,7 @@ impl<S: EventStore> EngineCore<S> {
     /// The current bounded rows remain authoritative unless a prior store
     /// failure marked the projection incomplete, in which case the full
     /// refresh oracle repairs it before evidence is emitted.
+    #[cfg(test)]
     pub(super) fn refresh_all_history_evidence(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<_> = self.histories.keys().copied().collect();
         for id in ids {
@@ -1074,6 +1083,8 @@ impl<S: EventStore> EngineCore<S> {
         ordered.truncate(needed);
         let auth_status = self.auth_status_map();
         let finished_stored_events = self.finished_stored_events();
+        let placed_requests = self.placed_request_keys();
+        let awaiting_requests = self.awaiting_request_keys();
         let by_branch = self.history_handles_by_branch(id);
         let mut evidence: Vec<AcquisitionEvidence> = Vec::with_capacity(by_branch.len());
         for (branch, handles) in by_branch.into_iter().enumerate() {
@@ -1087,11 +1098,23 @@ impl<S: EventStore> EngineCore<S> {
             evidence.push(evidence::acquisition_evidence(
                 &subtree_atoms,
                 plans.get(branch).unwrap_or(&RelayPlan::default()),
-                self.resolver.store(),
-                &self.connected_relays,
-                &auth_status,
-                &self.ever_connected_relays,
-                &finished_stored_events,
+                evidence::AcquisitionEvidenceContext {
+                    store: self.resolver.store(),
+                    connected: &self.connected_relays,
+                    auth_status: &auth_status,
+                    ever_connected: &self.ever_connected_relays,
+                    finished_stored_events: &finished_stored_events,
+                    placed_requests: &placed_requests,
+                    awaiting_requests: &awaiting_requests,
+                    acquisition: match self.histories[&id].acquisitions_by_branch[branch].root() {
+                        Some(ScopeAcquisition::CoverageSatisfied(_)) => {
+                            evidence::EvidenceAcquisition::CoverageSatisfied
+                        }
+                        Some(ScopeAcquisition::Live)
+                        | Some(ScopeAcquisition::CacheOnly(_))
+                        | None => evidence::EvidenceAcquisition::Live,
+                    },
+                },
             )?);
         }
 

@@ -266,8 +266,8 @@ fn main() {
     // `budget`/`refused` are the two most load-bearing columns for #937 and
     // this probe used to omit them, which is how I came to call the resulting
     // under-service "silent". It is not silent: the engine records a
-    // `BudgetShortfall` per session, `RelayPlan::limited` keeps the affected
-    // atoms from being called fresh by `plan_is_fresh_for`, and
+    // `BudgetShortfall` per session, `RelayPlan::limited_demands` keeps the
+    // affected exact demands from being called fresh by `plan_is_fresh_for`, and
     // `acquisition_evidence` reports `ShortfallFact::LocalLimit` to the app.
     // The snapshot this probe already reads carries both numbers; only the
     // printout was missing them.

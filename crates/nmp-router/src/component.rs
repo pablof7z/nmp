@@ -17,18 +17,16 @@
 //!   k1-from-B, events neither operand asked for, and the waste is unbounded
 //!   on sparse inputs.
 //! - [`crate::wire_id`] decides which previously-allocated wire token a newly
-//!   compiled filter CONTINUES: the one it differs from in exactly one
-//!   component, zero-diff ranked first.
+//!   compiled byte-changing filter names as its predecessor: the one it
+//!   differs from in exactly one component, zero-diff ranked first. Exact
+//!   zero-diff keeps its token; changed bytes receive a fresh token.
 //!
 //! **They share this module deliberately, and the sharing is load-bearing
-//! rather than incidental.** The design's whole wire story is that growing a
-//! value set costs ONE overwriting REQ. That only holds if what the merge
-//! produces when a value arrives is, by the identity matcher's own
-//! definition, a one-component difference from what the merge produced last
-//! compile. Two separate notions of "component" could drift apart, and the
-//! symptom would be silent: merges that mint fresh tokens and churn the wire
-//! instead of widening in place. One definition makes the agreement
-//! structural.
+//! rather than incidental.** The shared component model lets coalescing and
+//! predecessor selection agree on which single logical axis changed. A
+//! byte-changing successor still receives a fresh token and is offered before
+//! its predecessor closes; the component match identifies that transition,
+//! never an in-place overwrite. One definition makes the agreement structural.
 //!
 //! What the two halves do NOT share is policy. Merging decides HOW MANY
 //! subscriptions exist and carries a widening proof obligation; identity

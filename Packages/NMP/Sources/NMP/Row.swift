@@ -95,6 +95,11 @@ public enum SourceStatus: Sendable, Hashable {
     /// query's window. What was proven is `reconciledThrough`, and the two
     /// disagree in both directions.
     case finishedStoredEvents
+    /// The request is planned and locally owned, but the transport has not
+    /// accepted it yet. This includes bounded retry backoff after a local
+    /// admission refusal; the relay socket may already be connected.
+    case awaitingRequest
+    case coverageSatisfied
     case connecting
     case disconnected
     case awaitingAuth(phase: AuthPhase)
@@ -105,6 +110,8 @@ public enum SourceStatus: Sendable, Hashable {
         switch ffi {
         case .requesting: self = .requesting
         case .finishedStoredEvents: self = .finishedStoredEvents
+        case .awaitingRequest: self = .awaitingRequest
+        case .coverageSatisfied: self = .coverageSatisfied
         case .connecting: self = .connecting
         case .disconnected: self = .disconnected
         case .awaitingAuth(let phase): self = .awaitingAuth(phase: AuthPhase(phase))
@@ -115,11 +122,12 @@ public enum SourceStatus: Sendable, Hashable {
 }
 
 /// One relay's acquisition state for a query's subtree, as two deliberately
-/// orthogonal facts: a durable PAST fact (`reconciledThrough`) and a fact
-/// about the request on the wire right now (`status`) -- a relay can be
-/// currently `.disconnected` while still carrying a perfectly good
-/// `reconciledThrough` from before it dropped (offline cached rows remain
-/// usable), and `.finishedStoredEvents` while carrying none at all.
+/// orthogonal facts: a durable PAST fact (`reconciledThrough`) and its
+/// effective current acquisition state (`status`). A relay can be currently
+/// `.disconnected` while still carrying a perfectly good `reconciledThrough`
+/// from before it dropped, and `.finishedStoredEvents` while carrying none at
+/// all. A fresh no-wire scope is `.coverageSatisfied` independently of link
+/// state.
 public struct SourceEvidence: Sendable, Hashable {
     public let relay: String
     /// The frozen access identity of the physical session that produced this

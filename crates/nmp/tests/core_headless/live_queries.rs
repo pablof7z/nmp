@@ -1536,7 +1536,7 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
     let evidence = evidence_from(&effects, id).expect("watermark advance must emit EmitRows");
     let r0 = source_for(evidence, &relay0).expect("relay0 must be a source");
     assert_eq!(r0.reconciled_through, Some(Timestamp::from(10u64)));
-    // `Requesting`, not `FinishedStoredEvents`, and correctly so: this test
+    // `AwaitingRequest`, not `FinishedStoredEvents`, and correctly so: this test
     // drives the reducer without the transport's `on_wire_request_handoff`
     // acknowledgement, so no wire request is live under this session to have
     // finished (#1235). The runtime path — where a REQ is genuinely accepted
@@ -1544,7 +1544,7 @@ fn source_watermark_survives_disconnect_alongside_the_disconnected_status() {
     // `crates/nmp/tests/finished_stored_events.rs` is where that is proven,
     // against real sockets. What this scenario owns is the orthogonality
     // below, and it holds under either status.
-    assert_eq!(r0.status, SourceStatus::Requesting);
+    assert_eq!(r0.status, SourceStatus::AwaitingRequest);
 
     // relay0 drops. Its watermark must survive; its status must flip.
     let effects = core.handle(EngineMsg::RelayDisconnected(

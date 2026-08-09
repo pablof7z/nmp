@@ -112,3 +112,15 @@ Feature: Every nested query keeps its own cache and freshness policy
       And an app reopens the outer query
       Then the nested query creates no remote request
       And its persisted source evidence remains scoped to the nested question
+
+    # nmp:id=QUERIES-DERIVED-FRESHNESS-006
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::coverage_satisfied_scope_never_borrows_request_placement_or_link_state
+    # nmp:evidence=rust:nmp::fresh_max_age_is_coverage_satisfied_alone_and_never_borrows_live_placement
+    # nmp:falsifier=Derive a fresh no-wire MaxAge scope from global link or placement state; it reports Connecting, Error, AwaitingRequest, or an identical Live sibling's Requesting state.
+    Scenario: Fresh no-wire scope reports coverage satisfaction independently
+      Given a max-age query has complete recent scoped coverage
+      When it opens alone or beside an identical live sibling
+      Then it creates no remote request of its own
+      And its source status is CoverageSatisfied independently of link state
+      And it never borrows the live sibling's request-placement status

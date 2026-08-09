@@ -5,52 +5,53 @@
 //! requests. Both paths share the same routing/coalescing compiler and wire
 //! token namespace.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, RoutingEvidence,
     SourceAuthority,
 };
-use nmp_store::{coverage_key, CoverageKey};
+use nmp_store::{coverage_claim_atoms, coverage_key, CoverageKey};
 
 use crate::budget::CompileBudget;
-use crate::coalesce::RuleRegistry;
-use crate::diag::{self, Diagnostics};
+use crate::coalesce::{EntryOwnership, RuleRegistry};
+use crate::diag::Diagnostics;
 use crate::facts::{PublicKey, RelayUrl, RoutingFacts};
-use crate::plan::{diff_plans, BudgetShortfall, DemandKey, RelayPlan, SubId, WireDelta, WireReq};
-use crate::route::{self, AtomClass, RouteKind, RouteProvenance, Skeleton};
-use crate::solver::{self, CoverageInput, Shortfall, ShortfallReason};
+use crate::ownership::{
+    reduce_outbox_shortfall, AdmissionWork, CompileOutcome, ExactFilterKey, FullMetadataWork,
+    RefusalOwner, RequestKey, RequestMetadataUpdate, RequestOwnerContribution, RequestReplacement,
+    WithdrawalWork,
+};
+use crate::plan::{diff_plans, BudgetShortfall, DemandKey, RelayPlan, SubId, WireReq};
+use crate::route::{self, AtomClass, RouteProvenance, Skeleton};
+use crate::solver::{self, CoverageInput, Shortfall};
 use crate::wire_id;
-
-pub(crate) type RequestKey = (RelaySessionKey, SubId);
-
-/// Exact work performed by ordinary delta-driven withdrawal. Structural
-/// counters make the 10k contract deterministic on every machine.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WithdrawalWork {
-    pub dropped_atoms: u64,
-    pub request_edges_touched: u64,
-    pub requests_closed: u64,
-    pub physical_coverage_edges_released: u64,
-    pub diagnostic_rebuilds: u64,
-}
-
-pub struct WithdrawalOutcome {
-    pub wire: WireDelta,
-    pub changed_coverage: BTreeSet<CoverageKey>,
-    pub diagnostics_changed: bool,
-}
 
 /// The equal-context-only coalescing gate (Fable D, "locus fixed"): two
 /// atoms only ever share wire work if their FULL context matches. Bagged
 /// and coalesced entirely inside `Router::compile` -- `coalesce.rs` itself
 /// stays PURE selection-only and never learns this type exists.
 /// One relay's not-yet-coalesced bag entry, PER context partition: a
-/// materialized (filter, single-lane provenance, absorbed coverage-key)
+/// materialized (filter, single-lane provenance, coverage_claims coverage-key)
 /// triple -- selection-only, exactly what `coalesce.rs::coalesce_with`
 /// (unchanged, context-free) has always taken.
-type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, EntryOwnership);
 type SessionBag = BTreeMap<RelaySessionKey, BTreeMap<SourceAuthority, Vec<BagEntry>>>;
+
+struct RelayCapOutcome {
+    limited_demands: BTreeSet<DemandKey>,
+    refused_sessions: BTreeSet<RelaySessionKey>,
+    refused_demands: BTreeMap<RelaySessionKey, BTreeSet<DemandKey>>,
+    refused_coverage_assignments: BTreeSet<(DemandKey, PublicKey)>,
+}
+
+#[derive(Default)]
+struct SupplementalAtomGroup {
+    known_authors: BTreeSet<PublicKey>,
+    routing_evidence: BTreeSet<RoutingEvidence>,
+    owner_demands: BTreeSet<DemandKey>,
+}
 
 /// Apply the ONE whole-demand relay ceiling after every routing lane has
 /// materialized. The previous implementation handed the full `cap` to each
@@ -61,43 +62,52 @@ type SessionBag = BTreeMap<RelaySessionKey, BTreeMap<SourceAuthority, Vec<BagEnt
 /// Selection is deterministic and coverage-biased: the relay carrying the
 /// most typed route facts wins, with the canonical relay URL as the stable
 /// tie-break. Refused relays are removed from the only bag that can become a
-/// [`RelayPlan`], and every absorbed atom they would have served is retained
+/// [`RelayPlan`], and every coverage_claims atom they would have served is retained
 /// as explicit local-limit evidence. This is intentionally conservative: if
 /// a cap removes an additive or redundant planned source, the demand still
 /// reports that local limit instead of pretending the smaller plan was the
 /// complete requested acquisition.
-fn apply_global_relay_cap(
-    bag: &mut SessionBag,
-    cap: usize,
-    uncovered_authors: &mut BTreeMap<PublicKey, Shortfall>,
-) -> (
-    BTreeSet<CoverageKey>,
-    BTreeSet<DemandKey>,
-    BTreeSet<RelaySessionKey>,
-) {
+fn apply_global_relay_cap(bag: &mut SessionBag, cap: usize) -> RelayCapOutcome {
     if bag.len() <= cap {
-        return (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+        return RelayCapOutcome {
+            limited_demands: BTreeSet::new(),
+            refused_sessions: BTreeSet::new(),
+            refused_demands: BTreeMap::new(),
+            refused_coverage_assignments: BTreeSet::new(),
+        };
     }
 
-    let mut ranked: Vec<(RelaySessionKey, usize)> = bag
+    let mut ranked: Vec<(RelaySessionKey, usize, usize)> = bag
         .iter()
         .map(|(session, by_source)| {
-            let route_facts = by_source
+            let coverage_assignments: BTreeSet<_> = by_source
                 .values()
                 .flatten()
-                .map(|(_, provenance, absorbed)| provenance.len().max(absorbed.len()).max(1))
+                .flat_map(|(_, _, ownership)| ownership.coverage_assignments.iter().copied())
+                .collect();
+            let secondary = by_source
+                .values()
+                .flatten()
+                .map(|(_, provenance, ownership)| {
+                    provenance.len().max(ownership.coverage_claims.len()).max(1)
+                })
                 .sum();
-            (session.clone(), route_facts)
+            (session.clone(), coverage_assignments.len(), secondary)
         })
         .collect();
-    ranked.sort_by(|(a_url, a_score), (b_url, b_score)| {
-        b_score.cmp(a_score).then_with(|| a_url.cmp(b_url))
-    });
+    ranked.sort_by(
+        |(a_url, a_coverage, a_secondary), (b_url, b_coverage, b_secondary)| {
+            b_coverage
+                .cmp(a_coverage)
+                .then_with(|| b_secondary.cmp(a_secondary))
+                .then_with(|| a_url.cmp(b_url))
+        },
+    );
 
     let selected: BTreeSet<RelaySessionKey> = ranked
         .iter()
         .take(cap)
-        .map(|(session, _)| session.clone())
+        .map(|(session, _, _)| session.clone())
         .collect();
     let refused: BTreeSet<RelaySessionKey> = bag
         .keys()
@@ -105,61 +115,29 @@ fn apply_global_relay_cap(
         .cloned()
         .collect();
 
-    let mut limited = BTreeSet::new();
     let mut limited_demands = BTreeSet::new();
-    let mut cap_limited_authors = BTreeSet::new();
+    let mut refused_demands = BTreeMap::new();
+    let mut refused_coverage_assignments = BTreeSet::new();
     for session in &refused {
         if let Some(by_source) = bag.get(session) {
-            for (filter, provenance, absorbed) in by_source.values().flatten() {
-                limited.extend(absorbed.iter().copied());
-                limited_demands.extend(
-                    absorbed
-                        .iter()
-                        .map(|key| DemandKey::from_filter(*key, filter)),
-                );
-                for route in provenance {
-                    if route.route_kind == RouteKind::Coverage {
-                        cap_limited_authors.extend(route.covers_authors.iter().cloned());
-                    }
-                }
+            for (_, _, ownership) in by_source.values().flatten() {
+                limited_demands.extend(ownership.owner_demands.iter().copied());
+                refused_demands
+                    .entry(session.clone())
+                    .or_insert_with(BTreeSet::new)
+                    .extend(ownership.owner_demands.iter().copied());
+                refused_coverage_assignments.extend(ownership.coverage_assignments.iter().copied());
             }
         }
     }
 
-    // Preserve the router diagnostic's historical per-author floor while
-    // moving cap enforcement to the assembled plan. Intrinsic no-candidate /
-    // fewer-than-k evidence from the uncapped solve remains more specific
-    // and is never overwritten by this cap-derived fact.
-    for author in cap_limited_authors {
-        if uncovered_authors.contains_key(&author) {
-            continue;
-        }
-        let achieved: BTreeSet<RelayUrl> = selected
-            .iter()
-            .filter(|session| {
-                bag.get(*session).is_some_and(|by_source| {
-                    by_source.values().flatten().any(|(_, provenance, _)| {
-                        provenance.iter().any(|route| {
-                            route.route_kind == RouteKind::Coverage
-                                && route.covers_authors.contains(&author)
-                        })
-                    })
-                })
-            })
-            .map(|session| session.relay.clone())
-            .collect();
-        uncovered_authors.insert(
-            author,
-            Shortfall {
-                requested_k: 2,
-                achieved: achieved.len(),
-                reason: ShortfallReason::CapExhausted,
-            },
-        );
-    }
-
     bag.retain(|session, _| selected.contains(session));
-    (limited, limited_demands, refused)
+    RelayCapOutcome {
+        limited_demands,
+        refused_sessions: refused,
+        refused_demands,
+        refused_coverage_assignments,
+    }
 }
 
 /// Cut `session_reqs` down to `allowed` subscriptions, returning the ones
@@ -168,8 +146,8 @@ fn apply_global_relay_cap(
 /// Selection is deterministic, coverage-biased, and — the property that
 /// matters most — STABLE across recompiles:
 ///
-/// An INCUMBENT (a subscription the previous plan already carried under this
-/// same token) outranks every newcomer. Without that, a saturated relay
+/// An INCUMBENT (an exact unchanged request the previous plan already carried)
+/// outranks every newcomer. Without that, a saturated relay
 /// would evict whatever the newest atom outranked, re-admit it next compile,
 /// and oscillate forever: a CLOSE plus a REQ per recompile, caused by the
 /// budget itself. Ranking incumbents first makes a bound budget quiet — the
@@ -177,7 +155,7 @@ fn apply_global_relay_cap(
 /// cannot fit is refused explicitly rather than swapped in and out.
 ///
 /// Below incumbency, the rank is the same coverage bias
-/// [`apply_global_relay_cap`] uses (most absorbed atoms, then most route
+/// [`apply_global_relay_cap`] uses (most coverage_claims atoms, then most route
 /// facts), with the canonical filter hash as a stable final tie-break so the
 /// outcome never depends on mint order or map iteration.
 fn refuse_over_budget(
@@ -195,13 +173,19 @@ fn refuse_over_budget(
         incumbents
             .contains(&b.sub_id)
             .cmp(&incumbents.contains(&a.sub_id))
-            .then_with(|| b.absorbed.len().cmp(&a.absorbed.len()))
+            .then_with(|| {
+                b.coverage_assignments
+                    .len()
+                    .cmp(&a.coverage_assignments.len())
+            })
+            .then_with(|| b.coverage_claims.len().cmp(&a.coverage_claims.len()))
             .then_with(|| b.provenance.len().cmp(&a.provenance.len()))
             .then_with(|| a.filter.hash().cmp(&b.filter.hash()))
     });
     let refused = ranked.split_off(allowed.min(ranked.len()));
-    // Restore the plan's own ordering invariant: `reqs` is sorted by
-    // `SubId`, and `diff_plans` reads it back that way.
+    // A freshly compiled plan starts in canonical token order. Exact delta
+    // withdrawal may later use swap-removal; `diff_plans` keys requests and
+    // does not depend on retained Vec order.
     ranked.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
     *session_reqs = ranked;
     refused
@@ -218,22 +202,70 @@ fn push_routes(
     source: &SourceAuthority,
     access: AccessContext,
     routes: Vec<(RelayUrl, RouteProvenance)>,
+    ownership: &EntryOwnership,
 ) {
     if routes.is_empty() {
         return;
     }
-    let key = coverage_key(&ContextualAtom {
-        filter: filter.clone(),
-        source: source.clone(),
-        access,
-        routing_evidence: BTreeSet::new(),
-    });
     for (relay, prov) in routes {
         bag.entry(RelaySessionKey::new(relay, access))
             .or_default()
             .entry(source.clone())
             .or_default()
-            .push((filter.clone(), vec![prov], BTreeSet::from([key])));
+            .push((filter.clone(), vec![prov], ownership.clone()));
+    }
+}
+
+fn exact_atom_ownership(atom: ContextualAtom) -> EntryOwnership {
+    EntryOwnership {
+        coverage_claims: coverage_claim_atoms(&atom)
+            .iter()
+            .map(coverage_key)
+            .collect(),
+        owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
+        coverage_assignments: BTreeSet::new(),
+    }
+}
+
+fn outbox_ownership(
+    skeleton: &Skeleton,
+    access: AccessContext,
+    authors: &BTreeSet<PublicKey>,
+    coverage_authors: &BTreeSet<PublicKey>,
+    evidence_by_author: &BTreeMap<PublicKey, BTreeSet<RoutingEvidence>>,
+    authors_by_demand: &BTreeMap<DemandKey, BTreeSet<PublicKey>>,
+) -> EntryOwnership {
+    let source = SourceAuthority::AuthorOutboxes;
+    let coverage_claims = authors
+        .iter()
+        .map(|author| {
+            let atom = ContextualAtom {
+                filter: skeleton.with_authors(BTreeSet::from([*author])),
+                source: source.clone(),
+                access,
+                routing_evidence: evidence_by_author.get(author).cloned().unwrap_or_default(),
+            };
+            coverage_key(&atom)
+        })
+        .collect();
+    let owner_demands = authors_by_demand
+        .iter()
+        .filter_map(|(demand, demand_authors)| {
+            (!authors.is_disjoint(demand_authors)).then_some(*demand)
+        })
+        .collect();
+    let coverage_assignments = authors_by_demand
+        .iter()
+        .flat_map(|(demand, demand_authors)| {
+            coverage_authors
+                .intersection(demand_authors)
+                .map(|author| (*demand, *author))
+        })
+        .collect();
+    EntryOwnership {
+        coverage_claims,
+        owner_demands,
+        coverage_assignments,
     }
 }
 
@@ -254,7 +286,33 @@ pub struct Router {
     pub(crate) active_demands: BTreeMap<DemandKey, ContextualAtom>,
     pub(crate) requests_by_demand: BTreeMap<DemandKey, BTreeSet<RequestKey>>,
     pub(crate) active_by_request: BTreeMap<RequestKey, usize>,
+    pub(crate) request_coverage_by_key: BTreeMap<RequestKey, BTreeSet<CoverageKey>>,
+    pub(crate) request_position_by_key: BTreeMap<RequestKey, usize>,
+    pub(crate) request_by_exact_filter: BTreeMap<ExactFilterKey, RequestKey>,
+    /// Exact durable claim shapes physically covered when a request entered
+    /// the immutable wire plan. Local owner metadata may shrink independently;
+    /// these edges remain until the physical request closes.
+    pub(crate) physical_claims_by_request: BTreeMap<RequestKey, BTreeSet<CoverageKey>>,
+    pub(crate) requests_by_physical_claim: BTreeMap<CoverageKey, BTreeSet<RequestKey>>,
+    pub(crate) physical_contributions_by_request:
+        BTreeMap<RequestKey, BTreeMap<DemandKey, RequestOwnerContribution>>,
+    pub(crate) requests_by_physical_demand: BTreeMap<DemandKey, BTreeSet<RequestKey>>,
+    pub(crate) request_owner_contributions:
+        BTreeMap<RequestKey, BTreeMap<DemandKey, RequestOwnerContribution>>,
+    pub(crate) request_claim_owner_counts: BTreeMap<(RequestKey, CoverageKey), usize>,
+    pub(crate) request_provenance_owner_counts: BTreeMap<(RequestKey, RouteProvenance), usize>,
+    pub(crate) request_demand_coverage_owner_counts: BTreeMap<(RequestKey, CoverageKey), usize>,
+    pub(crate) coverage_assignment_requests: BTreeMap<(DemandKey, PublicKey), BTreeSet<RequestKey>>,
+    pub(crate) refused_coverage_assignments_by_demand: BTreeMap<DemandKey, BTreeSet<PublicKey>>,
     pub(crate) active_outbox_authors: BTreeMap<PublicKey, usize>,
+    pub(crate) diagnostic_author_refs: BTreeMap<RelaySessionKey, BTreeMap<PublicKey, usize>>,
+    pub(crate) uncovered_by_demand: BTreeMap<DemandKey, BTreeMap<PublicKey, Shortfall>>,
+    pub(crate) uncovered_owners_by_author: BTreeMap<PublicKey, BTreeMap<DemandKey, Shortfall>>,
+    pub(crate) refusals_by_demand: BTreeMap<DemandKey, BTreeMap<RelaySessionKey, RefusalOwner>>,
+    pub(crate) refused_request_owner_counts: BTreeMap<RequestKey, usize>,
+    pub(crate) refused_owner_counts_by_session: BTreeMap<RelaySessionKey, usize>,
+    pub(crate) admission_work: AdmissionWork,
+    pub(crate) full_metadata_work: FullMetadataWork,
     pub(crate) withdrawal_work: WithdrawalWork,
 }
 
@@ -269,58 +327,30 @@ impl Router {
             active_demands: BTreeMap::new(),
             requests_by_demand: BTreeMap::new(),
             active_by_request: BTreeMap::new(),
+            request_coverage_by_key: BTreeMap::new(),
+            request_position_by_key: BTreeMap::new(),
+            request_by_exact_filter: BTreeMap::new(),
+            physical_claims_by_request: BTreeMap::new(),
+            requests_by_physical_claim: BTreeMap::new(),
+            physical_contributions_by_request: BTreeMap::new(),
+            requests_by_physical_demand: BTreeMap::new(),
+            request_owner_contributions: BTreeMap::new(),
+            request_claim_owner_counts: BTreeMap::new(),
+            request_provenance_owner_counts: BTreeMap::new(),
+            request_demand_coverage_owner_counts: BTreeMap::new(),
+            coverage_assignment_requests: BTreeMap::new(),
+            refused_coverage_assignments_by_demand: BTreeMap::new(),
             active_outbox_authors: BTreeMap::new(),
+            diagnostic_author_refs: BTreeMap::new(),
+            uncovered_by_demand: BTreeMap::new(),
+            uncovered_owners_by_author: BTreeMap::new(),
+            refusals_by_demand: BTreeMap::new(),
+            refused_request_owner_counts: BTreeMap::new(),
+            refused_owner_counts_by_session: BTreeMap::new(),
+            admission_work: AdmissionWork::default(),
+            full_metadata_work: FullMetadataWork::default(),
             withdrawal_work: WithdrawalWork::default(),
         }
-    }
-
-    pub(crate) fn rebuild_active_indexes(
-        &mut self,
-        demand: impl IntoIterator<Item = ContextualAtom>,
-    ) {
-        self.active_demands = demand
-            .into_iter()
-            .map(|atom| (DemandKey::for_atom(&atom), atom))
-            .collect();
-        self.requests_by_demand.clear();
-        self.active_by_request.clear();
-        for (session, requests) in &self.prev_plan.reqs {
-            for request in requests {
-                let request_key = (session.clone(), request.sub_id.clone());
-                let mut active = 0;
-                for demand in &request.covered_demands {
-                    self.requests_by_demand
-                        .entry(*demand)
-                        .or_default()
-                        .insert(request_key.clone());
-                    active += usize::from(self.active_demands.contains_key(demand));
-                }
-                self.active_by_request.insert(request_key, active);
-            }
-        }
-        self.active_outbox_authors.clear();
-        for atom in self.active_demands.values() {
-            if let AtomClass::Coverage { authors, .. } = route::classify(&atom.filter, &atom.source)
-            {
-                for author in authors {
-                    *self.active_outbox_authors.entry(author).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn reset_withdrawal_work(&mut self) {
-        self.withdrawal_work = WithdrawalWork::default();
-    }
-
-    #[doc(hidden)]
-    pub fn withdrawal_work(&self) -> WithdrawalWork {
-        self.withdrawal_work
-    }
-
-    pub fn physically_covers(&self, demand: DemandKey) -> bool {
-        self.requests_by_demand.contains_key(&demand)
     }
 
     /// Recompile the whole per-relay plan from `demand`, diff vs the previous
@@ -338,7 +368,7 @@ impl Router {
         demand: &BTreeSet<ContextualAtom>,
         facts: &dyn RoutingFacts,
         budget: impl Into<CompileBudget>,
-    ) -> WireDelta {
+    ) -> CompileOutcome {
         let budget = budget.into();
         // Step 1: group demand by (Skeleton, AccessContext) (outbox) /
         // classify pinned -- classification is now by DECLARED
@@ -352,19 +382,30 @@ impl Router {
             (Skeleton, AccessContext),
             BTreeMap<PublicKey, BTreeSet<RoutingEvidence>>,
         > = BTreeMap::new();
+        let mut outbox_demands_by_group: BTreeMap<(Skeleton, AccessContext), BTreeSet<DemandKey>> =
+            BTreeMap::new();
+        let mut outbox_authors_by_demand: BTreeMap<DemandKey, BTreeSet<PublicKey>> =
+            BTreeMap::new();
         let mut supplemental_atoms: BTreeMap<
             (ConcreteFilter, AccessContext),
-            (BTreeSet<PublicKey>, BTreeSet<RoutingEvidence>),
+            SupplementalAtomGroup,
         > = BTreeMap::new();
         // #107: query-declared `SourceAuthority::Pinned(relays)` atoms — kept
         // in their OWN collection, never merged into `pinned_atoms` (the
         // directory-fact `Public`-sourced kind), since these must skip every
         // additive lane (indexer/app/fallback) below, not just the solve.
-        let mut exact_atoms: Vec<(ConcreteFilter, AccessContext, BTreeSet<RelayUrl>)> = Vec::new();
+        let mut exact_atoms: Vec<(ContextualAtom, BTreeSet<RelayUrl>)> = Vec::new();
         for atom in demand {
             match route::classify(&atom.filter, &atom.source) {
                 AtomClass::Coverage { skeleton, authors } => {
-                    let group = outbox_groups.entry((skeleton, atom.access)).or_default();
+                    let group_key = (skeleton, atom.access);
+                    let demand = DemandKey::for_atom(atom);
+                    outbox_demands_by_group
+                        .entry(group_key.clone())
+                        .or_default()
+                        .insert(demand);
+                    outbox_authors_by_demand.insert(demand, authors.clone());
+                    let group = outbox_groups.entry(group_key).or_default();
                     for author in authors {
                         group
                             .entry(author)
@@ -373,14 +414,17 @@ impl Router {
                     }
                 }
                 AtomClass::Supplemental { authors } => {
-                    let (known_authors, evidence) = supplemental_atoms
+                    let supplemental = supplemental_atoms
                         .entry((atom.filter.clone(), atom.access))
                         .or_default();
-                    known_authors.extend(authors);
-                    evidence.extend(atom.routing_evidence.iter().cloned());
+                    supplemental.known_authors.extend(authors);
+                    supplemental
+                        .routing_evidence
+                        .extend(atom.routing_evidence.iter().cloned());
+                    supplemental.owner_demands.insert(DemandKey::for_atom(atom));
                 }
                 AtomClass::Exact(relays) => {
-                    exact_atoms.push((atom.filter.clone(), atom.access, relays));
+                    exact_atoms.push((atom.clone(), relays));
                 }
             }
         }
@@ -389,7 +433,7 @@ impl Router {
         // apply the additive indexer/app/fallback lanes OUTSIDE the solve
         // (Unit B, `routing-and-ownership.md` §2.1/§2.2 — never counted
         // toward `k`), and materialize each relay's bag of (filter,
-        // context, single-lane provenance, absorbed) entries. `absorbed` is
+        // context, single-lane provenance, coverage_claims) entries. `coverage_claims` is
         // the coverage-attribution ruling's per-atom `CoverageKey` (§2):
         // each entry here is exactly one pre-coalesce demand atom (one
         // author, for outbox; the full/shortfall author set, for an
@@ -398,12 +442,21 @@ impl Router {
         // alongside provenance as same-skeleton, SAME-CONTEXT atoms merge
         // (Fable D: equal-context-only).
         let mut bag: SessionBag = BTreeMap::new();
-        let mut uncovered_authors: BTreeMap<PublicKey, Shortfall> = BTreeMap::new();
+        let mut uncovered_by_demand: BTreeMap<DemandKey, BTreeMap<PublicKey, Shortfall>> =
+            BTreeMap::new();
 
         for ((skeleton, access), evidence_by_author) in &outbox_groups {
             let access = *access;
             let source = SourceAuthority::AuthorOutboxes;
             let authors: BTreeSet<PublicKey> = evidence_by_author.keys().copied().collect();
+            let group_demands = outbox_demands_by_group
+                .get(&(skeleton.clone(), access))
+                .cloned()
+                .unwrap_or_default();
+            let authors_by_group_demand: BTreeMap<_, _> = group_demands
+                .iter()
+                .map(|demand| (*demand, outbox_authors_by_demand[demand].clone()))
+                .collect();
             let candidates = route::build_candidates(&authors, facts);
             let mut candidates = candidates;
             route::add_projected_candidates(&mut candidates, evidence_by_author);
@@ -442,7 +495,23 @@ impl Router {
                 // incremental instead of touching `cap`; out of scope here.
                 cap: usize::MAX,
             });
-            uncovered_authors.extend(coverage.shortfall.clone());
+            if let Some(demands) = outbox_demands_by_group.get(&(skeleton.clone(), access)) {
+                for demand in demands {
+                    let exact: BTreeMap<_, _> = outbox_authors_by_demand[demand]
+                        .iter()
+                        .filter_map(|author| {
+                            coverage
+                                .shortfall
+                                .get(author)
+                                .copied()
+                                .map(|fact| (*author, fact))
+                        })
+                        .collect();
+                    if !exact.is_empty() {
+                        uncovered_by_demand.insert(*demand, exact);
+                    }
+                }
+            }
 
             // ONE bag entry per (relay, skeleton), carrying every author this
             // relay was solved for -- not one entry per (author, relay).
@@ -468,7 +537,7 @@ impl Router {
             // Coverage needs no special handling: a limited filter poisons its
             // whole EOSE attribution (`attribution.rs`, `limited:
             // filter.limit.is_some()`), so a bounded fetch records no coverage
-            // merged or unmerged. The per-author keys are still absorbed so an
+            // merged or unmerged. The per-author keys are still coverage_claims so an
             // UNLIMITED feed goes on proving coverage for each author it named.
             let mut by_relay: BTreeMap<RelayUrl, (BTreeSet<PublicKey>, Vec<RouteProvenance>)> =
                 BTreeMap::new();
@@ -484,35 +553,38 @@ impl Router {
                 // `routing_evidence`, so each key is exactly the key the
                 // resolver's own per-author atom hashes to -- which is what
                 // lets one merged REQ absorb them all.
-                let keys = relay_authors
-                    .iter()
-                    .map(|author| {
-                        coverage_key(&ContextualAtom {
-                            filter: skeleton.with_authors(BTreeSet::from([*author])),
-                            source: source.clone(),
-                            access,
-                            routing_evidence: evidence_by_author
-                                .get(author)
-                                .cloned()
-                                .unwrap_or_default(),
-                        })
-                    })
-                    .collect::<BTreeSet<_>>();
+                let ownership = outbox_ownership(
+                    skeleton,
+                    access,
+                    &relay_authors,
+                    &relay_authors,
+                    evidence_by_author,
+                    &authors_by_group_demand,
+                );
                 bag.entry(RelaySessionKey::new(relay, access))
                     .or_default()
                     .entry(source.clone())
                     .or_default()
-                    .push((filter, provenance, keys));
+                    .push((filter, provenance, ownership));
             }
 
             // Operator app policy supplements the group's full author set.
             let additive = route::operator_app_routes(facts, &authors);
+            let additive_ownership = outbox_ownership(
+                skeleton,
+                access,
+                &authors,
+                &BTreeSet::new(),
+                evidence_by_author,
+                &authors_by_group_demand,
+            );
             push_routes(
                 &mut bag,
                 &skeleton.with_authors(authors.clone()),
                 &source,
                 access,
                 additive,
+                &additive_ownership,
             );
 
             // Additive fallback lane: routes exactly the shortfall authors,
@@ -522,37 +594,48 @@ impl Router {
             let shortfall_authors: BTreeSet<PublicKey> =
                 coverage.shortfall.keys().copied().collect();
             let fallback = route::operator_fallback_routes(facts, &shortfall_authors);
+            let fallback_ownership = outbox_ownership(
+                skeleton,
+                access,
+                &shortfall_authors,
+                &BTreeSet::new(),
+                evidence_by_author,
+                &authors_by_group_demand,
+            );
             push_routes(
                 &mut bag,
                 &skeleton.with_authors(shortfall_authors),
                 &source,
                 access,
                 fallback,
+                &fallback_ownership,
             );
         }
 
-        for ((atom, access), (authors, routing_evidence)) in &supplemental_atoms {
+        for ((atom, access), supplemental) in &supplemental_atoms {
             let source = SourceAuthority::Public;
             let access = *access;
-            let key = coverage_key(&ContextualAtom {
+            let effective_atom = ContextualAtom {
                 filter: atom.clone(),
                 source: source.clone(),
                 access,
-                routing_evidence: routing_evidence.clone(),
-            });
-            let routes = route::provenance_for_projected(routing_evidence);
+                routing_evidence: supplemental.routing_evidence.clone(),
+            };
+            let mut ownership = exact_atom_ownership(effective_atom);
+            ownership.owner_demands = supplemental.owner_demands.clone();
+            let routes = route::provenance_for_projected(&supplemental.routing_evidence);
             for (relay, prov) in routes {
                 bag.entry(RelaySessionKey::new(relay, access))
                     .or_default()
                     .entry(source.clone())
                     .or_default()
-                    .push((atom.clone(), vec![prov], BTreeSet::from([key])));
+                    .push((atom.clone(), vec![prov], ownership.clone()));
             }
 
             // App lane routes every atom, including authorless/pinned ones
             // (closes #7 — the authorless-routing-lane gap).
-            let app = route::operator_app_routes(facts, authors);
-            push_routes(&mut bag, atom, &source, access, app);
+            let app = route::operator_app_routes(facts, &supplemental.known_authors);
+            push_routes(&mut bag, atom, &source, access, app, &ownership);
         }
 
         // #107: explicit, query-declared pinned wire authority — route
@@ -560,20 +643,17 @@ impl Router {
         // (indexer/app/fallback) is ever applied here: that's the #107
         // Contract's core guarantee ("Pinned author filters never contact
         // directory, author-outbox, app, fallback, or indexer relays").
-        for (filter, access, relays) in &exact_atoms {
+        for (atom, relays) in &exact_atoms {
+            let filter = &atom.filter;
+            let access = atom.access;
             let source = SourceAuthority::Pinned(relays.clone());
-            let key = coverage_key(&ContextualAtom {
-                filter: filter.clone(),
-                source: source.clone(),
-                access: *access,
-                routing_evidence: BTreeSet::new(),
-            });
+            let ownership = exact_atom_ownership(atom.clone());
             for (relay, prov) in route::provenance_for_exact(relays) {
-                bag.entry(RelaySessionKey::new(relay, *access))
+                bag.entry(RelaySessionKey::new(relay, access))
                     .or_default()
                     .entry(source.clone())
                     .or_default()
-                    .push((filter.clone(), vec![prov], BTreeSet::from([key])));
+                    .push((filter.clone(), vec![prov], ownership.clone()));
             }
         }
 
@@ -581,8 +661,12 @@ impl Router {
         // materialized bag. Nothing removed here can reach coalescing, the
         // plan, or the wire; its contextual coverage keys remain as exact
         // local-limit evidence.
-        let (mut limited, mut limited_demands, mut refused_sessions) =
-            apply_global_relay_cap(&mut bag, budget.relay_cap(), &mut uncovered_authors);
+        let RelayCapOutcome {
+            mut limited_demands,
+            mut refused_sessions,
+            refused_demands: cap_refused_demands,
+            refused_coverage_assignments: cap_refused_coverage_assignments,
+        } = apply_global_relay_cap(&mut bag, budget.relay_cap());
 
         // Step 5 + 6: per relay, PER CONTEXT PARTITION, dedup + widen-only
         // coalesce (`coalesce.rs` stays pure selection-only, Fable D "locus
@@ -599,14 +683,17 @@ impl Router {
         // the moment either side carries a `limit`, and `dedup_only()` holds
         // no author union at all -- minted the SAME id, and `diff_plans`
         // (keyed by `SubId`) then silently dropped one of them, forever.
-        // Allocation buys back injectivity AND keeps in-place widening,
-        // because the previous plan is the state that tells "this
-        // subscription churned" apart from "a sibling appeared".
+        // Allocation buys back injectivity. The previous plan still tells a
+        // byte-changing successor which request it replaces, but the
+        // successor receives a fresh token and EngineCore offers it before
+        // retiring the predecessor after the exact commit edge.
         let mint_root = self.mint_root;
         let mut mint_counter = self.next_token;
         let mut reqs: BTreeMap<RelaySessionKey, Vec<WireReq>> = BTreeMap::new();
+        let mut replacements: BTreeSet<RequestReplacement> = BTreeSet::new();
         let mut subscription_shortfalls: BTreeMap<RelaySessionKey, BudgetShortfall> =
             BTreeMap::new();
+        let mut budget_refused_requests: Vec<(RelaySessionKey, WireReq)> = Vec::new();
         for (session, by_source) in bag {
             let relay = session.relay.clone();
             let access = session.access;
@@ -638,18 +725,23 @@ impl Router {
                 });
 
                 session_reqs.extend(merged.into_iter().zip(assigned).map(
-                    |((filter, provenance, absorbed), sub_id)| {
-                        let covered_demands = absorbed
-                            .iter()
-                            .map(|key| DemandKey::from_filter(*key, &filter))
-                            .collect();
+                    |((filter, provenance, ownership), assignment)| {
+                        if let Some(prior_sub_id) = assignment.predecessor {
+                            replacements.insert(RequestReplacement {
+                                session: session.clone(),
+                                prior_sub_id,
+                                next_sub_id: assignment.sub_id.clone(),
+                            });
+                        }
+                        let provenance = provenance.into_iter().collect::<BTreeSet<_>>();
                         WireReq {
-                            sub_id,
+                            sub_id: assignment.sub_id,
                             filter,
                             source: source.clone(),
                             provenance,
-                            absorbed,
-                            covered_demands,
+                            coverage_claims: ownership.coverage_claims,
+                            owner_demands: ownership.owner_demands,
+                            coverage_assignments: ownership.coverage_assignments,
                         }
                     },
                 ));
@@ -676,9 +768,14 @@ impl Router {
                         self.prev_plan.reqs.get(&session),
                     );
                     for req in &refused {
-                        limited.extend(req.absorbed.iter().copied());
-                        limited_demands.extend(req.covered_demands.iter().copied());
+                        limited_demands.extend(req.owner_demands.iter().copied());
                     }
+                    budget_refused_requests.extend(
+                        refused
+                            .iter()
+                            .cloned()
+                            .map(|request| (session.clone(), request)),
+                    );
                     subscription_shortfalls.insert(
                         session.clone(),
                         BudgetShortfall {
@@ -703,6 +800,54 @@ impl Router {
         }
         self.next_token = mint_counter;
 
+        let selected_assignments: BTreeMap<_, BTreeSet<_>> = reqs
+            .iter()
+            .flat_map(|(session, requests)| {
+                requests.iter().flat_map(move |request| {
+                    request
+                        .coverage_assignments
+                        .iter()
+                        .map(move |assignment| (*assignment, session.clone()))
+                })
+            })
+            .fold(BTreeMap::new(), |mut indexed, (assignment, session)| {
+                indexed
+                    .entry(assignment)
+                    .or_insert_with(BTreeSet::new)
+                    .insert(session);
+                indexed
+            });
+        let refused_coverage_assignments: BTreeSet<_> = cap_refused_coverage_assignments
+            .iter()
+            .copied()
+            .chain(
+                budget_refused_requests
+                    .iter()
+                    .flat_map(|(_, request)| request.coverage_assignments.iter().copied()),
+            )
+            .collect();
+        for (demand, authors) in &outbox_authors_by_demand {
+            let intrinsic = uncovered_by_demand.remove(demand).unwrap_or_default();
+            let exact: BTreeMap<_, _> = authors
+                .iter()
+                .filter_map(|author| {
+                    let assignment = (*demand, *author);
+                    let achieved = selected_assignments
+                        .get(&assignment)
+                        .map_or(0, BTreeSet::len);
+                    reduce_outbox_shortfall(
+                        intrinsic.get(author).copied(),
+                        achieved,
+                        refused_coverage_assignments.contains(&assignment),
+                    )
+                    .map(|fact| (*author, fact))
+                })
+                .collect();
+            if !exact.is_empty() {
+                uncovered_by_demand.insert(*demand, exact);
+            }
+        }
+
         // The invariant the whole change exists to establish, checked in
         // RELEASE builds too (a `debug_assert!` compiles out of exactly the
         // builds that ship). Under allocation it can never fire -- each prior
@@ -722,26 +867,170 @@ impl Router {
             }
         }
 
-        let next_plan = RelayPlan {
+        let mut next_plan = RelayPlan {
             reqs,
-            limited,
             limited_demands,
             refused_sessions,
             subscription_shortfalls,
         };
 
-        // Step 7: diff vs previous plan.
+        // Physical diffing depends only on session, SubId, and filter. Do it
+        // before moving incumbent metadata into the next immutable request.
         let delta = diff_plans(&self.prev_plan, &next_plan);
-
-        self.last_diag = diag::build(
-            &next_plan,
-            &budget,
-            uncovered_authors,
-            self.rules.dropped_rules().to_vec(),
+        self.reconcile_active_demands(
+            demand
+                .iter()
+                .cloned()
+                .map(|atom| (DemandKey::for_atom(&atom), atom))
+                .collect(),
         );
+
+        // A byte-identical physical request is not rewritten merely because
+        // local owner or claim metadata changed. Preserve its already-sent
+        // metadata monotonically and report only new execution/claim owners
+        // to Core, including when the wire delta is empty. Consume the prior
+        // plan so large metadata sets move instead of being deep-cloned.
+        let mut previous_plan = std::mem::take(&mut self.prev_plan);
+        let mut exact_positions: BTreeMap<_, Vec<(usize, usize)>> = BTreeMap::new();
+        for (session, requests) in &next_plan.reqs {
+            for (next_position, request) in requests.iter().enumerate() {
+                let request_key = (session.clone(), request.sub_id.clone());
+                let Some(previous_position) = self.request_position_by_key.get(&request_key) else {
+                    continue;
+                };
+                self.full_metadata_work.requests_probed =
+                    self.full_metadata_work.requests_probed.saturating_add(1);
+                exact_positions
+                    .entry(session.clone())
+                    .or_default()
+                    .push((*previous_position, next_position));
+            }
+        }
+        let mut request_metadata_updates = Vec::new();
+        let mut unchanged_request_keys = BTreeSet::new();
+        let mut retired_requests = Vec::new();
+        for (session, mut positions) in exact_positions {
+            positions.sort_by_key(|position| Reverse(position.0));
+            let previous_requests = previous_plan
+                .reqs
+                .get_mut(&session)
+                .expect("the exact position index names an incumbent session");
+            let next_requests = next_plan
+                .reqs
+                .get_mut(&session)
+                .expect("positions were collected from the next plan");
+            for (previous_position, next_position) in positions {
+                let previous = previous_requests.swap_remove(previous_position);
+                let request = &mut next_requests[next_position];
+                if previous.source != request.source || previous.filter != request.filter {
+                    retired_requests.push((session.clone(), previous));
+                    continue;
+                }
+                let candidate = std::mem::replace(request, previous);
+                let request_key = (session.clone(), request.sub_id.clone());
+                unchanged_request_keys.insert(request_key.clone());
+                let candidate_contributions: Vec<_> = candidate
+                    .owner_demands
+                    .iter()
+                    .filter_map(|demand| {
+                        self.active_demands.get(demand).map(|atom| {
+                            (
+                                *demand,
+                                Self::derive_request_owner_contribution(atom, &candidate),
+                            )
+                        })
+                    })
+                    .collect();
+                self.full_metadata_work.candidate_entries_examined = self
+                    .full_metadata_work
+                    .candidate_entries_examined
+                    .saturating_add(
+                        (candidate.coverage_claims.len()
+                            + candidate.owner_demands.len()
+                            + candidate.coverage_assignments.len()
+                            + candidate.provenance.len()) as u64,
+                    );
+                let mut added_coverage_claims = BTreeSet::new();
+                for claim in candidate.coverage_claims {
+                    if request.coverage_claims.insert(claim) {
+                        added_coverage_claims.insert(claim);
+                    }
+                }
+                let mut added_owner_demands = BTreeSet::new();
+                for demand in candidate.owner_demands {
+                    if request.owner_demands.insert(demand) {
+                        added_owner_demands.insert(demand);
+                    }
+                }
+                let mut added_assignments = BTreeSet::new();
+                for assignment in candidate.coverage_assignments {
+                    if request.coverage_assignments.insert(assignment) {
+                        added_assignments.insert(assignment);
+                    }
+                }
+                let mut added_provenance = BTreeSet::new();
+                for provenance in candidate.provenance {
+                    if request.provenance.insert(provenance.clone()) {
+                        added_provenance.insert(provenance);
+                    }
+                }
+                self.add_full_request_metadata_indexes(
+                    &request_key,
+                    &added_owner_demands,
+                    &added_assignments,
+                    &added_provenance,
+                );
+                for (demand, contribution) in candidate_contributions {
+                    self.add_request_owner_contribution(&request_key, demand, contribution);
+                }
+                if !added_coverage_claims.is_empty() || !added_owner_demands.is_empty() {
+                    request_metadata_updates.push(RequestMetadataUpdate {
+                        session: session.clone(),
+                        sub_id: request.sub_id.clone(),
+                        filter_hash: request.filter.hash(),
+                        added_coverage_claims,
+                        added_owner_demands,
+                    });
+                }
+            }
+        }
+
+        retired_requests.extend(
+            previous_plan
+                .reqs
+                .into_iter()
+                .flat_map(|(session, requests)| {
+                    requests
+                        .into_iter()
+                        .map(move |request| (session.clone(), request))
+                }),
+        );
+        for (session, request) in retired_requests {
+            self.remove_full_request_indexes(&session, &request);
+        }
+        for (session, requests) in &next_plan.reqs {
+            for request in requests {
+                let request_key = (session.clone(), request.sub_id.clone());
+                if !unchanged_request_keys.contains(&request_key) {
+                    self.add_full_request_indexes(session, request);
+                }
+            }
+        }
+
         self.prev_plan = next_plan;
-        self.rebuild_active_indexes(demand.iter().cloned());
-        delta
+        self.rebuild_request_positions();
+        self.project_full_diagnostics(&budget, self.rules.dropped_rules().to_vec());
+        self.install_uncovered_ownership(uncovered_by_demand);
+        self.rebuild_refusal_indexes(
+            cap_refused_demands,
+            cap_refused_coverage_assignments,
+            budget_refused_requests,
+        );
+        CompileOutcome {
+            wire: delta,
+            request_metadata_updates,
+            replacements,
+        }
     }
 
     pub fn diagnostics(&self) -> &Diagnostics {

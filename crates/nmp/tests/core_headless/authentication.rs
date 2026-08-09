@@ -47,8 +47,8 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
                 |effect| matches!(effect, Effect::EnsureReadRelay(candidate) if candidate == &session)
             )
             .count(),
-        1,
-        "a demand recompile still names the existing protected worker once"
+        0,
+        "a demand recompile must not reacquire an already connected protected worker"
     );
     assert_no_protected_req(&second, &session);
 
@@ -60,8 +60,8 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
                 |effect| matches!(effect, Effect::EnsureReadRelay(candidate) if candidate == &session)
             )
             .count(),
-        1,
-        "the parked plan retains the exact current protected session"
+        0,
+        "shrinking the parked plan retains the connected protected worker without reacquiring it"
     );
     assert_no_protected_req(&newest_only, &session);
 

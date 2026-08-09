@@ -2,11 +2,11 @@
 //! subscription token a newly-compiled filter CONTINUES (#899).
 //!
 //! Wire ids are allocated opaque tokens, not functions of the filter (see
-//! [`crate::plan::SubId::allocate`]). Every compile therefore has to decide,
-//! for each filter the coalescer produced, whether it is the continuation of
-//! a filter the previous plan already held — in which case it inherits that
-//! filter's token and the relay sees ONE overwriting REQ — or something new,
-//! in which case a fresh token is minted.
+//! [`crate::plan::SubId::allocate`]). Every byte-identical filter keeps its
+//! token. Every byte-changed filter receives a fresh token; structural
+//! matching identifies only the predecessor that Core must retire after the
+//! fresh request is locally accepted (#774). It never authorizes an in-place
+//! overwrite.
 //!
 //! THE MATCHING KEY is the per-component structural signature defined by
 //! [`crate::component`] — `since | until | kinds | authors | ids | one
@@ -14,7 +14,7 @@
 //! [`crate::coalesce`] on purpose; see its doc for why one definition rather
 //! than two.
 //!
-//! A new filter continues the prior it differs from in EXACTLY ONE component.
+//! A new filter replaces the prior it differs from in EXACTLY ONE component.
 //! One property of that rule is local to this module and load-bearing:
 //! **zero-diff ranks first.** An unchanged filter must match ITSELF before
 //! any one-diff candidate is considered, or a no-op recompile would churn the
@@ -105,9 +105,9 @@ pub(crate) fn assign(
     priors: &[(ConcreteFilter, SubId)],
     next: &[ConcreteFilter],
     mut mint: impl FnMut() -> SubId,
-) -> Vec<SubId> {
+) -> Vec<Assignment> {
     let mut taken = vec![false; priors.len()];
-    let mut out: Vec<Option<SubId>> = vec![None; next.len()];
+    let mut out: Vec<Option<Assignment>> = vec![None; next.len()];
 
     // Canonical order, independent of how the coalescer happened to emit its
     // survivors, so both the matching decisions and the order in which fresh
@@ -130,7 +130,10 @@ pub(crate) fn assign(
         }
         if let Some(p) = best {
             taken[p] = true;
-            out[i] = Some(priors[p].1.clone());
+            out[i] = Some(Assignment {
+                sub_id: priors[p].1.clone(),
+                predecessor: None,
+            });
         }
     }
 
@@ -156,7 +159,10 @@ pub(crate) fn assign(
         }
         if let Some((p, _)) = best {
             taken[p] = true;
-            out[i] = Some(priors[p].1.clone());
+            out[i] = Some(Assignment {
+                sub_id: mint(),
+                predecessor: Some(priors[p].1.clone()),
+            });
         }
     }
 
@@ -165,13 +171,22 @@ pub(crate) fn assign(
     // reproducible too.
     for &i in &order {
         if out[i].is_none() {
-            out[i] = Some(mint());
+            out[i] = Some(Assignment {
+                sub_id: mint(),
+                predecessor: None,
+            });
         }
     }
 
     out.into_iter()
-        .map(|sub| sub.expect("every filter is matched or minted by phase 3"))
+        .map(|assignment| assignment.expect("every filter is matched or minted by phase 3"))
         .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Assignment {
+    pub(crate) sub_id: SubId,
+    pub(crate) predecessor: Option<SubId>,
 }
 
 #[cfg(test)]
@@ -208,7 +223,8 @@ mod tests {
 
         let priors = vec![(other, token(0)), (unchanged.clone(), token(1))];
         let assigned = assign(&priors, &[unchanged], || panic!("must not mint"));
-        assert_eq!(assigned, vec![token(1)]);
+        assert_eq!(assigned[0].sub_id, token(1));
+        assert_eq!(assigned[0].predecessor, None);
     }
 
     /// Each prior token is assigned to at MOST one new filter -- injectivity
@@ -227,13 +243,19 @@ mod tests {
             token(next_token)
         });
         assert_eq!(
-            assigned.iter().collect::<BTreeSet<_>>().len(),
+            assigned
+                .iter()
+                .map(|assignment| &assignment.sub_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
             2,
             "one prior cannot serve two new filters"
         );
         assert!(
-            assigned.contains(&token(0)),
-            "one of them continues the prior"
+            assigned
+                .iter()
+                .any(|assignment| assignment.predecessor.as_ref() == Some(&token(0))),
+            "one fresh request is paired with the prior transition"
         );
     }
 
@@ -253,8 +275,13 @@ mod tests {
         ]));
 
         let priors = vec![(shares_none, token(0)), (shares_two, token(1))];
-        let assigned = assign(&priors, &[new], || panic!("a one-diff candidate exists"));
-        assert_eq!(assigned, vec![token(1)], "the overlapping prior wins");
+        let assigned = assign(&priors, &[new], || token(99));
+        assert_eq!(assigned[0].sub_id, token(99));
+        assert_eq!(
+            assigned[0].predecessor,
+            Some(token(1)),
+            "the overlapping prior wins"
+        );
     }
 
     /// A scalar has no overlap metric, so the tiebreak is nearest value.
@@ -265,8 +292,13 @@ mod tests {
             ..cf()
         };
         let priors = vec![(windowed(10), token(0)), (windowed(1_000), token(1))];
-        let assigned = assign(&priors, &[windowed(1_001)], || panic!("candidates exist"));
-        assert_eq!(assigned, vec![token(1)], "1001 is nearest 1000, not 10");
+        let assigned = assign(&priors, &[windowed(1_001)], || token(99));
+        assert_eq!(assigned[0].sub_id, token(99));
+        assert_eq!(
+            assigned[0].predecessor,
+            Some(token(1)),
+            "1001 is nearest 1000, not 10"
+        );
     }
 
     /// A two-component move is not a continuation -- it mints.
@@ -278,6 +310,7 @@ mod tests {
 
         let priors = vec![(cf(), token(0))];
         let assigned = assign(&priors, &[moved], || token(99));
-        assert_eq!(assigned, vec![token(99)]);
+        assert_eq!(assigned[0].sub_id, token(99));
+        assert_eq!(assigned[0].predecessor, None);
     }
 }

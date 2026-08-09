@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
-    Nip77Frame, ObservationFact, ObservationId, PublishError, ReceiptId, RequestTerminal, RowDelta,
-    ShortfallFact, SourceEvidence, SourceStatus,
+    LocalSendRefusal, Nip77Frame, ObservationFact, ObservationId, PublishError, ReceiptId,
+    RequestAttemptId, RequestHandoffOutcome, RequestTerminal, RowDelta, ShortfallFact,
+    SourceEvidence, SourceStatus,
 };
 use nmp::mechanism::publish_queue::{
     NotSentReason, RelayState, RelayWaiting, RetryCause, SigningState, WriteFact, WriteOutcome,

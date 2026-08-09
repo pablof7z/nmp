@@ -151,14 +151,14 @@ impl SubId {
 /// A single wire request: the (possibly coalesced/widened) filter plus why
 /// it exists.
 ///
-/// `absorbed` (coverage-attribution ruling
+/// `coverage_claims` (coverage-attribution ruling
 /// `docs/design/query-demand-and-evidence.md`) is every
 /// narrow demand atom's window-erased [`CoverageKey`] this (possibly
 /// coalesced) wire filter supersets — populated at materialization (one key
 /// per pre-coalesce atom entry) and concatenated through every
 /// `coalesce_with` merge exactly as `provenance` already is. Because every
 /// merge in this crate is widen-only-proven (`coalesce.rs`), `wide ⊇ atom`
-/// holds for every key in `absorbed` BY CONSTRUCTION at the moment of
+/// holds for every key in `coverage_claims` BY CONSTRUCTION at the moment of
 /// materialization — this is the containment rule the ruling requires,
 /// discharged once, here, never re-derived at read time by subset-testing
 /// filters (banned by the ruling).
@@ -173,13 +173,21 @@ pub struct WireReq {
     /// `Public`-sourced filter must never inherit an `AuthorOutboxes`-sourced
     /// filter's token, which is the wire-side half of the #106 anti-alias.
     pub source: SourceAuthority,
-    pub provenance: Vec<RouteProvenance>,
-    pub absorbed: BTreeSet<CoverageKey>,
-    /// Exact demand identities this immutable physical request covers.
-    /// Unlike `absorbed`, these retain the request window/count. They never
-    /// shrink: current active ownership lives in the router's incremental
-    /// reverse index, separately from this admission-time coverage proof.
-    pub covered_demands: BTreeSet<DemandKey>,
+    pub provenance: BTreeSet<RouteProvenance>,
+    /// Exact durable coverage-claim keys carried independently of the
+    /// synthetic/coalesced wire filter. Core registers each normalized shape
+    /// once through `nmp_store::coverage_claim_atoms`; requests retain only
+    /// the compact immutable keys.
+    pub coverage_claims: BTreeSet<CoverageKey>,
+    /// Exact current local demand identities attached to this immutable
+    /// physical request. Unlike coverage claims, these retain the request
+    /// window/count. Local metadata may shrink on an exact owner 1->0 while
+    /// the sent filter/subscription id remain byte-identical.
+    pub owner_demands: BTreeSet<DemandKey>,
+    /// Exact k-of-n assignments this request actually serves. Supplemental
+    /// app/fallback lanes own request lifecycle but never count as an author
+    /// outbox coverage assignment.
+    pub coverage_assignments: BTreeSet<(DemandKey, crate::facts::PublicKey)>,
 }
 
 /// One session's per-relay subscription-budget shortfall (#931): what the
@@ -194,8 +202,8 @@ pub struct BudgetShortfall {
     pub budget: usize,
     /// Subscriptions this compile would have opened without the budget.
     pub planned: usize,
-    /// `planned - budget`: subscriptions removed, every one of them also
-    /// reported through `RelayPlan::limited`.
+    /// `planned - budget`: subscriptions removed, with their exact logical
+    /// owners reported through [`RelayPlan::limited_demands`].
     pub refused: usize,
 }
 
@@ -203,19 +211,10 @@ pub struct BudgetShortfall {
 #[derive(Clone, Default, Debug)]
 pub struct RelayPlan {
     pub reqs: BTreeMap<RelaySessionKey, Vec<WireReq>>,
-    /// Narrow demand atoms for which a local bound removed at least one
-    /// otherwise-routable source — the whole-demand relay ceiling, or a
-    /// relay's own advertised concurrent-subscription budget (#931). Kept as
-    /// coverage keys so the engine can join the fact back to the exact
-    /// contextual atom without weakening descriptor identity.
-    ///
-    /// This is the seam that makes a bound budget impossible to mistake for
-    /// a complete acquisition: `plan_is_fresh_for` refuses to call a limited
-    /// atom fresh, and `acquisition_evidence` reports it to the app as
-    /// `ShortfallFact::LocalLimit`.
-    pub limited: BTreeSet<CoverageKey>,
-    /// Exact limited demand identities. `limited` remains the window-erased
-    /// evidence projection; admission retries and lifecycle use this set.
+    /// Exact demand identities for which a local bound removed at least one
+    /// otherwise-routable source. Window/count boundaries remain part of the
+    /// key so one limited demand can never contaminate a sibling sharing its
+    /// durable coverage shape.
     pub limited_demands: BTreeSet<DemandKey>,
     /// Distinct relay candidates refused ENTIRELY — by the whole-demand
     /// ceiling, or by a relay advertising zero concurrent subscriptions.
@@ -232,8 +231,10 @@ pub struct RelayPlan {
     pub subscription_shortfalls: BTreeMap<RelaySessionKey, BudgetShortfall>,
 }
 
-/// A single wire operation. `Req` is open-or-replace (same sub-id
-/// overwrites); `Close` withdraws a sub-id.
+/// A single wire operation. `Req` opens the named subscription; Router-planned
+/// byte changes use a fresh id and a typed replacement transition, while only
+/// exact zero-diff retains an existing id. `Close` withdraws a sub-id after
+/// the owning transition reaches its commit edge.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum WireOp {
     Req(SubId, ConcreteFilter),
@@ -241,8 +242,10 @@ pub enum WireOp {
 }
 
 /// Surgical per-relay deltas — the M1 atom-diffing discipline lifted to the
-/// wire layer. INVARIANT (mirrors `DemandDelta`): within each relay's op
-/// list, all `Close` ops precede all `Req` ops.
+/// wire layer. Raw canonical deltas list `Close` before `Req`; a
+/// [`crate::CompileOutcome`] separately names byte-changing replacement pairs
+/// so EngineCore withholds each predecessor close until its fresh-id successor
+/// reaches the exact commit edge.
 #[derive(Clone, Default, Debug)]
 pub struct WireDelta {
     pub ops: Vec<(RelaySessionKey, Vec<WireOp>)>,
@@ -250,9 +253,11 @@ pub struct WireDelta {
 
 /// Diff `next` against `prev`. Unchanged (relay, skeleton) subs whose
 /// filter is byte-identical emit NOTHING (the relay does not appear in the
-/// output at all); a changed filter on an existing sub emits one
-/// `Req(sub_id, new)`; a vanished sub emits `Close(sub_id)`; a new sub
-/// emits `Req(sub_id, filter)`.
+/// output at all). A changed filter puts a predecessor `Close` plus fresh-id
+/// successor `Req` in this raw delta; [`crate::CompileOutcome`] names that pair
+/// so EngineCore offers the successor first and defers the close until exact
+/// acceptance. A vanished sub emits `Close(sub_id)` and a new sub emits
+/// `Req(sub_id, filter)`.
 pub fn diff_plans(prev: &RelayPlan, next: &RelayPlan) -> WireDelta {
     let sessions: BTreeSet<&RelaySessionKey> = prev.reqs.keys().chain(next.reqs.keys()).collect();
     let mut ops = Vec::new();
@@ -330,9 +335,10 @@ mod tests {
             sub_id,
             filter,
             source: SourceAuthority::AuthorOutboxes,
-            provenance: Vec::new(),
-            absorbed: BTreeSet::new(),
-            covered_demands: BTreeSet::new(),
+            provenance: BTreeSet::new(),
+            coverage_claims: BTreeSet::new(),
+            owner_demands: BTreeSet::new(),
+            coverage_assignments: BTreeSet::new(),
         };
         RelayPlan {
             reqs: BTreeMap::from([(RelaySessionKey::public(relay), vec![req])]),
@@ -392,9 +398,10 @@ mod tests {
                 ),
                 filter: cf(1, &["bb", "cc"]),
                 source: SourceAuthority::AuthorOutboxes,
-                provenance: Vec::new(),
-                absorbed: BTreeSet::new(),
-                covered_demands: BTreeSet::new(),
+                provenance: BTreeSet::new(),
+                coverage_claims: BTreeSet::new(),
+                owner_demands: BTreeSet::new(),
+                coverage_assignments: BTreeSet::new(),
             }],
         );
 

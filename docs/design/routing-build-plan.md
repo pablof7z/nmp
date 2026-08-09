@@ -108,8 +108,9 @@ Cited so builders extend, never re-plan, what exists. All paths under
 - `Router::compile` `crates/nmp-router/src/router.rs:44` — full-recompile-then-
   diff; `k: 2` is hardcoded at `router.rs:81`, `cap` is a compile param.
   Widen-only coalescing via `RuleRegistry` (`coalesce.rs`, `default_widen_only`,
-  `register`, `coalesce`); skeleton-stable `SubId` `plan.rs:18`; surgical
-  `diff_plans` `plan.rs:82`.
+  `register`, `coalesce`); opaque allocated `SubId` with exact-zero-diff
+  retention and fresh accepted-open-before-close successors for byte changes;
+  surgical `diff_plans` `plan.rs:82`.
 - Read-side typed provenance `route.rs:17` `RouteProvenance{relay, lane,
   covers_authors, route_kind: OutboxSolved|Pinned}`.
 - Write outbox `crates/nmp-engine/src/outbox/mod.rs` — `WriteIntent`,
@@ -270,8 +271,9 @@ router property test against narrowed candidates):**
   unchanged — a relay that is both an author write relay and an indexer keeps
   both roles.
 - A2 two-wave reactive flow (`routing-and-ownership.md §2.6`) still holds:
-  kind:0 routes to indexers+appRelay wave 1, then to uX's own relays wave 2
-  with skeleton-stable overwriting REQ.
+  kind:0 routes to indexers+appRelay wave 1, then to uX's own relays wave 2;
+  changed wire bytes use a fresh successor id and retire the predecessor only
+  after the exact accepted handoff.
 
 **Dependencies:** A (needs `app_relays`/`fallback_relays` accessors + lanes).
 

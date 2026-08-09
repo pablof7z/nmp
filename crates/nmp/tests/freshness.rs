@@ -574,7 +574,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
         Some(Timestamp::from(99_000u64)),
         "the nested source exposes only its own fresh durable watermark"
     );
-    assert_eq!(inner_evidence.status, SourceStatus::Connecting);
+    assert_eq!(inner_evidence.status, SourceStatus::CoverageSatisfied);
     let outer_evidence = fresh_evidence[0]
         .sources
         .iter()
@@ -709,7 +709,10 @@ fn nested_max_age_scoped_coverage_survives_redb_restart() {
         Some(Timestamp::from(99_000u64)),
         "the reopened snapshot retains the nested durable watermark"
     );
-    assert_eq!(evidence[0].sources[0].status, SourceStatus::Connecting);
+    assert_eq!(
+        evidence[0].sources[0].status,
+        SourceStatus::CoverageSatisfied
+    );
     assert_eq!(
         evidence[0].shortfall,
         vec![ShortfallFact::NoPlannedSource {

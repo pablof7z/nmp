@@ -1,12 +1,15 @@
 use nmp_grammar::{AccessContext, ConcreteFilter, DescriptorHash, IdentityField, RelaySessionKey};
 use nmp_resolver::{HandleId, ResolutionNodeKind, ResolvedValue};
 use nmp_router::SubId;
-use nmp_store::{coverage_key, EventStore};
+use nmp_store::{CoverageInterval, EventStore};
 use nmp_transport::RelayHandle as TransportRelayHandle;
 use nostr::{RelayUrl, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{AttributionSendId, Effect, EngineCore, EventFailureTarget};
+use super::{
+    AttributionSendId, Effect, EngineCore, LocalSendRefusal, RequestAttemptId,
+    RequestAttemptPurpose, RequestAttemptState, RequestHandoffOutcome, RequestSend,
+};
 
 /// Ordered execution evidence for one live observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,14 +106,14 @@ pub enum ObservationFact {
         request_revision: Option<u64>,
         reason: String,
     },
-    RelayRefused {
+    RequestDeferred {
         path: String,
         filter_revision: u64,
         relay: RelayUrl,
         access: AccessContext,
-        transport_generation: Option<u64>,
         request_revision: u64,
-        reason: String,
+        retry_at: Timestamp,
+        cause: LocalSendRefusal,
     },
     Withdrawn,
     /// The bounded delivery mailbox discarded an exact contiguous sequence
@@ -150,11 +153,12 @@ pub(super) struct ObservationExecutionState {
 
 #[derive(Debug, Clone)]
 pub(super) struct PendingRequestEvidence {
+    pub(super) attempt_id: RequestAttemptId,
     pub(super) request_revision: u64,
     pub(super) session: RelaySessionKey,
     pub(super) sub_id: SubId,
     pub(super) filter: ConcreteFilter,
-    pub(super) targets: Vec<(HandleId, String, u64)>,
+    pub(super) owner_demands: BTreeSet<nmp_router::DemandKey>,
     pub(super) replay: bool,
 }
 
@@ -163,7 +167,7 @@ pub(super) struct ActiveRequestEvidence {
     pub(super) request_revision: u64,
     pub(super) session: RelaySessionKey,
     pub(super) sub_id: SubId,
-    pub(super) targets: Vec<(HandleId, String, u64)>,
+    pub(super) owner_demands: BTreeSet<nmp_router::DemandKey>,
     pub(super) handle: TransportRelayHandle,
 }
 
@@ -179,6 +183,10 @@ pub(super) struct ActiveRequestEvidence {
 #[derive(Debug, Clone)]
 pub(super) struct LiveWireRequest {
     pub(super) filter: ConcreteFilter,
+    /// Router-plan identity used only by acquisition evidence. NIP-77 roles
+    /// keep their distinct physical `SubId` in the map key and every wire
+    /// owner while projecting the semantic request they execute here.
+    pub(super) evidence_sub_id: SubId,
     pub(super) handle: TransportRelayHandle,
     pub(super) stored_events: StoredEvents,
 }
@@ -195,31 +203,14 @@ pub(super) struct LiveWireRequest {
 /// alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StoredEvents {
-    Streaming { request_revision: u64 },
-    Finished,
-}
-
-impl ObservationExecutionState {
-    pub(super) fn request_targets(
-        &self,
-        absorbed: &std::collections::BTreeSet<nmp_store::CoverageKey>,
-    ) -> Vec<(String, u64)> {
-        self.nodes
-            .iter()
-            .filter_map(|(path, node)| {
-                let RememberedResolution::Filter {
-                    revision, atoms, ..
-                } = node
-                else {
-                    return None;
-                };
-                atoms
-                    .iter()
-                    .any(|atom| absorbed.contains(&coverage_key(atom)))
-                    .then(|| (path.clone(), *revision))
-            })
-            .collect()
-    }
+    Streaming {
+        request_revision: u64,
+        committed_interval: Option<CoverageInterval>,
+    },
+    Finished {
+        request_revision: u64,
+        committed_interval: Option<CoverageInterval>,
+    },
 }
 
 fn resolved_values(values: Vec<ResolvedValue>) -> Vec<ResolvedBindingValue> {
@@ -277,45 +268,160 @@ fn filter_fingerprint(filters: &[ConcreteFilter]) -> String {
 impl<S: EventStore> EngineCore<S> {
     pub(super) fn record_observed_request(
         &mut self,
-        session: &RelaySessionKey,
-        sub_id: &SubId,
-        filter: &ConcreteFilter,
-        absorbed: BTreeSet<nmp_store::CoverageKey>,
-        replay: bool,
-        event_failure_target: EventFailureTarget,
+        request: RequestSend<'_>,
     ) -> AttributionSendId {
+        self.record_observed_request_with_purpose(request, RequestAttemptPurpose::Ordinary)
+            .0
+    }
+
+    pub(super) fn record_observed_request_with_purpose(
+        &mut self,
+        request: RequestSend<'_>,
+        purpose: RequestAttemptPurpose,
+    ) -> (AttributionSendId, RequestAttemptId) {
         // Every outgoing REQ this engine ever places -- planned, replayed,
         // NIP-77 live candidate, backlog and backfill alike -- passes through
         let send = self.attribution.record_send(
-            session,
-            sub_id,
-            filter,
-            absorbed.clone(),
-            event_failure_target,
+            request.session,
+            request.sub_id,
+            request.filter,
+            request.coverage_claims.clone(),
+            request.event_failure_target,
         );
-        let targets = self
-            .handles
-            .iter()
-            .flat_map(|(id, state)| {
-                state
-                    .execution
-                    .request_targets(&absorbed)
-                    .into_iter()
-                    .map(|(path, revision)| (*id, path, revision))
-            })
-            .collect();
+        let attempt_id = self.mint_request_attempt(RequestAttemptState {
+            session: request.session.clone(),
+            sub_id: request.sub_id.clone(),
+            filter_hash: request.filter.hash(),
+            filter: request.filter.clone(),
+            coverage_claims: request.coverage_claims,
+            owner_demands: request.owner_demands.clone(),
+            replay: request.replay,
+            event_failure_target: request.event_failure_target,
+            request_revision: Some(send.revision()),
+            retry_failures: 0,
+            purpose,
+        });
         self.pending_request_evidence
-            .entry((session.clone(), sub_id.clone()))
+            .entry((request.session.clone(), request.sub_id.clone()))
             .or_default()
             .push_back(PendingRequestEvidence {
+                attempt_id,
                 request_revision: send.revision(),
-                session: session.clone(),
-                sub_id: sub_id.clone(),
-                filter: filter.clone(),
-                targets,
-                replay,
+                session: request.session.clone(),
+                sub_id: request.sub_id.clone(),
+                filter: request.filter.clone(),
+                owner_demands: request.owner_demands,
+                replay: request.replay,
             });
-        send
+        (send, attempt_id)
+    }
+
+    /// Attach exact logical owners to the current byte-identical request
+    /// generation without replaying a historical request fact.
+    pub(super) fn extend_current_request_owner_demands(
+        &mut self,
+        session: &RelaySessionKey,
+        sub_id: &SubId,
+        filter_hash: DescriptorHash,
+        owner_demands: &BTreeSet<nmp_router::DemandKey>,
+    ) {
+        let key = (session.clone(), sub_id.clone());
+        if let Some(current) = self
+            .pending_request_evidence
+            .get_mut(&key)
+            .and_then(|queue| queue.back_mut())
+            .filter(|request| request.filter.hash() == filter_hash)
+        {
+            current.owner_demands.extend(owner_demands.iter().copied());
+        }
+
+        let current_revision = self.live_wire_requests.get(&key).and_then(|request| {
+            (request.filter.hash() == filter_hash)
+                .then_some(request.stored_events)
+                .and_then(|stored_events| match stored_events {
+                    StoredEvents::Streaming {
+                        request_revision, ..
+                    } => Some(request_revision),
+                    StoredEvents::Finished { .. } => None,
+                })
+        });
+        if let Some(request) =
+            current_revision.and_then(|revision| self.active_request_evidence.get_mut(&revision))
+        {
+            request.owner_demands.extend(owner_demands.iter().copied());
+        }
+    }
+
+    /// Detach exact local execution owners from the current pending or
+    /// accepted generation without changing its wire filter or subscription
+    /// id. Attribution prunes the matching current claim membership in the
+    /// same metadata-removal transition.
+    pub(super) fn remove_current_request_owner_demands(
+        &mut self,
+        session: &RelaySessionKey,
+        sub_id: &SubId,
+        filter_hash: DescriptorHash,
+        owner_demands: &BTreeSet<nmp_router::DemandKey>,
+    ) {
+        let key = (session.clone(), sub_id.clone());
+        if let Some(current) = self
+            .pending_request_evidence
+            .get_mut(&key)
+            .and_then(|queue| queue.back_mut())
+            .filter(|request| request.filter.hash() == filter_hash)
+        {
+            current
+                .owner_demands
+                .retain(|demand| !owner_demands.contains(demand));
+        }
+
+        let current_revision = self.live_wire_requests.get(&key).and_then(|request| {
+            (request.filter.hash() == filter_hash)
+                .then_some(request.stored_events)
+                .and_then(|stored_events| match stored_events {
+                    StoredEvents::Streaming {
+                        request_revision, ..
+                    } => Some(request_revision),
+                    StoredEvents::Finished { .. } => None,
+                })
+        });
+        if let Some(request) =
+            current_revision.and_then(|revision| self.active_request_evidence.get_mut(&revision))
+        {
+            request
+                .owner_demands
+                .retain(|demand| !owner_demands.contains(demand));
+        }
+    }
+
+    fn current_request_targets(
+        &self,
+        owner_demands: &BTreeSet<nmp_router::DemandKey>,
+    ) -> Vec<(HandleId, String, u64)> {
+        let mut targets = BTreeSet::new();
+        for demand in owner_demands {
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.request_target_demand_keys_touched.set(
+                self.request_target_demand_keys_touched
+                    .get()
+                    .saturating_add(1),
+            );
+            let Some(indexed) = self.request_targets_by_demand.get(demand) else {
+                continue;
+            };
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            self.request_target_candidates_examined.set(
+                self.request_target_candidates_examined
+                    .get()
+                    .saturating_add(indexed.len() as u64),
+            );
+            targets.extend(
+                indexed
+                    .keys()
+                    .map(|target| (target.handle, target.path.clone(), target.revision)),
+            );
+        }
+        targets.into_iter().collect()
     }
 
     /// Runtime/mechanism acknowledgement for one attempted REQ handoff.
@@ -323,35 +429,56 @@ impl<S: EventStore> EngineCore<S> {
     /// Public only through the doc-hidden mechanism surface so headless
     /// reducer falsifiers can drive the same acceptance edge as the runtime.
     #[doc(hidden)]
-    pub fn on_wire_request_handoff(
+    pub fn on_wire_request_handoff(&mut self, outcome: RequestHandoffOutcome) -> Vec<Effect> {
+        let (mut effects, evidence_demands) = self.consume_wire_request_handoff(outcome);
+        self.refresh_evidence_for_coverage_and_demand_keys(
+            &BTreeSet::new(),
+            &evidence_demands,
+            &mut effects,
+        );
+        effects
+    }
+
+    pub(super) fn consume_wire_request_handoff(
         &mut self,
-        session: &RelaySessionKey,
-        sub_id: &SubId,
-        filter_hash: DescriptorHash,
-        handle: Option<TransportRelayHandle>,
-        accepted: bool,
-        reason: Option<String>,
-    ) -> Vec<Effect> {
-        let key = (session.clone(), sub_id.clone());
+        outcome: RequestHandoffOutcome,
+    ) -> (Vec<Effect>, BTreeSet<nmp_router::DemandKey>) {
+        let Some(attempt) = self.take_request_attempt(&outcome) else {
+            return (Vec::new(), BTreeSet::new());
+        };
+        let key = (attempt.session.clone(), attempt.sub_id.clone());
         let Some(queue) = self.pending_request_evidence.get_mut(&key) else {
-            return Vec::new();
+            return (Vec::new(), BTreeSet::new());
         };
         let Some(position) = queue
             .iter()
-            .position(|request| request.filter.hash() == filter_hash)
+            .position(|request| request.attempt_id == outcome.attempt_id())
         else {
-            return Vec::new();
+            return (Vec::new(), BTreeSet::new());
         };
         let request = queue
             .remove(position)
             .expect("position came from pending request queue");
+        let mut evidence_demands = request.owner_demands.clone();
+        if let Some(plan_sub_id) = attempt.purpose.plan_sub_id() {
+            if let Some(metadata) = self.plan_execution_metadata.get(plan_sub_id) {
+                evidence_demands.extend(metadata.owner_demands.iter().copied());
+            }
+        }
+        let evidence_sub_id = attempt.purpose.evidence_sub_id(&request.sub_id);
+        let replacement_successor = matches!(attempt.purpose, RequestAttemptPurpose::Ordinary)
+            .then(|| attempt.sub_id.clone());
+        debug_assert_eq!(attempt.filter_hash, request.filter.hash());
+        debug_assert_eq!(attempt.request_revision, Some(request.request_revision));
         if queue.is_empty() {
             self.pending_request_evidence.remove(&key);
         }
+        let targets = self.current_request_targets(&request.owner_demands);
         let mut effects = Vec::new();
-        match (accepted, handle) {
-            (true, Some(handle)) => {
-                for (id, path, filter_revision) in &request.targets {
+        match outcome {
+            RequestHandoffOutcome::Accepted { handle, .. } => {
+                self.clear_request_retry_for_attempt(&attempt);
+                for (id, path, filter_revision) in &targets {
                     self.emit_observation_fact(
                         *id,
                         ObservationFact::RelayRequest {
@@ -371,43 +498,78 @@ impl<S: EventStore> EngineCore<S> {
                     (request.session.clone(), request.sub_id.clone()),
                     LiveWireRequest {
                         filter: request.filter.clone(),
+                        evidence_sub_id,
                         handle,
                         stored_events: StoredEvents::Streaming {
                             request_revision: request.request_revision,
+                            committed_interval: None,
                         },
                     },
                 );
+                self.active_request_revisions_by_sub
+                    .entry((request.session.clone(), request.sub_id.clone()))
+                    .or_default()
+                    .insert(request.request_revision);
                 self.active_request_evidence.insert(
                     request.request_revision,
                     ActiveRequestEvidence {
                         request_revision: request.request_revision,
                         session: request.session,
                         sub_id: request.sub_id,
-                        targets: request.targets,
+                        owner_demands: request.owner_demands,
                         handle,
                     },
                 );
+                if let Some(successor) = replacement_successor {
+                    self.complete_request_replacement(&successor, &mut effects);
+                }
             }
-            (_, handle) => {
-                let reason = reason.unwrap_or_else(|| "transport refused request".to_string());
-                for (id, path, filter_revision) in request.targets {
+            RequestHandoffOutcome::Refused { cause, .. } => {
+                self.attribution
+                    .discard_send_revision(&request.sub_id, request.request_revision);
+                if !self.attribution.has_inflight(&request.sub_id)
+                    && !self.live_wire_requests.contains_key(&key)
+                {
+                    self.attribution
+                        .discard_wire_mapping(&request.session, &request.sub_id);
+                }
+                self.schedule_request_retry(attempt);
+                let retry_at = self
+                    .request_retry_by_sub
+                    .get(&request.sub_id)
+                    .and_then(|key| self.pending_request_retries.get(key))
+                    .map(|retry| retry.due)
+                    .unwrap_or(self.clock);
+                for (id, path, filter_revision) in targets {
                     self.emit_observation_fact(
                         id,
-                        ObservationFact::RelayRefused {
+                        ObservationFact::RequestDeferred {
                             path,
                             filter_revision,
                             relay: request.session.relay.clone(),
                             access: request.session.access,
-                            transport_generation: handle.map(|value| value.generation),
                             request_revision: request.request_revision,
-                            reason: reason.clone(),
+                            retry_at,
+                            cause: cause.clone(),
                         },
                         &mut effects,
                     );
                 }
             }
         }
-        effects
+        (effects, evidence_demands)
+    }
+
+    fn take_active_request_evidence(&mut self, revision: u64) -> Option<ActiveRequestEvidence> {
+        let request = self.active_request_evidence.remove(&revision)?;
+        let key = (request.session.clone(), request.sub_id.clone());
+        if let Some(revisions) = self.active_request_revisions_by_sub.get_mut(&key) {
+            revisions.remove(&revision);
+            if revisions.is_empty() {
+                self.active_request_revisions_by_sub.remove(&key);
+            }
+        }
+        Some(request)
     }
 
     pub(super) fn emit_request_settled(
@@ -416,12 +578,13 @@ impl<S: EventStore> EngineCore<S> {
         observed_at: Timestamp,
         terminal: RequestTerminal,
         effects: &mut Vec<Effect>,
-    ) {
-        let Some(request) = self.active_request_evidence.remove(&send.revision()) else {
-            return;
+    ) -> BTreeSet<nmp_router::DemandKey> {
+        let Some(request) = self.take_active_request_evidence(send.revision()) else {
+            return BTreeSet::new();
         };
+        let targets = self.current_request_targets(&request.owner_demands);
         self.finish_stored_events(&request);
-        for (id, path, filter_revision) in request.targets {
+        for (id, path, filter_revision) in targets {
             self.emit_observation_fact(
                 id,
                 ObservationFact::RequestSettled {
@@ -437,6 +600,7 @@ impl<S: EventStore> EngineCore<S> {
                 effects,
             );
         }
+        request.owner_demands
     }
 
     /// Retire an actually-finished request whose local facts-before-claims
@@ -452,11 +616,15 @@ impl<S: EventStore> EngineCore<S> {
     /// the case that separates them — it finishes without ever earning a
     /// watermark, and reporting neither fact is what left an app with only a
     /// wall clock to end a bounded read on.
-    pub(super) fn retire_request_evidence(&mut self, send: AttributionSendId) {
-        let Some(request) = self.active_request_evidence.remove(&send.revision()) else {
-            return;
+    pub(super) fn retire_request_evidence(
+        &mut self,
+        send: AttributionSendId,
+    ) -> BTreeSet<nmp_router::DemandKey> {
+        let Some(request) = self.take_active_request_evidence(send.revision()) else {
+            return BTreeSet::new();
         };
         self.finish_stored_events(&request);
+        request.owner_demands
     }
 
     /// End the stored-events phase of the wire request `request` speaks for,
@@ -470,12 +638,17 @@ impl<S: EventStore> EngineCore<S> {
         else {
             return;
         };
-        if live.stored_events
-            == (StoredEvents::Streaming {
-                request_revision: request.request_revision,
-            })
+        if let StoredEvents::Streaming {
+            request_revision,
+            committed_interval,
+        } = live.stored_events
         {
-            live.stored_events = StoredEvents::Finished;
+            if request_revision == request.request_revision {
+                live.stored_events = StoredEvents::Finished {
+                    request_revision,
+                    committed_interval,
+                };
+            }
         }
     }
 
@@ -484,8 +657,33 @@ impl<S: EventStore> EngineCore<S> {
     pub(super) fn finished_stored_events(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
         self.live_wire_requests
             .iter()
-            .filter(|(_, live)| live.stored_events == StoredEvents::Finished)
-            .map(|(key, _)| key.clone())
+            .filter(|(_, live)| matches!(live.stored_events, StoredEvents::Finished { .. }))
+            .map(|((session, _), live)| (session.clone(), live.evidence_sub_id.clone()))
+            .collect()
+    }
+
+    pub(super) fn placed_request_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
+        self.live_wire_requests
+            .iter()
+            .map(|((session, _), live)| (session.clone(), live.evidence_sub_id.clone()))
+            .collect()
+    }
+
+    pub(super) fn awaiting_request_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
+        self.request_attempts
+            .values()
+            .map(|attempt| {
+                (
+                    attempt.session.clone(),
+                    attempt.purpose.evidence_sub_id(&attempt.sub_id),
+                )
+            })
+            .chain(self.pending_request_retries.values().map(|retry| {
+                (
+                    retry.attempt.session.clone(),
+                    retry.attempt.purpose.evidence_sub_id(&retry.attempt.sub_id),
+                )
+            }))
             .collect()
     }
 
@@ -508,10 +706,11 @@ impl<S: EventStore> EngineCore<S> {
             })
             .collect();
         for revision in revisions {
-            let Some(request) = self.active_request_evidence.remove(&revision) else {
+            let Some(request) = self.take_active_request_evidence(revision) else {
                 continue;
             };
-            for (id, path, filter_revision) in request.targets {
+            let targets = self.current_request_targets(&request.owner_demands);
+            for (id, path, filter_revision) in targets {
                 self.emit_observation_fact(
                     id,
                     ObservationFact::RelayClosed {
@@ -546,20 +745,23 @@ impl<S: EventStore> EngineCore<S> {
             self.live_wire_requests.remove(&key);
         }
         let revisions: Vec<_> = self
-            .active_request_evidence
-            .iter()
-            .filter_map(|(revision, request)| {
-                (&request.session == session
-                    && request.handle == handle
-                    && &request.sub_id == sub_id)
-                    .then_some(*revision)
+            .active_request_revisions_by_sub
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter(|revision| {
+                self.active_request_evidence
+                    .get(revision)
+                    .is_some_and(|request| request.handle == handle)
             })
+            .copied()
             .collect();
         for revision in revisions {
-            let Some(request) = self.active_request_evidence.remove(&revision) else {
+            let Some(request) = self.take_active_request_evidence(revision) else {
                 continue;
             };
-            for (id, path, filter_revision) in request.targets {
+            let targets = self.current_request_targets(&request.owner_demands);
+            for (id, path, filter_revision) in targets {
                 self.emit_observation_fact(
                     id,
                     ObservationFact::RelayClosed {
@@ -600,6 +802,7 @@ impl<S: EventStore> EngineCore<S> {
             return;
         };
         let mut evidence = Vec::new();
+        let mut current_targets = BTreeMap::new();
         for node in snapshot {
             match node.kind {
                 ResolutionNodeKind::Reactive { field, values } => {
@@ -687,7 +890,7 @@ impl<S: EventStore> EngineCore<S> {
                         ));
                     }
                 }
-                ResolutionNodeKind::Filter { atoms } => {
+                ResolutionNodeKind::Filter { scope, atoms } => {
                     let filters: Vec<_> = atoms.iter().map(|atom| atom.filter.clone()).collect();
                     let fingerprint = filter_fingerprint(&filters);
                     let prior = state.execution.nodes.get(&node.path);
@@ -709,6 +912,16 @@ impl<S: EventStore> EngineCore<S> {
                             ..
                         }) if old == &fingerprint
                     );
+                    for atom in &atoms {
+                        *current_targets
+                            .entry(super::ActiveRequestTarget {
+                                demand: nmp_router::DemandKey::for_atom(atom),
+                                scope,
+                                path: node.path.clone(),
+                                revision,
+                            })
+                            .or_insert(0) += 1;
+                    }
                     state.execution.nodes.insert(
                         node.path.clone(),
                         RememberedResolution::Filter {
@@ -733,11 +946,133 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
         }
+        self.replace_request_targets_for_handle(id, current_targets);
         if !evidence.is_empty() {
             if let Some(state) = self.observations.get_mut(&observation) {
                 state.next_sequence = next_sequence;
             }
             effects.push(Effect::EmitObservationEvidence(observation, evidence));
+        }
+    }
+
+    pub(super) fn remove_request_targets_for_handle(&mut self, id: HandleId) {
+        self.replace_request_targets_for_handle(id, BTreeMap::new());
+    }
+
+    fn replace_request_targets_for_handle(
+        &mut self,
+        id: HandleId,
+        current: BTreeMap<super::ActiveRequestTarget, usize>,
+    ) {
+        let wire_attached = self.wire_atoms_by_handle.contains_key(&id);
+        if wire_attached {
+            self.deactivate_request_targets_for_handle(id);
+        }
+        self.request_targets_by_handle.remove(&id);
+        if !current.is_empty() {
+            self.request_targets_by_handle.insert(id, current);
+        }
+        if wire_attached {
+            self.activate_request_targets_for_handle(id);
+        }
+    }
+
+    pub(super) fn activate_request_targets_for_handle(&mut self, id: HandleId) {
+        let active_scopes: BTreeSet<_> = self
+            .handles
+            .get(&id)
+            .into_iter()
+            .flat_map(|state| state.acquisition.scopes.iter().enumerate())
+            .filter_map(|(scope, acquisition)| acquisition.contributes_wire().then_some(scope))
+            .collect();
+        let current = self
+            .request_targets_by_handle
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        let mut active_by_demand: BTreeMap<_, BTreeMap<_, usize>> = BTreeMap::new();
+        for (target, count) in current {
+            if !active_scopes.contains(&target.scope) {
+                continue;
+            }
+            let reverse_target = super::RequestTarget {
+                handle: id,
+                path: target.path,
+                revision: target.revision,
+            };
+            *self
+                .request_targets_by_demand
+                .entry(target.demand)
+                .or_default()
+                .entry(reverse_target.clone())
+                .or_insert(0) += count;
+            *active_by_demand
+                .entry(target.demand)
+                .or_default()
+                .entry(reverse_target)
+                .or_insert(0) += count;
+        }
+        if !active_by_demand.is_empty() {
+            self.active_request_targets_by_handle_demand
+                .insert(id, active_by_demand);
+        }
+    }
+
+    pub(super) fn deactivate_request_targets_for_handle(&mut self, id: HandleId) {
+        let prior = self
+            .active_request_targets_by_handle_demand
+            .remove(&id)
+            .unwrap_or_default();
+        for (demand, targets) in prior {
+            self.release_active_request_targets(demand, targets);
+        }
+    }
+
+    pub(super) fn deactivate_request_targets_for_handle_demand(
+        &mut self,
+        id: HandleId,
+        demand: nmp_router::DemandKey,
+    ) {
+        let Some(targets) = self
+            .active_request_targets_by_handle_demand
+            .get_mut(&id)
+            .and_then(|by_demand| by_demand.remove(&demand))
+        else {
+            return;
+        };
+        if self
+            .active_request_targets_by_handle_demand
+            .get(&id)
+            .is_some_and(BTreeMap::is_empty)
+        {
+            self.active_request_targets_by_handle_demand.remove(&id);
+        }
+        self.release_active_request_targets(demand, targets);
+    }
+
+    fn release_active_request_targets(
+        &mut self,
+        demand: nmp_router::DemandKey,
+        targets: BTreeMap<super::RequestTarget, usize>,
+    ) {
+        for (reverse_target, count) in targets {
+            let indexed = self
+                .request_targets_by_demand
+                .get_mut(&demand)
+                .expect("per-handle request-target demand mirrors the reverse index");
+            let owned = indexed
+                .get_mut(&reverse_target)
+                .expect("per-handle request target mirrors the reverse index");
+            *owned = owned
+                .checked_sub(count)
+                .expect("per-handle request-target refs mirror the reverse index");
+            if *owned == 0 {
+                indexed.remove(&reverse_target);
+            }
+            let remove_demand = indexed.is_empty();
+            if remove_demand {
+                self.request_targets_by_demand.remove(&demand);
+            }
         }
     }
 
@@ -795,7 +1130,7 @@ mod tests {
     use super::*;
     use crate::core::EngineMsg;
     use nmp_grammar::LiveQuery;
-    use nmp_grammar::{Binding, Demand, Derived, Filter, Selector};
+    use nmp_grammar::{Binding, Demand, Derived, Filter, Freshness, Selector, SourceAuthority};
     use nmp_router::FixtureRoutingFacts;
     use nmp_store::{MemoryStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -813,6 +1148,46 @@ mod tests {
             }))),
             ..Filter::default()
         })
+    }
+
+    fn pinned_articles_by_follows(relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
+        let mut inner = Demand::from_filter(Filter {
+            kinds: Some(BTreeSet::from([3])),
+            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+            ..Filter::default()
+        });
+        inner.freshness = freshness;
+        let mut demand = Demand::from_filter(Filter {
+            kinds: Some(BTreeSet::from([30_023])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner,
+                project: Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        });
+        demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+        demand.freshness = freshness;
+        LiveQuery::single(demand)
+    }
+
+    fn pinned_kind_one(relay: &RelayUrl) -> LiveQuery {
+        let mut demand = Demand::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        });
+        demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+        demand.freshness = Freshness::Live;
+        LiveQuery::single(demand)
+    }
+
+    fn opened_observation(effects: &[Effect]) -> super::super::ObservationId {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, _, _) => Some(*id),
+                _ => None,
+            })
+            .expect("opening an observation emits its cache seed")
     }
 
     fn observation_facts(effects: &[Effect]) -> Vec<&ObservationEvidence> {
@@ -967,5 +1342,116 @@ mod tests {
                 ..
             } if path == "$"
         )));
+    }
+
+    #[test]
+    fn request_target_multiplicity_replaces_and_tears_down_exactly() {
+        let relay = RelayUrl::parse("wss://request-target-multiplicity.example").unwrap();
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let observation =
+            opened_observation(&core.handle(EngineMsg::Subscribe(pinned_kind_one(&relay))));
+        let handle = core.observations[&observation].branches[0];
+        let target = core.request_targets_by_handle[&handle]
+            .keys()
+            .next()
+            .expect("one root filter target")
+            .clone();
+
+        core.replace_request_targets_for_handle(handle, BTreeMap::from([(target.clone(), 2)]));
+        assert_eq!(core.bench_ownership_census().request_target_edges, 1);
+        assert_eq!(core.bench_ownership_census().request_target_refs, 2);
+        core.replace_request_targets_for_handle(handle, BTreeMap::from([(target, 1)]));
+        assert_eq!(core.bench_ownership_census().request_target_edges, 1);
+        assert_eq!(core.bench_ownership_census().request_target_refs, 1);
+
+        core.handle(EngineMsg::Unsubscribe(observation));
+        assert_eq!(
+            core.bench_ownership_census(),
+            super::super::CoreOwnershipCensus::default()
+        );
+    }
+
+    #[test]
+    fn changed_filter_revisions_replace_stale_request_targets_before_send() {
+        let account_a = Keys::generate();
+        let account_b = Keys::generate();
+        let followed_a = Keys::generate();
+        let followed_b = Keys::generate();
+        let relay = RelayUrl::parse("wss://request-target-revision.example").unwrap();
+        let mut store = MemoryStore::new();
+        for (event, observed_at) in [
+            (
+                EventBuilder::new(Kind::ContactList, "")
+                    .tag(Tag::public_key(followed_a.public_key()))
+                    .custom_created_at(Timestamp::from(10))
+                    .sign_with_keys(&account_a)
+                    .unwrap(),
+                11,
+            ),
+            (
+                EventBuilder::new(Kind::ContactList, "")
+                    .tag(Tag::public_key(followed_b.public_key()))
+                    .custom_created_at(Timestamp::from(20))
+                    .sign_with_keys(&account_b)
+                    .unwrap(),
+                21,
+            ),
+        ] {
+            store
+                .insert(
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(observed_at)),
+                )
+                .unwrap();
+        }
+        let mut core = EngineCore::new(store, 20);
+        core.handle(EngineMsg::SetActivePubkey(Some(account_a.public_key())));
+        let observation = opened_observation(&core.handle(EngineMsg::Subscribe(
+            pinned_articles_by_follows(&relay, Freshness::Live),
+        )));
+        let handle = core.observations[&observation].branches[0];
+        let cache_only_observation = opened_observation(&core.handle(EngineMsg::Subscribe(
+            pinned_articles_by_follows(&relay, Freshness::CacheOnly),
+        )));
+        let cache_only_handle = core.observations[&cache_only_observation].branches[0];
+        assert!(core.request_targets_by_handle[&handle]
+            .keys()
+            .all(|target| target.revision == 1));
+        assert!(core.request_targets_by_handle[&cache_only_handle]
+            .keys()
+            .all(|target| target.revision == 1));
+
+        core.handle(EngineMsg::SetActivePubkey(Some(account_b.public_key())));
+        assert!(core.request_targets_by_handle[&handle]
+            .keys()
+            .all(|target| target.revision == 2));
+        assert!(core.request_targets_by_handle[&cache_only_handle]
+            .keys()
+            .all(|target| target.revision == 2));
+        let active_reverse_handles: BTreeSet<_> = core
+            .request_targets_by_demand
+            .values()
+            .flat_map(BTreeMap::keys)
+            .map(|target| target.handle)
+            .collect();
+        assert_eq!(active_reverse_handles, BTreeSet::from([handle]));
+        let pending_targets: Vec<_> = core
+            .pending_request_evidence
+            .values()
+            .flatten()
+            .flat_map(|request| core.current_request_targets(&request.owner_demands))
+            .filter(|(target, _, _)| *target == handle)
+            .collect();
+        assert!(!pending_targets.is_empty());
+        assert!(pending_targets
+            .iter()
+            .all(|(_, _, revision)| *revision == 2));
+
+        core.handle(EngineMsg::Unsubscribe(cache_only_observation));
+        core.handle(EngineMsg::Unsubscribe(observation));
+        assert_eq!(
+            core.bench_ownership_census(),
+            super::super::CoreOwnershipCensus::default()
+        );
     }
 }

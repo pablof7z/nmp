@@ -1,0 +1,361 @@
+//! completion transfer admission proofs.
+
+use super::*;
+
+#[test]
+#[ignore = "known violation #1341: split physical requests do not yet aggregate one wide logical coverage proof"]
+fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
+    let relay = RelayUrl::parse("wss://split-request-coverage.example").unwrap();
+    let session = RelaySessionKey::public(relay.clone());
+    let alice = Keys::generate().public_key().to_hex();
+    let bob = Keys::generate().public_key().to_hex();
+    let carol = Keys::generate().public_key().to_hex();
+    let atom = |authors: BTreeSet<String>| ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            authors: Some(authors),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let whole = atom(BTreeSet::from([alice.clone(), bob.clone(), carol.clone()]));
+    let incumbent_piece = atom(BTreeSet::from([alice, bob]));
+    let residual_piece = atom(BTreeSet::from([carol]));
+    let whole_claim = coverage_key(&whole);
+    let incumbent_claim = coverage_key(&incumbent_piece);
+    let residual_claim = coverage_key(&residual_piece);
+    let owner = DemandKey::for_atom(&whole);
+    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    for shape in [&whole, &incumbent_piece, &residual_piece] {
+        core.attribution.observe_atom(shape);
+    }
+    let transport = TransportRelayHandle {
+        slot: 81,
+        generation: 1,
+    };
+    core.slot_to_relay
+        .insert(transport.slot, (transport, session.clone()));
+
+    let open_piece = |core: &mut EngineCore<MemoryStore>, piece: &ContextualAtom| {
+        let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.source, piece.access);
+        let claim = coverage_key(piece);
+        core.attribution
+            .retain_live_request_claims(&sub_id, BTreeSet::from([claim]));
+        core.record_observed_request(RequestSend {
+            session: &session,
+            sub_id: &sub_id,
+            filter: &piece.filter,
+            coverage_claims: BTreeSet::from([claim]),
+            owner_demands: BTreeSet::from([owner]),
+            replay: false,
+            event_failure_target: EventFailureTarget::ThisSend,
+        });
+        accept_request(core, &session, &sub_id, piece.filter.hash(), transport);
+        sub_id
+    };
+    let incumbent_sub = open_piece(&mut core, &incumbent_piece);
+    let residual_sub = open_piece(&mut core, &residual_piece);
+
+    core.clock = Timestamp::from(180u64);
+    core.on_relay_frame(
+        transport,
+        session.clone(),
+        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+            nostr::SubscriptionId::new(wire_sub_id_string(&incumbent_sub)),
+        ))),
+    );
+    assert_eq!(
+        core.resolver
+            .store()
+            .get_coverage(incumbent_claim, &relay)
+            .unwrap(),
+        Some(CoverageInterval::new(
+            Timestamp::from(0),
+            Timestamp::from(180)
+        ))
+    );
+    assert_eq!(
+        core.resolver
+            .store()
+            .get_coverage(whole_claim, &relay)
+            .unwrap(),
+        None
+    );
+
+    core.clock = Timestamp::from(200u64);
+    core.on_relay_frame(
+        transport,
+        session.clone(),
+        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+            nostr::SubscriptionId::new(wire_sub_id_string(&residual_sub)),
+        ))),
+    );
+    assert_eq!(
+        core.resolver
+            .store()
+            .get_coverage(residual_claim, &relay)
+            .unwrap(),
+        Some(CoverageInterval::new(
+            Timestamp::from(0),
+            Timestamp::from(200)
+        ))
+    );
+    assert_eq!(
+        core.resolver
+            .store()
+            .get_coverage(whole_claim, &relay)
+            .unwrap(),
+        Some(CoverageInterval::new(
+            Timestamp::from(0),
+            Timestamp::from(180)
+        )),
+        "only the complete fragment set may mint the wide logical coverage proof"
+    );
+
+    for sub_id in [incumbent_sub, residual_sub] {
+        core.live_wire_requests
+            .remove(&(session.clone(), sub_id.clone()));
+        core.attribution.release_live_request_claims(&sub_id);
+        core.abandon_sub(&sub_id);
+    }
+    core.slot_to_relay.remove(&transport.slot);
+    for shape in [&whole, &incumbent_piece, &residual_piece] {
+        core.attribution.release_atom(shape);
+    }
+    assert_eq!(
+        core.bench_ownership_census(),
+        CoreOwnershipCensus::default()
+    );
+}
+
+#[test]
+fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
+    for replacement in [false, true] {
+        let relay = RelayUrl::parse("wss://post-eose-transfer-cancel.example").unwrap();
+        let session = RelaySessionKey::public(relay.clone());
+        let incumbent = ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(BTreeSet::from([1, 2])),
+                since: Some(100),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let added = ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(BTreeSet::from([1])),
+                since: Some(100),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let incumbent_claim = coverage_key(&incumbent);
+        let added_claim = coverage_key(&added);
+        let control = StoreFailureControl::default();
+        let mut core = EngineCore::new(
+            ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+            20,
+        );
+        core.attribution.observe_atom(&incumbent);
+        core.attribution.observe_atom(&added);
+        let sub_id = SubId::for_wire(
+            relay,
+            &incumbent.filter,
+            &incumbent.source,
+            incumbent.access,
+        );
+        core.attribution
+            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
+        core.live_wire_requests.insert(
+            (session.clone(), sub_id.clone()),
+            LiveWireRequest {
+                filter: incumbent.filter.clone(),
+                evidence_sub_id: sub_id.clone(),
+                handle: TransportRelayHandle {
+                    slot: 78,
+                    generation: 1,
+                },
+                stored_events: super::observation::StoredEvents::Finished {
+                    request_revision: 10,
+                    committed_interval: Some(CoverageInterval::new(
+                        Timestamp::from(100),
+                        Timestamp::from(200),
+                    )),
+                },
+            },
+        );
+        control.fail_coverage_write("leave one exact transfer pending");
+        core.apply_request_metadata_updates(
+            &[nmp_router::RequestMetadataUpdate {
+                session: session.clone(),
+                sub_id: sub_id.clone(),
+                filter_hash: incumbent.filter.hash(),
+                added_coverage_claims: BTreeSet::from([added_claim]),
+                added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+            }],
+            &mut Vec::new(),
+        );
+        assert_eq!(core.pending_request_claim_transfers.len(), 1);
+
+        let op = if replacement {
+            let mut replacement_filter = incumbent.filter.clone();
+            replacement_filter.kinds = Some(BTreeSet::from([3]));
+            WireOp::Req(sub_id.clone(), replacement_filter)
+        } else {
+            WireOp::Close(sub_id.clone())
+        };
+        core.reconcile_request_claim_transfers_for_wire_delta(&WireDelta {
+            ops: vec![(session.clone(), vec![op])],
+        });
+        assert!(core.pending_request_claim_transfers.is_empty());
+
+        core.live_wire_requests.remove(&(session, sub_id.clone()));
+        core.attribution.release_live_request_claims(&sub_id);
+        core.attribution.release_atom(&incumbent);
+        core.attribution.release_atom(&added);
+        assert_eq!(
+            core.bench_ownership_census(),
+            CoreOwnershipCensus::default()
+        );
+    }
+}
+
+#[test]
+fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_job() {
+    const GENERATIONS: u16 = 1_000;
+    let relay = RelayUrl::parse("wss://post-eose-transfer-bounded.example").unwrap();
+    let session = RelaySessionKey::public(relay.clone());
+    let incumbent = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some((1_000..2_001).collect()),
+            since: Some(100),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let incumbent_claim = coverage_key(&incumbent);
+    let control = StoreFailureControl::default();
+    let mut core = EngineCore::new(
+        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+        20,
+    );
+    core.attribution.observe_atom(&incumbent);
+    let sub_id = SubId::for_wire(
+        relay,
+        &incumbent.filter,
+        &incumbent.source,
+        incumbent.access,
+    );
+    core.attribution
+        .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
+    core.live_wire_requests.insert(
+        (session.clone(), sub_id.clone()),
+        LiveWireRequest {
+            filter: incumbent.filter.clone(),
+            evidence_sub_id: sub_id.clone(),
+            handle: TransportRelayHandle {
+                slot: 79,
+                generation: 1,
+            },
+            stored_events: super::observation::StoredEvents::Finished {
+                request_revision: 1,
+                committed_interval: Some(CoverageInterval::new(
+                    Timestamp::from(100),
+                    Timestamp::from(200),
+                )),
+            },
+        },
+    );
+
+    let mut added_atoms = Vec::with_capacity(GENERATIONS as usize);
+    for generation in 1..=GENERATIONS {
+        let added = ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(BTreeSet::from([1_000 + generation])),
+                since: Some(100),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Pinned(BTreeSet::from([sub_id.0.clone()])),
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let claim = coverage_key(&added);
+        core.attribution.observe_atom(&added);
+        if let Some(live) = core
+            .live_wire_requests
+            .get_mut(&(session.clone(), sub_id.clone()))
+        {
+            live.stored_events = super::observation::StoredEvents::Finished {
+                request_revision: generation as u64,
+                committed_interval: Some(CoverageInterval::new(
+                    Timestamp::from(100),
+                    Timestamp::from(200 + generation as u64),
+                )),
+            };
+        }
+        if generation == 1 {
+            control.fail_coverage_write("first transfer failure arms one bounded retry");
+        }
+        core.apply_request_metadata_updates(
+            &[nmp_router::RequestMetadataUpdate {
+                session: session.clone(),
+                sub_id: sub_id.clone(),
+                filter_hash: incumbent.filter.hash(),
+                added_coverage_claims: BTreeSet::from([claim]),
+                added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+            }],
+            &mut Vec::new(),
+        );
+        added_atoms.push(added);
+    }
+
+    assert_eq!(core.pending_request_claim_transfers.len(), 1);
+    let pending = core
+        .pending_request_claim_transfers
+        .values()
+        .next()
+        .unwrap();
+    assert_eq!(pending.request_revision, GENERATIONS as u64);
+    assert_eq!(pending.claims.len(), GENERATIONS as usize);
+    assert_eq!(pending.interval.through, Timestamp::from(1_200u64));
+    assert_eq!(core.request_claim_transfer_attempts.get(), 1);
+    assert_eq!(core.request_claim_transfer_claims_attempted.get(), 1);
+    assert_eq!(core.request_claim_transfer_failures.get(), 1);
+
+    core.retry_scheduler_blocked = true;
+    let due = core
+        .next_deadline()
+        .unwrap()
+        .expect("the one accumulated transfer owns one retry deadline");
+    core.tick(due);
+    assert!(core.pending_request_claim_transfers.is_empty());
+    assert_eq!(core.request_claim_transfer_attempts.get(), 2);
+    assert_eq!(
+        core.request_claim_transfer_claims_attempted.get(),
+        u64::from(GENERATIONS) + 1
+    );
+    assert_eq!(core.request_claim_transfer_failures.get(), 1);
+    assert_eq!(core.request_claim_transfer_commits.get(), 1);
+
+    core.reconcile_request_claim_transfers_for_wire_delta(&WireDelta {
+        ops: vec![(session.clone(), vec![WireOp::Close(sub_id.clone())])],
+    });
+    core.live_wire_requests.remove(&(session, sub_id.clone()));
+    core.attribution.release_live_request_claims(&sub_id);
+    core.attribution.release_atom(&incumbent);
+    for added in added_atoms {
+        core.attribution.release_atom(&added);
+    }
+    assert_eq!(
+        core.bench_ownership_census(),
+        CoreOwnershipCensus::default()
+    );
+}

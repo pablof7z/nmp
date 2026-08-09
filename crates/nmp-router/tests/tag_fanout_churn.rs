@@ -66,7 +66,7 @@ fn compile_step(
 ) -> Ops {
     let delta = router.compile(demand, dir, CAP);
     let mut ops = Ops::default();
-    for (_, relay_ops) in &delta.ops {
+    for (_, relay_ops) in &delta.wire.ops {
         for op in relay_ops {
             match op {
                 WireOp::Req(..) => ops.reqs += 1,
@@ -110,25 +110,22 @@ fn grow(n: usize, batched: bool) -> (Vec<Ops>, Ops, usize) {
 /// H — resolver fan-out vs a pre-batched filter, both compiled by the real
 /// router, over identical incremental growth.
 ///
-/// FULLY INVERTED, in two stages, and the two stages are the two halves of
-/// the design (`docs/internals/subscriptions/identity-grouping-and-limits.md`
-/// §7.3).
+/// FULLY INVERTED by structural union. Per-value and pre-batched demand reach
+/// the same immutable plan at every step.
 ///
 /// This file originally measured a gap that no longer exists. It asserted
 /// that fan-out held N live subscriptions while batching held 1 but paid a
 /// Close plus a Req per growth step, because `SubId::for_wire` erased
 /// `authors` and nothing else, so a widened `#d` filter minted a new id every
-/// time it grew. #899's allocated tokens removed the churn half (a grown
-/// value set is a one-component difference that overwrites the same token in
-/// place). `StructuralUnion` removes the remaining half: the router now
+/// time it grew. `StructuralUnion` removes that fan-out: the router now
 /// coalesces the fan-out into the batched shape ITSELF, so the two columns
 /// are no longer two shapes at all -- they are the same plan reached from two
 /// different demand encodings.
 ///
 /// The assertion that carries the weight is therefore the EQUALITY of the two
-/// columns. A regression in either half separates them again: lose the merge
-/// and fan-out's live count climbs back to N; lose in-place continuation and
-/// the batched column's Closes reappear.
+/// columns. A regression in the merge separates them again: fan-out's live
+/// count climbs back to N. Byte-changing growth deliberately uses a fresh-id
+/// transition in both columns.
 #[test]
 fn resolver_fan_out_and_a_pre_batched_filter_compile_to_the_same_plan() {
     const N: usize = 8;
@@ -170,21 +167,19 @@ fn resolver_fan_out_and_a_pre_batched_filter_compile_to_the_same_plan() {
         "a pre-batched filter holds exactly one live sub"
     );
 
-    // INVERTED when allocated ids landed (#899). Under derived ids a widened
-    // filter's SubId moved on every growth step, so batching bought one live
-    // sub at the price of a Close plus a Req per value -- measured then as 15
-    // wire messages against fan-out's 8. Allocation decides continuity by
-    // structural signature instead, so a grown value set is a one-component
-    // difference that overwrites the SAME token in place.
+    // Every changed filter mints a fresh successor id. The raw Router delta
+    // therefore contains one CLOSE plus one REQ after the first step; Core
+    // uses the typed transition to offer each successor before retiring its
+    // predecessor after acceptance.
     assert_eq!(
-        fan_total.closes, 0,
-        "growth must never close a sub -- a widening value set is a \
-         one-component difference that replaces in place"
+        fan_total.closes,
+        N - 1,
+        "every byte-changing growth step leaves one old raw-plan identity"
     );
     assert_eq!(
-        batch_total.closes, 0,
-        "a widened filter must grow in place: allocated ids do not move \
-         when a value set grows"
+        batch_total.closes,
+        N - 1,
+        "pre-batched growth follows the same fresh-id transition shape"
     );
 
     // THE assertion: the two encodings are indistinguishable on the wire.
@@ -196,9 +191,8 @@ fn resolver_fan_out_and_a_pre_batched_filter_compile_to_the_same_plan() {
     );
     assert_eq!(
         fan_total.total(),
-        N,
-        "one in-place REQ per growth step, no closes -- the cheapest shape \
-         available, and the one the author axis already had"
+        2 * N - 1,
+        "one initial REQ, then one raw CLOSE plus one fresh REQ per growth step"
     );
 }
 
@@ -208,7 +202,7 @@ fn resolver_fan_out_and_a_pre_batched_filter_compile_to_the_same_plan() {
 /// tag name as two instances of one case. The two tests must agree exactly;
 /// if they ever diverge, one axis has grown a special case.
 #[test]
-fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
+fn the_authors_slot_achieves_one_live_sub_with_fresh_transitions() {
     const N: usize = 8;
     let dir = FixtureRoutingFacts::new();
     let mut router = Router::new(RuleRegistry::default_widen_only());
@@ -246,13 +240,11 @@ fn the_authors_slot_already_achieves_one_stable_sub_with_no_churn() {
         "the union collapses every author atom onto one wire sub"
     );
     assert_eq!(
-        total.closes, 0,
-        "a one-component difference replaces in place, so growth never closes"
+        total.closes,
+        N - 1,
+        "every byte-changing growth step leaves one old raw-plan identity"
     );
-    assert_eq!(
-        total.reqs, N,
-        "one in-place REQ per growth step — the cheapest of the three shapes"
-    );
+    assert_eq!(total.reqs, N, "one fresh successor REQ per growth step");
 }
 
 // ---- the injectivity falsifier ------------------------------------------
@@ -303,6 +295,7 @@ fn limited_identical_except_authors_atoms_each_reach_the_wire() {
         .collect();
     let planned_ids: BTreeSet<_> = planned.iter().map(|req| req.sub_id.clone()).collect();
     let emitted: usize = delta
+        .wire
         .ops
         .iter()
         .map(|(_, ops)| {
@@ -326,7 +319,7 @@ fn limited_identical_except_authors_atoms_each_reach_the_wire() {
 
     // Recompiling identical demand must not repair the loss.
     let second = router.compile(&demand, &dir, CAP);
-    let repaired: usize = second.ops.iter().map(|(_, ops)| ops.len()).sum();
+    let repaired: usize = second.wire.ops.iter().map(|(_, ops)| ops.len()).sum();
     println!("ops on identical recompile: {repaired}");
 
     assert_eq!(planned.len(), 2, "both atoms are planned separately");

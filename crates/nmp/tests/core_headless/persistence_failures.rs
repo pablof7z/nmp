@@ -336,28 +336,40 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         let (sub_id, filter) = req_for_kind(&healthy_subscribed, &healthy_relay, 2);
         (sub_id.clone(), filter.clone())
     };
-    let failed_request_accepted = core.on_wire_request_handoff(
-        &public_session(&relay),
-        &request,
-        request_filter.hash(),
-        Some(RelayHandle {
+    let failed_attempt = failed_subscribed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Wire(delta) => {
+                Some(delta.attempt_id(&public_session(&relay), &request, &request_filter))
+            }
+            _ => None,
+        })
+        .expect("the failed request carries its exact attempt identity");
+    let healthy_attempt = healthy_subscribed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta.attempt_id(
+                &public_session(&healthy_relay),
+                &healthy_request,
+                &healthy_filter,
+            )),
+            _ => None,
+        })
+        .expect("the healthy request carries its exact attempt identity");
+    let failed_request_accepted = core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+        attempt_id: failed_attempt,
+        handle: RelayHandle {
             slot: 0,
             generation: 1,
-        }),
-        true,
-        None,
-    );
-    let healthy_request_accepted = core.on_wire_request_handoff(
-        &public_session(&healthy_relay),
-        &healthy_request,
-        healthy_filter.hash(),
-        Some(RelayHandle {
+        },
+    });
+    let healthy_request_accepted = core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+        attempt_id: healthy_attempt,
+        handle: RelayHandle {
             slot: 1,
             generation: 1,
-        }),
-        true,
-        None,
-    );
+        },
+    });
     assert!(
         failed_request_accepted
             .iter()
@@ -870,7 +882,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         })
         .expect("failed relay replays its coalesced request");
     assert_eq!(
-        failed_request.absorbed.len(),
+        failed_request.coverage_claims.len(),
         2,
         "the one request must carry both narrow coverage atoms"
     );

@@ -121,6 +121,16 @@ class RelayViewsTest {
                     NmpRelayRuntimePresentation.FinishedStoredEvents,
                     "Finished stored events",
                 ),
+                Triple(
+                    SourceStatus.AwaitingRequest,
+                    NmpRelayRuntimePresentation.AwaitingRequest,
+                    "Awaiting request placement",
+                ),
+                Triple(
+                    SourceStatus.CoverageSatisfied,
+                    NmpRelayRuntimePresentation.CoverageSatisfied,
+                    "Satisfied from cache",
+                ),
                 Triple(SourceStatus.Connecting, NmpRelayRuntimePresentation.Connecting, "Connecting"),
                 Triple(SourceStatus.Disconnected, NmpRelayRuntimePresentation.Disconnected, "Disconnected"),
                 Triple(

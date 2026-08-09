@@ -245,7 +245,8 @@ Until 2026-07-27 nothing in the registry merged on tags. `AuthorUnion` and
 carry `ids`. So two filters differing only in a `#p` or `#d` value **never
 combined**, at any scale.
 
-Measured against a live `nak serve` relay
+Historical measurement under the removed deterministic same-id scheme, against
+a live `nak serve` relay
 (`crates/nmp/examples/tag_fanout_live.rs`):
 
 | | live subscriptions | widest filter |
@@ -273,54 +274,59 @@ measured no-op on this axis.
 | widest filter | 1 value | **300 values** (bound 500) |
 
 The equality assertion is now a strict improvement and the kill verdict is
-`fired=false`. Two neighbouring measurements moved with it: `tag_fanout_churn.rs`
-now records resolver fan-out and a pre-batched atom compiling to the *same
-plan* (8 REQs, 0 CLOSEs, 1 live sub either way), and `derived_tag_fanout.rs`'s
-tag-versus-author contrast has become an asserted equality.
+`fired=false`. Two neighbouring measurements moved with it:
+`tag_fanout_churn.rs` now records resolver fan-out and a pre-batched atom
+compiling to the *same plan* (8 REQs, 7 raw-plan CLOSEs, and 1 live sub either
+way); each byte-changing step is a typed fresh-id transition, so EngineCore
+offers its successor before committing the predecessor close.
+`derived_tag_fanout.rs`'s tag-versus-author contrast has become an asserted
+equality.
 
 ---
 
-## 4. Identity — BUILT, and the source of the trouble
+## 4. Identity — BUILT
 
 ### 4.1 How a subscription is named today
 
-`SubId::for_wire` (`crates/nmp-router/src/plan.rs`) derives the id from
-`(relay, Skeleton::of(filter).hash() folded with source/access, access)`.
+`SubId::allocate` (`crates/nmp-router/src/plan.rs`) mints an opaque,
+never-reused id from the router's monotonic counter plus relay, source, and
+access context. The filter is not encoded into the token.
 
-`Skeleton::of` (`crates/nmp-router/src/route.rs`) **erases `authors` and nothing
-else**. Every other field — kinds, ids, tags, since, until, limit — stays in the
-hash.
-
-The erasure has a purpose, stated in `plan.rs`: adding or removing an author
-re-uses the same id, so on the wire that is **one overwriting REQ**, not a
-close-and-reopen of everything. NIP-01 defines a REQ with an existing sub-id as
-replacing that subscription's filter. This is what produces the in-place
-widening measured above.
+An exact byte-identical request keeps its allocated id and emits no wire work.
+When the filter bytes change, structural component matching identifies the
+predecessor but the successor receives a fresh id. `CompileOutcome` records the
+typed predecessor/successor transition. `EngineCore` offers the successor REQ
+first and retires the predecessor only after the exact successor handoff is
+accepted. A local refusal keeps the predecessor live and owns one retry.
 
 ### 4.2 The bet the erasure makes
 
-Deleting a field from the id is a bet: *anything that lands in the same id will
-have been merged into one filter first.*
+The removed deterministic scheme erased `authors` from the filter skeleton.
+That made a bet: *anything that lands in the same id will have been merged into
+one filter first.*
 
 When the bet holds, one id names one filter and everything works. When it fails,
 two filters share one id — and `diff_plans` keys its delta by `SubId`, so the
 duplicate collapses. One REQ never reaches the wire.
 
 **The general statement:** identity erasure is *static*; mergeability is
-*dynamic*. Wherever they diverge, demand is silently lost.
+*dynamic*. Wherever they diverge, demand is silently lost. Allocated opaque
+ids remove that bet from current identity.
 
 ### 4.3 Determinism is bookkeeping, not a requirement
 
-The id is a pure function of the filter so that the router need not remember
-which id it previously gave a subscription. NIP-01 itself requires only that ids
-are unique per connection and that reuse means replacement.
+The current id is not a pure function of the filter. The router retains its
+allocated plan identity and a monotonic mint counter. NIP-01 requires only that
+ids are unique per connection; exact zero-diff retention is local bookkeeping,
+not a protocol requirement that byte changes reuse an id.
 
 Verified: nothing in reconnect/replay, `clear_session`, NIP-77 role ids,
 persistence, or the #106 anti-alias tests depends on the derivation. Coverage is
 consulted only by the `MaxAge` freshness gate and by diagnostics — **never
 during filter construction**.
 
-This matters because determinism is what buys the entire problem space in §5.
+This matters because the removed deterministic erasure created the entire
+problem space in §5; the current allocated namespace excludes it.
 
 ### 4.4 Wire string format
 
@@ -478,9 +484,10 @@ defect for CI to catch, not a reason to refuse a user's demand in production.
 (Fable, consulted adversarially on fail-open versus a guessed default, reached
 the same verdict independently.)
 
-**Refusal is loud.** Every refused subscription's `absorbed` keys join
-`RelayPlan::limited`, so `plan_is_fresh_for` refuses to call those atoms fresh
-and `acquisition_evidence` reports `ShortfallFact::LocalLimit` to the app.
+**Refusal is loud.** Every refused subscription's exact logical owners join
+`RelayPlan::limited_demands`, so `plan_is_fresh_for` refuses to call those
+demands fresh and `acquisition_evidence` reports
+`ShortfallFact::LocalLimit` to the app.
 `RelayPlan::subscription_shortfalls` carries the per-session (budget, planned,
 refused) triple, and diagnostics carries `subscription_budget` /
 `subscriptions_refused` per session. A relay advertising ZERO joins
@@ -510,7 +517,7 @@ identity instability.
 
 ---
 
-## 7. The decided design — DECIDED, NOT BUILT
+## 7. The decided design — BUILT
 
 Three designs were reviewed adversarially. The chosen one has two halves that
 are independent of each other.
@@ -570,14 +577,12 @@ with two different polarities.
 
 **One component model, two consumers.** `Component` and `differing` live in
 `crates/nmp-router/src/component.rs`, shared by `coalesce` and `wire_id`. The
-sharing is load-bearing rather than incidental: the whole wire story is that
-growing a value set costs ONE overwriting REQ, and that only holds if what the
-merge produces when a value arrives is — *by the identity matcher's own
-definition* — a one-component difference from what it produced last compile.
-Two separate notions of "component" could drift, and the symptom would be
-silent: merges that mint fresh tokens and churn instead of widening in place.
-§7.3's independence is about FUNCTION (count versus naming), not about the
-coordinate system.
+sharing is load-bearing rather than incidental: coalescing and predecessor
+selection must agree about which single logical axis changed. A byte-changing
+successor still receives a fresh token and is offered before its predecessor
+closes; the component match identifies that transition, never an in-place
+overwrite. §7.3's independence is about FUNCTION (count versus transition
+identity), not about the coordinate system.
 
 `differing` destructures `ConcreteFilter` by name so that adding an eighth
 field is a compile error there. A field it forgot would be reported as
@@ -587,29 +592,34 @@ constraint.
 
 ### 7.2 Identity: allocated ids, structural-signature matching — BUILT
 
-The wire id becomes an **allocated opaque token** — minted at first appearance,
-carried forward by matching, closed when unmatched — rather than a function of
-the filter. Matching uses a per-component signature:
+The wire id is an **allocated opaque token** — minted at first appearance and
+never recycled — rather than a function of the filter. Matching uses a
+per-component signature to identify predecessor relationships:
 
 ```
 since | until | h(kinds),|kinds| | h(authors),|authors| | h(ids),|ids|
       | h(values) per tag name   | limit
 ```
 
-A new filter **continues** the prior it differs from in **exactly one
-component**, with **zero-diff ranked first** (an unchanged filter must match
-itself, or no-op recompiles break).
+A byte-identical filter keeps its prior token and emits no wire work. A new
+byte-changing filter may identify as predecessor the prior it differs from in
+**exactly one component**, with **zero-diff ranked first** so unchanged filters
+always retain themselves. The changed filter still receives a fresh token.
 
 - **Ties** break by value-set overlap on the differing component, then by
   canonical filter hash. Overlap is *content-grounded*, not positional — this is
   not the sort-order matching that was rejected, where churn anywhere reorders
   unrelated subscriptions.
-- **Injectivity comes from the assignment** — each prior id assigned at most
-  once, fresh ids unique by minting — not from id content.
+- **Injectivity comes from the assignment** — each prior request selected as a
+  predecessor at most once, fresh ids unique by minting — not from id content.
 - **Never recycle an id** within a session: a reused id lets a straggler frame
   resolve against a different filter's inflight state. Fold a per-router
   monotonic seed into the mint. Restart is safe because connections drop and
   `clear_session` wipes stale mappings.
+- **Changed bytes open before close.** Router reports the typed
+  predecessor/successor relation. EngineCore offers the fresh-id successor,
+  keeps the predecessor on local refusal, and retires it only after the exact
+  acceptance edge. Exact zero-diff alone retains an id.
 
 **Why this over the alternatives:**
 
@@ -619,12 +629,12 @@ itself, or no-op recompiles break).
 | allocated ids, lineage matching (`absorbed` overlap) | works, but couples identity to `coverage_key`'s erasure choices — and `coverage_key` is version-tagged for evolution, so changing it would silently change which subscriptions continue. |
 | **allocated ids, signature matching** | **chosen.** Filter-local, no coverage coupling, resolves prior-merge cases without overlap arithmetic, handles full turnover better. |
 
-**What it deletes:** the erasure rules, any un-groupable marker, the collision
-scan, and — the win nobody predicted — the limited-churn cost. Because
-injectivity comes from the assignment rather than from id content, a *limited*
-filter whose authors churn is a one-component difference and **overwrites in
-place**. It also closes the Close/reopen straggler race in §8.2, because a
-never-recycled id makes a late EOSE for a closed subscription resolve to nothing.
+**What it deletes:** the erasure rules, any un-groupable marker, and the
+collision scan. A limited filter whose authors churn can still identify its
+predecessor by one-component difference, but its byte-changing successor uses
+a fresh id. It also closes the Close/reopen straggler race in §8.2, because a
+never-recycled id makes a late EOSE for a retired subscription resolve to
+nothing.
 
 **What it costs:** the router holds matching state (bounded — it is `prev_plan`,
 already held and pruned every compile, not the unbounded-map class); ids stop
@@ -636,9 +646,11 @@ domain-separated from the allocated namespace.
 
 They are independent in FUNCTION, and share one coordinate system (§7.1).
 Merging controls **how many** subscriptions exist;
-identity controls **what they are called** and whether growth replaces in place.
-Neither substitutes for the other: without merging, 300 filters remain 300
-subscriptions whatever their ids; without identity, growth churns.
+identity controls **what they are called** and which prior request a fresh-id
+successor conditionally replaces. Neither substitutes for the other: without
+merging, 300 filters remain 300 subscriptions whatever their ids; without
+identity, a byte-changing transition cannot preserve its predecessor until the
+successor is accepted.
 
 ---
 
@@ -647,7 +659,9 @@ subscriptions whatever their ids; without identity, growth churns.
 ### 8.1 Accepted — pin as tests, do not "fix"
 
 - **Compound churn.** Two components moving in one recompile — an author
-  resolves *and* the window advances — is a 2-diff, so it closes and reopens.
+  resolves *and* the window advances — is a 2-diff, so it cannot claim a
+  structural predecessor and opens as an independent fresh-id request while
+  unmatched prior work closes normally.
   Reviewed and **dismissed by the owner as not a real workload** (2026-07-27);
   not to be measured or designed around. **Do not relax to "≤2 components with
   overlap evidence"** regardless — every relaxation re-imports lineage matching's
@@ -671,11 +685,10 @@ recompile path. The recompile is already a full recomputation from demand
 demand rather than being a separate imperative step.
 
 Note the interaction with §7.2: under signature matching, a filter whose values
-shrink is still a one-component difference, so the common case is an in-place
-overwrite carrying the survivor set — the same wire behaviour the author axis
-already exhibits (an 8-author filter shrinking one value at a time, never a
-CLOSE). Explicit closure is needed only where the demand is genuinely gone, not
-merely narrower.
+shrink is still a one-component difference, so the common case is a typed
+fresh-id successor carrying the survivor set. EngineCore offers that successor
+before closing its predecessor and keeps the predecessor live if local
+placement is refused. Demand that is genuinely gone still closes directly.
 
 ### 8.1c PARTIAL (#1004) — ordinary-plan assertions raced NIP-77 capability proof
 
@@ -688,9 +701,11 @@ The relay's behavioral NIP-77 probe sometimes resolved between two watch
 mutations. The first mutations therefore emitted ordinary planned REQs; the
 next broad Public recompile correctly opened a distinct `limit:0` NIP-77 live
 candidate. Once that candidate's exact EOSE arrived, the gap-free handoff
-correctly closed the overlapped ordinary predecessor. The failing record was
-unambiguous: two in-place ordinary replacements, then a fresh `limit:0`
-candidate covering the enlarged author set, then the predecessor CLOSE.
+correctly closed the overlapped ordinary predecessor. The historical failing
+record was unambiguous under the implementation at that time: two in-place
+ordinary replacements, then a fresh `limit:0` candidate covering the enlarged
+author set, then the predecessor CLOSE. Current ordinary byte changes instead
+use the fresh-id accepted-open-before-close transition in §7.2.
 
 That is not a router-plan CLOSE and not an observation race. It is a harness
 capability race: the assertion claimed to measure ordinary NIP-01 plan
@@ -742,11 +757,11 @@ nothing under-fetching. The remaining derived observation is therefore churn,
 not a demonstrated correctness defect.
 
 The mechanism is interleaving. `tag_fanout_churn.rs` presents every growth step
-as one recompile over the whole demand set and measures ZERO closes,
-deterministically. A live engine does not guarantee one recompile per demand:
-two can land in separate compiles, the coalescer's grouping can differ between
-them, and a token that no longer names any filter is retired rather than
-replaced.
+as one recompile over the whole demand set and measures the same deterministic
+fresh-id transition sequence for fan-out and pre-batched input. A live engine
+does not guarantee one recompile per demand: two can land in separate compiles,
+the coalescer's grouping can differ between them, and a request with no typed
+successor is retired directly rather than at an accepted transition edge.
 
 Proving the derived case live requires giving the harness a way to await a
 specific plan generation rather than a quiet socket. Until then the polling
@@ -991,11 +1006,12 @@ cargo run -p nmp --example tag_fanout_live -- ws://localhost:10547 20 0 both
 
 ---
 
-## 11. What a widening subscription costs — MEASURED; #933 NOT BUILT
+## 11. What the historical same-id widening cost — MEASURED; #933 NOT BUILT
 
 Whole-demand replanning can make a growing *derived* value set into one
-subscription widened in place. That trade has a price nobody had put a number
-on: NIP-01 says a REQ carrying an existing sub-id REPLACES that subscription,
+subscription widened in place under the removed identity scheme. That trade
+had a price nobody had put a number on: NIP-01 says a REQ carrying an existing
+sub-id REPLACES that subscription,
 so the relay re-runs the whole query and re-serves every event it already
 served. #933 proposed paying it back for derived growth — keep the incumbent,
 and open a small second subscription carrying only the newly discovered
@@ -1024,7 +1040,8 @@ why the number is not enough.
 behaviour is already established by §3.4. Two strategies, same relay, same
 seed, same end state:
 
-- `overwrite` — today. One sub-id; each growth step REQs the cumulative set.
+- `overwrite` — the historical baseline. One sub-id; each growth step REQs the
+  cumulative set.
 - `delta` — #933. First subscription untouched; each later step opens a
   separate subscription carrying only that step's new values.
 
@@ -1184,9 +1201,10 @@ not ship two unreconciled loops.
 ### 11.4 The real cost: every survivable variant converges on the same bill
 
 **A — as specified, a lost backfill is never retried; the only retry path
-that exists costs the whole design.** Today every widening re-sends the wide
-UNFLOORED filter, so any history previously missed is re-served. That
-accidental self-repair is precisely what the delta design removes. If a
+that exists costs the whole design.** Each current byte-changing successor
+still sends the wide UNFLOORED filter, so any history previously missed is
+re-served. That accidental self-repair is precisely what the delta design
+removes. If a
 one-shot backfill is lost — disconnect mid-flight, CLOSE before EOSE, a relay
 that never EOSEs — the next compile is zero-diff and no REQ is emitted.
 Nothing else picks it up: `decide_handle_acquisition` is explicitly one-shot
@@ -1226,13 +1244,13 @@ the sharpest one. Under §7.2 `Since` and a tag's values are SEPARATE
 components (`crates/nmp-router/src/component.rs`). A floored-incumbent design
 moves both in the same compile at every growth step: the value set gains the
 backfilled value AND the floor advances. That is a two-component move, so
-`wire_id::assign` mints a fresh token and `diff_plans` emits Close + Req
-rather than one overwriting REQ. It is exactly the **compound churn** §8.1
+`wire_id::assign` mints a fresh token without a structural predecessor. The
+next request opens independently and unmatched prior work closes normally. It
+is exactly the **compound churn** §8.1
 dismissed as "not a real workload" and forbade designing around — reintroduced
 as the steady state of the feature. The replacement REQ is floored, so the
-churn is bandwidth-cheap; but it re-enters §8.2's straggler surface once per
-growth step, and it contradicts the one-overwriting-REQ wire story the whole
-of §7 exists to preserve.
+churn is bandwidth-cheap; but it creates a new physical generation on every
+growth step and therefore pays the transition cost each time.
 
 **C — a lesser cost: #931 ranks the backfill last.** `refuse_over_budget`
 runs per session after coalescing and token assignment, and §6.1's ranking is
@@ -1242,9 +1260,10 @@ is narrow and loud: it can only fire on a relay that advertises
 `max_subscriptions` AND is already over cap — the state §3.4's collapse made
 rare — and when it does fire, the refused keys join `limited`, so
 `plan_is_fresh_for` returns false and `ShortfallFact::LocalLimit` reaches the
-app. It also has a clean in-router answer, since the split and the budget
-would live in the same compile step: when `planned + 1 > allowed`, emit
-today's unfloored merged filter for that session and degrade to overwrite.
+app. It also has a clean in-router answer, since the split and the budget would
+live in the same compile step: when `planned + 1 > allowed`, emit the current
+unfloored merged filter for that session as the full-query successor instead
+of a separate backfill.
 
 ### 11.5 The cheaper change — BUILT for app-admission bursts
 

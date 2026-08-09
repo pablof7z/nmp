@@ -1,9 +1,16 @@
-//! Admission-window and surgical lifecycle falsifiers for #1340/#1341.
+//! Admission-window and surgical lifecycle falsifiers for #1341/#1342.
 
 use super::*;
-use nmp_grammar::{Binding, Demand, Filter, IndexedTagName};
-use nmp_store::MemoryStore;
-use nostr::Keys;
+use nmp_grammar::{
+    Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, IdentityField,
+    IndexedTagName, Selector,
+};
+use nmp_router::DemandKey;
+use nmp_store::{coverage_key, CoverageInterval, MemoryStore, RelayObserved};
+use nostr::{EventBuilder, Keys, Kind};
+use std::borrow::Cow;
+
+use super::history_load_failure_tests::{ControlledFailureStore, StoreFailureControl};
 
 fn query(relay: &RelayUrl, value: &str, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::from_filter(Filter {
@@ -20,18 +27,136 @@ fn query(relay: &RelayUrl, value: &str, freshness: Freshness) -> LiveQuery {
 }
 
 fn bounded_query(relay: &RelayUrl, value: &str) -> LiveQuery {
+    limited_query(relay, value, 25)
+}
+
+fn limited_query(relay: &RelayUrl, value: &str, limit: usize) -> LiveQuery {
     let mut demand = Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([0u16])),
         tags: BTreeMap::from([(
             IndexedTagName::new('p').unwrap(),
             Binding::Literal(BTreeSet::from([value.to_owned()])),
         )]),
-        limit: Some(25),
+        limit: Some(limit),
         ..Filter::default()
     });
     demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
     demand.freshness = Freshness::Live;
     LiveQuery::single(demand)
+}
+
+fn bounded_atom(relay: &RelayUrl, value: &str) -> ContextualAtom {
+    ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([0u16])),
+            tags: BTreeMap::from([(
+                IndexedTagName::new('p').unwrap(),
+                BTreeSet::from([value.to_owned()]),
+            )]),
+            limit: Some(25),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
+}
+
+fn query_atom(relay: &RelayUrl, value: &str) -> ContextualAtom {
+    ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([0u16])),
+            tags: BTreeMap::from([(
+                IndexedTagName::new('p').unwrap(),
+                BTreeSet::from([value.to_owned()]),
+            )]),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
+}
+
+fn unbounded_incompatible_query(relay: &RelayUrl, index: u16) -> LiveQuery {
+    let mut demand = Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1_000 + index])),
+        tags: BTreeMap::from([(
+            IndexedTagName::new('p').unwrap(),
+            Binding::Literal(BTreeSet::from([format!("owner-{index:04}")])),
+        )]),
+        ..Filter::default()
+    });
+    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    demand.freshness = Freshness::Live;
+    LiveQuery::single(demand)
+}
+
+fn profile_query(relay: &RelayUrl, author: PublicKey) -> LiveQuery {
+    let mut demand = Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([0u16])),
+        authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+        ..Filter::default()
+    });
+    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    demand.freshness = Freshness::Live;
+    LiveQuery::single(demand)
+}
+
+fn nested_same_profile_query(
+    relay: &RelayUrl,
+    inner_authors: Binding,
+    outer_freshness: Freshness,
+) -> LiveQuery {
+    let mut inner = Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([0u16])),
+        authors: Some(inner_authors),
+        ..Filter::default()
+    });
+    inner.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    inner.freshness = Freshness::Live;
+
+    let mut outer = Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([0u16])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner,
+            project: Selector::Authors,
+        }))),
+        ..Filter::default()
+    });
+    outer.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    outer.freshness = outer_freshness;
+    LiveQuery::single(outer)
+}
+
+fn profile_atom(relay: &RelayUrl, author: PublicKey) -> ContextualAtom {
+    ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(BTreeSet::from([author.to_hex()])),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
+}
+
+fn seeded_profiles(relay: &RelayUrl, authors: &[&Keys]) -> MemoryStore {
+    let mut store = MemoryStore::new();
+    for (index, author) in authors.iter().enumerate() {
+        let observed_at = 10 + index as u64;
+        store
+            .insert(
+                EventBuilder::new(Kind::Metadata, "{}")
+                    .custom_created_at(Timestamp::from(observed_at))
+                    .sign_with_keys(author)
+                    .expect("sign fixture profile"),
+                RelayObserved::new(relay.clone(), Timestamp::from(observed_at)),
+            )
+            .expect("seed fixture profile");
+    }
+    store
 }
 
 fn routeless_outbox_query(author: PublicKey) -> LiveQuery {
@@ -49,6 +174,19 @@ fn routeless_outbox_query(author: PublicKey) -> LiveQuery {
     )
 }
 
+fn routeless_outbox_atom(author: PublicKey) -> ContextualAtom {
+    ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(BTreeSet::from([author.to_hex()])),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::AuthorOutboxes,
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    }
+}
+
 fn observation_id(effects: &[Effect]) -> ObservationId {
     effects
         .iter()
@@ -57,6 +195,102 @@ fn observation_id(effects: &[Effect]) -> ObservationId {
             _ => None,
         })
         .expect("an observation open returns its immediate cache seed")
+}
+
+fn source_statuses(effects: &[Effect], observation: ObservationId) -> Vec<SourceStatus> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitRows(id, _, evidence) if *id == observation => Some(evidence),
+            _ => None,
+        })
+        .flat_map(|evidence| evidence.iter())
+        .flat_map(|evidence| evidence.sources.iter())
+        .map(|source| source.status)
+        .collect()
+}
+
+fn current_source_statuses<S: EventStore>(
+    core: &EngineCore<S>,
+    observation: ObservationId,
+) -> Vec<SourceStatus> {
+    core.observations[&observation]
+        .last_evidence
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .flat_map(|evidence| evidence.sources.iter())
+        .map(|source| source.status)
+        .collect()
+}
+
+#[test]
+fn fresh_max_age_is_coverage_satisfied_alone_and_never_borrows_live_placement() {
+    let relay = RelayUrl::parse("wss://max-age-evidence.example").unwrap();
+    let session = RelaySessionKey::public(relay.clone());
+    let value = "fresh-owner";
+    let atom = query_atom(&relay, value);
+    let mut store = MemoryStore::new();
+    store
+        .record_coverage(&[(
+            atom,
+            relay.clone(),
+            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+        )])
+        .unwrap();
+    let mut core = EngineCore::new(store, 8);
+    core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
+    let handle = TransportRelayHandle {
+        slot: 31,
+        generation: 1,
+    };
+    core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+
+    let max_opened = core.handle(EngineMsg::Subscribe(query(
+        &relay,
+        value,
+        Freshness::MaxAge { seconds: 60 },
+    )));
+    let max = observation_id(&max_opened);
+    assert_eq!(
+        source_statuses(&max_opened, max),
+        vec![SourceStatus::CoverageSatisfied]
+    );
+    assert!(wire_ops(&flush(&mut core)).is_empty());
+
+    let live_opened = core.handle(EngineMsg::Subscribe(query(&relay, value, Freshness::Live)));
+    let live = observation_id(&live_opened);
+    let admitted = flush(&mut core);
+    assert_eq!(
+        current_source_statuses(&core, max),
+        vec![SourceStatus::CoverageSatisfied]
+    );
+    assert_eq!(
+        source_statuses(&admitted, live),
+        vec![SourceStatus::AwaitingRequest]
+    );
+    let accepted = accept_first_request(&mut core, &session, handle.slot);
+    assert_eq!(
+        current_source_statuses(&core, max),
+        vec![SourceStatus::CoverageSatisfied]
+    );
+    assert_eq!(
+        source_statuses(&accepted, live),
+        vec![SourceStatus::Requesting]
+    );
+
+    assert!(wire_ops(&core.handle(EngineMsg::Unsubscribe(max))).is_empty());
+    assert_eq!(
+        wire_ops(&core.handle(EngineMsg::Unsubscribe(live)))
+            .into_iter()
+            .filter(|op| matches!(op, WireOp::Close(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        core.bench_ownership_census(),
+        CoreOwnershipCensus::default()
+    );
 }
 
 fn wire_ops(effects: &[Effect]) -> Vec<&WireOp> {
@@ -70,466 +304,121 @@ fn wire_ops(effects: &[Effect]) -> Vec<&WireOp> {
         .collect()
 }
 
-fn flush(core: &mut EngineCore<MemoryStore>) -> Vec<Effect> {
+fn flush<S: EventStore>(core: &mut EngineCore<S>) -> Vec<Effect> {
     core.handle(EngineMsg::FlushWireAdmission)
 }
 
-#[test]
-fn cache_seed_is_immediate_while_wire_execution_waits_for_admission_flush() {
-    let relay = RelayUrl::parse("wss://admission-seed.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-
-    let opened = core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "alice",
-        Freshness::Live,
-    )));
-
-    observation_id(&opened);
-    assert!(wire_ops(&opened).is_empty(), "open must not execute a REQ");
-    assert!(opened
+fn current_attempt<S: EventStore>(
+    core: &EngineCore<S>,
+    session: &RelaySessionKey,
+    sub_id: &SubId,
+    filter_hash: DescriptorHash,
+) -> RequestAttemptId {
+    core.pending_request_evidence[&(session.clone(), sub_id.clone())]
         .iter()
-        .any(|effect| matches!(effect, Effect::ArmWireAdmission)));
-
-    let flushed = flush(&mut core);
-    assert_eq!(
-        wire_ops(&flushed)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Req(_, _)))
-            .count(),
-        1
-    );
+        .rev()
+        .find(|request| request.filter.hash() == filter_hash)
+        .expect("the test request owns a current attempt")
+        .attempt_id
 }
 
-#[test]
-fn compatible_pending_observations_compile_once_into_one_relay_request() {
-    let relay = RelayUrl::parse("wss://admission-group.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+fn accept_request<S: EventStore>(
+    core: &mut EngineCore<S>,
+    session: &RelaySessionKey,
+    sub_id: &SubId,
+    filter_hash: DescriptorHash,
+    handle: TransportRelayHandle,
+) -> Vec<Effect> {
+    let attempt_id = current_attempt(core, session, sub_id, filter_hash);
+    core.on_wire_request_handoff(RequestHandoffOutcome::Accepted { attempt_id, handle })
+}
 
-    let alice = core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "alice",
-        Freshness::Live,
-    )));
-    let bob = core.handle(EngineMsg::Subscribe(query(&relay, "bob", Freshness::Live)));
-    assert_ne!(observation_id(&alice), observation_id(&bob));
-    for opened in [&alice, &bob] {
-        assert!(opened.iter().any(|effect| matches!(
-            effect,
-            Effect::EmitRows(_, _, evidence) if evidence.len() == 1
-        )));
-    }
-    assert_eq!(core.router_compiles.get(), 0);
+fn refuse_request<S: EventStore>(
+    core: &mut EngineCore<S>,
+    session: &RelaySessionKey,
+    sub_id: &SubId,
+    filter_hash: DescriptorHash,
+) -> Vec<Effect> {
+    let attempt_id = current_attempt(core, session, sub_id, filter_hash);
+    core.on_wire_request_handoff(RequestHandoffOutcome::Refused {
+        attempt_id,
+        cause: LocalSendRefusal::SessionUnavailable,
+    })
+}
 
-    let flushed = flush(&mut core);
-    assert_eq!(core.router_compiles.get(), 1);
-    let filters: Vec<_> = wire_ops(&flushed)
-        .into_iter()
-        .filter_map(|op| match op {
-            WireOp::Req(_, filter) => Some(filter),
-            WireOp::Close(_) => None,
+fn accept_first_request<S: EventStore>(
+    core: &mut EngineCore<S>,
+    session: &RelaySessionKey,
+    slot: u32,
+) -> Vec<Effect> {
+    let request = core.router.plan().reqs[session][0].clone();
+    accept_request(
+        core,
+        session,
+        &request.sub_id,
+        request.filter.hash(),
+        TransportRelayHandle {
+            slot,
+            generation: 1,
+        },
+    )
+}
+
+fn relay_request_observations(effects: &[Effect]) -> BTreeSet<ObservationId> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitObservationEvidence(observation, evidence)
+                if evidence
+                    .iter()
+                    .any(|fact| matches!(fact.fact, ObservationFact::RelayRequest { .. })) =>
+            {
+                Some(*observation)
+            }
+            _ => None,
         })
-        .collect();
-    assert_eq!(filters.len(), 1);
-    assert_eq!(
-        filters[0].tags[&IndexedTagName::new('p').unwrap()],
-        BTreeSet::from(["alice".to_owned(), "bob".to_owned()])
-    );
+        .collect()
 }
 
-#[test]
-fn later_uncovered_demand_opens_a_second_req_without_replacing_the_running_one() {
-    let relay = RelayUrl::parse("wss://admission-immutable.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "alice",
-        Freshness::Live,
-    )));
-    let first = flush(&mut core);
-    let first_id = wire_ops(&first)
-        .into_iter()
-        .find_map(|op| match op {
-            WireOp::Req(id, _) => Some(id.clone()),
-            WireOp::Close(_) => None,
+fn relay_request_targets(effects: &[Effect]) -> BTreeSet<(ObservationId, String, u64)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::EmitObservationEvidence(observation, evidence) => {
+                Some((*observation, evidence.as_slice()))
+            }
+            _ => None,
         })
-        .unwrap();
-
-    let later = core.handle(EngineMsg::Subscribe(query(&relay, "bob", Freshness::Live)));
-    assert!(wire_ops(&later).is_empty());
-    let second = flush(&mut core);
-    let second_ops = wire_ops(&second);
-    assert!(second_ops.iter().all(|op| !matches!(op, WireOp::Close(_))));
-    let second_id = second_ops
-        .into_iter()
-        .find_map(|op| match op {
-            WireOp::Req(id, _) => Some(id.clone()),
-            WireOp::Close(_) => None,
+        .flat_map(|(observation, evidence)| {
+            evidence.iter().filter_map(move |fact| match &fact.fact {
+                ObservationFact::RelayRequest {
+                    path,
+                    filter_revision,
+                    ..
+                } => Some((observation, path.clone(), *filter_revision)),
+                _ => None,
+            })
         })
-        .unwrap();
-    assert_ne!(first_id, second_id);
-    assert_eq!(
-        core.router.plan().reqs[&RelaySessionKey::public(relay)].len(),
-        2
-    );
+        .collect()
 }
 
-#[test]
-fn duplicate_running_demand_attaches_without_compile_or_sibling_projection() {
-    let relay = RelayUrl::parse("wss://admission-covered.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "alice",
-        Freshness::Live,
-    )));
-    flush(&mut core);
-    core.projection_store_queries.set(0);
-    core.router_compiles.set(0);
-
-    let duplicate = core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "alice",
-        Freshness::Live,
-    )));
-
-    observation_id(&duplicate);
-    assert_eq!(
-        core.projection_store_queries.get(),
-        1,
-        "only the new observation may read its canonical cache projection"
-    );
-    assert_eq!(core.router_compiles.get(), 0);
-    assert!(!duplicate
-        .iter()
-        .any(|effect| matches!(effect, Effect::ArmWireAdmission)));
-    assert!(wire_ops(&duplicate).is_empty());
-}
-
-#[test]
-fn cache_only_open_reads_only_its_own_projection_and_never_arms_wire() {
-    let relay = RelayUrl::parse("wss://admission-cache-only.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "alice",
-        Freshness::Live,
-    )));
-    flush(&mut core);
-    core.projection_store_queries.set(0);
-    core.router_compiles.set(0);
-
-    let cached = core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "bob",
-        Freshness::CacheOnly,
-    )));
-
-    observation_id(&cached);
-    assert_eq!(core.projection_store_queries.get(), 1);
-    assert_eq!(core.router_compiles.get(), 0);
-    assert!(!cached
-        .iter()
-        .any(|effect| matches!(effect, Effect::ArmWireAdmission)));
-    assert!(wire_ops(&cached).is_empty());
-}
-
-#[test]
-fn cancelling_a_pending_observation_before_flush_sends_nothing() {
-    let relay = RelayUrl::parse("wss://admission-cancel.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    let opened = core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "alice",
-        Freshness::Live,
-    )));
-    let id = observation_id(&opened);
-
-    let closed = core.handle(EngineMsg::Unsubscribe(id));
-    assert!(wire_ops(&closed).is_empty());
-    assert!(wire_ops(&flush(&mut core)).is_empty());
-}
-
-#[test]
-fn closing_an_incumbent_rearms_an_already_pending_limited_atom_without_a_rebuild() {
-    let first_relay = RelayUrl::parse("wss://admission-cap-first.example").unwrap();
-    let second_relay = RelayUrl::parse("wss://admission-cap-second.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 1);
-    let first = observation_id(&core.handle(EngineMsg::Subscribe(query(
-        &first_relay,
-        "alice",
-        Freshness::Live,
-    ))));
-    assert_eq!(
-        wire_ops(&flush(&mut core))
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Req(_, _)))
-            .count(),
-        1
-    );
-    core.handle(EngineMsg::Subscribe(query(
-        &second_relay,
-        "bob",
-        Freshness::Live,
-    )));
-    assert!(wire_ops(&flush(&mut core)).is_empty());
-    assert_eq!(core.pending_wire_atoms.len(), 1);
-
-    core.pending_atoms_rebuilt.set(0);
-    let released = core.handle(EngineMsg::Unsubscribe(first));
-
-    assert_eq!(
-        wire_ops(&released)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Close(_)))
-            .count(),
-        1
-    );
-    assert!(released
-        .iter()
-        .any(|effect| matches!(effect, Effect::ArmWireAdmission)));
-    assert_eq!(core.pending_atoms_rebuilt.get(), 0);
-    assert_eq!(core.pending_wire_atoms.len(), 1);
-    assert_eq!(
-        wire_ops(&flush(&mut core))
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Req(_, _)))
-            .count(),
-        1
-    );
-    assert!(core.pending_wire_atoms.is_empty());
-}
-
-#[test]
-fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() {
-    let relay = RelayUrl::parse("wss://admission-pending-withdraw-10k.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    let mut observations = Vec::with_capacity(10_000);
-    for index in 0..10_000 {
-        observations.push(observation_id(&core.handle(EngineMsg::Subscribe(query(
-            &relay,
-            &format!("pending-{index:05}"),
-            Freshness::Live,
-        )))));
-    }
-    assert_eq!(core.pending_wire_atoms.len(), 10_000);
-
-    core.projection_store_queries.set(0);
-    core.router_compiles.set(0);
-    core.withdrawal_handle_detaches.set(0);
-    core.resolver_delta_ops_consumed.set(0);
-    core.pending_atoms_rebuilt.set(0);
-    core.router.reset_withdrawal_work();
-    for observation in observations {
-        let effects = core.handle(EngineMsg::Unsubscribe(observation));
-        assert!(wire_ops(&effects).is_empty());
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))));
-    }
-
-    let router = core.router.withdrawal_work();
-    assert_eq!(core.withdrawal_handle_detaches.get(), 10_000);
-    assert_eq!(core.resolver_delta_ops_consumed.get(), 10_000);
-    assert_eq!(router.dropped_atoms, 10_000);
-    assert_eq!(router.request_edges_touched, 0);
-    assert_eq!(router.requests_closed, 0);
-    assert_eq!(router.physical_coverage_edges_released, 0);
-    assert_eq!(router.diagnostic_rebuilds, 0);
-    assert_eq!(core.projection_store_queries.get(), 0);
-    assert_eq!(core.router_compiles.get(), 0);
-    assert_eq!(core.pending_atoms_rebuilt.get(), 0);
-    assert!(core.pending_wire_atoms.is_empty());
-    assert_eq!(
-        core.bench_ownership_census(),
-        CoreOwnershipCensus::default()
-    );
-}
-
-#[test]
-fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
-    let relay = RelayUrl::parse("wss://admission-scale.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    let mut observations = Vec::new();
-    core.projection_store_queries.set(0);
-    core.router_compiles.set(0);
-
-    for index in 0..207 {
-        let opened = core.handle(EngineMsg::Subscribe(query(
-            &relay,
-            &format!("person-{index:03}"),
-            Freshness::Live,
-        )));
-        observations.push(observation_id(&opened));
-    }
-
-    assert_eq!(core.projection_store_queries.get(), 207);
-    assert_eq!(core.router_compiles.get(), 0);
-    let admitted = flush(&mut core);
-    assert_eq!(core.router_compiles.get(), 1);
-    assert_eq!(core.projection_store_queries.get(), 207);
-    assert_eq!(
-        wire_ops(&admitted)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Req(_, _)))
-            .count(),
-        1
-    );
-
-    core.projection_store_queries.set(0);
-    core.router.reset_withdrawal_work();
-    let mut diagnostics = 0;
-    for observation in observations {
-        diagnostics += core
-            .handle(EngineMsg::Unsubscribe(observation))
-            .iter()
-            .filter(|effect| matches!(effect, Effect::EmitDiagnostics(_)))
-            .count();
-    }
-    assert_eq!(core.projection_store_queries.get(), 0);
-    let work = core.router.withdrawal_work();
-    assert_eq!(work.dropped_atoms, 207);
-    assert_eq!(work.request_edges_touched, 207);
-    assert_eq!(work.requests_closed, 1);
-    assert_eq!(work.physical_coverage_edges_released, 207);
-    assert_eq!(work.diagnostic_rebuilds, 1);
-    assert_eq!(
-        diagnostics, 1,
-        "only the final owner changes the immutable relay plan"
-    );
-}
-
-#[test]
-fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
-    let relay = RelayUrl::parse("wss://admission-shared-10k.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    let mut observations = Vec::with_capacity(10_000);
-    for _ in 0..10_000 {
-        observations.push(observation_id(
-            &core.handle(EngineMsg::Subscribe(bounded_query(&relay, "same-owner"))),
-        ));
-    }
-    assert_eq!(
-        observations.iter().copied().collect::<BTreeSet<_>>().len(),
-        10_000
-    );
-    let admitted = flush(&mut core);
-    assert_eq!(
-        wire_ops(&admitted)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Req(_, _)))
-            .count(),
-        1
-    );
-
-    core.projection_store_queries.set(0);
-    core.router_compiles.set(0);
-    core.withdrawal_handle_detaches.set(0);
-    core.resolver_delta_ops_consumed.set(0);
-    core.pending_atoms_rebuilt.set(0);
-    core.router.reset_withdrawal_work();
-    for observation in observations.iter().take(9_999) {
-        let effects = core.handle(EngineMsg::Unsubscribe(*observation));
-        assert!(wire_ops(&effects).is_empty());
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))));
-    }
-
-    let non_final = core.router.withdrawal_work();
-    assert_eq!(core.withdrawal_handle_detaches.get(), 9_999);
-    assert_eq!(core.resolver_delta_ops_consumed.get(), 0);
-    assert_eq!(core.pending_atoms_rebuilt.get(), 0);
-    assert_eq!(non_final.dropped_atoms, 0);
-    assert_eq!(non_final.request_edges_touched, 0);
-    assert_eq!(non_final.requests_closed, 0);
-    assert_eq!(non_final.diagnostic_rebuilds, 0);
-    assert_eq!(core.projection_store_queries.get(), 0);
-    assert_eq!(core.router_compiles.get(), 0);
-
-    let final_effects = core.handle(EngineMsg::Unsubscribe(observations[9_999]));
-    assert_eq!(
-        wire_ops(&final_effects)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Close(_)))
-            .count(),
-        1
-    );
-    assert_eq!(
-        final_effects
-            .iter()
-            .filter(|effect| matches!(effect, Effect::EmitDiagnostics(_)))
-            .count(),
-        1
-    );
-    let final_work = core.router.withdrawal_work();
-    assert_eq!(core.withdrawal_handle_detaches.get(), 10_000);
-    assert_eq!(core.resolver_delta_ops_consumed.get(), 1);
-    assert_eq!(core.pending_atoms_rebuilt.get(), 0);
-    assert_eq!(final_work.dropped_atoms, 1);
-    assert_eq!(final_work.request_edges_touched, 1);
-    assert_eq!(final_work.requests_closed, 1);
-    assert_eq!(final_work.physical_coverage_edges_released, 1);
-    assert_eq!(final_work.diagnostic_rebuilds, 1);
-    assert_eq!(core.projection_store_queries.get(), 0);
-    assert_eq!(core.router_compiles.get(), 0);
-}
-
-#[test]
-fn withdrawing_the_final_routeless_observation_emits_its_diagnostic_retraction() {
-    let author = Keys::generate().public_key();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    let opened = core.handle(EngineMsg::Subscribe(routeless_outbox_query(author)));
-    let observation = observation_id(&opened);
-    let admitted = flush(&mut core);
-    assert!(wire_ops(&admitted).is_empty());
-    assert_eq!(core.diagnostics_snapshot().uncovered_author_count, 1);
-
-    let withdrawn = core.handle(EngineMsg::Unsubscribe(observation));
-
-    assert!(wire_ops(&withdrawn).is_empty());
-    assert!(withdrawn.iter().any(|effect| {
-        matches!(effect, Effect::EmitDiagnostics(snapshot)
-            if snapshot.uncovered_author_count == 0)
-    }));
-    assert_eq!(core.diagnostics_snapshot().uncovered_author_count, 0);
-}
-
-#[test]
-fn history_open_waits_for_the_same_flush_without_refreshing_an_ordinary_sibling() {
-    let relay = RelayUrl::parse("wss://admission-history.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    core.handle(EngineMsg::Subscribe(query(
-        &relay,
-        "alice",
-        Freshness::Live,
-    )));
-    core.projection_store_queries.set(0);
-    core.history_store_queries.set(0);
-    core.router_compiles.set(0);
-
-    let opened = core.handle(EngineMsg::SubscribeHistory(HistoryQuery::new(
-        query(&relay, "bob", Freshness::Live),
-        1,
-        2,
-    )));
-
-    assert!(opened
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitHistory(_, _))));
-    assert_eq!(core.projection_store_queries.get(), 0);
-    assert_eq!(core.history_store_queries.get(), 1);
-    assert_eq!(core.router_compiles.get(), 0);
-    let admitted = flush(&mut core);
-    assert_eq!(core.router_compiles.get(), 1);
-    assert_eq!(core.projection_store_queries.get(), 0);
-    assert_eq!(core.history_store_queries.get(), 1);
-    assert_eq!(
-        wire_ops(&admitted)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Req(_, _)))
-            .count(),
-        2,
-        "the bounded history filter cannot merge with an unlimited ordinary filter"
-    );
-}
+#[path = "admission_tests/claim_detach.rs"]
+mod claim_detach;
+#[path = "admission_tests/claim_transfer_retry.rs"]
+mod claim_transfer_retry;
+#[path = "admission_tests/cohort.rs"]
+mod cohort;
+#[path = "admission_tests/completion_transfer.rs"]
+mod completion_transfer;
+#[path = "admission_tests/diagnostics_scale.rs"]
+mod diagnostics_scale;
+#[path = "admission_tests/execution_targets.rs"]
+mod execution_targets;
+#[path = "admission_tests/lifecycle.rs"]
+mod lifecycle;
+#[path = "admission_tests/resolver_delta.rs"]
+mod resolver_delta;
+#[path = "admission_tests/routing_evidence.rs"]
+mod routing_evidence;
+#[path = "admission_tests/scale_teardown.rs"]
+mod scale_teardown;

@@ -42,7 +42,7 @@
 //! `finish_neg_session` then attributes coverage through the EXACT SAME
 //! `AttributionState::attribute_eose` call the real EOSE path already
 //! uses (`docs/design/query-demand-and-evidence.md`: "attribute
-//! coverage via the same absorbed-snapshot mechanism EngineCore already
+//! coverage via the same coverage_claims-snapshot mechanism EngineCore already
 //! uses for EOSE; feed a NEG-DONE the same way") — this module never
 //! invents a second coverage mechanism, it only drives the protocol and
 //! hands `core::mod` a `BTreeSet<EventId>` of what the local store is

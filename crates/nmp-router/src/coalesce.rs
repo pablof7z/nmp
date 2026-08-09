@@ -13,11 +13,28 @@ use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_store::CoverageKey;
 
 use crate::component::{sole_difference, Component};
+use crate::facts::PublicKey;
+use crate::plan::DemandKey;
 use crate::route::RouteProvenance;
 
 /// One coalesce-in-progress entry: the filter plus the provenance/coverage
 /// bookkeeping threaded alongside it through `coalesce_with`'s merges.
-pub(crate) type Entry = (ConcreteFilter, Vec<RouteProvenance>, BTreeSet<CoverageKey>);
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EntryOwnership {
+    pub(crate) coverage_claims: BTreeSet<CoverageKey>,
+    pub(crate) owner_demands: BTreeSet<DemandKey>,
+    pub(crate) coverage_assignments: BTreeSet<(DemandKey, PublicKey)>,
+}
+
+impl EntryOwnership {
+    fn extend(&mut self, other: Self) {
+        self.coverage_claims.extend(other.coverage_claims);
+        self.owner_demands.extend(other.owner_demands);
+        self.coverage_assignments.extend(other.coverage_assignments);
+    }
+}
+
+pub(crate) type Entry = (ConcreteFilter, Vec<RouteProvenance>, EntryOwnership);
 
 /// A widen-only, INTROSPECTABLE merge rule.
 pub trait MergeRule {
@@ -301,7 +318,7 @@ impl RuleRegistry {
     pub fn coalesce(&self, filters: BTreeSet<ConcreteFilter>) -> Vec<ConcreteFilter> {
         let entries = filters
             .into_iter()
-            .map(|f| (f, Vec::new(), BTreeSet::new()))
+            .map(|f| (f, Vec::new(), EntryOwnership::default()))
             .collect();
         self.coalesce_with(entries)
             .into_iter()
@@ -312,7 +329,7 @@ impl RuleRegistry {
     /// Provenance/coverage-threading variant used by the router: identical
     /// merge decisions to [`Self::coalesce`] (implemented in terms of the
     /// exact same rule set, so the two can never diverge), but concatenates
-    /// both the provenance list AND the `absorbed` coverage-key set of every
+    /// both the provenance list AND the `coverage_claims` coverage-key set of every
     /// filter folded into a merge.
     ///
     /// Deliberately PURE selection-only (#106, Fable D "locus fixed"): this
@@ -326,26 +343,26 @@ impl RuleRegistry {
     /// widen-only proof (which reasons about `ConcreteFilter` pairs alone)
     /// and property tests stay untouched.
     ///
-    /// `absorbed` threading is what discharges the coverage-attribution
+    /// `coverage_claims` threading is what discharges the coverage-attribution
     /// ruling's containment rule
     /// (`docs/design/query-demand-and-evidence.md`) at
     /// materialization time: because every rule here is proven widen-only
     /// (`matches(merged) ⊇ matches(a) ∪ matches(b)`), the union of two
-    /// atoms' `absorbed` sets is still soundly contained in the merged
+    /// atoms' `coverage_claims` sets is still soundly contained in the merged
     /// filter's matches — the SAME real mechanism that already threads
     /// `provenance` through a merge.
     pub(crate) fn coalesce_with(&self, entries: Vec<Entry>) -> Vec<Entry> {
         // 1. Exact-canonical dedup by hash (the trivially-correct floor).
         let mut by_hash: BTreeMap<DescriptorHash, Entry> = BTreeMap::new();
-        for (f, prov, absorbed) in entries {
+        for (f, prov, ownership) in entries {
             let h = f.hash();
             by_hash
                 .entry(h)
-                .and_modify(|(_, p, a)| {
+                .and_modify(|(_, p, retained)| {
                     p.extend(prov.clone());
-                    a.extend(absorbed.clone());
+                    retained.extend(ownership.clone());
                 })
-                .or_insert((f, prov, absorbed));
+                .or_insert((f, prov, ownership));
         }
         let mut current: Vec<Entry> = by_hash.into_values().collect();
 
@@ -372,7 +389,7 @@ impl RuleRegistry {
         //    `diff_plans` quietly kept one. Under allocation they would each
         //    get their OWN token and become two permanently-live duplicate
         //    REQs -- the relay double-delivering every matching event forever,
-        //    with `absorbed` split across two entries so neither is fully
+        //    with `coverage_claims` split across two entries so neither is fully
         //    credited. Strictly worse than the bug it replaced.
         //
         //    Order-preserving: each duplicate folds into the FIRST entry
@@ -384,20 +401,20 @@ impl RuleRegistry {
     }
 
     /// Fold byte-identical survivors into their first occurrence, unioning
-    /// `provenance` and `absorbed`. See `coalesce_with` step 3 for why this
+    /// `provenance` and `coverage_claims`. See `coalesce_with` step 3 for why this
     /// exists and why it must preserve order.
     fn dedup_survivors(entries: &mut Vec<Entry>) {
         let mut first_index: BTreeMap<DescriptorHash, usize> = BTreeMap::new();
         let mut out: Vec<Entry> = Vec::with_capacity(entries.len());
-        for (filter, provenance, absorbed) in std::mem::take(entries) {
+        for (filter, provenance, ownership) in std::mem::take(entries) {
             match first_index.get(&filter.hash()) {
                 Some(&first) => {
                     out[first].1.extend(provenance);
-                    out[first].2.extend(absorbed);
+                    out[first].2.extend(ownership);
                 }
                 None => {
                     first_index.insert(filter.hash(), out.len());
-                    out.push((filter, provenance, absorbed));
+                    out.push((filter, provenance, ownership));
                 }
             }
         }
@@ -491,9 +508,9 @@ impl RuleRegistry {
             if let Some(merged) = rule.try_merge(&a.0, &b.0) {
                 let mut prov = a.1.clone();
                 prov.extend(b.1.clone());
-                let mut absorbed = a.2.clone();
-                absorbed.extend(b.2.clone());
-                return Some((merged, prov, absorbed));
+                let mut ownership = a.2.clone();
+                ownership.extend(b.2.clone());
+                return Some((merged, prov, ownership));
             }
         }
         None
@@ -550,15 +567,15 @@ mod tests {
     /// oracle -- never call this outside `#[cfg(test)]`.
     fn naive_coalesce_with(registry: &RuleRegistry, entries: Vec<Entry>) -> Vec<Entry> {
         let mut by_hash: BTreeMap<DescriptorHash, Entry> = BTreeMap::new();
-        for (f, prov, absorbed) in entries {
+        for (f, prov, ownership) in entries {
             let h = f.hash();
             by_hash
                 .entry(h)
-                .and_modify(|(_, p, a)| {
+                .and_modify(|(_, p, retained)| {
                     p.extend(prov.clone());
-                    a.extend(absorbed.clone());
+                    retained.extend(ownership.clone());
                 })
-                .or_insert((f, prov, absorbed));
+                .or_insert((f, prov, ownership));
         }
         let mut current: Vec<Entry> = by_hash.into_values().collect();
 
@@ -570,15 +587,15 @@ mod tests {
                         if let Some(merged) = rule.try_merge(&current[i].0, &current[j].0) {
                             let mut prov = current[i].1.clone();
                             prov.extend(current[j].1.clone());
-                            let mut absorbed = current[i].2.clone();
-                            absorbed.extend(current[j].2.clone());
+                            let mut ownership = current[i].2.clone();
+                            ownership.extend(current[j].2.clone());
                             let mut next = Vec::with_capacity(current.len() - 1);
                             for (k, entry) in current.into_iter().enumerate() {
                                 if k != i && k != j {
                                     next.push(entry);
                                 }
                             }
-                            next.push((merged, prov, absorbed));
+                            next.push((merged, prov, ownership));
                             current = next;
                             merged_once = true;
                             break 'search;
@@ -596,7 +613,7 @@ mod tests {
     fn entries_of(filters: Vec<ConcreteFilter>) -> Vec<Entry> {
         filters
             .into_iter()
-            .map(|f| (f, Vec::new(), Set::new()))
+            .map(|f| (f, Vec::new(), EntryOwnership::default()))
             .collect()
     }
 
@@ -1042,7 +1059,11 @@ mod tests {
     fn coalesce_ships_an_unconstrained_authors_filter_separately() {
         let filters = Set::from([cf(&[1], &[]), cf(&[1], &["aa"])]);
         let out = RuleRegistry::default_widen_only().coalesce(filters);
-        assert_eq!(out.len(), 2, "an unconstrained filter must not be absorbed");
+        assert_eq!(
+            out.len(),
+            2,
+            "an unconstrained filter must not be coverage_claims"
+        );
         assert!(out.iter().any(|f| f.authors.is_none()));
     }
 

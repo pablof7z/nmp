@@ -88,6 +88,12 @@ sealed class SourceStatus {
      * both directions. */
     object FinishedStoredEvents : SourceStatus()
 
+    /** The request is planned and locally owned, but the transport has not
+     * accepted it yet. This includes bounded retry backoff after a local
+     * admission refusal; the relay socket may already be connected. */
+    object AwaitingRequest : SourceStatus()
+    object CoverageSatisfied : SourceStatus()
+
     object Connecting : SourceStatus()
 
     object Disconnected : SourceStatus()
@@ -103,6 +109,8 @@ sealed class SourceStatus {
             when (ffi) {
                 is FfiSourceStatus.Requesting -> Requesting
                 is FfiSourceStatus.FinishedStoredEvents -> FinishedStoredEvents
+                is FfiSourceStatus.AwaitingRequest -> AwaitingRequest
+                is FfiSourceStatus.CoverageSatisfied -> CoverageSatisfied
                 is FfiSourceStatus.Connecting -> Connecting
                 is FfiSourceStatus.Disconnected -> Disconnected
                 is FfiSourceStatus.AwaitingAuth -> AwaitingAuth(AuthPhase.from(ffi.phase))
@@ -113,11 +121,12 @@ sealed class SourceStatus {
 }
 
 /** One relay's acquisition state for a query's subtree, as two deliberately
- * orthogonal facts: a durable PAST fact (`reconciledThrough`) and a fact about
- * the request on the wire right now (`status`) -- a relay can be currently
+ * orthogonal facts: a durable PAST fact (`reconciledThrough`) and its effective
+ * current acquisition state (`status`). A relay can be currently
  * `Disconnected` while still carrying a perfectly good `reconciledThrough`
- * from before it dropped (offline cached rows remain usable), and
- * `FinishedStoredEvents` while carrying none at all. */
+ * from before it dropped, and `FinishedStoredEvents` while carrying none at
+ * all. A fresh no-wire scope is `CoverageSatisfied` independently of link
+ * state. */
 data class SourceEvidence(
     val relay: String,
     /** The frozen access identity of the physical session that produced this

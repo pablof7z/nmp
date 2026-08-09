@@ -316,6 +316,9 @@ pub enum ResolutionNodeKind {
         values: Vec<ResolvedValue>,
     },
     Filter {
+        /// Stable structural Demand-boundary index, in the same root-first
+        /// order returned by `Engine::demand_scopes`.
+        scope: usize,
         atoms: Vec<ContextualAtom>,
     },
 }
