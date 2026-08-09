@@ -1573,7 +1573,7 @@ mod coverage_evidence_refresh_tests {
         core.handle(EngineMsg::Subscribe(pinned_query(&relay)));
         core.diagnostic_snapshots_built.set(0);
 
-        let admitted = core.handle(EngineMsg::FlushWireAdmission);
+        let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
         let wire = wire_id(&admitted);
         assert_eq!(core.diagnostic_snapshots_built.get(), 0);
         assert!(admitted
@@ -1624,7 +1624,7 @@ mod coverage_evidence_refresh_tests {
                     .expect("each observation emits its local frame"),
             );
         }
-        core.handle(EngineMsg::FlushWireAdmission);
+        core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
         let requests = core.router.plan().reqs[&session].clone();
         assert_eq!(
             requests.len(),
@@ -1725,7 +1725,7 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission));
+        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         core.projection_store_queries.set(0);
         core.evidence_candidates_examined.set(0);
         core.diagnostic_snapshots_built.set(0);
@@ -1770,7 +1770,7 @@ mod coverage_evidence_refresh_tests {
                 None,
             )));
         }
-        let admitted = core.handle(EngineMsg::FlushWireAdmission);
+        let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
         assert_eq!(
             admitted
                 .iter()
@@ -1817,7 +1817,7 @@ mod coverage_evidence_refresh_tests {
                 None,
             )));
         }
-        let admitted = core.handle(EngineMsg::FlushWireAdmission);
+        let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
         assert_eq!(
             admitted
                 .iter()
@@ -1856,7 +1856,7 @@ mod coverage_evidence_refresh_tests {
         core.handle(EngineMsg::SubscribeHistory(HistoryQuery::new(
             history, 1, 2,
         )));
-        core.handle(EngineMsg::FlushWireAdmission);
+        core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
         let requests = core.router.plan().reqs[&session].clone();
         assert_eq!(requests.len(), 2);
         let limited = requests
@@ -1955,7 +1955,7 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission));
+        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         let remembered = core.histories[&id].last_rows.clone();
         core.history_store_queries.set(0);
 

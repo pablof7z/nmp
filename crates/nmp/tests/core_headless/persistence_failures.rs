@@ -857,7 +857,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         &[1],
         &b.public_key().to_hex(),
     )));
-    let _ = core.handle(EngineMsg::FlushWireAdmission);
+    let _ = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &healthy.public_key().to_hex(),

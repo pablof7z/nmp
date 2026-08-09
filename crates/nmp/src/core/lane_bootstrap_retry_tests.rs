@@ -17,6 +17,9 @@ use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
 
 use super::*;
 
+#[path = "lane_bootstrap_retry_tests/clock.rs"]
+mod clock;
+
 // ---- fixtures ----------------------------------------------------------
 
 fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {

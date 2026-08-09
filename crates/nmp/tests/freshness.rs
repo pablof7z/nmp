@@ -146,9 +146,13 @@ fn core_with_relays(
     )
 }
 
-fn subscribe<S: EventStore>(core: &mut EngineCore<S>, query: LiveQuery) -> Vec<Effect> {
+fn subscribe<S: EventStore>(
+    core: &mut EngineCore<S>,
+    query: LiveQuery,
+    admission_at: u64,
+) -> Vec<Effect> {
     let mut effects = core.handle(EngineMsg::Subscribe(query));
-    effects.extend(core.handle(EngineMsg::FlushWireAdmission));
+    effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(admission_at))));
     effects
 }
 
@@ -275,6 +279,7 @@ fn fresh_cached_profile_uses_coverage_and_zero_wire() {
     let effects = subscribe(
         &mut core,
         query(&keys, Freshness::MaxAge { seconds: 14_400 }),
+        100_000,
     );
     let (id, rows, evidence) = initial(&effects);
     assert_eq!(reqs(&effects), 0);
@@ -304,11 +309,12 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
     let stale_effects = subscribe(
         &mut stale,
         query(&keys, Freshness::MaxAge { seconds: 14_400 }),
+        100_000,
     );
     assert_eq!(reqs(&stale_effects), 1);
     let mut live = core(MemoryStore::new(), &keys, &relay);
     tick(&mut live, 100_000);
-    let live_effects = subscribe(&mut live, query(&keys, Freshness::Live));
+    let live_effects = subscribe(&mut live, query(&keys, Freshness::Live), 100_000);
     assert_eq!(
         requested_filters(&stale_effects),
         requested_filters(&live_effects),
@@ -322,6 +328,7 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
     let empty_effects = subscribe(
         &mut empty,
         query(&keys, Freshness::MaxAge { seconds: 14_400 }),
+        100_000,
     );
     let (_, rows, evidence) = initial(&empty_effects);
     assert_eq!(reqs(&empty_effects), 0);
@@ -338,11 +345,11 @@ fn cache_only_does_not_borrow_live_sibling_wire_or_evidence() {
     let relay = RelayUrl::parse("wss://cache-only.example").unwrap();
     let mut core = core(MemoryStore::new(), &keys, &relay);
     tick(&mut core, 100_000);
-    let live = subscribe(&mut core, query(&keys, Freshness::Live));
+    let live = subscribe(&mut core, query(&keys, Freshness::Live), 100_000);
     let (live_id, _, _) = initial(&live);
     assert_eq!(reqs(&live), 1);
 
-    let cached = subscribe(&mut core, query(&keys, Freshness::CacheOnly));
+    let cached = subscribe(&mut core, query(&keys, Freshness::CacheOnly), 100_000);
     let (cached_id, _, evidence) = initial(&cached);
     assert_eq!(reqs(&cached), 0);
     assert!(evidence[0].sources.is_empty());
@@ -371,7 +378,7 @@ fn cache_only_never_opens_wire_with_populated_cache_and_coverage() {
     );
     let mut core = core(store, &keys, &relay);
     tick(&mut core, 100_000);
-    let effects = subscribe(&mut core, query(&keys, Freshness::CacheOnly));
+    let effects = subscribe(&mut core, query(&keys, Freshness::CacheOnly), 100_000);
     let (_, rows, evidence) = initial(&effects);
     assert_eq!(reqs(&effects), 0);
     assert!(rows
@@ -402,6 +409,7 @@ fn nested_cache_only_opens_no_inner_wire_under_live_outer() {
             &outer_relay,
             Freshness::Live,
         ),
+        0,
     );
 
     assert_eq!(
@@ -483,7 +491,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
     root.cache = CacheMode::Strict;
     root.freshness = Freshness::CacheOnly;
     let mut core = EngineCore::new(store, 10);
-    let effects = subscribe(&mut core, LiveQuery::single(root));
+    let effects = subscribe(&mut core, LiveQuery::single(root), 0);
     let (_, rows, _) = initial(&effects);
 
     assert!(
@@ -513,6 +521,7 @@ fn nested_live_opens_wire_under_cache_only_outer() {
             &outer_relay,
             Freshness::CacheOnly,
         ),
+        0,
     );
 
     assert_eq!(
@@ -550,6 +559,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
             &outer_relay,
             Freshness::Live,
         ),
+        100_000,
     );
     assert_eq!(
         requested_filters(&fresh_effects),
@@ -604,6 +614,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
     let sibling_opened = subscribe(
         &mut stale,
         pinned_query(&sibling_keys, &sibling_relay, Freshness::Live),
+        100_000,
     );
     let (sibling_id, _, sibling_evidence) = initial(&sibling_opened);
     assert_eq!(
@@ -625,6 +636,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
             &outer_relay,
             Freshness::Live,
         ),
+        100_000,
     );
     assert_eq!(
         requested_filters(&stale_effects),
@@ -691,6 +703,7 @@ fn nested_max_age_scoped_coverage_survives_redb_restart() {
             &outer_relay,
             Freshness::CacheOnly,
         ),
+        100_000,
     );
 
     assert!(
@@ -739,11 +752,12 @@ fn live_and_satisfied_max_age_drop_independently() {
     );
     let mut forward = core(store, &keys, &relay);
     tick(&mut forward, 100_000);
-    let live = subscribe(&mut forward, query(&keys, Freshness::Live));
+    let live = subscribe(&mut forward, query(&keys, Freshness::Live), 100_000);
     let (live_id, _, _) = initial(&live);
     let fresh = subscribe(
         &mut forward,
         query(&keys, Freshness::MaxAge { seconds: 3_600 }),
+        100_000,
     );
     let (fresh_id, _, _) = initial(&fresh);
     assert_eq!(reqs(&live), 1);
@@ -766,11 +780,12 @@ fn live_and_satisfied_max_age_drop_independently() {
     );
     let mut reverse = core(store, &keys, &relay);
     tick(&mut reverse, 100_000);
-    let live = subscribe(&mut reverse, query(&keys, Freshness::Live));
+    let live = subscribe(&mut reverse, query(&keys, Freshness::Live), 100_000);
     let (live_id, _, _) = initial(&live);
     let fresh = subscribe(
         &mut reverse,
         query(&keys, Freshness::MaxAge { seconds: 3_600 }),
+        100_000,
     );
     let (fresh_id, _, _) = initial(&fresh);
     assert_eq!(closes(&reverse.handle(EngineMsg::Unsubscribe(fresh_id))), 0);
@@ -791,6 +806,7 @@ fn max_age_requires_fresh_coverage_from_every_assigned_outbox() {
     let partial_effects = subscribe(
         &mut partial,
         query(&keys, Freshness::MaxAge { seconds: 3_600 }),
+        100_000,
     );
     assert_eq!(reqs(&partial_effects), 2, "one fresh relay is insufficient");
 
@@ -802,6 +818,7 @@ fn max_age_requires_fresh_coverage_from_every_assigned_outbox() {
     let complete_effects = subscribe(
         &mut complete,
         query(&keys, Freshness::MaxAge { seconds: 3_600 }),
+        100_000,
     );
     let (_, _, evidence) = initial(&complete_effects);
     assert_eq!(reqs(&complete_effects), 0);
@@ -828,6 +845,7 @@ fn stale_max_age_refreshes_coverage_once_and_remains_live() {
     let opened = subscribe(
         &mut core,
         query(&keys, Freshness::MaxAge { seconds: 3_600 }),
+        100_000,
     );
     let (id, _, _) = initial(&opened);
     assert_eq!(reqs(&opened), 1);
@@ -876,7 +894,7 @@ fn pinned_strict_max_age_uses_pinned_scope_for_coverage_and_rows() {
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
     let mut core = EngineCore::new(store, 10);
     tick(&mut core, 100_000);
-    let effects = subscribe(&mut core, LiveQuery::single(demand));
+    let effects = subscribe(&mut core, LiveQuery::single(demand), 100_000);
     let (_, rows, evidence) = initial(&effects);
     assert_eq!(reqs(&effects), 0);
     assert!(rows.is_empty(), "Strict excludes non-pinned provenance");
@@ -896,7 +914,7 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
     let _ = core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let _ = core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None));
     tick(&mut core, 100_000);
-    let live = subscribe(&mut core, query(&keys, Freshness::Live));
+    let live = subscribe(&mut core, query(&keys, Freshness::Live), 100_000);
     let (live_id, _, _) = initial(&live);
     let wire = wire_id(&live);
     let _ = core.handle(EngineMsg::RelayFrame(
@@ -927,6 +945,7 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
     let effects = subscribe(
         &mut core,
         query(&keys, Freshness::MaxAge { seconds: 1_000 }),
+        120_000,
     );
     assert_eq!(
         reqs(&effects),

@@ -9,6 +9,7 @@ impl<S: EventStore> EngineCore<S> {
     pub(crate) fn open_history_observation(
         &mut self,
         query: HistoryQuery,
+        now: Timestamp,
     ) -> ObservationOpen<HistorySessionId, HistoryBatch> {
         let mut effects = Vec::new();
         // Every branch's live-top acquisition opens before the session
@@ -41,7 +42,7 @@ impl<S: EventStore> EngineCore<S> {
         let mut acquisitions_by_branch = Vec::with_capacity(handles.len());
         for index in 0..handles.len() {
             let (branch, freshness) = (handles[index].id(), handles[index].freshness());
-            match self.decide_handle_acquisition(branch, freshness) {
+            match self.decide_handle_acquisition(branch, freshness, now) {
                 Ok(acquisition) => acquisitions_by_branch.push(acquisition),
                 Err(error) => {
                     for handle in handles {
@@ -161,7 +162,7 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn on_subscribe_history(&mut self, query: HistoryQuery) -> Vec<Effect> {
-        match self.open_history_observation(query) {
+        match self.open_history_observation(query, self.clock) {
             ObservationOpen::Opened {
                 id,
                 seed,
