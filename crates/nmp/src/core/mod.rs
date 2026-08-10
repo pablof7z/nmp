@@ -1194,7 +1194,7 @@ pub struct CoreOwnershipCensus {
     pub router_diagnostic_dropped_merge_rules: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-instrumentation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoreObservationOwnershipCensus {
     pub(crate) handles: usize,
@@ -2929,7 +2929,7 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(crate) fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
         CoreObservationOwnershipCensus {
             handles: self.handles.len(),

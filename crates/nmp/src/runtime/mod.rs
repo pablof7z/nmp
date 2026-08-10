@@ -924,7 +924,7 @@ enum Cmd {
         id: ReceiptId,
         reply: Sender<usize>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     ObservationOwnershipCensus {
         reply: Sender<ObservationOwnershipCensus>,
     },
@@ -1001,9 +1001,10 @@ enum Cmd {
     Shutdown,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-instrumentation"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ObservationOwnershipCensus {
+#[doc(hidden)]
+pub struct ObservationOwnershipCensus {
     handles: usize,
     histories: usize,
     history_handles: usize,
@@ -4476,7 +4477,7 @@ fn engine_loop<S>(
                 Cmd::ReceiptDeliveryCount { id, reply } => {
                     let _ = reply.send(receipt_deliveries.borrow().count(id));
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 Cmd::ObservationOwnershipCensus { reply } => {
                     let core_census = core.observation_ownership_census();
                     let _ = reply.send(ObservationOwnershipCensus {
@@ -5037,7 +5038,7 @@ fn engine_loop<S>(
             Cmd::ReceiptDeliveryCount { id, reply } => {
                 let _ = reply.send(receipt_deliveries.borrow().count(id));
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             Cmd::ObservationOwnershipCensus { reply } => {
                 let core_census = core.observation_ownership_census();
                 let _ = reply.send(ObservationOwnershipCensus {
@@ -7056,8 +7057,9 @@ impl Handle {
             .expect("nmp-engine: engine dropped receipt delivery census reply")
     }
 
-    #[cfg(test)]
-    pub(crate) fn observation_ownership_census(&self) -> ObservationOwnershipCensus {
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[doc(hidden)]
+    pub fn observation_ownership_census(&self) -> ObservationOwnershipCensus {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::ObservationOwnershipCensus { reply: reply_tx })
