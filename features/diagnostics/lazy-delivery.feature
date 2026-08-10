@@ -44,3 +44,17 @@ Feature: Diagnostics changes are delivered without rebuilding every close
     And it marks diagnostics dirty without materializing a snapshot
     And repeated changes arm no delivery work while there are no observers
     And a later observer receives one current snapshot through the bounded delivery contract
+
+  # nmp:id=DIAG-LAZY-004
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::schedule_ready_skips_lane_less_obligations
+  # nmp:evidence=rust:nmp::the_detail_window_is_bounded_while_the_census_stays_exact
+  # nmp:falsifier=Let one healthy write rescan every lane-less durable obligation or rebuild and sort the entire stalled-write projection for an unrelated diagnostics request; periodic app heartbeats turn an old queue into recurring CPU saturation.
+  Scenario: A large stalled queue is not ordinary write overhead
+    Given many durable writes are stalled without physical relay lanes
+    And their bounded diagnostic projection is current
+    When one unrelated healthy write is scheduled
+    Then only that write's physical lane is read
+    And the stalled queue is neither retried nor deleted
+    And unrelated diagnostics reuse the current bounded stalled-write projection
+    And a real stalled-stage change marks diagnostics dirty before rebuilding it once
