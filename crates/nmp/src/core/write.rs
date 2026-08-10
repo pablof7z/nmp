@@ -341,6 +341,53 @@ impl<S: EventStore> EngineCore<S> {
         census
     }
 
+    /// Refresh only receipts whose write facts changed this reducer turn.
+    /// The full census is rebuilt once at boot; afterward an unrelated write
+    /// must not rescan every durable obligation merely to discover that none
+    /// of their stalled stages changed.
+    pub(super) fn refresh_stalled_write_cache_for_effects(&mut self, effects: &[Effect]) -> bool {
+        let touched: BTreeSet<ReceiptId> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EmitReceipt(id, _) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let mut changed = false;
+        for id in touched {
+            let next = self
+                .pending
+                .get(&id)
+                .and_then(|pending| self.stalled_write_stage(pending))
+                .map(|(stage, _)| stage);
+            let position = self
+                .last_stalled_write_census
+                .binary_search_by_key(&id, |(receipt, _)| *receipt);
+            match (position, next) {
+                (Ok(index), Some(stage)) if self.last_stalled_write_census[index].1 == stage => {}
+                (Ok(index), Some(stage)) => {
+                    self.last_stalled_write_census[index].1 = stage;
+                    changed = true;
+                }
+                (Ok(index), None) => {
+                    self.last_stalled_write_census.remove(index);
+                    changed = true;
+                }
+                (Err(index), Some(stage)) => {
+                    self.last_stalled_write_census.insert(index, (id, stage));
+                    changed = true;
+                }
+                (Err(_), None) => {}
+            }
+        }
+        if changed {
+            let (rows, totals) = self.stalled_write_projection();
+            self.cached_stalled_writes = rows;
+            self.cached_stalled_write_totals = totals;
+        }
+        changed
+    }
+
     /// The bounded stalled-write section of [`Self::diagnostics_snapshot`].
     ///
     /// One pass over the reducer's own open obligations produces both the
@@ -662,10 +709,12 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
-    /// Full O(pending) re-read of every outstanding write's lanes.
-    /// `schedule_ready` still needs the complete durable attempt-ordinal and
-    /// cap-accounting state. Worker ownership no longer calls this door:
-    /// #985 projects exact nonterminal lane demand in reducer memory.
+    /// Re-read every outstanding write that can actually own a lane.
+    /// `schedule_ready` still needs complete durable attempt-ordinal and cap
+    /// accounting for those lanes, but lane-less obligations must not turn
+    /// every healthy publish into thousands of empty store lookups. The
+    /// reducer projection is complete unless the wake index is degraded; in
+    /// degraded mode this deliberately retains the full-scan safety fallback.
     /// `wake_relay_lanes` narrows ordinary relay events through
     /// `receipts_by_lane_relay`, except in its degraded fallback.
     pub(super) fn recover_all_lanes(
@@ -673,6 +722,9 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Result<Vec<(ReceiptId, PublishQueueLane)>, PersistenceError> {
         let mut lanes = Vec::new();
         for (id, pending) in &self.pending {
+            if !self.lane_relay_index_degraded && pending.lane_projection.persisted.is_empty() {
+                continue;
+            }
             let intent_id = pending.intent_id;
             lanes.extend(
                 self.resolver
@@ -1364,6 +1416,10 @@ impl<S: EventStore> EngineCore<S> {
         if !recovered_route_needs.is_empty() {
             effects.push(Effect::AuthorRouteNeedsChanged(recovered_route_needs));
         }
+        self.last_stalled_write_census = self.stalled_write_census();
+        let (rows, totals) = self.stalled_write_projection();
+        self.cached_stalled_writes = rows;
+        self.cached_stalled_write_totals = totals;
         effects
     }
 

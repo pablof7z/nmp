@@ -2034,6 +2034,12 @@ pub struct EngineCore<S: EventStore> {
     /// publish from rebuilding an engine-global snapshot at every beat of a
     /// lifecycle in which nothing was ever stuck.
     last_stalled_write_census: Vec<(ReceiptId, StalledWriteStage)>,
+    /// Materialized only when the stalled-write census changes. Diagnostics
+    /// snapshots can be requested by unrelated read/query activity, so
+    /// rebuilding and sorting every durable write on each request would put
+    /// the entire publish queue on the read-plane hot path.
+    cached_stalled_writes: Vec<StalledWrite>,
+    cached_stalled_write_totals: StalledWriteTotals,
     event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
     /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
     /// finding E5): `receipt_for_intent` used to be a full linear scan of
@@ -2398,6 +2404,11 @@ impl<S: EventStore> EngineCore<S> {
             active_pubkey: None,
             pending: HashMap::new(),
             last_stalled_write_census: Vec::new(),
+            cached_stalled_writes: Vec::new(),
+            cached_stalled_write_totals: StalledWriteTotals {
+                detail_limit: u64::try_from(STALLED_WRITE_DETAIL_LIMIT).unwrap_or(u64::MAX),
+                ..StalledWriteTotals::default()
+            },
             event_to_receipts: HashMap::new(),
             intent_receipts: HashMap::new(),
             receipts_by_lane_relay: HashMap::new(),
@@ -3152,9 +3163,8 @@ impl<S: EventStore> EngineCore<S> {
             );
         }
         snapshot.auth_sessions = auth_sessions.into_values().collect();
-        let (stalled_writes, stalled_write_totals) = self.stalled_write_projection();
-        snapshot.stalled_writes = stalled_writes;
-        snapshot.stalled_write_totals = stalled_write_totals;
+        snapshot.stalled_writes = self.cached_stalled_writes.clone();
+        snapshot.stalled_write_totals = self.cached_stalled_write_totals;
         for relay in &mut snapshot.relays {
             // NIP-11 advertisement and the NIP-77 behavioral probe are both
             // PUBLIC-session evidence (#8): the one-shot HTTP document and
@@ -3509,15 +3519,8 @@ impl<S: EventStore> EngineCore<S> {
         // would make every ACK cost a full diagnostics rebuild for no new
         // fact. The census is cheap by construction (no formatted detail, no
         // descriptor) precisely so this guard is cheaper than what it skips.
-        if effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EmitReceipt(..)))
-        {
-            let census = self.stalled_write_census();
-            if census != self.last_stalled_write_census {
-                self.last_stalled_write_census = census;
-                effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
-            }
+        if self.refresh_stalled_write_cache_for_effects(&effects) {
+            effects.push(Effect::DiagnosticsChanged);
         }
         if self.prune_unowned_relay_state() {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));

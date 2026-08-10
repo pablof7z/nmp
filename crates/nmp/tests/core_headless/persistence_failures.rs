@@ -1212,6 +1212,49 @@ impl EventStore for WakeLaneProbeStore {
     delegate_publish_queue_door!(inner);
 }
 
+/// A large durable backlog can contain obligations that own no physical lane
+/// at all (for example, writes still waiting for a signer). Scheduling one
+/// healthy routed write must read only that write's lane state, not perform
+/// one empty store lookup for every unrelated obligation.
+#[test]
+fn schedule_ready_skips_lane_less_obligations() {
+    const PARKED: usize = 207;
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://lane-less-scheduler.example.com").unwrap();
+    let calls = Rc::new(Cell::new(0u64));
+    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
+    activate(&mut core, &author);
+
+    for i in 0..PARKED {
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(draft(10_000 + i as u64, "parked")),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::RequestSign(..))));
+    }
+
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Event(draft(20_000, "healthy")),
+        routing: WriteRouting::Explicit(vec![relay]),
+        identity: Identity::Active,
+        correlation: None,
+    }));
+    let (id, generation, unsigned) = find_sign_request(&accepted);
+    calls.set(0);
+    let signed = unsigned.sign_with_keys(&author).unwrap();
+    core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+
+    assert_eq!(
+        calls.get(),
+        1,
+        "only the one routed write owns a lane; {PARKED} unrelated signer waits must cost zero lane reads"
+    );
+}
+
 /// Falsifier (epic #507 finding E5): a single relay-connected event for
 /// relay X must trigger `recover_publish_queue_lanes` only for X's own intent on
 /// the wake path, not for every outstanding durable write. Composition of
