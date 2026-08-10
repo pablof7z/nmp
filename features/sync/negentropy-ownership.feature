@@ -27,3 +27,16 @@ Feature: Reconciliation work keeps exact plan ownership
     And only the fresh generation's candidate can open reconciliation
     And a request key with multiple pending revisions reports one key and every queued owner
     And final cancellation leaves zero primary entries, reverse entries, queue keys, and queue owners
+
+  # nmp:id=SYNC-NEGENTROPY-003
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata
+  # nmp:falsifier=Retire the predecessor plan's local execution metadata as soon as its wire CLOSE is deferred behind a replacement; a valid late candidate EOSE then panics or opens reconciliation without an owner.
+  Scenario: A predecessor can finish reconciliation handoff while its replacement waits
+    Given a proven reconciliation relay has accepted a live candidate for the current plan
+    And a byte-changed successor request is waiting for local transport acceptance
+    When the predecessor candidate reaches EOSE before that successor is accepted
+    Then the predecessor still owns the exact plan metadata needed to open reconciliation
+    And NMP does not panic or discard the predecessor's valid completion
+    And accepting the successor later retires the predecessor exactly once
+    And final withdrawal leaves no plan, request, or reconciliation ownership

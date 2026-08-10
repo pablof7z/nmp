@@ -1007,8 +1007,8 @@ impl<S: EventStore> EngineCore<S> {
                         self.attribution.retain_live_request_claims(sub_id, claims);
                     }
                     WireOp::Close(sub_id) => {
-                        self.plan_execution_metadata.remove(sub_id);
                         if !transition_priors.contains(&(session.clone(), sub_id.clone())) {
+                            self.plan_execution_metadata.remove(sub_id);
                             self.attribution.release_live_request_claims(sub_id);
                         }
                     }
