@@ -21,6 +21,7 @@ use nmp_store::{
     GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin, MemoryStore, PersistenceFault,
     PromoteOutcome, PublishQueueAttemptOutcome, ReceiptState, RedbStore, RefuseReason,
     RelayObserved, RemoveQueueEntryOutcome, RetractReason, SigState, VerifiedSignature,
+    SUPERSEDED_RECEIPT_MAX_AGE_SECS, SUPERSEDED_RECEIPT_MAX_COUNT,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, EventId, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -736,20 +737,18 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
                     vec![nmp_store::RetiredIntent {
                         intent_id: older_intent,
                         receipt_id: older_receipt,
+                        handoff_may_have_occurred: false,
                     }]
                 );
             }
             other => panic!("expected supersession, got {other:?}"),
         }
 
-        assert_eq!(
-            store
-                .reattach_receipt(older_receipt)
-                .unwrap()
-                .unwrap()
-                .state,
-            ReceiptState::Superseded
+        assert!(
+            store.reattach_receipt(older_receipt).unwrap().is_none(),
+            "a safely-unsent predecessor is obsolete data, not retained receipt history"
         );
+        assert_eq!(store.enumerate_publish_queue_receipts().unwrap().len(), 1);
         assert!(store
             .recover_publish_queue_lanes(older_intent)
             .unwrap()
@@ -776,12 +775,51 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
 }
 
 #[test]
-fn superseded_receipt_and_pruned_publish_queue_survive_redb_reopen() {
+fn every_nip01_replaceable_class_retires_its_offline_predecessor() {
+    for_each_backend(|store| {
+        let k = keys();
+        let relay = RelayUrl::parse("wss://offline-classes.example").unwrap();
+        let cases = [
+            (Kind::Metadata, Vec::new()),
+            (Kind::ContactList, Vec::new()),
+            (Kind::from(10_001u16), Vec::new()),
+            (Kind::from(30_001u16), vec![Tag::identifier("presence")]),
+        ];
+
+        for (kind, tags) in cases {
+            let (older_frozen, older_signed) =
+                compose_with_tags(&k, kind, "older", 100, tags.clone());
+            let older = do_accept(store, accept(older_frozen, k.public_key(), 100));
+            let older_intent = older.journaled_intent_id().unwrap();
+            let older_receipt = older.journaled_receipt_id().unwrap();
+            store
+                .promote_signed(older_intent, evidence(&older_signed))
+                .unwrap();
+            store
+                .record_route_revision(older_intent, BTreeSet::from([relay.clone()]))
+                .unwrap();
+            store.bootstrap_publish_queue_lanes(older_intent).unwrap();
+
+            let (newer_frozen, _) = compose_with_tags(&k, kind, "newer", 200, tags);
+            let newer = do_accept(store, accept(newer_frozen, k.public_key(), 200));
+            assert!(matches!(
+                newer,
+                AcceptOutcome::Superseded { ref retired, .. }
+                    if retired.iter().any(|retired| retired.intent_id == older_intent)
+            ));
+            assert!(store.reattach_receipt(older_receipt).unwrap().is_none());
+        }
+    });
+}
+
+#[test]
+fn superseded_unsent_body_and_receipt_are_destroyed_across_redb_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("replaceable-coalescing.redb");
     let k = keys();
     let relay = RelayUrl::parse("wss://offline-restart.example").unwrap();
     let (older_frozen, older_signed) = compose(&k, Kind::Metadata, "older", 100);
+    let older_id = older_frozen.id;
     let (newer_frozen, _) = compose(&k, Kind::Metadata, "newer", 200);
     let (older_intent, older_receipt, newer_intent) = {
         let mut store = RedbStore::open(&path).unwrap();
@@ -803,17 +841,13 @@ fn superseded_receipt_and_pruned_publish_queue_survive_redb_reopen() {
         )
     };
 
-    let store = RedbStore::open(&path).unwrap();
+    let mut store = RedbStore::open(&path).unwrap();
     let recovered = store.recover_publish_queue().unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0].intent_id, newer_intent);
-    assert_eq!(
-        store
-            .reattach_receipt(older_receipt)
-            .unwrap()
-            .unwrap()
-            .state,
-        ReceiptState::Superseded
+    assert!(
+        store.reattach_receipt(older_receipt).unwrap().is_none(),
+        "restart must not resurrect an obsolete receipt"
     );
     assert!(store
         .recover_publish_queue_lanes(older_intent)
@@ -823,10 +857,16 @@ fn superseded_receipt_and_pruned_publish_queue_survive_redb_reopen() {
         .recover_route_revisions(older_intent)
         .unwrap()
         .is_empty());
+    let compensated = store.cancel_write(newer_intent).unwrap();
+    assert!(matches!(
+        compensated,
+        CompensateOutcome::Compensated { restored: None, .. }
+    ));
+    assert!(store.query(&Filter::new().id(older_id)).unwrap().is_empty());
 }
 
 #[test]
-fn a_started_attempt_preserves_the_older_replaceable_obligation() {
+fn a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safety_evidence() {
     for_each_backend(|store| {
         let k = keys();
         let relay = RelayUrl::parse("wss://attempted.example").unwrap();
@@ -858,7 +898,14 @@ fn a_started_attempt_preserves_the_older_replaceable_obligation() {
 
         let (newer_frozen, _) = compose(&k, Kind::ContactList, "newer contacts", 200);
         match do_accept(store, accept(newer_frozen, k.public_key(), 200)) {
-            AcceptOutcome::Superseded { retired, .. } => assert!(retired.is_empty()),
+            AcceptOutcome::Superseded { retired, .. } => assert_eq!(
+                retired,
+                vec![nmp_store::RetiredIntent {
+                    intent_id: older_intent,
+                    receipt_id: older_receipt,
+                    handoff_may_have_occurred: true,
+                }]
+            ),
             other => panic!("expected supersession, got {other:?}"),
         }
         assert_eq!(
@@ -867,16 +914,216 @@ fn a_started_attempt_preserves_the_older_replaceable_obligation() {
                 .unwrap()
                 .unwrap()
                 .state,
-            ReceiptState::Signed
+            ReceiptState::Superseded
         );
-        assert_eq!(store.recover_attempts(older_intent).unwrap().len(), 1);
+        assert!(store.recover_attempts(older_intent).unwrap().is_empty());
+        assert!(store
+            .recover_publish_queue_lanes(older_intent)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .recover_publish_queue()
+            .unwrap()
+            .iter()
+            .all(|intent| { intent.intent_id != older_intent }));
+    });
+}
+
+#[test]
+fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt_and_correlation() {
+    for_each_backend(|store| {
+        let k = keys();
+        let relay = RelayUrl::parse("wss://not-handed-off.example").unwrap();
+        let (older_frozen, older_signed) = compose(&k, Kind::ContactList, "older contacts", 100);
+        let mut older_accept = accept(older_frozen, k.public_key(), 100);
+        older_accept.correlation = Some(
+            nmp_grammar::CorrelationToken::try_from("obsolete-correlation")
+                .expect("bounded fixture token"),
+        );
+        let older = do_accept(store, older_accept);
+        let older_intent = older.journaled_intent_id().unwrap();
+        let older_receipt = older.journaled_receipt_id().unwrap();
+        store
+            .promote_signed(older_intent, evidence(&older_signed))
+            .unwrap();
+        store
+            .record_route_revision(older_intent, BTreeSet::from([relay]))
+            .unwrap();
+        let lane = store
+            .bootstrap_publish_queue_lanes(older_intent)
+            .unwrap()
+            .remove(0);
+        let lane = store
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(101u64))
+            .unwrap();
+        let (_, lane) = store
+            .start_lane_attempt(
+                &lane.key,
+                lane.revision,
+                older_signed,
+                Timestamp::from(102u64),
+            )
+            .unwrap();
+        store
+            .record_lane_handoff(
+                &lane.key,
+                lane.revision,
+                1,
+                nmp_store::PublishQueueAttemptHandoff {
+                    at: Timestamp::from(103u64),
+                    result: nmp_store::HandoffEvidence::NotHandedOff,
+                },
+                nmp_store::PublishQueuePostHandoffState::WaitingConnection,
+            )
+            .unwrap();
+
+        let (newer_frozen, _) = compose(&k, Kind::ContactList, "newer contacts", 200);
+        match do_accept(store, accept(newer_frozen, k.public_key(), 200)) {
+            AcceptOutcome::Superseded { retired, .. } => assert_eq!(
+                retired,
+                vec![nmp_store::RetiredIntent {
+                    intent_id: older_intent,
+                    receipt_id: older_receipt,
+                    handoff_may_have_occurred: false,
+                }]
+            ),
+            other => panic!("expected supersession, got {other:?}"),
+        }
+        assert!(store.reattach_receipt(older_receipt).unwrap().is_none());
+        assert!(store
+            .lookup_correlation("obsolete-correlation")
+            .unwrap()
+            .is_none());
+        assert!(store.recover_attempts(older_intent).unwrap().is_empty());
+    });
+}
+
+#[test]
+fn superseded_safety_receipts_are_bounded_by_age_and_count() {
+    for_each_backend(|store| {
+        let k = keys();
+        let relay = RelayUrl::parse("wss://bounded-history.example").unwrap();
+        let total = SUPERSEDED_RECEIPT_MAX_COUNT + 2;
+        for ordinal in 0..total {
+            let at = u64::try_from(ordinal + 1).unwrap();
+            let (frozen, signed) = compose(&k, Kind::Metadata, &format!("profile {ordinal}"), at);
+            let outcome = do_accept(store, accept(frozen, k.public_key(), at));
+            let intent = outcome.journaled_intent_id().unwrap();
+            store.promote_signed(intent, evidence(&signed)).unwrap();
+            store
+                .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+                .unwrap();
+            let lane = store
+                .bootstrap_publish_queue_lanes(intent)
+                .unwrap()
+                .remove(0);
+            let lane = store
+                .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(at))
+                .unwrap();
+            store
+                .start_lane_attempt(&lane.key, lane.revision, signed, Timestamp::from(at))
+                .unwrap();
+        }
+
+        let removed = store
+            .prune_superseded_receipts(Timestamp::from(total as u64))
+            .unwrap();
+        assert_eq!(
+            removed.len(),
+            1,
+            "count pruning removes only the oldest excess"
+        );
         assert_eq!(
             store
-                .recover_publish_queue_lanes(older_intent)
+                .enumerate_publish_queue_receipts()
                 .unwrap()
-                .len(),
-            1
+                .into_iter()
+                .filter(|receipt| receipt.state == ReceiptState::Superseded)
+                .count(),
+            SUPERSEDED_RECEIPT_MAX_COUNT
         );
+
+        let removed = store
+            .prune_superseded_receipts(Timestamp::from(
+                total as u64 + SUPERSEDED_RECEIPT_MAX_AGE_SECS,
+            ))
+            .unwrap();
+        assert_eq!(removed.len(), SUPERSEDED_RECEIPT_MAX_COUNT);
+        let retained = store.enumerate_publish_queue_receipts().unwrap();
+        assert_eq!(
+            retained.len(),
+            1,
+            "only the current write obligation remains"
+        );
+        assert_ne!(retained[0].state, ReceiptState::Superseded);
+    });
+}
+
+#[test]
+fn superseded_safety_receipt_deadline_survives_redb_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("superseded-retention.redb");
+    let k = keys();
+    let relay = RelayUrl::parse("wss://retention-restart.example").unwrap();
+    let (older_receipt, newer_receipt) = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let (older_frozen, older_signed) = compose(&k, Kind::Metadata, "older", 100);
+        let older = do_accept(&mut store, accept(older_frozen, k.public_key(), 100));
+        let older_intent = older.journaled_intent_id().unwrap();
+        let older_receipt = older.journaled_receipt_id().unwrap();
+        store
+            .promote_signed(older_intent, evidence(&older_signed))
+            .unwrap();
+        store
+            .record_route_revision(older_intent, BTreeSet::from([relay]))
+            .unwrap();
+        let lane = store
+            .bootstrap_publish_queue_lanes(older_intent)
+            .unwrap()
+            .remove(0);
+        let lane = store
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(101u64))
+            .unwrap();
+        store
+            .start_lane_attempt(
+                &lane.key,
+                lane.revision,
+                older_signed,
+                Timestamp::from(102u64),
+            )
+            .unwrap();
+        let (newer_frozen, _) = compose(&k, Kind::Metadata, "newer", 200);
+        let newer = do_accept(&mut store, accept(newer_frozen, k.public_key(), 200));
+        (older_receipt, newer.journaled_receipt_id().unwrap())
+    };
+
+    let mut store = RedbStore::open(&path).unwrap();
+    assert_eq!(
+        store.next_superseded_receipt_deadline().unwrap(),
+        Some(Timestamp::from(100 + SUPERSEDED_RECEIPT_MAX_AGE_SECS))
+    );
+    assert!(store
+        .prune_superseded_receipts(Timestamp::from(99 + SUPERSEDED_RECEIPT_MAX_AGE_SECS))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .prune_superseded_receipts(Timestamp::from(100 + SUPERSEDED_RECEIPT_MAX_AGE_SECS))
+            .unwrap(),
+        vec![older_receipt]
+    );
+    assert!(store.reattach_receipt(older_receipt).unwrap().is_none());
+    assert!(store.reattach_receipt(newer_receipt).unwrap().is_some());
+}
+
+#[test]
+fn already_expired_refusal_cannot_be_retained_as_a_receipt() {
+    for_each_backend(|store| {
+        let k = keys();
+        let (frozen, _) = compose(&k, Kind::Metadata, "already expired", 100);
+        let result = store.accept_refused(frozen.id, k.public_key(), RefuseReason::AlreadyExpired);
+        assert!(result.is_err(), "expiry must not cross the custody door");
+        assert!(store.enumerate_publish_queue_receipts().unwrap().is_empty());
     });
 }
 
@@ -1723,11 +1970,10 @@ fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
     });
 }
 
-/// Once an older replaceable event crossed the attempt boundary, a newer
-/// local winner must keep it as a valid predecessor. Cancelling the newer
-/// intent restores the exact signed bytes, never a sentinel draft.
+/// Crossing the handoff boundary retains only bounded safety evidence. It
+/// does not keep obsolete event bytes or publication work alive.
 #[test]
-fn attempted_predecessor_survives_supersession_and_newer_cancellation() {
+fn attempted_predecessor_is_not_restored_after_newer_cancellation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.redb");
     let mut store = RedbStore::open(&path).expect("open redb store");
@@ -1749,34 +1995,24 @@ fn attempted_predecessor_survives_supersession_and_newer_cancellation() {
     let outcome_b = do_accept(&mut store, accept(frozen_b, k.public_key(), 200));
     let intent_b = outcome_b.journaled_intent_id().expect("journaled");
     match outcome_b {
-        AcceptOutcome::Superseded { retired, .. } => assert!(retired.is_empty()),
+        AcceptOutcome::Superseded { retired, .. } => assert_eq!(retired.len(), 1),
         other => panic!("expected Superseded, got {other:?}"),
     }
 
-    // Cancel B — restores its attempted predecessor (A), which must carry
-    // the real signature.
+    // Cancel B — A remains obsolete and cannot be resurrected.
     let compensated_b = store
         .compensate_write(intent_b)
         .expect("compensate persistence");
     match compensated_b {
         CompensateOutcome::Compensated { restored, .. } => {
-            let restored = restored.expect("A restored");
-            assert_eq!(restored.event.id, frozen_a_id);
-            assert_eq!(
-                restored.event.sig, signed_a.sig,
-                "the restored predecessor must carry the attempted signed bytes, not a stale sentinel"
-            );
-            assert_eq!(
-                restored
-                    .provenance
-                    .local
-                    .expect("still carries local provenance")
-                    .sig_state,
-                SigState::Signed
-            );
+            assert!(restored.is_none());
         }
         other => panic!("expected Compensated, got {other:?}"),
     }
+    assert!(store
+        .query(&Filter::new().id(frozen_a_id))
+        .unwrap()
+        .is_empty());
 }
 
 /// A pending predecessor retired by local supersession cannot later be
@@ -1800,6 +2036,7 @@ fn retired_pending_predecessor_never_resurrects_when_newer_is_cancelled() {
                 vec![nmp_store::RetiredIntent {
                     intent_id: intent_a,
                     receipt_id: receipt_a,
+                    handoff_may_have_occurred: false,
                 }]
             ),
             other => panic!("expected Superseded, got {other:?}"),
@@ -1808,10 +2045,7 @@ fn retired_pending_predecessor_never_resurrects_when_newer_is_cancelled() {
             store.compensate_write(intent_a).unwrap(),
             CompensateOutcome::NotFound
         ));
-        assert_eq!(
-            store.reattach_receipt(receipt_a).unwrap().unwrap().state,
-            ReceiptState::Superseded
-        );
+        assert!(store.reattach_receipt(receipt_a).unwrap().is_none());
 
         // Cancel B — must find nothing to restore because A's superseded
         // obligation and invalid pending row were retired together.
@@ -3897,101 +4131,21 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
     });
 }
 
-/// Issue #2 P0 correction (codex-nova ruling): `accept_write`'s duplicate
-/// detection must ALSO search the `PUBLISH_QUEUE_DISPLACED` stash, not only the
-/// live `EVENTS` row — a duplicate accepted while its canonical
-/// predecessor is currently sitting displaced (superseded by a later
-/// local edit, not yet restored) must join that stash entry's owner set
-/// too, and that shared ownership must survive both an unrelated owner's
-/// cancellation AND the later restore of the whole stash entry back to
-/// live.
+/// Obsolete local bytes do not become a hidden duplicate target. Restart
+/// retains the current winner and the old safety receipt only.
 #[test]
-fn duplicate_accepted_while_attempted_predecessor_is_stashed_joins_owner_set() {
-    for_each_backend(|store| {
-        let k = keys();
-        let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
-        let frozen_a_id = frozen_a.id;
-        let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
-        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
-        assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
-        start_publish_queue_attempt(
-            store,
-            intent_a,
-            signed_a,
-            "wss://stashed-duplicate.example",
-            101,
-        );
-
-        // C supersedes A after A crossed the attempt boundary, so A remains
-        // in C's stash.
-        let (frozen_c, _signed_c) = compose(&k, Kind::ContactList, "c", 200);
-        let outcome_c = do_accept(store, accept(frozen_c, k.public_key(), 200));
-        let intent_c = outcome_c.journaled_intent_id().expect("journaled");
-        assert!(matches!(outcome_c, AcceptOutcome::Superseded { .. }));
-
-        // D: a fresh intent with BYTE-IDENTICAL frozen bytes to A, accepted
-        // WHILE A sits displaced (not live). Must be detected as a
-        // `Duplicate` against the STASHED entry, not treated as a fresh
-        // insert.
-        let outcome_d = do_accept(store, accept(frozen_a, k.public_key(), 100));
-        let intent_d = outcome_d.journaled_intent_id().expect("journaled");
-        match outcome_d {
-            AcceptOutcome::Duplicate { row, .. } => {
-                assert_eq!(row.event.id, frozen_a_id);
-                let local = row
-                    .provenance
-                    .local
-                    .expect("stash entry already carried local provenance");
-                assert_eq!(local.sig_state, SigState::Signed);
-                assert!(local.owners.contains(&intent_a));
-                assert!(local.owners.contains(&intent_d));
-            }
-            other => panic!("expected Duplicate (joined via the displaced stash), got {other:?}"),
-        }
-
-        // Cancelling C restores the shared signed stash entry to live.
-        let compensated_c = store
-            .compensate_write(intent_c)
-            .expect("compensate persistence");
-        match compensated_c {
-            CompensateOutcome::Compensated { restored, .. } => {
-                let restored = restored.expect("A's slot must survive cancelling C");
-                assert_eq!(restored.event.id, frozen_a_id);
-                let local = restored.provenance.local.expect("still locally owned");
-                assert_eq!(local.sig_state, SigState::Signed);
-                assert!(local.owners.contains(&intent_d));
-                assert!(local.owners.contains(&intent_a));
-            }
-            other => panic!("expected Compensated, got {other:?}"),
-        }
-
-        assert!(matches!(
-            store.compensate_write(intent_d).unwrap(),
-            CompensateOutcome::AlreadySigned
-        ));
-        assert_eq!(
-            store.query(&Filter::new().id(frozen_a_id)).unwrap().len(),
-            1
-        );
-    });
-}
-
-/// `RedbStore`-only durable-reopen variant of the falsifier above: an
-/// owner set joined via the DISPLACED stash (not the live row) must
-/// survive a real process restart just like the live-row case does
-/// (`duplicate_ownership_survives_restart`).
-#[test]
-fn duplicate_accepted_while_stashed_survives_restart() {
+fn obsolete_attempt_body_does_not_survive_restart_as_hidden_duplicate_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.redb");
     let k = keys();
     let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
     let frozen_a_id = frozen_a.id;
 
-    let (intent_a, intent_c, intent_d) = {
+    let (receipt_a, intent_c, intent_d) = {
         let mut store = RedbStore::open(&path).expect("open redb store");
         let outcome_a = do_accept(&mut store, accept(frozen_a.clone(), k.public_key(), 100));
         let intent_a = outcome_a.journaled_intent_id().expect("journaled");
+        let receipt_a = outcome_a.journaled_receipt_id().expect("journaled");
         start_publish_queue_attempt(
             &mut store,
             intent_a,
@@ -4007,158 +4161,34 @@ fn duplicate_accepted_while_stashed_survives_restart() {
 
         let outcome_d = do_accept(&mut store, accept(frozen_a, k.public_key(), 100));
         let intent_d = outcome_d.journaled_intent_id().expect("journaled");
-        assert!(matches!(outcome_d, AcceptOutcome::Duplicate { .. }));
+        assert!(matches!(outcome_d, AcceptOutcome::Stale { .. }));
 
-        (intent_a, intent_c, intent_d)
+        (receipt_a, intent_c, intent_d)
     };
 
     let mut store = RedbStore::open(&path).expect("reopen redb store");
     let recovered = store.recover_publish_queue().expect("recover delivery");
-    assert!(recovered.iter().any(|r| r.intent_id == intent_a));
     assert!(recovered.iter().any(|r| r.intent_id == intent_c));
     assert!(recovered.iter().any(|r| r.intent_id == intent_d));
+    assert_eq!(
+        store.reattach_receipt(receipt_a).unwrap().unwrap().state,
+        ReceiptState::Superseded
+    );
 
-    // Restore C after reopen -- the shared stash entry (owned by A and D)
-    // must come back intact.
+    // Cancelling C cannot restore A from hidden bytes because none remain.
     let compensated_c = store
         .compensate_write(intent_c)
         .expect("compensate persistence");
     match compensated_c {
         CompensateOutcome::Compensated { restored, .. } => {
-            let restored = restored.expect("A's slot must survive reopen + cancelling C");
-            assert_eq!(restored.event.id, frozen_a_id);
-            let local = restored.provenance.local.expect("still locally owned");
-            assert!(local.owners.contains(&intent_a));
-            assert!(local.owners.contains(&intent_d));
+            assert!(restored.is_none());
         }
         other => panic!("expected Compensated, got {other:?}"),
     }
-}
-
-/// codex-nova ruling (cross-door reachability finding, backend-parity
-/// falsifier for `reinsert_stashed`'s own id-collision branch): this branch
-/// is NOT unreachable through the public `EventStore` door -- it is reached
-/// by mixing the ordinary `remove`/`insert` doors with the delivery doors.
-/// Concrete path: accept local addressable A; accept newer local B so A is
-/// displaced into B's stash; remove B through the ORDINARY store door
-/// (bypassing `compensate_write` entirely -- e.g. the caller is reacting to
-/// B's own NIP-40 expiry or an unrelated GC-adjacent removal); a relay then
-/// delivers the REAL signed form of A's exact event id through the
-/// ordinary `insert` door -- since A is not live (B's slot, now empty,
-/// governs address competition) and A is not yet in EVENTS either, this is
-/// a plain fresh insert, landing A live with `local: None` (purely
-/// relay-observed) while A's OLD sentinel-signed, locally-owned copy still
-/// sits in B's stash. Compensating B then unconditionally restores B's OWN
-/// stash entry (A) through `reinsert_stashed`, colliding with the row the
-/// relay just planted. The union + Signed-dominance + adopt-signature +
-/// fan-out logic must all fire: A's canonical row keeps the relay's real
-/// signature, A's owner set is preserved, and -- the specific bug this
-/// falsifier catches -- A's own still-open local intent must be told the
-/// row is `Signed` even though the EXISTING (not the stashed) side was the
-/// one already carrying the real signature.
-#[test]
-fn reinsert_stashed_collision_with_relay_signed_row_adopts_and_fans_out() {
-    for_each_backend(|store| {
-        let k = keys();
-        let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
-        let frozen_a_id = frozen_a.id;
-        let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
-        let intent_a = outcome_a.journaled_intent_id().expect("journaled");
-        assert!(matches!(outcome_a, AcceptOutcome::Inserted { .. }));
-        start_publish_queue_attempt(
-            store,
-            intent_a,
-            signed_a.clone(),
-            "wss://collision-attempt.example",
-            101,
-        );
-
-        // B supersedes A -- A is displaced into B's stash, owned by {A},
-        // already Signed with a started attempt.
-        let (frozen_b, _signed_b) = compose(&k, Kind::ContactList, "b", 200);
-        let frozen_b_id = frozen_b.id;
-        let outcome_b = do_accept(store, accept(frozen_b, k.public_key(), 200));
-        let intent_b = outcome_b.journaled_intent_id().expect("journaled");
-        assert!(matches!(outcome_b, AcceptOutcome::Superseded { .. }));
-
-        // Remove B through the ORDINARY store door -- NOT compensate_write
-        // -- freeing the address slot while B's own PUBLISH_QUEUE_INTENTS/
-        // PUBLISH_QUEUE_DISPLACED entries (still holding A) are left untouched.
-        let removed_b = store.remove(frozen_b_id, RetractReason::Rejected).unwrap();
-        assert!(removed_b.is_some(), "B must have been live to remove");
-        assert!(store
-            .query(&Filter::new().id(frozen_b_id))
-            .unwrap()
-            .is_empty());
-
-        // A relay delivers A's REAL signed bytes through the ordinary
-        // `insert` door. A is not live (B's slot is now empty) and not yet
-        // in EVENTS -- this is a plain fresh insert: A becomes live with
-        // `local: None`, a genuine (non-sentinel) signature.
-        let relay = RelayUrl::parse("wss://relay.example").expect("relay url");
-        let insert_outcome = store
-            .insert(
-                signed_a.clone(),
-                RelayObserved::new(relay, Timestamp::from(100)),
-            )
-            .unwrap();
-        assert!(matches!(insert_outcome, InsertOutcome::Inserted));
-        let rows = store.query(&Filter::new().id(frozen_a_id)).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].event.sig, signed_a.sig);
-        assert!(
-            rows[0].provenance.local.is_none(),
-            "the relay-planted row must start purely relay-observed"
-        );
-
-        // Compensating B unconditionally restores B's OWN displaced stash
-        // entry (A, signed and owned by {intent_a}) --
-        // colliding with the relay-planted live row for A's exact id.
-        let compensated_b = store
-            .compensate_write(intent_b)
-            .expect("compensate persistence");
-        match compensated_b {
-            CompensateOutcome::Compensated { restored, .. } => {
-                let restored = restored.expect("A's stash entry must survive the collision");
-                assert_eq!(restored.event.id, frozen_a_id);
-                assert_eq!(
-                    restored.event.sig, signed_a.sig,
-                    "the row must keep the REAL (relay) signature, never regress to A's stale sentinel"
-                );
-                let local = restored
-                    .provenance
-                    .local
-                    .expect("A's stash-side ownership must be adopted onto the collided row");
-                assert_eq!(
-                    local.sig_state,
-                    SigState::Signed,
-                    "Signed dominance: the relay side was already signed"
-                );
-                assert!(local.owners.contains(&intent_a));
-            }
-            other => panic!("expected Compensated, got {other:?}"),
-        }
-
-        // The specific bug this falsifier targets: A's own still-open
-        // local intent must have been told the row is Signed -- NOT left
-        // stranded at Pending just because the EXISTING (relay) side, not
-        // the stashed side, was the one already carrying the real
-        // signature.
-        let promoted_a = store
-            .promote_signed(intent_a, evidence(&signed_a))
-            .expect("promote persistence");
-        assert!(
-            matches!(promoted_a, PromoteOutcome::NotFound),
-            "A's own journal must already be Signed (fanned out during the collision), not still open"
-        );
-        let compensated_a = store
-            .compensate_write(intent_a)
-            .expect("compensate persistence");
-        assert!(
-            matches!(compensated_a, CompensateOutcome::AlreadySigned),
-            "compensation is pre-signature only -- A's journal is already Signed"
-        );
-    });
+    assert!(store
+        .query(&Filter::new().id(frozen_a_id))
+        .unwrap()
+        .is_empty());
 }
 
 /// Issue #2 required falsifier #4 (kind:5 variant): an exact-`Duplicate`
@@ -4269,20 +4299,19 @@ fn supersession_retires_every_unattempted_duplicate_owner() {
                     nmp_store::RetiredIntent {
                         intent_id: intent_a,
                         receipt_id: receipt_a,
+                        handoff_may_have_occurred: false,
                     },
                     nmp_store::RetiredIntent {
                         intent_id: intent_b,
                         receipt_id: receipt_b,
+                        handoff_may_have_occurred: false,
                     },
                 ]
             ),
             other => panic!("expected Superseded, got {other:?}"),
         }
         for (intent, receipt) in [(intent_a, receipt_a), (intent_b, receipt_b)] {
-            assert_eq!(
-                store.reattach_receipt(receipt).unwrap().unwrap().state,
-                ReceiptState::Superseded
-            );
+            assert!(store.reattach_receipt(receipt).unwrap().is_none());
             assert!(matches!(
                 store.compensate_write(intent).unwrap(),
                 CompensateOutcome::NotFound
@@ -4302,11 +4331,10 @@ fn supersession_retires_every_unattempted_duplicate_owner() {
     });
 }
 
-/// Retirement is per owner, not per canonical row. If one co-owner crossed
-/// the attempt boundary while another did not, only the latter is retired;
-/// the attempted owner and signed predecessor remain compensable.
+/// Retirement is per owner, while the retained safety fact is per owner too:
+/// only the owner whose bytes crossed a handoff keeps a bounded receipt.
 #[test]
-fn supersession_only_retires_unattempted_duplicate_coowners() {
+fn supersession_retires_all_duplicate_coowners_and_retains_only_handoff_evidence() {
     for_each_backend(|store| {
         let k = keys();
         let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
@@ -4333,39 +4361,41 @@ fn supersession_only_retires_unattempted_duplicate_coowners() {
         match outcome_c {
             AcceptOutcome::Superseded { retired, .. } => assert_eq!(
                 retired,
-                vec![nmp_store::RetiredIntent {
-                    intent_id: intent_b,
-                    receipt_id: receipt_b,
-                }]
+                vec![
+                    nmp_store::RetiredIntent {
+                        intent_id: intent_a,
+                        receipt_id: receipt_a,
+                        handoff_may_have_occurred: true,
+                    },
+                    nmp_store::RetiredIntent {
+                        intent_id: intent_b,
+                        receipt_id: receipt_b,
+                        handoff_may_have_occurred: false,
+                    }
+                ]
             ),
             other => panic!("expected Superseded, got {other:?}"),
         }
         assert_eq!(
             store.reattach_receipt(receipt_a).unwrap().unwrap().state,
-            ReceiptState::Signed
-        );
-        assert_eq!(
-            store.reattach_receipt(receipt_b).unwrap().unwrap().state,
             ReceiptState::Superseded
         );
+        assert!(store.reattach_receipt(receipt_b).unwrap().is_none());
 
-        // Cancelling C restores the shared entry with only the attempted
-        // owner left.
+        // Cancelling C cannot resurrect either obsolete local value.
         let compensated_c = store
             .compensate_write(intent_c)
             .expect("compensate persistence");
         match compensated_c {
             CompensateOutcome::Compensated { restored, .. } => {
-                let restored = restored.expect("the shared row must survive cancelling C");
-                assert_eq!(restored.event.id, frozen_a_id);
-                assert_eq!(restored.event.sig, signed_a.sig);
-                let local = restored.provenance.local.expect("still locally owned");
-                assert_eq!(local.sig_state, SigState::Signed);
-                assert!(local.owners.contains(&intent_a));
-                assert!(!local.owners.contains(&intent_b));
+                assert!(restored.is_none());
             }
             other => panic!("expected Compensated, got {other:?}"),
         }
+        assert!(store
+            .query(&Filter::new().id(frozen_a_id))
+            .unwrap()
+            .is_empty());
     });
 }
 

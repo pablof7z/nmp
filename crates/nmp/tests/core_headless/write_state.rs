@@ -51,7 +51,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
 }
 
 #[test]
-fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
+fn cancellation_never_restores_an_unpublished_replaceable_predecessor() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
@@ -109,7 +109,14 @@ fn cancellation_restores_replaceable_predecessor_through_query_reactivity() {
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == newer_id)));
-    assert!(all_row_deltas(&effects)
+    assert!(!all_row_deltas(&effects)
+        .iter()
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == older.id)));
+    let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
+        &[0],
+        &a.public_key().to_hex(),
+    )));
+    assert!(!all_row_deltas(&fresh)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == older.id)));
 }
@@ -401,7 +408,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
 }
 
 #[test]
-fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
+fn cancelling_newest_never_restores_a_destroyed_local_predecessor_chain() {
     let a = Keys::generate();
     let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
@@ -464,14 +471,14 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
     assert!(!all_row_deltas(&newest_cancel)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)));
-    assert!(all_row_deltas(&newest_cancel)
+    assert!(!all_row_deltas(&newest_cancel)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == base_id)));
     let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[0],
         &a.public_key().to_hex(),
     )));
-    assert!(all_row_deltas(&fresh)
+    assert!(!all_row_deltas(&fresh)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == base_id)));
     assert!(!all_row_deltas(&fresh)
@@ -480,7 +487,7 @@ fn cancelling_newest_restores_valid_base_but_never_retired_pending_middle() {
 }
 
 #[test]
-fn expired_local_acceptance_is_refused_in_custody_with_no_side_effects() {
+fn expired_local_acceptance_is_refused_before_custody_and_retains_nothing() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://write.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
@@ -500,16 +507,91 @@ fn expired_local_acceptance_is_refused_in_custody_with_no_side_effects() {
     assert!(
         matches!(
             effects.as_slice(),
-            [
-                Effect::WriteAccepted(accepted, _),
-                Effect::EmitReceipt(
-                    emitted,
-                    WriteFact::Outcome(WriteOutcome::Refused(RefuseReason::AlreadyExpired))
-                )
-            ] if accepted == emitted
+            [Effect::PublishFailed(PublishError::AlreadyExpired)]
         ),
-        "the store answered no, so the write is in custody as a permanently failed entry -- got {effects:?}"
+        "expired work must be rejected before custody -- got {effects:?}"
     );
+    assert!(
+        core.publish_queue_entries().unwrap().is_empty(),
+        "an attempt rejected before custody must not allocate a receipt"
+    );
+}
+
+#[test]
+fn superseded_safety_receipt_is_pruned_by_the_engine_deadline() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://superseded-retention.example.com").unwrap();
+    let mut core = new_core(FixtureRoutingFacts::new());
+    core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
+    connect_signer(&mut core, 0, &relay, a.public_key());
+    release_author_probe(
+        &mut core,
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        &relay,
+        a.public_key(),
+    );
+
+    let older = UnsignedEvent::new(
+        a.public_key(),
+        Timestamp::from(100u64),
+        Kind::Metadata,
+        Vec::new(),
+        "older",
+    )
+    .sign_with_keys(&a)
+    .unwrap();
+    let older_effects = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(older),
+        routing: WriteRouting::Explicit(vec![relay.clone()]),
+        identity: Identity::Active,
+        correlation: None,
+    }));
+    let older_receipt = older_effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::WriteAccepted(receipt, _) => Some(*receipt),
+            _ => None,
+        })
+        .unwrap();
+    mark_written(&mut core, &older_effects, &relay);
+
+    core.handle(EngineMsg::Tick(Timestamp::from(200u64)));
+    let newer = UnsignedEvent::new(
+        a.public_key(),
+        Timestamp::from(200u64),
+        Kind::Metadata,
+        Vec::new(),
+        "newer",
+    )
+    .sign_with_keys(&a)
+    .unwrap();
+    core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Signed(newer),
+        routing: WriteRouting::Explicit(vec![relay]),
+        identity: Identity::Active,
+        correlation: None,
+    }));
+
+    let before = core.publish_queue_entries().unwrap();
+    assert!(before.iter().any(|entry| {
+        entry.receipt_id == older_receipt && entry.outcome == Some(WriteOutcome::Superseded)
+    }));
+    assert_eq!(
+        core.next_deadline().unwrap(),
+        Some(Timestamp::from(
+            100u64 + nmp_store::SUPERSEDED_RECEIPT_MAX_AGE_SECS
+        ))
+    );
+
+    core.handle(EngineMsg::Tick(Timestamp::from(
+        100u64 + nmp_store::SUPERSEDED_RECEIPT_MAX_AGE_SECS,
+    )));
+    let after = core.publish_queue_entries().unwrap();
+    assert_eq!(after.len(), 1, "only the current replaceable write remains");
+    assert!(after.iter().all(|entry| entry.receipt_id != older_receipt));
 }
 
 #[test]

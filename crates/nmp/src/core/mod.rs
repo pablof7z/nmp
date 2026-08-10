@@ -498,7 +498,7 @@ impl ReceiptReplayCursor {
     }
 }
 
-/// The two, and only two, ways `publish()` refuses.
+/// The reasons `publish()` refuses before taking custody.
 ///
 /// Everything else takes CUSTODY and fails in the queue where the app can
 /// see it — no relays, no signer online, a stale replaceable base and disk
@@ -517,7 +517,7 @@ impl ReceiptReplayCursor {
 /// nothing is pinned and nothing may park:
 /// [`Self::NoActiveAccount`], [`Self::SignatureInvalid`],
 /// [`Self::IdentityContradictsSignedAuthor`], [`Self::ReservedKind`],
-/// [`Self::EmptyExplicitRoute`].
+/// [`Self::EmptyExplicitRoute`], [`Self::AlreadyExpired`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishError {
     /// The runtime has begun its finite cancellation/drain phase and cannot
@@ -548,6 +548,10 @@ pub enum PublishError {
     /// relays. It never degrades into `Auto`: sending a write to relays the
     /// caller did not choose is the failure this refusal exists to prevent.
     EmptyExplicitRoute,
+    /// The event's own NIP-40 expiration was already at or before the
+    /// acceptance timestamp. NMP never takes custody of work that is
+    /// impossible to publish usefully.
+    AlreadyExpired,
 }
 
 impl std::fmt::Display for PublishError {
@@ -576,6 +580,7 @@ impl std::fmt::Display for PublishError {
                 f,
                 "an explicit route naming no relays is refused: it never degrades into Auto"
             ),
+            Self::AlreadyExpired => write!(f, "the event was already expired at acceptance"),
         }
     }
 }
@@ -1326,7 +1331,7 @@ pub enum Effect {
     /// replay.
     ReplayReceipt(ReceiptId, ReceiptReplayPage),
     /// `publish()` refused. Nothing durable exists and nothing ever will —
-    /// see [`PublishError`] for the only two reasons that is ever true.
+    /// see [`PublishError`] for the closed set of pre-custody failures.
     PublishFailed(PublishError),
     RequestSign(ReceiptId, u64, UnsignedEvent),
     /// Execute one reducer-owned NIP-42 operation. This envelope has its own
@@ -3310,6 +3315,9 @@ impl<S: EventStore> EngineCore<S> {
             Ok(_) => {}
             Err(e) => self.degrade_store(e, &mut effects),
         }
+        if let Err(error) = self.resolver.store_mut().prune_superseded_receipts(now) {
+            self.degrade_store(error, &mut effects);
+        }
 
         // `>=` against the EXACT `Timestamp` threshold `next_deadline()`
         // arms for (`started_at + NEG_LIVENESS_DEADLINE_SECS`) -- not the
@@ -3386,6 +3394,7 @@ impl<S: EventStore> EngineCore<S> {
     /// the store on `Err`, which is the #122 fact an app already reads.
     pub fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
         let expiry = self.resolver.store().next_expiration()?;
+        let superseded_receipt = self.resolver.store().next_superseded_receipt_deadline()?;
         let neg_liveness = self
             .neg_sessions
             .values()
@@ -3433,6 +3442,7 @@ impl<S: EventStore> EngineCore<S> {
             bootstrap,
             request_claim_transfer,
             request_retry,
+            superseded_receipt,
         ]
         .into_iter()
         .flatten()

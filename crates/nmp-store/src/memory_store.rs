@@ -17,13 +17,13 @@ use crate::coverage::{
     coverage_key, merge_interval, shrink_after_eviction, window_erase, GcVictimIndex,
 };
 use crate::{
-    AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome, CompensateOutcome,
-    CoverageInterval, CoverageKey, EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId,
-    IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, PublishQueueAttempt,
-    PublishQueueAttemptDetails, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
-    PublishQueueAttemptTransient, PublishQueueDeadline, PublishQueueDeadlineKind,
-    PublishQueueInFlightPhase, PublishQueueIntent, PublishQueueLane, PublishQueueLaneKey,
-    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
+    handoff_may_have_occurred, AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome,
+    CompensateOutcome, CoverageInterval, CoverageKey, EventStore, GcReport, GcRetentionSet,
+    InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome,
+    Provenance, PublishQueueAttempt, PublishQueueAttemptDetails, PublishQueueAttemptHandoff,
+    PublishQueueAttemptOutcome, PublishQueueAttemptTransient, PublishQueueDeadline,
+    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueIntent, PublishQueueLane,
+    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
     PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RefuseReason, RelayObserved, RetiredIntent, RetractReason, SigState, StoredEvent,
     VerifiedSignature,
@@ -172,11 +172,11 @@ pub struct MemoryStore {
     /// caller-side receipt-id counter has `IntentId`'s exact reuse hazard).
     next_receipt_id: u64,
     /// `PUBLISH_QUEUE_RECEIPTS` mirror: retained receipt records, independent of
-    /// `publish_queue_intents`'s open-work rows (architecture review correction —
-    /// see `ReceiptState`'s doc). Never pruned by this unit.
+    /// open intent rows. Superseded safety receipts are age/count pruned;
+    /// other terminal classes survive until the app removes them.
     publish_queue_receipts: HashMap<u64, PublishQueueReceipt>,
     /// `PUBLISH_QUEUE_CORRELATIONS` mirror (#591): caller correlation token ->
-    /// the receipt id it was journaled under. Never pruned by this unit.
+    /// the receipt id it was journaled under. Removed with its receipt.
     publish_queue_correlations: HashMap<String, u64>,
     /// Typed mirror of `PUBLISH_QUEUE_ATTEMPTS`, keyed by its complete stable key.
     publish_queue_attempts: BTreeMap<(IntentId, RelayUrl, u64), PublishQueueAttempt>,
@@ -493,6 +493,7 @@ impl MemoryStore {
         intent_id: IntentId,
         frozen_id: EventId,
         expected_pubkey: PublicKey,
+        accepted_at: Timestamp,
         correlation: &Option<nmp_grammar::CorrelationToken>,
     ) {
         self.publish_queue_receipts.insert(
@@ -502,6 +503,7 @@ impl MemoryStore {
                 intent_id: Some(intent_id),
                 frozen_id,
                 expected_pubkey,
+                accepted_at: Some(accepted_at),
                 state: ReceiptState::Accepted,
             },
         );
@@ -538,33 +540,45 @@ impl MemoryStore {
             let Some(intent) = self.publish_queue_intents.get(&owner) else {
                 continue;
             };
-            let has_attempt = self
+            let attempt_keys = self
                 .publish_queue_attempts
                 .keys()
-                .any(|(candidate, _, _)| *candidate == owner)
-                || self
-                    .publish_queue_attempt_details
-                    .keys()
-                    .any(|(candidate, _, _)| *candidate == owner)
-                || self
-                    .publish_queue_lanes
+                .filter(|(candidate, _, _)| *candidate == owner)
+                .cloned()
+                .chain(
+                    self.publish_queue_attempt_details
+                        .keys()
+                        .filter(|(candidate, _, _)| *candidate == owner)
+                        .cloned(),
+                )
+                .collect::<BTreeSet<_>>();
+            let retain_safety_receipt = if attempt_keys.is_empty() {
+                self.publish_queue_lanes
                     .get(&owner)
-                    .is_some_and(|lanes| lanes.values().any(|lane| lane.last_ordinal != 0));
-            if !has_attempt {
-                eligible.push((owner, intent.receipt_id));
-            }
+                    .is_some_and(|lanes| lanes.values().any(|lane| lane.last_ordinal != 0))
+            } else {
+                attempt_keys.iter().any(|key| {
+                    handoff_may_have_occurred(
+                        self.publish_queue_attempt_details
+                            .get(key)
+                            .and_then(|details| details.handoff.as_ref()),
+                    )
+                })
+            };
+            eligible.push((owner, intent.receipt_id, retain_safety_receipt));
         }
 
-        let mut predecessor = None;
-        for (owner, receipt_id) in &eligible {
+        for (owner, receipt_id, retain_safety_receipt) in &eligible {
             if let Some(local) = replaced.provenance.local.as_mut() {
                 local.owners.remove(owner);
             }
-            if let Some(displaced) = self.publish_queue_displaced.remove(owner) {
-                predecessor.get_or_insert(displaced);
-            }
+            self.publish_queue_displaced.remove(owner);
             self.publish_queue_intents.remove(owner);
             self.publish_queue_lanes.remove(owner);
+            self.publish_queue_attempts
+                .retain(|(candidate, _, _), _| candidate != owner);
+            self.publish_queue_attempt_details
+                .retain(|(candidate, _, _), _| candidate != owner);
             self.publish_queue_route_revisions
                 .retain(|(candidate, _), _| candidate != owner);
             if let Some(rows) = self.publish_queue_deadlines_by_intent.remove(owner) {
@@ -572,28 +586,31 @@ impl MemoryStore {
                     self.publish_queue_deadlines.remove(&(at, *owner, relay));
                 }
             }
-            self.publish_queue_receipts
-                .get_mut(receipt_id)
-                .expect("open delivery intent must retain its receipt")
-                .state = ReceiptState::Superseded;
+            if *retain_safety_receipt {
+                self.publish_queue_receipts
+                    .get_mut(receipt_id)
+                    .expect("open delivery intent must retain its receipt")
+                    .state = ReceiptState::Superseded;
+            } else {
+                self.publish_queue_receipts
+                    .remove(receipt_id)
+                    .expect("open delivery intent must retain its receipt");
+                self.publish_queue_correlations
+                    .retain(|_, journaled| journaled != receipt_id);
+            }
         }
 
-        let remains_valid =
-            replaced.provenance.local.as_ref().is_some_and(|local| {
-                !local.owners.is_empty() || local.sig_state == SigState::Signed
-            }) || !replaced.provenance.seen.is_empty();
-        let displaced = if remains_valid {
-            Some(replaced)
-        } else {
-            predecessor
-        };
         let retired = eligible
             .into_iter()
-            .map(|(intent_id, receipt_id)| RetiredIntent {
-                intent_id,
-                receipt_id,
-            })
+            .map(
+                |(intent_id, receipt_id, handoff_may_have_occurred)| RetiredIntent {
+                    intent_id,
+                    receipt_id,
+                    handoff_may_have_occurred,
+                },
+            )
             .collect();
+        let displaced = (!replaced.provenance.seen.is_empty()).then_some(replaced);
         (displaced, retired)
     }
 
@@ -1967,6 +1984,7 @@ impl EventStore for MemoryStore {
                 intent_id,
                 frozen_id,
                 expected_pubkey,
+                accepted_at,
                 &correlation,
             );
             if already_signed {
@@ -2103,6 +2121,7 @@ impl EventStore for MemoryStore {
             intent_id,
             frozen_id,
             expected_pubkey,
+            accepted_at,
             &correlation,
         );
 
@@ -3255,6 +3274,11 @@ impl EventStore for MemoryStore {
         expected_pubkey: PublicKey,
         reason: crate::RefuseReason,
     ) -> Result<u64, PersistenceError> {
+        if reason == crate::RefuseReason::AlreadyExpired {
+            return Err(PersistenceError::invariant(
+                "already-expired writes are refused before receipt custody",
+            ));
+        }
         // Receipt-ONLY and terminal at birth: no EVENTS row, no
         // PUBLISH_QUEUE_INTENTS row — nothing backs `intent_id` at all
         // (`None`). The refusal reason IS the receipt's whole content.
@@ -3266,6 +3290,7 @@ impl EventStore for MemoryStore {
                 intent_id: None,
                 frozen_id,
                 expected_pubkey,
+                accepted_at: None,
                 state: ReceiptState::Refused(reason),
             },
         );

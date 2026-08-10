@@ -33,7 +33,7 @@ use nmp_store::{
     CoverageKey, DurabilityOutcome, EventStore, GcReport, GcRetentionSet, InsertOutcome,
     MemoryStore, PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttempt,
     PublishQueueAttemptOutcome, PublishQueueIntent, PublishQueueReceipt, PublishQueueRouteRevision,
-    RedbStore, RefuseReason, RelayObserved, RetractReason, StoredEvent,
+    RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};

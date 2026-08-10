@@ -13,6 +13,10 @@ final class EvidenceMappingTests: XCTestCase {
             .outcome(.notSent(.superseded))
         )
         XCTAssertEqual(
+            WriteFact(.outcome(outcome: .superseded)),
+            .outcome(.superseded)
+        )
+        XCTAssertEqual(
             NMPWriteCancellationError(.UnknownReceipt(receiptId: 42)),
             .unknownReceipt(receiptId: 42)
         )

@@ -25,7 +25,7 @@ use super::publish_queue::{
 
 pub(super) type PublishQueueRelayId = u32;
 
-pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 1;
+pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 2;
 pub(super) const PUBLISH_QUEUE_CODEC_VERSION_KEY: &[u8] = b"codec_version";
 pub(super) const NEXT_INTENT_ID_KEY: &[u8] = b"next_intent_id";
 pub(super) const NEXT_RECEIPT_ID_KEY: &[u8] = b"next_receipt_id";
@@ -652,6 +652,13 @@ pub(super) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
     }
     encoder.fixed(record.frozen_id.as_bytes());
     encoder.fixed(record.expected_pubkey.as_bytes());
+    match record.accepted_at {
+        None => encoder.u8(0),
+        Some(accepted_at) => {
+            encoder.u8(1);
+            encoder.u64(accepted_at.as_secs());
+        }
+    }
     encode_receipt_state(&mut encoder, record.state);
     encoder.finish()
 }
@@ -667,12 +674,23 @@ pub(super) fn decode_receipt(
     };
     let frozen_id = decoder.event_id()?;
     let expected_pubkey = decoder.public_key()?;
+    let accepted_at = match decoder.u8()? {
+        0 => None,
+        1 => Some(Timestamp::from(decoder.u64()?)),
+        other => {
+            return Err(PublishQueueCodecError::InvalidTag(
+                "receipt acceptance",
+                other,
+            ))
+        }
+    };
     let state = decode_receipt_state(&mut decoder)?;
     decoder.finish()?;
     Ok(PublishQueueReceiptRecord {
         intent_id,
         frozen_id,
         expected_pubkey,
+        accepted_at,
         state,
     })
 }
@@ -1081,13 +1099,9 @@ pub(super) fn encode_attempt_details(
     Ok(encoder.finish())
 }
 
-pub(super) fn decode_attempt_details(
-    bytes: &[u8],
-    intent_id: IntentId,
-    relay: RelayUrl,
-    ordinal: u64,
-) -> Result<PublishQueueAttemptDetails, PublishQueueCodecError> {
-    let mut decoder = Decoder::new(bytes, DETAIL_MAGIC)?;
+fn decode_attempt_detail_prefix(
+    decoder: &mut Decoder<'_>,
+) -> Result<(Option<Timestamp>, Option<PublishQueueAttemptHandoff>), PublishQueueCodecError> {
     let started_at = match decoder.u8()? {
         0 => None,
         1 => Some(Timestamp::from(decoder.u64()?)),
@@ -1097,10 +1111,24 @@ pub(super) fn decode_attempt_details(
         0 => None,
         1 => Some(PublishQueueAttemptHandoff {
             at: Timestamp::from(decoder.u64()?),
-            result: decode_handoff_result(&mut decoder)?,
+            result: decode_handoff_result(decoder)?,
         }),
         other => return Err(PublishQueueCodecError::InvalidTag("attempt handoff", other)),
     };
+    Ok((started_at, handoff))
+}
+
+type DecodedAttemptDetail = (
+    Option<Timestamp>,
+    Option<PublishQueueAttemptHandoff>,
+    Option<PublishQueueAttemptTransient>,
+    Option<Timestamp>,
+    Option<PublishQueueAttemptOutcome>,
+);
+
+fn decode_attempt_detail(bytes: &[u8]) -> Result<DecodedAttemptDetail, PublishQueueCodecError> {
+    let mut decoder = Decoder::new(bytes, DETAIL_MAGIC)?;
+    let (started_at, handoff) = decode_attempt_detail_prefix(&mut decoder)?;
     let transient = match decoder.u8()? {
         0 => None,
         1 => Some(PublishQueueAttemptTransient {
@@ -1141,6 +1169,23 @@ pub(super) fn decode_attempt_details(
             "attempt finish and terminal must coexist",
         ));
     }
+    Ok((started_at, handoff, transient, finished_at, terminal))
+}
+
+pub(super) fn decode_attempt_handoff(
+    bytes: &[u8],
+) -> Result<Option<PublishQueueAttemptHandoff>, PublishQueueCodecError> {
+    let (_, handoff, _, _, _) = decode_attempt_detail(bytes)?;
+    Ok(handoff)
+}
+
+pub(super) fn decode_attempt_details(
+    bytes: &[u8],
+    intent_id: IntentId,
+    relay: RelayUrl,
+    ordinal: u64,
+) -> Result<PublishQueueAttemptDetails, PublishQueueCodecError> {
+    let (started_at, handoff, transient, finished_at, terminal) = decode_attempt_detail(bytes)?;
     Ok(PublishQueueAttemptDetails {
         version: 1,
         intent_id,

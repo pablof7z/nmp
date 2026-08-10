@@ -214,8 +214,9 @@ pub enum NotSentReason {
     /// promotion. Compensation committed atomically.
     Cancelled,
     /// A newer accepted write won the same NIP-01 replaceable/addressable
-    /// coordinate before this obligation started any wire attempt. Not a
-    /// failure — for an app renewing presence it is the steady state.
+    /// coordinate, and NMP proved the older bytes did not cross the local
+    /// transport handoff. Not a failure — for an app renewing presence it is
+    /// the steady state.
     Superseded,
 }
 
@@ -234,6 +235,10 @@ pub enum WriteOutcome {
     /// destination set.
     NoDestination,
     NotSent(NotSentReason),
+    /// A newer replaceable write retired this obligation after its bytes may
+    /// already have crossed the local transport handoff. NMP will not retry
+    /// it, but does not falsely claim it was never sent.
+    Superseded,
     /// The store answered the acceptance instruction with a semantic no. The
     /// write is in custody as a permanently-failed entry: one row, payload
     /// intact, readable and removable through the enumeration door.
@@ -315,8 +320,9 @@ pub enum WriteFact {
 /// terminal receipt either leaves behind — so removal is a termination path
 /// rather than housekeeping.
 ///
-/// Retained receipts and correlation tokens still regrow without bound
-/// (#46); this door makes that growth visible and does not fix it.
+/// Superseded safety receipts are automatically age/count bounded. Other
+/// terminal classes remain app-removable, and #46 continues to own their
+/// general retention policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishQueueEntry {
     pub receipt_id: ReceiptId,

@@ -98,11 +98,15 @@ about current code:
   immediately, so a stale grant names a destination nothing can reach, but it
   is not reference-counted away.
 - **Crash-safe acceptance, restart reattachment, a real attempt ceiling, and
-  governed SDK observation are built; retention is not.** #46 still owns the
-  retention/GC gap, and #1039's enumeration door makes the growth VISIBLE
-  rather than fixing it: retained receipts and correlation tokens still
-  accumulate without bound, and removing an entry is the app's decision, not a
-  policy NMP applies. One transaction owns the intent, stable receipt, frozen
+  governed SDK observation are built; general terminal-history retention is
+  not.** #1352 bounds the high-volume replaceable-write class: safely unsent
+  predecessors are destroyed outright, possible-handoff predecessors retain
+  no body or retry machinery and keep only a `Superseded` safety receipt for at
+  most one hour, with at most 500 retained globally. Already-expired writes are
+  refused before custody and retain nothing. #46 still owns retention for the
+  other terminal receipt/attempt classes; #1039 makes those rows visible and
+  app-removable, but does not impose a general policy. One transaction owns
+  the intent, stable receipt, frozen
   body, canonical pending row and displaced state. Rust boot recovery rebuilds
   ownership without reinsertion, resumes the frozen signer, persists versioned
   exact-byte `(intent, relay, ordinal)` Started facts before wire, and replays
