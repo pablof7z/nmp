@@ -38,7 +38,7 @@ mod auth_core_headless;
 mod auth_transport;
 mod diagnostics;
 mod evidence;
-#[cfg(all(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 mod freshness_snapshot_tests;
 #[cfg(test)]
 mod handoff_starvation_tests;

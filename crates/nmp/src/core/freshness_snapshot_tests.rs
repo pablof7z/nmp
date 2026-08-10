@@ -4,10 +4,14 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, LiveQuery,
     SourceAuthority,
 };
-use nmp_store::{CoverageInterval, EventStore, RedbStore};
+use nmp_store::{CoverageInterval, EventStore, MemoryStore};
 use nostr::{Keys, RelayUrl, Timestamp};
 
 use super::{Effect, EngineCore, EngineMsg, SourceStatus};
+
+#[path = "freshness_snapshot_tests/store.rs"]
+mod store;
+use store::{CountingCoverageStore, CoverageReadCounter};
 
 #[test]
 fn fresh_max_age_reads_each_coverage_row_once() {
@@ -30,9 +34,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
-    let directory = tempfile::tempdir().unwrap();
-    let mut store =
-        RedbStore::open_benchmark_nondurable(directory.path().join("fresh.redb")).unwrap();
+    let mut store = MemoryStore::new();
     store
         .record_coverage(&[(
             atom,
@@ -40,9 +42,10 @@ fn fresh_max_age_reads_each_coverage_row_once() {
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(99_000u64)),
         )])
         .unwrap();
-    let mut core = EngineCore::new(store, 8);
+    let reads = CoverageReadCounter::default();
+    let mut core = EngineCore::new(CountingCoverageStore::new(store, reads.clone()), 8);
     core.handle(EngineMsg::Tick(Timestamp::from(100_000u64)));
-    core.bench_reset_coverage_reads();
+    reads.reset();
 
     let mut demand = Demand::new(
         filter,
@@ -53,7 +56,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
     let effects = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
 
-    assert_eq!(core.bench_coverage_reads(), 1);
+    assert_eq!(reads.get(), 1);
     let evidence = effects
         .iter()
         .find_map(|effect| match effect {
