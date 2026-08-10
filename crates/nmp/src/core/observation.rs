@@ -5,6 +5,7 @@ use nmp_store::{CoverageInterval, EventStore};
 use nmp_transport::RelayHandle as TransportRelayHandle;
 use nostr::{RelayUrl, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::{
     AttributionSendId, Effect, EngineCore, LocalSendRefusal, RequestAttemptId,
@@ -84,7 +85,7 @@ pub enum ObservationFact {
         access: AccessContext,
         transport_generation: u64,
         request_revision: u64,
-        filter: ConcreteFilter,
+        filter: Arc<ConcreteFilter>,
         replay: bool,
     },
     RequestSettled {
@@ -478,6 +479,7 @@ impl<S: EventStore> EngineCore<S> {
         match outcome {
             RequestHandoffOutcome::Accepted { handle, .. } => {
                 self.clear_request_retry_for_attempt(&attempt);
+                let shared_filter = Arc::new(request.filter.clone());
                 for (id, path, filter_revision) in &targets {
                     self.emit_observation_fact(
                         *id,
@@ -488,7 +490,7 @@ impl<S: EventStore> EngineCore<S> {
                             access: request.session.access,
                             transport_generation: handle.generation,
                             request_revision: request.request_revision,
-                            filter: request.filter.clone(),
+                            filter: shared_filter.clone(),
                             replay: request.replay,
                         },
                         &mut effects,
