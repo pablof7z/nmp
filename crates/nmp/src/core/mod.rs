@@ -1586,6 +1586,10 @@ struct LaneWorkerProjection {
     persisted: BTreeSet<RelayUrl>,
     nonterminal: BTreeSet<RelayUrl>,
     uncertain: BTreeSet<RelayUrl>,
+    /// Exact latest committed nonterminal row by relay. Scheduling is a
+    /// reducer decision over this current state; the durable store remains
+    /// the recovery authority, not a database that every heartbeat rereads.
+    current_nonterminal: BTreeMap<RelayUrl, PublishQueueLane>,
 }
 
 impl LaneWorkerProjection {
@@ -1605,13 +1609,16 @@ impl LaneWorkerProjection {
         self.uncertain.remove(&relay);
         if matches!(lane.state, PublishQueueLaneState::Terminal { .. }) {
             self.nonterminal.remove(&relay);
+            self.current_nonterminal.remove(&relay);
         } else {
-            self.nonterminal.insert(relay);
+            self.nonterminal.insert(relay.clone());
+            self.current_nonterminal.insert(relay, lane.clone());
         }
         newly_persisted
     }
 
     fn mark_uncertain(&mut self, relay: RelayUrl) -> bool {
+        self.current_nonterminal.remove(&relay);
         self.uncertain.insert(relay.clone());
         self.persisted.insert(relay)
     }
