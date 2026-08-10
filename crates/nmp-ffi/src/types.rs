@@ -1201,6 +1201,10 @@ pub enum FfiWriteOutcome {
     NoDestination,
     /// The write ended without going anywhere.
     NotSent { reason: FfiNotSentReason },
+    /// A newer replaceable write retired this obligation after its bytes may
+    /// already have crossed the local transport handoff. NMP will not retry
+    /// it, but does not falsely claim it was never sent.
+    Superseded,
     /// The store answered the acceptance instruction with a semantic no. The
     /// write is in custody as a permanently-failed entry: one row, payload
     /// intact, readable and removable through the queue door.
@@ -1211,9 +1215,9 @@ pub enum FfiWriteOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiNotSentReason {
     Cancelled,
-    /// A newer accepted write won the same replaceable coordinate before this
-    /// one started any wire attempt. Not a failure — for an app renewing
-    /// presence it is the steady state.
+    /// A newer accepted write won the same replaceable coordinate, and NMP
+    /// proved the older bytes did not cross the local transport handoff. Not a
+    /// failure — for an app renewing presence it is the steady state.
     Superseded,
 }
 

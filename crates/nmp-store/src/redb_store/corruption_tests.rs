@@ -62,6 +62,13 @@ fn note(keys: &Keys, content: &str, created_at: u64) -> Event {
         .expect("sign note")
 }
 
+fn replaceable_note(keys: &Keys, content: &str, created_at: u64) -> Event {
+    EventBuilder::new(Kind::ContactList, content)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .expect("sign replaceable note")
+}
+
 fn frozen_from(signed: &Event) -> Event {
     Event::new(
         signed.id,
@@ -341,6 +348,119 @@ fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
             "reopen {reopen}: Absent must mean no valid lane was committed"
         );
     }
+}
+
+/// Replacement retirement must validate the complete attempt-detail row
+/// before it trusts a `NotHandedOff` prefix as permission to destroy safety
+/// evidence. A valid prefix followed by a missing required tail is corruption,
+/// not proof that the obsolete receipt can be deleted.
+#[test]
+fn replaceable_retirement_refuses_a_truncated_not_handed_off_attempt_record() {
+    let fixture = Fixture::new();
+    let keys = keys();
+    let relay = relay();
+    let older = replaceable_note(&keys, "older", 1_000);
+    let (intent_id, receipt_id) = {
+        let mut store = fixture.open();
+        let mut accept = accept_of(frozen_from(&older));
+        accept.correlation = Some(
+            nmp_grammar::CorrelationToken::try_from("corrupt-attempt-correlation")
+                .expect("bounded correlation"),
+        );
+        let accepted = store.accept_write(accept).expect("accept older write");
+        let intent_id = accepted.journaled_intent_id().expect("durable intent");
+        let receipt_id = accepted.journaled_receipt_id().expect("durable receipt");
+        store
+            .promote_signed(intent_id, evidence(&older))
+            .expect("promote older write");
+        store
+            .record_route_revision(intent_id, BTreeSet::from([relay]))
+            .expect("route older write");
+        let lane = store
+            .bootstrap_publish_queue_lanes(intent_id)
+            .expect("bootstrap lane")
+            .remove(0);
+        let lane = store
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_001))
+            .expect("make lane eligible");
+        let (_, lane) = store
+            .start_lane_attempt(
+                &lane.key,
+                lane.revision,
+                older.clone(),
+                Timestamp::from(1_002),
+            )
+            .expect("start attempt");
+        store
+            .record_lane_handoff(
+                &lane.key,
+                lane.revision,
+                1,
+                PublishQueueAttemptHandoff {
+                    at: Timestamp::from(1_003),
+                    result: crate::HandoffEvidence::NotHandedOff,
+                },
+                PublishQueuePostHandoffState::WaitingConnection,
+            )
+            .expect("record explicit non-handoff");
+        (intent_id, receipt_id)
+    };
+
+    let detail_key = first_fixed_key(&fixture, PUBLISH_QUEUE_ATTEMPT_DETAILS);
+    let full_detail = fixed_table_digest(&fixture, PUBLISH_QUEUE_ATTEMPT_DETAILS)
+        .into_iter()
+        .next()
+        .expect("attempt detail row")
+        .1;
+    let prefix_len = 8 + 1 + 8 + 1 + 8 + 1;
+    assert!(
+        full_detail.len() > prefix_len,
+        "fixture has a required tail"
+    );
+    rewrite_fixed_row(
+        &fixture,
+        PUBLISH_QUEUE_ATTEMPT_DETAILS,
+        &detail_key,
+        &full_detail[..prefix_len],
+    );
+    let corrupted_before = fixed_table_digest(&fixture, PUBLISH_QUEUE_ATTEMPT_DETAILS);
+
+    let newer = replaceable_note(&keys, "newer", 2_000);
+    let mut store = fixture.open();
+    let error = assert_typed_refusal("accept_write replacement retirement", || {
+        store.accept_write(accept_of(frozen_from(&newer)))
+    });
+    assert!(
+        error.message().contains("attempt details"),
+        "the error must identify the malformed attempt record: {error}"
+    );
+    assert!(
+        store
+            .reattach_receipt(receipt_id)
+            .expect("receipt read remains healthy")
+            .is_some(),
+        "failed replacement must not destroy the predecessor receipt"
+    );
+    assert_eq!(
+        store
+            .lookup_correlation("corrupt-attempt-correlation")
+            .expect("correlation read remains healthy"),
+        Some(receipt_id),
+        "failed replacement must not destroy the predecessor correlation"
+    );
+    assert_eq!(
+        store
+            .recover_attempts(intent_id)
+            .expect_err("the malformed attempt remains visible")
+            .fault(),
+        PersistenceFault::Invariant
+    );
+    drop(store);
+    assert_eq!(
+        fixed_table_digest(&fixture, PUBLISH_QUEUE_ATTEMPT_DETAILS),
+        corrupted_before,
+        "the refused mutation must leave the malformed row byte-identical"
+    );
 }
 
 /// The highest-value single conversion in #790: boot-time journal replay.

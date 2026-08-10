@@ -6103,6 +6103,7 @@ fn dispatch_effect(
                 &status,
                 WriteFact::Signing(SigningState::Signed { .. })
                     | WriteFact::Outcome(WriteOutcome::NotSent(_))
+                    | WriteFact::Outcome(WriteOutcome::Superseded)
             ) {
                 registry.cancel_pending_write(id);
             }

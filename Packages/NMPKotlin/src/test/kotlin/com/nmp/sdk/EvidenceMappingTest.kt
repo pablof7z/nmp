@@ -43,6 +43,10 @@ class EvidenceMappingTest {
             ),
         )
         assertEquals(
+            WriteFact.Outcome(WriteOutcome.Superseded),
+            WriteFact.from(FfiWriteFact.Outcome(FfiWriteOutcome.Superseded)),
+        )
+        assertEquals(
             NMPWriteCancellationError.UnknownReceipt(42uL),
             NMPWriteCancellationError.from(FfiCancelWriteException.UnknownReceipt(42uL)),
         )

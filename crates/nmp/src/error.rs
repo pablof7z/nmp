@@ -318,6 +318,10 @@ mod tests {
                 },
                 "the write could not be recorded: disk",
             ),
+            (
+                crate::core::PublishError::AlreadyExpired,
+                "the event was already expired at acceptance",
+            ),
         ] {
             let mapped = EngineError::from_publish_error(error);
             assert_eq!(

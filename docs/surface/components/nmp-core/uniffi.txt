@@ -4157,7 +4157,7 @@ enum Enum {
             discr: None,
             fields: [],
             docstring: Some(
-                "A newer accepted write won the same replaceable coordinate before this\none started any wire attempt. Not a failure — for an app renewing\npresence it is the steady state.",
+                "A newer accepted write won the same replaceable coordinate, and NMP\nproved the older bytes did not cross the local transport handoff. Not a\nfailure — for an app renewing presence it is the steady state.",
             ),
         },
     ],
@@ -5597,6 +5597,14 @@ enum Enum {
             ],
             docstring: Some(
                 "The write ended without going anywhere.",
+            ),
+        },
+        Variant {
+            name: "Superseded",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A newer replaceable write retired this obligation after its bytes may\nalready have crossed the local transport handoff. NMP will not retry\nit, but does not falsely claim it was never sent.",
             ),
         },
         Variant {

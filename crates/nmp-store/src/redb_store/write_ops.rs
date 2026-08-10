@@ -14,9 +14,9 @@ use super::publish_queue::{
     PublishQueueIntentRecord, PublishQueueReceiptRecord, SuppressClaimRecord,
 };
 use super::publish_queue_codec::{
-    attempt_range, codec_error, deadline_intent_range, deadline_key, decode_claims,
-    decode_deadline, decode_displaced, decode_intent, encode_claims, encode_displaced,
-    encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
+    attempt_range, codec_error, deadline_intent_range, deadline_key, decode_attempt_handoff,
+    decode_claims, decode_deadline, decode_displaced, decode_intent, encode_claims,
+    encode_displaced, encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
     parse_deadline_by_intent_key, parse_lane_key, receipt_key, route_revision_range,
 };
 use super::query::expiration_key;
@@ -34,7 +34,7 @@ use super::{
     PersistenceError, PromoteOutcome, Provenance, ReceiptState, RefuseReason, SigState,
     StoredEvent, Timestamp,
 };
-use crate::{RetiredIntent, VerifiedSignature};
+use crate::{handoff_may_have_occurred, RetiredIntent, VerifiedSignature};
 use redb::ReadableTable;
 
 /// Redb half of replaceable-delivery coalescing. Everything here runs inside
@@ -42,12 +42,13 @@ use redb::ReadableTable;
 fn retire_superseded_owners_in_txn(
     ingest: &mut RedbIngestTxn<'_, '_>,
     write_txn: &redb::WriteTransaction,
+    correlations: &mut redb::Table<'_, &[u8], &[u8; 8]>,
     mut replaced: StoredEvent,
 ) -> Result<(Option<StoredEvent>, Vec<RetiredIntent>), PersistenceError> {
-    let attempts = write_txn
+    let mut attempts = write_txn
         .open_table(PUBLISH_QUEUE_ATTEMPTS)
         .map_err(persist_err)?;
-    let attempt_details = write_txn
+    let mut attempt_details = write_txn
         .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
         .map_err(persist_err)?;
     let mut lanes = write_txn
@@ -83,23 +84,21 @@ fn retire_superseded_owners_in_txn(
         let intent = decode_intent(&intent_bytes)
             .map_err(|error| codec_error(&format!("intent {}", owner.0), error))?;
         let (attempt_lower, attempt_upper) = attempt_range(owner);
-        let has_attempt = attempts
+        let attempt_keys = attempts
             .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
             .map_err(persist_err)?
-            .next()
-            .transpose()
+            .map(|row| row.map(|(key, _)| *key.value()).map_err(persist_err))
+            .collect::<Result<Vec<_>, _>>()?;
+        let attempt_detail_rows = attempt_details
+            .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
             .map_err(persist_err)?
-            .is_some()
-            || attempt_details
-                .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
-                .map_err(persist_err)?
-                .next()
-                .transpose()
-                .map_err(persist_err)?
-                .is_some();
-        if has_attempt {
-            continue;
-        }
+            .map(|row| {
+                let (key, value) = row.map_err(persist_err)?;
+                let handoff = decode_attempt_handoff(value.value())
+                    .map_err(|error| codec_error("attempt details", error))?;
+                Ok::<_, PersistenceError>((*key.value(), handoff))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut lane_keys = Vec::new();
         let mut lane_started = false;
         let (lane_lower, lane_upper) = lane_range(owner);
@@ -120,31 +119,55 @@ fn retire_superseded_owners_in_txn(
             lane_started |= last_ordinal != 0;
             lane_keys.push(*lane_key.value());
         }
-        if !lane_started {
-            eligible.push((owner, intent.receipt_id, lane_keys));
-        }
+        let attempt_evidence_exists = !attempt_keys.is_empty() || !attempt_detail_rows.is_empty();
+        let retain_safety_receipt = if attempt_evidence_exists {
+            attempt_keys.iter().any(|attempt_key| {
+                let details = attempt_detail_rows
+                    .iter()
+                    .find_map(|(detail_key, details)| {
+                        (detail_key == attempt_key).then_some(details)
+                    });
+                handoff_may_have_occurred(details.and_then(Option::as_ref))
+            }) || attempt_detail_rows.iter().any(|(detail_key, handoff)| {
+                !attempt_keys.contains(detail_key) && handoff_may_have_occurred(handoff.as_ref())
+            })
+        } else {
+            lane_started
+        };
+        eligible.push((
+            owner,
+            intent.receipt_id,
+            lane_keys,
+            attempt_keys,
+            attempt_detail_rows
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            retain_safety_receipt,
+        ));
     }
 
-    let mut predecessor = None;
-    for (owner, receipt_id, lane_keys) in &eligible {
+    for (owner, receipt_id, lane_keys, attempt_keys, attempt_detail_keys, retain_safety_receipt) in
+        &eligible
+    {
         if let Some(local) = replaced.provenance.local.as_mut() {
             local.owners.remove(owner);
         }
         let key = intent_key(*owner);
-        let displaced_bytes = ingest
+        ingest
             .publish_queue_displaced
             .remove(&key)
-            .map_err(persist_err)?
-            .map(|guard| guard.value().to_vec());
-        if let Some(bytes) = displaced_bytes {
-            predecessor.get_or_insert(
-                decode_displaced(&bytes).map_err(|error| codec_error("displaced event", error))?,
-            );
-        }
+            .map_err(persist_err)?;
         ingest
             .publish_queue_intents
             .remove(&key)
             .map_err(persist_err)?;
+        for attempt_key in attempt_keys {
+            attempts.remove(attempt_key).map_err(persist_err)?;
+        }
+        for attempt_key in attempt_detail_keys {
+            attempt_details.remove(attempt_key).map_err(persist_err)?;
+        }
         for lane_key in lane_keys {
             lanes.remove(lane_key).map_err(persist_err)?;
         }
@@ -186,31 +209,51 @@ fn retire_superseded_owners_in_txn(
                 .remove(&by_intent_key)
                 .map_err(persist_err)?;
         }
-        update_publish_queue_receipt(
-            &mut ingest.publish_queue_receipts,
-            *receipt_id,
-            ReceiptState::Superseded,
-        )?;
+        if *retain_safety_receipt {
+            update_publish_queue_receipt(
+                &mut ingest.publish_queue_receipts,
+                *receipt_id,
+                ReceiptState::Superseded,
+            )?;
+            continue;
+        }
+        if ingest
+            .publish_queue_receipts
+            .remove(&receipt_key(*receipt_id))
+            .map_err(persist_err)?
+            .is_none()
+        {
+            return Err(PersistenceError::invariant(
+                "open delivery intent must retain its receipt",
+            ));
+        }
+        let stale_tokens = correlations
+            .iter()
+            .map_err(persist_err)?
+            .filter_map(|row| match row {
+                Ok((token, journaled)) if u64::from_be_bytes(*journaled.value()) == *receipt_id => {
+                    Some(Ok(token.value().to_vec()))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(persist_err(error))),
+            })
+            .collect::<Result<Vec<_>, PersistenceError>>()?;
+        for token in stale_tokens {
+            correlations.remove(token.as_slice()).map_err(persist_err)?;
+        }
     }
 
-    let remains_valid = replaced
-        .provenance
-        .local
-        .as_ref()
-        .is_some_and(|local| !local.owners.is_empty() || local.sig_state == SigState::Signed)
-        || !replaced.provenance.seen.is_empty();
-    let displaced = if remains_valid {
-        Some(replaced)
-    } else {
-        predecessor
-    };
     let retired = eligible
         .into_iter()
-        .map(|(intent_id, receipt_id, _)| RetiredIntent {
-            intent_id,
-            receipt_id,
-        })
+        .map(
+            |(intent_id, receipt_id, .., handoff_may_have_occurred)| RetiredIntent {
+                intent_id,
+                receipt_id,
+                handoff_may_have_occurred,
+            },
+        )
         .collect();
+    let displaced = (!replaced.provenance.seen.is_empty()).then_some(replaced);
     Ok((displaced, retired))
 }
 
@@ -582,6 +625,7 @@ pub(super) fn accept_write(
                                 let (displaced, retired) = retire_superseded_owners_in_txn(
                                     ingest,
                                     write_txn,
+                                    &mut publish_queue_correlations,
                                     replaced.clone(),
                                 )?;
                                 (
@@ -656,6 +700,7 @@ pub(super) fn accept_write(
                 intent_id: Some(intent_id),
                 frozen_id: frozen.id,
                 expected_pubkey,
+                accepted_at: Some(accepted_at),
                 state: receipt_state,
             };
             let encoded_receipt = encode_receipt(&receipt_record);

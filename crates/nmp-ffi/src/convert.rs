@@ -1763,6 +1763,7 @@ fn write_outcome_to_ffi(outcome: &GWriteOutcome) -> FfiWriteOutcome {
                 GNotSentReason::Superseded => FfiNotSentReason::Superseded,
             },
         },
+        GWriteOutcome::Superseded => FfiWriteOutcome::Superseded,
         GWriteOutcome::Refused(reason) => FfiWriteOutcome::Refused {
             reason: refuse_reason_to_ffi(*reason),
         },

@@ -367,6 +367,12 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
                 },
             },
         ),
+        (
+            WriteFact::Outcome(WriteOutcome::Superseded),
+            FfiWriteFact::Outcome {
+                outcome: FfiWriteOutcome::Superseded,
+            },
+        ),
         // #1039: both event ids survive the boundary whole. Reduced to a
         // string this failure could only tell a user to redo the edit.
         (
@@ -461,6 +467,8 @@ enum NormStatus {
     /// reason it was: a retired obligation's whole content is that a newer
     /// write at the same NIP-01 address took its place.
     NotSent(&'static str),
+    /// Replaced after local transport may have observed the bytes.
+    Superseded,
     Refused(NormRefuseReason),
 }
 
@@ -948,6 +956,7 @@ fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
         WriteFact::Outcome(WriteOutcome::NotSent(reason)) => {
             NormStatus::NotSent(not_sent_reason_name(reason))
         }
+        WriteFact::Outcome(WriteOutcome::Superseded) => NormStatus::Superseded,
         WriteFact::Outcome(WriteOutcome::Refused(reason)) => {
             NormStatus::Refused(normalize_direct_refuse_reason(reason))
         }
@@ -1033,6 +1042,9 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
             outcome: FfiWriteOutcome::NotSent { reason },
         } => NormStatus::NotSent(ffi_not_sent_reason_name(reason)),
         FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::Superseded,
+        } => NormStatus::Superseded,
+        FfiWriteFact::Outcome {
             outcome: FfiWriteOutcome::Refused { reason },
         } => NormStatus::Refused(normalize_ffi_refuse_reason(reason)),
     }
@@ -1060,6 +1072,7 @@ fn is_whole_write_terminal(status: &NormStatus) -> bool {
         NormStatus::Settled
             | NormStatus::NoDestination
             | NormStatus::NotSent(_)
+            | NormStatus::Superseded
             | NormStatus::Refused(_)
             | NormStatus::SigningRefused(_)
     )
@@ -1776,6 +1789,7 @@ fn direct_follow_receipt_name(status: &WriteFact) -> &'static str {
         // `(pubkey, kind)` address. Both surfaces must name that terminal
         // with the same word, and both must stop reading the stream on it.
         WriteFact::Outcome(WriteOutcome::NotSent(reason)) => not_sent_reason_name(*reason),
+        WriteFact::Outcome(WriteOutcome::Superseded) => "superseded_after_handoff",
         WriteFact::Outcome(WriteOutcome::Refused(_)) => "refused",
     }
 }
@@ -1820,6 +1834,9 @@ fn ffi_follow_receipt_name(status: &FfiWriteFact) -> &'static str {
         FfiWriteFact::Outcome {
             outcome: FfiWriteOutcome::NotSent { reason },
         } => ffi_not_sent_reason_name(*reason),
+        FfiWriteFact::Outcome {
+            outcome: FfiWriteOutcome::Superseded,
+        } => "superseded_after_handoff",
         FfiWriteFact::Outcome {
             outcome: FfiWriteOutcome::Refused { .. },
         } => "refused",
@@ -3387,26 +3404,29 @@ fn drain_ffi_replay(rx: &mpsc::Receiver<FfiWriteFact>, label: &str) -> Vec<NormS
     }
 }
 
-/// TERMINAL half: reach a genuinely terminal retained receipt WITHOUT the
+/// TERMINAL half: reach a genuinely terminal retained receipt without the
 /// explicit cancellation path exercised above, and prove it survives a
-/// restart.
-///
-/// #1237 deleted `Durability::Ephemeral` and with it the boot-time
-/// abandon-on-restart reconciliation this scenario used to ride. The
-/// property it protects — "a terminal retained receipt reattaches to
-/// `Attached` and replays its terminal from disk, identically on both
-/// surfaces" — now rides supersession: two writes to the same NIP-01
-/// replaceable coordinate, neither signed (no signer is ever registered),
-/// so the newer one retires the older before any wire attempt and the older
-/// receipt's stream ends on `NotSent(Superseded)`.
+/// restart. Safely-unsent superseded receipts are deliberately destroyed;
+/// this fixture first proves a local handoff against an AUTH-gated relay, so
+/// the older write owns the narrow, temporary safety receipt that remains.
 async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     let keys = Keys::generate();
+    let relay = ScriptedRelay::start(&RelayConfig {
+        auth_required_writes: true,
+        ..RelayConfig::default()
+    })
+    .await;
+    let relay_url = relay.url.to_string();
     let superseded_id = {
         let engine = Engine::new(EngineConfig {
             store_path: Some(path.to_string_lossy().into_owned()),
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..EngineConfig::default()
         })
         .expect("direct engine must construct");
+        engine
+            .add_account(&keys.secret_key().to_secret_hex())
+            .expect("direct account must register");
         engine
             .set_active_account(Some(keys.public_key()))
             .expect("direct account must activate");
@@ -3417,31 +3437,32 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
                 content: content.into(),
                 created_at: Some(Timestamp::from(created_at)),
             }),
-            routing: WriteRouting::Auto,
+            routing: WriteRouting::Explicit(vec![relay.url.clone()]),
             identity: Identity::Active,
             correlation: None,
         };
         let first = engine
             .publish(write("reattach-terminal-first", WRITE_CREATED_AT))
             .expect("direct publish must enqueue");
-        let deadline = Instant::now() + WAIT;
-        assert_eq!(
-            recv_before(&first.statuses, deadline, "direct terminal-setup park"),
-            WriteFact::Signing(SigningState::AwaitingSigner {
-                pubkey: keys.public_key()
-            })
+        let parked = collect_direct_receipts_until_awaiting_auth(&first.statuses, &relay_url);
+        assert!(
+            parked
+                .iter()
+                .any(|status| matches!(status, NormStatus::Sent(_))),
+            "the retained superseded receipt requires an actual local handoff"
         );
         engine
             .publish(write("reattach-terminal-second", WRITE_CREATED_AT + 1))
             .expect("the newer write at the same replaceable coordinate must enqueue");
         assert_eq!(
             drain_direct_replay(&first.statuses, "direct terminal-setup supersession"),
-            vec![NormStatus::NotSent("superseded")],
-            "the older write must retire on the newer one, before any wire attempt"
+            vec![NormStatus::Superseded],
+            "the older attempted write must retire when the newer value wins"
         );
         engine.shutdown();
         first.id
     };
+    relay.shutdown();
 
     let engine = Engine::new(EngineConfig {
         store_path: Some(path.to_string_lossy().into_owned()),
@@ -3473,12 +3494,22 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
 
 async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     let keys = Keys::generate();
+    let relay = ScriptedRelay::start(&RelayConfig {
+        auth_required_writes: true,
+        ..RelayConfig::default()
+    })
+    .await;
+    let relay_url = relay.url.to_string();
     let superseded_id = {
         let engine = NmpEngine::new(NmpEngineConfig {
             store_path: Some(path.to_string_lossy().into_owned()),
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..NmpEngineConfig::default()
         })
         .expect("FFI engine must construct");
+        engine
+            .add_account(keys.secret_key().to_secret_hex())
+            .expect("FFI account must register");
         engine
             .set_active_account(Some(keys.public_key().to_hex()))
             .expect("FFI account must activate");
@@ -3491,7 +3522,9 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
                     created_at: Some(created_at),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec![relay_url.clone()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         };
@@ -3500,22 +3533,25 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
             .expect("FFI publish must enqueue");
         let receipt_id = first.id();
         let rx = bridge_receipts(&first);
-        let deadline = Instant::now() + WAIT;
-        assert_eq!(
-            normalize_ffi_status(recv_before(&rx, deadline, "FFI terminal-setup park"), "n/a"),
-            NormStatus::AwaitingSigner(keys.public_key().to_hex())
+        let parked = collect_ffi_receipts_until_awaiting_auth(&rx, &relay_url);
+        assert!(
+            parked
+                .iter()
+                .any(|status| matches!(status, NormStatus::Sent(_))),
+            "the retained superseded receipt requires an actual local handoff"
         );
         engine
             .publish(write("reattach-terminal-second", WRITE_CREATED_AT + 1))
             .expect("the newer write at the same replaceable coordinate must enqueue");
         assert_eq!(
             drain_ffi_replay(&rx, "FFI terminal-setup supersession"),
-            vec![NormStatus::NotSent("superseded")],
-            "the older write must retire on the newer one, before any wire attempt"
+            vec![NormStatus::Superseded],
+            "the older attempted write must retire when the newer value wins"
         );
         engine.shutdown();
         receipt_id
     };
+    relay.shutdown();
 
     let engine = NmpEngine::new(NmpEngineConfig {
         store_path: Some(path.to_string_lossy().into_owned()),
@@ -3596,7 +3632,7 @@ async fn direct_and_ffi_reattach_are_semantically_identical_for_a_terminal_retai
     assert_eq!(direct.outcome, NormReattach::Attached);
     assert_eq!(
         direct.replay,
-        vec![NormStatus::NotSent("superseded")],
+        vec![NormStatus::Superseded],
         "a terminal retained receipt replays its whole-write terminal from disk"
     );
 }

@@ -1114,6 +1114,7 @@ pub nmp::WriteOutcome::NoDestination
 pub nmp::WriteOutcome::NotSent(nmp::NotSentReason)
 pub nmp::WriteOutcome::Refused(nmp_store::RefuseReason)
 pub nmp::WriteOutcome::Settled
+pub nmp::WriteOutcome::Superseded
 impl core::clone::Clone for nmp::WriteOutcome
 pub fn nmp::WriteOutcome::clone(&self) -> nmp::WriteOutcome
 impl core::cmp::Eq for nmp::WriteOutcome

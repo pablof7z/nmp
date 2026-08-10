@@ -1604,9 +1604,7 @@ impl<S: EventStore> EngineCore<S> {
             ReceiptState::Cancelled => Some(WriteFact::Outcome(WriteOutcome::NotSent(
                 NotSentReason::Cancelled,
             ))),
-            ReceiptState::Superseded => Some(WriteFact::Outcome(WriteOutcome::NotSent(
-                NotSentReason::Superseded,
-            ))),
+            ReceiptState::Superseded => Some(WriteFact::Outcome(WriteOutcome::Superseded)),
             ReceiptState::Refused(reason) => {
                 Some(WriteFact::Outcome(WriteOutcome::Refused(reason)))
             }
@@ -2271,6 +2269,9 @@ impl<S: EventStore> EngineCore<S> {
                 let AcceptOutcome::Refused(reason) = outcome else {
                     unreachable!("only Refused omits journal ids")
                 };
+                if reason == nmp_store::RefuseReason::AlreadyExpired {
+                    return self.refuse_publish(PublishError::AlreadyExpired);
+                }
                 // CUSTODY. The store was working and said no, which is an
                 // answer the app is entitled to read back — so the refusal
                 // becomes a one-row, permanently-failed queue entry rather
@@ -2386,21 +2387,14 @@ impl<S: EventStore> EngineCore<S> {
             self.intent_receipts.insert(intent_id, id);
         }
 
-        if let Some(committed) = committed {
-            // A local pending row was committed before Accepted. When it did
-            // not alter reactive demand/router shape, expose its exact row
-            // facts through the same O(committed delta) projection path as a
-            // relay batch. Any demand change keeps the broad refresh oracle.
-            self.apply_committed_mutation(committed, &mut effects);
-        }
-
         for retired in retired_intents {
             let retired_id = ReceiptId(retired.receipt_id);
-            self.emit_write_fact(
-                retired_id,
-                WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Superseded)),
-                &mut effects,
-            );
+            let outcome = if retired.handoff_may_have_occurred {
+                WriteOutcome::Superseded
+            } else {
+                WriteOutcome::NotSent(NotSentReason::Superseded)
+            };
+            self.emit_write_fact(retired_id, WriteFact::Outcome(outcome), &mut effects);
             if let Some(retired_pending) = self.pending.remove(&retired_id) {
                 self.forget_pending_indexes(retired_id, &retired_pending);
                 if let Some(event_id) = retired_pending.event_id {
@@ -2414,6 +2408,24 @@ impl<S: EventStore> EngineCore<S> {
             } else {
                 self.intent_receipts.remove(&retired.intent_id);
             }
+        }
+
+        if let Some(committed) = committed {
+            // A local pending row was committed before Accepted. When it did
+            // not alter reactive demand/router shape, expose its exact row
+            // facts through the same O(committed delta) projection path as a
+            // relay batch. Any demand change keeps the broad refresh oracle.
+            // Retired terminals are already queued above so a synchronous
+            // new-request handoff cannot close their observer first.
+            self.apply_committed_mutation(committed, &mut effects);
+        }
+
+        if let Err(error) = self
+            .resolver
+            .store_mut()
+            .prune_superseded_receipts(self.clock)
+        {
+            self.degrade_store(error, &mut effects);
         }
 
         match payload {
@@ -2588,9 +2600,9 @@ impl<S: EventStore> EngineCore<S> {
     /// acceptance. It is INSPECTION: nothing here blocks, and nothing here
     /// waits for settlement.
     ///
-    /// It does not fix #46. Retained receipts and correlation tokens still
-    /// regrow without bound; this door makes that growth visible, which is
-    /// the first thing a retention rule will need.
+    /// Superseded safety receipts are automatically age/count bounded. Other
+    /// terminal receipt classes remain app-removable and #46 continues to own
+    /// their general retention policy.
     pub fn publish_queue_entries(&self) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
         let receipts = self.resolver.store().enumerate_publish_queue_receipts()?;
         let mut entries = Vec::with_capacity(receipts.len());
@@ -2614,7 +2626,7 @@ impl<S: EventStore> EngineCore<S> {
             };
             let outcome = match receipt.state {
                 ReceiptState::Cancelled => Some(WriteOutcome::NotSent(NotSentReason::Cancelled)),
-                ReceiptState::Superseded => Some(WriteOutcome::NotSent(NotSentReason::Superseded)),
+                ReceiptState::Superseded => Some(WriteOutcome::Superseded),
                 ReceiptState::Refused(reason) => Some(WriteOutcome::Refused(reason)),
                 ReceiptState::NoDestination => Some(WriteOutcome::NoDestination),
                 ReceiptState::Accepted | ReceiptState::Signed => match pending {

@@ -346,9 +346,9 @@ public enum RelayState: Sendable, Hashable {
 /// Why a write ended without going anywhere.
 public enum NotSentReason: Sendable, Hashable {
     case cancelled
-    /// A newer accepted write won the same replaceable coordinate before this
-    /// one started any wire attempt. Not a failure -- for an app renewing
-    /// presence it is the steady state.
+    /// A newer accepted write won the same replaceable coordinate, and NMP
+    /// proved the older bytes did not cross the local transport handoff. Not a
+    /// failure -- for an app renewing presence it is the steady state.
     case superseded
 
     init(_ ffi: FfiNotSentReason) {
@@ -395,6 +395,9 @@ public enum WriteOutcome: Sendable, Hashable {
     /// resolving, which parks forever.
     case noDestination
     case notSent(NotSentReason)
+    /// A newer replaceable write retired this obligation after its bytes may
+    /// already have crossed the local transport handoff. It will not retry.
+    case superseded
     /// The store answered the acceptance instruction with a semantic no. The
     /// write is in custody as a permanently-failed entry: one row, payload
     /// intact, readable and removable through `Engine.publishQueue()`.
@@ -405,6 +408,7 @@ public enum WriteOutcome: Sendable, Hashable {
         case .settled: self = .settled
         case .noDestination: self = .noDestination
         case .notSent(let reason): self = .notSent(NotSentReason(reason))
+        case .superseded: self = .superseded
         case .refused(let reason): self = .refused(RefuseReason(reason))
         }
     }

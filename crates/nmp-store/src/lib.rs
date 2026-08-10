@@ -779,10 +779,11 @@ pub enum InsertOutcome {
 /// Why an [`EventStore::insert`] refused an event outright, before it ever
 /// touched an index.
 ///
-/// Serialized because a locally-authored write refused at acceptance is
-/// still taken into custody: it becomes a one-row, permanently-failed
-/// publish-queue entry carrying this reason ([`EventStore::accept_refused`]),
-/// so the reason has to survive a restart exactly as it was observed.
+/// Serialized because most semantic refusals of a locally-authored write are
+/// retained as one permanently-failed receipt through
+/// [`EventStore::accept_refused`]. [`RefuseReason::AlreadyExpired`] is the
+/// deliberate exception: the engine refuses it before custody, so it creates
+/// no receipt, event body, signer request, route, lane, or attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefuseReason {
     /// The event's NIP-40 `expiration` tag is already in the past at the
@@ -972,9 +973,10 @@ pub enum AcceptOutcome {
         receipt_id: u64,
         row: StoredEvent,
         replaced: Box<StoredEvent>,
-        /// Older open delivery obligations at this exact address that had
-        /// not started a wire attempt and were retired atomically with this
-        /// acceptance. Their retained receipts remain reattachable.
+        /// Older open delivery obligations at this exact address that were
+        /// retired atomically with this acceptance. Each item says whether a
+        /// bounded safety receipt remains necessary because its bytes may
+        /// have crossed the local transport handoff.
         retired: Vec<RetiredIntent>,
     },
     /// This intent lost its address race to an existing, newer winner.
@@ -1019,6 +1021,10 @@ pub enum AcceptOutcome {
 pub struct RetiredIntent {
     pub intent_id: IntentId,
     pub receipt_id: u64,
+    /// True only when local transport evidence cannot prove the obsolete
+    /// bytes stayed local. This selects the honest app-facing terminal and
+    /// the bounded durable safety receipt.
+    pub handoff_may_have_occurred: bool,
 }
 
 impl AcceptOutcome {
@@ -1243,8 +1249,10 @@ pub enum ReceiptState {
     /// fact rather than a generic failure string.
     Cancelled,
     /// A newer accepted event won the same NIP-01 replaceable/addressable
-    /// coordinate before this obligation started any wire attempt. Terminal:
-    /// the receipt is retained, but the old intent is absent from recovery.
+    /// coordinate. Terminal: the obsolete body and all delivery machinery are
+    /// gone. A receipt remains only when a local handoff may have occurred,
+    /// and that safety evidence is destroyed after one hour or when it falls
+    /// outside the newest 500 superseded receipts.
     Superseded,
     /// Routing finished — knowledge exhausted — and named zero relays, so
     /// there was nowhere to publish ([`EventStore::close_unroutable_intent`]).
@@ -1280,10 +1288,11 @@ pub enum CompensationReason {
 
 /// A durably-retained receipt record, independent of whether the intent's
 /// open-work row (`PUBLISH_QUEUE_INTENTS`/[`PublishQueueIntent`]) still exists —
-/// see [`ReceiptState`]'s doc for why this separation exists. This unit
-/// builds no pruning policy for these rows (mirrors how the retry-owner
-/// follow-up, not this frame, owns `PUBLISH_QUEUE_ATTEMPTS` retention policy);
-/// they simply accumulate until a later unit defines a retention/GC rule.
+/// see [`ReceiptState`]'s doc for why this separation exists. Superseded
+/// safety receipts are the one automatically disposable class: NMP destroys
+/// them after one hour and keeps no more than the newest 500. Other terminal
+/// receipt classes remain app-removable through
+/// [`EventStore::remove_publish_queue_entry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishQueueReceipt {
     pub receipt_id: u64,
@@ -1296,8 +1305,18 @@ pub struct PublishQueueReceipt {
     pub intent_id: Option<IntentId>,
     pub frozen_id: EventId,
     pub expected_pubkey: PublicKey,
+    /// Acceptance time for receipts backed by a real write intent. Receipt-
+    /// only semantic refusals never entered custody and therefore carry no
+    /// retention clock.
+    pub accepted_at: Option<Timestamp>,
     pub state: ReceiptState,
 }
+
+/// Replaced-write safety receipts are short-lived evidence, not an archive.
+pub const SUPERSEDED_RECEIPT_MAX_AGE_SECS: u64 = 60 * 60;
+/// Even inside the age window, retain no more than this many replaced-write
+/// safety receipts. Oldest receipt identity loses first.
+pub const SUPERSEDED_RECEIPT_MAX_COUNT: usize = 500;
 
 /// Versioned, durable evidence for one publication attempt. The key is the
 /// full `(intent, relay, ordinal)` tuple: a restart can never confuse a new
@@ -1494,6 +1513,19 @@ pub(crate) fn attempt_is_live(
         }
         _ => true,
     }
+}
+
+/// Whether a started attempt still carries any possibility that its bytes
+/// crossed the local transport boundary. Missing detail is ambiguous after a
+/// crash; an explicit `NotHandedOff` is the one definitive negative fact.
+pub(crate) fn handoff_may_have_occurred(handoff: Option<&PublishQueueAttemptHandoff>) -> bool {
+    !matches!(
+        handoff,
+        Some(PublishQueueAttemptHandoff {
+            result: HandoffEvidence::NotHandedOff,
+            ..
+        })
+    )
 }
 
 /// Caller-selected post-handoff persistence state. This is a fact-writing
@@ -2034,12 +2066,65 @@ pub trait EventStore {
 
     /// Read every retained receipt back out, newest id last (#1039).
     ///
-    /// The enumeration half of the app's outbox door. Retained receipts
-    /// accumulate without bound (#46 is NOT closed by this); making the
-    /// growth readable is precisely the point.
+    /// The enumeration half of the app's outbox door. Superseded safety
+    /// receipts are bounded automatically; other terminal classes remain
+    /// app-removable and #46 continues to own their general retention policy.
     fn enumerate_publish_queue_receipts(
         &self,
     ) -> Result<Vec<PublishQueueReceipt>, PersistenceError>;
+
+    /// Permanently remove superseded receipt evidence once it is one hour old
+    /// or outside the newest 500 entries. Open obligations and every other
+    /// receipt state are outside this disposal class.
+    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError> {
+        let mut retained = self
+            .enumerate_publish_queue_receipts()?
+            .into_iter()
+            .filter_map(|receipt| {
+                (receipt.state == ReceiptState::Superseded)
+                    .then_some((receipt.receipt_id, receipt.accepted_at))
+            })
+            .collect::<Vec<_>>();
+        retained.sort_by_key(|(receipt_id, accepted_at)| (*accepted_at, *receipt_id));
+        let excess = retained.len().saturating_sub(SUPERSEDED_RECEIPT_MAX_COUNT);
+        let mut removed = Vec::new();
+        for (index, (receipt_id, accepted_at)) in retained.into_iter().enumerate() {
+            let age_due = accepted_at
+                .is_none_or(|accepted_at| now >= accepted_at + SUPERSEDED_RECEIPT_MAX_AGE_SECS);
+            if index >= excess && !age_due {
+                continue;
+            }
+            match self.remove_publish_queue_entry(receipt_id)? {
+                RemoveQueueEntryOutcome::Removed | RemoveQueueEntryOutcome::NotFound => {
+                    removed.push(receipt_id);
+                }
+                RemoveQueueEntryOutcome::StillOpen => {
+                    return Err(PersistenceError::invariant(
+                        "superseded receipt still owns open publish work",
+                    ));
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Earliest age deadline for disposable supersession evidence. A count
+    /// overflow returns the epoch so the reducer schedules immediate pruning.
+    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        let retained = self
+            .enumerate_publish_queue_receipts()?
+            .into_iter()
+            .filter(|receipt| receipt.state == ReceiptState::Superseded)
+            .collect::<Vec<_>>();
+        if retained.len() > SUPERSEDED_RECEIPT_MAX_COUNT {
+            return Ok(Some(Timestamp::from(0)));
+        }
+        Ok(retained
+            .into_iter()
+            .filter_map(|receipt| receipt.accepted_at)
+            .map(|accepted_at| accepted_at + SUPERSEDED_RECEIPT_MAX_AGE_SECS)
+            .min())
+    }
 
     /// Forget one retained receipt and every piece of evidence keyed to it
     /// (#1039). The removal half of the app's outbox door, and a real
@@ -2316,7 +2401,8 @@ pub trait EventStore {
     /// — no intent, no journal, no pending event row, no signer request, no
     /// relay write) and [`ReceiptState::Refused`] carrying `reason`
     /// verbatim, including a [`RefuseReason::ReplaceableBaseChanged`]'s two
-    /// event ids.
+    /// event ids. [`RefuseReason::AlreadyExpired`] never reaches this door:
+    /// expiry is a pre-custody refusal with no retained receipt.
     ///
     /// Terminal at birth. Custody is not viability: the entry exists so the
     /// app can see the failure and remove it

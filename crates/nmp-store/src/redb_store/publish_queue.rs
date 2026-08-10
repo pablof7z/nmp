@@ -185,6 +185,7 @@ pub(super) struct PublishQueueReceiptRecord {
     pub(super) intent_id: Option<IntentId>,
     pub(super) frozen_id: EventId,
     pub(super) expected_pubkey: PublicKey,
+    pub(super) accepted_at: Option<Timestamp>,
     pub(super) state: ReceiptState,
 }
 
