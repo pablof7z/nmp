@@ -151,6 +151,72 @@ fn wire_ops(effects: &[Effect]) -> Vec<&WireOp> {
 }
 
 #[test]
+fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
+    let mut fixture = Fixture::new("nip77-predecessor-candidate-eose");
+    let first = fixture.atom(20);
+    let second = fixture.atom(21);
+
+    fixture.core.attribution.observe_atom(&first);
+    let opened = fixture.compile(BTreeSet::from([first.clone()]));
+    let (_, first_plan, first_filter, first_attempt) = only_request(&opened);
+    fixture
+        .core
+        .on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+            attempt_id: first_attempt,
+            handle: fixture.handle,
+        });
+    fixture.core.prober.states.insert(
+        fixture.relay.clone(),
+        crate::negentropy::ProbeState::Supported,
+    );
+    let probed = fixture.core.prober.probed(&fixture.relay).unwrap();
+    let mut candidate_effects = Vec::new();
+    fixture.core.begin_neg_handoff(
+        probed,
+        first_plan.clone(),
+        Some(first_plan.clone()),
+        first_filter,
+        &mut candidate_effects,
+    );
+    let (_, first_candidate, _, candidate_attempt) = only_request(&candidate_effects);
+    fixture
+        .core
+        .on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+            attempt_id: candidate_attempt,
+            handle: fixture.handle,
+        });
+
+    fixture.core.attribution.observe_atom(&second);
+    fixture.core.attribution.release_atom(&first);
+    let replacement = fixture.compile(BTreeSet::from([second.clone()]));
+    let (_, second_candidate, _, second_attempt) = only_request(&replacement);
+    assert!(fixture.core.pending_request_replacements.len() == 1);
+    assert!(fixture
+        .core
+        .plan_execution_metadata
+        .contains_key(&first_plan));
+
+    let predecessor_eose = fixture.eose(&first_candidate);
+    assert!(predecessor_eose
+        .iter()
+        .any(|effect| matches!(effect, Effect::NegOpen(..))));
+
+    fixture
+        .core
+        .on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+            attempt_id: second_attempt,
+            handle: fixture.handle,
+        });
+    fixture.eose(&second_candidate);
+    fixture.compile(BTreeSet::new());
+    fixture.core.attribution.release_atom(&second);
+    assert_eq!(
+        fixture.core.bench_ownership_census(),
+        CoreOwnershipCensus::default()
+    );
+}
+
+#[test]
 fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert() {
     let mut fixture = Fixture::new("nip77-supersede-before-eose");
     let first = fixture.atom(1);
