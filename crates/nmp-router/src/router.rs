@@ -270,7 +270,7 @@ fn outbox_ownership(
 }
 
 pub struct Router {
-    rules: RuleRegistry,
+    pub(crate) rules: RuleRegistry,
     pub(crate) prev_plan: RelayPlan,
     pub(crate) last_diag: Diagnostics,
     /// Monotonic wire-token mint counter (#899). Never reset and never

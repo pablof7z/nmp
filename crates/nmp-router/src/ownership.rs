@@ -149,6 +149,24 @@ pub struct AdmissionOutcome {
     pub request_metadata_updates: Vec<RequestMetadataUpdate>,
 }
 
+/// Read-only result of evaluating one pending cohort against the immutable
+/// requests and residual capacity already owned by this router.
+#[doc(hidden)]
+pub struct AdmissionPreview {
+    pub plan: crate::RelayPlan,
+    pub work: AdmissionPreviewWork,
+}
+
+/// Exact candidate-local work performed by [`crate::Router::preview_admission`].
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdmissionPreviewWork {
+    pub candidate_atoms: u64,
+    pub incumbent_demand_edges_visited: u64,
+    pub incumbent_request_entries_visited: u64,
+    pub coalesce_pair_attempts: u64,
+}
+
 pub struct CompileOutcome {
     pub wire: WireDelta,
     pub request_metadata_updates: Vec<RequestMetadataUpdate>,

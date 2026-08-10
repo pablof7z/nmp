@@ -27,7 +27,10 @@ fn option_set_covers<T: Ord>(
 /// Whether one already-sent immutable filter contains every event selected by
 /// a candidate. Limited requests stay exact-only: their result-count boundary
 /// is not a set axis and cannot safely be reconstructed for a later owner.
-fn physical_filter_covers(physical: &ConcreteFilter, candidate: &ConcreteFilter) -> bool {
+pub(super) fn physical_filter_covers(
+    physical: &ConcreteFilter,
+    candidate: &ConcreteFilter,
+) -> bool {
     if physical.limit.is_some() || candidate.limit.is_some() {
         return false;
     }
@@ -88,6 +91,43 @@ pub(super) fn rank_new_sessions(
 }
 
 impl Router {
+    pub(super) fn covering_request_key(
+        &self,
+        session: &RelaySessionKey,
+        candidate: &WireReq,
+    ) -> Option<crate::ownership::RequestKey> {
+        let exact = (
+            session.clone(),
+            candidate.source.clone(),
+            candidate.filter.clone(),
+        );
+        if let Some(request) = self.request_by_exact_filter.get(&exact) {
+            return Some(request.clone());
+        }
+        let first_claim = candidate.coverage_claims.first()?;
+        self.requests_by_physical_claim
+            .get(first_claim)
+            .into_iter()
+            .flatten()
+            .find(|request_key| {
+                if &request_key.0 != session {
+                    return false;
+                }
+                let Some(physical_claims) = self.physical_claims_by_request.get(*request_key)
+                else {
+                    return false;
+                };
+                if !candidate.coverage_claims.is_subset(physical_claims) {
+                    return false;
+                }
+                let position = self.request_position_by_key[*request_key];
+                let incumbent = &self.prev_plan.reqs[session][position];
+                incumbent.source == candidate.source
+                    && physical_filter_covers(&incumbent.filter, &candidate.filter)
+            })
+            .cloned()
+    }
+
     /// Reactivate one exact original owner of an immutable physical request
     /// without compiling a cohort or scheduling wire work. Only ownership
     /// captured when the request was first installed is eligible here; later
@@ -225,30 +265,18 @@ impl Router {
         candidate: &mut Option<WireReq>,
         changed_coverage: &mut BTreeSet<nmp_store::CoverageKey>,
     ) -> Option<ExactMetadataAttach> {
-        let candidate_ref = candidate.as_ref()?;
-        let first_claim = candidate_ref.coverage_claims.first()?;
-        let request_key = self
-            .requests_by_physical_claim
-            .get(first_claim)
-            .into_iter()
-            .flatten()
-            .find(|request_key| {
-                if &request_key.0 != session {
-                    return false;
-                }
-                let Some(physical_claims) = self.physical_claims_by_request.get(*request_key)
-                else {
-                    return false;
-                };
-                if !candidate_ref.coverage_claims.is_subset(physical_claims) {
-                    return false;
-                }
-                let position = self.request_position_by_key[*request_key];
-                let incumbent = &self.prev_plan.reqs[session][position];
-                incumbent.source == candidate_ref.source
-                    && physical_filter_covers(&incumbent.filter, &candidate_ref.filter)
-            })
-            .cloned()?;
+        let request_key = self.covering_request_key(session, candidate.as_ref()?)?;
+        let exact = self
+            .request_by_exact_filter
+            .get(&(
+                session.clone(),
+                candidate.as_ref()?.source.clone(),
+                candidate.as_ref()?.filter.clone(),
+            ))
+            .is_some_and(|request| request == &request_key);
+        if exact {
+            return None;
+        }
         let candidate = candidate
             .take()
             .expect("a physical metadata candidate is consumed at most once");

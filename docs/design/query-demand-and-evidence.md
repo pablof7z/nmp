@@ -182,8 +182,8 @@ include whether a planned source is cached-only, connecting, AUTH-blocked,
 requesting, EOSE-observed, reconciled through a watermark, disconnected, or in
 error. Exact raw wire filters and counters remain diagnostics.
 
-A coverage-satisfied `MaxAge` boundary retains the exact opening-time plan that
-justified its suppression and reports those scoped watermarks. Evidence is
+A coverage-satisfied `MaxAge` boundary retains only the exact scoped source
+facts and watermarks that justified its suppression. Evidence is
 computed once per Demand boundary and then merged by physical source; one
 boundary's missing plan remains an explicit shortfall. `CacheOnly` does not
 borrow a live parent, child, or sibling's plan or evidence. None is relabeled

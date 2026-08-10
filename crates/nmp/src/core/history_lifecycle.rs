@@ -698,23 +698,23 @@ impl<S: EventStore> EngineCore<S> {
         let Some(state) = self.histories.get(&id) else {
             return Vec::new();
         };
-        let needs_live = state.acquisitions_by_branch.iter().any(|acquisition| {
-            !matches!(
-                acquisition.root(),
-                Some(ScopeAcquisition::CoverageSatisfied { .. })
-                    | Some(ScopeAcquisition::CacheOnly(_))
-            )
-        });
-        let live = needs_live.then(|| self.shadow_plan_for(self.wire_demand()));
+        let handles_by_branch = self.history_handles_by_branch(id);
         state
             .acquisitions_by_branch
             .iter()
-            .map(|acquisition| match acquisition.root() {
-                Some(ScopeAcquisition::CoverageSatisfied { plan, .. })
-                | Some(ScopeAcquisition::CacheOnly(plan)) => plan.clone(),
-                _ => live
-                    .clone()
-                    .expect("a branch that contributes wire work computed the live shadow plan"),
+            .enumerate()
+            .map(|(branch, acquisition)| {
+                let wire: BTreeSet<_> = handles_by_branch
+                    .get(branch)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|handle| self.wire_atoms_for_handle(*handle, acquisition))
+                    .collect();
+                if wire.is_empty() {
+                    RelayPlan::default()
+                } else {
+                    self.shadow_plan_for(wire)
+                }
             })
             .collect()
     }
@@ -1083,40 +1083,16 @@ impl<S: EventStore> EngineCore<S> {
             )
         });
         ordered.truncate(needed);
-        let auth_status = self.auth_status_map();
-        let finished_stored_events = self.finished_stored_events();
-        let placed_requests = self.placed_request_keys();
-        let awaiting_requests = self.awaiting_request_keys();
         let by_branch = self.history_handles_by_branch(id);
         let mut evidence: Vec<AcquisitionEvidence> = Vec::with_capacity(by_branch.len());
         for (branch, handles) in by_branch.into_iter().enumerate() {
-            let subtree_atoms: BTreeSet<ContextualAtom> = handles
-                .iter()
-                .flat_map(|handle| self.resolver.subtree_atoms(*handle))
-                .collect();
             // `?`: this whole advance is already all-or-nothing on a store
             // failure, and a coverage read is no different from the row
             // reads above it (#763).
-            evidence.push(evidence::acquisition_evidence(
-                &subtree_atoms,
+            evidence.push(self.acquisition_evidence_for_scopes_with_plan(
+                self.history_branch_demand_scopes(&handles),
+                &self.histories[&id].acquisitions_by_branch[branch],
                 plans.get(branch).unwrap_or(&RelayPlan::default()),
-                evidence::AcquisitionEvidenceContext {
-                    store: self.resolver.store(),
-                    connected: &self.connected_relays,
-                    auth_status: &auth_status,
-                    ever_connected: &self.ever_connected_relays,
-                    finished_stored_events: &finished_stored_events,
-                    placed_requests: &placed_requests,
-                    awaiting_requests: &awaiting_requests,
-                    acquisition: match self.histories[&id].acquisitions_by_branch[branch].root() {
-                        Some(ScopeAcquisition::CoverageSatisfied { .. }) => {
-                            evidence::EvidenceAcquisition::CoverageSatisfied
-                        }
-                        Some(ScopeAcquisition::Live)
-                        | Some(ScopeAcquisition::CacheOnly(_))
-                        | None => evidence::EvidenceAcquisition::Live,
-                    },
-                },
             )?);
         }
 

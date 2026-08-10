@@ -1579,7 +1579,7 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    fn wire_atoms_for_handle(
+    pub(super) fn wire_atoms_for_handle(
         &self,
         id: HandleId,
         acquisition: &HandleAcquisition,
@@ -1593,20 +1593,9 @@ impl<S: EventStore> EngineCore<S> {
             .collect()
     }
 
-    /// Compile an isolated plan through the same router/directory/admission/
-    /// cap path as a live recompile, without mutating live wire,
-    /// attribution, diagnostics, or any handle. Used once for `MaxAge` and
-    /// for staged history projection.
-    ///
-    /// TRAP, since wire ids became allocated tokens (#899): this builds a
-    /// FRESH `Router`, whose mint counter also starts at zero, so its plan's
-    /// `SubId`s collide BY VALUE with the live router's tokens while
-    /// identifying entirely unrelated filters. That is benign only because
-    /// every consumer of a retained shadow plan (`plan_is_fresh_for`, and
-    /// `acquisition_evidence` via a scope's retained evaluation plan)
-    /// reads sessions, `coverage_claims`, and `limited` — never `sub_id`. Correlating
-    /// a shadow plan's `sub_id` with a live one would alias silently; if that
-    /// is ever needed, give this router its own token namespace first.
+    /// Evaluate only one scoped cohort through the same candidate compiler
+    /// and residual-capacity reducer as live admission. The preview reads
+    /// exact incumbent indexes but never mutates live wire or ownership.
     pub(super) fn shadow_plan_for(&self, demand: BTreeSet<ContextualAtom>) -> RelayPlan {
         let admitted = demand
             .into_iter()
@@ -1619,13 +1608,33 @@ impl<S: EventStore> EngineCore<S> {
                 atom
             })
             .collect();
-        let mut router = Router::new(RuleRegistry::default_widen_only());
-        // The SAME budget the live recompile plans within, deliberately.
-        // A shadow plan feeds `plan_is_fresh_for`, which refuses to call a
-        // `limited` atom fresh -- so an unbudgeted shadow would call an atom
-        // fresh that the live plan had refused to request at all.
-        let _ = router.compile(&admitted, &self.routing_facts, self.compile_budget());
-        router.plan().clone()
+        let preview =
+            self.router
+                .preview_admission(&admitted, &self.routing_facts, self.compile_budget());
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        {
+            self.freshness_candidate_atoms.set(
+                self.freshness_candidate_atoms
+                    .get()
+                    .saturating_add(preview.work.candidate_atoms),
+            );
+            self.freshness_incumbent_demand_edges_visited.set(
+                self.freshness_incumbent_demand_edges_visited
+                    .get()
+                    .saturating_add(preview.work.incumbent_demand_edges_visited),
+            );
+            self.freshness_plan_request_entries_visited.set(
+                self.freshness_plan_request_entries_visited
+                    .get()
+                    .saturating_add(preview.work.incumbent_request_entries_visited),
+            );
+            self.freshness_coalesce_pair_attempts.set(
+                self.freshness_coalesce_pair_attempts
+                    .get()
+                    .saturating_add(preview.work.coalesce_pair_attempts),
+            );
+        }
+        preview.plan
     }
 
     /// Freeze every Demand boundary's opening-time wire participation. Each
@@ -1648,30 +1657,25 @@ impl<S: EventStore> EngineCore<S> {
             .iter()
             .any(|(_, freshness)| matches!(freshness, Freshness::MaxAge { .. }))
             .then(|| {
-                let mut candidate_demand = self.wire_demand();
-                candidate_demand.extend(
-                    scopes
-                        .iter()
-                        .filter(|(_, freshness)| *freshness != Freshness::CacheOnly)
-                        .flat_map(|(atoms, _)| atoms.iter().cloned()),
-                );
+                let candidate_demand = scopes
+                    .iter()
+                    .filter(|(_, freshness)| *freshness != Freshness::CacheOnly)
+                    .flat_map(|(atoms, _)| atoms.iter().cloned())
+                    .collect();
                 self.shadow_plan_for(candidate_demand)
             });
         let mut decided = Vec::with_capacity(scopes.len());
         for (atoms, freshness) in scopes {
             decided.push(match freshness {
                 Freshness::Live => ScopeAcquisition::Live,
-                Freshness::CacheOnly => ScopeAcquisition::CacheOnly(RelayPlan::default()),
+                Freshness::CacheOnly => ScopeAcquisition::CacheOnly,
                 Freshness::MaxAge { seconds } => {
                     let plan = candidate_plan
                         .as_ref()
                         .expect("a MaxAge scope built the candidate plan");
                     let evidence = self.opening_coverage_evidence_for(&atoms, plan)?;
                     if self.plan_is_fresh_for(&evidence, seconds, now) {
-                        ScopeAcquisition::CoverageSatisfied {
-                            plan: plan.clone(),
-                            evidence,
-                        }
+                        ScopeAcquisition::CoverageSatisfied { evidence }
                     } else {
                         ScopeAcquisition::Live
                     }
@@ -1686,19 +1690,33 @@ impl<S: EventStore> EngineCore<S> {
         scopes: Vec<(BTreeSet<ContextualAtom>, Freshness)>,
         acquisition: &HandleAcquisition,
     ) -> Result<AcquisitionEvidence, PersistenceError> {
+        self.acquisition_evidence_for_scopes_with_plan(scopes, acquisition, self.router.plan())
+    }
+
+    pub(super) fn acquisition_evidence_for_scopes_with_plan(
+        &self,
+        scopes: Vec<(BTreeSet<ContextualAtom>, Freshness)>,
+        acquisition: &HandleAcquisition,
+        live_plan: &RelayPlan,
+    ) -> Result<AcquisitionEvidence, PersistenceError> {
         let auth_status = self.auth_status_map();
         let finished_stored_events = self.finished_stored_events();
         let placed_requests = self.placed_request_keys();
         let awaiting_requests = self.awaiting_request_keys();
+        let empty_plan = RelayPlan::default();
         let mut parts = Vec::with_capacity(scopes.len());
         for ((atoms, _), decision) in scopes.into_iter().zip(&acquisition.scopes) {
             if let Some(evidence) = decision.opening_evidence() {
                 parts.push(evidence.clone());
                 continue;
             }
-            let plan = decision
-                .evidence_plan()
-                .unwrap_or_else(|| self.router.plan());
+            let plan = match decision {
+                ScopeAcquisition::Live => live_plan,
+                ScopeAcquisition::CacheOnly => &empty_plan,
+                ScopeAcquisition::CoverageSatisfied { .. } => {
+                    unreachable!("opening evidence returned above")
+                }
+            };
             parts.push(evidence::acquisition_evidence(
                 &atoms,
                 plan,

@@ -166,11 +166,11 @@ empty coverage also satisfies `MaxAge`: freshness proves the question was
 checked, not that a row existed. Evidence remains scoped; none of these modes
 means "globally absent."
 
-For a coverage-satisfied `MaxAge` handle, evidence preserves the opening-time
-plan and watermarks that justified suppressing wire work even if routing inputs
-later change. The handle's rows still react to canonical-store changes. Open a
-new observation to evaluate current routing; global diagnostics explain active
-wire work only, not a hypothetical replan for the suppressed handle. See
+For a coverage-satisfied `MaxAge` handle, evidence preserves only the scoped
+opening source facts and watermarks that justified suppressing wire work even
+if routing inputs later change. The handle's rows still react to canonical-store
+changes. Open a new observation to evaluate current routing; global diagnostics
+explain active wire work only, not a hypothetical replan for the suppressed handle. See
 [Evidence without global completeness](11-coverage.md#choose-freshness-per-observation).
 
 ## Cycle and depth are immutable presentation context
