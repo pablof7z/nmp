@@ -265,3 +265,14 @@ Feature: Relay work waits briefly for compatible pending demand
       Then the source status becomes Requesting
       And candidate, reconciliation, and repair role ids report through their plan source
       And withdrawal cancels the attempt or retry ownership
+
+    # nmp:id=ROUTING-PENDING-018
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::grouped_handoff_shares_one_immutable_filter_across_every_observation_fact
+    # nmp:falsifier=Clone one large grouped wire filter into every observation's execution fact; handoff memory grows with observation count times grouped-filter size instead of one filter plus local references.
+    Scenario: Grouped request evidence does not duplicate the wire filter
+      Given many independent observations are served by one grouped relay request
+      When the transport accepts that immutable request
+      Then every observation receives its own ordered relay-request fact
+      And every fact reports the same exact wire filter
+      But NMP retains only one immutable filter payload shared by those facts
