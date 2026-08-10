@@ -7,7 +7,9 @@
 //! degradation): its filters ship as separate REQs. Exact-canonical dedup
 //! alone is the trivially-correct floor and is not expressed as a rule.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_store::CoverageKey;
@@ -270,8 +272,9 @@ impl MergeRule for DiscardSecondOperand {
 /// ([`StructuralUnion`]); `dropped_rules()` reports any rule that was
 /// constructed but excluded (graceful-degradation visibility, M2 plan §6).
 pub struct RuleRegistry {
-    rules: Vec<Box<dyn MergeRule>>,
+    rules: Vec<Arc<dyn MergeRule>>,
     dropped: Vec<&'static str>,
+    pair_attempts: Cell<u64>,
 }
 
 impl RuleRegistry {
@@ -280,8 +283,9 @@ impl RuleRegistry {
     /// plus a missing fourth.
     pub fn default_widen_only() -> Self {
         Self {
-            rules: vec![Box::new(StructuralUnion)],
+            rules: vec![Arc::new(StructuralUnion)],
             dropped: Vec::new(),
+            pair_attempts: Cell::new(0),
         }
     }
 
@@ -291,6 +295,7 @@ impl RuleRegistry {
         Self {
             rules: Vec::new(),
             dropped: Vec::new(),
+            pair_attempts: Cell::new(0),
         }
     }
 
@@ -302,7 +307,7 @@ impl RuleRegistry {
     /// unproven merge.
     pub fn register(mut self, rule: Box<dyn MergeRule>, verified_widening: bool) -> Self {
         if verified_widening {
-            self.rules.push(rule);
+            self.rules.push(Arc::from(rule));
         } else {
             self.dropped.push(rule.name());
         }
@@ -311,6 +316,18 @@ impl RuleRegistry {
 
     pub fn dropped_rules(&self) -> &[&'static str] {
         &self.dropped
+    }
+
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            rules: self.rules.clone(),
+            dropped: self.dropped.clone(),
+            pair_attempts: Cell::new(0),
+        }
+    }
+
+    pub(crate) fn pair_attempts(&self) -> u64 {
+        self.pair_attempts.get()
     }
 
     /// Exact-canonical dedup, then fixed-point pairwise merge across every
@@ -504,6 +521,8 @@ impl RuleRegistry {
     /// open (`register`), and first-match-wins is the behaviour a caller
     /// adding a candidate rule alongside the default gets.
     fn try_merge_pair(&self, a: &Entry, b: &Entry) -> Option<Entry> {
+        self.pair_attempts
+            .set(self.pair_attempts.get().saturating_add(1));
         for rule in &self.rules {
             if let Some(merged) = rule.try_merge(&a.0, &b.0) {
                 let mut prov = a.1.clone();

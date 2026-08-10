@@ -11,15 +11,19 @@ use nmp_grammar::ContextualAtom;
 use crate::budget::CompileBudget;
 use crate::facts::RoutingFacts;
 use crate::ownership::{
-    reduce_outbox_shortfall, refresh_refusal_diagnostics, refused_session_class, RefusalKind,
+    reduce_outbox_shortfall, refresh_refusal_diagnostics, refused_session_class,
 };
 use crate::plan::{BudgetShortfall, DemandKey, WireDelta, WireOp};
 use crate::route::{self, AtomClass};
 use crate::{AdmissionOutcome, Router};
 
 mod metadata;
+mod preview;
+#[cfg(test)]
+#[path = "admission/preview_tests.rs"]
+mod preview_tests;
 
-use metadata::rank_new_sessions;
+use preview::apply_residual_budget;
 
 impl Router {
     /// Reactivate one exact logical owner already covered by an immutable
@@ -231,80 +235,13 @@ impl Router {
             !requests.is_empty()
         });
 
-        // Existing sessions do not consume another global-relay slot. New
-        // sessions compete only for the slots that remain.
-        let available_new_sessions = budget.relay_cap().saturating_sub(self.prev_plan.reqs.len());
-        let new_sessions = rank_new_sessions(
-            &candidate.reqs,
-            candidate
-                .reqs
-                .keys()
-                .filter(|session| !self.prev_plan.reqs.contains_key(*session))
-                .cloned(),
-        );
-        let mut refused_requests = Vec::new();
-        for session in new_sessions.into_iter().skip(available_new_sessions) {
-            if let Some(refused) = candidate.reqs.remove(&session) {
-                refused_requests.extend(
-                    refused
-                        .into_iter()
-                        .map(|request| (session.clone(), request, RefusalKind::RelayCap)),
-                );
-            }
-        }
-
-        // A relay's advertised concurrent-subscription budget is reduced by
-        // the immutable requests already consuming slots there.
-        let candidate_request_totals: BTreeMap<_, _> = candidate
-            .reqs
-            .iter()
-            .map(|(session, requests)| (session.clone(), requests.len()))
-            .collect();
-        let existing_request_counts: BTreeMap<_, _> = candidate
-            .reqs
-            .keys()
-            .map(|session| {
-                (
-                    session.clone(),
-                    self.prev_plan.reqs.get(session).map_or(0, Vec::len),
-                )
-            })
-            .collect();
-        let mut budget_refused_counts = BTreeMap::new();
-        let sessions: Vec<_> = candidate.reqs.keys().cloned().collect();
-        for session in sessions {
-            let existing = self.prev_plan.reqs.get(&session).map_or(0, Vec::len);
-            let Some(limit) = budget.max_subscriptions(&session.relay) else {
-                continue;
-            };
-            let allowed = limit.saturating_sub(existing);
-            let requests = candidate
-                .reqs
-                .get_mut(&session)
-                .expect("session came from candidate plan");
-            if requests.len() <= allowed {
-                continue;
-            }
-            requests.sort_by(|a, b| {
-                b.coverage_assignments
-                    .len()
-                    .cmp(&a.coverage_assignments.len())
-                    .then_with(|| b.coverage_claims.len().cmp(&a.coverage_claims.len()))
-                    .then_with(|| b.provenance.len().cmp(&a.provenance.len()))
-                    .then_with(|| a.filter.hash().cmp(&b.filter.hash()))
-            });
-            let refused = requests.split_off(allowed);
-            requests.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
-            budget_refused_counts.insert(session.clone(), refused.len());
-            refused_requests.extend(
-                refused
-                    .into_iter()
-                    .map(|request| (session.clone(), request, RefusalKind::SubscriptionBudget)),
-            );
-            if requests.is_empty() {
-                candidate.reqs.remove(&session);
-            }
-        }
+        // Candidate and preview share the same residual global-relay and
+        // per-session subscription-budget reducer.
+        let residual = apply_residual_budget(&self.prev_plan, &mut candidate, &budget);
+        let refused_requests = residual.refused_requests;
+        let candidate_request_totals = residual.candidate_request_totals;
+        let existing_request_counts = residual.existing_request_counts;
+        let budget_refused_counts = residual.budget_refused_counts;
 
         let admitted = candidate.reqs.clone();
         changed_coverage.extend(

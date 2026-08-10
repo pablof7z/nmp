@@ -63,9 +63,9 @@ pub use facts::{
     RelayUrl, RoutingFacts,
 };
 pub use ownership::{
-    AdmissionOutcome, AdmissionWork, CompileOutcome, FullMetadataWork, RequestMetadataRemoval,
-    RequestMetadataUpdate, RequestReplacement, RouterOwnershipCensus, WithdrawalOutcome,
-    WithdrawalWork,
+    AdmissionOutcome, AdmissionPreview, AdmissionPreviewWork, AdmissionWork, CompileOutcome,
+    FullMetadataWork, RequestMetadataRemoval, RequestMetadataUpdate, RequestReplacement,
+    RouterOwnershipCensus, WithdrawalOutcome, WithdrawalWork,
 };
 pub use plan::{
     diff_plans, BudgetShortfall, DemandKey, RelayPlan, SubId, WireDelta, WireOp, WireReq,

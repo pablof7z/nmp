@@ -37,6 +37,19 @@ Feature: Opening-time freshness is separate from deadline maintenance
       Then each assigned coverage row is read once
       And the opening evidence retains the watermark that justified no wire
 
+    # nmp:id=QUERIES-FRESHNESS-CLOCK-012
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::max_age_opening_retains_only_its_scoped_candidate_plan
+    # nmp:evidence=rust:nmp-router::one_preview_never_visits_ten_thousand_unrelated_incumbent_demand_edges
+    # nmp:falsifier=Recompile and retain the whole active plan for one fresh opening; 207 unrelated sources are retained and the 10,000-edge preview visits incumbents.
+    Scenario: A max-age opening evaluates only its own scoped relay work
+      Given many unrelated live observations are already open
+      And a new max-age query has fresh coverage at its assigned relay
+      When the app opens the new query
+      Then NMP evaluates only the new query against current relay capacity
+      And the opening decision retains only the new query's assigned source
+      And unrelated requests are neither reconsidered nor retained
+
   Rule: A due deadline wins a race with an app command
 
     # nmp:id=QUERIES-FRESHNESS-CLOCK-003

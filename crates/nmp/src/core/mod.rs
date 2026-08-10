@@ -1067,6 +1067,16 @@ pub struct CoreAdmissionWork {
     pub metadata_entries_examined: u64,
 }
 
+/// Deterministic candidate-local work performed by opening-time freshness.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoreFreshnessWork {
+    pub candidate_atoms: u64,
+    pub incumbent_demand_edges_visited: u64,
+    pub plan_request_entries_visited: u64,
+    pub coalesce_pair_attempts: u64,
+}
+
 /// Exact local ownership retained by the reducer after a lifecycle step.
 #[cfg(any(test, feature = "bench-instrumentation"))]
 #[doc(hidden)]
@@ -1074,6 +1084,7 @@ pub struct CoreAdmissionWork {
 pub struct CoreOwnershipCensus {
     pub observations: usize,
     pub branch_handles: usize,
+    pub retained_freshness_source_edges: usize,
     pub request_target_handles: usize,
     pub request_target_demand_keys: usize,
     pub request_target_edges: usize,
@@ -1461,15 +1472,12 @@ struct HandleAcquisition {
 /// One Demand boundary's freshness decision. Lifecycle ownership is
 /// represented by variants, never a teardown bool: only `Live` contributes
 /// that boundary's current atoms to the router; a coverage-satisfied scope
-/// retains the exact plan and opening evidence that justified suppression.
+/// retains only the opening evidence that justified suppression.
 #[derive(Clone)]
 enum ScopeAcquisition {
     Live,
-    CoverageSatisfied {
-        plan: RelayPlan,
-        evidence: AcquisitionEvidence,
-    },
-    CacheOnly(RelayPlan),
+    CoverageSatisfied { evidence: AcquisitionEvidence },
+    CacheOnly,
 }
 
 impl ScopeAcquisition {
@@ -1477,24 +1485,11 @@ impl ScopeAcquisition {
         matches!(self, Self::Live)
     }
 
-    fn evidence_plan(&self) -> Option<&RelayPlan> {
-        match self {
-            Self::CoverageSatisfied { plan, .. } | Self::CacheOnly(plan) => Some(plan),
-            Self::Live => None,
-        }
-    }
-
     fn opening_evidence(&self) -> Option<&AcquisitionEvidence> {
         match self {
             Self::CoverageSatisfied { evidence, .. } => Some(evidence),
-            Self::Live | Self::CacheOnly(_) => None,
+            Self::Live | Self::CacheOnly => None,
         }
-    }
-}
-
-impl HandleAcquisition {
-    fn root(&self) -> Option<&ScopeAcquisition> {
-        self.scopes.first()
     }
 }
 
@@ -2267,6 +2262,14 @@ pub struct EngineCore<S: EventStore> {
     #[cfg(any(test, feature = "bench-instrumentation"))]
     evidence_candidates_examined: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
+    freshness_candidate_atoms: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    freshness_incumbent_demand_edges_visited: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    freshness_plan_request_entries_visited: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    freshness_coalesce_pair_attempts: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     request_target_demand_keys_touched: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     request_target_candidates_examined: Cell<u64>,
@@ -2450,6 +2453,14 @@ impl<S: EventStore> EngineCore<S> {
             attribution_atoms_rebuilt: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             evidence_candidates_examined: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            freshness_candidate_atoms: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            freshness_incumbent_demand_edges_visited: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            freshness_plan_request_entries_visited: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            freshness_coalesce_pair_attempts: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             request_target_demand_keys_touched: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2709,6 +2720,21 @@ impl<S: EventStore> EngineCore<S> {
         CoreOwnershipCensus {
             observations: self.observations.len(),
             branch_handles: self.handles.len(),
+            retained_freshness_source_edges: self
+                .handles
+                .values()
+                .flat_map(|state| &state.acquisition.scopes)
+                .filter_map(ScopeAcquisition::opening_evidence)
+                .map(|evidence| evidence.sources.len())
+                .sum::<usize>()
+                + self
+                    .histories
+                    .values()
+                    .flat_map(|state| &state.acquisitions_by_branch)
+                    .flat_map(|acquisition| &acquisition.scopes)
+                    .filter_map(ScopeAcquisition::opening_evidence)
+                    .map(|evidence| evidence.sources.len())
+                    .sum::<usize>(),
             request_target_handles: self.request_targets_by_handle.len(),
             request_target_demand_keys: self.request_targets_by_demand.len(),
             request_target_edges: self
@@ -3655,6 +3681,24 @@ impl EngineCore<nmp_store::RedbStore> {
             active_entries_appended: router.active_entries_appended,
             request_edges_appended: router.request_edges_appended,
             metadata_entries_examined: router.metadata_entries_examined,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn bench_reset_freshness_work(&self) {
+        self.freshness_candidate_atoms.set(0);
+        self.freshness_incumbent_demand_edges_visited.set(0);
+        self.freshness_plan_request_entries_visited.set(0);
+        self.freshness_coalesce_pair_attempts.set(0);
+    }
+
+    #[doc(hidden)]
+    pub fn bench_freshness_work(&self) -> CoreFreshnessWork {
+        CoreFreshnessWork {
+            candidate_atoms: self.freshness_candidate_atoms.get(),
+            incumbent_demand_edges_visited: self.freshness_incumbent_demand_edges_visited.get(),
+            plan_request_entries_visited: self.freshness_plan_request_entries_visited.get(),
+            coalesce_pair_attempts: self.freshness_coalesce_pair_attempts.get(),
         }
     }
 
