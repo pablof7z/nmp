@@ -930,7 +930,7 @@ enum Cmd {
     },
     /// Hold the reducer inside one command turn so a test can observe whether
     /// a simultaneously-due core deadline ran before command dispatch.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     DeadlineRaceProbe {
         at: Timestamp,
         entered: Sender<()>,
@@ -4344,7 +4344,7 @@ fn engine_loop<S>(
                 Err(RecvTimeoutError::Disconnected) => break,
             },
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "bench-instrumentation"))]
         if let Cmd::DeadlineRaceProbe { at, .. } = &cmd {
             // Model the exact boundary where the command and an armed core
             // deadline become ready together. The ordinary clock setter
@@ -4518,7 +4518,7 @@ fn engine_loop<S>(
                 Cmd::ExemptSignEventDrain(op_id) => {
                     sign_event_cancellations.remove(&op_id);
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 Cmd::DeadlineRaceProbe { .. } => {}
                 Cmd::Engine(_)
                 | Cmd::RelayInformationFetched { .. }
@@ -5054,7 +5054,7 @@ fn engine_loop<S>(
                     history_channels: history_channels.len(),
                 });
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             Cmd::DeadlineRaceProbe {
                 entered, release, ..
             } => {
@@ -6420,6 +6420,27 @@ pub struct Handle {
     relay_information: RelayInformationService,
 }
 
+/// Benchmark-only hold at the deterministic command/deadline race boundary.
+///
+/// While this value is alive the engine has processed every deadline due at
+/// the probed instant and is blocked before executing the synthetic command.
+/// Dropping it releases the engine. This is mechanism instrumentation, not an
+/// application API.
+#[cfg(feature = "bench-instrumentation")]
+#[doc(hidden)]
+pub struct DeadlineRaceHold {
+    release: Option<Sender<()>>,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl Drop for DeadlineRaceHold {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
 /// One accepted sign-only operation. It owns no write receipt or durable
 /// obligation: dropping it before completion cancels the exact signer RPC.
 pub struct SignEventOperation {
@@ -7044,6 +7065,28 @@ impl Handle {
         reply_rx
             .recv()
             .expect("nmp-engine: engine dropped observation ownership census reply")
+    }
+
+    /// Make one synthetic command ready at exactly `at`, then hold it after
+    /// the runtime has executed any core deadline due at that same instant.
+    #[cfg(feature = "bench-instrumentation")]
+    #[doc(hidden)]
+    pub fn bench_hold_due_deadline_command(&self, at: Timestamp) -> DeadlineRaceHold {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::DeadlineRaceProbe {
+                at,
+                entered: entered_tx,
+                release: release_rx,
+            })
+            .expect("nmp-engine: deadline race probe called after shutdown");
+        entered_rx
+            .recv()
+            .expect("nmp-engine: deadline race probe was not entered");
+        DeadlineRaceHold {
+            release: Some(release_tx),
+        }
     }
 
     /// Stop the engine thread (and, transitively, its bridge threads — see
