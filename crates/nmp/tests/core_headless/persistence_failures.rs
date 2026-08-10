@@ -1250,20 +1250,18 @@ fn schedule_ready_skips_lane_less_obligations() {
 
     assert_eq!(
         calls.get(),
-        1,
-        "only the one routed write owns a lane; {PARKED} unrelated signer waits must cost zero lane reads"
+        0,
+        "the one current routed lane is already reducer-owned; {PARKED} unrelated signer waits and the healthy write must cost zero recovery reads"
     );
 }
 
 /// Falsifier (epic #507 finding E5): a single relay-connected event for
 /// relay X must trigger `recover_publish_queue_lanes` only for X's own intent on
 /// the wake path, not for every outstanding durable write. Composition of
-/// the expected count: `schedule_ready`'s own `O(pending)` accounting is
-/// UNCHANGED (deliberately -- see `recover_all_lanes`'s doc comment) and
-/// reads all `N` pending intents once; the wake scan itself collapses from
-/// `N` reads (the old `recover_all_lanes` + relay filter) down to exactly
-/// `1` (only the receipt actually routed through the woken relay). Total:
-/// `N + 1`, strictly less than the old `2 * N`.
+/// the expected count: `schedule_ready` uses reducer-owned current lane rows
+/// and performs zero recovery reads; the wake scan itself collapses from `N`
+/// reads (the old `recover_all_lanes` + relay filter) down to exactly `1`
+/// (only the receipt actually routed through the woken relay).
 #[test]
 fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     const N: usize = 3;
@@ -1316,10 +1314,10 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
 
     assert_eq!(
         calls.get(),
-        (N as u64) + 1,
-        "expected exactly N ({N}) reads from schedule_ready's unchanged \
-         durable-cap accounting plus 1 read from the wake scan (collapsed \
-         from N) -- strictly less than the old 2*N={}",
+        1,
+        "expected zero recovery reads from schedule_ready plus 1 read from \
+         the exact wake scan (collapsed from N={N}) -- strictly less than \
+         the old 2*N={}",
         2 * N,
     );
 

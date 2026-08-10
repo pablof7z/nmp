@@ -709,12 +709,13 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
-    /// Re-read every outstanding write that can actually own a lane.
-    /// `schedule_ready` still needs complete durable attempt-ordinal and cap
-    /// accounting for those lanes, but lane-less obligations must not turn
-    /// every healthy publish into thousands of empty store lookups. The
-    /// reducer projection is complete unless the wake index is degraded; in
-    /// degraded mode this deliberately retains the full-scan safety fallback.
+    /// Recover the complete current scheduler input.
+    ///
+    /// Ordinary operation reads the exact committed nonterminal rows already
+    /// owned by the reducer. A lane-less obligation costs nothing and a large
+    /// durable backlog performs no database reads on each healthy publish.
+    /// Any uncertain projection, or the global degraded index, deliberately
+    /// falls back to the durable store rather than guessing.
     /// `wake_relay_lanes` narrows ordinary relay events through
     /// `receipts_by_lane_relay`, except in its degraded fallback.
     pub(super) fn recover_all_lanes(
@@ -722,17 +723,24 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Result<Vec<(ReceiptId, PublishQueueLane)>, PersistenceError> {
         let mut lanes = Vec::new();
         for (id, pending) in &self.pending {
-            if !self.lane_relay_index_degraded && pending.lane_projection.persisted.is_empty() {
-                continue;
+            if self.lane_relay_index_degraded || !pending.lane_projection.uncertain.is_empty() {
+                lanes.extend(
+                    self.resolver
+                        .store()
+                        .recover_publish_queue_lanes(pending.intent_id)?
+                        .into_iter()
+                        .map(|lane| (*id, lane)),
+                );
+            } else {
+                lanes.extend(
+                    pending
+                        .lane_projection
+                        .current_nonterminal
+                        .values()
+                        .cloned()
+                        .map(|lane| (*id, lane)),
+                );
             }
-            let intent_id = pending.intent_id;
-            lanes.extend(
-                self.resolver
-                    .store()
-                    .recover_publish_queue_lanes(intent_id)?
-                    .into_iter()
-                    .map(|lane| (*id, lane)),
-            );
         }
         lanes.sort_by(|(_, left), (_, right)| left.key.cmp(&right.key));
         Ok(lanes)
