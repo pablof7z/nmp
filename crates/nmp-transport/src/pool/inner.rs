@@ -1866,7 +1866,18 @@ mod tests {
             outcome,
             crate::pool::DurableSendOutcome::Resolved(HandoffResult::NotHandedOff)
         );
-        assert!(rx.try_recv().is_err(), "immediate resolution stays local");
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(20)) {
+            assert!(
+                !matches!(
+                    event,
+                    PoolEvent::EventHandoff {
+                        correlation: delivered,
+                        ..
+                    } if delivered == correlation
+                ),
+                "immediate durable resolution must stay local; unrelated worker lifecycle events are allowed"
+            );
+        }
         pool.shutdown();
     }
 
