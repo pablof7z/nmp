@@ -555,7 +555,11 @@ about current code:
   transport. `BootstrapRelayList::into_write_intent` returns an ordinary
   explicit write; `nmp::nip65::Nip65Operations` binds that value to the
   ordinary tracked receipt. The same optional feature privately turns generic
-  author needs into neutral atomic route facts. **Gap:** FFI, Swift, and
+  author needs into neutral atomic route facts. A deterministic public-facade
+  capstone starts through `Engine::new` with only an indexer, independently
+  witnesses Alice-scoped kind:10002 acquisition before any content-relay
+  contact, then witnesses the discovered kind:1 request and public row without
+  using the indexer as a content fallback (#1077). **Gap:** FFI, Swift, and
   Kotlin do not yet project publication or opt-in assembly (#764, blocked by
   #824) and must not hand-roll either.
 

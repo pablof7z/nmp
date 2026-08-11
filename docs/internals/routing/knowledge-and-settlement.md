@@ -46,6 +46,14 @@ the only neutral fact that can unpark it, so naming those authors
 the write. This is a need declaration, not a hidden subscription.
 Feature-disabled core therefore contains no NIP-65 dependency or behavior.
 
+A live `AuthorOutboxes` read contributes each resolved author while that
+author has no positive outbound route (`Unknown`, `Absent`, or `Present` with
+an empty outbound set). A positive outbound route retires that provider work
+and becomes the content plan; pinned provider queries never contribute their
+own authors back into the set. This lets a cold public query bootstrap without
+turning an indexer into a generic content route or keeping discovery work alive
+after routing is already usable.
+
 ## Exact settlement
 
 The generic evidence fact is `RequestSettled`. It cites the exact path,

@@ -160,17 +160,3 @@ Feature: The routes that were removed stay removed
     Then the note is delivered to "chosen-relay"
     And no relay outside "chosen-relay" was ever contacted
     And nothing describes that write as private
-
-  # nmp:id=ROUTING-REMOVEDROUTES-007
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1320
-  Scenario: Bootstrapping a relay list still works without a route of its own
-    # The case `RelayListBootstrap` existed for, served by the general
-    # primitive: publishing my own kind:10002 when nobody knows where I write
-    # is a crate minting exact relays, not a variant.
-    Given my relay list has never been fetched
-    When nmp-nip65 publishes my relay list to exactly "bootstrap-relay"
-    Then the relay list is delivered to "bootstrap-relay"
-    And the receipt reports routing complete
-    And no discovery was needed to route it

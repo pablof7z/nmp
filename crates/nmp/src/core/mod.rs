@@ -1245,10 +1245,11 @@ pub enum Effect {
         published: Vec<CommittedObservationPublication>,
     },
     /// The complete current set of public keys whose neutral author-route
-    /// provider is still needed. Most are `Unknown`; zero-destination writes
-    /// also retain settled zero-route contributors so a later positive
-    /// replacement can unpark them. This is a need declaration, never a
-    /// subscription; optional protocol assembly owns any exact query it opens.
+    /// provider is still needed. Live `AuthorOutboxes` reads retain authors
+    /// until a positive outbound route exists; zero-destination writes also
+    /// retain settled zero-route contributors so a later positive replacement
+    /// can unpark them. This is a need declaration, never a subscription;
+    /// optional protocol assembly owns any exact query it opens.
     AuthorRouteNeedsChanged(BTreeSet<PublicKey>),
     /// -> `Pool::send` per (relay, current handle).
     Wire(AttemptedWireDelta),
@@ -1934,6 +1935,16 @@ pub struct EngineCore<S: EventStore> {
     /// Exact per-handle multiplicity of normalized durable claim keys.
     wire_coverage_refs_by_handle: HashMap<HandleId, BTreeMap<CoverageKey, usize>>,
     wire_owner_counts: BTreeMap<nmp_router::DemandKey, (ContextualAtom, usize)>,
+    /// Exact live-wire owner count per author contributed by
+    /// `AuthorOutboxes` demand. This keeps neutral provider work incremental:
+    /// unrelated handle teardown never scans the complete wire-demand set.
+    author_outbox_wire_owner_counts: BTreeMap<PublicKey, usize>,
+    /// Authors with live `AuthorOutboxes` demand and no positive outbound
+    /// route. This is the read half of `AuthorRouteNeedsChanged`.
+    author_outbox_route_needs: BTreeSet<PublicKey>,
+    /// Whether an incremental wire-owner change altered that read half since
+    /// the last provider-work edge was published.
+    author_outbox_route_needs_changed: bool,
     /// Exact per-demand ownership of routing facts erased by `DemandKey`.
     /// The aggregate atom in `wire_owner_counts` always carries this map's
     /// live union, while each fact remains independently removable.
@@ -2037,6 +2048,13 @@ pub struct EngineCore<S: EventStore> {
     /// status; `event_to_receipt` lets an inbound `OK` frame (keyed by
     /// `EventId` on the wire) find its receipt.
     pending: HashMap<ReceiptId, PendingWrite>,
+    /// Last complete neutral author-route provider-work set published to the
+    /// optional protocol assembly. The set is the union of unresolved write
+    /// contributors and authors in live `AuthorOutboxes` reads without a
+    /// positive outbound route. Keeping the prior value here makes provider
+    /// synchronization an edge rather than a repeated side effect of every
+    /// unrelated recompile.
+    last_author_route_needs: BTreeSet<PublicKey>,
     /// The stalled-obligation census as of the last diagnostics snapshot
     /// this reducer PUSHED for a write-plane reason.
     ///
@@ -2376,6 +2394,9 @@ impl<S: EventStore> EngineCore<S> {
             wire_demand_refs_by_handle: HashMap::new(),
             wire_coverage_refs_by_handle: HashMap::new(),
             wire_owner_counts: BTreeMap::new(),
+            author_outbox_wire_owner_counts: BTreeMap::new(),
+            author_outbox_route_needs: BTreeSet::new(),
+            author_outbox_route_needs_changed: false,
             wire_routing_evidence_owner_counts: BTreeMap::new(),
             wire_handles_by_atom: BTreeMap::new(),
             wire_handles_by_coverage: BTreeMap::new(),
@@ -2415,6 +2436,7 @@ impl<S: EventStore> EngineCore<S> {
             clock: Timestamp::from(0u64),
             active_pubkey: None,
             pending: HashMap::new(),
+            last_author_route_needs: BTreeSet::new(),
             last_stalled_write_census: Vec::new(),
             cached_stalled_writes: Vec::new(),
             cached_stalled_write_totals: StalledWriteTotals {

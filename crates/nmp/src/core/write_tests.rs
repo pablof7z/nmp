@@ -473,6 +473,15 @@ mod receipt_allocator_tests {
             vec![BTreeSet::from([keys.public_key()])],
             "boot must publish the exact stateless route-need set rebuilt from durable intents"
         );
+
+        let mut immediate_resync = Vec::new();
+        recovered.resync_route_needs(&mut immediate_resync);
+        assert!(
+            immediate_resync
+                .iter()
+                .all(|effect| !matches!(effect, Effect::AuthorRouteNeedsChanged(_))),
+            "boot recovery must update the same edge cache as live synchronization, or the first unrelated recompile repeats the recovered need set"
+        );
     }
 }
 

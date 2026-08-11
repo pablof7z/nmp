@@ -570,6 +570,7 @@ impl WireRecord {
 #[derive(Debug, Default)]
 struct WireLog {
     inner: Mutex<WireLogInner>,
+    notify: tokio::sync::Notify,
 }
 
 #[derive(Debug, Default)]
@@ -595,7 +596,7 @@ impl WireLog {
             return;
         };
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        match verb {
+        let recorded = match verb {
             "REQ" => {
                 let Some(sub_id) = array.get(1).and_then(serde_json::Value::as_str) else {
                     inner
@@ -611,6 +612,7 @@ impl WireLog {
                     filters: array[2..].to_vec(),
                     replaces,
                 });
+                true
             }
             "CLOSE" => {
                 let Some(sub_id) = array.get(1).and_then(serde_json::Value::as_str) else {
@@ -622,6 +624,7 @@ impl WireLog {
                 inner.live.remove(sub_id);
                 inner.frames += 1;
                 inner.closes.push(sub_id.to_string());
+                true
             }
             "EVENT" => {
                 let Some(event_id) = array
@@ -637,9 +640,14 @@ impl WireLog {
                 };
                 inner.frames += 1;
                 inner.event_ids.push(event_id.to_string());
+                true
             }
             // AUTH/COUNT are not asserted on by this fixture.
-            _ => {}
+            _ => false,
+        };
+        drop(inner);
+        if recorded {
+            self.notify.notify_waiters();
         }
     }
 
@@ -1141,6 +1149,33 @@ impl ScriptedRelay {
     /// a count read off an incomplete record would be worse than no count.
     pub fn wire_record(&self) -> WireRecord {
         self.wire.snapshot()
+    }
+
+    /// Bounded wait for an exact raw REQ witness.
+    ///
+    /// The predicate reads the decoded client-to-relay frame, not the relay's
+    /// kind-only policy callback or engine diagnostics. Lost wakeups are
+    /// excluded by registering the notification before the second snapshot.
+    pub async fn wait_wire_req(
+        &self,
+        timeout: Duration,
+        predicate: impl Fn(&WireReq) -> bool,
+    ) -> Option<WireReq> {
+        let wait = async {
+            loop {
+                if let Some(req) = self.wire.snapshot().reqs.into_iter().find(&predicate) {
+                    return req;
+                }
+                let notified = self.wire.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if let Some(req) = self.wire.snapshot().reqs.into_iter().find(&predicate) {
+                    return req;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(timeout, wait).await.ok()
     }
 
     /// Block until this relay's client has sent NOTHING for a whole `quiet`

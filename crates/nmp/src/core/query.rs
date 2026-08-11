@@ -337,6 +337,7 @@ impl<S: EventStore> EngineCore<S> {
                 .saturating_add(demand.len() as u64),
         );
         self.attribution.observe_demand(demand.iter());
+        self.flush_author_outbox_route_need_changes(effects);
         // Finding E3 (epic #507): prune `shape_by_key` against the SAME
         // `demand` just observed above, plus every key still `coverage_claims` by
         // an outstanding attribution snapshot (see `prune_shapes`'s own
@@ -1208,14 +1209,16 @@ impl<S: EventStore> EngineCore<S> {
             *count += 1;
         }
         let effective_evidence = evidence.keys().cloned().collect();
-        let entry = self
-            .wire_owner_counts
-            .entry(key)
-            .or_insert_with(|| (atom.clone(), 0));
-        entry.1 = entry.1.saturating_add(1);
-        entry.0.routing_evidence = effective_evidence;
-        let first_owner = entry.1 == 1;
-        let effective_atom = entry.0.clone();
+        let (first_owner, effective_atom) = {
+            let entry = self
+                .wire_owner_counts
+                .entry(key)
+                .or_insert_with(|| (atom.clone(), 0));
+            entry.1 = entry.1.saturating_add(1);
+            entry.0.routing_evidence = effective_evidence;
+            (entry.1 == 1, entry.0.clone())
+        };
+        self.retain_author_outbox_wire_owner(atom);
 
         self.router.activate(effective_atom.clone());
         let mut metadata_diagnostics_changed = false;
@@ -1271,10 +1274,13 @@ impl<S: EventStore> EngineCore<S> {
             })
             .unwrap_or_default();
 
-        let (effective_atom, count) = self.wire_owner_counts.get_mut(&key)?;
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            let final_atom = effective_atom.clone();
+        let (final_atom, became_ownerless) = {
+            let (effective_atom, count) = self.wire_owner_counts.get_mut(&key)?;
+            *count = count.saturating_sub(1);
+            (effective_atom.clone(), *count == 0)
+        };
+        self.release_author_outbox_wire_owner(atom);
+        if became_ownerless {
             self.attribution.release_atom(&final_atom);
             self.release_rejected_projected_evidence(key);
             self.wire_owner_counts.remove(&key);
@@ -1284,8 +1290,14 @@ impl<S: EventStore> EngineCore<S> {
             return Some(final_atom);
         }
 
-        effective_atom.routing_evidence = effective_evidence;
-        let effective_atom = effective_atom.clone();
+        let effective_atom = {
+            let (effective_atom, _) = self
+                .wire_owner_counts
+                .get_mut(&key)
+                .expect("a demand with surviving owners remains indexed");
+            effective_atom.routing_evidence = effective_evidence;
+            effective_atom.clone()
+        };
         self.router.activate(effective_atom.clone());
         if self.pending_wire_atoms.contains_key(&key) {
             self.pending_wire_atoms.insert(key, effective_atom.clone());
@@ -1469,6 +1481,7 @@ impl<S: EventStore> EngineCore<S> {
             .into_values()
             .collect();
         self.withdraw_wire_demand(closing, effects);
+        self.flush_author_outbox_route_need_changes(effects);
     }
 
     fn rebuild_wire_ownership(&mut self) {
@@ -1488,6 +1501,9 @@ impl<S: EventStore> EngineCore<S> {
         self.wire_demand_refs_by_handle.clear();
         self.wire_coverage_refs_by_handle.clear();
         self.wire_owner_counts.clear();
+        self.author_outbox_wire_owner_counts.clear();
+        let previous_author_outbox_route_needs =
+            std::mem::take(&mut self.author_outbox_route_needs);
         self.wire_routing_evidence_owner_counts.clear();
         self.wire_handles_by_atom.clear();
         self.wire_handles_by_coverage.clear();
@@ -1546,6 +1562,9 @@ impl<S: EventStore> EngineCore<S> {
                 .cloned()
                 .collect();
         }
+        self.rebuild_author_outbox_route_needs();
+        self.author_outbox_route_needs_changed |=
+            previous_author_outbox_route_needs != self.author_outbox_route_needs;
         self.refresh_pending_wire_atoms();
     }
 
