@@ -35,7 +35,7 @@ pub(super) struct GovernedWrite {
 
 impl GovernedWrite {
     pub(super) fn begin(store: &RedbStore) -> Result<Self, PersistenceError> {
-        let write_txn = store.db.begin_write().map_err(persist_err)?;
+        let write_txn = store.database()?.begin_write().map_err(persist_err)?;
         #[cfg(feature = "bench-instrumentation")]
         let mut write_txn = write_txn;
         #[cfg(feature = "bench-instrumentation")]

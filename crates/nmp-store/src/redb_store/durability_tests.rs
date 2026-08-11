@@ -161,10 +161,9 @@ fn store_with_injectable_backend(
 
 /// Close a store and open a fresh one over the same storage, with no fault
 /// armed. This is a plain reopen — a new `Database`, a new transactional
-/// memory, redb's header-driven repair — not an in-place recovery door.
-/// `nmp-store` has none and will not grow one: #895 declined that door
-/// because dropping the owner and opening again IS the recovery, and it
-/// needs no process restart to do it.
+/// memory, redb's header-driven repair. The test-only in-memory backend has
+/// no filesystem identity the production #1362 reconstruction door could
+/// reopen, so this helper supplies its next backend generation explicitly.
 fn reopen_over(dir: &TempDir, name: &str, bytes: &Arc<InMemoryBackend>) -> RedbStore {
     let backend = FaultBackend {
         inner: Arc::clone(bytes),
@@ -211,6 +210,69 @@ fn attempt_durable_write(store: &mut RedbStore, created_at: u64) -> Result<(), P
             correlation: None,
         })
         .map(|_| ())
+}
+
+#[test]
+fn reopen_replaces_only_the_database_generation_and_preserves_durable_identity() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("engine-owned-reopen.redb");
+    let mut store = RedbStore::open(&path).expect("healthy persistent store");
+    let keys = keys();
+    let frozen = frozen_event(900);
+    let outcome = store
+        .accept_write(AcceptWrite {
+            frozen: frozen.clone(),
+            replaceable_base: None,
+            monotonic_stamp: false,
+            expected_pubkey: keys.public_key(),
+            signing_identity_ref: "reopen-proof".into(),
+            routing: "reopen-proof".into(),
+            sig_state: IntentSigState::Pending,
+            accepted_at: Timestamp::from(900),
+            correlation: Some(
+                nmp_grammar::CorrelationToken::try_from("stable-reopen-correlation").unwrap(),
+            ),
+        })
+        .expect("accept before reconstruction");
+    let receipt = outcome.journaled_receipt_id().expect("accepted receipt");
+
+    // Model the exact lifecycle edge after a typed requires-reopen fault: the
+    // poisoned redb handle is gone, but the NMP ownership fence remains.
+    drop(store.db.take());
+    assert!(matches!(
+        RedbStore::open(&path),
+        Err(crate::RedbStoreOpenError::StoreAlreadyOpen { .. })
+    ));
+
+    store
+        .reopen_after_failure()
+        .expect("same owner reconstructs the redb handle");
+    assert_eq!(
+        store
+            .lookup_correlation("stable-reopen-correlation")
+            .unwrap(),
+        Some(receipt)
+    );
+    assert_eq!(
+        store.reattach_receipt(receipt).unwrap().unwrap().frozen_id,
+        frozen.id
+    );
+}
+
+#[test]
+fn reopen_refuses_to_create_a_missing_durable_target() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("missing-during-reopen.redb");
+    let mut store = RedbStore::open(&path).expect("healthy persistent store");
+
+    drop(store.db.take());
+    std::fs::remove_file(&path).expect("remove target while ownership fence remains");
+
+    let error = store
+        .reopen_after_failure()
+        .expect_err("reconstruction must not initialize a replacement store");
+    assert_eq!(error.fault(), crate::PersistenceFault::Io);
+    assert!(!path.exists(), "failed reconstruction recreated the target");
 }
 
 // ---- falsifiers --------------------------------------------------------
@@ -326,10 +388,11 @@ fn no_door_retries_a_commit_against_a_latched_memory() {
         }
     }
 
-    // The store also exposes no door that could retry: the only recovery is
-    // dropping this handle and opening a new one. Prove that is what it
-    // takes — a fresh handle over a fresh, healthy backend works, and the
-    // latched one is still latched afterwards.
+    // The #1362 recovery door replaces the whole database generation; it can
+    // never retry one of these mutations against this latched transactional
+    // memory. This injected in-memory backend has no persistent file to
+    // reconstruct, so prove the distinction with a separate healthy store:
+    // the new handle works and the old handle remains latched.
     let (mut reopened, _, _) = store_with_injectable_backend(&dir, "no-retry-reopened.redb");
     attempt_durable_write(&mut reopened, 2_200).expect("a reopened handle writes normally");
     assert!(attempt_durable_write(&mut store, 2_201)

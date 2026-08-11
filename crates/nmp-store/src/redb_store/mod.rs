@@ -133,6 +133,10 @@ mod publish_queue_ops;
 mod write_ops;
 
 impl EventStore for RedbStore {
+    fn reopen_after_failure(&mut self) -> Result<(), PersistenceError> {
+        self.reopen_database_after_failure()
+    }
+
     fn insert(
         &mut self,
         event: Event,

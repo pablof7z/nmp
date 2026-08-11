@@ -97,7 +97,7 @@ use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AuthDenial as StoredAuthDenial,
     AuthDenialSource as StoredAuthDenialSource, CloseIntentOutcome, CompensateOutcome,
     CoverageInterval, CoverageKey, DurabilityOutcome, EventStore, HandoffEvidence, IntentId,
-    IntentSigState, PersistenceError, PromoteOutcome, PublishQueueAttemptHandoff,
+    IntentSigState, PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttemptHandoff,
     PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
     PublishQueueTerminalOutcome, PublishQueueTransientCause, ReceiptState, RelayObserved,
@@ -2239,23 +2239,33 @@ pub struct EngineCore<S: EventStore> {
     rejected_projected_evidence_by_demand:
         BTreeMap<nmp_router::DemandKey, BTreeSet<(DescriptorHash, RoutingEvidence)>>,
     rejected_projected_evidence_owner_counts: BTreeMap<(DescriptorHash, RoutingEvidence), usize>,
-    /// Read-only degrade flag (issue #122): set once the first time an
+    /// Degraded-store diagnostic retained from the first failed door in the
+    /// current storage generation.
+    ///
+    /// A failure whose typed fault requires a fresh backend handle also arms
+    /// `store_recovery_requested`. The runtime consumes that request and
+    /// supervises bounded reconstruction; only a complete reopen plus
+    /// store-derived reducer rebuild clears this diagnostic. Faults that do
+    /// not require reopen remain observable but never trigger blind retry.
+    ///
+    /// Originally this was a permanent read-only latch (issue #122): set once the first time an
     /// ingest/read [`EventStore`] door returns [`PersistenceError`] (disk
     /// full, I/O error). The reducer NEVER panics on such a failure — it
     /// records the error message here, skips the affected reactive step
     /// (leaving already-delivered state untouched rather than fabricating a
     /// phantom retraction), and surfaces it on the read-only diagnostics
     /// snapshot. A minimal, honest "the local cache went read-only" signal;
-    /// a richer failure-mode framework (recovery, reopen, per-door policy)
-    /// is deliberately out of scope — see the issue's priority note.
-    ///
-    /// This flag is OBSERVATIONAL, not a gate: no code path reads it to
-    /// refuse work. "Read-only" is descriptive — a later message simply
-    /// re-attempts the same door and degrades again on a repeat failure
-    /// (harmless: every widened door is atomic, so a failed attempt commits
-    /// nothing). Enforcing degrade (short-circuiting further writes) would be
-    /// the richer policy explicitly deferred here.
+    /// #1362 closes that gap without making this string a control surface:
+    /// recovery branches only on [`PersistenceFault`].
     store_degraded: Option<String>,
+    /// Monotonic evidence that some store door failed. Recovery snapshots it
+    /// before reducer reconstruction so a swallowed partial rebuild can never
+    /// clear the diagnostic merely because its fault did not require reopen.
+    store_failure_epoch: u64,
+    /// `Option::take` request from the reducer to the one runtime supervisor.
+    /// The fault is retained as typed evidence; its presence, never an
+    /// adjacent boolean or diagnostic string, owns the recovery transition.
+    store_recovery_requested: Option<PersistenceFault>,
     /// Runtime relay-worker open failures keyed by their exact current owner.
     /// Entries are pruned whenever demand/write ownership changes and cleared
     /// by a successful connection for that session.
@@ -2472,6 +2482,8 @@ impl<S: EventStore> EngineCore<S> {
             rejected_projected_evidence_by_demand: BTreeMap::new(),
             rejected_projected_evidence_owner_counts: BTreeMap::new(),
             store_degraded: None,
+            store_failure_epoch: 0,
+            store_recovery_requested: None,
             relay_open_failures: BTreeMap::new(),
             transport_degraded: None,
             retry_scheduler_blocked: false,

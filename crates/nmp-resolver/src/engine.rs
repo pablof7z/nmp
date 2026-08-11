@@ -549,6 +549,21 @@ impl<S: EventStore> Engine<S> {
         Ok(merge_deltas(drop_delta, self.run_recompute(seed)?))
     }
 
+    /// Re-read every store-derived binding after the backend handle was
+    /// replaced. Literal and reactive values are process-owned and stay put;
+    /// every `Derived` value is recomputed dependency-first from the reopened
+    /// durable store, and the ordinary atom diff reports any routing-demand
+    /// change. Existing query handles and their ids remain valid.
+    pub fn rebuild_after_store_reopen(&mut self) -> Result<DemandDelta, PersistenceError> {
+        let drop_delta = self.drain_pending_drops();
+        let seed: BTreeSet<NodeId> = self.graph.derived_node_ids().into_iter().collect();
+        if seed.is_empty() {
+            return Ok(drop_delta);
+        }
+        self.metrics.recompute_passes += 1;
+        Ok(merge_deltas(drop_delta, self.run_recompute(seed)?))
+    }
+
     // ---- subscribe / unsubscribe (M1 plan §4) ---------------------------
 
     pub fn subscribe(&mut self, branch: Demand) -> SubscribeOutcome {
