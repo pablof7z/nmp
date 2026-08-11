@@ -211,7 +211,7 @@ the ownership gate enforces that boundary (`scripts/check-nip29-ownership.sh`)
 **Pablo ruled these IN SCOPE for this effort — not a later addition:**
 
 > nmp doesn't know what 'remove user from group means', but nmp-nip29 crate
-> does and must provide the group.publish.... group.remove_user....
+> does and must provide the group.publish.... group.remove_users....
 > group.join_request... -- and no, it's not "additive" in the sense that we can
 > avoid shipping it during this current effort; it's IN SCOPE.
 
@@ -219,11 +219,18 @@ So `Group` carries typed composers for NIP-29's own operations alongside
 `publish`:
 
 ```rust
-group.publish(&engine, builder)?;          // any kind — kind-blind
-group.join_request(&engine, invite_code)?; // 9021
-group.remove_user(&engine, pubkey)?;       // 9001
-group.edit_metadata(&engine, name, about)?;// 9002
+group.publish(&engine, author, builder)?;                  // any kind — kind-blind
+group.join_request(&engine, author, invite_code)?;         // 9021
+group.add_users(&engine, author, users)?;                  // one 9000
+group.remove_users(&engine, author, pubkeys)?;             // one 9001
+group.edit_metadata(&engine, author, metadata_edit)?;      // 9002
 ```
+
+`add_users` and `remove_users` take the whole moderation change. NIP-29
+permits several `p` rows in one kind:9000/9001 event, so the facade publishes
+one signed event and returns one ordinary receipt. It never loops one write per
+pubkey. Exact duplicates collapse in pubkey order; an empty operation or one
+pubkey assigned conflicting roles is refused before any write is accepted.
 
 Why this is not optional polish: without it every app looks up NIP-29's kind
 numbers and tag schema itself, and a subtly wrong tag produces a relay
@@ -437,7 +444,7 @@ state the underlying kinds cannot establish.
 - `crates/nmp/src/nip29/group.rs` — `Group`'s inherent `read`,
   `validate_context`, `publish` (the ONE write door since #1292 deleted
   `intent`/`signed_intent`/`publish_signed`), and the named operations
-  (`join_request`, `leave_request`, `add_user`, `remove_user`,
+  (`join_request`, `leave_request`, `add_users`, `remove_users`,
   `edit_metadata`, `delete_event`, `create_group`, `delete_group`,
   `create_invite`) — all inherent, no `GroupOperations` trait. Carries
   `a_group_write_routes_explicitly_to_every_host_in_the_scope`.

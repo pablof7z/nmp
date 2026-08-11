@@ -59,6 +59,7 @@ use crate::engine::Engine;
 pub use group::{Group, GroupPublishError};
 pub use groups::Groups;
 pub use nmp_nip29::GroupContextError;
+pub use nmp_nip29::{GroupUser, GroupUsersError};
 pub use predicate::{
     admin_list_includes, all, any_of, groups_whose_record_matches, member_list_includes, GroupIds,
     GroupPredicate, GroupPredicateError,
@@ -78,8 +79,8 @@ pub use nmp_nip29::{GroupMetadata, GroupRecord, ListedRecord, ListedSubject};
 // the raw builder for a named operation gets it; the group's own methods are
 // the ordinary path.
 pub use nmp_nip29::{
-    add_user, create_group, create_invite, delete_event, delete_group, edit_metadata, join_request,
-    leave_request, remove_user, GroupMetadataEdit, JoinAccess, ReadAccess,
+    add_users, create_group, create_invite, delete_event, delete_group, edit_metadata,
+    join_request, leave_request, remove_users, GroupMetadataEdit, JoinAccess, ReadAccess,
 };
 // The kinds NIP-29 itself defines for describing a group. Named because
 // NIP-29 names them -- unlike a group's CONTENT kinds, which are the app's to
