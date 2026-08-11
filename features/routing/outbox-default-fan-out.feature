@@ -1,19 +1,33 @@
 Feature: Where an ordinary event goes when the app says nothing
   "Publish this event" is the whole of what an app has to say. Everything
   after that is the built-in outbox resolver's business, and outbox is not one
-  source but three, added together:
+  source. Its intended answer is the union of four evidence-owned
+  contributions:
 
     1. the author's neutral outbound routes,
     2. the operator-configured app relays, always,
-    3. every p-tagged recipient's neutral inbound routes -- their inbox.
+    3. every p-tagged recipient's neutral inbound routes -- their inbox,
+    4. verified relay provenance NMP recorded for the referenced parent event.
 
   Pablo, on what the app surface is allowed to be:
 
   > the app should be able to say "publish this event" and it would default to using outbox.
 
-  The built resolver reads only `RoutingFacts`: one atomic author fact owns
-  both directional sets, while operator app and fallback sets remain
-  independent policy. It invents no protocol kind, discovery source, or
+  The first three contributions are built. The fourth is a known violation:
+  the current resolver reads only `RoutingFacts`, scans `p` tags, and discards
+  the canonical store provenance of an event referenced as the reply parent.
+  That can publish a reply everywhere except the relay where the conversation
+  was actually observed.
+
+  Parent provenance is NMP's own observation, not arbitrary text in a tag. A
+  relay hint authored into an `e` tag does not become verified merely because
+  it survived signing. The contrast at the end of this feature preserves both
+  halves of the correction. It deliberately uses one observed parent source;
+  choosing among several verified sources is a separate policy decision.
+
+  `RoutingFacts` still owns the neutral author directions: one atomic author
+  fact owns both directional sets, while operator app and fallback sets remain
+  independent policy. Outbox invents no protocol kind, discovery source, or
   implicit indexer lane.
 
   The recipient half is the one that is easy to get subtly wrong, and the
@@ -109,7 +123,7 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1", "author-write-2", and "bob-unmarked"
     And the note is never routed to "bob-outbox"
 
-  # ---- how the three sources combine ------------------------------------
+  # ---- how the built author, app and recipient sources combine ----------
 
   # nmp:id=ROUTING-OUTBOXDEFAULT-006
   # nmp:status=built
@@ -143,15 +157,46 @@ Feature: Where an ordinary event goes when the app says nothing
   # nmp:id=ROUTING-OUTBOXDEFAULT-008
   # nmp:status=built
   # nmp:evidence=rust:nmp::the_outbox_answer_never_names_a_relay_outside_its_three_sources
-  # nmp:falsifier=Let the resolver read every author the directory happens to hold rather than only the author, the operator and the p-tagged recipients; a stranger's relays enter the route.
-  Scenario: The app never named a relay and never could have
-    # The point of the whole default: nothing in this flow gives the app a
-    # place to pass a relay in, and the resolver reads only engine-owned
-    # directory facts. If an app-facing knob for "which relays does an
-    # ordinary note go to" ever appears, this default has been abandoned
-    # rather than extended.
+  # nmp:falsifier=Let the resolver read every author the directory happens to hold rather than only identities the event names; an unrelated cached author's relays enter the route.
+  Scenario: An unrelated cached author's relays never enter the route
+    # Parent provenance adds a new evidence-owned source; it does not license
+    # a scan of every warm routing fact. A stranger appears only as the
+    # negative control proving that a relay still needs a relationship to the
+    # event being published.
     Given app relays "app-indexer-1" are configured
     And Bob's relay list names "bob-inbox" as his read relay
+    And an unrelated author's relay list names "stranger-inbox" and "stranger-outbox"
     When I publish a note saying "I said nothing about relays" that p-tags Bob
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer-1", and "bob-inbox"
-    And no relay outside the author's, the app's, and the recipients' was ever contacted
+    And neither "stranger-inbox" nor "stranger-outbox" was ever contacted
+
+  # ---- replies retain their observed relay context ----------------------
+
+  # nmp:id=ROUTING-OUTBOXDEFAULT-009
+  # nmp:status=known-violation
+  # nmp:issue=#1365
+  Scenario: A reply returns to the relay where NMP observed its parent
+    # The missing fourth contribution. The parent has exactly one verified
+    # source, so this scenario does not smuggle in an unanswered choice among
+    # several candidate relays. Bob's settled-empty inbox also makes the
+    # parent provenance, rather than recipient routing, the only way the
+    # conversation relay can enter the answer.
+    Given no app relays are configured
+    And a parent event by Bob is in the canonical store after NMP observed it only at "conversation-relay"
+    And discovery has settled that Bob has no inbox relay
+    When I publish a reply to that parent event
+    Then the reply is routed to exactly "author-write-1", "author-write-2", and "conversation-relay"
+
+  # nmp:id=ROUTING-OUTBOXDEFAULT-010
+  # nmp:status=specified
+  # nmp:gap=evidence
+  # nmp:issue=#1365
+  Scenario: An unverified parent relay hint does not widen Auto routing
+    # The negative boundary. Signed bytes prove who authored the hint; they do
+    # not prove the named relay ever held the parent. Explicit routing remains
+    # the separate door for an app that intentionally chooses an exact relay.
+    Given no app relays are configured
+    And NMP has never observed the referenced parent at "unverified-hint-relay"
+    When I publish with Auto routing a reply whose parent tag names "unverified-hint-relay" only as a relay hint
+    Then the reply is routed to exactly "author-write-1" and "author-write-2"
+    And "unverified-hint-relay" is never contacted
