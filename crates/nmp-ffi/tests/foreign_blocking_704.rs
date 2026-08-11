@@ -1,3 +1,5 @@
+#![cfg(feature = "nip02")]
+
 //! #704 review falsifier — "category 3 is empty": moving every executor user
 //! onto the shared engine runtime did NOT relocate synchronous FOREIGN blocking
 //! onto a runtime worker.

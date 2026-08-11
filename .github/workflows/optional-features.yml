@@ -69,3 +69,6 @@ jobs:
 
       - name: cargo test (workspace, all features)
         run: cargo test --workspace --all-features
+
+      - name: Native app-facing feature matrix
+        run: scripts/check-native-feature-matrix.sh

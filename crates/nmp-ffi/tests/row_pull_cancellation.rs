@@ -54,7 +54,9 @@ async fn publish_note(engine: &NmpEngine, sequence: u64) {
                     created_at: Some(sequence),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         })

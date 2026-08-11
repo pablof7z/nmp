@@ -1,3 +1,5 @@
+#![cfg(feature = "nip02")]
+
 //! #680 falsifiers — real composition, cancellation, and async delivery over
 //! the pull-based observation handles. Driven by a real Tokio executor
 //! (`#[tokio::test]`, dev-only; production stays runtime-free).
@@ -98,7 +100,9 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
                     created_at: Some(0),
                 },
             },
-            routing: nmp_ffi::types::FfiWriteRouting::Auto,
+            routing: nmp_ffi::types::FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: nmp_ffi::types::FfiIdentity::Active,
             correlation: None,
         })

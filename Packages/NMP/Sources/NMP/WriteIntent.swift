@@ -34,33 +34,39 @@ public enum RetryCause: Sendable, Hashable {
     }
 }
 
-/// Where a write is routed. The whole vocabulary is two words: `.auto`
-/// ("figure out how to route whatever I'm publishing") and `.explicit`
-/// ("use these exact relays and that is that"). There is no third case --
-/// no "outbox", no NIP name, no strategy label -- because which strategy
-/// claims a kind is NMP's own business, decided at send time.
-///
 /// `.explicit` is a general capability, not a protocol-module privilege: an
 /// app offering "publish this event to relay: [user input]", a wiki module
 /// publishing to the user's preferred wiki relays, and a user archiving
 /// someone else's signed note to their own relay are all the same
 /// primitive. It executes verbatim -- the relay directory is never
 /// consulted, and nothing learned later widens it -- and an empty `relays`
-/// is refused at the door, never quietly downgraded to `.auto`.
+/// is refused at the door.
+// nmp-native:if nip65
+///
+/// `.auto` asks the selected NIP-65 assembly to discover author-write and
+/// recipient-read routes. An engine constructed without NIP-65 runtime
+/// indexers refuses it before durable acceptance.
+// nmp-native:endif
 public enum WriteRouting: Sendable, Hashable {
+    // nmp-native:if nip65
     case auto
+    // nmp-native:endif
     case explicit(relays: [String])
 
     func toFfi() -> FfiWriteRouting {
         switch self {
+        // nmp-native:if nip65
         case .auto: return .auto
+        // nmp-native:endif
         case let .explicit(relays): return .explicit(relays: relays)
         }
     }
 
     init(_ ffi: FfiWriteRouting) {
         switch ffi {
+        // nmp-native:if nip65
         case .auto: self = .auto
+        // nmp-native:endif
         case let .explicit(relays): self = .explicit(relays: relays)
         }
     }

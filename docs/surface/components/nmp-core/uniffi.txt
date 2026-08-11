@@ -2651,6 +2651,14 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "Nip65IndexerRelaysEmpty",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A selected NIP-65 runtime assembly named no app-owned indexer relay.\nEngine construction is refused; NMP never installs a hidden default.",
+            ),
+        },
+        Variant {
             name: "InvalidTag",
             discr: None,
             fields: [
@@ -2747,6 +2755,14 @@ enum Enum {
             ],
             docstring: Some(
                 "`publish` refused the call outright: either NMP could not write\nanything down, or the instruction could not resolve (no active\naccount, a signature that does not verify, an explicit identity\ncontradicting a signed payload's author, a reserved kind, an empty\nexplicit route). Nothing durable exists and there is no queue entry\nto inspect.\n\nEverything else takes CUSTODY and fails in the queue where the app\ncan see it — including a stale replaceable base, which succeeds here\nand arrives as `FfiWriteOutcome::Refused`.",
+            ),
+        },
+        Variant {
+            name: "AutomaticRoutingUnavailable",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "An Auto write was attempted through an engine constructed without an\nautomatic-route provider. Refused before durable acceptance, so no\nreceipt, queue row, or delivery residue exists.",
             ),
         },
         Variant {
@@ -7207,6 +7223,27 @@ record Record {
 }
 
 record Record {
+    name: "FfiNip65Config",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "indexer_relays",
+            type_: Sequence {
+                inner_type: String,
+            },
+            default: None,
+            docstring: Some(
+                "Relays queried for kind:10002 relay lists. NMP supplies no defaults.",
+            ),
+        },
+    ],
+    docstring: Some(
+        "App-owned runtime inputs for the selected NIP-65 assembly. These values do\nnot participate in the native artifact's feature or cache identity.",
+    ),
+}
+
+record Record {
     name: "FfiPublishQueueEntry",
     module_path: "nmp_ffi",
     remote: false,
@@ -8402,6 +8439,21 @@ record Record {
             ),
         },
         Field {
+            name: "nip65",
+            type_: Optional {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiNip65Config",
+                },
+            },
+            default: Some(
+                None,
+            ),
+            docstring: Some(
+                "Optional runtime assembly for automatic NIP-65 routing. This field\nexists only in a native build that selected the `nip65` app feature.\n`None` constructs an explicit-routing-only engine; `Some` must name at\nleast one app-owned indexer relay or construction is refused.",
+            ),
+        },
+        Field {
             name: "allowed_local_relay_hosts",
             type_: Sequence {
                 inner_type: String,
@@ -8455,7 +8507,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "Construction config for [`NmpEngine::new`].\n\nThis core native assembly accepts only neutral operator app/fallback\npolicy. It exposes no discovery-source setting and no mutable author-route\nmap: without a separately assembled route provider, `Auto` remains\nroute-waiting until operator policy supplies a destination.",
+        "Construction config for [`NmpEngine::new`]. Build-time feature selection\ncontrols which fields exist; runtime relay values remain app-owned inputs.",
     ),
 }
 
@@ -8618,6 +8670,51 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_any_of",
     checksum: Some(
         5099,
+    ),
+}
+
+function Function {
+    name: "asset_sha256_hex",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [
+        Argument {
+            name: "bytes",
+            type_: Bytes,
+            by_ref: false,
+            optional: false,
+            default: None,
+        },
+    ],
+    return_type: Some(
+        String,
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_asset_sha256_hex",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "bytes",
+                type_: RustBuffer(
+                    None,
+                ),
+            },
+        ],
+        return_type: Some(
+            RustBuffer(
+                None,
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "Return the canonical lowercase SHA-256 identity of the exact supplied\nbytes. This function performs no network I/O and trusts no claimed digest.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_asset_sha256_hex",
+    checksum: Some(
+        31263,
     ),
 }
 
@@ -14181,13 +14278,18 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Ask NMP to follow `target`. This is the complete NIP-02 action: it\nwaits for the module's source-evidence policy, preserves the exact\nkind:3 base, atomically guards that base, signs, routes, and streams\nthe durable receipt. The native button owns none of those steps; it\nonly awaits [`NmpFollowActionStream::next`].",
+                "Ask NMP to follow `target`. This is the complete NIP-02 action.",
             ),
-            throws: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_follow",
             checksum: Some(
-                20611,
+                45378,
             ),
         },
         Method {
@@ -15182,11 +15284,16 @@ object Object {
             docstring: Some(
                 "The inverse of [`Self::follow`], with the same acquisition,\ncompare-and-swap, signer, routing, and receipt guarantees.",
             ),
-            throws: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_unfollow",
             checksum: Some(
-                25680,
+                20346,
             ),
         },
     ],

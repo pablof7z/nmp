@@ -7,15 +7,22 @@ identity and diagnostics. Mechanism crates such as `nmp-engine`, `nmp-store`,
 not parallel application contracts. The feature-gated `from_parts` path is
 explicitly unstable test infrastructure.
 
-Opt-in direct-Rust protocol crates may provide semantic operations over that
-same facade. `nmp-nip65` exposes the first kind:10002 bootstrap operation: its
-consumer manifest needs only `nmp` plus `nmp-nip65`, and the operation returns
-the ordinary `ReceiptStream`. The internal exact-route authority remains
-withheld from `nmp`; no raw relay-array write escape hatch is added.
+Opt-in protocol crates provide semantic operations over that same facade. A
+direct-Rust app selects facade Cargo features. A Swift or Kotlin app selects
+stable app-facing feature keys in one checked-in manifest and runs the generic
+`tools/nmp-native/nmp_native.py prepare` command. Cargo resolves that selection
+into one `nmp-ffi` library; UniFFI is generated from that exact binary, and only
+matching Swift/Kotlin wrappers are materialized. `native/features.toml` is the
+machine-readable surface catalog. The build tool contains no protocol-family
+branches and NMP publishes no per-family or per-combination binary matrix.
 
-NIP-65 bootstrap is not projected through UniFFI, Swift, or Kotlin in its first
-unit. Native consumers must not recreate it with raw sockets or mechanism
-crates; parity is an explicit later surface change.
+Build selection and runtime authority remain separate. Selecting `nip65`
+exposes `NIP65Config`/`FfiNip65Config`; a nonempty app-owned indexer list
+enables automatic author-route discovery, and an empty list is refused. A
+selected build may construct an explicit-routing-only engine by omitting that
+runtime provider, but any `Auto` write then receives a typed pre-acceptance
+refusal with no durable residue. A build that does not select `nip65` has no
+`Auto` routing case at all. NMP supplies no hidden indexer relay.
 
 NIP-22 comment composition is projected, but it does not become an Engine
 capability. `nmp-nip22` owns the kind:1111/NIP-73 schema and returns the
@@ -25,7 +32,7 @@ ordinary `WriteIntent`; FFI, Swift, and Kotlin expose matching engine-free
 `publish` door and receipt lifecycle. There is no `Engine.commentIntent`,
 `CommentIntent` wrapper, or NIP-22-specific composed-publication overload.
 
-NIP-29 Group publication is a Rust-and-FFI surface, multi-relay
+NIP-29 Group publication is a Rust/FFI/Swift/Kotlin surface, multi-relay
 ([#1033](https://github.com/pablof7z/nmp/issues/1033); superseded the
 single-host `group_discovery_demand`/`Group::new(host, id)` door with no
 alias). `nmp::nip29::on(hosts)` names a caller-supplied relay set — fallible,
@@ -41,12 +48,11 @@ an app that needs a signed event without publishing it uses
 `Engine::sign_event`. Reads mint one
 ordinary `LiveQuery` per group or discovery predicate, never a group-specific
 observe door. `nmp-ffi` projects the full `FfiRelayScope`/`FfiGroup`/
-`FfiGroupPredicate`/`FfiGroupIds` read-and-write surface. Swift and Kotlin do not yet
-project it; native apps must not reproduce `h`, host routing, signing, or
-receipt choreography while that projection is absent. This record makes no
-Kotlin or Android Group support claim.
+`FfiGroupPredicate`/`FfiGroupIds` read-and-write surface; the selected Swift and
+Kotlin wrappers project the same relay-scope operations. This is a native SDK
+surface claim, not an Android AAR/runtime qualification claim (#831).
 
-`nmp-ffi` is a projection of that facade. The repository uses UniFFI proc
+`nmp-ffi` is a feature-gated projection of that facade. The repository uses UniFFI proc
 macros and extracts component metadata from a compiled library; there is no UDL
 source of truth. Swift and Kotlin add native observation/lifecycle ergonomics
 over generated bindings without becoming independent semantic engines.
@@ -54,7 +60,8 @@ over generated bindings without becoming independent semantic engines.
 ## How public changes are governed
 
 - `docs/surface/nmp-facade.txt` starts with pinned `cargo-public-api` output for
-  facade-owned items, then adds compiler-resolved definitions for every
+  facade-owned items from the complete all-feature governance build, then adds
+  compiler-resolved definitions for every
   dependency-owned item explicitly re-exported from the `nmp` root, plus the
   dependency-owned definition closure reachable through its public shape.
   Discovery comes from rustdoc JSON `use` items and follows only exact Cargo
@@ -106,9 +113,10 @@ over generated bindings without becoming independent semantic engines.
   `null` privacy markers without exposing rustdoc ids. A path-free reference
   must have an indexed semantic definition or extraction fails rather than
   emitting an unstable rustdoc id. Metadata and rustdoc run locked, so manifest
-  and lockfile drift fails closed. Regeneration also enforces a 30,000-line /
-  8,000,000-byte ceiling: deliberately generous for the explicit facade roots,
-  but small enough to catch accidental recursive helper-method expansion.
+  and lockfile drift fails closed. Regeneration also enforces a 60,000-line /
+  12,000,000-byte ceiling: deliberately generous for the complete
+  feature-selected facade roots, but small enough to catch accidental
+  recursive helper-method expansion.
 - `scripts/regenerate-surface-snapshots.sh` regenerates the facade and every
   active component from a clean checkout. The ordinary checker runs it in both
   catalog and reverse component order, requires byte-identical output, then

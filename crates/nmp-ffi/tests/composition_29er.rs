@@ -1,3 +1,5 @@
+#![cfg(feature = "nip02")]
+
 //! #680 — the "29er" composition reproduction (falsifier item 10 / item 1
 //! in-repo proxy).
 //!
@@ -210,7 +212,9 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
                     created_at: Some(1_700_000_000),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         })

@@ -34,7 +34,7 @@ nmp-signer.workspace = true
 # and takes the same engine's `Handle` back out to fold the raw delta and
 # diagnostics channels its `Then` steps assert on. `nip65` drives the
 # feature-on coordinator scenarios through ordinary pinned queries.
-nmp = { workspace = true, features = ["unstable-mechanism", "nip65"] }
+nmp = { workspace = true, features = ["unstable-mechanism", "nip29", "nip65"] }
 nmp-test-support.workspace = true
 
 cucumber = "0.21"

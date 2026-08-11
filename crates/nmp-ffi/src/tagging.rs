@@ -21,16 +21,36 @@
 //! holding, sources included — and never a relationship, a marker, a relay
 //! hint or an author. Those are what the door fills.
 
-use crate::convert::{
-    event_builder_from_ffi, parse_pubkey, parse_relay_url, signed_event_from_ffi, FfiError,
-};
-use crate::types::{FfiContentPart, FfiEventBuilder, FfiReaction, FfiRow};
+#[cfg(any(
+    feature = "nip18",
+    feature = "nip22",
+    feature = "nip25",
+    feature = "nipc7"
+))]
+use crate::convert::signed_event_from_ffi;
+use crate::convert::{event_builder_from_ffi, parse_pubkey, parse_relay_url, FfiError};
+#[cfg(feature = "nip25")]
+use crate::types::FfiReaction;
+#[cfg(any(
+    feature = "nip18",
+    feature = "nip22",
+    feature = "nip25",
+    feature = "nipc7"
+))]
+use crate::types::FfiRow;
+use crate::types::{FfiContentPart, FfiEventBuilder};
 use nmp::{At, InterpolatedContent, Mention};
 
 /// Rebuild the canonical row an app read from NMP. `sources` is the verified
 /// provenance the hint slot is filled from, and it survives the round trip
 /// rather than being dropped at the boundary — a hint the native side cannot
 /// carry is a hint nothing can emit.
+#[cfg(any(
+    feature = "nip18",
+    feature = "nip22",
+    feature = "nip25",
+    feature = "nipc7"
+))]
 pub(crate) fn row_from_ffi(row: FfiRow) -> Result<nmp::Row, FfiError> {
     let event = signed_event_from_ffi(
         row.id,
@@ -62,6 +82,7 @@ fn builder_to_ffi(builder: nmp::EventBuilder) -> FfiEventBuilder {
 /// an app that believes it is replying to a root and one composed by an app
 /// that knows better produce the same bytes.
 #[uniffi::export]
+#[cfg(feature = "nip22")]
 pub fn reply_to(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
     Ok(builder_to_ffi(nmp::reply_to(&row_from_ffi(target)?)))
 }
@@ -78,6 +99,7 @@ pub fn reply_to(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 /// comes from [`with_content`], which is also what emits the rows an inline
 /// mention or quote needs.
 #[uniffi::export]
+#[cfg(feature = "nipc7")]
 pub fn chat() -> FfiEventBuilder {
     builder_to_ffi(nmp::nipc7::chat())
 }
@@ -114,6 +136,7 @@ pub fn with_content(
                     None => interpolate(&pubkey, &mut interpolated),
                 }
             }
+            #[cfg(feature = "nip18")]
             FfiContentPart::Quote { target } => {
                 let row = row_from_ffi(target)?;
                 match row.sources.iter().next() {
@@ -144,6 +167,7 @@ fn interpolate(mention: &dyn Mention, into: &mut InterpolatedContent) {
 /// A group's `h` row and its relay set come from `FfiGroup::publish`, which
 /// takes exactly this value.
 #[uniffi::export]
+#[cfg(feature = "nipc7")]
 pub fn chat_reply(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
     Ok(builder_to_ffi(nmp::nipc7::chat_reply(&row_from_ffi(
         target,
@@ -156,6 +180,7 @@ pub fn chat_reply(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 /// text note is a kind:6 and anything else is a kind:16 that states what it
 /// reposted. A caller never picks a kind.
 #[uniffi::export]
+#[cfg(feature = "nip18")]
 pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
     let row = row_from_ffi(target)?;
     let hint = row.sources.iter().next().cloned();
@@ -175,6 +200,7 @@ pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 /// fixed meanings and a caller writing content by hand can mean one of them by
 /// accident.
 #[uniffi::export]
+#[cfg(feature = "nip25")]
 pub fn react_to(target: FfiRow, reaction: FfiReaction) -> Result<FfiEventBuilder, FfiError> {
     let reaction = match reaction {
         FfiReaction::Like => nmp::nip25::Reaction::Like,
@@ -192,7 +218,13 @@ pub fn react_to(target: FfiRow, reaction: FfiReaction) -> Result<FfiEventBuilder
     )))
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "nip18",
+    feature = "nip22",
+    feature = "nip25",
+    feature = "nipc7"
+))]
 mod tests {
     use super::*;
     use crate::convert::row_to_ffi_row;

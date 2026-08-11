@@ -54,34 +54,40 @@ enum class RetryCause {
     }
 }
 
-/** Where a write is routed. The whole vocabulary is two words: [Auto]
- * ("figure out how to route whatever I'm publishing") and [Explicit] ("use
- * these exact relays and that is that"). There is no third word -- no
- * "outbox", no NIP name, no strategy label -- because which strategy claims
- * a kind is NMP's own business, decided at send time.
- *
- * [Explicit] is a general capability, not a protocol-module privilege: an
+/** [Explicit] routing is a general capability, not a protocol-module privilege: an
  * app offering "publish this event to relay: [user input]", a wiki module
  * publishing to the user's preferred wiki relays, and a user archiving
  * someone else's signed note to their own relay are all the same primitive.
  * It executes verbatim -- the relay directory is never consulted, and
  * nothing added to it later widens it -- and an empty [relays] is refused
- * at the door with `NMPError`, never quietly downgraded to [Auto]. */
+ * at the door with `NMPError`.
+ *
+ * nmp-native:if nip65
+ * [Auto] asks the selected NIP-65 assembly to discover author-write and
+ * recipient-read routes. An engine constructed without NIP-65 runtime
+ * indexers refuses it before durable acceptance.
+ * nmp-native:endif */
 sealed class WriteRouting {
+    // nmp-native:if nip65
     object Auto : WriteRouting()
+    // nmp-native:endif
 
     data class Explicit(val relays: List<String>) : WriteRouting()
 
     fun toFfi(): FfiWriteRouting =
         when (this) {
+            // nmp-native:if nip65
             is Auto -> FfiWriteRouting.Auto
+            // nmp-native:endif
             is Explicit -> FfiWriteRouting.Explicit(relays)
         }
 
     companion object {
         internal fun from(ffi: FfiWriteRouting): WriteRouting =
             when (ffi) {
+                // nmp-native:if nip65
                 is FfiWriteRouting.Auto -> Auto
+                // nmp-native:endif
                 is FfiWriteRouting.Explicit -> Explicit(ffi.relays)
             }
     }
