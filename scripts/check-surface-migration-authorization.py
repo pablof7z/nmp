@@ -421,6 +421,11 @@ def issue_target_url(policy: AuthorizationPolicy, issue_number: int) -> str:
     return f"https://github.com/{policy.repository}/issues/{issue_number}"
 
 
+def status_api_url(policy: AuthorizationPolicy, head: str) -> str:
+    head = _require_oid("head", head)
+    return f"https://api.github.com/repos/{policy.repository}/statuses/{head}"
+
+
 def issue_number_from_target(policy: AuthorizationPolicy, target_url: Any) -> int:
     if not isinstance(target_url, str):
         raise AuthorizationError("migration status has no trusted issue target")
@@ -629,7 +634,10 @@ def require_owner_status_identity(
 ) -> None:
     checks = (
         (status.get("state") == "success", "latest migration status is not successful"),
-        (status.get("sha") == head, "migration status is attached to another commit"),
+        (
+            status.get("url") == status_api_url(policy, head),
+            "migration status API URL is not attached to the exact repository head",
+        ),
         (
             _nested(status, "creator", "login") == policy.owner_login,
             "migration status creator is not the fixed repository owner",

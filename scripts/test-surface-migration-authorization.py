@@ -312,6 +312,7 @@ class MigrationAuthorizationTests(unittest.TestCase):
         *,
         description: str | None = None,
         head: str | None = None,
+        repository: str | None = None,
         issue_number: int | None = None,
         context: str | None = None,
         state: str = "success",
@@ -320,14 +321,18 @@ class MigrationAuthorizationTests(unittest.TestCase):
         identifier: int = 10,
         created_at: str = "2026-07-30T23:59:00Z",
         target_url: str | None = None,
+        status_url: str | None = None,
     ) -> dict[str, Any]:
         actual_issue = (
             issue_number if issue_number is not None else self.issue_number
         )
+        actual_repository = repository or self.policy.repository
+        actual_head = head or self.head
         return {
             "id": identifier,
             "created_at": created_at,
-            "sha": head or self.head,
+            "url": status_url
+            or f"https://api.github.com/repos/{actual_repository}/statuses/{actual_head}",
             "state": state,
             "context": context or self.policy.context,
             "description": description or self.description,
@@ -436,7 +441,7 @@ class MigrationAuthorizationTests(unittest.TestCase):
         status = {
             "id": 10,
             "created_at": "2026-07-30T23:59:00Z",
-            "sha": self.head,
+            "url": f"https://api.github.com/repos/{repository}/statuses/{self.head}",
             "state": "success",
             "context": PINNED_AUTHORIZING_IDENTITY["context"],
             "description": description,
@@ -648,6 +653,42 @@ class MigrationAuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(self.verify(), expected)
         self.assertEqual(self.verify(), expected)
+
+    def test_real_api_shaped_status_binds_the_exact_head_by_canonical_url(self) -> None:
+        status = self.make_status()
+        self.assertNotIn("sha", status)
+        self.assertEqual(
+            status["url"],
+            (
+                "https://api.github.com/repos/"
+                f"{self.policy.repository}/statuses/{self.head}"
+            ),
+        )
+        self.verify(statuses=[status])
+
+    def test_status_url_must_bind_the_exact_repository_and_head(self) -> None:
+        wrong_urls = (
+            None,
+            "",
+            f"https://api.github.com/repos/{self.policy.repository}/statuses/{'0' * 40}",
+            f"https://api.github.com/repos/other/repository/statuses/{self.head}",
+            f"https://github.com/{self.policy.repository}/statuses/{self.head}",
+        )
+        for status_url in wrong_urls:
+            with self.subTest(status_url=status_url):
+                status = self.make_status()
+                if status_url is None:
+                    status.pop("url")
+                else:
+                    status["url"] = status_url
+                with self.assertRaises(authorization.AuthorizationError):
+                    self.verify(statuses=[status])
+
+        answer_injected = self.make_status()
+        answer_injected.pop("url")
+        answer_injected["sha"] = self.head
+        with self.assertRaises(authorization.AuthorizationError):
+            self.verify(statuses=[answer_injected])
 
     def test_raw_diff_binds_complete_diff_and_merge_base(self) -> None:
         self.assertEqual(self.snapshot.merge_base, self.base)
