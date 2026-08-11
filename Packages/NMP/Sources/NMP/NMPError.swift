@@ -364,6 +364,8 @@ extension NMPError: LocalizedError {
             "The finite live fact stream fell behind before a receipt was observable"
         case .receiptReplayUnavailable(let receiptId):
             "Retained evidence for receipt \(receiptId) became unavailable during replay"
+        case .receiptClosedWithoutOutcome(let receiptId):
+            "Receipt \(receiptId) closed before its terminal outcome"
         case .signEventAlreadyConsumed:
             "This sign-event result was already consumed"
         case .invalidSignature(let got):

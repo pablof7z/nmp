@@ -146,6 +146,10 @@ final class EvidenceMappingTests: XCTestCase {
             NMPError(.ReceiptReplayUnavailable(receiptId: 42)),
             .receiptReplayUnavailable(receiptId: 42)
         )
+        XCTAssertEqual(
+            NMPError(.ReceiptClosedWithoutOutcome(receiptId: 43)),
+            .receiptClosedWithoutOutcome(receiptId: 43)
+        )
     }
 
     /// #680: `reattachReceipt` now maps the generated `FfiReceiptReattachment`
