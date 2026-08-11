@@ -1596,11 +1596,9 @@ impl<S: EventStore> EngineCore<S> {
             ReceiptState::Signed => Some(WriteFact::Signing(SigningState::Signed {
                 event_id: receipt.frozen_id,
             })),
-            // Compensation is the store half of a whole-write failure; the
-            // caller-visible reason rode the signing refusal that caused it.
-            ReceiptState::Compensated => Some(WriteFact::Signing(SigningState::Refused {
-                reason: "write compensated".to_string(),
-            })),
+            ReceiptState::Compensated => Some(WriteFact::Outcome(WriteOutcome::NotSent(
+                NotSentReason::SignerRefused,
+            ))),
             ReceiptState::Cancelled => Some(WriteFact::Outcome(WriteOutcome::NotSent(
                 NotSentReason::Cancelled,
             ))),
@@ -1697,9 +1695,20 @@ impl<S: EventStore> EngineCore<S> {
             None => (Vec::new(), Vec::new(), Vec::new()),
         };
         let mut replay = Vec::new();
-        if let Some(status) = Self::retained_receipt_fact(&receipt) {
-            replay.push((ReceiptReplayFactKey::ReceiptStatus, status));
-        }
+        let retained_status =
+            if receipt.state == ReceiptState::Signed && !self.pending.contains_key(&id) {
+                Some(WriteFact::Outcome(WriteOutcome::Settled))
+            } else {
+                Self::retained_receipt_fact(&receipt)
+            };
+        let terminal_status = match retained_status {
+            Some(status @ WriteFact::Outcome(_)) => Some(status),
+            Some(status) => {
+                replay.push((ReceiptReplayFactKey::ReceiptStatus, status));
+                None
+            }
+            None => None,
+        };
         // A reattaching app is told which of the two unsigned states this
         // obligation is in, exactly as the queue projection reports it
         // (#1261): a signer holding the request is not a signer nobody has.
@@ -1949,6 +1958,9 @@ impl<S: EventStore> EngineCore<S> {
                     },
                 ));
             }
+        }
+        if let Some(status) = terminal_status {
+            replay.push((ReceiptReplayFactKey::ReceiptStatus, status));
         }
         if limit == 0 {
             return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
@@ -2645,7 +2657,9 @@ impl<S: EventStore> EngineCore<S> {
                         (receipt.state == ReceiptState::Signed).then_some(WriteOutcome::Settled)
                     }
                 },
-                ReceiptState::Compensated => None,
+                ReceiptState::Compensated => {
+                    Some(WriteOutcome::NotSent(NotSentReason::SignerRefused))
+                }
             };
             let relay_states = pending
                 .map(|pending| self.relay_states_for(pending))
@@ -3265,6 +3279,10 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::EmitReceipt(
             id,
             WriteFact::Signing(SigningState::Refused { reason }),
+        ));
+        effects.push(Effect::EmitReceipt(
+            id,
+            WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::SignerRefused)),
         ));
     }
 

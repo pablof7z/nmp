@@ -13,6 +13,10 @@ final class EvidenceMappingTests: XCTestCase {
             .outcome(.notSent(.superseded))
         )
         XCTAssertEqual(
+            WriteFact(.outcome(outcome: .notSent(reason: .signerRefused))),
+            .outcome(.notSent(.signerRefused))
+        )
+        XCTAssertEqual(
             WriteFact(.outcome(outcome: .superseded)),
             .outcome(.superseded)
         )
@@ -141,6 +145,10 @@ final class EvidenceMappingTests: XCTestCase {
         XCTAssertEqual(
             NMPError(.ReceiptReplayUnavailable(receiptId: 42)),
             .receiptReplayUnavailable(receiptId: 42)
+        )
+        XCTAssertEqual(
+            NMPError(.ReceiptClosedWithoutOutcome(receiptId: 43)),
+            .receiptClosedWithoutOutcome(receiptId: 43)
         )
     }
 

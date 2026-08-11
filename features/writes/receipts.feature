@@ -48,3 +48,60 @@ Feature: Publishing tells the truth, per relay
     When every planned relay rejects its publication
     Then the receipt records each relay rejection
     And the signed row remains visible
+
+  # nmp:id=WRITES-RECEIPTS-005
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::receipt_result_returns_one_terminal_answer_without_app_reduction
+  # nmp:falsifier=Require every app to drain and interpret WriteFact itself; two apps can give different answers for the same durable receipt.
+  @ledger-9
+  Scenario: An app awaits one terminal publication answer
+    Given NMP accepted a write and returned its receipt
+    When the app awaits the receipt result
+    Then NMP returns exactly one typed whole-write outcome
+    And the app implements no receipt-state reducer
+
+  # nmp:id=WRITES-RECEIPTS-006
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::mixed_relay_result_preserves_each_terminal_truth
+  # nmp:falsifier=Collapse a mixed publish and rejection to one boolean; the app loses which relay rejected and why.
+  @ledger-9
+  Scenario: Relay disagreement survives terminal reduction
+    Given one destination published the event
+    And another destination rejected it with a reason
+    When the receipt result completes
+    Then both final relay states are present
+    And the rejection reason remains attached to the rejecting relay
+
+  # nmp:id=WRITES-RECEIPTS-007
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::terminal_signer_errors_compensate_the_write
+  # nmp:falsifier=End an accepted write with only a signing-progress refusal; result waits forever because no whole-write terminal exists.
+  @ledger-9 @ledger-10
+  Scenario: Signer refusal is a terminal publication result
+    Given NMP accepted an unsigned write
+    When its signer refuses and compensation commits
+    Then the receipt reports that signing was refused
+    And the receipt ends as not sent because the signer refused
+
+  # nmp:id=WRITES-RECEIPTS-008
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-ffi::receipt_result_recovers_from_live_fifo_lag_without_exposing_replay
+  # nmp:falsifier=Treat live-stream lag as terminal loss; an app awaiting the result fails even though durable replay contains the complete receipt.
+  @ledger-9 @ledger-15
+  Scenario: Terminal result recovers from live receipt lag
+    Given live receipt delivery exceeded its bounded memory window
+    And the complete receipt remains durable
+    When the app awaits the receipt result
+    Then NMP restarts from retained receipt history
+    And returns the same terminal answer without exposing a replay cursor
+
+  # nmp:id=WRITES-RECEIPTS-009
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::restart_reattachment_returns_the_same_terminal_answer_without_cursor_code
+  # nmp:falsifier=Make a restarted app traverse receipt pages and reduce them itself; restart requires a second app-specific receipt implementation.
+  @ledger-9 @ledger-15
+  Scenario: Restarted app retrieves the terminal result by receipt id
+    Given an accepted receipt survived process restart
+    When the app asks NMP for that receipt's result
+    Then NMP traverses retained pages and returns its terminal answer
+    And the app implements no cursor or replay loop

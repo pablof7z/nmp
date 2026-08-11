@@ -226,7 +226,7 @@ impl FfiGroup {
         let author = parse_pubkey(&author)?;
         let builder = event_builder_from_ffi(builder)?;
         let receipts = self.inner.publish(&engine.engine, author, builder)?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9021 -- ask to join. Publishable with no subscription at all.
@@ -240,7 +240,7 @@ impl FfiGroup {
         let receipts = self
             .inner
             .join_request(&engine.engine, author, invite_code.as_deref())?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9022 -- leave.
@@ -251,7 +251,7 @@ impl FfiGroup {
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
         let receipts = self.inner.leave_request(&engine.engine, author)?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9000 -- add several members in one event, optionally with a role
@@ -273,7 +273,7 @@ impl FfiGroup {
             })
             .collect::<Result<Vec<_>, FfiError>>()?;
         let receipts = self.inner.add_users(&engine.engine, author, users)?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9001 -- remove several members in one event.
@@ -289,7 +289,7 @@ impl FfiGroup {
             .map(|pubkey| parse_pubkey(&pubkey))
             .collect::<Result<Vec<_>, _>>()?;
         let receipts = self.inner.remove_users(&engine.engine, author, pubkeys)?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9002 -- state part of the group's metadata
@@ -310,7 +310,7 @@ impl FfiGroup {
         let receipts = self
             .inner
             .edit_metadata(&engine.engine, author, edit.into())?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9005 -- delete one group-hosted event.
@@ -323,7 +323,7 @@ impl FfiGroup {
         let author = parse_pubkey(&author)?;
         let event_id = parse_event_id(&event_id)?;
         let receipts = self.inner.delete_event(&engine.engine, author, event_id)?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9007 -- create the group at its hosts, optionally as a SUBGROUP
@@ -343,7 +343,7 @@ impl FfiGroup {
         let receipts = self
             .inner
             .create_group(&engine.engine, author, parent.as_deref())?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9008 -- delete the group from its hosts.
@@ -354,7 +354,7 @@ impl FfiGroup {
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
         let receipts = self.inner.delete_group(&engine.engine, author)?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 
     /// kind:9009 -- mint an invite code redeemable by
@@ -367,7 +367,7 @@ impl FfiGroup {
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
         let receipts = self.inner.create_invite(&engine.engine, author, &code)?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 }
 
@@ -411,7 +411,7 @@ impl FfiGroups {
         let author = parse_pubkey(&author)?;
         let builder = event_builder_from_ffi(builder)?;
         let receipts = self.inner.publish(&engine.engine, author, builder)?;
-        Ok(NmpReceiptStream::new(receipts))
+        Ok(NmpReceiptStream::new(engine.engine.clone(), receipts))
     }
 }
 

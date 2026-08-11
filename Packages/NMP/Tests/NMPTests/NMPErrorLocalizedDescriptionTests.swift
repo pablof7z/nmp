@@ -67,6 +67,10 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
                 .receiptReplayUnavailable(receiptId: 29),
                 "Retained evidence for receipt 29 became unavailable during replay"
             ),
+            (
+                .receiptClosedWithoutOutcome(receiptId: 31),
+                "Receipt 31 closed before its terminal outcome"
+            ),
             (.signEventAlreadyConsumed, "This sign-event result was already consumed"),
             (.invalidSignature("sentinel-signature"), #"Invalid signature hex: "sentinel-signature""#),
             (.engineClosed, "Engine already shut down"),

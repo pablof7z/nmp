@@ -55,10 +55,43 @@ public struct ReceiptStatus: AsyncSequence, Sendable {
 public struct Receipt: Sendable {
     public let id: UInt64
     public let status: ReceiptStatus
+    private let handle: NmpReceiptStream
 
     init(handle: NmpReceiptStream) {
         self.id = handle.id()
         self.status = ReceiptStatus(handle: handle)
+        self.handle = handle
+    }
+
+    /// Await the one terminal publication answer. NMP owns receipt reduction
+    /// and durable replay; callers do not fold `status` themselves.
+    public func result() async throws -> ReceiptResult {
+        let result = try await nmpRethrowingAsync {
+            try await handle.result()
+        }
+        return ReceiptResult(result)
+    }
+}
+
+public struct ReceiptRelayResult: Sendable, Hashable {
+    public let relay: String
+    public let state: RelayState
+
+    init(_ ffi: FfiReceiptRelayResult) {
+        self.relay = ffi.relay
+        self.state = RelayState(ffi.state)
+    }
+}
+
+/// NMP's terminal answer for one accepted write. Every known destination's
+/// final state remains visible, including mixed publish/reject outcomes.
+public struct ReceiptResult: Sendable, Hashable {
+    public let outcome: WriteOutcome
+    public let relays: [ReceiptRelayResult]
+
+    init(_ ffi: FfiReceiptResult) {
+        self.outcome = WriteOutcome(ffi.outcome)
+        self.relays = ffi.relays.map(ReceiptRelayResult.init)
     }
 }
 

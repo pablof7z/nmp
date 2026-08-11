@@ -1053,6 +1053,7 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
 fn not_sent_reason_name(reason: NotSentReason) -> &'static str {
     match reason {
         NotSentReason::Cancelled => "cancelled",
+        NotSentReason::SignerRefused => "signer-refused",
         NotSentReason::Superseded => "superseded",
     }
 }
@@ -1060,6 +1061,7 @@ fn not_sent_reason_name(reason: NotSentReason) -> &'static str {
 fn ffi_not_sent_reason_name(reason: FfiNotSentReason) -> &'static str {
     match reason {
         FfiNotSentReason::Cancelled => "cancelled",
+        FfiNotSentReason::SignerRefused => "signer-refused",
         FfiNotSentReason::Superseded => "superseded",
     }
 }
