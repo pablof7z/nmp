@@ -82,6 +82,11 @@ required-features = ["bench-instrumentation"]
 name = "local_mutation_delta_bench"
 required-features = ["bench-instrumentation"]
 
+[[test]]
+name = "acceptance"
+path = "tests/acceptance/main.rs"
+required-features = ["nip65"]
+
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
@@ -153,6 +158,7 @@ libc = { version = "0.2", optional = true }
 # path an app has -- instead of through a second `nmp-nip51` dev edge.
 nmp = { path = ".", features = ["nip65", "nip51"] }
 nmp-test-support.workspace = true
+cucumber = "0.21"
 # In-process test relay for the runtime (C) integration tests: reconnection
 # replay (test 6) and the end-to-end subscribe/publish/reconnect drive.
 # Async under the hood (nostr-sdk); confined to dev-dependencies and

@@ -1420,10 +1420,7 @@ impl<S: EventStore> EngineCore<S> {
         // had already queried it. Needs themselves are deliberately
         // stateless; replay the rebuilt set through the same typed effect
         // live rewrites use so NIP-65 can reopen discovery after a crash.
-        let recovered_route_needs = self.author_route_needs();
-        if !recovered_route_needs.is_empty() {
-            effects.push(Effect::AuthorRouteNeedsChanged(recovered_route_needs));
-        }
+        self.resync_route_needs(&mut effects);
         self.last_stalled_write_census = self.stalled_write_census();
         let (rows, totals) = self.stalled_write_projection();
         self.cached_stalled_writes = rows;
@@ -3033,9 +3030,8 @@ impl<S: EventStore> EngineCore<S> {
             .entry(event.id)
             .or_default()
             .insert(id);
-        let needs_before = self.author_route_needs();
         self.apply_route_answer(id, intent_id, answer, effects);
-        self.resync_route_needs(needs_before, effects);
+        self.resync_route_needs(effects);
     }
 
     /// Turn one intent's freshly-minted lanes into live delivery work
@@ -3428,21 +3424,110 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    /// Every public key the open intents still need neutral author routes for.
+    /// Every public key for which current read or write work needs the
+    /// optional neutral author-route provider.
     ///
-    /// Read straight off reducer memory (`route_needs`, refreshed by the
-    /// last resolution of each intent), so a discovery pass costs no store
-    /// read and N intents wanting the same author collapse to one entry by
-    /// set union. An optional protocol assembly may turn this set into an
-    /// exact query. Nothing here is recovered from the journal: a restart
-    /// re-resolves every open intent and re-declares whatever is still
-    /// needed, which is why declared needs have no durability story to lose.
+    /// Write needs come straight from reducer memory (`route_needs`, refreshed
+    /// by the last resolution of each intent). Read needs come from the
+    /// resolver's current wire-contributing `AuthorOutboxes` atoms whose
+    /// author lacks a positive outbound route, including authors produced by
+    /// a derived query. Pinned provider queries do not feed themselves back
+    /// into this set.
     pub(super) fn author_route_needs(&self) -> BTreeSet<PublicKey> {
-        self.pending
+        let mut needs: BTreeSet<PublicKey> = self
+            .pending
             .values()
             .filter(|pending| !pending.route_complete)
             .flat_map(|pending| pending.route_needs.iter().copied())
+            .collect();
+        needs.extend(self.author_outbox_route_needs.iter().copied());
+        needs
+    }
+
+    fn author_outbox_authors(atom: &ContextualAtom) -> Vec<PublicKey> {
+        if atom.source != SourceAuthority::AuthorOutboxes {
+            return Vec::new();
+        }
+        atom.filter
+            .authors
+            .iter()
+            .flatten()
+            .map(|author| {
+                PublicKey::from_hex(author)
+                    .expect("resolved ConcreteFilter authors are validated public keys")
+            })
             .collect()
+    }
+
+    fn author_has_positive_outbox(&self, author: &PublicKey) -> bool {
+        matches!(
+            self.routing_facts.author_routes(author),
+            AuthorRouteState::Present(routes) if !routes.outbound().is_empty()
+        )
+    }
+
+    pub(super) fn retain_author_outbox_wire_owner(&mut self, atom: &ContextualAtom) {
+        for author in Self::author_outbox_authors(atom) {
+            let owners = self
+                .author_outbox_wire_owner_counts
+                .entry(author)
+                .or_insert(0);
+            *owners = owners.saturating_add(1);
+            if *owners == 1
+                && !self.author_has_positive_outbox(&author)
+                && self.author_outbox_route_needs.insert(author)
+            {
+                self.author_outbox_route_needs_changed = true;
+            }
+        }
+    }
+
+    pub(super) fn release_author_outbox_wire_owner(&mut self, atom: &ContextualAtom) {
+        for author in Self::author_outbox_authors(atom) {
+            let Some(owners) = self.author_outbox_wire_owner_counts.get_mut(&author) else {
+                continue;
+            };
+            *owners = owners.saturating_sub(1);
+            if *owners == 0 {
+                self.author_outbox_wire_owner_counts.remove(&author);
+                if self.author_outbox_route_needs.remove(&author) {
+                    self.author_outbox_route_needs_changed = true;
+                }
+            }
+        }
+    }
+
+    pub(super) fn rebuild_author_outbox_route_needs(&mut self) {
+        let owners: Vec<_> = self
+            .wire_owner_counts
+            .values()
+            .map(|(atom, count)| (atom.clone(), *count))
+            .collect();
+        for (atom, count) in owners {
+            for author in Self::author_outbox_authors(&atom) {
+                let total = self
+                    .author_outbox_wire_owner_counts
+                    .entry(author)
+                    .or_insert(0);
+                *total = total.saturating_add(count);
+            }
+        }
+        let authors: Vec<_> = self
+            .author_outbox_wire_owner_counts
+            .keys()
+            .copied()
+            .collect();
+        for author in authors {
+            if !self.author_has_positive_outbox(&author) {
+                self.author_outbox_route_needs.insert(author);
+            }
+        }
+    }
+
+    pub(super) fn flush_author_outbox_route_need_changes(&mut self, effects: &mut Vec<Effect>) {
+        if self.author_outbox_route_needs_changed {
+            self.resync_route_needs(effects);
+        }
     }
 
     /// ONE resolution moment for ONE intent: re-execute the strategy against
@@ -3687,25 +3772,22 @@ impl<S: EventStore> EngineCore<S> {
         if open.is_empty() {
             return;
         }
-        let before = self.author_route_needs();
         for id in open {
             self.rewrite_route(id, effects);
             self.close_if_all_lanes_terminal(id, effects);
         }
-        self.resync_route_needs(before, effects);
+        self.resync_route_needs(effects);
     }
 
     /// Publish a changed neutral author-route need set.
     ///
     /// A need is not a subscription. Optional protocol assembly reads this
     /// neutral set and owns any exact query it opens.
-    pub(super) fn resync_route_needs(
-        &mut self,
-        before: BTreeSet<PublicKey>,
-        effects: &mut Vec<Effect>,
-    ) {
+    pub(super) fn resync_route_needs(&mut self, effects: &mut Vec<Effect>) {
+        self.author_outbox_route_needs_changed = false;
         let current = self.author_route_needs();
-        if current != before {
+        if current != self.last_author_route_needs {
+            self.last_author_route_needs = current.clone();
             effects.push(Effect::AuthorRouteNeedsChanged(current));
         }
     }

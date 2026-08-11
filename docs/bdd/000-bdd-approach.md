@@ -172,6 +172,12 @@ Ungoverned legacy retains its old `@wip`/`@designed`/`@live` filter while
 migration proceeds. #1077 owns the one supported-facade acceptance target;
 this mechanism runner never impersonates it.
 
+The `nmp` acceptance target under `crates/nmp/tests/acceptance/` is the one
+deterministic public-facade Cucumber runner. It loads selected canonical
+`features/<domain>/` files directly, constructs `Engine::new`, and uses
+independent scripted-relay witnesses; no `.feature` copy lives beside the
+test. CI runs it in the distinct `facade-acceptance` job.
+
 ## 5. Current executable scope
 
 The current harness proves a narrow but real slice:
