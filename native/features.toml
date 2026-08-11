@@ -1,0 +1,213 @@
+schema = 1
+
+# Cargo owns dependency resolution. Each record below names only the
+# forwarding feature on the one native FFI package and the source files that
+# become valid when Cargo reports that forwarding feature active.
+[artifact]
+ffi_package = "nmp-ffi"
+ffi_manifest = "crates/nmp-ffi/Cargo.toml"
+library_stem = "nmp_ffi"
+bindgen_bin = "uniffi-bindgen"
+
+[apple]
+package_name = "NMP"
+xcframework_name = "NMP.xcframework"
+binary_target = "nmp_ffiFFI"
+ffi_target = "NMPFFI"
+macos_deployment_target = "13.0"
+platforms = [".iOS(.v16)", ".macOS(.v13)"]
+linked_frameworks = ["SystemConfiguration"]
+targets = [
+  { name = "NMP", dependencies = ["NMPFFI"] },
+  { name = "NMPContent", dependencies = ["NMPFFI"] },
+]
+slices = [
+  { name = "ios-device", targets = ["aarch64-apple-ios"] },
+  { name = "ios-simulator", targets = ["aarch64-apple-ios-sim", "x86_64-apple-ios"] },
+  { name = "macos", targets = ["aarch64-apple-darwin"] },
+]
+
+[kotlin]
+project_name = "nmp-kotlin"
+group = "com.nmp"
+version = "0.0.0"
+jvm_toolchain = 17
+dependencies = [
+  "net.java.dev.jna:jna:5.14.0",
+  "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0",
+]
+
+[core]
+ffi_sources = [
+  "crates/nmp-ffi/src/auth.rs",
+  "crates/nmp-ffi/src/convert.rs",
+  "crates/nmp-ffi/src/entity.rs",
+  "crates/nmp-ffi/src/facade.rs",
+  "crates/nmp-ffi/src/lib.rs",
+  "crates/nmp-ffi/src/tagging.rs",
+  "crates/nmp-ffi/src/types.rs",
+]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/AuthPolicy.swift", target = "NMP", destination = "AuthPolicy.swift" },
+  { path = "Packages/NMP/Sources/NMP/Diagnostics.swift", target = "NMP", destination = "Diagnostics.swift" },
+  { path = "Packages/NMP/Sources/NMP/DiagnosticsQuery.swift", target = "NMP", destination = "DiagnosticsQuery.swift" },
+  { path = "Packages/NMP/Sources/NMP/Engine.swift", target = "NMP", destination = "Engine.swift" },
+  { path = "Packages/NMP/Sources/NMP/InsecureFileAccountStore.swift", target = "NMP", destination = "InsecureFileAccountStore.swift" },
+  { path = "Packages/NMP/Sources/NMP/KeychainAccountStore.swift", target = "NMP", destination = "KeychainAccountStore.swift" },
+  { path = "Packages/NMP/Sources/NMP/NMPDemand.swift", target = "NMP", destination = "NMPDemand.swift" },
+  { path = "Packages/NMP/Sources/NMP/NMPError.swift", target = "NMP", destination = "NMPError.swift" },
+  { path = "Packages/NMP/Sources/NMP/NMPFilter.swift", target = "NMP", destination = "NMPFilter.swift" },
+  { path = "Packages/NMP/Sources/NMP/NostrEntity.swift", target = "NMP", destination = "NostrEntity.swift" },
+  { path = "Packages/NMP/Sources/NMP/Observable.swift", target = "NMP", destination = "Observable.swift" },
+  { path = "Packages/NMP/Sources/NMP/PullDriver.swift", target = "NMP", destination = "PullDriver.swift" },
+  { path = "Packages/NMP/Sources/NMP/Query.swift", target = "NMP", destination = "Query.swift" },
+  { path = "Packages/NMP/Sources/NMP/Receipt.swift", target = "NMP", destination = "Receipt.swift" },
+  { path = "Packages/NMP/Sources/NMP/RelayInformation.swift", target = "NMP", destination = "RelayInformation.swift" },
+  { path = "Packages/NMP/Sources/NMP/Row.swift", target = "NMP", destination = "Row.swift" },
+  { path = "Packages/NMP/Sources/NMP/Signing.swift", target = "NMP", destination = "Signing.swift" },
+  { path = "Packages/NMP/Sources/NMP/Tagging.swift", target = "NMP", destination = "Tagging.swift" },
+  { path = "Packages/NMP/Sources/NMP/Window.swift", target = "NMP", destination = "Window.swift" },
+  { path = "Packages/NMP/Sources/NMP/WriteIntent.swift", target = "NMP", destination = "WriteIntent.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/AuthPolicy.kt", destination = "com/nmp/sdk/AuthPolicy.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Diagnostics.kt", destination = "com/nmp/sdk/Diagnostics.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/DiagnosticsQuery.kt", destination = "com/nmp/sdk/DiagnosticsQuery.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Engine.kt", destination = "com/nmp/sdk/Engine.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/InsecureFileAccountStore.kt", destination = "com/nmp/sdk/InsecureFileAccountStore.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPDemand.kt", destination = "com/nmp/sdk/NMPDemand.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPError.kt", destination = "com/nmp/sdk/NMPError.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPFilter.kt", destination = "com/nmp/sdk/NMPFilter.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NostrEntity.kt", destination = "com/nmp/sdk/NostrEntity.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Query.kt", destination = "com/nmp/sdk/Query.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Receipt.kt", destination = "com/nmp/sdk/Receipt.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/RelayInformation.kt", destination = "com/nmp/sdk/RelayInformation.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Row.kt", destination = "com/nmp/sdk/Row.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/SecureKeyStoreAccountStore.kt", destination = "com/nmp/sdk/SecureKeyStoreAccountStore.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Signing.kt", destination = "com/nmp/sdk/Signing.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Tagging.kt", destination = "com/nmp/sdk/Tagging.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Window.kt", destination = "com/nmp/sdk/Window.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/WriteIntent.kt", destination = "com/nmp/sdk/WriteIntent.kt" },
+]
+
+[[features]]
+key = "asset"
+cargo_feature = "asset"
+ffi_sources = ["crates/nmp-ffi/src/asset.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/Asset.swift", target = "NMP", destination = "Asset.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Asset.kt", destination = "com/nmp/sdk/Asset.kt" },
+]
+
+[[features]]
+key = "blossom"
+cargo_feature = "blossom"
+ffi_sources = ["crates/nmp-ffi/src/blossom.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/Blossom.swift", target = "NMP", destination = "Blossom.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Blossom.kt", destination = "com/nmp/sdk/Blossom.kt" },
+]
+
+[[features]]
+key = "content"
+cargo_feature = "content"
+ffi_sources = ["crates/nmp-ffi/src/content.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMPContent/ContentDocument.swift", target = "NMPContent", destination = "ContentDocument.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Content.kt", destination = "com/nmp/sdk/Content.kt" },
+]
+
+[[features]]
+key = "nip02"
+cargo_feature = "nip02"
+ffi_sources = ["crates/nmp-ffi/src/nip02.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/Following.swift", target = "NMP", destination = "Following.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Following.kt", destination = "com/nmp/sdk/Following.kt" },
+]
+
+[[features]]
+key = "nip18"
+cargo_feature = "nip18"
+ffi_sources = ["crates/nmp-ffi/src/tagging.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/Tagging.swift", target = "NMP", destination = "Tagging.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Tagging.kt", destination = "com/nmp/sdk/Tagging.kt" },
+]
+
+[[features]]
+key = "nip22"
+cargo_feature = "nip22"
+ffi_sources = [
+  "crates/nmp-ffi/src/nip22.rs",
+  "crates/nmp-ffi/src/tagging.rs",
+]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/NIP22.swift", target = "NMP", destination = "NIP22.swift" },
+  { path = "Packages/NMP/Sources/NMP/Tagging.swift", target = "NMP", destination = "Tagging.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP22.kt", destination = "com/nmp/sdk/NIP22.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Tagging.kt", destination = "com/nmp/sdk/Tagging.kt" },
+]
+
+[[features]]
+key = "nip25"
+cargo_feature = "nip25"
+ffi_sources = ["crates/nmp-ffi/src/tagging.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/Tagging.swift", target = "NMP", destination = "Tagging.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Tagging.kt", destination = "com/nmp/sdk/Tagging.kt" },
+]
+
+[[features]]
+key = "nip29"
+cargo_feature = "nip29"
+ffi_sources = ["crates/nmp-ffi/src/nip29.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/NIP29.swift", target = "NMP", destination = "NIP29.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt", destination = "com/nmp/sdk/NIP29.kt" },
+]
+
+[[features]]
+key = "nip51"
+cargo_feature = "nip51"
+ffi_sources = ["crates/nmp-ffi/src/nip51.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/NIP51.swift", target = "NMP", destination = "NIP51.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP51.kt", destination = "com/nmp/sdk/NIP51.kt" },
+]
+
+[[features]]
+key = "nip65"
+cargo_feature = "nip65"
+ffi_sources = ["crates/nmp-ffi/src/facade.rs"]
+swift_sources = []
+kotlin_sources = []
+
+[[features]]
+key = "nipc7"
+cargo_feature = "nipc7"
+ffi_sources = ["crates/nmp-ffi/src/tagging.rs"]
+swift_sources = [
+  { path = "Packages/NMP/Sources/NMP/Tagging.swift", target = "NMP", destination = "Tagging.swift" },
+]
+kotlin_sources = [
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Tagging.kt", destination = "com/nmp/sdk/Tagging.kt" },
+]

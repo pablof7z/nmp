@@ -100,7 +100,26 @@ validates or promotes them. See `docs/builder/34-content.md`.
 
 ## Building from a clean clone
 
-`build.gradle.kts` compiles two things this module does NOT commit (see
+An application checks in one NMP feature manifest and prepares one exact local
+Kotlin/JVM build from the repository root:
+
+```sh
+python3 tools/nmp-native/nmp_native.py prepare \
+  --manifest path/to/app/nmp.toml \
+  --platform kotlin-jvm \
+  --output path/to/app/Generated/NMP
+```
+
+Consume it as a Gradle composite build with
+`includeBuild("Generated/NMP/kotlin-jvm")` and
+`implementation("com.nmp:nmp-kotlin:0.0.0")`. The local coordinate is stable;
+`nmp-native-provenance.json` identifies the exact selected content. Re-run
+prepare after changing the manifest, NMP source, or relevant host/toolchain
+inputs. Ordinary Gradle incrementals use the generated project without running
+Cargo. See [`native/README.md`](../../native/README.md).
+
+This repository's complete-surface qualification project compiles two things it
+does NOT commit (see
 `.gitignore`): the uniffi-bindgen-generated Kotlin bindings
 (`src/main/kotlin/uniffi/nmp_ffi/nmp_ffi.kt`) and the compiled native
 library (`src/main/resources/<jna-platform>/libnmp_ffi.{dylib,so}`) --
@@ -109,7 +128,7 @@ Swift package's xcframework: committing a binary would make this SDK's
 actual proof-of-correctness (that it's built from the source in this repo)
 unverifiable.
 
-That means `./gradlew build` / `./gradlew test` do **not** work straight
+That means maintainer `./gradlew build` / `./gradlew test` do **not** work straight
 after `git clone` until the artifacts exist once. Generate them from the
 **repo root**:
 
@@ -137,6 +156,9 @@ Re-run `scripts/build-kotlin-jvm.sh` after any change to `nmp-ffi`'s public
 UniFFI surface (new/changed exported types or methods) -- the generated
 bindings and the compiled cdylib both need to stay in sync with the Rust
 source, same discipline as the Swift xcframework.
+
+The fixed all-feature script is repository qualification machinery, not the app
+feature-selection workflow.
 
 ## Findings (#40's actual purpose -- discovering a bad shape is success)
 

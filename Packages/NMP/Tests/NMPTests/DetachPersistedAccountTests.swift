@@ -171,7 +171,10 @@ final class DetachPersistedAccountTests: XCTestCase {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let database = fixture.root.appendingPathComponent("nmp.redb")
-        let config = NMPConfig(storePath: database.path)
+        let config = NMPConfig(
+            storePath: database.path,
+            nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+        )
         let cachedKind: UInt16 = 30_333
 
         let seed = try NMPEngine(config: config, localAccountStore: fixture.store)

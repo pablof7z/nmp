@@ -26,6 +26,10 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidPublicKey(String)
     case invalidEventId(String)
     case invalidRelayUrl(String)
+    // nmp-native:if nip65
+    case nip65IndexerRelaysEmpty
+    case automaticRoutingUnavailable
+    // nmp-native:endif
     case invalidTag([String])
     case invalidSecretKey
     case invalidSigner(String)
@@ -146,20 +150,27 @@ public enum NMPError: Error, Sendable, Equatable {
     /// given a token that failed `CorrelationToken`'s bounded/non-empty
     /// validation.
     case invalidCorrelationToken(got: String, reason: String)
+    // nmp-native:if nip22
     /// #572/#1258: an `Nip73` failed its constructor validation (an empty
     /// `I`/`K` cell).
     case invalidNip73(reason: String)
+    // nmp-native:endif
+    // nmp-native:if nip25
     /// #155: a `Reaction.emoji` said something the caller did not mean --
     /// the empty string, which NIP-25 reads as a like, or a NIP-30
     /// `:shortcode:`, which needs a companion `emoji` row this door does not
     /// write.
     case invalidReaction(reason: String)
+    // nmp-native:endif
+    // nmp-native:if nip22
     /// #973: a composer returned a compare-and-swap replaceable edit, which
     /// has no wire form on purpose -- a replaceable precondition crosses
     /// this boundary only inside the semantic method that owns it
     /// (`follow`/`unfollow`), never as a payload a native caller could
     /// reassemble without the guard.
     case replaceableEditHasNoWireForm
+    // nmp-native:endif
+    // nmp-native:if nip29
     /// #1033: `NMPRelayScope.on`/`FfiRelayScope.on` was given an empty
     /// relay set -- a group must be hosted somewhere.
     case emptyRelayScope
@@ -214,6 +225,7 @@ public enum NMPError: Error, Sendable, Equatable {
     /// `NMPGroupIds.anyOf(_:)` as a derived binding carrying its own
     /// authority.
     case groupIdSelectionNotAGroupRecordKind(kind: UInt16)
+    // nmp-native:endif
 
     init(_ ffi: FfiError) {
         switch ffi {
@@ -221,6 +233,10 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidPublicKey(let got): self = .invalidPublicKey(got)
         case .InvalidEventId(let got): self = .invalidEventId(got)
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)
+        // nmp-native:if nip65
+        case .Nip65IndexerRelaysEmpty: self = .nip65IndexerRelaysEmpty
+        case .AutomaticRoutingUnavailable: self = .automaticRoutingUnavailable
+        // nmp-native:endif
         case .InvalidTag(let got): self = .invalidTag(got)
         case .InvalidSecretKey: self = .invalidSecretKey
         case .InvalidSigner(let reason): self = .invalidSigner(reason)
@@ -268,11 +284,18 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
         case .InvalidCorrelationToken(let got, let reason):
             self = .invalidCorrelationToken(got: got, reason: reason)
+        // nmp-native:if nip22
         case .InvalidNip73(let reason):
             self = .invalidNip73(reason: reason)
+        // nmp-native:endif
+        // nmp-native:if nip25
         case .InvalidReaction(let reason):
             self = .invalidReaction(reason: reason)
+        // nmp-native:endif
+        // nmp-native:if nip22
         case .ReplaceableEditHasNoWireForm: self = .replaceableEditHasNoWireForm
+        // nmp-native:endif
+        // nmp-native:if nip29
         case .EmptyRelayScope: self = .emptyRelayScope
         case .GroupCallerSuppliedContext: self = .groupCallerSuppliedContext
         case .GroupCallerSuppliedContextConstraint:
@@ -296,6 +319,7 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .groupIdSelectionNamesNoKind
         case .GroupIdSelectionNotAGroupRecordKind(let kind):
             self = .groupIdSelectionNotAGroupRecordKind(kind: kind)
+        // nmp-native:endif
         }
     }
 }
@@ -314,6 +338,12 @@ extension NMPError: LocalizedError {
             "Invalid event ID hex: \(got.debugDescription)"
         case .invalidRelayUrl(let got):
             "Invalid relay URL: \(got.debugDescription)"
+        // nmp-native:if nip65
+        case .nip65IndexerRelaysEmpty:
+            "NIP-65 requires at least one app-owned indexer relay"
+        case .automaticRoutingUnavailable:
+            "Automatic routing is unavailable; construct the engine with NIP-65 indexer relays"
+        // nmp-native:endif
         case .invalidTag(let got):
             "Invalid tag: \(String(reflecting: got))"
         case .invalidSecretKey:
@@ -400,12 +430,19 @@ extension NMPError: LocalizedError {
             "Relay information unavailable: \(kind)"
         case .invalidCorrelationToken(let got, let reason):
             "Invalid correlation token \(got.debugDescription): \(reason)"
+        // nmp-native:if nip22
         case .invalidNip73(let reason):
             "Invalid NIP-73 external content id: \(reason)"
+        // nmp-native:endif
+        // nmp-native:if nip25
         case .invalidReaction(let reason):
             "Invalid reaction: \(reason)"
+        // nmp-native:endif
+        // nmp-native:if nip22
         case .replaceableEditHasNoWireForm:
             "A replaceable edit crosses this boundary only inside the semantic method that owns its precondition, never as a payload"
+        // nmp-native:endif
+        // nmp-native:if nip29
         case .emptyRelayScope:
             "RelayScope.on requires a nonempty relay set -- a group must be hosted somewhere"
         case .groupCallerSuppliedContext:
@@ -434,6 +471,7 @@ extension NMPError: LocalizedError {
             "A group-record selection must name at least one of NIP-29's three relay-signed group record kinds"
         case .groupIdSelectionNotAGroupRecordKind(let kind):
             "Kind \(kind) is not one of NIP-29's three relay-signed group records; a group host is not authoritative for it"
+        // nmp-native:endif
         }
     }
 }

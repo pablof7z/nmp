@@ -1,3 +1,5 @@
+#![cfg(feature = "nip29")]
+
 //! #1033 Lane A -- the FFI projection of `nmp::nip29` end to end, through
 //! `nmp_ffi::nip29`'s own public objects rather than `#[cfg(test)]` unit
 //! tests inside the crate. This is the boundary a Swift/Kotlin app actually

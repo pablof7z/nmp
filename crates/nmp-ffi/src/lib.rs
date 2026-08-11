@@ -58,15 +58,23 @@
 //! `nmp-blossom` (#555, see [`blossom`]'s) are the opt-in protocol
 //! dependencies projected by this boundary.
 
+#[cfg(feature = "asset")]
+pub mod asset;
 pub mod auth;
+#[cfg(feature = "blossom")]
 pub mod blossom;
+#[cfg(feature = "content")]
 pub mod content;
 pub mod convert;
 pub mod entity;
 pub mod facade;
+#[cfg(feature = "nip02")]
 pub mod nip02;
+#[cfg(feature = "nip22")]
 pub mod nip22;
+#[cfg(feature = "nip29")]
 pub mod nip29;
+#[cfg(feature = "nip51")]
 pub mod nip51;
 // #1243: the one tagging door at the native boundary -- reply, chat reply and
 // repost, each returning the `FfiEventBuilder` the publish door already takes.

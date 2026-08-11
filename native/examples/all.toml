@@ -1,0 +1,14 @@
+schema = 1
+features = [
+  "asset",
+  "blossom",
+  "content",
+  "nip02",
+  "nip18",
+  "nip22",
+  "nip25",
+  "nip29",
+  "nip51",
+  "nip65",
+  "nipc7",
+]
