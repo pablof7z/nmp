@@ -201,10 +201,87 @@ impl<S: EventStore> EngineCore<S> {
     /// so a failing deadline peek has no reducer entry point to report
     /// through and reports here directly (#763).
     pub(crate) fn degrade_store(&mut self, err: PersistenceError, effects: &mut Vec<Effect>) {
+        self.record_store_failure(&err);
+        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+    }
+
+    /// Retain typed failure truth without requiring a call site to fabricate
+    /// an unrelated reducer effect. Boot reconstruction has several
+    /// per-intent reads whose established contract emits no receipt/wire fact;
+    /// this still lets the runtime detect an incomplete generation and decide
+    /// recovery from the fault type.
+    fn record_store_failure(&mut self, err: &PersistenceError) {
+        self.store_failure_epoch = self.store_failure_epoch.saturating_add(1);
+        if err.fault().requires_reopen() {
+            self.store_recovery_requested = Some(err.fault());
+        }
         if self.store_degraded.is_none() {
             self.store_degraded = Some(err.to_string());
         }
+    }
+
+    /// Transfer one typed reopen request to the runtime supervisor. Repeated
+    /// failures coalesce into one active recovery generation; diagnostics
+    /// retain the first error independently.
+    pub(crate) fn take_store_recovery_request(&mut self) -> Option<PersistenceFault> {
+        self.store_recovery_requested.take()
+    }
+
+    /// Replace the backend handle and rebuild every volatile projection whose
+    /// truth came from it, without replacing this reducer or any public
+    /// Engine-owned handle. The failed mutation is never retried here.
+    pub(crate) fn recover_store_after_failure(&mut self) -> Result<Vec<Effect>, PersistenceError> {
+        self.resolver.store_mut().reopen_after_failure()?;
+
+        // An I/O error may have committed even though redb returned `Err`.
+        // Recompute every store-derived binding before projecting rows, then
+        // rebuild the durable write plane from stable receipt/intent keys.
+        let resolver_delta = self.resolver.rebuild_after_store_reopen()?;
+        self.consume_resolver_delta(resolver_delta);
+
+        self.quarantined_auth_receipts.clear();
+        self.pending.clear();
+        self.last_stalled_write_census.clear();
+        self.cached_stalled_writes.clear();
+        self.cached_stalled_write_totals = StalledWriteTotals {
+            detail_limit: u64::try_from(STALLED_WRITE_DETAIL_LIMIT).unwrap_or(u64::MAX),
+            ..StalledWriteTotals::default()
+        };
+        self.event_to_receipts.clear();
+        self.intent_receipts.clear();
+        self.receipts_by_lane_relay.clear();
+        self.lane_relay_index_degraded = false;
+        self.lane_projection_unprovable = false;
+        self.lane_bootstrap_retries.clear();
+        self.attempt_correlations.clear();
+        self.retry_scheduler_blocked = false;
+
+        let recovery_failure_epoch = self.store_failure_epoch;
+        let mut effects = self.recover_on_boot();
+        let branch_ids: Vec<_> = self.handles.keys().copied().collect();
+        for id in branch_ids {
+            self.reconcile_observation_resolution(
+                id,
+                ResolutionCause::DependencyChanged,
+                &mut effects,
+            );
+        }
+        self.recompile(&mut effects);
+
+        // `recover_on_boot` can itself discover a fresh backend failure. Only
+        // a generation that completed without rearming recovery is healthy.
+        if self.store_failure_epoch != recovery_failure_epoch {
+            let fault = self
+                .store_recovery_requested
+                .unwrap_or(PersistenceFault::Invariant);
+            return Err(PersistenceError::new(
+                fault,
+                "durable store failed again while reconstructing reducer state",
+            ));
+        }
+        self.store_degraded = None;
         effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        Ok(effects)
     }
 
     /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
@@ -1220,8 +1297,9 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// Rebuild volatile ownership from the journal without reinserting a
-    /// single row. Called exactly once by the runtime before its first
-    /// command. Retry clocks are reconstructed only from persisted lane facts.
+    /// single row. Called by the runtime before its first command and again
+    /// after a failed database generation is replaced. Retry clocks are
+    /// reconstructed only from persisted lane facts.
     pub fn recover_on_boot(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
         // #790: the journal is now allowed to say "unreadable" instead of
@@ -1237,7 +1315,8 @@ impl<S: EventStore> EngineCore<S> {
             Err(error) => {
                 self.lane_relay_index_degraded = true;
                 // Nothing was rebuilt, so there is no intent to retry a
-                // bootstrap for: this gap is closable only by another boot.
+                // bootstrap for. A later engine-supervised store
+                // reconstruction re-enters this whole recovery door.
                 self.lane_projection_unprovable = true;
                 self.degrade_store(error, &mut effects);
                 return effects;
@@ -1331,7 +1410,7 @@ impl<S: EventStore> EngineCore<S> {
                 .recover_route_revisions(intent.intent_id)
             {
                 Ok(revisions) => revisions,
-                Err(_) => {
+                Err(error) => {
                     // This intent may already own real persisted lanes from
                     // before this boot; skipping straight to the next intent
                     // (as below) means `bootstrap_publish_queue_lanes` never runs
@@ -1339,6 +1418,7 @@ impl<S: EventStore> EngineCore<S> {
                     // those lanes -- an unprovable gap, so degrade rather
                     // than silently under-index (epic #507 finding E5).
                     self.lane_relay_index_degraded = true;
+                    self.record_store_failure(&error);
                     // The durable route set is exactly what could not be
                     // read, so nothing can be held as `uncertain` and the
                     // projection reports unavailable. Register the gap so a
@@ -1368,15 +1448,16 @@ impl<S: EventStore> EngineCore<S> {
                     .cloned()
                     .collect::<BTreeSet<_>>();
                 if !new_routes.is_empty() {
-                    if self
-                        .commit_route_revision(intent.intent_id, answer.relays.clone())
-                        .is_err()
-                    {
-                        if let Some(pending) = self.pending.get_mut(&id) {
-                            pending.route_blocked_relays.extend(new_routes);
+                    match self.commit_route_revision(intent.intent_id, answer.relays.clone()) {
+                        Err(error) => {
+                            self.record_store_failure(&error);
+                            if let Some(pending) = self.pending.get_mut(&id) {
+                                pending.route_blocked_relays.extend(new_routes);
+                            }
                         }
-                    } else {
-                        durable_relays.extend(answer.relays.iter().cloned());
+                        Ok(_) => {
+                            durable_relays.extend(answer.relays.iter().cloned());
+                        }
                     }
                 }
                 if let Some(pending) = self.pending.get_mut(&id) {
@@ -1393,7 +1474,7 @@ impl<S: EventStore> EngineCore<S> {
             let lanes =
                 match self.bootstrap_projected_lanes(intent.intent_id, Some(&durable_relays)) {
                     Ok(lanes) => lanes,
-                    Err(_) => {
+                    Err(error) => {
                         // Same reasoning as the `recover_route_revisions`
                         // error above: this is the sole call that teaches the
                         // reverse index this intent's lanes, so a failure
@@ -1403,6 +1484,7 @@ impl<S: EventStore> EngineCore<S> {
                         // retryable gap that gets this intent out of its
                         // conservative retention (#1000).
                         self.lane_relay_index_degraded = true;
+                        self.record_store_failure(&error);
                         continue;
                     }
                 };
@@ -1497,13 +1579,12 @@ impl<S: EventStore> EngineCore<S> {
                     // recovery degraded (this function's own untrustworthy-
                     // recovery signal) rather than warm a connection that
                     // cannot wake a still-`WaitingAuth` lane.
-                    if self
-                        .commit_lane_waiting(&lane.key, lane.revision, false)
-                        .is_ok()
-                    {
-                        effects.push(Effect::EnsureWriteRelay(session));
-                    } else {
-                        self.lane_relay_index_degraded = true;
+                    match self.commit_lane_waiting(&lane.key, lane.revision, false) {
+                        Ok(_) => effects.push(Effect::EnsureWriteRelay(session)),
+                        Err(error) => {
+                            self.lane_relay_index_degraded = true;
+                            self.record_store_failure(&error);
+                        }
                     }
                 }
                 PublishQueueLaneState::Terminal { .. } => {}
@@ -2140,9 +2221,12 @@ impl<S: EventStore> EngineCore<S> {
                     // the existing obligation, not a second write. Keep that
                     // replay distinct from a new live fact so runtime can
                     // prime only this publisher's fresh mailbox before it
-                    // joins live delivery.
+                    // joins live delivery. A receipt still in `Accepted` has
+                    // no replay fact by design: the successful return from
+                    // this call is its acceptance fact, so an empty attached
+                    // page is both valid and required at the ambiguous commit
+                    // boundary (#1362).
                     if page.outcome == ReattachOutcome::Attached {
-                        debug_assert!(!page.facts.is_empty());
                         return vec![Effect::ReplayReceipt(receipt_id, page)];
                     }
                     // Review (#591, PR #604 finding 1): never mask a corrupt

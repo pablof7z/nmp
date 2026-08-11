@@ -4166,6 +4166,86 @@ struct EngineWiring<'a> {
     self_inbox: &'a Sender<Cmd>,
 }
 
+const STORE_RECOVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+const STORE_RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Runtime-owned retry schedule for one failed durable-store generation.
+/// `next_attempt: Some` is the complete retry lifecycle state. `None` means
+/// this driver owns no retry; the core's typed diagnostic separately says
+/// whether that is because the store is healthy or the fault is permanent.
+#[derive(Default)]
+struct StoreRecoveryDriver {
+    next_attempt: Option<Instant>,
+    failures: u32,
+}
+
+impl StoreRecoveryDriver {
+    fn arm_now(&mut self, now: Instant) {
+        self.next_attempt.get_or_insert(now);
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        self.next_attempt.is_some_and(|deadline| deadline <= now)
+    }
+
+    fn wait(&self, now: Instant) -> Option<Duration> {
+        self.next_attempt
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    fn record_failure(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let shift = self.failures.saturating_sub(1).min(9);
+        let multiplier = 1u32 << shift;
+        let delay = STORE_RECOVERY_INITIAL_BACKOFF
+            .saturating_mul(multiplier)
+            .min(STORE_RECOVERY_MAX_BACKOFF);
+        self.next_attempt = Some(now + delay);
+    }
+
+    fn recovered(&mut self) {
+        self.next_attempt = None;
+        self.failures = 0;
+    }
+
+    fn stop_retrying(&mut self) {
+        self.next_attempt = None;
+        self.failures = 0;
+    }
+
+    fn is_active(&self) -> bool {
+        self.next_attempt.is_some()
+    }
+}
+
+#[cfg(test)]
+mod store_recovery_driver_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_backoff_is_exponential_event_driven_and_capped() {
+        let now = Instant::now();
+        let mut driver = StoreRecoveryDriver::default();
+        driver.arm_now(now);
+        assert!(driver.is_due(now));
+
+        for expected_millis in [
+            100_u64, 200, 400, 800, 1_600, 3_200, 6_400, 12_800, 25_600, 30_000, 30_000,
+        ] {
+            driver.record_failure(now);
+            assert_eq!(
+                driver.wait(now),
+                Some(Duration::from_millis(expected_millis))
+            );
+            assert!(!driver.is_due(now));
+        }
+
+        driver.recovered();
+        assert!(!driver.is_active());
+        assert_eq!(driver.wait(now), None);
+    }
+}
+
 /// The engine thread's body: construct `EngineCore` (this is the ONLY place
 /// it is ever built — it never leaves this stack frame), then block on
 /// `cmd_rx` (D8) until `Cmd::Shutdown`.
@@ -4262,7 +4342,51 @@ fn engine_loop<S>(
     );
 
     let mut shutting_down = false;
+    let mut store_recovery = StoreRecoveryDriver::default();
     loop {
+        if core.take_store_recovery_request().is_some() {
+            store_recovery.arm_now(Instant::now());
+        }
+        if !shutting_down && store_recovery.is_due(Instant::now()) {
+            match core.recover_store_after_failure() {
+                Ok(effects) => {
+                    store_recovery.recovered();
+                    dispatch_core_effects(
+                        &mut core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+                Err(error) => {
+                    let retryable = error.fault().requires_reopen();
+                    let mut effects = Vec::new();
+                    core.degrade_store(error, &mut effects);
+                    if retryable {
+                        store_recovery.record_failure(Instant::now());
+                    } else {
+                        // An invariant/schema/value refusal is not made safer
+                        // by cycling a healthy handle. Leave the core visibly
+                        // degraded and wait for explicit external change.
+                        store_recovery.stop_retrying();
+                    }
+                    dispatch_core_effects(
+                        &mut core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+            }
+        }
         // A continuously-ready command stream must not starve a delivery
         // deadline. This command-boundary check is still event-driven; the
         // timeout arm below owns the idle-engine case.
@@ -4280,27 +4404,34 @@ fn engine_loop<S>(
         // wait then falls back to the plain `recv()`, and the next message
         // re-reads the deadline -- so a failing store cannot spin this loop
         // either.
-        let (core_deadline, core_wait) = match core.next_deadline() {
-            Ok(deadline) => (
-                deadline,
-                deadline.map(|deadline| duration_until(deadline, clock.now())),
-            ),
-            Err(error) => {
-                let mut effects = Vec::new();
-                core.degrade_store(error, &mut effects);
-                dispatch_core_effects(
-                    &mut core,
-                    effects,
-                    &pool,
-                    &mut row_channels,
-                    &mut history_channels,
-                    &mut diag_channels,
-                    &registry,
-                    dispatch_runtime,
-                );
-                (None, None)
+        let (core_deadline, core_wait) = if store_recovery.is_active() {
+            (None, None)
+        } else {
+            match core.next_deadline() {
+                Ok(deadline) => (
+                    deadline,
+                    deadline.map(|deadline| duration_until(deadline, clock.now())),
+                ),
+                Err(error) => {
+                    let mut effects = Vec::new();
+                    core.degrade_store(error, &mut effects);
+                    dispatch_core_effects(
+                        &mut core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                    (None, None)
+                }
             }
         };
+        if core.take_store_recovery_request().is_some() {
+            store_recovery.arm_now(Instant::now());
+        }
         let nip11_wait = nip11_decisions
             .borrow()
             .next_deadline()
@@ -4313,13 +4444,20 @@ fn engine_loop<S>(
             .borrow()
             .next_deadline()
             .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let store_recovery_wait = store_recovery.wait(Instant::now());
         let wait = if shutting_down {
             None
         } else {
-            [core_wait, nip11_wait, wire_admission_wait, diagnostics_wait]
-                .into_iter()
-                .flatten()
-                .min()
+            [
+                core_wait,
+                nip11_wait,
+                wire_admission_wait,
+                diagnostics_wait,
+                store_recovery_wait,
+            ]
+            .into_iter()
+            .flatten()
+            .min()
         };
         let cmd = match wait {
             None => match cmd_rx.recv() {
@@ -4368,22 +4506,26 @@ fn engine_loop<S>(
                     // and firing anyway would only reach the same failure
                     // one door deeper. The degrade is recorded instead, and
                     // the `continue` below re-arms from the top (#763).
-                    let due = match core.next_deadline() {
-                        Ok(deadline) => deadline.is_some_and(|deadline| deadline <= wall_now),
-                        Err(error) => {
-                            let mut effects = Vec::new();
-                            core.degrade_store(error, &mut effects);
-                            dispatch_core_effects(
-                                &mut core,
-                                effects,
-                                &pool,
-                                &mut row_channels,
-                                &mut history_channels,
-                                &mut diag_channels,
-                                &registry,
-                                dispatch_runtime,
-                            );
-                            false
+                    let due = if store_recovery.is_active() {
+                        false
+                    } else {
+                        match core.next_deadline() {
+                            Ok(deadline) => deadline.is_some_and(|deadline| deadline <= wall_now),
+                            Err(error) => {
+                                let mut effects = Vec::new();
+                                core.degrade_store(error, &mut effects);
+                                dispatch_core_effects(
+                                    &mut core,
+                                    effects,
+                                    &pool,
+                                    &mut row_channels,
+                                    &mut history_channels,
+                                    &mut diag_channels,
+                                    &registry,
+                                    dispatch_runtime,
+                                );
+                                false
+                            }
                         }
                     };
                     if due {

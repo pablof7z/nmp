@@ -262,11 +262,25 @@ pub(crate) struct RequiredLockedFileBackend {
 
 impl RequiredLockedFileBackend {
     pub(crate) fn open(target: &Path) -> Result<Self, RedbStoreOpenError> {
+        Self::open_with_creation(target, true)
+    }
+
+    /// Reacquire an existing durable target during handle reconstruction.
+    /// Unlike the first-open door, this must never create a replacement file:
+    /// disappearance is a typed refusal owned by the engine supervisor.
+    pub(crate) fn open_existing(target: &Path) -> Result<Self, RedbStoreOpenError> {
+        Self::open_with_creation(target, false)
+    }
+
+    fn open_with_creation(
+        target: &Path,
+        create_if_missing: bool,
+    ) -> Result<Self, RedbStoreOpenError> {
         let file = Arc::new(
             OpenOptions::new()
                 .read(true)
                 .write(true)
-                .create(true)
+                .create(create_if_missing)
                 .truncate(false)
                 .open(target)
                 .map_err(|source| RedbStoreOpenError::LockFailed {
