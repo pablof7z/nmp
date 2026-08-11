@@ -1433,6 +1433,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "reattach_by_correlation",
         "reattach_receipt",
         "reattach_receipt_from",
+        "receipt_result",
         "relay_information",
         "remove_auth_policy",
         "remove_publish_queue_entry",
