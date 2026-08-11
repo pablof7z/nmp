@@ -1215,10 +1215,28 @@ pub enum FfiWriteOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiNotSentReason {
     Cancelled,
+    /// The accepted signing request was refused or failed, and NMP proved no
+    /// EVENT bytes crossed the local transport handoff.
+    SignerRefused,
     /// A newer accepted write won the same replaceable coordinate, and NMP
     /// proved the older bytes did not cross the local transport handoff. Not a
     /// failure — for an app renewing presence it is the steady state.
     Superseded,
+}
+
+/// One relay's final state inside a terminal receipt result.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiReceiptRelayResult {
+    pub relay: String,
+    pub state: FfiRelayState,
+}
+
+/// The one terminal answer for an accepted write. Relay disagreement remains
+/// visible instead of being collapsed to a boolean.
+#[derive(Debug, Clone, PartialEq, Eq, Record)]
+pub struct FfiReceiptResult {
+    pub outcome: FfiWriteOutcome,
+    pub relays: Vec<FfiReceiptRelayResult>,
 }
 
 /// `nmp_store::RefuseReason` mirror: why the acceptance door said no.

@@ -18,7 +18,7 @@ use std::time::Duration;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpReceiptStream};
 use nmp_ffi::types::{
     FfiIdentity, FfiReceiptReattachment, FfiRelayState, FfiSigningState, FfiWriteFact,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 use nmp_store::{
     AcceptWrite, EventStore, HandoffEvidence, IntentSigState, PublishQueueAttemptHandoff,
@@ -304,6 +304,19 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
         40,
         "every persisted handoff must arrive exactly once"
     );
+
+    let result_stream = match engine
+        .reattach_receipt(receipt_id)
+        .expect("reattach seeded receipt for terminal reduction")
+    {
+        FfiReceiptReattachment::Attached { stream } => stream,
+        _ => panic!("seeded receipt must remain reattachable"),
+    };
+    let result = result_stream.result().await.expect("NMP reduces all pages");
+    assert_eq!(result.outcome, FfiWriteOutcome::Settled);
+    assert_eq!(result.relays.len(), 1);
+    assert_eq!(result.relays[0].relay, relay.to_string());
+    assert_eq!(result.relays[0].state, FfiRelayState::GaveUp);
 
     engine.shutdown();
 }

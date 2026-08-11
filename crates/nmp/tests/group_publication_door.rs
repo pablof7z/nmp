@@ -54,9 +54,9 @@ use nmp::nip29::{
     GroupRecord, GroupSnapshot,
 };
 use nmp::{
-    Binding, Engine, EngineConfig, EventBuilder, RelayState, SignerError, SignerOp,
+    Binding, Engine, EngineConfig, EventBuilder, NotSentReason, RelayState, SignerError, SignerOp,
     SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, SigningState,
-    WriteFact,
+    WriteFact, WriteOutcome,
 };
 use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -581,10 +581,15 @@ async fn a_signing_failure_leaves_no_event_frame_and_no_delivery_implying_receip
     let statuses = drain_until(&receipts, |status| {
         matches!(
             status,
-            WriteFact::Signing(SigningState::Refused { reason })
-                if reason.to_lowercase().contains("sign")
+            WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::SignerRefused))
         )
     });
+
+    assert!(statuses.iter().any(|status| matches!(
+        status,
+        WriteFact::Signing(SigningState::Refused { reason })
+            if reason.to_lowercase().contains("sign")
+    )));
 
     assert!(
         !statuses.iter().any(|status| matches!(

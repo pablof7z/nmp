@@ -961,6 +961,13 @@ fn terminal_signer_errors_compensate_the_write() {
             Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::Refused { .. }))
                 if *rid == id
         )));
+        assert!(failed.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                rid,
+                WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::SignerRefused))
+            ) if *rid == id
+        )));
         assert!(core
             .handle(EngineMsg::SignerAttached(a.public_key()))
             .iter()

@@ -384,6 +384,9 @@ sealed class RelayState {
 /** Why a write ended without going anywhere. */
 enum class NotSentReason {
     Cancelled,
+    /** The accepted signing request was refused or failed, and no EVENT bytes
+     * crossed the local transport handoff. */
+    SignerRefused,
 
     /** A newer accepted write won the same replaceable coordinate, and NMP
      * proved the older bytes did not cross the local transport handoff. Not a
@@ -395,6 +398,7 @@ enum class NotSentReason {
         internal fun from(ffi: FfiNotSentReason): NotSentReason =
             when (ffi) {
                 FfiNotSentReason.CANCELLED -> Cancelled
+                FfiNotSentReason.SIGNER_REFUSED -> SignerRefused
                 FfiNotSentReason.SUPERSEDED -> Superseded
             }
     }

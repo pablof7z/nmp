@@ -154,6 +154,13 @@ terminal. Recovery of open work and retention of terminal receipt facts are
 separate concerns; closing a delivery lane must not erase the only reattachment
 record.
 
+An app that needs the final publication answer calls `Receipt.result()`.
+That result contains the whole-write outcome and the final state of every
+known relay; mixed publication and rejection remain mixed, including the
+rejecting relay's reason. Raw receipt facts remain available for progressive
+UI, but terminal reduction, lag recovery, and retained-page traversal belong
+to NMP.
+
 ## Durability classes
 
 ### Durable
