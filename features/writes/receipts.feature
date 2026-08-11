@@ -62,7 +62,7 @@ Feature: Publishing tells the truth, per relay
 
   # nmp:id=WRITES-RECEIPTS-006
   # nmp:status=built
-  # nmp:evidence=rust:nmp::publish_queue::result::tests::mixed_relay_result_preserves_each_terminal_truth
+  # nmp:evidence=rust:nmp::mixed_relay_result_preserves_each_terminal_truth
   # nmp:falsifier=Collapse a mixed publish and rejection to one boolean; the app loses which relay rejected and why.
   @ledger-9
   Scenario: Relay disagreement survives terminal reduction
