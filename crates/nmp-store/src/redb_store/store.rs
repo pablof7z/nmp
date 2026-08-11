@@ -63,7 +63,11 @@ pub(super) enum RedbCrashPoint {
 }
 
 pub struct RedbStore {
-    pub(super) db: Database,
+    /// `None` is the closed half of the recovery state machine: the poisoned
+    /// redb handle has been dropped, while `_ownership` still fences this
+    /// canonical pathname. Only
+    /// `reopen_database_after_failure` installs the next generation.
+    pub(super) db: Option<Database>,
     // Field order is load-bearing: Rust drops `db` before this ownership
     // token, so no process can open or reset the target until this database
     // handle has finished closing.
@@ -183,8 +187,10 @@ impl Drop for RedbStore {
         // drain explicit and timed so a no-fsync foreground ceiling cannot
         // hide persistence work after the measurement window.
         let started = std::time::Instant::now();
-        let checkpoint = self
-            .db
+        let Some(db) = self.db.as_ref() else {
+            return;
+        };
+        let checkpoint = db
             .begin_write()
             .expect("redb benchmark durability checkpoint begin");
         checkpoint
@@ -196,6 +202,54 @@ impl Drop for RedbStore {
 }
 
 impl RedbStore {
+    pub(super) fn database(&self) -> Result<&Database, PersistenceError> {
+        self.db.as_ref().ok_or_else(|| {
+            PersistenceError::new(
+                crate::PersistenceFault::Latched,
+                "durable database handle is closed for reconstruction",
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn raw_database(&self) -> &Database {
+        self.db
+            .as_ref()
+            .expect("test inspected a store while its database handle was closed")
+    }
+
+    /// Replace only redb's poisoned handle while retaining the sidecar owner
+    /// that fences this exact canonical target. No fresh store is initialized
+    /// here: a missing or non-current target is a refusal, never an empty
+    /// database silently substituted for the caller's durable obligations.
+    pub(super) fn reopen_database_after_failure(&mut self) -> Result<(), PersistenceError> {
+        let target = self._ownership.target().to_path_buf();
+
+        // `Option::take` is the lifecycle transition. The old Database must
+        // be fully dropped before its target-inode lock can be reacquired;
+        // `_ownership` deliberately stays live throughout, so another opener
+        // of the canonical pathname cannot enter between generations. A
+        // hard-link alias has a distinct sidecar; the required target-inode
+        // lock below makes that race resolve to one owner (and a typed reopen
+        // refusal for the other), never two live database generations.
+        drop(self.db.take());
+
+        let backend =
+            RequiredLockedFileBackend::open_existing(&target).map_err(reopen_open_error)?;
+        let db = Database::builder()
+            .set_cache_size(REDB_CACHE_BYTES)
+            .create_with_backend(backend)
+            .map_err(persist_err)?;
+        validate_reopened_schema(&db, &target)?;
+
+        self.publish_queue_relays
+            .lock()
+            .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
+            .clear();
+        self.db = Some(db);
+        Ok(())
+    }
+
     pub(super) fn publish_queue_relay_id(
         &self,
         relay: &RelayUrl,
@@ -210,7 +264,7 @@ impl RedbStore {
         {
             return Ok(id);
         }
-        let read = self.db.begin_read().map_err(persist_err)?;
+        let read = self.database()?.begin_read().map_err(persist_err)?;
         let relay_ids = read
             .open_table(PUBLISH_QUEUE_RELAY_IDS)
             .map_err(persist_err)?;
@@ -254,7 +308,7 @@ impl RedbStore {
         {
             return Ok(relay);
         }
-        let read = self.db.begin_read().map_err(persist_err)?;
+        let read = self.database()?.begin_read().map_err(persist_err)?;
         let relays = read.open_table(PUBLISH_QUEUE_RELAYS).map_err(persist_err)?;
         let relay_ids = read
             .open_table(PUBLISH_QUEUE_RELAY_IDS)
@@ -320,7 +374,7 @@ impl RedbStore {
         state: PublishQueueLaneState,
     ) -> Result<PublishQueueLane, PersistenceError> {
         let relay_id = self.publish_queue_relay_id(&key.relay)?;
-        let write_txn = self.db.begin_write().map_err(persist_err)?;
+        let write_txn = self.database()?.begin_write().map_err(persist_err)?;
         let lane = {
             let mut lanes = write_txn
                 .open_table(PUBLISH_QUEUE_LANES)
@@ -391,11 +445,10 @@ impl RedbStore {
     /// durability tests drive a genuine `RedbStore` through a genuine
     /// disk-full sequence.
     ///
-    /// The database handle itself is unchanged: still a bare `Database`,
-    /// still opened exactly once, and it stays that way. #895 declined an
-    /// in-place close/reopen door: recovery is dropping this owner and
-    /// opening again, which releases the lock (see `_ownership`'s drop
-    /// order on the struct) and costs no process restart.
+    /// The supplied backend belongs only to the first database generation.
+    /// Production reconstruction reopens the exact canonical file through
+    /// `RequiredLockedFileBackend`; a test-only backend cannot be replayed or
+    /// silently substituted after it reports a failure.
     #[cfg(test)]
     pub(super) fn open_with_backend(
         path: impl AsRef<Path>,
@@ -552,7 +605,7 @@ impl RedbStore {
             _open_write_transactions += 1;
         }
         Ok(Self {
-            db,
+            db: Some(db),
             _ownership: ownership,
             publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),
             #[cfg(test)]
@@ -992,6 +1045,91 @@ impl RedbStore {
             },
             &mut materialize_if_visible,
         )
+    }
+}
+
+impl PublishQueueRelayCache {
+    fn clear(&mut self) {
+        self.by_id.clear();
+        self.by_url.clear();
+    }
+}
+
+fn validate_reopened_schema(db: &Database, path: &Path) -> Result<(), PersistenceError> {
+    let read = db.begin_read().map_err(persist_err)?;
+    let tables = read.list_tables().map_err(persist_err)?;
+    if !tables
+        .into_iter()
+        .any(|table| table.name() == STORE_META.name())
+    {
+        return Err(PersistenceError::invariant(format!(
+            "reopened durable store at {} has no current schema marker",
+            path.display()
+        )));
+    }
+
+    let store_meta = read.open_table(STORE_META).map_err(persist_err)?;
+    let version = store_meta
+        .get(SCHEMA_VERSION_KEY)
+        .map_err(persist_err)?
+        .map(|guard| guard.value());
+    if version != Some(SCHEMA_VERSION) {
+        return Err(PersistenceError::invariant(format!(
+            "reopened durable store at {} has schema {version:?}, expected {SCHEMA_VERSION}",
+            path.display()
+        )));
+    }
+
+    let publish_queue_meta = read.open_table(PUBLISH_QUEUE_META).map_err(persist_err)?;
+    let codec_version = publish_queue_meta
+        .get(PUBLISH_QUEUE_CODEC_VERSION_KEY)
+        .map_err(persist_err)?
+        .map(|guard| decode_meta_u64(guard.value(), "delivery codec version"))
+        .transpose()?;
+    if codec_version != Some(PUBLISH_QUEUE_CODEC_VERSION) {
+        return Err(PersistenceError::invariant(format!(
+            "reopened durable store at {} has publish-queue codec {codec_version:?}, expected {PUBLISH_QUEUE_CODEC_VERSION}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn reopen_open_error(error: RedbStoreOpenError) -> PersistenceError {
+    match error {
+        RedbStoreOpenError::Database(error) => persist_err(error),
+        RedbStoreOpenError::StoreAlreadyOpen { path } => PersistenceError::new(
+            crate::PersistenceFault::Latched,
+            format!(
+                "durable store target remained locked during reconstruction: {}",
+                path.display()
+            ),
+        ),
+        RedbStoreOpenError::UnsupportedSchema {
+            path,
+            expected,
+            found,
+        } => PersistenceError::invariant(format!(
+            "durable store at {} has schema {found:?}, expected {expected}",
+            path.display()
+        )),
+        RedbStoreOpenError::PathResolutionFailed { path, source }
+        | RedbStoreOpenError::LockFileOpenFailed { path, source }
+        | RedbStoreOpenError::LockFailed { path, source } => PersistenceError::new(
+            crate::PersistenceFault::Io,
+            format!(
+                "could not reopen durable store at {}: {source}",
+                path.display()
+            ),
+        ),
+        RedbStoreOpenError::TargetChanged { expected, actual } => PersistenceError::new(
+            crate::PersistenceFault::UnknownBackend,
+            format!(
+                "durable store target changed during reconstruction: expected {}, found {}",
+                expected.display(),
+                actual.display()
+            ),
+        ),
     }
 }
 

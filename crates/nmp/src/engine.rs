@@ -1109,6 +1109,206 @@ mod tests {
     use nostr::Keys;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn engine_with_lane_faults(faults: crate::lane_fault_store::LaneFaults) -> Engine {
+        let store = crate::lane_fault_store::FaultyLaneStore::new(MemoryStore::new(), faults);
+        let (engine_thread, handle) = EngineThread::spawn(
+            store,
+            4,
+            PoolConfig::default(),
+            crate::core::RelayAdmissionPolicy::default(),
+        )
+        .expect("fault-injecting engine construction");
+        Engine {
+            inner: Mutex::new(Some(Inner {
+                handle,
+                engine_thread,
+                active_pubkey: None,
+            })),
+        }
+    }
+
+    #[test]
+    fn persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once() {
+        use std::time::Duration;
+
+        use crate::lane_fault_store::LaneFaults;
+        use nmp_grammar::{Identity, WritePayload, WriteRouting};
+        use nostr::EventBuilder;
+
+        let faults = LaneFaults::default();
+        faults.fail_reopen_attempts(2);
+        let reopen_events = faults.fail_accept_after_commit_once();
+        let engine = engine_with_lane_faults(faults.clone());
+
+        let author = Keys::generate();
+        engine
+            .set_active_account(Some(author.public_key()))
+            .expect("set facade-owned identity");
+        let subscription = engine
+            .observe(
+                LiveQuery::from_filter(nmp_grammar::Filter {
+                    kinds: Some(std::collections::BTreeSet::from([1])),
+                    ..nmp_grammar::Filter::default()
+                }),
+                None,
+            )
+            .expect("open a query handle before the storage generation fails");
+        let opening = subscription
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a new observation receives its opening frame");
+        assert!(opening.deltas.iter().all(|delta| delta.event().is_none()));
+        let relay = RelayUrl::parse("wss://recovery.example").unwrap();
+        let event = EventBuilder::text_note("ambiguous acceptance")
+            .sign_with_keys(&author)
+            .unwrap();
+        let intent = || WriteIntent {
+            payload: WritePayload::Signed(event.clone()),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: Some(
+                nmp_grammar::CorrelationToken::try_from("recovery-correlation").unwrap(),
+            ),
+        };
+
+        let first = engine.publish(intent());
+        assert!(
+            matches!(&first, Err(EngineError::PublishRefused { reason }) if reason.contains("injected acceptance committed before I/O failure")),
+            "the uncertain boundary must not report acceptance: {}",
+            first
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default()
+        );
+
+        assert!(
+            !reopen_events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "the first bounded reopen attempt remains unavailable"
+        );
+        assert!(
+            !reopen_events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "the second bounded reopen attempt remains unavailable"
+        );
+        assert!(
+            reopen_events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "the supervisor reconstructs without replacing the Engine"
+        );
+        let recovered_frame = subscription
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the pre-failure query handle receives reconstructed rows");
+        assert!(
+            recovered_frame
+                .deltas
+                .iter()
+                .filter_map(|delta| delta.event())
+                .any(|recovered| recovered.id == event.id),
+            "the existing query handle did not receive the committed boundary event"
+        );
+
+        assert_eq!(
+            engine.active_account().unwrap(),
+            Some(author.public_key()),
+            "facade identity survives the internal store generation change"
+        );
+        let recovered = engine
+            .publish(intent())
+            .expect("correlation readback reattaches the committed acceptance");
+        let repeated = engine
+            .publish(intent())
+            .expect("repeating the same correlation remains idempotent");
+        assert_eq!(recovered.id, repeated.id);
+        assert_eq!(recovered.event_id, repeated.event_id);
+
+        let later_event = EventBuilder::text_note("accepted after reconstruction")
+            .sign_with_keys(&author)
+            .unwrap();
+        engine
+            .publish(WriteIntent {
+                payload: WritePayload::Signed(later_event),
+                routing: WriteRouting::Explicit(vec![relay.clone()]),
+                identity: Identity::Active,
+                correlation: Some(
+                    nmp_grammar::CorrelationToken::try_from("post-recovery-correlation").unwrap(),
+                ),
+            })
+            .expect("later independent work is accepted by the reconstructed Engine");
+
+        // Exercise the other honest I/O boundary in the same public Engine:
+        // this transaction is absent rather than committed-but-errored.
+        faults.fail_reopen_attempts(1);
+        let absent_reopen_events = faults.fail_accept_before_commit_once();
+        let absent_event = EventBuilder::text_note("absent boundary acceptance")
+            .sign_with_keys(&author)
+            .unwrap();
+        let absent_intent = || WriteIntent {
+            payload: WritePayload::Signed(absent_event.clone()),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: Some(
+                nmp_grammar::CorrelationToken::try_from("absent-recovery-correlation").unwrap(),
+            ),
+        };
+        let absent_first = engine.publish(absent_intent());
+        assert!(
+            matches!(&absent_first, Err(EngineError::PublishRefused { reason }) if reason.contains("failed before commit")),
+            "an absent I/O boundary must not report acceptance: {}",
+            absent_first
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default()
+        );
+        assert!(!absent_reopen_events
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap());
+        assert!(absent_reopen_events
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap());
+        let absent_recovered = engine
+            .publish(absent_intent())
+            .expect("an absent transaction can be accepted once after reconstruction");
+        assert_eq!(absent_recovered.event_id, absent_event.id);
+        assert_eq!(engine.publish_queue().unwrap().len(), 3);
+
+        engine.shutdown();
+    }
+
+    #[test]
+    fn persistent_engine_does_not_reconstruct_for_an_invariant_fault() {
+        use crate::lane_fault_store::LaneFaults;
+        use nmp_grammar::{Identity, WritePayload, WriteRouting};
+        use nostr::EventBuilder;
+
+        let faults = LaneFaults::default();
+        faults.fail_accept_with_invariant_once();
+        let engine = engine_with_lane_faults(faults.clone());
+        let author = Keys::generate();
+        engine
+            .set_active_account(Some(author.public_key()))
+            .expect("set facade-owned identity");
+        let relay = RelayUrl::parse("wss://invariant.example").unwrap();
+        let intent = |content: &str| WriteIntent {
+            payload: WritePayload::Signed(
+                EventBuilder::text_note(content)
+                    .sign_with_keys(&author)
+                    .unwrap(),
+            ),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        };
+
+        let refused = engine.publish(intent("invariant refusal"));
+        assert!(
+            matches!(&refused, Err(EngineError::PublishRefused { reason }) if reason.contains("non-reopenable acceptance invariant"))
+        );
+        engine
+            .publish(intent("ordinary next write"))
+            .expect("a non-reopenable refusal does not replace the healthy store handle");
+        assert_eq!(faults.reopen_attempt_count(), 0);
+        assert_eq!(engine.publish_queue().unwrap().len(), 1);
+
+        engine.shutdown();
+    }
+
     fn signer_public_key(public_key: PublicKey) -> nmp_signer::SignerPublicKey {
         nmp_signer::SignerPublicKey::new(public_key.to_bytes())
     }
