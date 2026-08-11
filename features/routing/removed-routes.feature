@@ -67,7 +67,6 @@ Feature: The routes that were removed stay removed
   # nmp:status=built
   # nmp:evidence=script:repository::scripts/check-routing-vocabulary.sh
   # nmp:evidence=rust:nmp-grammar::routing_is_two_words_and_explicit_is_verbatim
-  # nmp:evidence=rust:nmp-ffi::the_routing_vocabulary_is_two_words_in_both_directions
   # nmp:falsifier=Add a third variant naming a NIP or a strategy to the Rust enum; the gate's surface enumeration reports the extra word and the exhaustive FFI conversion match stops compiling.
   Scenario: There is no third routing word to reach for
     # The standing guard on the surface itself. A third word appearing in an

@@ -36,6 +36,7 @@ final class ControlledRelayHarness: @unchecked Sendable {
     }
 
     private let listener: NWListener
+    private let withheldEOSEKinds: Set<UInt64>
     private let queue = DispatchQueue(label: "nmp.swift-host.controlled-relay")
     private let lock = NSLock()
     private var webSockets: [ObjectIdentifier: NWConnection] = [:]
@@ -50,7 +51,8 @@ final class ControlledRelayHarness: @unchecked Sendable {
 
     private(set) var relayURL = ""
 
-    init() throws {
+    init(withholdingEOSEForKinds withheldEOSEKinds: Set<UInt64> = []) throws {
+        self.withheldEOSEKinds = withheldEOSEKinds
         listener = try NWListener(using: .tcp, on: .any)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { state in
@@ -286,7 +288,14 @@ final class ControlledRelayHarness: @unchecked Sendable {
                 .forEach {
                     sendJSON(["EVENT", subscriptionID, $0], on: connection)
                 }
-            sendJSON(["EOSE", subscriptionID], on: connection)
+            let requestedKinds = Set(filters.flatMap { filter in
+                (filter["kinds"] as? [Any] ?? []).compactMap { value in
+                    (value as? NSNumber)?.uint64Value
+                }
+            })
+            if withheldEOSEKinds.isDisjoint(with: requestedKinds) {
+                sendJSON(["EOSE", subscriptionID], on: connection)
+            }
         case "CLOSE":
             guard message.count >= 2, let subscriptionID = message[1] as? String else {
                 return
