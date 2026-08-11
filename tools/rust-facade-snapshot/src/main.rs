@@ -234,11 +234,17 @@ fn rustdoc(
     package: &Package,
 ) -> Result<()> {
     let exact_package_id = &package.id.repr;
-    let status = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    command
         .arg(format!("+{toolchain}"))
         .args(["rustdoc", "--locked", "--manifest-path"])
         .arg(manifest)
-        .args(["-p", exact_package_id, "--lib", "--"])
+        .args(["-p", exact_package_id]);
+    if package.source.is_none() {
+        command.arg("--all-features");
+    }
+    let status = command
+        .args(["--lib", "--"])
         .args(["-Z", "unstable-options", "--output-format", "json"])
         .env("CARGO_TARGET_DIR", target_dir)
         .current_dir(root)
