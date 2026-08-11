@@ -133,3 +133,18 @@ jobs:
               check --root "$GITHUB_WORKSPACE" \
               --base "$TRACE_BASE" --head "$TRACE_HEAD" \
               --issues "$TRACE_ISSUES"
+
+  facade-acceptance:
+    name: Deterministic public-facade acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select the repository Rust toolchain
+        run: rustup show
+
+      - name: Run Engine::new capstones against independent scripted relays
+        run: cargo test -p nmp --features nip65 --test acceptance

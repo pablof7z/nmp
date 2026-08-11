@@ -173,3 +173,42 @@ pub(crate) fn build_nip65_sources(config: &EngineConfig) -> Result<Vec<RelayUrl>
         .map(|url| parse_relay_url(url))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use nmp_router::{AuthorRouteState, RoutingFacts};
+    use nostr::Keys;
+
+    use super::*;
+
+    #[test]
+    fn indexer_relays_are_not_generic_routing_facts() {
+        let indexer = "wss://indexer.example";
+        let config = EngineConfig {
+            indexer_relays: vec![indexer.to_string()],
+            ..EngineConfig::default()
+        };
+
+        let facts = build_routing_facts(&config).expect("valid indexer config");
+
+        assert!(
+            facts.operator_app_relays().is_empty(),
+            "a NIP-65 source must not become an operator app/content lane"
+        );
+        assert!(
+            facts.operator_fallback_relays().is_empty(),
+            "a NIP-65 source must not become a generic fallback lane"
+        );
+        assert_eq!(
+            facts.author_routes(&Keys::generate().public_key()),
+            AuthorRouteState::Unknown,
+            "configuration must not fabricate an author route"
+        );
+        #[cfg(feature = "nip65")]
+        assert_eq!(
+            build_nip65_sources(&config).expect("valid NIP-65 source"),
+            vec![RelayUrl::parse(indexer).expect("valid relay")],
+            "the same URL belongs only to the optional protocol assembly"
+        );
+    }
+}

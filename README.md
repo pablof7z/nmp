@@ -69,8 +69,8 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ Full connection lifecycle behind **one finite fan-out ceiling** over the whole read plan
 - ✅ Local / private / link-local / `.onion` targets **rejected by default** — resolved-IP admission is pinned per connection, closing a DNS-rebinding gap where a re-resolve could point an already-approved host somewhere internal
 - ✅ Permanently-failing relays retire cleanly instead of wedging a connection slot; the send queue behind them is bounded
-- ✅ **Optional NIP-65 routing assembly** — core declares neutral unknown
-  author-route needs; the `nip65` feature owns exact source queries, canonical
+- ✅ **Optional NIP-65 routing assembly** — core declares neutral author-route
+  provider needs; the `nip65` feature owns exact source queries, canonical
   kind:10002 winners, marker parsing, settlement, and atomic fact replacement
 - ✅ Parse-once typed ingest with bounded parallel signature verification
 - ✅ NIP-11 relay metadata (single-flight, LRU-bounded, proven raw-body ceiling)

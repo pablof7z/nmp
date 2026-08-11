@@ -1,6 +1,123 @@
 //! Ownership-domain tests moved with the implementation they falsify.
 
 use super::*;
+use nmp_grammar::{Binding, Demand, Filter};
+use nmp_router::test_relay;
+use nmp_store::MemoryStore;
+use nostr::Keys;
+
+#[test]
+fn author_outbox_queries_need_a_provider_until_a_positive_route_or_withdrawal() {
+    let author = Keys::generate().public_key();
+    let content_relay = test_relay(1);
+    let filter = Filter {
+        kinds: Some(BTreeSet::from([1])),
+        authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+        ..Filter::default()
+    };
+    let mut core = EngineCore::new(MemoryStore::new(), 8);
+
+    let opened = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(filter.clone())));
+    assert!(opened.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::AuthorRouteNeedsChanged(needs)
+                if needs == &BTreeSet::from([author])
+        )
+    }));
+    let handle = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(handle, ..) => Some(handle),
+            _ => None,
+        })
+        .copied()
+        .expect("subscribe returns its handle");
+
+    let pinned = Demand::new(
+        filter,
+        SourceAuthority::Pinned(BTreeSet::from([test_relay(65)])),
+        AccessContext::Public,
+    )
+    .expect("exact provider query");
+    let provider = core.handle(EngineMsg::Subscribe(LiveQuery::single(pinned)));
+    assert!(
+        !provider
+            .iter()
+            .any(|effect| matches!(effect, Effect::AuthorRouteNeedsChanged(_))),
+        "an exact provider query must not feed its own need set"
+    );
+
+    let mut route_effects = Vec::new();
+    core.replace_author_routes(
+        author,
+        AuthorRouteReplacement::Present(AuthorRoutes::new([content_relay], [])),
+        &mut route_effects,
+    );
+    assert!(
+        route_effects.iter().any(
+            |effect| matches!(effect, Effect::AuthorRouteNeedsChanged(needs) if needs.is_empty())
+        ),
+        "a positive outbound route must retire provider work for the live read"
+    );
+
+    let withdrawn = core.handle(EngineMsg::Unsubscribe(handle));
+    assert!(
+        !withdrawn
+            .iter()
+            .any(|effect| matches!(effect, Effect::AuthorRouteNeedsChanged(_))),
+        "withdrawal after provider work retired must not emit a duplicate edge"
+    );
+}
+
+#[test]
+fn shared_author_outbox_need_retires_only_with_its_last_wire_owner() {
+    let author = Keys::generate().public_key();
+    let query = LiveQuery::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1])),
+        authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+        ..Filter::default()
+    });
+    let mut core = EngineCore::new(MemoryStore::new(), 8);
+
+    let first = core.handle(EngineMsg::Subscribe(query.clone()));
+    let first_handle = first
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(handle, ..) => Some(*handle),
+            _ => None,
+        })
+        .expect("first subscription returns its handle");
+    let second = core.handle(EngineMsg::Subscribe(query));
+    let second_handle = second
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(handle, ..) => Some(*handle),
+            _ => None,
+        })
+        .expect("second subscription returns its handle");
+    assert!(
+        !second
+            .iter()
+            .any(|effect| matches!(effect, Effect::AuthorRouteNeedsChanged(_))),
+        "another owner of the same provider need is not a new edge"
+    );
+
+    let first_close = core.handle(EngineMsg::Unsubscribe(first_handle));
+    assert!(
+        !first_close
+            .iter()
+            .any(|effect| matches!(effect, Effect::AuthorRouteNeedsChanged(_))),
+        "one surviving wire owner retains the existing provider need"
+    );
+    let last_close = core.handle(EngineMsg::Unsubscribe(second_handle));
+    assert!(
+        last_close.iter().any(
+            |effect| matches!(effect, Effect::AuthorRouteNeedsChanged(needs) if needs.is_empty())
+        ),
+        "the final wire owner withdraws the provider need"
+    );
+}
 
 #[cfg(test)]
 mod affected_handle_invalidation_tests {
