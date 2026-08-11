@@ -86,6 +86,7 @@ Feature: Publishing tells the truth, per relay
   # nmp:id=WRITES-RECEIPTS-008
   # nmp:status=built
   # nmp:evidence=rust:nmp_ffi::receipt_result_recovers_from_live_fifo_lag_without_exposing_replay
+  # nmp:falsifier=Treat live-stream lag as terminal loss; an app awaiting the result fails even though durable replay contains the complete receipt.
   @ledger-9 @ledger-15
   Scenario: Terminal result recovers from live receipt lag
     Given live receipt delivery exceeded its bounded memory window
