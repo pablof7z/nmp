@@ -37,12 +37,13 @@ use crate::types::{
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiEventBuilder, FfiFilter,
     FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
     FfiLaneCount, FfiLiveQuery, FfiNotSentReason, FfiPublishQueueEntry, FfiQueueRelayState,
-    FfiRefuseReason, FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRelayState,
-    FfiRelayWaiting, FfiRemoveQueueEntryError, FfiRetryCause, FfiRow, FfiRowDelta, FfiSelector,
-    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest,
-    FfiSignedEvent, FfiSigningState, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
-    FfiStalledWrite, FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow, FfiWindowContents,
-    FfiWindowLoad, FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
+    FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason, FfiRelayDiagnostics,
+    FfiRelayInformationErrorKind, FfiRelayState, FfiRelayWaiting, FfiRemoveQueueEntryError,
+    FfiRetryCause, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact,
+    FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSigningState, FfiSourceAuthority,
+    FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage,
+    FfiStalledWriteTotals, FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteFact,
+    FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -191,6 +192,10 @@ pub enum FfiError {
     /// page from retained evidence. The receipt identity remains known and is
     /// not collapsed into absence.
     ReceiptReplayUnavailable {
+        receipt_id: u64,
+    },
+    /// The stream ended before its promised whole-write outcome was retained.
+    ReceiptClosedWithoutOutcome {
         receipt_id: u64,
     },
     /// A `FfiWritePayload::Signed`'s `sig` did not parse as a valid 64-byte
@@ -691,6 +696,10 @@ impl std::fmt::Display for FfiError {
             Self::ReceiptReplayUnavailable { receipt_id } => write!(
                 f,
                 "retained evidence for receipt {receipt_id} became unavailable during replay"
+            ),
+            Self::ReceiptClosedWithoutOutcome { receipt_id } => write!(
+                f,
+                "receipt {receipt_id} closed before its terminal outcome"
             ),
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
@@ -1781,6 +1790,7 @@ fn write_outcome_to_ffi(outcome: &GWriteOutcome) -> FfiWriteOutcome {
         GWriteOutcome::NotSent(reason) => FfiWriteOutcome::NotSent {
             reason: match reason {
                 GNotSentReason::Cancelled => FfiNotSentReason::Cancelled,
+                GNotSentReason::SignerRefused => FfiNotSentReason::SignerRefused,
                 GNotSentReason::Superseded => FfiNotSentReason::Superseded,
             },
         },
@@ -1788,6 +1798,20 @@ fn write_outcome_to_ffi(outcome: &GWriteOutcome) -> FfiWriteOutcome {
         GWriteOutcome::Refused(reason) => FfiWriteOutcome::Refused {
             reason: refuse_reason_to_ffi(*reason),
         },
+    }
+}
+
+pub fn receipt_result_to_ffi(result: nmp::ReceiptResult) -> FfiReceiptResult {
+    FfiReceiptResult {
+        outcome: write_outcome_to_ffi(&result.outcome),
+        relays: result
+            .relays
+            .into_iter()
+            .map(|(relay, state)| FfiReceiptRelayResult {
+                relay: relay.to_string(),
+                state: relay_state_to_ffi(&state),
+            })
+            .collect(),
     }
 }
 
@@ -2285,6 +2309,14 @@ mod write_fact_tests {
                 FfiWriteFact::Outcome {
                     outcome: FfiWriteOutcome::NotSent {
                         reason: FfiNotSentReason::Cancelled,
+                    },
+                },
+            ),
+            (
+                GWriteStatus::Outcome(GWriteOutcome::NotSent(GNotSentReason::SignerRefused)),
+                FfiWriteFact::Outcome {
+                    outcome: FfiWriteOutcome::NotSent {
+                        reason: FfiNotSentReason::SignerRefused,
                     },
                 },
             ),

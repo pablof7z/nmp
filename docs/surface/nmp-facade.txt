@@ -655,6 +655,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::EngineError
 impl core::panic::unwind_safe::UnwindSafe for nmp::EngineError
 pub enum nmp::NotSentReason
 pub nmp::NotSentReason::Cancelled
+pub nmp::NotSentReason::SignerRefused
 pub nmp::NotSentReason::Superseded
 impl core::clone::Clone for nmp::NotSentReason
 pub fn nmp::NotSentReason::clone(&self) -> nmp::NotSentReason
@@ -686,6 +687,27 @@ impl core::marker::Unpin for nmp::ReceiptReattachment
 impl core::marker::UnsafeUnpin for nmp::ReceiptReattachment
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::ReceiptReattachment
 impl core::panic::unwind_safe::UnwindSafe for nmp::ReceiptReattachment
+pub enum nmp::ReceiptResultError
+pub nmp::ReceiptResultError::ClosedWithoutOutcome
+pub nmp::ReceiptResultError::ReplayUnavailable
+impl core::clone::Clone for nmp::ReceiptResultError
+pub fn nmp::ReceiptResultError::clone(&self) -> nmp::ReceiptResultError
+impl core::cmp::Eq for nmp::ReceiptResultError
+impl core::cmp::PartialEq for nmp::ReceiptResultError
+pub fn nmp::ReceiptResultError::eq(&self, &nmp::ReceiptResultError) -> bool
+impl core::error::Error for nmp::ReceiptResultError
+impl core::fmt::Debug for nmp::ReceiptResultError
+pub fn nmp::ReceiptResultError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::ReceiptResultError
+pub fn nmp::ReceiptResultError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::ReceiptResultError
+impl core::marker::Freeze for nmp::ReceiptResultError
+impl core::marker::Send for nmp::ReceiptResultError
+impl core::marker::Sync for nmp::ReceiptResultError
+impl core::marker::Unpin for nmp::ReceiptResultError
+impl core::marker::UnsafeUnpin for nmp::ReceiptResultError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::ReceiptResultError
+impl core::panic::unwind_safe::UnwindSafe for nmp::ReceiptResultError
 pub enum nmp::RelayInformationCachePolicy
 pub nmp::RelayInformationCachePolicy::Refresh
 pub nmp::RelayInformationCachePolicy::UseCache
@@ -1318,6 +1340,7 @@ pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::res
 pub fn nmp::Engine::publish_queue(&self) -> core::result::Result<alloc::vec::Vec<nmp::PublishQueueEntry>, nmp::RemoveQueueEntryError>
 pub fn nmp::Engine::reattach_by_correlation(&self, alloc::string::String) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp::ReceiptId) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
+pub fn nmp::Engine::receipt_result(&self, nmp::ReceiptId) -> core::result::Result<nmp::ReceiptResult, nmp::ReceiptResultError>
 pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>
 pub fn nmp::Engine::remove_account(&self, &nmp::AccountRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::remove_auth_policy(&self, &nmp::AuthPolicyRegistration) -> core::result::Result<bool, nmp::EngineError>
@@ -1472,10 +1495,32 @@ impl core::marker::Unpin for nmp::ReceiptId
 impl core::marker::UnsafeUnpin for nmp::ReceiptId
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::ReceiptId
 impl core::panic::unwind_safe::UnwindSafe for nmp::ReceiptId
+pub struct nmp::ReceiptResult
+pub nmp::ReceiptResult::outcome: nmp::WriteOutcome
+pub nmp::ReceiptResult::relays: alloc::collections::btree::map::BTreeMap<nostr::types::url::RelayUrl, nmp::RelayState>
+impl nmp::ReceiptResult
+pub fn nmp::ReceiptResult::from_facts(impl core::iter::traits::collect::IntoIterator<Item = nmp::WriteFact>) -> core::result::Result<Self, nmp::ReceiptResultError>
+impl core::clone::Clone for nmp::ReceiptResult
+pub fn nmp::ReceiptResult::clone(&self) -> nmp::ReceiptResult
+impl core::cmp::Eq for nmp::ReceiptResult
+impl core::cmp::PartialEq for nmp::ReceiptResult
+pub fn nmp::ReceiptResult::eq(&self, &nmp::ReceiptResult) -> bool
+impl core::fmt::Debug for nmp::ReceiptResult
+pub fn nmp::ReceiptResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::ReceiptResult
+impl core::marker::Freeze for nmp::ReceiptResult
+impl core::marker::Send for nmp::ReceiptResult
+impl core::marker::Sync for nmp::ReceiptResult
+impl core::marker::Unpin for nmp::ReceiptResult
+impl core::marker::UnsafeUnpin for nmp::ReceiptResult
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::ReceiptResult
+impl core::panic::unwind_safe::UnwindSafe for nmp::ReceiptResult
 pub struct nmp::ReceiptStream
 pub nmp::ReceiptStream::event_id: nostr::event::id::EventId
 pub nmp::ReceiptStream::id: nmp::ReceiptId
 pub nmp::ReceiptStream::statuses: nmp::runtime::fifo_channel::FifoReceiver<nmp::WriteFact>
+impl nmp::ReceiptStream
+pub fn nmp::ReceiptStream::result(self) -> core::result::Result<nmp::ReceiptResult, nmp::ReceiptResultError>
 impl core::marker::Freeze for nmp::ReceiptStream
 impl core::marker::Send for nmp::ReceiptStream
 impl core::marker::Sync for nmp::ReceiptStream

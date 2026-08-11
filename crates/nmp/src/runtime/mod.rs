@@ -106,8 +106,8 @@ use crate::core::{
     ReceiptId, RelayAdmissionPolicy, RequestAttemptId, RequestHandoffOutcome, Row, RowDelta,
 };
 use crate::publish_queue::{
-    CancelWriteError, CancelWriteOutcome, PublishQueueEntry, RemoveQueueEntryError, SigningState,
-    WriteFact, WriteOutcome,
+    CancelWriteError, CancelWriteOutcome, PublishQueueEntry, ReceiptResult, ReceiptResultError,
+    RemoveQueueEntryError, SigningState, WriteFact, WriteOutcome,
 };
 use crate::relay_information_service::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
@@ -621,6 +621,72 @@ pub struct ReceiptStream {
     /// about one write would cost every write that app has ever made (#1314).
     pub event_id: EventId,
     pub statuses: FifoReceiver<WriteFact>,
+    handle: std::panic::AssertUnwindSafe<Handle>,
+}
+
+impl ReceiptStream {
+    /// Block until this accepted write reaches its one terminal result.
+    ///
+    /// NMP performs fact reduction and durable replay itself. If the finite
+    /// live FIFO lags, collection restarts from the retained receipt rather
+    /// than asking the app to understand replay cursors.
+    pub fn result(self) -> Result<ReceiptResult, ReceiptResultError> {
+        self.handle.0.receipt_result(self.id)
+    }
+}
+
+fn collect_receipt_result(
+    handle: &Handle,
+    id: ReceiptId,
+    mut statuses: FifoReceiver<WriteFact>,
+    mut next_cursor: Option<ReceiptReplayCursor>,
+    mut facts: Vec<WriteFact>,
+) -> Result<ReceiptResult, ReceiptResultError> {
+    loop {
+        match statuses.recv() {
+            Ok(fact) => {
+                let terminal = matches!(fact, WriteFact::Outcome(_));
+                facts.push(fact);
+                if terminal {
+                    return ReceiptResult::from_facts(facts);
+                }
+            }
+            Err(FifoRecvError::Closed) => {
+                let Some(cursor) = next_cursor.take() else {
+                    return Err(ReceiptResultError::ClosedWithoutOutcome);
+                };
+                match handle.reattach_receipt_from(id, cursor) {
+                    ReceiptReattachment::Attached {
+                        statuses: page,
+                        next_cursor: cursor,
+                        ..
+                    } => {
+                        statuses = page;
+                        next_cursor = cursor;
+                    }
+                    ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {
+                        return Err(ReceiptResultError::ReplayUnavailable);
+                    }
+                }
+            }
+            Err(FifoRecvError::Lagged) => {
+                facts.clear();
+                match handle.reattach_receipt(id) {
+                    ReceiptReattachment::Attached {
+                        statuses: page,
+                        next_cursor: cursor,
+                        ..
+                    } => {
+                        statuses = page;
+                        next_cursor = cursor;
+                    }
+                    ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {
+                        return Err(ReceiptResultError::ReplayUnavailable);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Result of looking up retained receipt facts by stable id (or, #591, by a
@@ -6863,7 +6929,23 @@ impl Handle {
             id,
             event_id,
             statuses: rx,
+            handle: std::panic::AssertUnwindSafe(self.clone()),
         })
+    }
+
+    /// Attach to a retained receipt and block until its terminal result.
+    /// This is the restart counterpart of [`ReceiptStream::result`].
+    pub fn receipt_result(&self, id: ReceiptId) -> Result<ReceiptResult, ReceiptResultError> {
+        match self.reattach_receipt(id) {
+            ReceiptReattachment::Attached {
+                statuses,
+                next_cursor,
+                ..
+            } => collect_receipt_result(self, id, statuses, next_cursor, Vec::new()),
+            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => {
+                Err(ReceiptResultError::ReplayUnavailable)
+            }
+        }
     }
 
     /// Attach an additional observer to a retained receipt. The returned

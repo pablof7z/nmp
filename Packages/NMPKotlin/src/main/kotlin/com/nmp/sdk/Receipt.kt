@@ -3,6 +3,7 @@ package com.nmp.sdk
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiReceiptReattachment
+import uniffi.nmp_ffi.FfiReceiptResult
 import uniffi.nmp_ffi.FfiCancelWriteException
 import uniffi.nmp_ffi.FfiRemoveQueueEntryException
 import uniffi.nmp_ffi.FfiCancelWriteOutcome
@@ -10,10 +11,34 @@ import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.NmpReceiptStream
 
 /** A stable receipt identity and its stream of retained/live write facts. */
-data class Receipt(
+class Receipt internal constructor(
     val id: ULong,
-    val status: Flow<WriteFact>,
-)
+    private val stream: NmpReceiptStream,
+) {
+    val status: Flow<WriteFact> = receiptStatusFlow(stream)
+
+    /** Await NMP's one terminal result; apps do not fold receipt facts or
+     * implement durable replay themselves. */
+    suspend fun result(): ReceiptResult =
+        ReceiptResult.from(nmpRethrowingAsync { stream.result() })
+}
+
+data class ReceiptRelayResult(val relay: String, val state: RelayState)
+
+/** The terminal answer for one accepted write, preserving every relay's
+ * final state rather than collapsing disagreement to a boolean. */
+data class ReceiptResult(
+    val outcome: WriteOutcome,
+    val relays: List<ReceiptRelayResult>,
+) {
+    companion object {
+        internal fun from(ffi: FfiReceiptResult): ReceiptResult =
+            ReceiptResult(
+                outcome = WriteOutcome.from(ffi.outcome),
+                relays = ffi.relays.map { ReceiptRelayResult(it.relay, RelayState.from(it.state)) },
+            )
+    }
+}
 
 sealed interface ReceiptReattachment {
     data class Attached(val receipt: Receipt) : ReceiptReattachment
@@ -139,7 +164,7 @@ internal fun cancelWrite(engine: NmpEngineInterface, receiptId: ULong): WriteCan
  * facts in finite pages. Collection-scope teardown withdraws the LIVE stream
  * via `handle.cancel()`; the durable receipt itself is untouched. */
 internal fun receiptFrom(stream: NmpReceiptStream): Receipt =
-    Receipt(id = stream.id(), status = receiptStatusFlow(stream))
+    Receipt(id = stream.id(), stream = stream)
 
 private fun receiptStatusFlow(stream: NmpReceiptStream): Flow<WriteFact> =
     flow {

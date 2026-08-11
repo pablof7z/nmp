@@ -25,7 +25,9 @@
 use std::sync::Mutex;
 
 use crate::core::ReceiptId;
-use crate::publish_queue::{PublishQueueEntry, RemoveQueueEntryError};
+use crate::publish_queue::{
+    PublishQueueEntry, ReceiptResult, ReceiptResultError, RemoveQueueEntryError,
+};
 use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
@@ -708,6 +710,15 @@ impl Engine {
     /// retained obligations with unreadable evidence are distinct outcomes.
     pub fn reattach_receipt(&self, id: ReceiptId) -> Result<ReceiptReattachment, EngineError> {
         self.with_handle(|handle| handle.reattach_receipt(id))
+    }
+
+    /// Reattach after a restart and wait for NMP's terminal publication
+    /// result without exposing replay pages or fact reduction to the app.
+    pub fn receipt_result(&self, id: ReceiptId) -> Result<ReceiptResult, ReceiptResultError> {
+        match self.with_handle(|handle| handle.receipt_result(id)) {
+            Ok(result) => result,
+            Err(_) => Err(ReceiptResultError::ReplayUnavailable),
+        }
     }
 
     #[doc(hidden)]

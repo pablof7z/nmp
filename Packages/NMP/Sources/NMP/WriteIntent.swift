@@ -346,6 +346,9 @@ public enum RelayState: Sendable, Hashable {
 /// Why a write ended without going anywhere.
 public enum NotSentReason: Sendable, Hashable {
     case cancelled
+    /// The accepted signing request was refused or failed, and no EVENT bytes
+    /// crossed the local transport handoff.
+    case signerRefused
     /// A newer accepted write won the same replaceable coordinate, and NMP
     /// proved the older bytes did not cross the local transport handoff. Not a
     /// failure -- for an app renewing presence it is the steady state.
@@ -354,6 +357,7 @@ public enum NotSentReason: Sendable, Hashable {
     init(_ ffi: FfiNotSentReason) {
         switch ffi {
         case .cancelled: self = .cancelled
+        case .signerRefused: self = .signerRefused
         case .superseded: self = .superseded
         }
     }

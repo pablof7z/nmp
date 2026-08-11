@@ -2915,6 +2915,21 @@ enum Enum {
             ),
         },
         Variant {
+            name: "ReceiptClosedWithoutOutcome",
+            discr: None,
+            fields: [
+                Field {
+                    name: "receipt_id",
+                    type_: UInt64,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The stream ended before its promised whole-write outcome was retained.",
+            ),
+        },
+        Variant {
             name: "InvalidSignature",
             discr: None,
             fields: [
@@ -4174,6 +4189,14 @@ enum Enum {
             discr: None,
             fields: [],
             docstring: None,
+        },
+        Variant {
+            name: "SignerRefused",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "The accepted signing request was refused or failed, and NMP proved no\nEVENT bytes crossed the local transport handoff.",
+            ),
         },
         Variant {
             name: "Superseded",
@@ -7302,6 +7325,63 @@ record Record {
     ],
     docstring: Some(
         "One `(relay, state)` pair on a [`FfiPublishQueueEntry`]. A record rather\nthan a map because UniFFI dictionaries key only on primitives and the\nrelay URL is the caller-meaningful half.",
+    ),
+}
+
+record Record {
+    name: "FfiReceiptRelayResult",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "relay",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "state",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiRelayState",
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One relay's final state inside a terminal receipt result.",
+    ),
+}
+
+record Record {
+    name: "FfiReceiptResult",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "outcome",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiWriteOutcome",
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "relays",
+            type_: Sequence {
+                inner_type: Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiReceiptRelayResult",
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "The one terminal answer for an accepted write. Relay disagreement remains\nvisible instead of being collapsed to a boolean.",
     ),
 }
 
@@ -15662,6 +15742,51 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptstream_next",
             checksum: Some(
                 3778,
+            ),
+        },
+        Method {
+            name: "result",
+            object_name: "NmpReceiptStream",
+            object_module_path: "nmp_ffi",
+            is_async: true,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiReceiptResult",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpreceiptstream_result",
+                is_async: true,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpReceiptStream",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    Handle,
+                ),
+                has_rust_call_status_arg: false,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Await the one terminal publication answer. NMP owns fact reduction and\nautomatically restarts from durable replay if live delivery lags.",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpreceiptstream_result",
+            checksum: Some(
+                28591,
             ),
         },
     ],

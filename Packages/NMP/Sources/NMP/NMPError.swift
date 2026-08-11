@@ -95,6 +95,7 @@ public enum NMPError: Error, Sendable, Equatable {
     /// bounded; when present, reattach `receiptId` to replay persisted facts.
     case factStreamLagged(receiptId: UInt64?)
     case receiptReplayUnavailable(receiptId: UInt64)
+    case receiptClosedWithoutOutcome(receiptId: UInt64)
     /// #680: `NmpSignEventHandle.signed()` was awaited a second time -- the
     /// one-shot result was already delivered to the first await.
     case signEventAlreadyConsumed
@@ -245,6 +246,8 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .factStreamLagged(receiptId: receiptId)
         case .ReceiptReplayUnavailable(let receiptId):
             self = .receiptReplayUnavailable(receiptId: receiptId)
+        case .ReceiptClosedWithoutOutcome(let receiptId):
+            self = .receiptClosedWithoutOutcome(receiptId: receiptId)
         case .InvalidSignature(let got): self = .invalidSignature(got)
         case .EngineClosed: self = .engineClosed
         case .InvalidNostrEntity(let reason): self = .invalidNostrEntity(reason)
@@ -361,6 +364,8 @@ extension NMPError: LocalizedError {
             "The finite live fact stream fell behind before a receipt was observable"
         case .receiptReplayUnavailable(let receiptId):
             "Retained evidence for receipt \(receiptId) became unavailable during replay"
+        case .receiptClosedWithoutOutcome(let receiptId):
+            "Receipt \(receiptId) closed before its terminal outcome"
         case .signEventAlreadyConsumed:
             "This sign-event result was already consumed"
         case .invalidSignature(let got):
