@@ -143,8 +143,8 @@ check_no_routing_parameter() {
 
 # (012): the nine names, on every surface, take semantic fields plus the
 # retained engine/author capability alone.
-RUST_OPS=(join_request leave_request add_user remove_user edit_metadata delete_event create_group delete_group create_invite)
-CAMEL_OPS=(joinRequest leaveRequest addUser removeUser editMetadata deleteEvent createGroup deleteGroup createInvite)
+RUST_OPS=(join_request leave_request add_users remove_users edit_metadata delete_event create_group delete_group create_invite)
+CAMEL_OPS=(joinRequest leaveRequest addUsers removeUsers editMetadata deleteEvent createGroup deleteGroup createInvite)
 
 for op in "${RUST_OPS[@]}"; do
   check_signature_shape "$RUST_FACADE" "pub fn" "$op"

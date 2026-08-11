@@ -46,6 +46,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import uniffi.nmp_ffi.FfiEventBuilder
 import uniffi.nmp_ffi.FfiGroup
+import uniffi.nmp_ffi.FfiGroupUser
 import uniffi.nmp_ffi.FfiGroupIds
 import uniffi.nmp_ffi.FfiGroups
 import uniffi.nmp_ffi.FfiGroupMetadataEdit
@@ -67,6 +68,12 @@ import uniffi.nmp_ffi.adminListIncludes as ffiAdminListIncludes
 import uniffi.nmp_ffi.anyOf as ffiAnyOf
 import uniffi.nmp_ffi.groupsWhoseRecordMatches as ffiGroupsWhoseRecordMatches
 import uniffi.nmp_ffi.memberListIncludes as ffiMemberListIncludes
+
+/** One user in a kind:9000 add-users moderation event. */
+data class NMPGroupUser(
+    val pubkeyHex: String,
+    val role: String? = null,
+)
 
 /** The relays a NIP-29 group lives on -- named once, retained privately, and
  * never asked for again (`nmp::nip29::RelayScope`/`FfiRelayScope` mirror). */
@@ -239,21 +246,31 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
     fun leaveRequest(engine: NMPEngine, authorPubkeyHex: String): Receipt =
         receiptFrom(nmpRethrowing { ffi.leaveRequest(engine.ffi, authorPubkeyHex) })
 
-    /** kind:9000 -- add a member, optionally with a role. */
-    fun addUser(
+    /** kind:9000 -- add several members in one event, optionally with a role
+     * per member. */
+    fun addUsers(
         engine: NMPEngine,
         authorPubkeyHex: String,
-        pubkeyHex: String,
-        role: String? = null,
+        users: List<NMPGroupUser>,
     ): Receipt =
         receiptFrom(
-            nmpRethrowing { ffi.addUser(engine.ffi, authorPubkeyHex, pubkeyHex, role) },
+            nmpRethrowing {
+                ffi.addUsers(
+                    engine.ffi,
+                    authorPubkeyHex,
+                    users.map { FfiGroupUser(it.pubkeyHex, it.role) },
+                )
+            },
         )
 
-    /** kind:9001 -- remove a member. */
-    fun removeUser(engine: NMPEngine, authorPubkeyHex: String, pubkeyHex: String): Receipt =
+    /** kind:9001 -- remove several members in one event. */
+    fun removeUsers(
+        engine: NMPEngine,
+        authorPubkeyHex: String,
+        pubkeysHex: List<String>,
+    ): Receipt =
         receiptFrom(
-            nmpRethrowing { ffi.removeUser(engine.ffi, authorPubkeyHex, pubkeyHex) },
+            nmpRethrowing { ffi.removeUsers(engine.ffi, authorPubkeyHex, pubkeysHex) },
         )
 
     /** kind:9002 -- state part of the group's metadata (#1282).

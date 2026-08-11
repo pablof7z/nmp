@@ -299,6 +299,12 @@ sealed class NMPError(message: String) : Exception(message) {
             "a group records observation must name at least one of the three relay-signed records",
         )
 
+    object GroupUserBatchEmpty :
+        NMPError("a NIP-29 user operation must name at least one user")
+
+    data class GroupUserBatchConflictingRoles(val pubkey: String) :
+        NMPError("NIP-29 user operation names $pubkey with conflicting roles")
+
     /** #1252: a selection handed to `NMPGroupIds.whoseRecordMatches` named no
      * kind. It is evaluated with NIP-29's own pin, so it would match every
      * event the group's host holds. */
@@ -383,6 +389,9 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.GroupRecordsNotContextScoped ->
                     GroupRecordsNotContextScoped(ffi.kinds)
                 is FfiException.GroupNoRecordSelected -> GroupNoRecordSelected
+                is FfiException.GroupUserBatchEmpty -> GroupUserBatchEmpty
+                is FfiException.GroupUserBatchConflictingRoles ->
+                    GroupUserBatchConflictingRoles(ffi.pubkey)
                 is FfiException.GroupIdSelectionNamesNoKind -> GroupIdSelectionNamesNoKind
                 is FfiException.GroupIdSelectionNotAGroupRecordKind ->
                     GroupIdSelectionNotAGroupRecordKind(ffi.kind)

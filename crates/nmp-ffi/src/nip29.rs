@@ -57,6 +57,13 @@ use crate::convert::{
 use crate::facade::{NmpEngine, NmpReceiptStream};
 use crate::types::{FfiBinding, FfiEventBuilder, FfiFilter, FfiLiveQuery, FfiSignedEvent};
 
+/// One user in a kind:9000 add-users moderation event.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGroupUser {
+    pub pubkey: String,
+    pub role: Option<String>,
+}
+
 fn parse_host(host: String) -> Result<RelayUrl, FfiError> {
     RelayUrl::parse(&host).map_err(|_| FfiError::InvalidRelayUrl { got: host })
 }
@@ -247,32 +254,41 @@ impl FfiGroup {
         Ok(NmpReceiptStream::new(receipts))
     }
 
-    /// kind:9000 -- add a member, optionally with a role.
-    pub fn add_user(
+    /// kind:9000 -- add several members in one event, optionally with a role
+    /// per member.
+    pub fn add_users(
         &self,
         engine: Arc<NmpEngine>,
         author: String,
-        pubkey: String,
-        role: Option<String>,
+        users: Vec<FfiGroupUser>,
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
-        let pubkey = parse_pubkey(&pubkey)?;
-        let receipts = self
-            .inner
-            .add_user(&engine.engine, author, pubkey, role.as_deref())?;
+        let users = users
+            .into_iter()
+            .map(|user| {
+                Ok(nmp::nip29::GroupUser::new(
+                    parse_pubkey(&user.pubkey)?,
+                    user.role,
+                ))
+            })
+            .collect::<Result<Vec<_>, FfiError>>()?;
+        let receipts = self.inner.add_users(&engine.engine, author, users)?;
         Ok(NmpReceiptStream::new(receipts))
     }
 
-    /// kind:9001 -- remove a member.
-    pub fn remove_user(
+    /// kind:9001 -- remove several members in one event.
+    pub fn remove_users(
         &self,
         engine: Arc<NmpEngine>,
         author: String,
-        pubkey: String,
+        pubkeys: Vec<String>,
     ) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let author = parse_pubkey(&author)?;
-        let pubkey = parse_pubkey(&pubkey)?;
-        let receipts = self.inner.remove_user(&engine.engine, author, pubkey)?;
+        let pubkeys = pubkeys
+            .into_iter()
+            .map(|pubkey| parse_pubkey(&pubkey))
+            .collect::<Result<Vec<_>, _>>()?;
+        let receipts = self.inner.remove_users(&engine.engine, author, pubkeys)?;
         Ok(NmpReceiptStream::new(receipts))
     }
 
@@ -1114,12 +1130,19 @@ mod tests {
                 group.leave_request(engine.clone(), author.clone()),
             ),
             (
-                "add_user",
-                group.add_user(engine.clone(), author.clone(), subject.clone(), None),
+                "add_users",
+                group.add_users(
+                    engine.clone(),
+                    author.clone(),
+                    vec![FfiGroupUser {
+                        pubkey: subject.clone(),
+                        role: None,
+                    }],
+                ),
             ),
             (
-                "remove_user",
-                group.remove_user(engine.clone(), author.clone(), subject.clone()),
+                "remove_users",
+                group.remove_users(engine.clone(), author.clone(), vec![subject.clone()]),
             ),
             (
                 "edit_metadata",

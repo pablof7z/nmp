@@ -5,8 +5,8 @@
 //! (`nmp-nip51`'s), the schema for join, leave, put-user, remove-user,
 //! edit-metadata, delete-event, create-group, delete-group and create-invite
 //! is genuinely NIP-29's own -- <https://github.com/nostr-protocol/nips/blob/master/29.md>.
-//! Owning it here is what lets an app write `group.remove_user(pubkey)`
-//! instead of looking up kind 9001 and hand-assembling a `p` tag itself.
+//! Owning it here is what lets an app write `group.remove_users(pubkeys)`
+//! instead of looking up kind 9001 and hand-assembling `p` tags itself.
 //!
 //! Every function here returns a plain [`EventBuilder`]: kind and tags only,
 //! no pubkey, no signature, no `h` tag. The `h` tag names which group a draft
@@ -26,6 +26,8 @@
 //! on 2026-07-16) are stated on [`create_group`] and nowhere else. That
 //! function documents the live probe behind the choice, including the one
 //! place NIP-29's prose and its only implementation disagree.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::EventBuilder;
 use nostr::{Kind, PublicKey, Tag};
@@ -57,22 +59,96 @@ pub fn leave_request() -> EventBuilder {
     EventBuilder::new(Kind::from(LEAVE_REQUEST))
 }
 
-/// kind:9000 -- put-user: add a member, optionally granting a role.
-///
-/// `role` becomes a third value on the `p` tag
-/// (`["p", "<pubkey-hex>", "<role>"]`) when supplied; with no role the tag is
-/// the plain `["p", "<pubkey-hex>"]`.
-pub fn add_user(pubkey: PublicKey, role: Option<&str>) -> EventBuilder {
-    let tag = match role {
-        Some(role) => Tag::parse(["p", &pubkey.to_hex(), role]).expect("'p' is well-formed"),
-        None => Tag::public_key(pubkey),
-    };
-    EventBuilder::new(Kind::from(PUT_USER)).tag(tag)
+/// One user named by a kind:9000 put-user operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupUser {
+    pub pubkey: PublicKey,
+    pub role: Option<String>,
 }
 
-/// kind:9001 -- remove-user: drop a member from the group.
-pub fn remove_user(pubkey: PublicKey) -> EventBuilder {
-    EventBuilder::new(Kind::from(REMOVE_USER)).tag(Tag::public_key(pubkey))
+impl GroupUser {
+    pub fn new(pubkey: PublicKey, role: Option<String>) -> Self {
+        Self { pubkey, role }
+    }
+}
+
+/// Why a multi-user moderation event could not be composed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupUsersError {
+    NoUsers,
+    ConflictingRoles { pubkey: PublicKey },
+}
+
+impl std::fmt::Display for GroupUsersError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoUsers => write!(f, "a NIP-29 user operation must name at least one user"),
+            Self::ConflictingRoles { pubkey } => write!(
+                f,
+                "NIP-29 user operation names {pubkey} with conflicting roles"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GroupUsersError {}
+
+/// kind:9000 -- put-user: add several members in ONE event, optionally
+/// granting each one a role.
+///
+/// A role becomes the third value on that user's `p` tag
+/// (`["p", "<pubkey-hex>", "<role>"]`); with no role the row is the plain
+/// `["p", "<pubkey-hex>"]`. Exact duplicates collapse deterministically.
+/// Naming one pubkey with different roles is refused rather than emitting an
+/// ambiguous moderation command.
+pub fn add_users(
+    users: impl IntoIterator<Item = GroupUser>,
+) -> Result<EventBuilder, GroupUsersError> {
+    let mut unique = BTreeMap::new();
+    for user in users {
+        match unique.get(&user.pubkey) {
+            Some(role) if role != &user.role => {
+                return Err(GroupUsersError::ConflictingRoles {
+                    pubkey: user.pubkey,
+                });
+            }
+            Some(_) => {}
+            None => {
+                unique.insert(user.pubkey, user.role);
+            }
+        }
+    }
+    if unique.is_empty() {
+        return Err(GroupUsersError::NoUsers);
+    }
+
+    let mut builder = EventBuilder::new(Kind::from(PUT_USER));
+    for (pubkey, role) in unique {
+        let tag = match role {
+            Some(role) => Tag::parse(vec!["p".to_string(), pubkey.to_hex(), role])
+                .expect("a public key and role form a p row"),
+            None => Tag::public_key(pubkey),
+        };
+        builder = builder.tag(tag);
+    }
+    Ok(builder)
+}
+
+/// kind:9001 -- remove-user: drop several members in ONE event. Exact
+/// duplicates collapse deterministically.
+pub fn remove_users(
+    pubkeys: impl IntoIterator<Item = PublicKey>,
+) -> Result<EventBuilder, GroupUsersError> {
+    let unique: BTreeSet<_> = pubkeys.into_iter().collect();
+    if unique.is_empty() {
+        return Err(GroupUsersError::NoUsers);
+    }
+
+    let mut builder = EventBuilder::new(Kind::from(REMOVE_USER));
+    for pubkey in unique {
+        builder = builder.tag(Tag::public_key(pubkey));
+    }
+    Ok(builder)
 }
 
 /// Who may READ a group's messages -- NIP-29's `private` marker, and the
@@ -346,20 +422,21 @@ mod tests {
     }
 
     #[test]
-    fn add_user_carries_kind_9000_and_a_bare_p_tag() {
+    fn add_users_carries_kind_9000_and_a_bare_p_tag() {
         let pubkey = subject();
-        assert_eq!(kind_of(add_user(pubkey, None)), Kind::from(PUT_USER));
+        let compose = || add_users([GroupUser::new(pubkey, None)]).unwrap();
+        assert_eq!(kind_of(compose()), Kind::from(PUT_USER));
         assert_eq!(
-            rows(add_user(pubkey, None)),
+            rows(compose()),
             vec![vec!["p".to_string(), pubkey.to_hex()]]
         );
     }
 
     #[test]
-    fn add_user_with_role_carries_the_role_on_the_p_tag() {
+    fn add_users_with_role_carries_the_role_on_the_p_tag() {
         let pubkey = subject();
         assert_eq!(
-            rows(add_user(pubkey, Some("moderator"))),
+            rows(add_users([GroupUser::new(pubkey, Some("moderator".to_string()),)]).unwrap()),
             vec![vec![
                 "p".to_string(),
                 pubkey.to_hex(),
@@ -369,12 +446,70 @@ mod tests {
     }
 
     #[test]
-    fn remove_user_carries_kind_9001_and_a_p_tag() {
+    fn remove_users_carries_kind_9001_and_a_p_tag() {
         let pubkey = subject();
-        assert_eq!(kind_of(remove_user(pubkey)), Kind::from(REMOVE_USER));
+        let compose = || remove_users([pubkey]).unwrap();
+        assert_eq!(kind_of(compose()), Kind::from(REMOVE_USER));
         assert_eq!(
-            rows(remove_user(pubkey)),
+            rows(compose()),
             vec![vec!["p".to_string(), pubkey.to_hex()]]
+        );
+    }
+
+    #[test]
+    fn add_users_composes_one_event_with_every_user_once_in_pubkey_order() {
+        let alice = subject();
+        let bob = subject();
+        let mut expected = vec![
+            vec!["p".to_string(), alice.to_hex(), "admin".to_string()],
+            vec!["p".to_string(), bob.to_hex()],
+        ];
+        expected.sort();
+
+        assert_eq!(
+            rows(
+                add_users([
+                    GroupUser::new(bob, None),
+                    GroupUser::new(alice, Some("admin".to_string())),
+                    GroupUser::new(bob, None),
+                ])
+                .unwrap()
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn remove_users_composes_one_event_with_every_pubkey_once_in_order() {
+        let alice = subject();
+        let bob = subject();
+        let mut expected = vec![
+            vec!["p".to_string(), alice.to_hex()],
+            vec!["p".to_string(), bob.to_hex()],
+        ];
+        expected.sort();
+
+        assert_eq!(rows(remove_users([bob, alice, bob]).unwrap()), expected);
+    }
+
+    #[test]
+    fn user_batches_refuse_empty_and_conflicting_role_inputs() {
+        let pubkey = subject();
+        assert_eq!(
+            add_users(std::iter::empty::<GroupUser>()).unwrap_err(),
+            GroupUsersError::NoUsers
+        );
+        assert_eq!(
+            remove_users(std::iter::empty::<PublicKey>()).unwrap_err(),
+            GroupUsersError::NoUsers
+        );
+        assert_eq!(
+            add_users([
+                GroupUser::new(pubkey, None),
+                GroupUser::new(pubkey, Some("admin".to_string())),
+            ])
+            .unwrap_err(),
+            GroupUsersError::ConflictingRoles { pubkey }
         );
     }
 
