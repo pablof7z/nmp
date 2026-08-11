@@ -105,3 +105,43 @@ Feature: Publishing tells the truth, per relay
     When the app asks NMP for that receipt's result
     Then NMP traverses retained pages and returns its terminal answer
     And the app implements no cursor or replay loop
+
+  Rule: A persistent Engine owns recovery from a transient storage failure
+
+    # nmp:id=WRITES-STORE-RECOVERY-001
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
+    # nmp:evidence=rust:nmp-store::reopen_replaces_only_the_database_generation_and_preserves_durable_identity
+    # nmp:falsifier=Disable the runtime recovery driver; the same Engine never accepts or reattaches a later write after the injected handle latch.
+    @ledger-9 @ledger-15
+    Scenario: A transient storage failure does not require a new Engine
+      Given an app is using one persistent Engine
+      And the durable store becomes temporarily unwritable
+      When the store becomes writable again
+      Then the same Engine reconstructs its durable state
+      And a later write can be accepted without app recovery orchestration
+
+    # nmp:id=WRITES-STORE-RECOVERY-002
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
+    # nmp:falsifier=Repeat the uncertain acceptance without correlation readback; the retained publish queue contains two receipts instead of one.
+    @ledger-9 @ledger-15
+    Scenario: An uncertain acceptance is resolved from durable identity
+      Given a write has an app-owned correlation token
+      And its acceptance transaction reports an uncertain storage failure
+      When the same Engine reconstructs its durable state
+      Then NMP reads the correlation token back before repeating acceptance
+      And exactly one durable receipt owns the write
+
+    # nmp:id=WRITES-STORE-RECOVERY-003
+    # nmp:status=built
+    # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
+    # nmp:evidence=rust:nmp::persistent_engine_does_not_reconstruct_for_an_invariant_fault
+    # nmp:evidence=rust:nmp::recovery_backoff_is_exponential_event_driven_and_capped
+    # nmp:falsifier=Treat either injected unavailable reopen as success; publishing can report acceptance before durable reconstruction completes.
+    @ledger-9
+    Scenario: A store that cannot be reconstructed never fabricates acceptance
+      Given the durable store remains unavailable
+      When the app publishes through the existing Engine
+      Then publishing does not report acceptance
+      And NMP keeps retrying internal recovery with bounded backoff

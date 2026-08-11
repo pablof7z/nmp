@@ -6,7 +6,7 @@
 //! raw lane-door call it finds in a core module.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 use nmp_grammar::ContextualAtom;
 use nmp_store::{
@@ -28,6 +28,13 @@ use nostr::{Event, Event as SignedEvent, EventId, PublicKey, RelayUrl, Timestamp
 /// (the transition may have landed) while `Invariant` is `Absent` (the
 /// post-commit decode path at `publish_queue_ops.rs`), and #1000's stuck-forever
 /// shape is reachable through either.
+#[derive(Clone, Copy)]
+enum AcceptanceFault {
+    BeforeCommitIo,
+    AfterCommitIo,
+    BeforeCommitInvariant,
+}
+
 #[derive(Default)]
 pub(crate) struct LaneFaultState {
     bootstrap: Option<PersistenceFault>,
@@ -39,12 +46,48 @@ pub(crate) struct LaneFaultState {
     handoff_once: Option<PersistenceFault>,
     bootstrap_calls: u32,
     maintenance_sweeps: u32,
+    /// Commit the next acceptance into the inner oracle, then report the
+    /// originating I/O failure and latch every subsequent store read. This
+    /// models redb's genuinely ambiguous commit boundary.
+    acceptance_fault_once: Option<AcceptanceFault>,
+    handle_latched: bool,
+    reopen_failures_remaining: u32,
+    reopen_attempts: u32,
+    reopen_observer: Option<mpsc::Sender<bool>>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct LaneFaults(Arc<Mutex<LaneFaultState>>);
 
 impl LaneFaults {
+    pub(crate) fn fail_accept_after_commit_once(&self) -> mpsc::Receiver<bool> {
+        self.fail_accept_once(AcceptanceFault::AfterCommitIo)
+    }
+
+    pub(crate) fn fail_accept_before_commit_once(&self) -> mpsc::Receiver<bool> {
+        self.fail_accept_once(AcceptanceFault::BeforeCommitIo)
+    }
+
+    pub(crate) fn fail_accept_with_invariant_once(&self) {
+        self.0.lock().unwrap().acceptance_fault_once = Some(AcceptanceFault::BeforeCommitInvariant);
+    }
+
+    fn fail_accept_once(&self, fault: AcceptanceFault) -> mpsc::Receiver<bool> {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = self.0.lock().unwrap();
+        state.acceptance_fault_once = Some(fault);
+        state.reopen_observer = Some(sender);
+        receiver
+    }
+
+    pub(crate) fn fail_reopen_attempts(&self, attempts: u32) {
+        self.0.lock().unwrap().reopen_failures_remaining = attempts;
+    }
+
+    pub(crate) fn reopen_attempt_count(&self) -> u32 {
+        self.0.lock().unwrap().reopen_attempts
+    }
+
     pub(crate) fn fail_bootstrap(&self, fault: PersistenceFault) {
         self.0.lock().unwrap().bootstrap = Some(fault);
     }
@@ -111,6 +154,23 @@ impl LaneFaults {
             .auth_denial
             .map(|fault| PersistenceError::new(fault, "injected AUTH denial failure".to_string()))
     }
+
+    fn latched_error(&self) -> Option<PersistenceError> {
+        self.0.lock().unwrap().handle_latched.then(|| {
+            PersistenceError::new(
+                PersistenceFault::Latched,
+                "injected durable store handle is latched",
+            )
+        })
+    }
+
+    fn take_acceptance_fault(&self) -> Option<AcceptanceFault> {
+        self.0.lock().unwrap().acceptance_fault_once.take()
+    }
+
+    fn latch_handle(&self) {
+        self.0.lock().unwrap().handle_latched = true;
+    }
 }
 
 /// A delegating store whose lane-bootstrap and route-revision reads can be
@@ -128,6 +188,26 @@ impl<S: EventStore> FaultyLaneStore<S> {
 }
 
 impl<S: EventStore> EventStore for FaultyLaneStore<S> {
+    fn reopen_after_failure(&mut self) -> Result<(), PersistenceError> {
+        let mut state = self.faults.0.lock().unwrap();
+        state.reopen_attempts = state.reopen_attempts.saturating_add(1);
+        if state.reopen_failures_remaining > 0 {
+            state.reopen_failures_remaining -= 1;
+            if let Some(observer) = state.reopen_observer.as_ref() {
+                let _ = observer.send(false);
+            }
+            return Err(PersistenceError::new(
+                PersistenceFault::Io,
+                "injected durable store is still unavailable",
+            ));
+        }
+        state.handle_latched = false;
+        if let Some(observer) = state.reopen_observer.take() {
+            let _ = observer.send(true);
+        }
+        Ok(())
+    }
+
     fn bootstrap_publish_queue_lanes(
         &mut self,
         intent_id: IntentId,
@@ -298,6 +378,9 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
         self.inner.expire_due(now)
     }
     fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        if let Some(error) = self.faults.latched_error() {
+            return Err(error);
+        }
         self.inner.next_expiration()
     }
     fn record_coverage(
@@ -317,7 +400,34 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
         self.inner.gc(claims)
     }
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
-        self.inner.accept_write(accept)
+        if let Some(error) = self.faults.latched_error() {
+            return Err(error);
+        }
+        let fault = self.faults.take_acceptance_fault();
+        match fault {
+            Some(AcceptanceFault::BeforeCommitIo) => {
+                self.faults.latch_handle();
+                return Err(PersistenceError::new(
+                    PersistenceFault::Io,
+                    "injected acceptance failed before commit",
+                ));
+            }
+            Some(AcceptanceFault::BeforeCommitInvariant) => {
+                return Err(PersistenceError::invariant(
+                    "injected non-reopenable acceptance invariant",
+                ));
+            }
+            Some(AcceptanceFault::AfterCommitIo) | None => {}
+        }
+        let outcome = self.inner.accept_write(accept)?;
+        if matches!(fault, Some(AcceptanceFault::AfterCommitIo)) {
+            self.faults.latch_handle();
+            return Err(PersistenceError::new(
+                PersistenceFault::Io,
+                "injected acceptance committed before I/O failure",
+            ));
+        }
+        Ok(outcome)
     }
     fn promote_signed(
         &mut self,

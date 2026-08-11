@@ -275,7 +275,7 @@ fn healthy_current_schema_reopen_starts_no_application_write_transaction() {
         0,
         "a healthy schema-marker reopen must remain read-only"
     );
-    let read_txn = reopened.db.begin_read().unwrap();
+    let read_txn = reopened.raw_database().begin_read().unwrap();
     let store_meta = read_txn.open_table(STORE_META).unwrap();
     assert_eq!(
         store_meta.get(SCHEMA_VERSION_KEY).unwrap().unwrap().value(),
@@ -321,7 +321,7 @@ fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("allocator-flush.redb");
     let store = RedbStore::open(&path).unwrap();
-    let write_txn = store.db.begin_write().unwrap();
+    let write_txn = store.raw_database().begin_write().unwrap();
     {
         let mut canonical = CanonicalWriteTables::open(&write_txn).unwrap();
         for expected in 1..=128 {
@@ -620,7 +620,7 @@ fn room_event(keys: &nostr::Keys, room: &str, created_at: u64, content: &str) ->
 }
 
 fn raw_canonical_row(store: &RedbStore, id: EventId) -> (EventKey, Vec<u8>, Option<Vec<u8>>) {
-    let read_txn = store.db.begin_read().unwrap();
+    let read_txn = store.raw_database().begin_read().unwrap();
     let event_ids = read_txn.open_table(EVENT_IDS).unwrap();
     let events = read_txn.open_table(EVENTS).unwrap();
     let event_key = event_ids
@@ -642,7 +642,7 @@ fn raw_canonical_row(store: &RedbStore, id: EventId) -> (EventKey, Vec<u8>, Opti
 }
 
 fn raw_observation_rows(store: &RedbStore, event_key: EventKey) -> Vec<(Vec<u8>, u64)> {
-    let read_txn = store.db.begin_read().unwrap();
+    let read_txn = store.raw_database().begin_read().unwrap();
     let events = read_txn.open_table(EVENTS).unwrap();
     let (lower, upper) = observation_bounds(event_key);
     events
@@ -799,22 +799,25 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
         .unwrap();
 
     let first_relay_key = {
-        let read_txn = store.db.begin_read().unwrap();
+        let read_txn = store.raw_database().begin_read().unwrap();
         let relay_ids = read_txn.open_table(RELAY_IDS).unwrap();
         let relay_key = relay_ids.get(relay.as_str()).unwrap().unwrap().value();
         drop(read_txn);
-        assert_eq!(relay_refs_of(&store.db, relay_key), Some(2));
+        assert_eq!(relay_refs_of(store.raw_database(), relay_key), Some(2));
         relay_key
     };
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 
     store.remove(first.id, RetractReason::Deleted).unwrap();
-    assert_eq!(relay_refs_of(&store.db, first_relay_key), Some(1));
-    assert_canonical_integrity(&store.db);
+    assert_eq!(
+        relay_refs_of(store.raw_database(), first_relay_key),
+        Some(1)
+    );
+    assert_canonical_integrity(store.raw_database());
 
     store.remove(second.id, RetractReason::Deleted).unwrap();
     {
-        let read_txn = store.db.begin_read().unwrap();
+        let read_txn = store.raw_database().begin_read().unwrap();
         assert!(read_txn
             .open_table(RELAY_IDS)
             .unwrap()
@@ -831,7 +834,7 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
             .unwrap()
             .all(|entry| entry.unwrap().0.value()[8] != EVENT_COL_OBSERVATION));
     }
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 
     let third = make_event(3);
     store
@@ -840,7 +843,7 @@ fn relay_dictionary_is_shared_refcounted_reclaimed_and_never_reuses_keys() {
             RelayObserved::new(relay.clone(), Timestamp::from(30u64)),
         )
         .unwrap();
-    let read_txn = store.db.begin_read().unwrap();
+    let read_txn = store.raw_database().begin_read().unwrap();
     let new_relay_key = read_txn
         .open_table(RELAY_IDS)
         .unwrap()
@@ -962,7 +965,7 @@ fn batch_relay_refcounts_flush_once_per_distinct_relay() {
     let path = dir.path().join("relay-refcount-batch.redb");
     let store = RedbStore::open(&path).unwrap();
     let relay = RelayUrl::parse("wss://one-hot-refcount.example").unwrap();
-    let write_txn = store.db.begin_write().unwrap();
+    let write_txn = store.raw_database().begin_write().unwrap();
     {
         let mut canonical = CanonicalWriteTables::open(&write_txn).unwrap();
         let relay_key = canonical.intern_relay(&relay).unwrap();
@@ -1022,14 +1025,14 @@ fn batch_net_zero_observation_reclaims_new_relay_dictionary_row() {
         .unwrap();
     assert!(matches!(outcomes[0], InsertOutcome::Inserted));
     assert!(matches!(outcomes[1], InsertOutcome::Superseded { .. }));
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 
-    let read_txn = store.db.begin_read().unwrap();
+    let read_txn = store.raw_database().begin_read().unwrap();
     let relay_ids = read_txn.open_table(RELAY_IDS).unwrap();
     assert!(relay_ids.get(old_relay.as_str()).unwrap().is_none());
     let winner_key = relay_ids.get(new_relay.as_str()).unwrap().unwrap().value();
     drop(read_txn);
-    assert_eq!(relay_refs_of(&store.db, winner_key), Some(1));
+    assert_eq!(relay_refs_of(store.raw_database(), winner_key), Some(1));
 }
 
 #[test]
@@ -1074,7 +1077,7 @@ fn later_same_relay_updates_only_one_timestamp_value() {
     assert_eq!(before[0].0, after[0].0);
     assert_eq!(before[0].1, 10);
     assert_eq!(after[0].1, 20);
-    let read_txn = store.db.begin_read().unwrap();
+    let read_txn = store.raw_database().begin_read().unwrap();
     let relays = read_txn.open_table(RELAYS).unwrap();
     let (relay_key, row) = {
         let entry = relays.iter().unwrap().next().unwrap().unwrap();
@@ -1129,7 +1132,7 @@ fn surrogate_keys_are_monotonic_and_never_reused_after_remove_or_reopen() {
         .unwrap();
     let third_key = raw_canonical_row(&reopened, third.id).0;
     assert!(third_key > second_key);
-    assert_canonical_integrity(&reopened.db);
+    assert_canonical_integrity(reopened.raw_database());
 }
 
 #[test]
@@ -1154,7 +1157,7 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
     store
         .insert(target.clone(), observed(relay2.clone(), 11))
         .unwrap();
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 
     let replaceable_old = EventBuilder::new(Kind::ContactList, "old")
         .custom_created_at(Timestamp::from(20u64))
@@ -1170,7 +1173,7 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
     store
         .insert(replaceable_new, observed(relay1.clone(), 30))
         .unwrap();
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 
     let deletion = EventBuilder::new(Kind::EventDeletion, "")
         .tag(Tag::event(target.id))
@@ -1180,7 +1183,7 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
     store
         .insert(deletion, observed(relay1.clone(), 40))
         .unwrap();
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 
     let expiring = EventBuilder::new(Kind::TextNote, "expiring")
         .tag(Tag::expiration(Timestamp::from(60u64)))
@@ -1191,7 +1194,7 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
         .insert(expiring, observed(relay1.clone(), 50))
         .unwrap();
     store.expire_due(Timestamp::from(60u64)).unwrap();
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 
     let gc_candidate = EventBuilder::new(Kind::TextNote, "gc")
         .custom_created_at(Timestamp::from(70u64))
@@ -1201,7 +1204,7 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
         .insert(gc_candidate, observed(relay1.clone(), 70))
         .unwrap();
     store.gc(&GcRetentionSet::new(Vec::new())).unwrap();
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 
     let signed = EventBuilder::new(Kind::TextNote, "pending")
         .custom_created_at(Timestamp::from(80u64))
@@ -1229,11 +1232,11 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
             correlation: None,
         })
         .unwrap();
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
     store
         .compensate_write(accepted.journaled_intent_id().unwrap())
         .unwrap();
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 }
 
 #[test]
@@ -1465,7 +1468,7 @@ fn query_newest_ids_preserves_provisional_suppression() {
             .unwrap();
     }
     let claim_key = publish_queue_codec::id_claim_key(&hidden.id, &hidden.pubkey);
-    let write_txn = store.db.begin_write().unwrap();
+    let write_txn = store.raw_database().begin_write().unwrap();
     {
         let mut claims = write_txn.open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID).unwrap();
         add_claimant_in_txn(&mut claims, &claim_key, IntentId(1)).unwrap();
@@ -1502,7 +1505,7 @@ fn query_newest_ids_fails_closed_on_stale_ordered_index() {
             ),
         )
         .unwrap();
-    let write_txn = store.db.begin_write().unwrap();
+    let write_txn = store.raw_database().begin_write().unwrap();
     {
         let mut event_ids = write_txn.open_table(EVENT_IDS).unwrap();
         event_ids.remove(event.id.as_bytes()).unwrap();
@@ -1785,7 +1788,7 @@ fn packed_postings_use_inclusive_equal_time_ranges_and_id_ascending_ties() {
     ];
 
     for (filter, expected_index) in filters {
-        let read_txn = store.db.begin_read().unwrap();
+        let read_txn = store.raw_database().begin_read().unwrap();
         let plan = plan_ordered_query(&filter);
         assert_eq!(plan.index, expected_index);
         drop(read_txn);
@@ -1884,7 +1887,7 @@ fn plan_choice_cannot_change_query_results() {
         "every index that can answer this filter is a candidate"
     );
 
-    let read_txn = store.db.begin_read().unwrap();
+    let read_txn = store.raw_database().begin_read().unwrap();
     for plan in &candidates {
         let complete: BTreeSet<_> = store
             .query_ordered(&read_txn, plan, &filter, None, None, None)
@@ -1927,7 +1930,7 @@ fn plan_choice_cannot_change_query_results() {
         assert_eq!(bounded, first_bounded, "{:?} changed order", plan.index);
     }
     drop(read_txn);
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 }
 
 #[test]
@@ -2030,7 +2033,7 @@ fn multi_value_tag_merge_deduplicates_one_event_without_candidate_set() {
     let (_index_rows, event_values, materialized) = store.query_work();
     assert_eq!(event_values, 1);
     assert_eq!(materialized, 1);
-    assert_canonical_integrity(&store.db);
+    assert_canonical_integrity(store.raw_database());
 }
 
 #[test]
@@ -2184,7 +2187,7 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
                 .zip(filter.until)
                 .is_some_and(|(since, until)| since > until);
         if plannable {
-            let read_txn = redb.db.begin_read().unwrap();
+            let read_txn = redb.raw_database().begin_read().unwrap();
             for plan in candidate_ordered_plans(&filter) {
                 let complete: BTreeSet<_> = redb
                     .query_ordered(&read_txn, &plan, &filter, None, None, None)
@@ -2218,7 +2221,7 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
             }
         }
     }
-    assert_canonical_integrity(&redb.db);
+    assert_canonical_integrity(redb.raw_database());
 }
 
 /// #889's store half: a lane bootstrap that stages no row commits nothing.

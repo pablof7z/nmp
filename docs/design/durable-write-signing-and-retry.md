@@ -223,6 +223,38 @@ the fleet.
 There is no fixed-rate polling. The scheduler sleeps until the earliest real
 deadline and rearms after every state transition.
 
+### The engine owns durable-store reconstruction
+
+A backend fault classified `requires_reopen()` closes only the poisoned
+database generation. The persistent store retains its canonical-target
+ownership fence, reopens that exact target with bounded exponential backoff,
+validates the existing schema, and refuses a missing or incompatible target
+instead of initializing a replacement. The engine then reconstructs every
+store-derived resolver and write projection before clearing
+`store_degraded`; live query handles, receipt streams, registered signers,
+policies, and the engine instance keep their identity across that transition
+(#1362).
+
+This is reconstruction, not blind retry. A call whose commit returned an I/O
+error still has unknown durability. NMP reopens and reconciles durable facts,
+but never repeats that acceptance operation. An application-supplied
+correlation id is the durable identity that lets a caller repeat `publish`
+and recover the original receipt if the first transaction did commit. A
+permanent fault remains degraded and retry timing stays inside the event-driven
+engine scheduler.
+
+Falsifiers:
+`nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once`
+(failed reopen attempts, both acceptance-boundary durability outcomes, one
+live engine/query handle, and one correlated obligation),
+`nmp-store::reopen_replaces_only_the_database_generation_and_preserves_durable_identity`
+(the ownership fence never opens and the original receipt/event survive the
+new database generation),
+`nmp::persistent_engine_does_not_reconstruct_for_an_invariant_fault` (the
+next write succeeds with zero reopen calls), and
+`nmp::recovery_backoff_is_exponential_event_driven_and_capped` (100 ms
+initial delay, 30 s ceiling, no polling owner).
+
 ### Recovery costs what changed, not what accumulated
 
 The engine thread rebuilds volatile ownership from the durable queue before it
