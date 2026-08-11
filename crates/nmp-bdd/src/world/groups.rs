@@ -339,6 +339,9 @@ impl NmpWorld {
             Err(GroupPublishError::Engine(error)) => {
                 panic!("nmp-bdd: the publish door refused a group write: {error:?}")
             }
+            Err(GroupPublishError::Users(error)) => {
+                panic!("nmp-bdd: a valid fixture user batch was refused: {error:?}")
+            }
         }
     }
 

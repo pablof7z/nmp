@@ -220,12 +220,19 @@ async fn every_group_operation_reaches_the_one_publish_door() {
             group.leave_request(engine.clone(), author.clone()),
         ),
         (
-            "add_user",
-            group.add_user(engine.clone(), author.clone(), subject.clone(), None),
+            "add_users",
+            group.add_users(
+                engine.clone(),
+                author.clone(),
+                vec![nmp_ffi::nip29::FfiGroupUser {
+                    pubkey: subject.clone(),
+                    role: None,
+                }],
+            ),
         ),
         (
-            "remove_user",
-            group.remove_user(engine.clone(), author.clone(), subject.clone()),
+            "remove_users",
+            group.remove_users(engine.clone(), author.clone(), vec![subject.clone()]),
         ),
         (
             "edit_metadata",

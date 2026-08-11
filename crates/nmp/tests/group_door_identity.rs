@@ -303,7 +303,7 @@ async fn one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_
 }
 
 /// PROTOCOL-NIP29OPERATIONS-009. The host refuses a moderation action
-/// (kind:9001, `remove_user`) with its own restriction message. The receipt
+/// (kind:9001, `remove_users`) with its own restriction message. The receipt
 /// reports the rejection verbatim from that exact host, and the write is
 /// never also reported accepted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -323,7 +323,7 @@ async fn a_moderation_rejection_reports_the_hosts_exact_message_and_is_never_acc
         .expect("one host forms a scope")
         .group(GROUP_ID);
     let receipts = group
-        .remove_user(&engine, moderator, subject)
+        .remove_users(&engine, moderator, [subject])
         .expect("the door accepts the intent even though the host will refuse it")
         .statuses;
 
@@ -388,7 +388,7 @@ async fn a_moderation_rejection_is_a_host_fact_not_a_routing_failure() {
         .expect("two hosts form a scope")
         .group(GROUP_ID);
     let receipts = group
-        .remove_user(&engine, moderator, subject)
+        .remove_users(&engine, moderator, [subject])
         .expect("the door accepts the intent for the whole scope")
         .statuses;
 

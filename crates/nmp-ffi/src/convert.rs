@@ -372,6 +372,12 @@ pub enum FfiError {
     /// records observation named none of the three records, which would
     /// deliver a permanently empty snapshot.
     GroupNoRecordSelected,
+    /// A kind:9000 or kind:9001 operation named no users.
+    GroupUserBatchEmpty,
+    /// One kind:9000 operation assigned the same user conflicting roles.
+    GroupUserBatchConflictingRoles {
+        pubkey: String,
+    },
     /// #1252 (`nmp::nip29::GroupPredicateError::NoKindSelected` mirror). A
     /// selection handed to `groups_whose_record_matches` named no kind. It is
     /// evaluated with NIP-29's own pin, so it would match every event the
@@ -478,6 +484,14 @@ impl From<nmp::nip29::GroupPublishError> for FfiError {
     fn from(err: nmp::nip29::GroupPublishError) -> Self {
         match err {
             nmp::nip29::GroupPublishError::Context(error) => Self::from(error),
+            nmp::nip29::GroupPublishError::Users(error) => match error {
+                nmp::nip29::GroupUsersError::NoUsers => Self::GroupUserBatchEmpty,
+                nmp::nip29::GroupUsersError::ConflictingRoles { pubkey } => {
+                    Self::GroupUserBatchConflictingRoles {
+                        pubkey: pubkey.to_hex(),
+                    }
+                }
+            },
             nmp::nip29::GroupPublishError::Engine(error) => Self::from(error),
         }
     }
@@ -767,6 +781,13 @@ impl std::fmt::Display for FfiError {
             Self::GroupNoRecordSelected => f.write_str(
                 "a group-records observation must select at least one of the three relay-signed \
                  records",
+            ),
+            Self::GroupUserBatchEmpty => {
+                f.write_str("a NIP-29 user operation must name at least one user")
+            }
+            Self::GroupUserBatchConflictingRoles { pubkey } => write!(
+                f,
+                "NIP-29 user operation names {pubkey} with conflicting roles"
             ),
             Self::GroupIdSelectionNamesNoKind => f.write_str(
                 "a group-record selection must name at least one of NIP-29's three relay-signed \

@@ -3266,6 +3266,29 @@ enum Enum {
             ),
         },
         Variant {
+            name: "GroupUserBatchEmpty",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A kind:9000 or kind:9001 operation named no users.",
+            ),
+        },
+        Variant {
+            name: "GroupUserBatchConflictingRoles",
+            discr: None,
+            fields: [
+                Field {
+                    name: "pubkey",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "One kind:9000 operation assigned the same user conflicting roles.",
+            ),
+        },
+        Variant {
             name: "GroupIdSelectionNamesNoKind",
             discr: None,
             fields: [],
@@ -6918,6 +6941,31 @@ record Record {
     ],
     docstring: Some(
         "One group, as the hosts in the scope currently describe it\n(`nmp::nip29::GroupSnapshot` mirror). A complete self-contained value,\nnever a patch on a previous one.",
+    ),
+}
+
+record Record {
+    name: "FfiGroupUser",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "pubkey",
+            type_: String,
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "role",
+            type_: Optional {
+                inner_type: String,
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: Some(
+        "One user in a kind:9000 add-users moderation event.",
     ),
 }
 
@@ -11307,7 +11355,7 @@ object Object {
     constructors: [],
     methods: [
         Method {
-            name: "add_user",
+            name: "add_users",
             object_name: "FfiGroup",
             object_module_path: "nmp_ffi",
             is_async: false,
@@ -11332,16 +11380,12 @@ object Object {
                     default: None,
                 },
                 Argument {
-                    name: "pubkey",
-                    type_: String,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-                Argument {
-                    name: "role",
-                    type_: Optional {
-                        inner_type: String,
+                    name: "users",
+                    type_: Sequence {
+                        inner_type: Record {
+                            module_path: "nmp_ffi",
+                            name: "FfiGroupUser",
+                        },
                     },
                     by_ref: false,
                     optional: false,
@@ -11356,7 +11400,7 @@ object Object {
                 },
             ),
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffigroup_add_user",
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_add_users",
                 is_async: false,
                 arguments: [
                     FfiArgument {
@@ -11378,13 +11422,7 @@ object Object {
                         ),
                     },
                     FfiArgument {
-                        name: "pubkey",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                    FfiArgument {
-                        name: "role",
+                        name: "users",
                         type_: RustBuffer(
                             None,
                         ),
@@ -11399,7 +11437,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "kind:9000 -- add a member, optionally with a role.",
+                "kind:9000 -- add several members in one event, optionally with a role\nper member.",
             ),
             throws: Some(
                 Enum {
@@ -11408,9 +11446,9 @@ object Object {
                 },
             ),
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_add_user",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_add_users",
             checksum: Some(
-                32278,
+                7195,
             ),
         },
         Method {
@@ -12302,7 +12340,7 @@ object Object {
             ),
         },
         Method {
-            name: "remove_user",
+            name: "remove_users",
             object_name: "FfiGroup",
             object_module_path: "nmp_ffi",
             is_async: false,
@@ -12327,8 +12365,10 @@ object Object {
                     default: None,
                 },
                 Argument {
-                    name: "pubkey",
-                    type_: String,
+                    name: "pubkeys",
+                    type_: Sequence {
+                        inner_type: String,
+                    },
                     by_ref: false,
                     optional: false,
                     default: None,
@@ -12342,7 +12382,7 @@ object Object {
                 },
             ),
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffigroup_remove_user",
+                name: "uniffi_nmp_ffi_fn_method_ffigroup_remove_users",
                 is_async: false,
                 arguments: [
                     FfiArgument {
@@ -12364,7 +12404,7 @@ object Object {
                         ),
                     },
                     FfiArgument {
-                        name: "pubkey",
+                        name: "pubkeys",
                         type_: RustBuffer(
                             None,
                         ),
@@ -12379,7 +12419,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "kind:9001 -- remove a member.",
+                "kind:9001 -- remove several members in one event.",
             ),
             throws: Some(
                 Enum {
@@ -12388,9 +12428,9 @@ object Object {
                 },
             ),
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_remove_user",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_remove_users",
             checksum: Some(
-                26621,
+                14557,
             ),
         },
         Method {
