@@ -52,8 +52,8 @@ The authority for this cut is the repository owner’s wording:
 
 ## Fresh-store cut
 
-The whole Redb schema epoch is version 12. Publish queue has a second,
-explicit codec marker with version 1 in `publish_queue_meta_v1`. A new database
+The whole Redb schema epoch is version 14. Publish queue has a second,
+explicit codec marker with version 2 in `publish_queue_meta`. A new database
 creates only `publish_queue_*` execution tables. It never opens, drains,
 transforms, dual-writes, or deletes a legacy execution table.
 

@@ -11,13 +11,13 @@ use nostr::JsonUtil;
 /// One ordered fact from a live observation's real execution.
 ///
 /// `kind` is one of `reactive_input`, `derived_set`, `concrete_filter`,
-/// `relay_request`, `request_settled`, `relay_closed`, `relay_refused`, `withdrawn`,
-/// or `overflow`. Resolver facts carry exact public wire values in `values`;
-/// relay requests carry their canonical NIP-01 filter JSON there. Additional
-/// scalar correlation fields are ordered key/value `attributes`: `field`,
-/// `relay`, `access`, `transport_generation`, `request_revision`, `replay`,
-/// `observed_at`, `reason`, `first_sequence`, `last_sequence`, and `dropped`
-/// when applicable. `access` is `public` or `nip42:<hex-pubkey>`.
+/// `relay_request`, `request_settled`, `relay_closed`, `request_deferred`,
+/// `withdrawn`, or `overflow`. Resolver facts carry exact public wire values
+/// in `values`; relay requests carry their canonical NIP-01 filter JSON there.
+/// Additional scalar correlation fields are ordered key/value `attributes`:
+/// `field`, `relay`, `access`, `transport_generation`, `request_revision`,
+/// `replay`, `observed_at`, `reason`, `first_sequence`, `last_sequence`, and
+/// `dropped` when applicable. `access` is `public` or `nip42:<hex-pubkey>`.
 #[derive(Debug, Clone)]
 pub struct ObservationEvidence {
     /// Monotonic within this observation, across every branch of it.
@@ -201,31 +201,39 @@ impl ObservationEvidence {
                 }
                 evidence.attributes.push(attribute("reason", reason));
             }
-            crate::core::ObservationFact::RelayRefused {
+            crate::core::ObservationFact::RequestDeferred {
                 path,
                 filter_revision,
                 relay,
                 access,
-                transport_generation,
                 request_revision,
-                reason,
+                retry_at,
+                cause,
             } => {
-                evidence.kind = "relay_refused";
+                evidence.kind = "request_deferred";
                 evidence.path = Some(path);
                 evidence.revision = Some(filter_revision);
                 evidence.attributes = vec![
                     attribute("relay", relay),
                     attribute("access", access_string(access)),
+                    attribute("request_revision", request_revision),
+                    attribute("retry_at", retry_at.as_secs()),
                 ];
-                if let Some(transport_generation) = transport_generation {
-                    evidence
-                        .attributes
-                        .push(attribute("transport_generation", transport_generation));
+                match cause {
+                    crate::core::LocalSendRefusal::SessionUnavailable => {
+                        evidence
+                            .attributes
+                            .push(attribute("cause", "session_unavailable"));
+                    }
+                    crate::core::LocalSendRefusal::WorkerAdmissionRefused { handle } => {
+                        evidence
+                            .attributes
+                            .push(attribute("cause", "worker_admission_refused"));
+                        evidence
+                            .attributes
+                            .push(attribute("transport_generation", handle.generation));
+                    }
                 }
-                evidence
-                    .attributes
-                    .push(attribute("request_revision", request_revision));
-                evidence.attributes.push(attribute("reason", reason));
             }
             crate::core::ObservationFact::Withdrawn => {
                 evidence.kind = "withdrawn";

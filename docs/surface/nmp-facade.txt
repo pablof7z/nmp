@@ -994,7 +994,9 @@ pub enum nmp::SourceStatus
 pub nmp::SourceStatus::AuthDenied
 pub nmp::SourceStatus::AwaitingAuth
 pub nmp::SourceStatus::AwaitingAuth::phase: nmp::AuthPhase
+pub nmp::SourceStatus::AwaitingRequest
 pub nmp::SourceStatus::Connecting
+pub nmp::SourceStatus::CoverageSatisfied
 pub nmp::SourceStatus::Disconnected
 pub nmp::SourceStatus::Error
 pub nmp::SourceStatus::FinishedStoredEvents
@@ -1112,6 +1114,7 @@ pub nmp::WriteOutcome::NoDestination
 pub nmp::WriteOutcome::NotSent(nmp::NotSentReason)
 pub nmp::WriteOutcome::Refused(nmp_store::RefuseReason)
 pub nmp::WriteOutcome::Settled
+pub nmp::WriteOutcome::Superseded
 impl core::clone::Clone for nmp::WriteOutcome
 pub fn nmp::WriteOutcome::clone(&self) -> nmp::WriteOutcome
 impl core::cmp::Eq for nmp::WriteOutcome

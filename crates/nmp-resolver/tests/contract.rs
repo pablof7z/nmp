@@ -8,16 +8,25 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, DemandOp, Derived,
-    Filter, Freshness, IdentityField, IndexedTagName, RoutingEvidence, RoutingEvidenceKind,
-    Selector, SetAlgebra, SetOp, SourceAuthority,
+    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, DemandDelta,
+    DemandOp, Derived, Filter, Freshness, IdentityField, IndexedTagName, RoutingEvidence,
+    RoutingEvidenceKind, Selector, SetAlgebra, SetOp, SourceAuthority,
 };
 use nmp_resolver::testkit::{
     addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
 };
-use nmp_resolver::{Engine, HandleId, ResolutionNodeKind, ResolvedValue};
+use nmp_resolver::{
+    Engine, HandleId, QueryHandle, ResolutionNodeKind, ResolvedValue, SubscribeOutcome,
+};
 use nmp_store::{EventStore, MemoryStore, RelayObserved};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+fn opened(outcome: SubscribeOutcome) -> (QueryHandle, DemandDelta) {
+    match outcome {
+        SubscribeOutcome::Opened { handle, delta } => (handle, delta),
+        SubscribeOutcome::Refused { error, .. } => panic!("resolver open refused: {error}"),
+    }
+}
 
 // ---- ConcreteFilter builders (test-local; mirrors nmp-grammar's own test
 // helpers, kept separate since these assert resolver *output*, not grammar
@@ -524,9 +533,7 @@ fn derived_inner_strict_cache_filters_provenance_before_limit() {
     };
 
     let mut engine = Engine::new(store);
-    let (_handle, _opened) = engine
-        .subscribe(Demand::from_filter(outer))
-        .expect("stored-row projection should succeed");
+    let (_handle, _opened) = opened(engine.subscribe(Demand::from_filter(outer)));
     let demand = engine.active_demand();
     let outer_authors: BTreeSet<String> = demand
         .iter()
@@ -588,9 +595,7 @@ fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() 
     };
 
     let mut engine = Engine::new(store);
-    let (_handle, _opened) = engine
-        .subscribe(Demand::from_filter(outer))
-        .expect("stored-row projection should succeed");
+    let (_handle, _opened) = opened(engine.subscribe(Demand::from_filter(outer)));
     let authors: BTreeSet<String> = engine
         .active_demand()
         .into_iter()
@@ -608,7 +613,7 @@ fn derived_scalar_values(engine: &Engine<MemoryStore>, handle: HandleId) -> BTre
     engine
         .resolution_snapshot(handle)
         .into_iter()
-        .find_map(|node| match node.kind {
+        .find_map(|node| match node.node_type {
             ResolutionNodeKind::Derived { values } => Some(
                 values
                     .into_iter()
@@ -667,8 +672,8 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
             ..Filter::default()
         })
     };
-    let (strict, _) = engine.subscribe(query(CacheMode::Strict)).unwrap();
-    let (agnostic, _) = engine.subscribe(query(CacheMode::Agnostic)).unwrap();
+    let (strict, _) = opened(engine.subscribe(query(CacheMode::Strict)));
+    let (agnostic, _) = opened(engine.subscribe(query(CacheMode::Agnostic)));
     assert!(derived_scalar_values(&engine, strict.id()).is_empty());
     assert_eq!(
         derived_scalar_values(&engine, agnostic.id()),
@@ -1368,9 +1373,7 @@ fn duplicate_source_observation_grows_projected_routing_evidence() {
     let author = Keys::generate();
     let target = dummy_event_id("provenance-growth");
     engine.set_active_pubkey(Some(author.public_key())).unwrap();
-    let (_handle, _open) = engine
-        .subscribe(Demand::from_filter(bookmarks_filter()))
-        .unwrap();
+    let (_handle, _open) = opened(engine.subscribe(Demand::from_filter(bookmarks_filter())));
     let event = kind10003_bookmarks(&author, &[target], 100);
     let first = nostr::RelayUrl::parse("wss://first.example").unwrap();
     let second = nostr::RelayUrl::parse("wss://second.example").unwrap();

@@ -385,9 +385,9 @@ sealed class RelayState {
 enum class NotSentReason {
     Cancelled,
 
-    /** A newer accepted write won the same replaceable coordinate before this
-     * one started any wire attempt. Not a failure -- for an app renewing
-     * presence it is the steady state. */
+    /** A newer accepted write won the same replaceable coordinate, and NMP
+     * proved the older bytes did not cross the local transport handoff. Not a
+     * failure -- for an app renewing presence it is the steady state. */
     Superseded,
     ;
 
@@ -443,6 +443,10 @@ sealed class WriteOutcome {
 
     data class NotSent(val reason: NotSentReason) : WriteOutcome()
 
+    /** A newer replaceable write retired this obligation after its bytes may
+     * already have crossed the local transport handoff. It will not retry. */
+    object Superseded : WriteOutcome()
+
     /** The store answered the acceptance instruction with a semantic no. The
      * write is in custody as a permanently-failed entry: one row, payload
      * intact, readable and removable through [NMPEngine.publishQueue]. */
@@ -454,6 +458,7 @@ sealed class WriteOutcome {
                 is FfiWriteOutcome.Settled -> Settled
                 is FfiWriteOutcome.NoDestination -> NoDestination
                 is FfiWriteOutcome.NotSent -> NotSent(NotSentReason.from(ffi.reason))
+                is FfiWriteOutcome.Superseded -> Superseded
                 is FfiWriteOutcome.Refused -> Refused(RefuseReason.from(ffi.reason))
             }
     }

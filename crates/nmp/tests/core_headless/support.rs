@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use nmp::mechanism::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
-    Nip77Frame, ObservationFact, ObservationId, PublishError, ReceiptId, RequestTerminal, RowDelta,
-    ShortfallFact, SourceEvidence, SourceStatus,
+    LocalSendRefusal, Nip77Frame, ObservationFact, ObservationId, PublishError, ReceiptId,
+    RequestAttemptId, RequestHandoffOutcome, RequestTerminal, RowDelta, ShortfallFact,
+    SourceEvidence, SourceStatus,
 };
 use nmp::mechanism::publish_queue::{
     NotSentReason, RelayState, RelayWaiting, RetryCause, SigningState, WriteFact, WriteOutcome,
@@ -32,7 +33,7 @@ use nmp_store::{
     CoverageKey, DurabilityOutcome, EventStore, GcReport, GcRetentionSet, InsertOutcome,
     MemoryStore, PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttempt,
     PublishQueueAttemptOutcome, PublishQueueIntent, PublishQueueReceipt, PublishQueueRouteRevision,
-    RedbStore, RefuseReason, RelayObserved, RetractReason, StoredEvent,
+    RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -49,7 +50,7 @@ trait HeadlessAdmission {
 impl<S: EventStore> HeadlessAdmission for EngineCore<S> {
     fn handle_and_flush(&mut self, message: EngineMsg) -> Vec<Effect> {
         let mut effects = self.handle(message);
-        effects.extend(self.handle(EngineMsg::FlushWireAdmission));
+        effects.extend(self.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         effects
     }
 }

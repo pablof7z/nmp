@@ -9,6 +9,7 @@ impl<S: EventStore> EngineCore<S> {
     pub(crate) fn open_history_observation(
         &mut self,
         query: HistoryQuery,
+        now: Timestamp,
     ) -> ObservationOpen<HistorySessionId, HistoryBatch> {
         let mut effects = Vec::new();
         // Every branch's live-top acquisition opens before the session
@@ -17,11 +18,17 @@ impl<S: EventStore> EngineCore<S> {
         let mut handles = Vec::new();
         for branch in query.initial_demands() {
             match self.resolver.subscribe(branch) {
-                Ok((handle, _)) => handles.push(handle),
-                Err(error) => {
+                SubscribeOutcome::Opened { handle, delta } => {
+                    self.consume_resolver_delta(delta);
+                    handles.push(handle);
+                }
+                SubscribeOutcome::Refused { error, delta } => {
+                    self.consume_resolver_delta(delta);
                     for handle in handles {
-                        let _ = self.resolver.unsubscribe(handle.id());
+                        let delta = self.resolver.unsubscribe(handle.id());
+                        self.consume_resolver_delta(delta);
                     }
+                    self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("canonical history resolution failed: {error}");
                     self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
@@ -35,12 +42,14 @@ impl<S: EventStore> EngineCore<S> {
         let mut acquisitions_by_branch = Vec::with_capacity(handles.len());
         for index in 0..handles.len() {
             let (branch, freshness) = (handles[index].id(), handles[index].freshness());
-            match self.decide_handle_acquisition(branch, freshness) {
+            match self.decide_handle_acquisition(branch, freshness, now) {
                 Ok(acquisition) => acquisitions_by_branch.push(acquisition),
                 Err(error) => {
                     for handle in handles {
-                        let _ = self.resolver.unsubscribe(handle.id());
+                        let delta = self.resolver.unsubscribe(handle.id());
+                        self.consume_resolver_delta(delta);
                     }
+                    self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("history freshness decision failed: {error}");
                     self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
@@ -93,8 +102,10 @@ impl<S: EventStore> EngineCore<S> {
                     .unwrap_or_default();
                 for handle_id in withdrawn {
                     self.history_by_handle.remove(&handle_id);
-                    let _ = self.resolver.unsubscribe(handle_id);
+                    let delta = self.resolver.unsubscribe(handle_id);
+                    self.consume_resolver_delta(delta);
                 }
+                self.flush_consumed_resolver_closes(&mut effects);
                 self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
@@ -116,12 +127,31 @@ impl<S: EventStore> EngineCore<S> {
                     .unwrap_or_default();
                 for handle_id in withdrawn {
                     self.history_by_handle.remove(&handle_id);
-                    let _ = self.resolver.unsubscribe(handle_id);
+                    let delta = self.resolver.unsubscribe(handle_id);
+                    self.consume_resolver_delta(delta);
                 }
+                self.flush_consumed_resolver_closes(&mut effects);
                 self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
         };
+        let attachments: Vec<_> = {
+            let state = &self.histories[&id];
+            state
+                .live_handle_ids
+                .iter()
+                .enumerate()
+                .map(|(branch, handle)| (*handle, state.acquisitions_by_branch[branch].clone()))
+                .collect()
+        };
+        let mut diagnostics_changed = false;
+        for (handle, acquisition) in attachments {
+            diagnostics_changed |= self.attach_wire_handle(handle, &acquisition, &mut effects);
+        }
+        self.flush_consumed_resolver_closes(&mut effects);
+        if diagnostics_changed {
+            effects.push(Effect::DiagnosticsChanged);
+        }
         if self.wire_admission_needed() {
             effects.push(Effect::ArmWireAdmission);
         }
@@ -132,7 +162,7 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn on_subscribe_history(&mut self, query: HistoryQuery) -> Vec<Effect> {
-        match self.open_history_observation(query) {
+        match self.open_history_observation(query, self.clock) {
             ObservationOpen::Opened {
                 id,
                 seed,
@@ -149,12 +179,16 @@ impl<S: EventStore> EngineCore<S> {
         let Some(state) = self.histories.remove(&id) else {
             return Vec::new();
         };
+        let mut effects = Vec::new();
+        let mut closing = Vec::new();
         for handle in state.handles {
             self.history_by_handle.remove(&handle.id());
-            let _ = self.resolver.unsubscribe(handle.id());
+            closing.extend(self.detach_wire_handle(handle.id()));
+            let resolver_delta = self.resolver.unsubscribe(handle.id());
+            self.consume_resolver_delta(resolver_delta);
         }
-        let mut effects = Vec::new();
-        self.withdraw_wire_demand(&mut effects);
+        self.flush_consumed_resolver_closes(&mut effects);
+        self.withdraw_wire_demand(closing, &mut effects);
         effects
     }
 
@@ -337,11 +371,17 @@ impl<S: EventStore> EngineCore<S> {
         );
         for (branch, demand, kind) in staged {
             match self.resolver.subscribe(demand) {
-                Ok((handle, _)) => opened.push((branch, handle, kind)),
-                Err(error) => {
+                SubscribeOutcome::Opened { handle, delta } => {
+                    self.consume_resolver_delta(delta);
+                    opened.push((branch, handle, kind));
+                }
+                SubscribeOutcome::Refused { error, delta } => {
+                    self.consume_resolver_delta(delta);
                     for (_, handle, _) in opened {
-                        let _ = self.resolver.unsubscribe(handle.id());
+                        let delta = self.resolver.unsubscribe(handle.id());
+                        self.consume_resolver_delta(delta);
                     }
+                    self.flush_consumed_resolver_closes(&mut effects);
                     self.degrade_store(error, &mut effects);
                     effects.extend(self.on_rollback_history_load(id));
                     effects.push(Effect::HistoryLoadResult(
@@ -375,6 +415,29 @@ impl<S: EventStore> EngineCore<S> {
                     .opened_handle_ids
                     .push(handle_id);
             }
+        }
+
+        let attachments: Vec<_> = {
+            let state = &self.histories[&id];
+            state
+                .pending_load
+                .as_ref()
+                .expect("load remains staged after resolver handles open")
+                .opened_handle_ids
+                .iter()
+                .filter_map(|handle| {
+                    let branch = state.branch_of.get(handle).copied()?;
+                    Some((*handle, state.acquisitions_by_branch.get(branch)?.clone()))
+                })
+                .collect()
+        };
+        let mut diagnostics_changed = false;
+        for (handle, acquisition) in attachments {
+            diagnostics_changed |= self.attach_wire_handle(handle, &acquisition, &mut effects);
+        }
+        self.flush_consumed_resolver_closes(&mut effects);
+        if diagnostics_changed {
+            effects.push(Effect::DiagnosticsChanged);
         }
 
         // Build the prospective plan without touching live router,
@@ -462,6 +525,7 @@ impl<S: EventStore> EngineCore<S> {
         {
             return Vec::new();
         }
+        let mut effects = Vec::new();
 
         // #486: retire the historical tie/older acquisitions the session no
         // longer needs, so a deep scroll of K advances never accumulates O(K)
@@ -516,10 +580,13 @@ impl<S: EventStore> EngineCore<S> {
                 .map(|(handle, _)| *handle)
                 .collect()
         };
+        let mut withdrawn = Vec::new();
         if !superseded.is_empty() {
             for handle_id in &superseded {
                 self.history_by_handle.remove(handle_id);
-                let _ = self.resolver.unsubscribe(*handle_id);
+                withdrawn.extend(self.detach_wire_handle(*handle_id));
+                let resolver_delta = self.resolver.unsubscribe(*handle_id);
+                self.consume_resolver_delta(resolver_delta);
             }
             let state = self
                 .histories
@@ -535,8 +602,8 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        let mut effects = Vec::new();
-        self.withdraw_wire_demand(&mut effects);
+        self.flush_consumed_resolver_closes(&mut effects);
+        self.withdraw_wire_demand(withdrawn, &mut effects);
 
         let (made_progress, target, len, has_boundary) = {
             let state = self
@@ -581,10 +648,14 @@ impl<S: EventStore> EngineCore<S> {
             return Vec::new();
         };
 
+        let mut effects = Vec::new();
         let opened: BTreeSet<_> = pending.opened_handle_ids.iter().copied().collect();
+        let mut withdrawn = Vec::new();
         for handle_id in &opened {
             self.history_by_handle.remove(handle_id);
-            let _ = self.resolver.unsubscribe(*handle_id);
+            withdrawn.extend(self.detach_wire_handle(*handle_id));
+            let resolver_delta = self.resolver.unsubscribe(*handle_id);
+            self.consume_resolver_delta(resolver_delta);
         }
         let state = self
             .histories
@@ -613,7 +684,9 @@ impl<S: EventStore> EngineCore<S> {
         state.last_evidence = pending.prior_evidence;
         state.projection_complete = pending.prior_projection_complete;
 
-        Vec::new()
+        self.flush_consumed_resolver_closes(&mut effects);
+        self.withdraw_wire_demand(withdrawn, &mut effects);
+        effects
     }
 
     /// Compile the resolver's current (possibly staged-history) demand into
@@ -625,22 +698,23 @@ impl<S: EventStore> EngineCore<S> {
         let Some(state) = self.histories.get(&id) else {
             return Vec::new();
         };
-        let needs_live = state.acquisitions_by_branch.iter().any(|acquisition| {
-            !matches!(
-                acquisition.root(),
-                Some(ScopeAcquisition::CoverageSatisfied(_)) | Some(ScopeAcquisition::CacheOnly(_))
-            )
-        });
-        let live = needs_live.then(|| self.shadow_plan_for(self.wire_demand()));
+        let handles_by_branch = self.history_handles_by_branch(id);
         state
             .acquisitions_by_branch
             .iter()
-            .map(|acquisition| match acquisition.root() {
-                Some(ScopeAcquisition::CoverageSatisfied(plan))
-                | Some(ScopeAcquisition::CacheOnly(plan)) => plan.clone(),
-                _ => live
-                    .clone()
-                    .expect("a branch that contributes wire work computed the live shadow plan"),
+            .enumerate()
+            .map(|(branch, acquisition)| {
+                let wire: BTreeSet<_> = handles_by_branch
+                    .get(branch)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|handle| self.wire_atoms_for_handle(*handle, acquisition))
+                    .collect();
+                if wire.is_empty() {
+                    RelayPlan::default()
+                } else {
+                    self.shadow_plan_for(wire)
+                }
             })
             .collect()
     }
@@ -672,6 +746,7 @@ impl<S: EventStore> EngineCore<S> {
     /// The current bounded rows remain authoritative unless a prior store
     /// failure marked the projection incomplete, in which case the full
     /// refresh oracle repairs it before evidence is emitted.
+    #[cfg(test)]
     pub(super) fn refresh_all_history_evidence(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<_> = self.histories.keys().copied().collect();
         for id in ids {
@@ -1008,26 +1083,16 @@ impl<S: EventStore> EngineCore<S> {
             )
         });
         ordered.truncate(needed);
-        let auth_status = self.auth_status_map();
-        let finished_stored_events = self.finished_stored_events();
         let by_branch = self.history_handles_by_branch(id);
         let mut evidence: Vec<AcquisitionEvidence> = Vec::with_capacity(by_branch.len());
         for (branch, handles) in by_branch.into_iter().enumerate() {
-            let subtree_atoms: BTreeSet<ContextualAtom> = handles
-                .iter()
-                .flat_map(|handle| self.resolver.subtree_atoms(*handle))
-                .collect();
             // `?`: this whole advance is already all-or-nothing on a store
             // failure, and a coverage read is no different from the row
             // reads above it (#763).
-            evidence.push(evidence::acquisition_evidence(
-                &subtree_atoms,
+            evidence.push(self.acquisition_evidence_for_scopes_with_plan(
+                self.history_branch_demand_scopes(&handles),
+                &self.histories[&id].acquisitions_by_branch[branch],
                 plans.get(branch).unwrap_or(&RelayPlan::default()),
-                self.resolver.store(),
-                &self.connected_relays,
-                &auth_status,
-                &self.ever_connected_relays,
-                &finished_stored_events,
             )?);
         }
 

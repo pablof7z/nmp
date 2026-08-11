@@ -161,6 +161,14 @@ sealed interface NmpRelayRuntimePresentation {
         override val label = "Finished stored events"
     }
 
+    data object AwaitingRequest : NmpRelayRuntimePresentation {
+        override val label = "Awaiting request placement"
+    }
+
+    data object CoverageSatisfied : NmpRelayRuntimePresentation {
+        override val label = "Satisfied from cache"
+    }
+
     data object Connecting : NmpRelayRuntimePresentation {
         override val label = "Connecting"
     }
@@ -196,6 +204,8 @@ sealed interface NmpRelayRuntimePresentation {
                 null -> StatusUnavailable
                 SourceStatus.Requesting -> Requesting
                 SourceStatus.FinishedStoredEvents -> FinishedStoredEvents
+                SourceStatus.AwaitingRequest -> AwaitingRequest
+                SourceStatus.CoverageSatisfied -> CoverageSatisfied
                 SourceStatus.Connecting -> Connecting
                 SourceStatus.Disconnected -> Disconnected
                 is SourceStatus.AwaitingAuth -> AwaitingAuth(status.phase)

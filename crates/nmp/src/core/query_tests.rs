@@ -1297,10 +1297,10 @@ mod affected_handle_invalidation_tests {
     #[test]
     fn resolver_internal_handle_is_filtered_before_any_projection_read() {
         let mut core = EngineCore::new(MemoryStore::new(), 20);
-        let (internal, _delta) = core
-            .resolver
-            .subscribe(room_query(1).branches()[0].clone())
-            .unwrap();
+        let internal = match core.resolver.subscribe(room_query(1).branches()[0].clone()) {
+            SubscribeOutcome::Opened { handle, .. } => handle,
+            SubscribeOutcome::Refused { error, .. } => panic!("resolver refused: {error}"),
+        };
         core.projection_store_queries.set(0);
 
         let mut effects = Vec::new();
@@ -1336,6 +1336,44 @@ mod affected_handle_invalidation_tests {
             core.discovered_private_relays_rejected, 1,
             "an unchanged recompile must not recount one rejected fact"
         );
+    }
+
+    #[test]
+    fn incremental_projected_rejection_keeps_incumbent_ownership_exact() {
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let private = RelayUrl::parse("ws://127.0.0.1:7777").unwrap();
+        let evidence = RoutingEvidence {
+            relay: private,
+            origin: nmp_grammar::RoutingEvidenceKind::Hint,
+        };
+        let atom = |id: &str| ContextualAtom {
+            filter: ConcreteFilter {
+                ids: Some(BTreeSet::from([id.repeat(64)])),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Public,
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::from([evidence.clone()]),
+        };
+        let a = atom("a");
+        let b = atom("b");
+
+        core.admit_projected_routing_evidence(&BTreeSet::from([a.clone()]));
+        core.admit_pending_projected_routing_evidence(&BTreeSet::from([b.clone()]));
+        assert_eq!(core.discovered_private_relays_rejected, 2);
+        assert_eq!(core.rejected_projected_evidence_by_demand.len(), 2);
+
+        core.admit_projected_routing_evidence(&BTreeSet::from([a.clone(), b.clone()]));
+        core.admit_pending_projected_routing_evidence(&BTreeSet::from([a.clone()]));
+        assert_eq!(
+            core.discovered_private_relays_rejected, 2,
+            "a later cohort and a global recompile cannot recount active A"
+        );
+
+        core.release_rejected_projected_evidence(nmp_router::DemandKey::for_atom(&a));
+        core.release_rejected_projected_evidence(nmp_router::DemandKey::for_atom(&b));
+        assert!(core.rejected_projected_evidence_by_demand.is_empty());
+        assert!(core.rejected_projected_evidence_owner_counts.is_empty());
     }
 
     #[test]
@@ -1402,17 +1440,59 @@ mod affected_handle_invalidation_tests {
 mod coverage_evidence_refresh_tests {
     use std::borrow::Cow;
 
-    use nmp_grammar::Filter;
+    use nmp_grammar::{Binding, Filter, IndexedTagName};
     use nmp_store::MemoryStore;
+    #[cfg(feature = "bench-instrumentation")]
+    use nmp_store::RedbStore;
     use nostr::{Kind, SubscriptionId};
 
     use super::*;
+
+    fn accept_request<S: EventStore>(
+        core: &mut EngineCore<S>,
+        session: &RelaySessionKey,
+        sub_id: &SubId,
+        filter_hash: DescriptorHash,
+        handle: TransportRelayHandle,
+    ) -> Vec<Effect> {
+        let attempt_id = core.pending_request_evidence[&(session.clone(), sub_id.clone())]
+            .iter()
+            .rev()
+            .find(|request| request.filter.hash() == filter_hash)
+            .unwrap()
+            .attempt_id;
+        core.on_wire_request_handoff(RequestHandoffOutcome::Accepted { attempt_id, handle })
+    }
 
     fn pinned_query(relay: &RelayUrl) -> LiveQuery {
         LiveQuery::single(
             nmp_grammar::Demand::new(
                 Filter {
                     kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+                    ..Filter::default()
+                },
+                SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+                AccessContext::Public,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn pinned_tag_query(
+        relay: &RelayUrl,
+        kind: u16,
+        value: String,
+        limit: Option<usize>,
+    ) -> LiveQuery {
+        LiveQuery::single(
+            nmp_grammar::Demand::new(
+                Filter {
+                    kinds: Some(BTreeSet::from([kind])),
+                    tags: BTreeMap::from([(
+                        IndexedTagName::new('p').unwrap(),
+                        Binding::Literal(BTreeSet::from([value])),
+                    )]),
+                    limit,
                     ..Filter::default()
                 },
                 SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
@@ -1429,7 +1509,14 @@ mod coverage_evidence_refresh_tests {
         TransportRelayHandle,
         RelaySessionKey,
     ) {
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        connected_core_with_store(relay, MemoryStore::new())
+    }
+
+    fn connected_core_with_store<S: EventStore>(
+        relay: &RelayUrl,
+        store: S,
+    ) -> (EngineCore<S>, TransportRelayHandle, RelaySessionKey) {
+        let mut core = EngineCore::new(store, 20);
         let handle = TransportRelayHandle {
             slot: 7,
             generation: 1,
@@ -1456,13 +1543,13 @@ mod coverage_evidence_refresh_tests {
             .expect("subscription opens a wire request")
     }
 
-    fn eose(
-        core: &mut EngineCore<MemoryStore>,
+    fn eose<S: EventStore>(
+        core: &mut EngineCore<S>,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
         wire_id: String,
     ) -> Vec<Effect> {
-        core.handle(EngineMsg::Tick(Timestamp::from(101u64)));
+        advance_clock(core, 101);
         core.handle(EngineMsg::RelayFrame(
             handle,
             session,
@@ -1470,6 +1557,160 @@ mod coverage_evidence_refresh_tests {
                 SubscriptionId::new(wire_id),
             ))),
         ))
+    }
+
+    fn advance_clock<S: EventStore>(core: &mut EngineCore<S>, seconds: u64) {
+        core.clock = Timestamp::from(seconds);
+    }
+
+    #[test]
+    fn nip77_barrier_lifecycle_is_lazy_without_a_diagnostics_observer() {
+        let relay = RelayUrl::parse("wss://evidence-only-nip77-barrier.example").unwrap();
+        let (mut core, transport, session) = connected_core(&relay);
+        core.prober
+            .states
+            .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+        core.handle(EngineMsg::Subscribe(pinned_query(&relay)));
+        core.diagnostic_snapshots_built.set(0);
+
+        let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
+        let wire = wire_id(&admitted);
+        assert_eq!(core.diagnostic_snapshots_built.get(), 0);
+        assert!(admitted
+            .iter()
+            .any(|effect| matches!(effect, Effect::DiagnosticsChanged)));
+        assert!(!admitted
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(..))));
+
+        core.diagnostic_snapshots_built.set(0);
+        let barrier = eose(&mut core, transport, session, wire);
+        assert_eq!(core.diagnostic_snapshots_built.get(), 0);
+        assert!(barrier
+            .iter()
+            .any(|effect| matches!(effect, Effect::NegOpen(..))));
+        assert!(barrier
+            .iter()
+            .any(|effect| matches!(effect, Effect::DiagnosticsChanged)));
+        assert!(!barrier
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(..))));
+
+        assert_eq!(
+            core.diagnostics_snapshot().relays[0].nip77_handoff,
+            "reconciling"
+        );
+    }
+
+    #[test]
+    fn neg_completion_refreshes_only_its_exact_current_owners() {
+        let relay = RelayUrl::parse("wss://evidence-only-neg-terminal.example").unwrap();
+        let (mut core, transport, session) = connected_core(&relay);
+        let mut observations = Vec::new();
+        for index in 0..9u16 {
+            let effects = core.handle(EngineMsg::Subscribe(pinned_tag_query(
+                &relay,
+                1_000 + index,
+                format!("neg-owner-{index}"),
+                Some(1),
+            )));
+            observations.push(
+                effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        Effect::EmitRows(id, _, _) => Some(*id),
+                        _ => None,
+                    })
+                    .expect("each observation emits its local frame"),
+            );
+        }
+        core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
+        let requests = core.router.plan().reqs[&session].clone();
+        assert_eq!(
+            requests.len(),
+            9,
+            "limited siblings remain physically distinct"
+        );
+        let target = requests[0].clone();
+        for request in &requests {
+            core.abandon_sub(&request.sub_id);
+        }
+
+        let neg_sub_id = target.sub_id.clone();
+        let neg_filter = ConcreteFilter {
+            limit: None,
+            ..target.filter.clone()
+        };
+        let attribution_send = core.record_observed_request(RequestSend {
+            session: &session,
+            sub_id: &neg_sub_id,
+            filter: &neg_filter,
+            coverage_claims: target.coverage_claims.clone(),
+            owner_demands: target.owner_demands.clone(),
+            replay: false,
+            event_failure_target: EventFailureTarget::ThisSend,
+        });
+        core.install_plan_execution_metadata(
+            target.sub_id.clone(),
+            neg_filter.clone(),
+            target.coverage_claims.clone(),
+            target.owner_demands.clone(),
+        );
+        let request_facts = accept_request(
+            &mut core,
+            &session,
+            &neg_sub_id,
+            neg_filter.hash(),
+            transport,
+        );
+        assert_eq!(
+            request_facts
+                .iter()
+                .filter(|effect| matches!(effect, Effect::EmitObservationEvidence(..)))
+                .count(),
+            1
+        );
+
+        core.evidence_candidates_examined.set(0);
+        core.diagnostic_snapshots_built.set(0);
+        advance_clock(&mut core, 102);
+        let (reconciler, _) = crate::negentropy::Reconciler::open(&[]);
+        let mut effects = Vec::new();
+        core.finish_neg_session(
+            neg_sub_id,
+            relay.clone(),
+            NegSession {
+                plan_sub_id: target.sub_id,
+                relay,
+                filter: neg_filter,
+                attribution_send,
+                started_at: Timestamp::from(101u64),
+                reconciler,
+            },
+            BTreeSet::new(),
+            &mut effects,
+        );
+
+        assert_eq!(core.evidence_candidates_examined.get(), 1);
+        assert_eq!(core.diagnostic_snapshots_built.get(), 0);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::EmitRows(..)))
+                .count(),
+            1
+        );
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DiagnosticsChanged)));
+
+        for observation in observations {
+            core.handle(EngineMsg::Unsubscribe(observation));
+        }
+        assert_eq!(
+            core.bench_ownership_census(),
+            CoreOwnershipCensus::default()
+        );
     }
 
     #[test]
@@ -1484,12 +1725,19 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission));
+        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         core.projection_store_queries.set(0);
+        core.evidence_candidates_examined.set(0);
+        core.diagnostic_snapshots_built.set(0);
 
         let effects = eose(&mut core, transport, session, wire);
 
         assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.evidence_candidates_examined.get(), 1);
+        assert_eq!(core.diagnostic_snapshots_built.get(), 0);
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DiagnosticsChanged)));
         let (_, deltas, evidence) = effects
             .iter()
             .find_map(|effect| match effect {
@@ -1504,6 +1752,191 @@ mod coverage_evidence_refresh_tests {
             evidence[0].sources[0].reconciled_through,
             Some(Timestamp::from(101u64))
         );
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    #[test]
+    fn one_eose_visits_only_its_owner_among_207_incompatible_observations() {
+        let relay = RelayUrl::parse("wss://evidence-only-exact.example").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            RedbStore::open_benchmark_nondurable(directory.path().join("exact.redb")).unwrap();
+        let (mut core, transport, session) = connected_core_with_store(&relay, store);
+        for index in 0..207u16 {
+            core.handle(EngineMsg::Subscribe(pinned_tag_query(
+                &relay,
+                1_000 + index,
+                format!("owner-{index:03}"),
+                None,
+            )));
+        }
+        let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
+        assert_eq!(
+            admitted
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Wire(delta) => Some(&delta.ops),
+                    _ => None,
+                })
+                .flatten()
+                .flat_map(|(_, ops)| ops)
+                .filter(|op| matches!(op, WireOp::Req(_, _)))
+                .count(),
+            207
+        );
+        let wire = wire_id(&admitted);
+        core.evidence_candidates_examined.set(0);
+        core.projection_store_queries.set(0);
+        core.diagnostic_snapshots_built.set(0);
+        core.bench_reset_coverage_reads();
+
+        let effects = eose(&mut core, transport, session, wire);
+
+        assert_eq!(core.evidence_candidates_examined.get(), 1);
+        assert_eq!(core.projection_store_queries.get(), 0);
+        assert_eq!(core.bench_coverage_reads(), 1);
+        assert_eq!(core.diagnostic_snapshots_built.get(), 0);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::EmitRows(..)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn coalesced_eose_refreshes_its_two_current_owners_once_each() {
+        let relay = RelayUrl::parse("wss://evidence-only-coalesced.example").unwrap();
+        let (mut core, transport, session) = connected_core(&relay);
+        for value in ["alice", "bob"] {
+            core.handle(EngineMsg::Subscribe(pinned_tag_query(
+                &relay,
+                1,
+                value.to_string(),
+                None,
+            )));
+        }
+        let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
+        assert_eq!(
+            admitted
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Wire(delta) => Some(&delta.ops),
+                    _ => None,
+                })
+                .flatten()
+                .flat_map(|(_, ops)| ops)
+                .filter(|op| matches!(op, WireOp::Req(_, _)))
+                .count(),
+            1
+        );
+        let wire = wire_id(&admitted);
+        core.evidence_candidates_examined.set(0);
+
+        let effects = eose(&mut core, transport, session, wire);
+
+        assert_eq!(core.evidence_candidates_examined.get(), 2);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::EmitRows(..)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn limited_eose_refreshes_only_its_ordinary_and_history_request_phase() {
+        let relay = RelayUrl::parse("wss://evidence-only-poisoned.example").unwrap();
+        let (mut core, transport, session) = connected_core(&relay);
+        let ordinary = pinned_tag_query(&relay, 1, "limited".to_string(), Some(1));
+        let history = pinned_tag_query(&relay, 2, "history".to_string(), None);
+        core.handle(EngineMsg::Subscribe(ordinary));
+        core.handle(EngineMsg::SubscribeHistory(HistoryQuery::new(
+            history, 1, 2,
+        )));
+        core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
+        let requests = core.router.plan().reqs[&session].clone();
+        assert_eq!(requests.len(), 2);
+        let limited = requests
+            .iter()
+            .find(|request| request.filter.kinds == Some(BTreeSet::from([1u16])))
+            .unwrap()
+            .clone();
+        let history = requests
+            .iter()
+            .find(|request| request.filter.kinds == Some(BTreeSet::from([2u16])))
+            .unwrap()
+            .clone();
+        for request in &requests {
+            accept_request(
+                &mut core,
+                &session,
+                &request.sub_id,
+                request.filter.hash(),
+                transport,
+            );
+        }
+        assert_eq!(core.active_request_evidence.len(), 2);
+        core.evidence_candidates_examined.set(0);
+        core.diagnostic_snapshots_built.set(0);
+
+        let effects = eose(
+            &mut core,
+            transport,
+            session.clone(),
+            wire_sub_id_string(&limited.sub_id),
+        );
+
+        assert_eq!(core.evidence_candidates_examined.get(), 1);
+        assert_eq!(core.diagnostic_snapshots_built.get(), 0);
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DiagnosticsChanged)));
+        assert!(effects.iter().any(|effect| match effect {
+            Effect::EmitRows(_, _, evidence) => evidence.iter().any(|branch| {
+                branch
+                    .sources
+                    .iter()
+                    .any(|source| source.status == SourceStatus::FinishedStoredEvents)
+            }),
+            _ => false,
+        }));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitHistory(..))));
+        assert_eq!(core.active_request_evidence.len(), 1);
+        assert!(history.owner_demands.iter().all(|demand| {
+            core.wire_handles_by_demand
+                .get(demand)
+                .is_some_and(|handles| !handles.is_empty())
+        }));
+
+        core.attribution
+            .poison_event_commit_failure(&session, &wire_sub_id_string(&history.sub_id));
+        core.evidence_candidates_examined.set(0);
+        core.diagnostic_snapshots_built.set(0);
+        let effects = eose(
+            &mut core,
+            transport,
+            session,
+            wire_sub_id_string(&history.sub_id),
+        );
+        assert_eq!(core.evidence_candidates_examined.get(), 1);
+        assert_eq!(core.diagnostic_snapshots_built.get(), 0);
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitRows(..))));
+        assert!(effects.iter().any(|effect| match effect {
+            Effect::EmitHistory(_, batch) => batch.evidence.iter().any(|branch| {
+                branch
+                    .sources
+                    .iter()
+                    .any(|source| source.status == SourceStatus::FinishedStoredEvents)
+            }),
+            _ => false,
+        }));
     }
 
     #[test]
@@ -1522,7 +1955,7 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission));
+        let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         let remembered = core.histories[&id].last_rows.clone();
         core.history_store_queries.set(0);
 

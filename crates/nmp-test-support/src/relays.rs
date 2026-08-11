@@ -174,6 +174,7 @@ struct ContactLog {
 #[derive(Debug, Default)]
 struct QueryLog {
     by_kind: Mutex<BTreeMap<u16, u64>>,
+    notify: tokio::sync::Notify,
 }
 
 impl QueryLog {
@@ -183,13 +184,24 @@ impl QueryLog {
         let Some(kinds) = value.get("kinds").and_then(serde_json::Value::as_array) else {
             return;
         };
-        let mut counts = self
-            .by_kind
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        for kind in kinds.iter().filter_map(serde_json::Value::as_u64) {
-            *counts.entry(kind as u16).or_default() += 1;
+        let kinds = kinds
+            .iter()
+            .filter_map(serde_json::Value::as_u64)
+            .map(|kind| kind as u16)
+            .collect::<Vec<_>>();
+        if kinds.is_empty() {
+            return;
         }
+        {
+            let mut counts = self
+                .by_kind
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            for kind in kinds {
+                *counts.entry(kind).or_default() += 1;
+            }
+        }
+        self.notify.notify_waiters();
     }
 
     fn count(&self, kind: u16) -> u64 {
@@ -199,6 +211,31 @@ impl QueryLog {
             .get(&kind)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Bounded, exact-kind wait with the same lost-wakeup-safe registration
+    /// used by [`ContactLog::wait_contacted`]. Notifications for unrelated
+    /// kinds only wake the loop; they never satisfy the requested witness.
+    async fn wait_query_count_for_kind(&self, kind: u16, at_least: u64, timeout: Duration) -> bool {
+        let wait = async {
+            loop {
+                if self.count(kind) >= at_least {
+                    return;
+                }
+                let notified = self.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.count(kind) >= at_least {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(timeout, wait).await.is_ok()
+    }
+
+    async fn wait_query_for_kind(&self, kind: u16, timeout: Duration) -> bool {
+        self.wait_query_count_for_kind(kind, 1, timeout).await
     }
 }
 
@@ -1076,6 +1113,28 @@ impl ScriptedRelay {
         self.queries.count(kind)
     }
 
+    /// Wait until this relay independently witnesses an inbound REQ naming
+    /// `kind`. Unlike [`Self::wait_contacted`], probes, writes, and queries for
+    /// other kinds cannot satisfy this exact witness.
+    pub async fn wait_query_for_kind(&self, kind: u16, timeout: Duration) -> bool {
+        self.queries.wait_query_for_kind(kind, timeout).await
+    }
+
+    /// Wait until this relay independently witnesses at least `at_least`
+    /// inbound query filters naming `kind`. This is the bounded causal door
+    /// for tests that subsequently assert an exact raw REQ count after the
+    /// wire becomes quiet.
+    pub async fn wait_query_count_for_kind(
+        &self,
+        kind: u16,
+        at_least: u64,
+        timeout: Duration,
+    ) -> bool {
+        self.queries
+            .wait_query_count_for_kind(kind, at_least, timeout)
+            .await
+    }
+
     /// Every `REQ`/`CLOSE` this relay's client has sent so far, decoded from
     /// the raw socket bytes -- subscription ids included. Panics if the
     /// decoder ever failed to account for a frame (see [`WireLog::snapshot`]):
@@ -1459,5 +1518,46 @@ mod tests {
             recorder.await.expect("recorder task must not panic");
             assert!(seen, "wait_contacted missed a concurrent record()");
         }
+    }
+
+    #[tokio::test]
+    async fn wait_query_for_kind_observes_already_recorded_and_delayed_exact_queries() {
+        let target_kind = 9_999u16;
+        let target = nostr_relay_builder::prelude::Filter::new()
+            .kind(nostr_relay_builder::prelude::Kind::from(target_kind));
+
+        let already_recorded = QueryLog::default();
+        already_recorded.record(&target);
+        assert!(
+            already_recorded
+                .wait_query_for_kind(target_kind, Duration::from_millis(1))
+                .await,
+            "an already-recorded exact query must satisfy immediately"
+        );
+
+        let delayed = Arc::new(QueryLog::default());
+        delayed.record(&target);
+        let recorder = {
+            let delayed = Arc::clone(&delayed);
+            tokio::spawn(async move {
+                let unrelated = nostr_relay_builder::prelude::Filter::new()
+                    .kind(nostr_relay_builder::prelude::Kind::from(1u16));
+                delayed.record(&unrelated);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                delayed.record(&target);
+            })
+        };
+        assert!(
+            delayed
+                .wait_query_count_for_kind(target_kind, 2, Duration::from_millis(500))
+                .await,
+            "a delayed exact query-count notification must not be lost"
+        );
+        assert_eq!(
+            delayed.count(target_kind),
+            2,
+            "an unrelated query notification cannot satisfy the exact count wait"
+        );
+        recorder.await.expect("query recorder task must not panic");
     }
 }

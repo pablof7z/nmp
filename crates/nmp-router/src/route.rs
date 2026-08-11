@@ -10,7 +10,7 @@ use crate::facts::{AuthorRouteState, Lane, LanedRelay, PublicKey, RelayUrl, Rout
 use crate::solver::Coverage;
 
 /// Why one relay is in the plan for one atom.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RouteProvenance {
     pub relay: RelayUrl,
     pub lane: Lane,
@@ -19,7 +19,7 @@ pub struct RouteProvenance {
 }
 
 /// How a route was formed, independent of the protocol that requested it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum RouteKind {
     Coverage,
     Supplemental,

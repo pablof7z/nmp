@@ -525,13 +525,17 @@ pub enum FfiRowDelta {
 /// [`FfiAcquisitionEvidence`] surface. What the ratified names protect is that
 /// every state here is ONE SOURCE's own current fact: no query-level
 /// aggregate may ever be added anywhere on this surface, and no variant may
-/// be added that reads across sources or claims completeness. A seventh
-/// per-source state, `FinishedStoredEvents`, was added under #1235 -- the six
-/// could not say that a relay had finished answering, so consumers timed it.
+/// be added that reads across sources or claims completeness. The vocabulary
+/// distinguishes accepted streaming and finished delivery, local request
+/// placement or retry, fresh no-wire coverage satisfaction, connection and
+/// AUTH state, and exact source-local failure without relying on a variant
+/// count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiSourceStatus {
     Requesting,
     FinishedStoredEvents,
+    AwaitingRequest,
+    CoverageSatisfied,
     Connecting,
     Disconnected,
     AwaitingAuth { phase: FfiAuthPhase },
@@ -1197,6 +1201,10 @@ pub enum FfiWriteOutcome {
     NoDestination,
     /// The write ended without going anywhere.
     NotSent { reason: FfiNotSentReason },
+    /// A newer replaceable write retired this obligation after its bytes may
+    /// already have crossed the local transport handoff. NMP will not retry
+    /// it, but does not falsely claim it was never sent.
+    Superseded,
     /// The store answered the acceptance instruction with a semantic no. The
     /// write is in custody as a permanently-failed entry: one row, payload
     /// intact, readable and removable through the queue door.
@@ -1207,9 +1215,9 @@ pub enum FfiWriteOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiNotSentReason {
     Cancelled,
-    /// A newer accepted write won the same replaceable coordinate before this
-    /// one started any wire attempt. Not a failure — for an app renewing
-    /// presence it is the steady state.
+    /// A newer accepted write won the same replaceable coordinate, and NMP
+    /// proved the older bytes did not cross the local transport handoff. Not a
+    /// failure — for an app renewing presence it is the steady state.
     Superseded,
 }
 

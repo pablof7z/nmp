@@ -341,6 +341,53 @@ impl<S: EventStore> EngineCore<S> {
         census
     }
 
+    /// Refresh only receipts whose write facts changed this reducer turn.
+    /// The full census is rebuilt once at boot; afterward an unrelated write
+    /// must not rescan every durable obligation merely to discover that none
+    /// of their stalled stages changed.
+    pub(super) fn refresh_stalled_write_cache_for_effects(&mut self, effects: &[Effect]) -> bool {
+        let touched: BTreeSet<ReceiptId> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EmitReceipt(id, _) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let mut changed = false;
+        for id in touched {
+            let next = self
+                .pending
+                .get(&id)
+                .and_then(|pending| self.stalled_write_stage(pending))
+                .map(|(stage, _)| stage);
+            let position = self
+                .last_stalled_write_census
+                .binary_search_by_key(&id, |(receipt, _)| *receipt);
+            match (position, next) {
+                (Ok(index), Some(stage)) if self.last_stalled_write_census[index].1 == stage => {}
+                (Ok(index), Some(stage)) => {
+                    self.last_stalled_write_census[index].1 = stage;
+                    changed = true;
+                }
+                (Ok(index), None) => {
+                    self.last_stalled_write_census.remove(index);
+                    changed = true;
+                }
+                (Err(index), Some(stage)) => {
+                    self.last_stalled_write_census.insert(index, (id, stage));
+                    changed = true;
+                }
+                (Err(_), None) => {}
+            }
+        }
+        if changed {
+            let (rows, totals) = self.stalled_write_projection();
+            self.cached_stalled_writes = rows;
+            self.cached_stalled_write_totals = totals;
+        }
+        changed
+    }
+
     /// The bounded stalled-write section of [`Self::diagnostics_snapshot`].
     ///
     /// One pass over the reducer's own open obligations produces both the
@@ -662,10 +709,13 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
-    /// Full O(pending) re-read of every outstanding write's lanes.
-    /// `schedule_ready` still needs the complete durable attempt-ordinal and
-    /// cap-accounting state. Worker ownership no longer calls this door:
-    /// #985 projects exact nonterminal lane demand in reducer memory.
+    /// Recover the complete current scheduler input.
+    ///
+    /// Ordinary operation reads the exact committed nonterminal rows already
+    /// owned by the reducer. A lane-less obligation costs nothing and a large
+    /// durable backlog performs no database reads on each healthy publish.
+    /// Any uncertain projection, or the global degraded index, deliberately
+    /// falls back to the durable store rather than guessing.
     /// `wake_relay_lanes` narrows ordinary relay events through
     /// `receipts_by_lane_relay`, except in its degraded fallback.
     pub(super) fn recover_all_lanes(
@@ -673,14 +723,24 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Result<Vec<(ReceiptId, PublishQueueLane)>, PersistenceError> {
         let mut lanes = Vec::new();
         for (id, pending) in &self.pending {
-            let intent_id = pending.intent_id;
-            lanes.extend(
-                self.resolver
-                    .store()
-                    .recover_publish_queue_lanes(intent_id)?
-                    .into_iter()
-                    .map(|lane| (*id, lane)),
-            );
+            if self.lane_relay_index_degraded || !pending.lane_projection.uncertain.is_empty() {
+                lanes.extend(
+                    self.resolver
+                        .store()
+                        .recover_publish_queue_lanes(pending.intent_id)?
+                        .into_iter()
+                        .map(|lane| (*id, lane)),
+                );
+            } else {
+                lanes.extend(
+                    pending
+                        .lane_projection
+                        .current_nonterminal
+                        .values()
+                        .cloned()
+                        .map(|lane| (*id, lane)),
+                );
+            }
         }
         lanes.sort_by(|(_, left), (_, right)| left.key.cmp(&right.key));
         Ok(lanes)
@@ -1364,6 +1424,10 @@ impl<S: EventStore> EngineCore<S> {
         if !recovered_route_needs.is_empty() {
             effects.push(Effect::AuthorRouteNeedsChanged(recovered_route_needs));
         }
+        self.last_stalled_write_census = self.stalled_write_census();
+        let (rows, totals) = self.stalled_write_projection();
+        self.cached_stalled_writes = rows;
+        self.cached_stalled_write_totals = totals;
         effects
     }
 
@@ -1540,9 +1604,7 @@ impl<S: EventStore> EngineCore<S> {
             ReceiptState::Cancelled => Some(WriteFact::Outcome(WriteOutcome::NotSent(
                 NotSentReason::Cancelled,
             ))),
-            ReceiptState::Superseded => Some(WriteFact::Outcome(WriteOutcome::NotSent(
-                NotSentReason::Superseded,
-            ))),
+            ReceiptState::Superseded => Some(WriteFact::Outcome(WriteOutcome::Superseded)),
             ReceiptState::Refused(reason) => {
                 Some(WriteFact::Outcome(WriteOutcome::Refused(reason)))
             }
@@ -2207,6 +2269,9 @@ impl<S: EventStore> EngineCore<S> {
                 let AcceptOutcome::Refused(reason) = outcome else {
                     unreachable!("only Refused omits journal ids")
                 };
+                if reason == nmp_store::RefuseReason::AlreadyExpired {
+                    return self.refuse_publish(PublishError::AlreadyExpired);
+                }
                 // CUSTODY. The store was working and said no, which is an
                 // answer the app is entitled to read back — so the refusal
                 // becomes a one-row, permanently-failed queue entry rather
@@ -2322,21 +2387,14 @@ impl<S: EventStore> EngineCore<S> {
             self.intent_receipts.insert(intent_id, id);
         }
 
-        if let Some(committed) = committed {
-            // A local pending row was committed before Accepted. When it did
-            // not alter reactive demand/router shape, expose its exact row
-            // facts through the same O(committed delta) projection path as a
-            // relay batch. Any demand change keeps the broad refresh oracle.
-            self.apply_committed_mutation(committed, &mut effects);
-        }
-
         for retired in retired_intents {
             let retired_id = ReceiptId(retired.receipt_id);
-            self.emit_write_fact(
-                retired_id,
-                WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Superseded)),
-                &mut effects,
-            );
+            let outcome = if retired.handoff_may_have_occurred {
+                WriteOutcome::Superseded
+            } else {
+                WriteOutcome::NotSent(NotSentReason::Superseded)
+            };
+            self.emit_write_fact(retired_id, WriteFact::Outcome(outcome), &mut effects);
             if let Some(retired_pending) = self.pending.remove(&retired_id) {
                 self.forget_pending_indexes(retired_id, &retired_pending);
                 if let Some(event_id) = retired_pending.event_id {
@@ -2350,6 +2408,24 @@ impl<S: EventStore> EngineCore<S> {
             } else {
                 self.intent_receipts.remove(&retired.intent_id);
             }
+        }
+
+        if let Some(committed) = committed {
+            // A local pending row was committed before Accepted. When it did
+            // not alter reactive demand/router shape, expose its exact row
+            // facts through the same O(committed delta) projection path as a
+            // relay batch. Any demand change keeps the broad refresh oracle.
+            // Retired terminals are already queued above so a synchronous
+            // new-request handoff cannot close their observer first.
+            self.apply_committed_mutation(committed, &mut effects);
+        }
+
+        if let Err(error) = self
+            .resolver
+            .store_mut()
+            .prune_superseded_receipts(self.clock)
+        {
+            self.degrade_store(error, &mut effects);
         }
 
         match payload {
@@ -2524,9 +2600,9 @@ impl<S: EventStore> EngineCore<S> {
     /// acceptance. It is INSPECTION: nothing here blocks, and nothing here
     /// waits for settlement.
     ///
-    /// It does not fix #46. Retained receipts and correlation tokens still
-    /// regrow without bound; this door makes that growth visible, which is
-    /// the first thing a retention rule will need.
+    /// Superseded safety receipts are automatically age/count bounded. Other
+    /// terminal receipt classes remain app-removable and #46 continues to own
+    /// their general retention policy.
     pub fn publish_queue_entries(&self) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
         let receipts = self.resolver.store().enumerate_publish_queue_receipts()?;
         let mut entries = Vec::with_capacity(receipts.len());
@@ -2550,7 +2626,7 @@ impl<S: EventStore> EngineCore<S> {
             };
             let outcome = match receipt.state {
                 ReceiptState::Cancelled => Some(WriteOutcome::NotSent(NotSentReason::Cancelled)),
-                ReceiptState::Superseded => Some(WriteOutcome::NotSent(NotSentReason::Superseded)),
+                ReceiptState::Superseded => Some(WriteOutcome::Superseded),
                 ReceiptState::Refused(reason) => Some(WriteOutcome::Refused(reason)),
                 ReceiptState::NoDestination => Some(WriteOutcome::NoDestination),
                 ReceiptState::Accepted | ReceiptState::Signed => match pending {

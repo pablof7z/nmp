@@ -53,23 +53,28 @@ operations such as NMP's NIP-02 `follow` / `unfollow` action.
 Acceptance uses the same NIP-01 coordinate as canonical replacement:
 `(pubkey, kind)` for kinds `0`, `3`, and `10000...19999`, and
 `(pubkey, kind, d)` for `30000...39999`. When a newer winner is accepted,
-every older open intent that owns the displaced row and has not started a
-wire attempt is retired in the same transaction. Its intent, waiting lanes,
-route revisions, and deadlines are removed, while its retained receipt and
-correlation identity remain and report terminal `Superseded`.
+every older open intent that owns the displaced row is retired in the same
+transaction. Its event body, intent, waiting lanes, attempt rows, route
+revisions, and deadlines are removed. Work proved never handed off leaves no
+receipt or correlation identity. Work that may have crossed the local
+transport handoff retains only terminal `Superseded` safety evidence, which is
+destroyed after one hour and globally capped to the newest 500 entries.
 
 An offline or AUTH-blocked lane with attempt ordinal zero is still unattempted:
-route resolution alone is not evidence that bytes reached a relay. Once an
-attempt row exists, or a lane cursor proves an attempt existed, the older
-obligation is preserved because delivery may already have crossed the
-transport handoff boundary. Co-owners are classified independently, so an
-attempted owner survives while an unattempted duplicate owner is retired.
+route resolution alone is not evidence that bytes reached a relay, so its
+receipt is destroyed too. Every attempt record is decoded and validated in
+full. Explicit proof that it was not handed off is still safely disposable;
+missing, possible, or actual handoff evidence preserves only the bounded
+terminal uncertainty fact. The old attempt cannot retry and its bytes cannot
+re-enter the queue. Co-owners are classified independently when deciding
+whether any safety receipt is justified.
 
-Compensation chains remain valid. A signed, relay-observed, or still-owned
-predecessor stays stashed under the newer intent. A purely pending row whose
-last owner was retired is not restorable; its own valid predecessor is spliced
-forward instead. Cancelling the newer write can therefore never resurrect an
-ownerless sentinel draft.
+Compensation chains remain valid only for relay-observed canonical state. A
+predecessor with independent relay provenance may stay stashed under the newer
+intent because it is cache truth NMP did not invent. A superseded local
+attempt—signed or unsigned, attempted or not—is obsolete and never restorable.
+Cancelling the newer write can therefore never resurrect unpublished local
+history.
 
 ## 2. One row path
 
@@ -309,12 +314,13 @@ Required proofs include:
 - account/current-pubkey changes cannot change a pinned signer identity;
 - signer absence survives restart as `AwaitingSigner` and resumes after attach;
 - an invalid or mismatched signer response cannot promote the row;
-- pre-signature cancellation restores a displaced replaceable winner;
+- pre-signature cancellation restores a relay-observed displaced winner but
+  never an obsolete unpublished local predecessor;
 - kinds `0`, `3`, `10000...19999`, and same-`d` `30000...39999` retire older
-  offline obligations atomically, retain a reattachable `Superseded` receipt,
-  and recover only the newer open intent after restart;
-- different `d` coordinates remain independent, and a started attempt
-  prevents retirement of the older obligation;
+  obligations atomically, destroy safely-unsent bodies and receipts, and
+  recover only the newer open intent after restart;
+- different `d` coordinates remain independent; a started attempt retains
+  only bounded `Superseded` safety evidence and never preserves retry work;
 - an exact-base guarded replacement is accepted, while a concurrent winner
   produces a typed conflict with no intent, receipt, or pending-row residue;
 - all relays rejecting a signed event leaves the signed row intact;

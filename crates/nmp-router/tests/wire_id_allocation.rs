@@ -12,13 +12,11 @@
 //! two ordinary UNLIMITED atoms collide exactly the same way.
 //!
 //! THE FIX. Wire ids are ALLOCATED opaque tokens, not functions of the
-//! filter: minted at first appearance, carried forward by matching the new
-//! plan against the previous one, and closed when unmatched. A new filter
-//! continues the prior it differs from in exactly ONE structural component
-//! (`since | until | kinds | authors | ids | one component per TAG NAME |
-//! limit`), zero-diff first. Injectivity comes from the ASSIGNMENT (each
-//! prior id is assigned to at most one new filter) plus unique minting,
-//! never from the id's content.
+//! filter. Exact byte-identical requests retain their existing token. A
+//! byte-changed filter always mints a fresh one; structural matching names at
+//! most one predecessor so EngineCore can offer the successor before retiring
+//! that predecessor at the exact commit edge. Injectivity comes from fresh
+//! minting plus one-to-one transition assignment, never from the id's content.
 //!
 //! Run narrated with:
 //! `cargo test -p nmp-router --test wire_id_allocation -- --nocapture`
@@ -29,7 +27,7 @@ use proptest::prelude::*;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
 use nmp_router::{
-    FixtureRoutingFacts, RelayUrl, Router, RuleRegistry, SubId, WireDelta, WireOp, WireReq,
+    CompileOutcome, FixtureRoutingFacts, RelayUrl, Router, RuleRegistry, SubId, WireOp, WireReq,
 };
 
 const CAP: usize = 64;
@@ -88,8 +86,9 @@ fn sub_ids(router: &Router) -> BTreeSet<SubId> {
     planned(router).into_iter().map(|r| r.sub_id).collect()
 }
 
-fn count_reqs(delta: &WireDelta) -> usize {
+fn count_reqs(delta: &CompileOutcome) -> usize {
     delta
+        .wire
         .ops
         .iter()
         .flat_map(|(_, ops)| ops.iter())
@@ -97,8 +96,9 @@ fn count_reqs(delta: &WireDelta) -> usize {
         .count()
 }
 
-fn count_closes(delta: &WireDelta) -> usize {
+fn count_closes(delta: &CompileOutcome) -> usize {
     delta
+        .wire
         .ops
         .iter()
         .flat_map(|(_, ops)| ops.iter())
@@ -124,7 +124,7 @@ fn limited_identical_except_authors_atoms_get_distinct_sub_ids() {
 
     // Recompiling identical demand must not be relied on to repair a loss.
     let second = router.compile(&demand, &dir, CAP);
-    let repaired: usize = second.ops.iter().map(|(_, ops)| ops.len()).sum();
+    let repaired: usize = second.wire.ops.iter().map(|(_, ops)| ops.len()).sum();
 
     println!("\n=== injectivity: two LIMITED identical-except-authors atoms ===");
     println!("demand atoms:               2");
@@ -155,21 +155,12 @@ fn limited_identical_except_authors_atoms_get_distinct_sub_ids() {
     );
 }
 
-/// THE HEADLINE WIN, and the reason allocation earns its keep.
-///
-/// A LIMITED filter whose author set churns now OVERWRITES IN PLACE: the new
-/// filter differs from the prior in exactly one component (`authors`), so it
-/// continues that prior's allocated token — one REQ, zero CLOSEs.
-///
-/// This INVERTS the accepted cost a stateless-identity design has to pay. A
-/// stateless injective identity cannot tell "this subscription's author set
-/// churned" from "a sibling appeared" without previous-plan state, so it must
-/// carry `authors` in the identity of any filter the registry cannot widen
-/// along `authors` — and then every author churn inside a limited atom is a
-/// close plus a reopen, re-serving the whole window for nothing and splitting
-/// the attribution FIFO across two identities. Allocation remembers instead.
+/// A byte-changed filter gets a fresh identity. Structural matching names the
+/// old physical request only as the accepted-open-before-close predecessor;
+/// it never authorizes a same-SubId overwrite whose later EOSE would be
+/// generation-ambiguous (#774).
 #[test]
-fn churning_a_limited_atoms_author_set_overwrites_in_place() {
+fn churning_a_limited_atoms_author_set_mints_a_fresh_transition_identity() {
     let (dir, mut router) = router();
 
     router.compile(
@@ -186,7 +177,7 @@ fn churning_a_limited_atoms_author_set_overwrites_in_place() {
     );
     let after = sub_ids(&router);
 
-    println!("\n=== headline: LIMITED author churn overwrites in place ===");
+    println!("\n=== LIMITED author churn: fresh accepted transition ===");
     println!(
         "closes: {}  reqs: {}",
         count_closes(&delta),
@@ -195,19 +186,18 @@ fn churning_a_limited_atoms_author_set_overwrites_in_place() {
 
     assert_eq!(planned(&router).len(), 1, "still one subscription");
     assert_eq!(
-        before, after,
-        "the churned atom keeps its allocated token -- identity is carried, not re-derived"
-    );
-    assert_eq!(
         count_closes(&delta),
-        0,
-        "THE WIN: a limited atom's author churn must NOT close its subscription"
-    );
-    assert_eq!(
-        count_reqs(&delta),
         1,
-        "THE WIN: exactly one overwriting REQ (NIP-01: a REQ on an existing sub-id replaces it)"
+        "the router describes the old physical request that Core defers until acceptance"
     );
+    assert_ne!(
+        before, after,
+        "every byte-changed request gets a fresh SubId"
+    );
+    assert_eq!(count_reqs(&delta), 1, "exactly one fresh REQ is dispatched");
+    let replacement = delta.replacements.iter().next().expect("one transition");
+    assert_eq!(replacement.prior_sub_id, before.into_iter().next().unwrap());
+    assert_eq!(replacement.next_sub_id, after.into_iter().next().unwrap());
 }
 
 /// `limit` is the TRIGGER, not the defect. `RuleRegistry::dedup_only()` holds
@@ -331,15 +321,16 @@ fn withdrawing_a_sibling_does_not_move_the_survivors_sub_id() {
     );
 }
 
-/// The control that must NOT regress: the author axis's in-place widening.
-/// Growing an unlimited author set one value at a time keeps ONE accumulating
-/// filter on ONE stable token — N REQs, zero CLOSEs.
+/// The control that must NOT regress: growing an unlimited author set keeps
+/// one accumulating live filter while every byte-changing step uses a fresh
+/// transition identity.
 #[test]
-fn unlimited_author_growth_keeps_one_stable_sub_with_zero_closes() {
+fn unlimited_author_growth_keeps_one_live_sub_with_fresh_transitions() {
     const N: u32 = 8;
     let (dir, mut router) = router();
     let mut reqs = 0usize;
     let mut closes = 0usize;
+    let mut replacements = 0usize;
     let mut ids = BTreeSet::new();
 
     for step in 1..=N {
@@ -347,6 +338,7 @@ fn unlimited_author_growth_keeps_one_stable_sub_with_zero_closes() {
         let delta = router.compile(&demand, &dir, CAP);
         reqs += count_reqs(&delta);
         closes += count_closes(&delta);
+        replacements += delta.replacements.len();
         ids.extend(sub_ids(&router));
     }
 
@@ -363,11 +355,20 @@ fn unlimited_author_growth_keeps_one_stable_sub_with_zero_closes() {
     );
     assert_eq!(
         ids.len(),
-        1,
-        "and that sub keeps ONE stable token throughout"
+        N as usize,
+        "every byte-changing step mints a fresh token"
     );
-    assert_eq!(closes, 0, "in-place widening never closes the subscription");
-    assert_eq!(reqs, N as usize, "one overwriting REQ per growth step");
+    assert_eq!(
+        closes,
+        N as usize - 1,
+        "every predecessor leaves the raw plan"
+    );
+    assert_eq!(
+        replacements,
+        N as usize - 1,
+        "every changed step matches its predecessor"
+    );
+    assert_eq!(reqs, N as usize, "one fresh REQ per growth step");
 }
 
 /// The same growth in the LIMITED slot: each author is its own unmergeable
@@ -428,22 +429,18 @@ fn identical_recompile_emits_nothing() {
     let before = sub_ids(&router);
     let delta = router.compile(&demand, &dir, CAP);
 
-    assert!(delta.ops.is_empty(), "identical demand must emit NOTHING");
+    assert!(
+        delta.wire.ops.is_empty(),
+        "identical demand must emit NOTHING"
+    );
     assert_eq!(before, sub_ids(&router), "and must not move any token");
 }
 
-/// A `since` churn is a one-component move, so it too carries the token
-/// forward and overwrites in place.
-///
-/// ACCEPTED CONSEQUENCE, recorded here rather than left to be discovered: a
-/// straggler EOSE for the OLD window now lands on the SAME attribution FIFO
-/// as the new snapshot, and `attribute_eose_detailed` credits the
-/// INTERSECTION of every outstanding snapshot — so the straggler's credit
-/// floor rises to the NEW `since` and some legitimately earned coverage is
-/// dropped. That is an UNDER-credit (fail-safe), never a mis-credit, and it
-/// is the direct price of `since` being a component of the matching key.
+/// A `since` churn is a one-component predecessor match, but changed bytes
+/// still mint a fresh identity. A delayed EOSE for the old window therefore
+/// cannot land on the successor's attribution generation.
 #[test]
-fn since_churn_overwrites_in_place() {
+fn since_churn_mints_a_fresh_transition_identity() {
     let (dir, mut router) = router();
     let windowed = |since: u64| {
         pinned_atom(ConcreteFilter {
@@ -456,27 +453,21 @@ fn since_churn_overwrites_in_place() {
     let before = sub_ids(&router);
     let delta = router.compile(&BTreeSet::from([windowed(200)]), &dir, CAP);
 
-    assert_eq!(
-        before,
-        sub_ids(&router),
-        "the token is carried across a since move"
-    );
-    assert_eq!(count_closes(&delta), 0);
+    let after = sub_ids(&router);
+    assert_ne!(before, after, "changed bytes must mint a fresh SubId");
+    assert_eq!(count_closes(&delta), 1);
     assert_eq!(count_reqs(&delta), 1);
+    let replacement = delta.replacements.iter().next().expect("one transition");
+    assert_eq!(replacement.prior_sub_id, before.into_iter().next().unwrap());
+    assert_eq!(replacement.next_sub_id, after.into_iter().next().unwrap());
 }
 
-/// ACCEPTED COST, pinned. `limit` is a component, so `limit: None -> Some(n)`
-/// is a one-diff move and the token is carried forward.
-///
-/// The consequence, named explicitly: pushing a `limited: true` snapshot onto
-/// a FIFO that still holds the unlimited REQ's snapshot POISONS the whole
-/// FIFO (`attribution.rs`: `poisoned = fifo.iter().any(|s| s.limited)`), so
-/// coverage the unlimited REQ had legitimately earned is discarded at the next
-/// EOSE. Under the old derived identity `limit` was part of the skeleton, so
-/// this minted a fresh id and a separate FIFO. It is fail-safe (under-credit
-/// only), and it is the price of `limit` being a component per the spec.
+/// `limit` is a component, so `limit: None -> Some(n)` identifies one exact
+/// predecessor. The byte-changed limited successor still gets a fresh token,
+/// keeping its filter-limit coverage poison in a separate attribution
+/// generation.
 #[test]
-fn a_limit_appearing_carries_the_token_and_will_poison_the_fifo() {
+fn a_limit_appearing_mints_a_fresh_transition_identity() {
     let (dir, mut router) = router();
 
     router.compile(&BTreeSet::from([pinned_atom(kind1(&[1], None))]), &dir, CAP);
@@ -487,15 +478,19 @@ fn a_limit_appearing_carries_the_token_and_will_poison_the_fifo() {
         CAP,
     );
 
-    assert_eq!(before, sub_ids(&router), "ACCEPTED: the token is carried");
-    assert_eq!(count_closes(&delta), 0);
+    let after = sub_ids(&router);
+    assert_ne!(before, after, "changed bytes must mint a fresh SubId");
+    assert_eq!(count_closes(&delta), 1);
     assert_eq!(count_reqs(&delta), 1);
+    let replacement = delta.replacements.iter().next().expect("one transition");
+    assert_eq!(replacement.prior_sub_id, before.into_iter().next().unwrap());
+    assert_eq!(replacement.next_sub_id, after.into_iter().next().unwrap());
 }
 
 /// ACCEPTED COST, pinned rather than fixed: COMPOUND CHURN. Two components
 /// moving in one recompile (here an author resolves AND the window advances)
-/// is a 2-diff, which is not a continuation, so the subscription closes and
-/// reopens.
+/// has no structural predecessor match, so the old request closes directly
+/// while the new one opens under its fresh identity.
 ///
 /// This is deliberately NOT relaxed to "<=2 components with overlap evidence":
 /// that re-imports exactly the ambiguity single-component matching avoids —
@@ -526,10 +521,14 @@ fn compound_churn_closes_and_reopens() {
 
     assert_ne!(
         before, after,
-        "ACCEPTED COST: a 2-diff is not a continuation"
+        "ACCEPTED COST: a 2-diff has no typed predecessor transition"
     );
     assert_eq!(count_closes(&delta), 1, "ACCEPTED COST: close");
     assert_eq!(count_reqs(&delta), 1, "ACCEPTED COST: and reopen");
+    assert!(
+        delta.replacements.is_empty(),
+        "compound churn has no accepted-open-before-close predecessor"
+    );
 }
 
 /// ACCEPTED RESIDUAL, pinned: WINDOW SIBLINGS. Two filters identical except
@@ -538,10 +537,11 @@ fn compound_churn_closes_and_reopens() {
 /// tiebreak is therefore arbitrary-but-deterministic: NEAREST scalar value,
 /// then canonical filter hash, then the prior's own token.
 ///
-/// What matters is that it is reproducible and that neither sibling closes:
-/// both overwrite in place, so the arbitrariness costs nothing on the wire.
+/// What matters is that the predecessor pairing is reproducible. Both
+/// successors still mint fresh identities; matching only names which two old
+/// requests EngineCore may retire after their respective handoffs succeed.
 #[test]
-fn window_siblings_match_deterministically_without_closing() {
+fn window_siblings_match_deterministically_with_fresh_successor_ids() {
     let windowed = |until: u64| {
         pinned_atom(ConcreteFilter {
             until: Some(until),
@@ -569,26 +569,39 @@ fn window_siblings_match_deterministically_without_closing() {
             .into_iter()
             .map(|r| (r.filter.until, r.sub_id))
             .collect();
-        (before, after, count_closes(&delta), count_reqs(&delta))
+        (
+            before,
+            after,
+            count_closes(&delta),
+            count_reqs(&delta),
+            delta.replacements,
+        )
     };
 
-    let (before_a, after_a, closes_a, reqs_a) = run();
-    let (before_b, after_b, closes_b, reqs_b) = run();
+    let (before_a, after_a, closes_a, reqs_a, replacements_a) = run();
+    let (before_b, after_b, closes_b, reqs_b, replacements_b) = run();
 
     println!("\n=== accepted residual: window siblings ===");
     println!("closes: {closes_a}  reqs: {reqs_a}");
 
     assert_eq!(
-        (before_a, after_a),
-        (before_b, after_b),
+        (&before_a, &after_a),
+        (&before_b, &after_b),
         "two freshly-constructed Routers must resolve the tie identically"
     );
-    assert_eq!((closes_a, reqs_a), (closes_b, reqs_b));
     assert_eq!(
-        closes_a, 0,
-        "neither window sibling closes -- both overwrite"
+        (closes_a, reqs_a, &replacements_a),
+        (closes_b, reqs_b, &replacements_b)
     );
-    assert_eq!(reqs_a, 2, "one overwriting REQ each");
+    assert_eq!(closes_a, 2, "the raw delta closes both old identities");
+    assert_eq!(reqs_a, 2, "one fresh successor REQ each");
+    assert_eq!(replacements_a.len(), 2, "both predecessors are matched");
+    let old_ids: BTreeSet<_> = before_a.values().cloned().collect();
+    let new_ids: BTreeSet<_> = after_a.values().cloned().collect();
+    assert!(
+        old_ids.is_disjoint(&new_ids),
+        "byte-changed siblings must never reuse predecessor tokens"
+    );
 }
 
 /// ACCEPTED COST, pinned: the one-diff pass is a single deterministic GREEDY
@@ -597,7 +610,8 @@ fn window_siblings_match_deterministically_without_closing() {
 /// Here `N1` is 1-diff from BOTH priors and takes `P2` (higher author
 /// overlap); `N2` is 1-diff from `P2` only, so once `P2` is taken it mints
 /// fresh and `P1` is stranded and closed. An optimal assignment (`N1`->`P1`,
-/// `N2`->`P2`) would have paid zero closes.
+/// `N2`->`P2`) would have classified both fresh successors as transitions,
+/// leaving no unmatched predecessor to close directly.
 ///
 /// Deliberately NOT repaired with augmenting paths: rematching an
 /// ALREADY-MATCHED filter would make a subscription's identity depend on which
@@ -634,9 +648,14 @@ fn the_greedy_one_diff_sweep_can_strand_a_prior() {
     // deliberately excluded -- which would make it a test of nothing.
     assert_eq!(
         count_closes(&delta),
+        2,
+        "both old identities leave the raw plan"
+    );
+    assert_eq!(
+        delta.replacements.len(),
         1,
-        "ACCEPTED COST: N1 takes P2 on overlap, so N2 mints and P1 is stranded \
-         and closed -- an optimal assignment (N1->P1, N2->P2) would pay zero closes"
+        "ACCEPTED COST: N1 takes P2 on overlap, so N2 has no typed predecessor \
+         and P1 closes directly -- an optimal assignment would match both"
     );
 
     // The correctness floor the cost is measured against: whatever the sweep
@@ -815,8 +834,8 @@ fn same_id_implies_merged_or_the_assignment_kept_them_distinct() {
     /// failure mode of a non-injective id, where the delta's `BTreeMap`
     /// keeps one of two colliding reqs -- shows up here as a plan entry with
     /// no wire counterpart, on the compile it happens AND on every later one.
-    fn check(wire: &mut WireState, router: &Router, delta: &WireDelta, label: &str) {
-        for (session, ops) in &delta.ops {
+    fn check(wire: &mut WireState, router: &Router, delta: &CompileOutcome, label: &str) {
+        for (session, ops) in &delta.wire.ops {
             for op in ops {
                 match op {
                     WireOp::Close(sub_id) => {
@@ -880,7 +899,7 @@ fn same_id_implies_merged_or_the_assignment_kept_them_distinct() {
 
         // A no-op recompile must emit nothing: zero-diff ranks first.
         let repeat = router.compile(&demand, &dir, CAP);
-        prop_assert!(repeat.ops.is_empty(), "identical recompile must be a no-op");
+        prop_assert!(repeat.wire.ops.is_empty(), "identical recompile must be a no-op");
         check(&mut wire, &router, &repeat, "no-op recompile");
 
         // ... and injectivity must survive an arbitrary churn step, where the

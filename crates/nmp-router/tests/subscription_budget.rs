@@ -22,10 +22,9 @@ use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, RelaySessionKey, SourceAuthority,
 };
 use nmp_router::{
-    AdvertisedRelayLimits, CompileBudget, FixtureRoutingFacts, RelayUrl, Router, RuleRegistry,
-    WireOp,
+    AdvertisedRelayLimits, CompileBudget, DemandKey, FixtureRoutingFacts, RelayUrl, Router,
+    RuleRegistry, WireOp,
 };
-use nmp_store::coverage_key;
 
 /// Well clear of anything these fixtures plan: this file is about the
 /// per-relay SUBSCRIPTION budget, never the whole-demand relay ceiling.
@@ -118,7 +117,7 @@ fn an_unadvertised_relay_carries_every_subscription() {
         "an unadvertised relay must not be capped"
     );
     assert!(
-        r.plan().limited.is_empty(),
+        r.plan().limited_demands.is_empty(),
         "nothing may be reported as limited when no budget was advertised"
     );
     assert!(r.plan().subscription_shortfalls.is_empty());
@@ -132,7 +131,7 @@ fn an_unadvertised_relay_carries_every_subscription() {
 }
 
 /// An advertised budget binds, and every subscription it removes is
-/// reported — as `limited` coverage keys (which `plan_is_fresh_for` refuses
+/// reported — as exact limited demands (which `plan_is_fresh_for` refuses
 /// to call fresh) and as a per-session shortfall. Silent truncation is the
 /// one outcome this must never be.
 #[test]
@@ -147,8 +146,8 @@ fn an_advertised_budget_refuses_the_excess_and_says_so() {
 
     let refused_keys: Vec<_> = demand
         .iter()
-        .map(coverage_key)
-        .filter(|key| r.plan().limited.contains(key))
+        .map(DemandKey::for_atom)
+        .filter(|key| r.plan().limited_demands.contains(key))
         .collect();
     assert_eq!(
         refused_keys.len(),
@@ -182,6 +181,7 @@ fn only_the_surviving_subscriptions_reach_the_wire() {
     let delta = r.compile(&unmergeable(5), &dir, budget(Some(2)));
 
     let reqs: Vec<_> = delta
+        .wire
         .ops
         .iter()
         .flat_map(|(_, ops)| ops)
@@ -226,10 +226,10 @@ fn a_bound_budget_does_not_churn_what_it_already_serves() {
         "an incumbent subscription must not be evicted for a newcomer"
     );
     assert!(
-        delta.ops.is_empty(),
+        delta.wire.ops.is_empty(),
         "a saturated relay whose served set is unchanged must emit no wire ops, \
          got {:?}",
-        delta.ops
+        delta.wire.ops
     );
 }
 
@@ -242,7 +242,7 @@ fn a_bound_budget_is_idempotent_across_recompiles() {
     let demand = unmergeable(5);
     r.compile(&demand, &dir, budget(Some(2)));
     let delta = r.compile(&demand, &dir, budget(Some(2)));
-    assert!(delta.ops.is_empty(), "got {:?}", delta.ops);
+    assert!(delta.wire.ops.is_empty(), "got {:?}", delta.wire.ops);
 }
 
 /// The sequencing claim from the issue, made a test: AFTER the collapse
@@ -261,7 +261,7 @@ fn a_collapsed_catalog_of_three_hundred_stays_inside_a_budget_of_twenty() {
         1,
         "300 values collapse to one subscription carrying all of them"
     );
-    assert!(r.plan().limited.is_empty());
+    assert!(r.plan().limited_demands.is_empty());
     assert!(r.plan().subscription_shortfalls.is_empty());
 }
 
@@ -308,7 +308,9 @@ fn a_budget_of_zero_refuses_the_whole_session() {
     assert!(r.plan().refused_sessions.contains(&session()));
     for atom in &demand {
         assert!(
-            r.plan().limited.contains(&coverage_key(atom)),
+            r.plan()
+                .limited_demands
+                .contains(&DemandKey::for_atom(atom)),
             "a session refused outright limits every atom it would have served"
         );
     }
@@ -398,7 +400,7 @@ fn advertised_limits_never_move_an_established_wire_id() {
         before, after,
         "a refreshed document must not rename anything"
     );
-    assert!(delta.ops.is_empty(), "nor cost a single wire op");
+    assert!(delta.wire.ops.is_empty(), "nor cost a single wire op");
 }
 
 /// A relaxed budget re-admits what it refused, in place: the atoms that were
@@ -414,7 +416,7 @@ fn relaxing_the_budget_re_admits_the_refused_demand() {
 
     r.compile(&demand, &dir, budget(Some(20)));
     assert_eq!(live_subs(&r), 5);
-    assert!(r.plan().limited.is_empty());
+    assert!(r.plan().limited_demands.is_empty());
     assert!(r.plan().subscription_shortfalls.is_empty());
 }
 

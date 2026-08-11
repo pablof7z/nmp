@@ -336,28 +336,40 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         let (sub_id, filter) = req_for_kind(&healthy_subscribed, &healthy_relay, 2);
         (sub_id.clone(), filter.clone())
     };
-    let failed_request_accepted = core.on_wire_request_handoff(
-        &public_session(&relay),
-        &request,
-        request_filter.hash(),
-        Some(RelayHandle {
+    let failed_attempt = failed_subscribed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Wire(delta) => {
+                Some(delta.attempt_id(&public_session(&relay), &request, &request_filter))
+            }
+            _ => None,
+        })
+        .expect("the failed request carries its exact attempt identity");
+    let healthy_attempt = healthy_subscribed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Wire(delta) => Some(delta.attempt_id(
+                &public_session(&healthy_relay),
+                &healthy_request,
+                &healthy_filter,
+            )),
+            _ => None,
+        })
+        .expect("the healthy request carries its exact attempt identity");
+    let failed_request_accepted = core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+        attempt_id: failed_attempt,
+        handle: RelayHandle {
             slot: 0,
             generation: 1,
-        }),
-        true,
-        None,
-    );
-    let healthy_request_accepted = core.on_wire_request_handoff(
-        &public_session(&healthy_relay),
-        &healthy_request,
-        healthy_filter.hash(),
-        Some(RelayHandle {
+        },
+    });
+    let healthy_request_accepted = core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+        attempt_id: healthy_attempt,
+        handle: RelayHandle {
             slot: 1,
             generation: 1,
-        }),
-        true,
-        None,
-    );
+        },
+    });
     assert!(
         failed_request_accepted
             .iter()
@@ -845,7 +857,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         &[1],
         &b.public_key().to_hex(),
     )));
-    let _ = core.handle(EngineMsg::FlushWireAdmission);
+    let _ = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &healthy.public_key().to_hex(),
@@ -870,7 +882,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         })
         .expect("failed relay replays its coalesced request");
     assert_eq!(
-        failed_request.absorbed.len(),
+        failed_request.coverage_claims.len(),
         2,
         "the one request must carry both narrow coverage atoms"
     );
@@ -1200,15 +1212,56 @@ impl EventStore for WakeLaneProbeStore {
     delegate_publish_queue_door!(inner);
 }
 
+/// A large durable backlog can contain obligations that own no physical lane
+/// at all (for example, writes still waiting for a signer). Scheduling one
+/// healthy routed write must read only that write's lane state, not perform
+/// one empty store lookup for every unrelated obligation.
+#[test]
+fn schedule_ready_skips_lane_less_obligations() {
+    const PARKED: usize = 207;
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://lane-less-scheduler.example.com").unwrap();
+    let calls = Rc::new(Cell::new(0u64));
+    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
+    activate(&mut core, &author);
+
+    for i in 0..PARKED {
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(draft(10_000 + i as u64, "parked")),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::RequestSign(..))));
+    }
+
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Event(draft(20_000, "healthy")),
+        routing: WriteRouting::Explicit(vec![relay]),
+        identity: Identity::Active,
+        correlation: None,
+    }));
+    let (id, generation, unsigned) = find_sign_request(&accepted);
+    calls.set(0);
+    let signed = unsigned.sign_with_keys(&author).unwrap();
+    core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+
+    assert_eq!(
+        calls.get(),
+        0,
+        "the one current routed lane is already reducer-owned; {PARKED} unrelated signer waits and the healthy write must cost zero recovery reads"
+    );
+}
+
 /// Falsifier (epic #507 finding E5): a single relay-connected event for
 /// relay X must trigger `recover_publish_queue_lanes` only for X's own intent on
 /// the wake path, not for every outstanding durable write. Composition of
-/// the expected count: `schedule_ready`'s own `O(pending)` accounting is
-/// UNCHANGED (deliberately -- see `recover_all_lanes`'s doc comment) and
-/// reads all `N` pending intents once; the wake scan itself collapses from
-/// `N` reads (the old `recover_all_lanes` + relay filter) down to exactly
-/// `1` (only the receipt actually routed through the woken relay). Total:
-/// `N + 1`, strictly less than the old `2 * N`.
+/// the expected count: `schedule_ready` uses reducer-owned current lane rows
+/// and performs zero recovery reads; the wake scan itself collapses from `N`
+/// reads (the old `recover_all_lanes` + relay filter) down to exactly `1`
+/// (only the receipt actually routed through the woken relay).
 #[test]
 fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     const N: usize = 3;
@@ -1261,10 +1314,10 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
 
     assert_eq!(
         calls.get(),
-        (N as u64) + 1,
-        "expected exactly N ({N}) reads from schedule_ready's unchanged \
-         durable-cap accounting plus 1 read from the wake scan (collapsed \
-         from N) -- strictly less than the old 2*N={}",
+        1,
+        "expected zero recovery reads from schedule_ready plus 1 read from \
+         the exact wake scan (collapsed from N={N}) -- strictly less than \
+         the old 2*N={}",
         2 * N,
     );
 

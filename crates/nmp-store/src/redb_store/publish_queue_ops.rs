@@ -111,6 +111,7 @@ pub(super) fn reattach_receipt(
         intent_id: record.intent_id,
         frozen_id: record.frozen_id,
         expected_pubkey: record.expected_pubkey,
+        accepted_at: record.accepted_at,
         state: record.state,
     }))
 }
@@ -1678,6 +1679,11 @@ pub(super) fn accept_refused(
     expected_pubkey: PublicKey,
     reason: crate::RefuseReason,
 ) -> Result<u64, PersistenceError> {
+    if reason == crate::RefuseReason::AlreadyExpired {
+        return Err(PersistenceError::invariant(
+            "already-expired writes are refused before receipt custody",
+        ));
+    }
     // Receipt-ONLY and terminal at birth: touches `PUBLISH_QUEUE_RECEIPTS`
     // (+ `PUBLISH_QUEUE_META` for the id allocation) alone — no `EVENTS` row,
     // no `PUBLISH_QUEUE_INTENTS` row, `intent_id: None` (nothing backs it).
@@ -1694,6 +1700,7 @@ pub(super) fn accept_refused(
             intent_id: None,
             frozen_id,
             expected_pubkey,
+            accepted_at: None,
             state: ReceiptState::Refused(reason),
         };
         let encoded = encode_receipt(&record);
@@ -1727,6 +1734,7 @@ pub(super) fn enumerate_publish_queue_receipts(
             intent_id: record.intent_id,
             frozen_id: record.frozen_id,
             expected_pubkey: record.expected_pubkey,
+            accepted_at: record.accepted_at,
             state: record.state,
         });
     }

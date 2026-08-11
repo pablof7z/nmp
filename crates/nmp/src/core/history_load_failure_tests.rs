@@ -15,12 +15,17 @@ use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
 use super::*;
 
 #[derive(Debug)]
-enum FailRead {
+enum StoreFailure {
     Query {
         message: String,
         block: Option<BlockedRead>,
     },
     NewestBefore(String),
+    Coverage {
+        message: String,
+        successes_before_failure: usize,
+    },
+    CoverageWrite(String),
 }
 
 #[derive(Debug)]
@@ -49,11 +54,11 @@ impl BlockedReadControl {
 }
 
 #[derive(Clone, Default)]
-struct ReadFailureControl(Arc<Mutex<Option<FailRead>>>);
+pub(super) struct StoreFailureControl(Arc<Mutex<Option<StoreFailure>>>);
 
-impl ReadFailureControl {
+impl StoreFailureControl {
     fn fail_query(&self, message: &str) {
-        *self.0.lock().unwrap() = Some(FailRead::Query {
+        *self.0.lock().unwrap() = Some(StoreFailure::Query {
             message: message.to_owned(),
             block: None,
         });
@@ -62,7 +67,7 @@ impl ReadFailureControl {
     fn block_then_fail_query(&self, message: &str) -> BlockedReadControl {
         let (entered_tx, entered) = mpsc::sync_channel(0);
         let release = Arc::new((Mutex::new(false), Condvar::new()));
-        *self.0.lock().unwrap() = Some(FailRead::Query {
+        *self.0.lock().unwrap() = Some(StoreFailure::Query {
             message: message.to_owned(),
             block: Some(BlockedRead {
                 entered: entered_tx,
@@ -73,13 +78,36 @@ impl ReadFailureControl {
     }
 
     fn fail_newest_before(&self, message: &str) {
-        *self.0.lock().unwrap() = Some(FailRead::NewestBefore(message.to_owned()));
+        *self.0.lock().unwrap() = Some(StoreFailure::NewestBefore(message.to_owned()));
+    }
+
+    fn fail_coverage_after(&self, successes_before_failure: usize, message: &str) {
+        *self.0.lock().unwrap() = Some(StoreFailure::Coverage {
+            message: message.to_owned(),
+            successes_before_failure,
+        });
+    }
+
+    pub(super) fn fail_coverage_write(&self, message: &str) {
+        *self.0.lock().unwrap() = Some(StoreFailure::CoverageWrite(message.to_owned()));
+    }
+
+    fn take_coverage_write_failure(&self) -> Option<PersistenceError> {
+        let mut failure = self.0.lock().unwrap();
+        if matches!(failure.as_ref(), Some(StoreFailure::CoverageWrite(_))) {
+            let Some(StoreFailure::CoverageWrite(message)) = failure.take() else {
+                unreachable!()
+            };
+            Some(PersistenceError::invariant(message))
+        } else {
+            None
+        }
     }
 
     fn take_query_failure(&self) -> Option<PersistenceError> {
         let mut failure = self.0.lock().unwrap();
-        if matches!(failure.as_ref(), Some(FailRead::Query { .. })) {
-            let Some(FailRead::Query { message, block }) = failure.take() else {
+        if matches!(failure.as_ref(), Some(StoreFailure::Query { .. })) {
+            let Some(StoreFailure::Query { message, block }) = failure.take() else {
                 unreachable!()
             };
             drop(failure);
@@ -102,8 +130,8 @@ impl ReadFailureControl {
 
     fn take_newest_before_failure(&self) -> Option<PersistenceError> {
         let mut failure = self.0.lock().unwrap();
-        if matches!(failure.as_ref(), Some(FailRead::NewestBefore(_))) {
-            let Some(FailRead::NewestBefore(message)) = failure.take() else {
+        if matches!(failure.as_ref(), Some(StoreFailure::NewestBefore(_))) {
+            let Some(StoreFailure::NewestBefore(message)) = failure.take() else {
                 unreachable!()
             };
             Some(PersistenceError::invariant(message))
@@ -111,20 +139,39 @@ impl ReadFailureControl {
             None
         }
     }
+
+    fn take_coverage_failure(&self) -> Option<PersistenceError> {
+        let mut failure = self.0.lock().unwrap();
+        let Some(StoreFailure::Coverage {
+            successes_before_failure,
+            ..
+        }) = failure.as_mut()
+        else {
+            return None;
+        };
+        if *successes_before_failure > 0 {
+            *successes_before_failure -= 1;
+            return None;
+        }
+        let Some(StoreFailure::Coverage { message, .. }) = failure.take() else {
+            unreachable!()
+        };
+        Some(PersistenceError::invariant(message))
+    }
 }
 
-struct FailingReadStore {
+pub(super) struct ControlledFailureStore {
     inner: MemoryStore,
-    control: ReadFailureControl,
+    control: StoreFailureControl,
 }
 
-impl FailingReadStore {
-    fn new(inner: MemoryStore, control: ReadFailureControl) -> Self {
+impl ControlledFailureStore {
+    pub(super) fn new(inner: MemoryStore, control: StoreFailureControl) -> Self {
         Self { inner, control }
     }
 }
 
-impl EventStore for FailingReadStore {
+impl EventStore for ControlledFailureStore {
     fn compensate_write_with_state(
         &mut self,
         intent_id: IntentId,
@@ -179,6 +226,9 @@ impl EventStore for FailingReadStore {
         &mut self,
         claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
+        if let Some(error) = self.control.take_coverage_write_failure() {
+            return Err(error);
+        }
         self.inner.record_coverage(claims)
     }
 
@@ -187,6 +237,9 @@ impl EventStore for FailingReadStore {
         key: CoverageKey,
         relay: &RelayUrl,
     ) -> Result<Option<CoverageInterval>, PersistenceError> {
+        if let Some(error) = self.control.take_coverage_failure() {
+            return Err(error);
+        }
         self.inner.get_coverage(key, relay)
     }
 
@@ -276,8 +329,8 @@ impl EventStore for FailingReadStore {
 
 #[test]
 fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
-    let control = ReadFailureControl::default();
-    let store = FailingReadStore::new(MemoryStore::new(), control.clone());
+    let control = StoreFailureControl::default();
+    let store = ControlledFailureStore::new(MemoryStore::new(), control.clone());
     let (engine, handle) = crate::runtime::EngineThread::spawn(
         store,
         4,
@@ -400,9 +453,9 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
 /// that is later abandoned.
 #[test]
 fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
-    let control = ReadFailureControl::default();
+    let control = StoreFailureControl::default();
     let mut core = EngineCore::new(
-        FailingReadStore::new(MemoryStore::new(), control.clone()),
+        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
         20,
     );
     let baseline = core.observation_ownership_census();
@@ -445,7 +498,7 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
     );
 
     control.fail_query("second branch graph construction failed");
-    let effects = match core.open_observation(query) {
+    let effects = match core.open_observation(query, Timestamp::from(0u64)) {
         ObservationOpen::Refused { reason, effects } => {
             assert!(
                 reason.contains("second branch graph construction failed"),
@@ -468,18 +521,214 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
     );
 
     assert!(matches!(
-        core.open_observation(LiveQuery::single(first)),
+        core.open_observation(LiveQuery::single(first), Timestamp::from(0u64)),
         ObservationOpen::Opened { .. }
     ));
 }
 
 #[test]
+fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
+    let control = StoreFailureControl::default();
+    let relay = RelayUrl::parse("wss://request-target-refusal.example").unwrap();
+    let filter = Filter {
+        kinds: Some(BTreeSet::from([1])),
+        ..Filter::default()
+    };
+    let mut demand = nmp_grammar::Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1])),
+        ..Filter::default()
+    });
+    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    demand.freshness = Freshness::MaxAge { seconds: 60 };
+    let atom = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: filter.kinds.clone(),
+            ..ConcreteFilter::default()
+        },
+        source: demand.source.clone(),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let mut store = MemoryStore::new();
+    store
+        .record_coverage(&[(
+            atom,
+            relay,
+            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+        )])
+        .unwrap();
+    let mut core = EngineCore::new(ControlledFailureStore::new(store, control.clone()), 20);
+    core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
+    // MaxAge now uses this one read for both its freshness decision and the
+    // opening frame. Fail that sole authority and prove the candidate graph
+    // unwinds before any request-target ownership can escape.
+    control.fail_coverage_after(0, "opening evidence coverage failed");
+
+    let refusal = core.open_observation(LiveQuery::single(demand), Timestamp::from(100u64));
+    match refusal {
+        ObservationOpen::Refused { reason, .. } => assert!(
+            reason.contains("opening evidence coverage failed"),
+            "unexpected refusal: {reason}"
+        ),
+        ObservationOpen::Opened { .. } => panic!("injected coverage failure was ignored"),
+    }
+    assert_eq!(
+        core.bench_ownership_census(),
+        CoreOwnershipCensus::default()
+    );
+}
+
+/// #1165/#1342: a failed graph build must not swallow handle drops drained
+/// before the failing read, and reporting the refusal consumes that batch
+/// exactly once.
+#[test]
+fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
+    let control = StoreFailureControl::default();
+    let mut resolver = ResolverEngine::new(ControlledFailureStore::new(
+        MemoryStore::new(),
+        control.clone(),
+    ));
+    let first = nmp_grammar::Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1])),
+        ..Filter::default()
+    });
+    let first_handle = match resolver.subscribe(first) {
+        SubscribeOutcome::Opened { handle, .. } => handle,
+        SubscribeOutcome::Refused { error, .. } => panic!("fixture open refused: {error}"),
+    };
+    drop(first_handle);
+
+    let failing = nmp_grammar::Demand::from_filter(Filter {
+        kinds: Some(BTreeSet::from([2])),
+        authors: Some(Binding::Derived(Box::new(Derived {
+            inner: nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([3])),
+                ..Filter::default()
+            }),
+            project: Selector::Tag("p".to_owned()),
+        }))),
+        ..Filter::default()
+    });
+    control.fail_query("failed after draining pending drops");
+    let delta = match resolver.subscribe(failing) {
+        SubscribeOutcome::Refused { error, delta } => {
+            assert!(error
+                .to_string()
+                .contains("failed after draining pending drops"));
+            delta
+        }
+        SubscribeOutcome::Opened { .. } => panic!("injected graph failure was ignored"),
+    };
+    assert_eq!(delta.ops.len(), 1);
+    assert!(matches!(
+        &delta.ops[0],
+        DemandOp::Close(atom) if atom.filter.kinds == Some(BTreeSet::from([1]))
+    ));
+    assert!(
+        resolver.poll_pending_drops().is_empty(),
+        "the refused outcome owns the drained close; polling cannot report it twice"
+    );
+}
+
+#[test]
+fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close() {
+    for graph_refusal in [true, false] {
+        let control = StoreFailureControl::default();
+        let relay = RelayUrl::parse("wss://refused-open-withdrawal.example").unwrap();
+        let mut core = EngineCore::new(
+            ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+            4,
+        );
+        let mut first = nmp_grammar::Demand::from_filter(Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        });
+        first.source = SourceAuthority::Pinned(BTreeSet::from([relay]));
+        first.freshness = Freshness::Live;
+        let observation =
+            match core.open_observation(LiveQuery::single(first), Timestamp::from(0u64)) {
+                ObservationOpen::Opened { id, .. } => id,
+                ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
+            };
+        let opened = core.flush_wire_admission(Timestamp::from(0u64));
+        let sub_id = opened
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Wire(delta) => Some(delta),
+                _ => None,
+            })
+            .flat_map(|delta| delta.ops.iter().flat_map(|(_, ops)| ops))
+            .find_map(|op| match op {
+                WireOp::Req(sub_id, _) => Some(sub_id.clone()),
+                WireOp::Close(_) => None,
+            })
+            .expect("fixture admission opens one wire request");
+
+        // Model the exact #1165 seam: the owning resolver handle is dropped,
+        // so its close is pending inside the resolver, while core's exact wire
+        // index still records the request the next outcome must withdraw.
+        let branch = core.observations[&observation].branches[0];
+        core.observations.remove(&observation);
+        drop(core.handles.remove(&branch));
+
+        let failing = if graph_refusal {
+            nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([2])),
+                authors: Some(Binding::Derived(Box::new(Derived {
+                    inner: nmp_grammar::Demand::from_filter(Filter {
+                        kinds: Some(BTreeSet::from([3])),
+                        ..Filter::default()
+                    }),
+                    project: Selector::Tag("p".to_owned()),
+                }))),
+                ..Filter::default()
+            })
+        } else {
+            nmp_grammar::Demand::from_filter(Filter {
+                kinds: Some(BTreeSet::from([2])),
+                ..Filter::default()
+            })
+        };
+        let refusal = if graph_refusal { "graph" } else { "projection" };
+        control.fail_query(&format!(
+            "{refusal} refused after draining pending wire owner"
+        ));
+        let effects = match core.open_observation(LiveQuery::single(failing), Timestamp::from(0u64))
+        {
+            ObservationOpen::Refused { reason, effects } => {
+                assert!(reason.contains(&format!(
+                    "{refusal} refused after draining pending wire owner"
+                )));
+                effects
+            }
+            ObservationOpen::Opened { .. } => panic!("injected {refusal} failure was ignored"),
+        };
+        let closes: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Wire(delta) => Some(delta),
+                _ => None,
+            })
+            .flat_map(|delta| delta.ops.iter().flat_map(|(_, ops)| ops))
+            .filter_map(|op| match op {
+                WireOp::Close(closed) => Some(closed),
+                WireOp::Req(_, _) => None,
+            })
+            .collect();
+        assert_eq!(closes, vec![&sub_id], "{refusal} refusal");
+        assert!(core.router.plan().reqs.is_empty());
+        assert!(core.resolver.poll_pending_drops().is_empty());
+        assert!(core.flush_wire_admission(Timestamp::from(0u64)).is_empty());
+    }
+}
+
+#[test]
 fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() {
     {
-        let control = ReadFailureControl::default();
+        let control = StoreFailureControl::default();
         let blocked = control.block_then_fail_query("ordinary refusal won the shutdown race");
         let (engine, handle) = crate::runtime::EngineThread::spawn(
-            FailingReadStore::new(MemoryStore::new(), control),
+            ControlledFailureStore::new(MemoryStore::new(), control),
             4,
             nmp_transport::PoolConfig::default(),
             RelayAdmissionPolicy::default(),
@@ -504,10 +753,10 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
     }
 
     {
-        let control = ReadFailureControl::default();
+        let control = StoreFailureControl::default();
         let blocked = control.block_then_fail_query("history refusal won the shutdown race");
         let (engine, handle) = crate::runtime::EngineThread::spawn(
-            FailingReadStore::new(MemoryStore::new(), control),
+            ControlledFailureStore::new(MemoryStore::new(), control),
             4,
             nmp_transport::PoolConfig::default(),
             RelayAdmissionPolicy::default(),
@@ -567,7 +816,7 @@ fn assert_only_refusal_diagnostic(effects: &[Effect], expected: &str) {
 
 fn assert_plan_unchanged(actual: &RelayPlan, expected: &RelayPlan) {
     assert_eq!(actual.reqs, expected.reqs);
-    assert_eq!(actual.limited, expected.limited);
+    assert_eq!(actual.limited_demands, expected.limited_demands);
     assert_eq!(actual.limited_demands, expected.limited_demands);
     assert_eq!(actual.refused_sessions, expected.refused_sessions);
     assert_eq!(
@@ -585,16 +834,17 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
     let facts = FixtureRoutingFacts::new()
         .with_outbound_routes(existing_author, [existing_relay])
         .with_outbound_routes(candidate_author, [candidate_relay]);
-    let control = ReadFailureControl::default();
+    let control = StoreFailureControl::default();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailingReadStore::new(MemoryStore::new(), control.clone()),
+        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
         facts,
         1,
     );
-    let existing_id = match core.open_observation(routed_query(existing_author, 1)) {
-        ObservationOpen::Opened { id, .. } => id,
-        ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
-    };
+    let existing_id =
+        match core.open_observation(routed_query(existing_author, 1), Timestamp::from(0u64)) {
+            ObservationOpen::Opened { id, .. } => id,
+            ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
+        };
     let baseline_census = core.observation_ownership_census();
     let baseline_demand = core.active_demand();
     let baseline_plan = core.router.plan().clone();
@@ -609,13 +859,14 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
     };
 
     control.fail_query("candidate ordinary projection failed");
-    let effects = match core.open_observation(routed_query(candidate_author, 2)) {
-        ObservationOpen::Refused { reason, effects } => {
-            assert!(reason.contains("candidate ordinary projection failed"));
-            effects
-        }
-        ObservationOpen::Opened { .. } => panic!("injected projection failure was ignored"),
-    };
+    let effects =
+        match core.open_observation(routed_query(candidate_author, 2), Timestamp::from(0u64)) {
+            ObservationOpen::Refused { reason, effects } => {
+                assert!(reason.contains("candidate ordinary projection failed"));
+                effects
+            }
+            ObservationOpen::Opened { .. } => panic!("injected projection failure was ignored"),
+        };
 
     assert_only_refusal_diagnostic(
         &effects,
@@ -641,7 +892,7 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
     );
 
     assert!(matches!(
-        core.open_observation(routed_query(candidate_author, 2)),
+        core.open_observation(routed_query(candidate_author, 2), Timestamp::from(0u64)),
         ObservationOpen::Opened { .. }
     ));
 }
@@ -655,17 +906,16 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     let facts = FixtureRoutingFacts::new()
         .with_outbound_routes(existing_author, [existing_relay])
         .with_outbound_routes(candidate_author, [candidate_relay]);
-    let control = ReadFailureControl::default();
+    let control = StoreFailureControl::default();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailingReadStore::new(MemoryStore::new(), control.clone()),
+        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
         facts,
         1,
     );
-    let existing_id = match core.open_history_observation(HistoryQuery::new(
-        routed_query(existing_author, 1),
-        1,
-        2,
-    )) {
+    let existing_id = match core.open_history_observation(
+        HistoryQuery::new(routed_query(existing_author, 1), 1, 2),
+        Timestamp::from(0u64),
+    ) {
         ObservationOpen::Opened { id, .. } => id,
         ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
     };
@@ -676,11 +926,10 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     let baseline_history = snapshot(&core, existing_id);
 
     control.fail_query("candidate history projection failed");
-    let effects = match core.open_history_observation(HistoryQuery::new(
-        routed_query(candidate_author, 2),
-        1,
-        2,
-    )) {
+    let effects = match core.open_history_observation(
+        HistoryQuery::new(routed_query(candidate_author, 2), 1, 2),
+        Timestamp::from(0u64),
+    ) {
         ObservationOpen::Refused { reason, effects } => {
             assert!(reason.contains("candidate history projection failed"));
             effects
@@ -707,7 +956,10 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     );
 
     assert!(matches!(
-        core.open_history_observation(HistoryQuery::new(routed_query(candidate_author, 2), 1, 2,)),
+        core.open_history_observation(
+            HistoryQuery::new(routed_query(candidate_author, 2), 1, 2),
+            Timestamp::from(0u64),
+        ),
         ObservationOpen::Opened { .. }
     ));
 }
@@ -725,7 +977,7 @@ struct HistorySnapshot {
     history_by_handle: HashMap<HandleId, HistorySessionId>,
 }
 
-fn snapshot(core: &EngineCore<FailingReadStore>, id: HistorySessionId) -> HistorySnapshot {
+fn snapshot(core: &EngineCore<ControlledFailureStore>, id: HistorySessionId) -> HistorySnapshot {
     let state = &core.histories[&id];
     assert!(state.pending_load.is_none());
     HistorySnapshot {
@@ -798,7 +1050,7 @@ fn literal_history_query() -> HistoryQuery {
 
 /// The oldest retained row's second: the boundary an advance would fetch
 /// behind. Derived from state now that windows carry no continuation token.
-fn boundary_second(core: &EngineCore<FailingReadStore>, id: HistorySessionId) -> u64 {
+fn boundary_second(core: &EngineCore<ControlledFailureStore>, id: HistorySessionId) -> u64 {
     core.histories[&id]
         .last_rows
         .values()
@@ -809,11 +1061,11 @@ fn boundary_second(core: &EngineCore<FailingReadStore>, id: HistorySessionId) ->
 
 fn open_history(
     store: MemoryStore,
-    control: ReadFailureControl,
+    control: StoreFailureControl,
     query: HistoryQuery,
     active_pubkey: Option<PublicKey>,
-) -> (EngineCore<FailingReadStore>, HistorySessionId) {
-    let mut core = EngineCore::new(FailingReadStore::new(store, control), 20);
+) -> (EngineCore<ControlledFailureStore>, HistorySessionId) {
+    let mut core = EngineCore::new(ControlledFailureStore::new(store, control), 20);
     if let Some(active_pubkey) = active_pubkey {
         core.handle(EngineMsg::SetActivePubkey(Some(active_pubkey)));
     }
@@ -829,7 +1081,7 @@ fn open_history(
 }
 
 fn assert_failed_load(
-    core: &EngineCore<FailingReadStore>,
+    core: &EngineCore<ControlledFailureStore>,
     id: HistorySessionId,
     before: &HistorySnapshot,
     effects: &[Effect],
@@ -858,9 +1110,9 @@ fn assert_failed_load(
 }
 
 fn derived_fixture() -> (
-    EngineCore<FailingReadStore>,
+    EngineCore<ControlledFailureStore>,
     HistorySessionId,
-    ReadFailureControl,
+    StoreFailureControl,
 ) {
     let me = Keys::generate();
     let followed = Keys::generate();
@@ -872,7 +1124,7 @@ fn derived_fixture() -> (
         .unwrap();
     let rows = (100..106).map(|created_at| event(&followed, 1, created_at));
     let store = seeded_store(std::iter::once(contact_list).chain(rows), &relay);
-    let control = ReadFailureControl::default();
+    let control = StoreFailureControl::default();
     let (core, id) = open_history(
         store,
         control.clone(),
@@ -940,7 +1192,7 @@ fn projection_advance_read_failure_dispatches_diagnostics_and_exact_rollback() {
         (100..106).map(|created_at| event(&keys, 9, created_at)),
         &relay,
     );
-    let control = ReadFailureControl::default();
+    let control = StoreFailureControl::default();
     let (mut core, id) = open_history(store, control.clone(), literal_history_query(), None);
     let before = snapshot(&core, id);
     control.fail_newest_before("projection advance read failed");
@@ -978,9 +1230,9 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
     );
     let directory =
         FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [first, second]);
-    let control = ReadFailureControl::default();
+    let control = StoreFailureControl::default();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailingReadStore::new(store, control),
+        ControlledFailureStore::new(store, control),
         directory,
         1,
     );
@@ -992,7 +1244,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
             _ => None,
         })
         .unwrap();
-    core.handle(EngineMsg::FlushWireAdmission);
+    core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     let selected = core.router.plan().reqs.keys().next().unwrap().clone();
     let relay_handle = TransportRelayHandle {
         slot: 7,

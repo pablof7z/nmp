@@ -37,6 +37,7 @@ done
 
 production_core=$(
   git ls-files 'crates/nmp/src/core/*.rs' |
+    grep -E '^crates/nmp/src/core/[^/]+\.rs$' |
     grep -vE '(_tests|auth_core_headless)\.rs$'
 )
 [[ -n $production_core ]] || fail "production core census is empty"

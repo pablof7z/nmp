@@ -979,7 +979,7 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
                 .recover_publish_queue()
                 .expect("recover delivery")
                 .len(),
-            2
+            1
         );
         assert!(matches!(
             store.compensate_write(intent).unwrap(),
@@ -988,13 +988,13 @@ fn promotion_and_displaced_compensation_are_atomic_across_process_death() {
     }
     let store = RedbStore::open(&path).expect("reopen compensated state");
     assert!(store.query(&Filter::new().id(newer_id)).unwrap().is_empty());
-    assert_eq!(store.query(&Filter::new().id(older_id)).unwrap().len(), 1);
+    assert!(store.query(&Filter::new().id(older_id)).unwrap().is_empty());
     assert_eq!(
         store
             .recover_publish_queue()
             .expect("recover delivery")
             .len(),
-        1
+        0
     );
     assert_eq!(
         store.reattach_receipt(receipt).unwrap().unwrap().state,

@@ -7,11 +7,11 @@
 //!   thread — see `engine_loop`'s doc and
 //!   `docs/design/retraction-and-negative-deltas.md` §3.3, #39): with no
 //!   deadline pending it blocks on plain `recv()`; with one pending it
-//!   `recv_timeout`s exactly until the earliest reducer, NIP-11, or pending
-//!   wire-admission deadline. A timeout dispatches only the due owner before
-//!   re-arming from the freshly-recomputed minimum — for
-//!   every command it calls `EngineCore::handle`/`::tick` and dispatches the
-//!   returned `core::Effect`s to `nmp_transport::Pool::send`, the
+//!   `recv_timeout`s exactly until the earliest reducer, NIP-11, pending
+//!   wire-admission, or diagnostics-delivery deadline. A timeout dispatches
+//!   only the due owner before re-arming from the freshly-recomputed minimum
+//!   — for every command it calls `EngineCore::handle`/`::tick` and dispatches
+//!   the returned `core::Effect`s to `nmp_transport::Pool::send`, the
 //!   `nmp_signer` capability, and the app-facing channels;
 //! - the **pool-bridge thread**, a tiny translator that blocking-`recv`s
 //!   `nmp_transport::PoolEvent`s (the pool's OWN `mio` worker threads push
@@ -55,6 +55,7 @@
 mod auth;
 mod clock;
 mod diagnostics_channel;
+mod diagnostics_delivery;
 mod fifo_channel;
 mod row_channel;
 
@@ -75,18 +76,20 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel as cb;
+use nmp_grammar::ConcreteFilter;
 use nmp_grammar::LiveQuery;
-use nmp_grammar::{ConcreteFilter, DescriptorHash};
 use nmp_network_policy::{Declarer, DestinationPolicy};
-use nmp_router::{SubId, WireDelta, WireOp, WireReq};
+use nmp_router::{SubId, WireOp};
 use nmp_signer::{
     PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
     SignerUnsignedEvent, SigningCapability,
 };
 use nmp_store::EventStore;
+#[cfg(test)]
+use nostr::RelayMessage;
 use nostr::{
-    ClientMessage, Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayMessage, RelayUrl,
-    SubscriptionId, Tag, Timestamp, UnsignedEvent,
+    ClientMessage, Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, SubscriptionId,
+    Tag, Timestamp, UnsignedEvent,
 };
 
 use nmp_transport::{
@@ -98,9 +101,9 @@ use nmp_transport::{
 pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, AuthSendCompletion, DiagnosticsSnapshot, Effect, EngineCore,
-    EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, Nip77Frame,
-    ObservationEvidence, ObservationId, ObservationOpen, PublishError, ReattachOutcome, ReceiptId,
-    RelayAdmissionPolicy, Row, RowDelta,
+    EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, LocalSendRefusal,
+    Nip77Frame, ObservationEvidence, ObservationId, ObservationOpen, PublishError, ReattachOutcome,
+    ReceiptId, RelayAdmissionPolicy, RequestAttemptId, RequestHandoffOutcome, Row, RowDelta,
 };
 use crate::publish_queue::{
     CancelWriteError, CancelWriteOutcome, PublishQueueEntry, RemoveQueueEntryError, SigningState,
@@ -114,6 +117,11 @@ use nmp_grammar::WriteIntent;
 
 use diagnostics_channel::{latest_channel, LatestSender};
 pub use diagnostics_channel::{AsyncLatestReceiver, ConcurrentNext, LatestReceiver};
+use diagnostics_delivery::{
+    fan_out as fan_out_diagnostics, flush_due as flush_due_diagnostics,
+    seed_observer as seed_diagnostics_observer,
+    snapshot_with_pool as diagnostics_snapshot_with_pool, DiagnosticsDeliveryState,
+};
 pub use fifo_channel::{
     fifo_channel, AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError,
     FifoRecvTimeoutError, FifoSender, FifoTryRecvError, FACT_CHANNEL_CAPACITY,
@@ -126,7 +134,7 @@ pub use row_channel::{AsyncRowsReceiver, RowsReceiver};
 /// one-shot grace window, not polling; the eventual document still updates
 /// diagnostics/cache after the behavioral probe has begun.
 const NIP11_DECISION_GRACE: Duration = Duration::from_millis(250);
-const WIRE_ADMISSION_WINDOW: Duration = Duration::from_millis(30);
+const WIRE_ADMISSION_WINDOW: Duration = Duration::from_millis(10);
 
 #[derive(Clone)]
 struct EnginePoolSink {
@@ -916,9 +924,17 @@ enum Cmd {
         id: ReceiptId,
         reply: Sender<usize>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     ObservationOwnershipCensus {
         reply: Sender<ObservationOwnershipCensus>,
+    },
+    /// Hold the reducer inside one command turn so a test can observe whether
+    /// a simultaneously-due core deadline ran before command dispatch.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    DeadlineRaceProbe {
+        at: Timestamp,
+        entered: Sender<()>,
+        release: Receiver<()>,
     },
     CancelWrite {
         id: ReceiptId,
@@ -985,9 +1001,10 @@ enum Cmd {
     Shutdown,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-instrumentation"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ObservationOwnershipCensus {
+#[doc(hidden)]
+pub struct ObservationOwnershipCensus {
     handles: usize,
     histories: usize,
     history_handles: usize,
@@ -2962,7 +2979,7 @@ mod relay_worker_reconciliation_tests {
         let protected_read = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
         let mut core = EngineCore::new(MemoryStore::new(), 1);
         let mut effects = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
-        effects.extend(core.handle(EngineMsg::FlushWireAdmission));
+        effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         assert!(effects.iter().any(
             |effect| matches!(effect, Effect::EnsureReadRelay(session) if session == &protected_read)
         ));
@@ -3010,6 +3027,7 @@ mod relay_worker_reconciliation_tests {
         let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let wire_admission = RefCell::new(WireAdmissionState::default());
+        let diagnostics_delivery = RefCell::new(DiagnosticsDeliveryState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
@@ -3021,6 +3039,7 @@ mod relay_worker_reconciliation_tests {
             runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
             wire_admission: &wire_admission,
+            diagnostics_delivery: &diagnostics_delivery,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
@@ -3036,7 +3055,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("first subscription handle");
-        first.extend(core.handle(EngineMsg::FlushWireAdmission));
+        first.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         assert_eq!(
             first
                 .iter()
@@ -3073,7 +3092,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("second subscription handle");
-        second.extend(core.handle(EngineMsg::FlushWireAdmission));
+        second.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         dispatch_core_effects(
             &mut core,
             second,
@@ -3139,6 +3158,7 @@ mod relay_worker_reconciliation_tests {
         let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let wire_admission = RefCell::new(WireAdmissionState::default());
+        let diagnostics_delivery = RefCell::new(DiagnosticsDeliveryState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
@@ -3150,6 +3170,7 @@ mod relay_worker_reconciliation_tests {
             runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
             wire_admission: &wire_admission,
+            diagnostics_delivery: &diagnostics_delivery,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
@@ -3165,7 +3186,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("protected subscription handle");
-        core.handle(EngineMsg::FlushWireAdmission);
+        core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
 
         dispatch_relay_open_failure(
             &mut core,
@@ -3301,6 +3322,7 @@ mod relay_worker_reconciliation_tests {
         let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let wire_admission = RefCell::new(WireAdmissionState::default());
+        let diagnostics_delivery = RefCell::new(DiagnosticsDeliveryState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
@@ -3312,6 +3334,7 @@ mod relay_worker_reconciliation_tests {
             runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
             wire_admission: &wire_admission,
+            diagnostics_delivery: &diagnostics_delivery,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
@@ -3327,7 +3350,7 @@ mod relay_worker_reconciliation_tests {
                 _ => None,
             })
             .expect("subscription emits its initial rows");
-        first.extend(core.handle(EngineMsg::FlushWireAdmission));
+        first.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         dispatch_core_effects(
             &mut core,
             first,
@@ -3357,7 +3380,7 @@ mod relay_worker_reconciliation_tests {
         );
 
         let mut replacement = core.handle(EngineMsg::Subscribe(query(&author_b)));
-        replacement.extend(core.handle(EngineMsg::FlushWireAdmission));
+        replacement.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         dispatch_core_effects(
             &mut core,
             replacement,
@@ -3442,6 +3465,7 @@ mod relay_worker_reconciliation_tests {
         let relay_information = RelayInformationService::new(rt.handle().clone());
         let nip11_decisions = RefCell::new(Nip11DecisionState::default());
         let wire_admission = RefCell::new(WireAdmissionState::default());
+        let diagnostics_delivery = RefCell::new(DiagnosticsDeliveryState::default());
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
@@ -3453,6 +3477,7 @@ mod relay_worker_reconciliation_tests {
             runtime: rt.handle(),
             nip11_decisions: &nip11_decisions,
             wire_admission: &wire_admission,
+            diagnostics_delivery: &diagnostics_delivery,
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
@@ -3894,24 +3919,6 @@ fn relay_frame_is_auth(frame: &RelayFrame) -> bool {
     )
 }
 
-/// Frames whose reducer handling consumes wall-clock truth. EOSE and
-/// NEG-MSG may mint coverage; AUTH creates timestamped challenge state.
-/// Advance the pure reducer clock immediately before the batch containing
-/// them so coverage `through` is completion-time capped and can never be
-/// influenced by an EVENT's `created_at`.
-fn relay_frame_needs_wall_clock(frame: &RelayFrame) -> bool {
-    matches!(
-        frame,
-        RelayFrame::Message(message)
-            if matches!(
-                message.as_ref(),
-                RelayMessage::Auth { .. }
-                    | RelayMessage::EndOfStoredEvents(_)
-                    | RelayMessage::NegMsg { .. }
-            )
-    )
-}
-
 #[derive(Clone, Copy)]
 struct DispatchRuntime<'a> {
     self_inbox: &'a Sender<Cmd>,
@@ -3919,6 +3926,7 @@ struct DispatchRuntime<'a> {
     runtime: &'a tokio::runtime::Handle,
     nip11_decisions: &'a RefCell<Nip11DecisionState>,
     wire_admission: &'a RefCell<WireAdmissionState>,
+    diagnostics_delivery: &'a RefCell<DiagnosticsDeliveryState>,
     auth_policies: &'a RefCell<auth::AuthPolicyRegistry>,
     auth_tasks: &'a RefCell<auth::AuthTaskRegistry>,
     receipt_deliveries: &'a RefCell<ReceiptDeliveryRegistry>,
@@ -4053,6 +4061,7 @@ mod wire_admission_tests {
 
     #[test]
     fn window_is_anchored_to_first_arrival_and_rearms_for_the_next_cohort() {
+        assert_eq!(WIRE_ADMISSION_WINDOW, Duration::from_millis(10));
         let now = Instant::now();
         let first_deadline = now + WIRE_ADMISSION_WINDOW;
         let mut state = WireAdmissionState::default();
@@ -4072,6 +4081,9 @@ mod wire_admission_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod observation_clock_tests;
 
 /// The three wires the engine thread owns, and the one thing they have in
 /// common: each is a way for something OUTSIDE the reducer to reach it. The
@@ -4093,11 +4105,11 @@ struct EngineWiring<'a> {
 /// `cmd_rx` (D8) until `Cmd::Shutdown`.
 ///
 /// The deadline-armed driver (§3.3, #39): every iteration re-reads the core
-/// plus the NIP-11 and wire-admission deadlines, then waits for their exact
-/// minimum. A command that introduces an earlier deadline re-arms naturally
-/// on the next iteration; there is no polling or sleeper. `None` blocks on
-/// plain `recv()`. A timeout fires only the due owners, then recomputes the
-/// minimum.
+/// plus the NIP-11, wire-admission, and deferred-diagnostics deadlines, then
+/// waits for their exact minimum. A command that introduces an earlier
+/// deadline re-arms naturally on the next iteration; there is no polling or
+/// sleeper. `None` blocks on plain `recv()`. A timeout fires only the due
+/// owners, then recomputes the minimum.
 fn engine_loop<S>(
     store: S,
     routing_facts: crate::core::RoutingFactStore,
@@ -4151,12 +4163,14 @@ fn engine_loop<S>(
     let mut sign_event_cancellations: HashMap<u64, ActiveSignEvent> = HashMap::new();
     let nip11_decisions = RefCell::new(Nip11DecisionState::default());
     let wire_admission = RefCell::new(WireAdmissionState::default());
+    let diagnostics_delivery = RefCell::new(DiagnosticsDeliveryState::default());
     let dispatch_runtime = DispatchRuntime {
         self_inbox,
         relay_information: &relay_information,
         runtime: runtime_handle,
         nip11_decisions: &nip11_decisions,
         wire_admission: &wire_admission,
+        diagnostics_delivery: &diagnostics_delivery,
         auth_policies: &auth_policies,
         auth_tasks: &auth_tasks,
         receipt_deliveries: &receipt_deliveries,
@@ -4164,9 +4178,11 @@ fn engine_loop<S>(
         nip65: &nip65,
     };
 
-    // Recovery happens before the first externally-issued command. Pending
-    // rows already live in the store; this only rebuilds ownership and may
-    // replay exact durable attempt bytes whose Started fact was committed.
+    // Recovery happens before the first externally-issued command. Give that
+    // transition current wall truth before it rebuilds deadline-bearing lane
+    // state; this is a cheap assignment, while recovery itself remains the
+    // explicit owner of its durable startup work.
+    core.advance_clock(clock.now());
     let recovery_effects = core.recover_on_boot();
     dispatch_core_effects(
         &mut core,
@@ -4181,6 +4197,16 @@ fn engine_loop<S>(
 
     let mut shutting_down = false;
     loop {
+        // A continuously-ready command stream must not starve a delivery
+        // deadline. This command-boundary check is still event-driven; the
+        // timeout arm below owns the idle-engine case.
+        flush_due_diagnostics(
+            &core,
+            &pool,
+            &diag_channels,
+            &diagnostics_delivery,
+            Instant::now(),
+        );
         // A deadline the store could not read is neither "due now" nor
         // "nothing to wait for" (#763). It is a persistence failure, and it
         // is recorded as the one #122 degrade fact an app already reads
@@ -4188,8 +4214,11 @@ fn engine_loop<S>(
         // wait then falls back to the plain `recv()`, and the next message
         // re-reads the deadline -- so a failing store cannot spin this loop
         // either.
-        let core_wait = match core.next_deadline() {
-            Ok(deadline) => deadline.map(|deadline| duration_until(deadline, clock.now())),
+        let (core_deadline, core_wait) = match core.next_deadline() {
+            Ok(deadline) => (
+                deadline,
+                deadline.map(|deadline| duration_until(deadline, clock.now())),
+            ),
             Err(error) => {
                 let mut effects = Vec::new();
                 core.degrade_store(error, &mut effects);
@@ -4203,7 +4232,7 @@ fn engine_loop<S>(
                     &registry,
                     dispatch_runtime,
                 );
-                None
+                (None, None)
             }
         };
         let nip11_wait = nip11_decisions
@@ -4214,10 +4243,14 @@ fn engine_loop<S>(
             .borrow()
             .next_deadline()
             .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let diagnostics_wait = diagnostics_delivery
+            .borrow()
+            .next_deadline()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
         let wait = if shutting_down {
             None
         } else {
-            [core_wait, nip11_wait, wire_admission_wait]
+            [core_wait, nip11_wait, wire_admission_wait, diagnostics_wait]
                 .into_iter()
                 .flatten()
                 .min()
@@ -4233,6 +4266,8 @@ fn engine_loop<S>(
                     // Core deadlines and NIP-11 fallback share this one
                     // event-driven wait. Fire only the owners actually due,
                     // then re-arm the exact minimum.
+                    let wall_now = clock.now();
+                    core.advance_clock(wall_now);
                     for url in nip11_decisions
                         .borrow_mut()
                         .take_due_fallbacks(Instant::now())
@@ -4250,7 +4285,7 @@ fn engine_loop<S>(
                         );
                     }
                     if wire_admission.borrow_mut().take_due(Instant::now()) {
-                        let effects = core.handle(EngineMsg::FlushWireAdmission);
+                        let effects = core.handle(EngineMsg::FlushWireAdmission(wall_now));
                         dispatch_core_effects(
                             &mut core,
                             effects,
@@ -4262,7 +4297,6 @@ fn engine_loop<S>(
                             dispatch_runtime,
                         );
                     }
-                    let wall_now = clock.now();
                     // A failed re-read fires no `Tick`: the store this tick
                     // would drain is the store that just refused to be read,
                     // and firing anyway would only reach the same failure
@@ -4299,11 +4333,50 @@ fn engine_loop<S>(
                             dispatch_runtime,
                         );
                     }
+                    flush_due_diagnostics(
+                        &core,
+                        &pool,
+                        &diag_channels,
+                        &diagnostics_delivery,
+                        Instant::now(),
+                    );
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             },
         };
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        if let Cmd::DeadlineRaceProbe { at, .. } = &cmd {
+            // Model the exact boundary where the command and an armed core
+            // deadline become ready together. The ordinary clock setter
+            // queues its own Tick and would pre-order this test.
+            clock.pin_silently(*at);
+        }
+        let command_wall_now = clock.now();
+        let command_is_tick = matches!(&cmd, Cmd::Engine(EngineMsg::Tick(_)));
+        if !shutting_down
+            && !command_is_tick
+            && core_deadline.is_some_and(|deadline| deadline <= command_wall_now)
+        {
+            // A queued command can win recv_timeout at the instant its core
+            // deadline becomes ready. Consume the deadline once first.
+            let effects = core.handle(EngineMsg::Tick(command_wall_now));
+            dispatch_core_effects(
+                &mut core,
+                effects,
+                &pool,
+                &mut row_channels,
+                &mut history_channels,
+                &mut diag_channels,
+                &registry,
+                dispatch_runtime,
+            );
+        }
+        if !command_is_tick {
+            // Every non-Tick reducer transition sees current wall truth. This
+            // is O(1) and never executes maintenance.
+            core.advance_clock(command_wall_now);
+        }
         if shutting_down {
             match cmd {
                 Cmd::AuthTaskReleased(release) => {
@@ -4404,7 +4477,7 @@ fn engine_loop<S>(
                 Cmd::ReceiptDeliveryCount { id, reply } => {
                     let _ = reply.send(receipt_deliveries.borrow().count(id));
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "bench-instrumentation"))]
                 Cmd::ObservationOwnershipCensus { reply } => {
                     let core_census = core.observation_ownership_census();
                     let _ = reply.send(ObservationOwnershipCensus {
@@ -4425,7 +4498,12 @@ fn engine_loop<S>(
                     let id = next_diag_id;
                     next_diag_id = next_diag_id.saturating_add(1);
                     let (tx, rx) = latest_channel();
-                    tx.send(core.diagnostics_snapshot());
+                    seed_diagnostics_observer(
+                        diagnostics_snapshot_with_pool(&core, &pool),
+                        &tx,
+                        &diag_channels,
+                        &diagnostics_delivery,
+                    );
                     if reply.send((id, rx)).is_ok() {
                         diag_channels.insert(id, tx);
                     }
@@ -4441,6 +4519,8 @@ fn engine_loop<S>(
                 Cmd::ExemptSignEventDrain(op_id) => {
                     sign_event_cancellations.remove(&op_id);
                 }
+                #[cfg(any(test, feature = "bench-instrumentation"))]
+                Cmd::DeadlineRaceProbe { .. } => {}
                 Cmd::Engine(_)
                 | Cmd::RelayInformationFetched { .. }
                 | Cmd::RelayWorkerRetired
@@ -4494,22 +4574,6 @@ fn engine_loop<S>(
             Cmd::RelayBatch { frames, applied } => {
                 #[cfg(feature = "bench-instrumentation")]
                 let batch_started = std::time::Instant::now();
-                if frames.iter().any(|(handle, session, frame)| {
-                    relay_frame_needs_wall_clock(frame)
-                        && core.is_current_transport_session(*handle, session)
-                }) {
-                    let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                    dispatch_core_effects(
-                        &mut core,
-                        tick_effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                }
                 let mut ordinary = Vec::new();
                 let mut committed = Vec::new();
                 for (handle, session, frame) in frames {
@@ -4908,11 +4972,12 @@ fn engine_loop<S>(
                 // (issue #121) — the proactive open-time snapshot must carry
                 // the relay-cap rejection count too, not only the ones fanned
                 // out later.
-                let mut snapshot = core.diagnostics_snapshot();
-                snapshot.sessions_rejected_over_cap = snapshot
-                    .sessions_rejected_over_cap
-                    .saturating_add(pool.admission_rejections());
-                tx.send(snapshot);
+                seed_diagnostics_observer(
+                    diagnostics_snapshot_with_pool(&core, &pool),
+                    &tx,
+                    &diag_channels,
+                    &diagnostics_delivery,
+                );
                 if reply.send((id, rx)).is_err() {
                     // Caller already gave up -- nothing to register.
                     continue;
@@ -4921,6 +4986,9 @@ fn engine_loop<S>(
             }
             Cmd::UnobserveDiagnostics(id) => {
                 diag_channels.remove(&id);
+                diagnostics_delivery
+                    .borrow_mut()
+                    .clear_if_unobserved(!diag_channels.is_empty());
             }
             Cmd::ReattachReceipt {
                 id,
@@ -4970,7 +5038,7 @@ fn engine_loop<S>(
             Cmd::ReceiptDeliveryCount { id, reply } => {
                 let _ = reply.send(receipt_deliveries.borrow().count(id));
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-instrumentation"))]
             Cmd::ObservationOwnershipCensus { reply } => {
                 let core_census = core.observation_ownership_census();
                 let _ = reply.send(ObservationOwnershipCensus {
@@ -4986,6 +5054,13 @@ fn engine_loop<S>(
                     row_channels: row_channels.len(),
                     history_channels: history_channels.len(),
                 });
+            }
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            Cmd::DeadlineRaceProbe {
+                entered, release, ..
+            } => {
+                let _ = entered.send(());
+                let _ = release.recv();
             }
             Cmd::PublishQueueEntries { reply } => {
                 let _ = reply.send(core.publish_queue_entries().map_err(|error| {
@@ -5025,22 +5100,6 @@ fn engine_loop<S>(
                 registration,
                 reply,
             } => {
-                // Deliver any wall-clock transition before calculating a
-                // correlation retry's retained page. Otherwise the replay
-                // would already include that transition, then registering
-                // its fresh observer before dispatching the Tick effect would
-                // deliver the same fact to it a second time.
-                let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                dispatch_core_effects(
-                    &mut core,
-                    tick_effects,
-                    &pool,
-                    &mut row_channels,
-                    &mut history_channels,
-                    &mut diag_channels,
-                    &registry,
-                    dispatch_runtime,
-                );
                 let mut publish_effects = core.handle(EngineMsg::Publish(intent));
                 let result = publish_result(&publish_effects);
                 let replay = take_publish_replay(&mut publish_effects);
@@ -5086,26 +5145,14 @@ fn engine_loop<S>(
                 );
             }
             Cmd::Subscribe { query, reply } => {
-                let mut tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                let (id, seed, mut effects) = match core.open_observation(query) {
-                    ObservationOpen::Opened {
-                        id,
-                        seed,
-                        mut effects,
-                    } => {
-                        tick_effects.append(&mut effects);
-                        (id, seed, tick_effects)
-                    }
-                    ObservationOpen::Refused {
-                        reason,
-                        mut effects,
-                    } => {
-                        tick_effects.append(&mut effects);
+                let (id, seed, mut effects) = match core.open_observation(query, command_wall_now) {
+                    ObservationOpen::Opened { id, seed, effects } => (id, seed, effects),
+                    ObservationOpen::Refused { reason, effects } => {
                         let _ =
                             reply.send(Err(EngineThreadError::ObservationUnavailable { reason }));
                         dispatch_core_effects(
                             &mut core,
-                            tick_effects,
+                            effects,
                             &pool,
                             &mut row_channels,
                             &mut history_channels,
@@ -5149,36 +5196,25 @@ fn engine_loop<S>(
                 );
             }
             Cmd::SubscribeHistory { query, reply } => {
-                let mut tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                let (id, seed, mut effects) = match core.open_history_observation(query) {
-                    ObservationOpen::Opened {
-                        id,
-                        seed,
-                        mut effects,
-                    } => {
-                        tick_effects.append(&mut effects);
-                        (id, seed, tick_effects)
-                    }
-                    ObservationOpen::Refused {
-                        reason,
-                        mut effects,
-                    } => {
-                        tick_effects.append(&mut effects);
-                        let _ =
-                            reply.send(Err(EngineThreadError::ObservationUnavailable { reason }));
-                        dispatch_core_effects(
-                            &mut core,
-                            tick_effects,
-                            &pool,
-                            &mut row_channels,
-                            &mut history_channels,
-                            &mut diag_channels,
-                            &registry,
-                            dispatch_runtime,
-                        );
-                        continue;
-                    }
-                };
+                let (id, seed, mut effects) =
+                    match core.open_history_observation(query, command_wall_now) {
+                        ObservationOpen::Opened { id, seed, effects } => (id, seed, effects),
+                        ObservationOpen::Refused { reason, effects } => {
+                            let _ = reply
+                                .send(Err(EngineThreadError::ObservationUnavailable { reason }));
+                            dispatch_core_effects(
+                                &mut core,
+                                effects,
+                                &pool,
+                                &mut row_channels,
+                                &mut history_channels,
+                                &mut diag_channels,
+                                &registry,
+                                dispatch_runtime,
+                            );
+                            continue;
+                        }
+                    };
                 let (history_tx, history_rx) = latest_channel();
                 history_channels.insert(id, history_tx);
                 if reply
@@ -5300,21 +5336,6 @@ fn engine_loop<S>(
                 retry_required_relay_workers(&core, &pool);
             }
             Cmd::Engine(EngineMsg::RelayFrame(handle, session, frame)) => {
-                if relay_frame_needs_wall_clock(&frame)
-                    && core.is_current_transport_session(handle, &session)
-                {
-                    let tick_effects = core.handle(EngineMsg::Tick(clock.now()));
-                    dispatch_core_effects(
-                        &mut core,
-                        tick_effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                }
                 let effects = core.handle(EngineMsg::RelayFrame(handle, session, frame));
                 dispatch_core_effects(
                     &mut core,
@@ -5779,16 +5800,9 @@ fn dispatch_effect(
             crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
         }
         Effect::Wire(delta) => {
-            let reports = apply_wire_delta(core, &delta, pool);
-            for report in reports {
-                let evidence = core.on_wire_request_handoff(
-                    &report.session,
-                    &report.sub_id,
-                    report.filter_hash,
-                    report.handle,
-                    report.accepted,
-                    report.reason,
-                );
+            let outcomes = apply_wire_delta(core, &delta, pool);
+            for outcome in outcomes {
+                let evidence = core.on_wire_request_handoff(outcome);
                 dispatch_effects(
                     core,
                     evidence,
@@ -5802,16 +5816,9 @@ fn dispatch_effect(
             }
         }
         Effect::Replay(session, reqs) => {
-            let reports = apply_replay(core, &session, reqs, pool);
-            for report in reports {
-                let evidence = core.on_wire_request_handoff(
-                    &report.session,
-                    &report.sub_id,
-                    report.filter_hash,
-                    report.handle,
-                    report.accepted,
-                    report.reason,
-                );
+            let outcomes = apply_replay(core, &session, &reqs, pool);
+            for outcome in outcomes {
+                let evidence = core.on_wire_request_handoff(outcome);
                 dispatch_effects(
                     core,
                     evidence,
@@ -6059,9 +6066,19 @@ fn dispatch_effect(
             }
         }
         Effect::HistoryLoadResult(..) => {}
+        Effect::DiagnosticsChanged => {
+            runtime
+                .diagnostics_delivery
+                .borrow_mut()
+                .changed(Instant::now(), !diag_channels.is_empty());
+        }
         Effect::EmitDiagnostics(mut snapshot) => {
             #[cfg(feature = "bench-instrumentation")]
             let phase_started = std::time::Instant::now();
+            // This full snapshot is at least as current as any pending lazy
+            // marker. Satisfy that cohort so its deadline cannot duplicate
+            // this proactive delivery.
+            runtime.diagnostics_delivery.borrow_mut().satisfy();
             // Fold in the transport pool's own relay-cap rejection count
             // (issue #121, worker-exhaustion half). `EngineCore` builds the
             // snapshot with this field `0` because it has no view of the
@@ -6077,9 +6094,7 @@ fn dispatch_effect(
             // own slot, so a slow consumer only ever sees the newest
             // snapshot next (see `diagnostics_channel`'s doc), never a
             // growing backlog.
-            for tx in diag_channels.values() {
-                tx.send(snapshot.clone());
-            }
+            fan_out_diagnostics(snapshot, diag_channels);
             #[cfg(feature = "bench-instrumentation")]
             crate::ingest_attribution::diagnostics_effect(phase_started.elapsed());
         }
@@ -6088,6 +6103,7 @@ fn dispatch_effect(
                 &status,
                 WriteFact::Signing(SigningState::Signed { .. })
                     | WriteFact::Outcome(WriteOutcome::NotSent(_))
+                    | WriteFact::Outcome(WriteOutcome::Superseded)
             ) {
                 registry.cancel_pending_write(id);
             }
@@ -6107,17 +6123,10 @@ fn dispatch_effect(
             // `PublishTracked` consumes this typed pre-receipt failure for
             // its synchronous reply. There is no receipt stream to fan out.
         }
-        Effect::StartProbe(url, sub_id, filter, initial_hex) => {
+        Effect::StartProbe(attempt_id, url, sub_id, filter, initial_hex) => {
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
-            let report = nip77_send(core, pool, &url, text);
-            let followups = core.on_nip77_handoff(
-                Nip77Frame::Probe,
-                &url,
-                &sub_id,
-                report.handle,
-                report.accepted,
-                report.reason,
-            );
+            let outcome = nip77_send(core, pool, attempt_id, &url, text);
+            let followups = core.on_nip77_handoff(Nip77Frame::Probe, outcome);
             dispatch_effects(
                 core,
                 followups,
@@ -6129,18 +6138,11 @@ fn dispatch_effect(
                 runtime,
             );
         }
-        Effect::NegOpen(probed, sub_id, filter, initial_hex) => {
+        Effect::NegOpen(attempt_id, probed, sub_id, filter, initial_hex) => {
             let relay = probed.url().clone();
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
-            let report = nip77_send(core, pool, &relay, text);
-            let followups = core.on_nip77_handoff(
-                Nip77Frame::Open,
-                &relay,
-                &sub_id,
-                report.handle,
-                report.accepted,
-                report.reason,
-            );
+            let outcome = nip77_send(core, pool, attempt_id, &relay, text);
+            let followups = core.on_nip77_handoff(Nip77Frame::Open, outcome);
             dispatch_effects(
                 core,
                 followups,
@@ -6152,17 +6154,10 @@ fn dispatch_effect(
                 runtime,
             );
         }
-        Effect::NegMsg(relay, sub_id, message_hex) => {
+        Effect::NegMsg(attempt_id, relay, sub_id, message_hex) => {
             let text = neg_msg_frame_text(&sub_id, message_hex);
-            let report = nip77_send(core, pool, &relay, text);
-            let followups = core.on_nip77_handoff(
-                Nip77Frame::Continue,
-                &relay,
-                &sub_id,
-                report.handle,
-                report.accepted,
-                report.reason,
-            );
+            let outcome = nip77_send(core, pool, attempt_id, &relay, text);
+            let followups = core.on_nip77_handoff(Nip77Frame::Continue, outcome);
             dispatch_effects(
                 core,
                 followups,
@@ -6187,16 +6182,9 @@ fn dispatch_effect(
 /// What placing one NIP-77 frame on the Public session for `relay` actually
 /// achieved, for `EngineCore::on_nip77_handoff` (issue #775).
 ///
-/// Deliberately the same shape as [`RequestHandoffReport`]: a NIP-77 frame's
-/// transport outcome is the same kind of fact an ordinary REQ's is, and the
-/// reducer consumes both through a door of its own rather than the runtime
-/// deciding anything.
-struct Nip77SendReport {
-    handle: Option<nmp_transport::RelayHandle>,
-    accepted: bool,
-    reason: Option<String>,
-}
-
+/// A NIP-77 frame returns the same closed [`RequestHandoffOutcome`] fact as an
+/// ordinary REQ. The reducer consumes it through a door of its own rather than
+/// letting the runtime decide anything.
 /// Place `text` on `relay`'s Public session and report the exact outcome.
 ///
 /// The two local refusals are kept distinct because they are different facts
@@ -6206,21 +6194,23 @@ struct Nip77SendReport {
 fn nip77_send<S: EventStore>(
     core: &EngineCore<S>,
     pool: &Pool,
+    attempt_id: RequestAttemptId,
     relay: &RelayUrl,
     text: String,
-) -> Nip77SendReport {
+) -> RequestHandoffOutcome {
     let Ok(handle) = pool.ensure_open(relay, core.dial_declarer(relay)) else {
-        return Nip77SendReport {
-            handle: None,
-            accepted: false,
-            reason: Some("transport could not open session for NIP-77 frame".to_string()),
+        return RequestHandoffOutcome::Refused {
+            attempt_id,
+            cause: LocalSendRefusal::SessionUnavailable,
         };
     };
-    let accepted = pool.send(handle, WireFrame::Text(text));
-    Nip77SendReport {
-        handle: Some(handle),
-        accepted,
-        reason: (!accepted).then(|| "transport send refused NIP-77 frame".to_string()),
+    if pool.send(handle, WireFrame::Text(text)) {
+        RequestHandoffOutcome::Accepted { attempt_id, handle }
+    } else {
+        RequestHandoffOutcome::Refused {
+            attempt_id,
+            cause: LocalSendRefusal::WorkerAdmissionRefused { handle },
+        }
     }
 }
 
@@ -6273,21 +6263,12 @@ fn neg_close_frame_text(sub_id: &SubId) -> String {
 /// PROTECTED sessions. Public replay belongs to `EngineCore`; protected REQs
 /// additionally cannot replay before the fresh generation reaches AUTH
 /// Ready (#8).
-struct RequestHandoffReport {
-    session: RelaySessionKey,
-    sub_id: SubId,
-    filter_hash: DescriptorHash,
-    handle: Option<nmp_transport::RelayHandle>,
-    accepted: bool,
-    reason: Option<String>,
-}
-
 fn apply_wire_delta<S: EventStore>(
     core: &EngineCore<S>,
-    delta: &WireDelta,
+    delta: &core::AttemptedWireDelta,
     pool: &Pool,
-) -> Vec<RequestHandoffReport> {
-    let mut reports = Vec::new();
+) -> Vec<RequestHandoffOutcome> {
+    let mut outcomes = Vec::new();
     for (session, ops) in &delta.ops {
         let has_req = ops.iter().any(|op| matches!(op, WireOp::Req(..)));
         let handle = if has_req {
@@ -6302,16 +6283,20 @@ fn apply_wire_delta<S: EventStore>(
         for op in ops {
             match op {
                 WireOp::Req(sub_id, filter) => {
+                    let attempt_id = delta.attempt_id(session, sub_id, filter);
                     let text = req_frame_text(sub_id, filter);
-                    let accepted =
-                        handle.is_some_and(|handle| pool.send(handle, WireFrame::Text(text)));
-                    reports.push(RequestHandoffReport {
-                        session: session.clone(),
-                        sub_id: sub_id.clone(),
-                        filter_hash: filter.hash(),
-                        handle,
-                        accepted,
-                        reason: (!accepted).then(|| "transport send refused REQ".to_string()),
+                    outcomes.push(match handle {
+                        Some(handle) if pool.send(handle, WireFrame::Text(text)) => {
+                            RequestHandoffOutcome::Accepted { attempt_id, handle }
+                        }
+                        Some(handle) => RequestHandoffOutcome::Refused {
+                            attempt_id,
+                            cause: LocalSendRefusal::WorkerAdmissionRefused { handle },
+                        },
+                        None => RequestHandoffOutcome::Refused {
+                            attempt_id,
+                            cause: LocalSendRefusal::SessionUnavailable,
+                        },
                     });
                 }
                 WireOp::Close(sub_id) => {
@@ -6326,7 +6311,7 @@ fn apply_wire_delta<S: EventStore>(
             pool.set_reconnect_preamble(handle, Vec::new());
         }
     }
-    reports
+    outcomes
 }
 
 /// `Effect::Replay`: for a Public session, `reqs` is `EngineCore`'s current
@@ -6339,37 +6324,37 @@ fn apply_wire_delta<S: EventStore>(
 fn apply_replay<S: EventStore>(
     core: &EngineCore<S>,
     session: &RelaySessionKey,
-    reqs: Vec<WireReq>,
+    reqs: &core::AttemptedReplay,
     pool: &Pool,
-) -> Vec<RequestHandoffReport> {
+) -> Vec<RequestHandoffOutcome> {
     let Ok(handle) = pool.ensure_session(session, core.dial_declarer(&session.relay)) else {
         return reqs
-            .into_iter()
-            .map(|req| RequestHandoffReport {
-                session: session.clone(),
-                sub_id: req.sub_id,
-                filter_hash: req.filter.hash(),
-                handle: None,
-                accepted: false,
-                reason: Some("transport could not open session for replay".to_string()),
+            .attempts()
+            .iter()
+            .copied()
+            .map(|attempt_id| RequestHandoffOutcome::Refused {
+                attempt_id,
+                cause: LocalSendRefusal::SessionUnavailable,
             })
             .collect();
     };
-    let mut reports = Vec::new();
-    for req in &reqs {
+    let mut outcomes = Vec::new();
+    for (req, attempt_id) in reqs.iter().zip(reqs.attempts()) {
         let text = req_frame_text(&req.sub_id, &req.filter);
-        let accepted = pool.send(handle, WireFrame::Text(text));
-        reports.push(RequestHandoffReport {
-            session: session.clone(),
-            sub_id: req.sub_id.clone(),
-            filter_hash: req.filter.hash(),
-            handle: Some(handle),
-            accepted,
-            reason: (!accepted).then(|| "transport send refused replay REQ".to_string()),
+        outcomes.push(if pool.send(handle, WireFrame::Text(text)) {
+            RequestHandoffOutcome::Accepted {
+                attempt_id: *attempt_id,
+                handle,
+            }
+        } else {
+            RequestHandoffOutcome::Refused {
+                attempt_id: *attempt_id,
+                cause: LocalSendRefusal::WorkerAdmissionRefused { handle },
+            }
         });
     }
     pool.set_reconnect_preamble(handle, Vec::new());
-    reports
+    outcomes
 }
 
 /// The wire `["REQ", sub_id, filter]` text for `sub_id`/`filter`, using the
@@ -6435,6 +6420,27 @@ impl DiagnosticsHandle {
 pub struct Handle {
     inbox: Sender<Cmd>,
     relay_information: RelayInformationService,
+}
+
+/// Benchmark-only hold at the deterministic command/deadline race boundary.
+///
+/// While this value is alive the engine has processed every deadline due at
+/// the probed instant and is blocked before executing the synthetic command.
+/// Dropping it releases the engine. This is mechanism instrumentation, not an
+/// application API.
+#[cfg(feature = "bench-instrumentation")]
+#[doc(hidden)]
+pub struct DeadlineRaceHold {
+    release: Option<Sender<()>>,
+}
+
+#[cfg(feature = "bench-instrumentation")]
+impl Drop for DeadlineRaceHold {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
 }
 
 /// One accepted sign-only operation. It owns no write receipt or durable
@@ -7009,13 +7015,14 @@ impl Handle {
     /// the read-only projection combining per-relay wire-sub count, exact
     /// filters, lane counts, reverse coverage, events-received-per-kind, and
     /// per-filter coverage, engine-global (one stream, not per-query).
-    /// Delivers the CURRENT snapshot immediately, then a fresh one on every
-    /// recompile and every EOSE-driven coverage change — pushed reactively,
-    /// never polled (D8); latest-wins if the consumer is slow (see
-    /// `diagnostics_channel`'s doc — no unbounded backlog, no dropped
-    /// row-equivalent data since this is a recomputed projection, not a
-    /// delta stream). Blocks briefly (one engine-thread round trip, same
-    /// discipline as [`Self::subscribe`]/[`Self::add_signer`]).
+    /// Delivers the CURRENT snapshot immediately. Proactive full diagnostic
+    /// effects remain immediate; lazy change markers are coalesced into one
+    /// latest full snapshot within a first-change-anchored 16 ms bound —
+    /// pushed reactively, never polled (D8). Delivery stays latest-wins if the
+    /// consumer is slow (see `diagnostics_channel`'s doc — no unbounded
+    /// backlog, no dropped row-equivalent data since this is a recomputed
+    /// projection, not a delta stream). Blocks briefly (one engine-thread
+    /// round trip, same discipline as [`Self::subscribe`]/[`Self::add_signer`]).
     ///
     /// # Panics
     /// If the engine thread has already shut down.
@@ -7051,8 +7058,9 @@ impl Handle {
             .expect("nmp-engine: engine dropped receipt delivery census reply")
     }
 
-    #[cfg(test)]
-    pub(crate) fn observation_ownership_census(&self) -> ObservationOwnershipCensus {
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[doc(hidden)]
+    pub fn observation_ownership_census(&self) -> ObservationOwnershipCensus {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
             .send(Cmd::ObservationOwnershipCensus { reply: reply_tx })
@@ -7060,6 +7068,28 @@ impl Handle {
         reply_rx
             .recv()
             .expect("nmp-engine: engine dropped observation ownership census reply")
+    }
+
+    /// Make one synthetic command ready at exactly `at`, then hold it after
+    /// the runtime has executed any core deadline due at that same instant.
+    #[cfg(feature = "bench-instrumentation")]
+    #[doc(hidden)]
+    pub fn bench_hold_due_deadline_command(&self, at: Timestamp) -> DeadlineRaceHold {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::DeadlineRaceProbe {
+                at,
+                entered: entered_tx,
+                release: release_rx,
+            })
+            .expect("nmp-engine: deadline race probe called after shutdown");
+        entered_rx
+            .recv()
+            .expect("nmp-engine: deadline race probe was not entered");
+        DeadlineRaceHold {
+            release: Some(release_tx),
+        }
     }
 
     /// Stop the engine thread (and, transitively, its bridge threads — see

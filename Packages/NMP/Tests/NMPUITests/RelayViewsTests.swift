@@ -95,6 +95,8 @@ final class RelayViewsTests: XCTestCase {
             (nil, .statusUnavailable, "Status unavailable"),
             (.requesting, .requesting, "Requesting"),
             (.finishedStoredEvents, .finishedStoredEvents, "Finished stored events"),
+            (.awaitingRequest, .awaitingRequest, "Awaiting request placement"),
+            (.coverageSatisfied, .coverageSatisfied, "Satisfied from cache"),
             (.connecting, .connecting, "Connecting"),
             (.disconnected, .disconnected, "Disconnected"),
             (

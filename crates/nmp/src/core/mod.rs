@@ -39,6 +39,8 @@ mod auth_transport;
 mod diagnostics;
 mod evidence;
 #[cfg(test)]
+mod freshness_snapshot_tests;
+#[cfg(test)]
 mod handoff_starvation_tests;
 mod history;
 mod history_lifecycle;
@@ -47,12 +49,20 @@ mod history_lifecycle_tests;
 #[cfg(test)]
 mod lane_bootstrap_retry_tests;
 mod lane_projection;
+#[cfg(test)]
+mod nip77_metadata_tests;
 mod observation;
 #[cfg(test)]
 mod outbox_tests;
 mod query;
 #[cfg(test)]
 mod query_tests;
+mod request_attempt;
+#[cfg(test)]
+mod request_attempt_tests;
+mod request_effects;
+#[cfg(test)]
+mod request_replacement_transition_tests;
 #[cfg(test)]
 mod transport_tests;
 mod write;
@@ -70,28 +80,28 @@ use nostr::{
 };
 
 use nmp_grammar::{
-    fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DescriptorHash, Freshness,
-    Identity, LiveQuery, RelaySessionKey, RoutingEvidence, SourceAuthority, WriteIntent,
-    WritePayload, WriteRouting,
+    fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
+    DescriptorHash, Freshness, Identity, LiveQuery, RelaySessionKey, RoutingEvidence,
+    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine,
-    HandleId, LocalAcceptResult, QueryHandle, RelayIngestError,
+    HandleId, LocalAcceptResult, QueryHandle, RelayIngestError, SubscribeOutcome,
 };
 use nmp_router::{
     AdvertisedRelayLimits, AuthorRouteState, AuthorRoutes, CompileBudget, RelayPlan, Router,
-    RoutingFacts, RuleRegistry, SubId, WireDelta, WireOp, WireReq,
+    RoutingFacts, RuleRegistry, SubId, WireDelta, WireOp,
 };
 use nmp_signer::SignerError;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AuthDenial as StoredAuthDenial,
-    AuthDenialSource as StoredAuthDenialSource, CloseIntentOutcome, CompensateOutcome, CoverageKey,
-    DurabilityOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState, PersistenceError,
-    PromoteOutcome, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
-    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
-    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
-    PublishQueueTransientCause, ReceiptState, RelayObserved, RemoveQueueEntryOutcome,
-    VerifiedSignature,
+    AuthDenialSource as StoredAuthDenialSource, CloseIntentOutcome, CompensateOutcome,
+    CoverageInterval, CoverageKey, DurabilityOutcome, EventStore, HandoffEvidence, IntentId,
+    IntentSigState, PersistenceError, PromoteOutcome, PublishQueueAttemptHandoff,
+    PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
+    PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
+    PublishQueueTerminalOutcome, PublishQueueTransientCause, ReceiptState, RelayObserved,
+    RemoveQueueEntryOutcome, VerifiedSignature,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -397,9 +407,7 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
 }
 
 pub use admission::{RelayAdmissionPolicy, RelayRefusal};
-use attribution::{
-    AttributionSendId, AttributionState, CompletedAttribution, CoveragePoison, EventFailureTarget,
-};
+use attribution::{AttributionSendId, AttributionState, CompletedAttribution, EventFailureTarget};
 use diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
@@ -415,6 +423,11 @@ pub use observation::{
     ObservationEvidence, ObservationFact, RequestTerminal, ResolutionCause, ResolvedBindingValue,
 };
 pub use query::Nip77Frame;
+pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
+use request_attempt::{
+    PendingRequestRetry, RequestAttemptPurpose, RequestAttemptState, RequestRetryKey, RequestSend,
+};
+pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back
@@ -485,7 +498,7 @@ impl ReceiptReplayCursor {
     }
 }
 
-/// The two, and only two, ways `publish()` refuses.
+/// The reasons `publish()` refuses before taking custody.
 ///
 /// Everything else takes CUSTODY and fails in the queue where the app can
 /// see it — no relays, no signer online, a stale replaceable base and disk
@@ -504,7 +517,7 @@ impl ReceiptReplayCursor {
 /// nothing is pinned and nothing may park:
 /// [`Self::NoActiveAccount`], [`Self::SignatureInvalid`],
 /// [`Self::IdentityContradictsSignedAuthor`], [`Self::ReservedKind`],
-/// [`Self::EmptyExplicitRoute`].
+/// [`Self::EmptyExplicitRoute`], [`Self::AlreadyExpired`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishError {
     /// The runtime has begun its finite cancellation/drain phase and cannot
@@ -535,6 +548,10 @@ pub enum PublishError {
     /// relays. It never degrades into `Auto`: sending a write to relays the
     /// caller did not choose is the failure this refusal exists to prevent.
     EmptyExplicitRoute,
+    /// The event's own NIP-40 expiration was already at or before the
+    /// acceptance timestamp. NMP never takes custody of work that is
+    /// impossible to publish usefully.
+    AlreadyExpired,
 }
 
 impl std::fmt::Display for PublishError {
@@ -563,6 +580,7 @@ impl std::fmt::Display for PublishError {
                 f,
                 "an explicit route naming no relays is refused: it never degrades into Auto"
             ),
+            Self::AlreadyExpired => write!(f, "the event was already expired at acceptance"),
         }
     }
 }
@@ -889,8 +907,11 @@ pub enum AuthEffect {
 pub enum EngineMsg {
     Subscribe(LiveQuery),
     /// Execute relay-bound demand admitted during the current short cohort.
-    /// Runtime owns the monotonic deadline; the reducer owns this transition.
-    FlushWireAdmission,
+    /// Runtime owns the monotonic deadline and supplies wall-clock truth for
+    /// liveness state minted by this transition; the reducer owns both the
+    /// admission transition and those stamps. This advances clock truth but
+    /// never runs deadline maintenance.
+    FlushWireAdmission(Timestamp),
     Unsubscribe(ObservationId),
     SubscribeHistory(HistoryQuery),
     /// Declaratively raise this window's row target to at least `usize`,
@@ -1001,7 +1022,195 @@ pub(crate) struct RowsSeed {
     pub(crate) evidence: Vec<AcquisitionEvidence>,
 }
 
-#[cfg(test)]
+/// Deterministic ordinary-withdrawal work counters for scale harnesses.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoreWithdrawalWork {
+    pub handles_detached: u64,
+    pub resolver_delta_ops_consumed: u64,
+    pub resolver_owner_keys_touched: u64,
+    pub resolver_surviving_atoms_examined: u64,
+    pub pending_atoms_rebuilt: u64,
+    pub evidence_candidates_examined: u64,
+    pub routing_evidence_owner_keys_touched: u64,
+    pub diagnostic_snapshots_built: u64,
+    pub exact_atoms_closed: u64,
+    pub request_edges_touched: u64,
+    pub plan_request_entries_visited: u64,
+    pub requests_closed: u64,
+    pub physical_coverage_edges_released: u64,
+    pub diagnostic_refreshes: u64,
+    pub diagnostic_requests_visited: u64,
+    pub nip77_plan_children_touched: u64,
+}
+
+/// Deterministic pending-admission work counters for incumbent-isolation
+/// scale harnesses.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoreAdmissionWork {
+    pub pending_atoms_rebuilt: u64,
+    pub pending_cohort_atoms_reconciled: u64,
+    pub attribution_atoms_rebuilt: u64,
+    pub evidence_candidates_examined: u64,
+    pub request_target_demand_keys_touched: u64,
+    pub request_target_candidates_examined: u64,
+    pub request_claim_entries_examined: u64,
+    pub request_owner_entries_examined: u64,
+    pub request_claim_transfer_attempts: u64,
+    pub request_claim_transfer_claims_attempted: u64,
+    pub request_claim_transfer_commits: u64,
+    pub request_claim_transfer_failures: u64,
+    pub diagnostic_snapshots_built: u64,
+    pub cohort_compiles: u64,
+    pub incumbent_active_entries_visited: u64,
+    pub incumbent_plan_requests_visited: u64,
+    pub incumbent_limited_entries_visited: u64,
+    pub incumbent_refusal_entries_visited: u64,
+    pub active_entries_appended: u64,
+    pub request_edges_appended: u64,
+    pub metadata_entries_examined: u64,
+}
+
+/// Deterministic candidate-local work performed by opening-time freshness.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoreFreshnessWork {
+    pub candidate_atoms: u64,
+    pub incumbent_demand_edges_visited: u64,
+    pub plan_request_entries_visited: u64,
+    pub coalesce_pair_attempts: u64,
+}
+
+/// Exact local ownership retained by the reducer after a lifecycle step.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoreOwnershipCensus {
+    pub observations: usize,
+    pub branch_handles: usize,
+    pub retained_freshness_source_edges: usize,
+    pub request_target_handles: usize,
+    pub request_target_demand_keys: usize,
+    pub request_target_edges: usize,
+    pub request_target_refs: usize,
+    pub active_request_target_handles: usize,
+    pub active_request_target_demand_keys: usize,
+    pub active_request_target_edges: usize,
+    pub active_request_target_refs: usize,
+    pub history_sessions: usize,
+    pub history_handles: usize,
+    pub resolver_active_atoms: usize,
+    pub pending_wire_atoms: usize,
+    pub pending_resolver_wire_closes: usize,
+    pub wire_handles: usize,
+    pub wire_handle_demand_ref_handles: usize,
+    pub wire_handle_demand_ref_keys: usize,
+    pub wire_handle_demand_refs: usize,
+    pub wire_handle_coverage_ref_handles: usize,
+    pub wire_handle_coverage_ref_keys: usize,
+    pub wire_handle_coverage_refs: usize,
+    pub wire_owner_keys: usize,
+    pub wire_reverse_owner_keys: usize,
+    pub wire_coverage_keys: usize,
+    pub wire_coverage_edges: usize,
+    pub wire_demand_keys: usize,
+    pub wire_demand_edges: usize,
+    pub wire_routing_evidence_keys: usize,
+    pub wire_routing_evidence_facts: usize,
+    pub wire_routing_evidence_refs: usize,
+    pub active_physical_requests: usize,
+    pub pending_execution_owner_keys: usize,
+    pub pending_execution_owners: usize,
+    pub request_attempts: usize,
+    pub request_attempt_sub_keys: usize,
+    pub request_attempt_sub_edges: usize,
+    pub request_attempt_session_keys: usize,
+    pub request_attempt_session_edges: usize,
+    pub request_retry_jobs: usize,
+    pub request_retry_sub_keys: usize,
+    pub request_retry_session_keys: usize,
+    pub request_retry_session_edges: usize,
+    pub request_replacement_jobs: usize,
+    pub request_replacement_session_keys: usize,
+    pub request_replacement_session_edges: usize,
+    pub active_execution_owners: usize,
+    pub active_execution_owner_keys: usize,
+    pub live_wire_owners: usize,
+    pub pending_request_claim_transfer_jobs: usize,
+    pub pending_request_claim_transfer_claims: usize,
+    pub attribution_inflight_subs: usize,
+    pub attribution_wire_keys: usize,
+    pub attribution_shape_keys: usize,
+    pub attribution_active_demands: usize,
+    pub attribution_active_shape_keys: usize,
+    pub attribution_active_shape_refs: usize,
+    pub attribution_live_request_keys: usize,
+    pub attribution_live_shape_keys: usize,
+    pub attribution_live_shape_refs: usize,
+    pub attribution_inflight_shape_keys: usize,
+    pub attribution_inflight_shape_refs: usize,
+    pub projected_rejection_demand_keys: usize,
+    pub projected_rejection_owner_keys: usize,
+    pub projected_rejection_owner_refs: usize,
+    pub planned_read_sessions: usize,
+    pub planned_read_relays: usize,
+    pub plan_execution_metadata: usize,
+    pub plan_execution_claims: usize,
+    pub plan_execution_owner_demands: usize,
+    pub active_nip77_live: usize,
+    pub pending_neg_handoffs: usize,
+    pub pending_neg_plan_keys: usize,
+    pub pending_neg_plan_edges: usize,
+    pub neg_sessions: usize,
+    pub neg_session_plan_keys: usize,
+    pub neg_session_plan_edges: usize,
+    pub pending_backfills: usize,
+    pub pending_backfill_plan_keys: usize,
+    pub pending_backfill_plan_edges: usize,
+    pub router_active_demands: usize,
+    pub router_request_demand_keys: usize,
+    pub router_request_demand_edges: usize,
+    pub router_active_requests: usize,
+    pub router_request_coverage_keys: usize,
+    pub router_request_position_keys: usize,
+    pub router_request_exact_filter_keys: usize,
+    pub router_physical_request_claim_keys: usize,
+    pub router_physical_claim_keys: usize,
+    pub router_physical_claim_edges: usize,
+    pub router_physical_request_contribution_keys: usize,
+    pub router_physical_demand_keys: usize,
+    pub router_physical_demand_edges: usize,
+    pub router_request_owner_contribution_keys: usize,
+    pub router_request_claim_owner_count_keys: usize,
+    pub router_request_provenance_owner_count_keys: usize,
+    pub router_request_demand_coverage_owner_count_keys: usize,
+    pub router_coverage_assignment_keys: usize,
+    pub router_coverage_assignment_edges: usize,
+    pub router_refused_coverage_assignment_demands: usize,
+    pub router_refused_coverage_assignment_authors: usize,
+    pub router_active_outbox_authors: usize,
+    pub router_refusal_demand_keys: usize,
+    pub router_refusal_demand_edges: usize,
+    pub router_refused_request_owner_keys: usize,
+    pub router_refused_session_owner_keys: usize,
+    pub router_diagnostic_author_session_keys: usize,
+    pub router_diagnostic_author_edges: usize,
+    pub router_uncovered_demand_keys: usize,
+    pub router_uncovered_author_keys: usize,
+    pub router_uncovered_author_refs: usize,
+    pub router_plan_sessions: usize,
+    pub router_plan_limited_demands: usize,
+    pub router_plan_refused_sessions: usize,
+    pub router_plan_subscription_shortfalls: usize,
+    pub router_diagnostic_sessions: usize,
+    pub router_diagnostic_uncovered_authors: usize,
+    pub router_diagnostic_sessions_refused_by_cap: usize,
+    pub router_diagnostic_sessions_refused_by_subscription_budget: usize,
+    pub router_diagnostic_dropped_merge_rules: usize,
+}
+
+#[cfg(any(test, feature = "bench-instrumentation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoreObservationOwnershipCensus {
     pub(crate) handles: usize,
@@ -1010,6 +1219,7 @@ pub(crate) struct CoreObservationOwnershipCensus {
     pub(crate) resolver_nodes: usize,
     pub(crate) demand_atoms: usize,
     pub(crate) planned_sessions: usize,
+    pub(crate) pending_execution_owner_keys: usize,
     pub(crate) pending_execution_owners: usize,
     pub(crate) active_execution_owners: usize,
     pub(crate) live_wire_owners: usize,
@@ -1041,10 +1251,10 @@ pub enum Effect {
     /// subscription; optional protocol assembly owns any exact query it opens.
     AuthorRouteNeedsChanged(BTreeSet<PublicKey>),
     /// -> `Pool::send` per (relay, current handle).
-    Wire(WireDelta),
+    Wire(AttemptedWireDelta),
     /// Reconnect: resend the current wire subs on the NEW generation of
     /// exactly this session.
-    Replay(RelaySessionKey, Vec<WireReq>),
+    Replay(RelaySessionKey, AttemptedReplay),
     /// Acquire/revalidate NIP-11 without blocking the reducer thread.
     FetchRelayInformation(RelayUrl),
     /// Open the exact protected transport generation's ordinary outbound gate
@@ -1055,15 +1265,15 @@ pub enum Effect {
     /// Prober::begin_probe`'s output, carried in full since the runtime has
     /// no negentropy-protocol knowledge of its own): the sub-id, the
     /// throwaway probe filter, and the hex initial message.
-    StartProbe(RelayUrl, SubId, ConcreteFilter, String),
+    StartProbe(RequestAttemptId, RelayUrl, SubId, ConcreteFilter, String),
     /// Place a real `NEG-OPEN` after the live-first EOSE barrier for
     /// `filter` against a PROVEN-supported relay (ledger #8's compile-fence:
     /// the first field can only ever be a `ProbedRelay`), under its own
     /// NIP-77 `sub_id`, with the initial message built from the local store.
-    NegOpen(ProbedRelay, SubId, ConcreteFilter, String),
+    NegOpen(RequestAttemptId, ProbedRelay, SubId, ConcreteFilter, String),
     /// Continue an open reconciliation: place this hex payload as the next
     /// outbound `NEG-MSG` for `sub_id` on `relay`.
-    NegMsg(RelayUrl, SubId, String),
+    NegMsg(RequestAttemptId, RelayUrl, SubId, String),
     /// Release `sub_id` on `relay` (`NEG-CLOSE`) -- reconciliation finished,
     /// was abandoned (liveness deadline / `NEG-ERR`), or is being converted
     /// back to a plain REQ.
@@ -1094,6 +1304,11 @@ pub enum Effect {
     /// registered observer, latest-wins if a consumer is slow (never
     /// buffered/replayed).
     EmitDiagnostics(DiagnosticsSnapshot),
+    /// Diagnostics state changed, but no projection has been materialized.
+    /// Runtime coalesces this marker and builds the latest snapshot only at
+    /// an observer delivery boundary; a reducer with no diagnostics observer
+    /// therefore does no coverage or sibling-request work for this change.
+    DiagnosticsChanged,
     EmitReceipt(ReceiptId, WriteFact),
     /// `publish()` took CUSTODY: the write is durably recorded under this
     /// receipt id and whatever becomes of it will be too. Not a fact on the
@@ -1116,7 +1331,7 @@ pub enum Effect {
     /// replay.
     ReplayReceipt(ReceiptId, ReceiptReplayPage),
     /// `publish()` refused. Nothing durable exists and nothing ever will —
-    /// see [`PublishError`] for the only two reasons that is ever true.
+    /// see [`PublishError`] for the closed set of pre-custody failures.
     PublishFailed(PublishError),
     RequestSign(ReceiptId, u64, UnsignedEvent),
     /// Execute one reducer-owned NIP-42 operation. This envelope has its own
@@ -1192,6 +1407,30 @@ struct BranchState {
     execution: ObservationExecutionState,
 }
 
+/// One current filter-resolution owner below a branch handle.
+///
+/// Exact relay demand and acquisition-scope identity are indexed separately
+/// from the execution target. Distinct windows must never alias through their
+/// shared durable coverage key, and two structural Demand occurrences may
+/// resolve the same exact relay atom while only one owns wire participation.
+/// The multiplicity in the owning maps makes replacement and teardown exact
+/// without rescanning remembered resolver nodes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ActiveRequestTarget {
+    demand: nmp_router::DemandKey,
+    scope: usize,
+    path: String,
+    revision: u64,
+}
+
+/// Reverse-index value for one current observation execution target.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RequestTarget {
+    handle: HandleId,
+    path: String,
+    revision: u64,
+}
+
 /// The opaque identity of ONE live observation (#1108).
 ///
 /// An observation owns one or more complete [`nmp_grammar::Demand`] branches
@@ -1230,6 +1469,7 @@ struct ObservationState {
 /// observation handle. The vector follows the resolver's stable structural
 /// Demand order (root first), so reactive value changes update the atoms
 /// without overwriting which boundary owns which policy decision.
+#[derive(Clone)]
 struct HandleAcquisition {
     scopes: Vec<ScopeAcquisition>,
 }
@@ -1237,11 +1477,12 @@ struct HandleAcquisition {
 /// One Demand boundary's freshness decision. Lifecycle ownership is
 /// represented by variants, never a teardown bool: only `Live` contributes
 /// that boundary's current atoms to the router; a coverage-satisfied scope
-/// retains the exact plan that justified suppression.
+/// retains only the opening evidence that justified suppression.
+#[derive(Clone)]
 enum ScopeAcquisition {
     Live,
-    CoverageSatisfied(RelayPlan),
-    CacheOnly(RelayPlan),
+    CoverageSatisfied { evidence: AcquisitionEvidence },
+    CacheOnly,
 }
 
 impl ScopeAcquisition {
@@ -1249,17 +1490,11 @@ impl ScopeAcquisition {
         matches!(self, Self::Live)
     }
 
-    fn evidence_plan(&self) -> Option<&RelayPlan> {
+    fn opening_evidence(&self) -> Option<&AcquisitionEvidence> {
         match self {
-            Self::CoverageSatisfied(plan) | Self::CacheOnly(plan) => Some(plan),
-            Self::Live => None,
+            Self::CoverageSatisfied { evidence, .. } => Some(evidence),
+            Self::Live | Self::CacheOnly => None,
         }
-    }
-}
-
-impl HandleAcquisition {
-    fn root(&self) -> Option<&ScopeAcquisition> {
-        self.scopes.first()
     }
 }
 
@@ -1356,6 +1591,10 @@ struct LaneWorkerProjection {
     persisted: BTreeSet<RelayUrl>,
     nonterminal: BTreeSet<RelayUrl>,
     uncertain: BTreeSet<RelayUrl>,
+    /// Exact latest committed nonterminal row by relay. Scheduling is a
+    /// reducer decision over this current state; the durable store remains
+    /// the recovery authority, not a database that every heartbeat rereads.
+    current_nonterminal: BTreeMap<RelayUrl, PublishQueueLane>,
 }
 
 impl LaneWorkerProjection {
@@ -1375,13 +1614,16 @@ impl LaneWorkerProjection {
         self.uncertain.remove(&relay);
         if matches!(lane.state, PublishQueueLaneState::Terminal { .. }) {
             self.nonterminal.remove(&relay);
+            self.current_nonterminal.remove(&relay);
         } else {
-            self.nonterminal.insert(relay);
+            self.nonterminal.insert(relay.clone());
+            self.current_nonterminal.insert(relay, lane.clone());
         }
         newly_persisted
     }
 
     fn mark_uncertain(&mut self, relay: RelayUrl) -> bool {
+        self.current_nonterminal.remove(&relay);
         self.uncertain.insert(relay.clone());
         self.persisted.insert(relay)
     }
@@ -1550,7 +1792,6 @@ struct NegSession {
     plan_sub_id: SubId,
     relay: RelayUrl,
     filter: ConcreteFilter,
-    absorbed: BTreeSet<CoverageKey>,
     attribution_send: AttributionSendId,
     started_at: Timestamp,
     reconciler: Reconciler,
@@ -1566,8 +1807,20 @@ struct PendingNegHandoff {
     live_sub_id: SubId,
     prior_live_sub_id: Option<SubId>,
     filter: ConcreteFilter,
-    absorbed: BTreeSet<CoverageKey>,
     started_at: Timestamp,
+}
+
+/// Current logical ownership attached to one immutable router-plan request.
+///
+/// NIP-77 role requests retain only `plan_sub_id`; every candidate, NEG, and
+/// fallback generation snapshots this one record when it is sent. A later
+/// byte-identical router metadata update mutates this record once and extends
+/// the exact live child generations through the plan-to-role reverse indexes.
+#[derive(Clone)]
+struct PlanExecutionMetadata {
+    filter: ConcreteFilter,
+    coverage_claims: BTreeSet<CoverageKey>,
+    owner_demands: BTreeSet<nmp_router::DemandKey>,
 }
 
 enum TemporaryReq {
@@ -1590,6 +1843,16 @@ enum TemporaryReq {
         live_sub_id: SubId,
         prior_live_sub_id: Option<SubId>,
     },
+}
+
+impl TemporaryReq {
+    fn plan_sub_id(&self) -> &SubId {
+        match self {
+            Self::MissingIds { plan_sub_id, .. }
+            | Self::Backlog { plan_sub_id }
+            | Self::BacklogActivatesLive { plan_sub_id, .. } => plan_sub_id,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1626,6 +1889,20 @@ enum AuthSessionPhase {
     Error,
 }
 
+/// One post-settlement metadata addition that still owns an atomic durable
+/// coverage transfer after the first store attempt failed.
+#[derive(Debug)]
+struct PendingRequestClaimTransfer {
+    session: RelaySessionKey,
+    sub_id: SubId,
+    request_revision: u64,
+    filter_hash: nmp_grammar::DescriptorHash,
+    interval: CoverageInterval,
+    claims: BTreeMap<CoverageKey, ContextualAtom>,
+    due: Timestamp,
+    failures: u32,
+}
+
 /// The PURE synchronous reducer (§2 position 1). No I/O, no threads.
 pub struct EngineCore<S: EventStore> {
     resolver: ResolverEngine<S>,
@@ -1635,6 +1912,49 @@ pub struct EngineCore<S: EventStore> {
     /// Per-BRANCH bookkeeping for every live observation branch, keyed by
     /// the resolver handle that owns it.
     handles: HashMap<HandleId, BranchState>,
+    /// Complete current-snapshot request-evidence edges per ordinary handle.
+    /// A reconcile replaces only this handle's set, so paths absent from the
+    /// new resolver snapshot and stale revisions disappear immediately.
+    request_targets_by_handle: HashMap<HandleId, BTreeMap<ActiveRequestTarget, usize>>,
+    /// Wire-active request targets grouped by exact handle and DemandKey.
+    /// Partial resolver closes can remove one demand's edges without scanning
+    /// or dropping sibling execution targets owned by the same handle.
+    active_request_targets_by_handle_demand:
+        HashMap<HandleId, BTreeMap<nmp_router::DemandKey, BTreeMap<RequestTarget, usize>>>,
+    /// Exact logical demand -> wire-active execution targets reverse index.
+    /// REQ attribution retains since/until/limit and never aliases observers
+    /// merely because durable coverage erases those fields.
+    request_targets_by_demand: BTreeMap<nmp_router::DemandKey, BTreeMap<RequestTarget, usize>>,
+    /// Immutable per-handle live-wire atoms plus exact active owner counts.
+    /// Ordinary withdrawal consults only the departing handle and these
+    /// reverse counts; it never reconstructs sibling demand.
+    wire_atoms_by_handle: HashMap<HandleId, BTreeSet<ContextualAtom>>,
+    /// Exact per-handle multiplicity after DemandKey erases routing evidence.
+    wire_demand_refs_by_handle: HashMap<HandleId, BTreeMap<nmp_router::DemandKey, usize>>,
+    /// Exact per-handle multiplicity of normalized durable claim keys.
+    wire_coverage_refs_by_handle: HashMap<HandleId, BTreeMap<CoverageKey, usize>>,
+    wire_owner_counts: BTreeMap<nmp_router::DemandKey, (ContextualAtom, usize)>,
+    /// Exact per-demand ownership of routing facts erased by `DemandKey`.
+    /// The aggregate atom in `wire_owner_counts` always carries this map's
+    /// live union, while each fact remains independently removable.
+    wire_routing_evidence_owner_counts:
+        BTreeMap<nmp_router::DemandKey, BTreeMap<RoutingEvidence, usize>>,
+    /// Exact reverse edge used only when a resolver call reports a handle
+    /// drop that happened before core could run its ordinary detach path.
+    wire_handles_by_atom: BTreeMap<ContextualAtom, BTreeSet<HandleId>>,
+    /// Exact evidence-refresh candidates by immutable coverage identity.
+    wire_handles_by_coverage: BTreeMap<CoverageKey, BTreeSet<HandleId>>,
+    /// Exact request-phase refresh candidates by relay-lifecycle identity.
+    /// Unlike coverage, this retains since/until/limit and includes both
+    /// ordinary observations and history handles.
+    wire_handles_by_demand: BTreeMap<nmp_router::DemandKey, BTreeSet<HandleId>>,
+    /// Resolver-reported final closes wait until the current open transaction
+    /// has attached any replacement live owner. That lets close+open of the
+    /// same atom reattach to retained physical coverage without wire churn.
+    pending_resolver_wire_closes: BTreeMap<nmp_router::DemandKey, ContextualAtom>,
+    /// Active exact demand not yet covered on every required physical
+    /// session. Refused opens stay here until a real close frees capacity.
+    pending_wire_atoms: BTreeMap<nmp_router::DemandKey, ContextualAtom>,
     /// Per-OBSERVATION delivered projection, keyed by the id every mailbox
     /// and cancellation uses.
     observations: HashMap<ObservationId, ObservationState>,
@@ -1644,11 +1964,23 @@ pub struct EngineCore<S: EventStore> {
     next_history_id: u64,
     attribution: AttributionState,
     pending_request_evidence: HashMap<(RelaySessionKey, SubId), VecDeque<PendingRequestEvidence>>,
+    request_attempts: HashMap<RequestAttemptId, RequestAttemptState>,
+    request_attempts_by_sub: HashMap<SubId, BTreeSet<RequestAttemptId>>,
+    request_attempts_by_session: HashMap<RelaySessionKey, BTreeSet<RequestAttemptId>>,
+    next_request_attempt: Option<u64>,
+    pending_request_retries: BTreeMap<RequestRetryKey, PendingRequestRetry>,
+    request_retry_by_sub: HashMap<SubId, RequestRetryKey>,
+    request_retries_by_session: HashMap<RelaySessionKey, BTreeSet<RequestRetryKey>>,
+    pending_request_replacements: BTreeMap<SubId, nmp_router::RequestReplacement>,
+    request_replacements_by_session: HashMap<RelaySessionKey, BTreeSet<SubId>>,
     active_request_evidence: HashMap<u64, ActiveRequestEvidence>,
+    active_request_revisions_by_sub: HashMap<(RelaySessionKey, SubId), BTreeSet<u64>>,
     /// Exact REQs accepted by a live transport generation. Unlike request
     /// evidence, this survives EOSE because EOSE settles a request without
     /// closing its subscription.
     live_wire_requests: HashMap<(RelaySessionKey, SubId), LiveWireRequest>,
+    pending_request_claim_transfers:
+        BTreeMap<(RelaySessionKey, SubId), PendingRequestClaimTransfer>,
     /// EngineCore's memory of the exact connection generation and SESSION
     /// that currently occupy each pool slot. Disconnects are asynchronous;
     /// the generation prevents a delayed old disconnect from erasing a slot
@@ -1714,6 +2046,12 @@ pub struct EngineCore<S: EventStore> {
     /// publish from rebuilding an engine-global snapshot at every beat of a
     /// lifecycle in which nothing was ever stuck.
     last_stalled_write_census: Vec<(ReceiptId, StalledWriteStage)>,
+    /// Materialized only when the stalled-write census changes. Diagnostics
+    /// snapshots can be requested by unrelated read/query activity, so
+    /// rebuilding and sorting every durable write on each request would put
+    /// the entire publish queue on the read-plane hot path.
+    cached_stalled_writes: Vec<StalledWrite>,
+    cached_stalled_write_totals: StalledWriteTotals,
     event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
     /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
     /// finding E5): `receipt_for_intent` used to be a full linear scan of
@@ -1787,6 +2125,12 @@ pub struct EngineCore<S: EventStore> {
     /// prevent historical relay churn from becoming a shadow cache. This is
     /// kept separate from `prober`: advertisement is evidence, never proof.
     nip11_information: HashMap<RelayUrl, RelayInformationCapabilityEvidence>,
+    /// Exact shadow of router sessions used by incremental plan housekeeping.
+    planned_read_sessions: BTreeSet<RelaySessionKey>,
+    planned_read_session_counts_by_relay: BTreeMap<RelayUrl, usize>,
+    /// Router plan request -> current logical metadata used by every NIP-77
+    /// role generation derived from that immutable physical request.
+    plan_execution_metadata: HashMap<SubId, PlanExecutionMetadata>,
     /// Router plan id -> exact NIP-01 subscription currently owning the live
     /// tail. NIP-77 candidates use role-derived ids, so an old live selection
     /// can overlap a replacement until the replacement's EOSE.
@@ -1801,14 +2145,17 @@ pub struct EngineCore<S: EventStore> {
     next_nip77_incarnation: u64,
     /// Candidate live REQs waiting for their exact EOSE barrier.
     pending_neg_handoffs: HashMap<SubId, PendingNegHandoff>,
+    pending_neg_handoffs_by_plan: HashMap<SubId, BTreeSet<SubId>>,
     /// Live reconciliation sessions keyed by their role-derived NIP-77 id.
     /// NIP-01 REQ ids and NIP-77 ids are separate namespaces by protocol and
     /// distinct values here, so closing one can never close the other.
     neg_sessions: HashMap<SubId, NegSession>,
+    neg_sessions_by_plan: HashMap<SubId, BTreeSet<SubId>>,
     /// Every temporary NIP-01 request outside router demand: missing-id
     /// fetches and ordinary unlimited backlog fallbacks. The typed value
     /// determines the exact EOSE consequence; no boolean lifecycle flag.
     pending_backfills: HashMap<SubId, TemporaryReq>,
+    pending_backfills_by_plan: HashMap<SubId, BTreeSet<SubId>>,
     /// The diagnostic surface's own counter (M5 plan §1.2 step 1) — events
     /// actually RECEIVED, per SESSION per kind. Bumped in the
     /// `RelayMessage::Event` arms of `on_relay_frame`/`on_relay_frames`;
@@ -1871,7 +2218,9 @@ pub struct EngineCore<S: EventStore> {
     /// Rejected selector-projected routing facts present at the previous
     /// recompile. Diffing this set prevents an unchanged demand from
     /// inflating the monotonic rejection counter on every reducer pass.
-    rejected_projected_evidence: BTreeSet<(DescriptorHash, RoutingEvidence)>,
+    rejected_projected_evidence_by_demand:
+        BTreeMap<nmp_router::DemandKey, BTreeSet<(DescriptorHash, RoutingEvidence)>>,
+    rejected_projected_evidence_owner_counts: BTreeMap<(DescriptorHash, RoutingEvidence), usize>,
     /// Read-only degrade flag (issue #122): set once the first time an
     /// ingest/read [`EventStore`] door returns [`PersistenceError`] (disk
     /// full, I/O error). The reducer NEVER panics on such a failure — it
@@ -1914,6 +2263,52 @@ pub struct EngineCore<S: EventStore> {
     router_compiles: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     history_store_queries: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    withdrawal_handle_detaches: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    resolver_delta_ops_consumed: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    resolver_owner_keys_touched: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    resolver_surviving_atoms_examined: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pending_atoms_rebuilt: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pending_cohort_atoms_reconciled: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    attribution_atoms_rebuilt: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    evidence_candidates_examined: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    freshness_candidate_atoms: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    freshness_incumbent_demand_edges_visited: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    freshness_plan_request_entries_visited: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    freshness_coalesce_pair_attempts: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    request_target_demand_keys_touched: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    request_target_candidates_examined: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    request_claim_entries_examined: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    request_owner_entries_examined: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    request_claim_transfer_attempts: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    request_claim_transfer_claims_attempted: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    request_claim_transfer_commits: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    request_claim_transfer_failures: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    diagnostic_snapshots_built: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    nip77_plan_children_touched: Cell<u64>,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    routing_evidence_owner_keys_touched: Cell<u64>,
     #[cfg(test)]
     history_rows_examined: Cell<u64>,
     #[cfg(test)]
@@ -1974,6 +2369,19 @@ impl<S: EventStore> EngineCore<S> {
             routing_facts,
             cap,
             handles: HashMap::new(),
+            request_targets_by_handle: HashMap::new(),
+            active_request_targets_by_handle_demand: HashMap::new(),
+            request_targets_by_demand: BTreeMap::new(),
+            wire_atoms_by_handle: HashMap::new(),
+            wire_demand_refs_by_handle: HashMap::new(),
+            wire_coverage_refs_by_handle: HashMap::new(),
+            wire_owner_counts: BTreeMap::new(),
+            wire_routing_evidence_owner_counts: BTreeMap::new(),
+            wire_handles_by_atom: BTreeMap::new(),
+            wire_handles_by_coverage: BTreeMap::new(),
+            wire_handles_by_demand: BTreeMap::new(),
+            pending_resolver_wire_closes: BTreeMap::new(),
+            pending_wire_atoms: BTreeMap::new(),
             observations: HashMap::new(),
             next_observation_id: 0,
             histories: HashMap::new(),
@@ -1981,8 +2389,19 @@ impl<S: EventStore> EngineCore<S> {
             next_history_id: 1,
             attribution: AttributionState::new(),
             pending_request_evidence: HashMap::new(),
+            request_attempts: HashMap::new(),
+            request_attempts_by_sub: HashMap::new(),
+            request_attempts_by_session: HashMap::new(),
+            next_request_attempt: Some(0),
+            pending_request_retries: BTreeMap::new(),
+            request_retry_by_sub: HashMap::new(),
+            request_retries_by_session: HashMap::new(),
+            pending_request_replacements: BTreeMap::new(),
+            request_replacements_by_session: HashMap::new(),
             active_request_evidence: HashMap::new(),
+            active_request_revisions_by_sub: HashMap::new(),
             live_wire_requests: HashMap::new(),
+            pending_request_claim_transfers: BTreeMap::new(),
             slot_to_relay: HashMap::new(),
             connected_relays: BTreeSet::new(),
             ever_connected_relays: BTreeSet::new(),
@@ -1997,6 +2416,11 @@ impl<S: EventStore> EngineCore<S> {
             active_pubkey: None,
             pending: HashMap::new(),
             last_stalled_write_census: Vec::new(),
+            cached_stalled_writes: Vec::new(),
+            cached_stalled_write_totals: StalledWriteTotals {
+                detail_limit: u64::try_from(STALLED_WRITE_DETAIL_LIMIT).unwrap_or(u64::MAX),
+                ..StalledWriteTotals::default()
+            },
             event_to_receipts: HashMap::new(),
             intent_receipts: HashMap::new(),
             receipts_by_lane_relay: HashMap::new(),
@@ -2005,11 +2429,17 @@ impl<S: EventStore> EngineCore<S> {
             lane_bootstrap_retries: BTreeMap::new(),
             prober: Prober::new(),
             nip11_information: HashMap::new(),
+            planned_read_sessions: BTreeSet::new(),
+            planned_read_session_counts_by_relay: BTreeMap::new(),
+            plan_execution_metadata: HashMap::new(),
             active_nip77_live: HashMap::new(),
             next_nip77_incarnation: 0,
             pending_neg_handoffs: HashMap::new(),
+            pending_neg_handoffs_by_plan: HashMap::new(),
             neg_sessions: HashMap::new(),
+            neg_sessions_by_plan: HashMap::new(),
             pending_backfills: HashMap::new(),
+            pending_backfills_by_plan: HashMap::new(),
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
@@ -2017,7 +2447,8 @@ impl<S: EventStore> EngineCore<S> {
             attached_signers: BTreeSet::new(),
             heeded_relays,
             discovered_private_relays_rejected: 0,
-            rejected_projected_evidence: BTreeSet::new(),
+            rejected_projected_evidence_by_demand: BTreeMap::new(),
+            rejected_projected_evidence_owner_counts: BTreeMap::new(),
             store_degraded: None,
             relay_open_failures: BTreeMap::new(),
             transport_degraded: None,
@@ -2029,6 +2460,52 @@ impl<S: EventStore> EngineCore<S> {
             router_compiles: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             history_store_queries: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            withdrawal_handle_detaches: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            resolver_delta_ops_consumed: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            resolver_owner_keys_touched: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            resolver_surviving_atoms_examined: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            pending_atoms_rebuilt: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            pending_cohort_atoms_reconciled: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            attribution_atoms_rebuilt: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            evidence_candidates_examined: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            freshness_candidate_atoms: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            freshness_incumbent_demand_edges_visited: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            freshness_plan_request_entries_visited: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            freshness_coalesce_pair_attempts: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            request_target_demand_keys_touched: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            request_target_candidates_examined: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            request_claim_entries_examined: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            request_owner_entries_examined: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            request_claim_transfer_attempts: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            request_claim_transfer_claims_attempted: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            request_claim_transfer_commits: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            request_claim_transfer_failures: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            diagnostic_snapshots_built: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            nip77_plan_children_touched: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            routing_evidence_owner_keys_touched: Cell::new(0),
             #[cfg(test)]
             history_rows_examined: Cell::new(0),
             #[cfg(test)]
@@ -2246,7 +2723,262 @@ impl<S: EventStore> EngineCore<S> {
         self.wire_demand()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[doc(hidden)]
+    pub fn bench_ownership_census(&self) -> CoreOwnershipCensus {
+        let (
+            attribution_inflight_subs,
+            attribution_wire_keys,
+            attribution_shape_keys,
+            attribution_active_demands,
+            attribution_active_shape_keys,
+            attribution_active_shape_refs,
+            attribution_live_request_keys,
+            attribution_live_shape_keys,
+            attribution_live_shape_refs,
+            attribution_inflight_shape_keys,
+            attribution_inflight_shape_refs,
+        ) = self.attribution.ownership_census();
+        let router = self.router.ownership_census();
+        CoreOwnershipCensus {
+            observations: self.observations.len(),
+            branch_handles: self.handles.len(),
+            retained_freshness_source_edges: self
+                .handles
+                .values()
+                .flat_map(|state| &state.acquisition.scopes)
+                .filter_map(ScopeAcquisition::opening_evidence)
+                .map(|evidence| evidence.sources.len())
+                .sum::<usize>()
+                + self
+                    .histories
+                    .values()
+                    .flat_map(|state| &state.acquisitions_by_branch)
+                    .flat_map(|acquisition| &acquisition.scopes)
+                    .filter_map(ScopeAcquisition::opening_evidence)
+                    .map(|evidence| evidence.sources.len())
+                    .sum::<usize>(),
+            request_target_handles: self.request_targets_by_handle.len(),
+            request_target_demand_keys: self.request_targets_by_demand.len(),
+            request_target_edges: self
+                .request_targets_by_demand
+                .values()
+                .map(BTreeMap::len)
+                .sum(),
+            request_target_refs: self
+                .request_targets_by_demand
+                .values()
+                .flat_map(BTreeMap::values)
+                .sum(),
+            active_request_target_handles: self.active_request_targets_by_handle_demand.len(),
+            active_request_target_demand_keys: self
+                .active_request_targets_by_handle_demand
+                .values()
+                .map(BTreeMap::len)
+                .sum(),
+            active_request_target_edges: self
+                .active_request_targets_by_handle_demand
+                .values()
+                .flat_map(BTreeMap::values)
+                .map(BTreeMap::len)
+                .sum(),
+            active_request_target_refs: self
+                .active_request_targets_by_handle_demand
+                .values()
+                .flat_map(BTreeMap::values)
+                .flat_map(BTreeMap::values)
+                .sum(),
+            history_sessions: self.histories.len(),
+            history_handles: self.history_by_handle.len(),
+            resolver_active_atoms: self.resolver.active_demand().len(),
+            pending_wire_atoms: self.pending_wire_atoms.len(),
+            pending_resolver_wire_closes: self.pending_resolver_wire_closes.len(),
+            wire_handles: self.wire_atoms_by_handle.len(),
+            wire_handle_demand_ref_handles: self.wire_demand_refs_by_handle.len(),
+            wire_handle_demand_ref_keys: self
+                .wire_demand_refs_by_handle
+                .values()
+                .map(BTreeMap::len)
+                .sum(),
+            wire_handle_demand_refs: self
+                .wire_demand_refs_by_handle
+                .values()
+                .flat_map(BTreeMap::values)
+                .sum(),
+            wire_handle_coverage_ref_handles: self.wire_coverage_refs_by_handle.len(),
+            wire_handle_coverage_ref_keys: self
+                .wire_coverage_refs_by_handle
+                .values()
+                .map(BTreeMap::len)
+                .sum(),
+            wire_handle_coverage_refs: self
+                .wire_coverage_refs_by_handle
+                .values()
+                .flat_map(BTreeMap::values)
+                .sum(),
+            wire_owner_keys: self.wire_owner_counts.len(),
+            wire_reverse_owner_keys: self.wire_handles_by_atom.len(),
+            wire_coverage_keys: self.wire_handles_by_coverage.len(),
+            wire_coverage_edges: self
+                .wire_handles_by_coverage
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            wire_demand_keys: self.wire_handles_by_demand.len(),
+            wire_demand_edges: self
+                .wire_handles_by_demand
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            wire_routing_evidence_keys: self.wire_routing_evidence_owner_counts.len(),
+            wire_routing_evidence_facts: self
+                .wire_routing_evidence_owner_counts
+                .values()
+                .map(BTreeMap::len)
+                .sum(),
+            wire_routing_evidence_refs: self
+                .wire_routing_evidence_owner_counts
+                .values()
+                .flat_map(BTreeMap::values)
+                .sum(),
+            active_physical_requests: router.plan_requests,
+            pending_execution_owner_keys: self.pending_request_evidence.len(),
+            pending_execution_owners: self
+                .pending_request_evidence
+                .values()
+                .map(VecDeque::len)
+                .sum(),
+            request_attempts: self.request_attempts.len(),
+            request_attempt_sub_keys: self.request_attempts_by_sub.len(),
+            request_attempt_sub_edges: self
+                .request_attempts_by_sub
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            request_attempt_session_keys: self.request_attempts_by_session.len(),
+            request_attempt_session_edges: self
+                .request_attempts_by_session
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            request_retry_jobs: self.pending_request_retries.len(),
+            request_retry_sub_keys: self.request_retry_by_sub.len(),
+            request_retry_session_keys: self.request_retries_by_session.len(),
+            request_retry_session_edges: self
+                .request_retries_by_session
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            request_replacement_jobs: self.pending_request_replacements.len(),
+            request_replacement_session_keys: self.request_replacements_by_session.len(),
+            request_replacement_session_edges: self
+                .request_replacements_by_session
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            active_execution_owners: self.active_request_evidence.len(),
+            active_execution_owner_keys: self.active_request_revisions_by_sub.len(),
+            live_wire_owners: self.live_wire_requests.len(),
+            pending_request_claim_transfer_jobs: self.pending_request_claim_transfers.len(),
+            pending_request_claim_transfer_claims: self
+                .pending_request_claim_transfers
+                .values()
+                .map(|pending| pending.claims.len())
+                .sum(),
+            attribution_inflight_subs,
+            attribution_wire_keys,
+            attribution_shape_keys,
+            attribution_active_demands,
+            attribution_active_shape_keys,
+            attribution_active_shape_refs,
+            attribution_live_request_keys,
+            attribution_live_shape_keys,
+            attribution_live_shape_refs,
+            attribution_inflight_shape_keys,
+            attribution_inflight_shape_refs,
+            projected_rejection_demand_keys: self.rejected_projected_evidence_by_demand.len(),
+            projected_rejection_owner_keys: self.rejected_projected_evidence_owner_counts.len(),
+            projected_rejection_owner_refs: self
+                .rejected_projected_evidence_owner_counts
+                .values()
+                .sum(),
+            planned_read_sessions: self.planned_read_sessions.len(),
+            planned_read_relays: self.planned_read_session_counts_by_relay.len(),
+            plan_execution_metadata: self.plan_execution_metadata.len(),
+            plan_execution_claims: self
+                .plan_execution_metadata
+                .values()
+                .map(|metadata| metadata.coverage_claims.len())
+                .sum(),
+            plan_execution_owner_demands: self
+                .plan_execution_metadata
+                .values()
+                .map(|metadata| metadata.owner_demands.len())
+                .sum(),
+            active_nip77_live: self.active_nip77_live.len(),
+            pending_neg_handoffs: self.pending_neg_handoffs.len(),
+            pending_neg_plan_keys: self.pending_neg_handoffs_by_plan.len(),
+            pending_neg_plan_edges: self
+                .pending_neg_handoffs_by_plan
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            neg_sessions: self.neg_sessions.len(),
+            neg_session_plan_keys: self.neg_sessions_by_plan.len(),
+            neg_session_plan_edges: self.neg_sessions_by_plan.values().map(BTreeSet::len).sum(),
+            pending_backfills: self.pending_backfills.len(),
+            pending_backfill_plan_keys: self.pending_backfills_by_plan.len(),
+            pending_backfill_plan_edges: self
+                .pending_backfills_by_plan
+                .values()
+                .map(BTreeSet::len)
+                .sum(),
+            router_active_demands: router.active_demands,
+            router_request_demand_keys: router.requests_by_demand_keys,
+            router_request_demand_edges: router.requests_by_demand_edges,
+            router_active_requests: router.active_by_request,
+            router_request_coverage_keys: router.request_coverage_keys,
+            router_request_position_keys: router.request_position_keys,
+            router_request_exact_filter_keys: router.request_exact_filter_keys,
+            router_physical_request_claim_keys: router.physical_request_claim_keys,
+            router_physical_claim_keys: router.physical_claim_keys,
+            router_physical_claim_edges: router.physical_claim_edges,
+            router_physical_request_contribution_keys: router.physical_request_contribution_keys,
+            router_physical_demand_keys: router.physical_demand_keys,
+            router_physical_demand_edges: router.physical_demand_edges,
+            router_request_owner_contribution_keys: router.request_owner_contribution_keys,
+            router_request_claim_owner_count_keys: router.request_claim_owner_count_keys,
+            router_request_provenance_owner_count_keys: router.request_provenance_owner_count_keys,
+            router_request_demand_coverage_owner_count_keys: router
+                .request_demand_coverage_owner_count_keys,
+            router_coverage_assignment_keys: router.coverage_assignment_keys,
+            router_coverage_assignment_edges: router.coverage_assignment_edges,
+            router_refused_coverage_assignment_demands: router.refused_coverage_assignment_demands,
+            router_refused_coverage_assignment_authors: router.refused_coverage_assignment_authors,
+            router_active_outbox_authors: router.active_outbox_authors,
+            router_refusal_demand_keys: router.refusal_demand_keys,
+            router_refusal_demand_edges: router.refusal_demand_edges,
+            router_refused_request_owner_keys: router.refused_request_owner_keys,
+            router_refused_session_owner_keys: router.refused_session_owner_keys,
+            router_diagnostic_author_session_keys: router.diagnostic_author_session_keys,
+            router_diagnostic_author_edges: router.diagnostic_author_edges,
+            router_uncovered_demand_keys: router.uncovered_demand_keys,
+            router_uncovered_author_keys: router.uncovered_author_keys,
+            router_uncovered_author_refs: router.uncovered_author_refs,
+            router_plan_sessions: router.plan_sessions,
+            router_plan_limited_demands: router.plan_limited_demands,
+            router_plan_refused_sessions: router.plan_refused_sessions,
+            router_plan_subscription_shortfalls: router.plan_subscription_shortfalls,
+            router_diagnostic_sessions: router.diagnostic_sessions,
+            router_diagnostic_uncovered_authors: router.diagnostic_uncovered_authors,
+            router_diagnostic_sessions_refused_by_cap: router.diagnostic_sessions_refused_by_cap,
+            router_diagnostic_sessions_refused_by_subscription_budget: router
+                .diagnostic_sessions_refused_by_subscription_budget,
+            router_diagnostic_dropped_merge_rules: router.diagnostic_dropped_merge_rules,
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(crate) fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
         CoreObservationOwnershipCensus {
             handles: self.handles.len(),
@@ -2255,7 +2987,12 @@ impl<S: EventStore> EngineCore<S> {
             resolver_nodes: self.resolver.graph_snapshot().nodes.len(),
             demand_atoms: self.active_demand().len(),
             planned_sessions: self.router.plan().reqs.len(),
-            pending_execution_owners: self.pending_request_evidence.len(),
+            pending_execution_owner_keys: self.pending_request_evidence.len(),
+            pending_execution_owners: self
+                .pending_request_evidence
+                .values()
+                .map(VecDeque::len)
+                .sum(),
             active_execution_owners: self.active_request_evidence.len(),
             live_wire_owners: self.live_wire_requests.len(),
         }
@@ -2337,6 +3074,9 @@ impl<S: EventStore> EngineCore<S> {
     /// routing/delivery; every number here is real state this reducer
     /// already tracks for other reasons, never fabricated/estimated.
     pub fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        self.diagnostic_snapshots_built
+            .set(self.diagnostic_snapshots_built.get().saturating_add(1));
         let mut snapshot = diagnostics::build(
             self.router.diagnostics(),
             self.router.plan(),
@@ -2435,9 +3175,8 @@ impl<S: EventStore> EngineCore<S> {
             );
         }
         snapshot.auth_sessions = auth_sessions.into_values().collect();
-        let (stalled_writes, stalled_write_totals) = self.stalled_write_projection();
-        snapshot.stalled_writes = stalled_writes;
-        snapshot.stalled_write_totals = stalled_write_totals;
+        snapshot.stalled_writes = self.cached_stalled_writes.clone();
+        snapshot.stalled_write_totals = self.cached_stalled_write_totals;
         for relay in &mut snapshot.relays {
             // NIP-11 advertisement and the NIP-77 behavioral probe are both
             // PUBLIC-session evidence (#8): the one-shot HTTP document and
@@ -2512,27 +3251,32 @@ impl<S: EventStore> EngineCore<S> {
         snapshot
     }
 
-    /// A pure clock update PLUS two deadline sweeps: NIP-40 expiry
+    /// A pure clock update plus the owned deadline sweeps: failed
+    /// post-settlement request-claim transfers, NIP-40 expiry
     /// (retraction-and-negative-deltas.md §3.2 — drains `store.expire_due`
     /// and retracts every row past its deadline) and the negentropy
     /// liveness-deadline sweep (plan §6 E, harvest `nmp-nip77`'s "30s
     /// liveness-deadline REQ fallback"): any reconciliation session open
     /// longer than [`NEG_LIVENESS_DEADLINE_SECS`] against `now` is
     /// abandoned in favor of a plain REQ for the same (unfloored/unlimited)
-    /// filter. The same tick first consumes every due durable-lane retry/ACK
-    /// deadline through the one delivery scheduler.
+    /// filter. Claim-transfer retry records retain the exact request revision,
+    /// committed interval, and atom payload through capped backoff. The same
+    /// tick also consumes every due durable-lane retry/ACK deadline through
+    /// the one delivery scheduler.
     ///
     /// `runtime::engine_loop` (§3.3, #39) is what actually drives this on
     /// its own now: it arms `cmd_rx.recv_timeout` off [`Self::next_deadline`]
     /// and dispatches `EngineMsg::Tick(wall_now())` exactly when that
     /// timeout elapses (D8: the existing blocking recv grows a timeout,
-    /// never a poll-loop timer thread). Both sweeps stay real and unit-
+    /// never a poll-loop timer thread). Every sweep stays real and unit-
     /// tested here against a synthetic clock regardless of who calls this
     /// -- the runtime driver is a caller, not part of the mechanism.
     pub fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
         self.clock = now;
         let mut effects = Vec::new();
         self.retry_scheduler_blocked = false;
+        self.retry_due_request_claim_transfers(now, &mut effects);
+        self.retry_due_request_attempts(now, &mut effects);
         // Before the durable deadline sweep: a committed bootstrap mints the
         // very lanes the sweep and `schedule_ready` below then act on, so
         // retrying first lets one tick both close the projection gap and
@@ -2571,6 +3315,9 @@ impl<S: EventStore> EngineCore<S> {
             Ok(_) => {}
             Err(e) => self.degrade_store(e, &mut effects),
         }
+        if let Err(error) = self.resolver.store_mut().prune_superseded_receipts(now) {
+            self.degrade_store(error, &mut effects);
+        }
 
         // `>=` against the EXACT `Timestamp` threshold `next_deadline()`
         // arms for (`started_at + NEG_LIVENESS_DEADLINE_SECS`) -- not the
@@ -2594,7 +3341,7 @@ impl<S: EventStore> EngineCore<S> {
             .map(|(id, _)| id.clone())
             .collect();
         for live_sub_id in stale_handoffs {
-            if let Some(handoff) = self.pending_neg_handoffs.remove(&live_sub_id) {
+            if let Some(handoff) = self.take_pending_neg_handoff(&live_sub_id) {
                 self.handoff_fallback_to_req(handoff, &mut effects);
             }
         }
@@ -2606,7 +3353,7 @@ impl<S: EventStore> EngineCore<S> {
             .map(|(id, _)| id.clone())
             .collect();
         for sub_id in stale_neg {
-            if let Some(session) = self.neg_sessions.remove(&sub_id) {
+            if let Some(session) = self.take_neg_session(&sub_id) {
                 self.neg_session_fallback_to_req(sub_id, session, &mut effects);
             }
         }
@@ -2614,21 +3361,30 @@ impl<S: EventStore> EngineCore<S> {
         effects
     }
 
+    /// Advance reducer wall-clock truth without executing any deadline work.
+    /// Runtime does this once at command boundaries; due expiry, retry, and
+    /// liveness work remain exclusively owned by [`Self::tick`] and
+    /// [`Self::next_deadline`].
+    pub(crate) fn advance_clock(&mut self, now: Timestamp) {
+        self.clock = now;
+    }
+
     /// The earliest wall-clock instant at which [`Self::tick`] must run for
     /// something to actually happen (retraction-and-negative-deltas.md
     /// §3.2): the min over every deadline source this reducer currently
-    /// tracks -- NIP-40 expiry (`store.next_expiration()`, index-backed) and
+    /// tracks -- NIP-40 expiry (`store.next_expiration()`, index-backed),
     /// open negentropy sessions' liveness deadlines (`started_at +
-    /// NEG_LIVENESS_DEADLINE_SECS`). `None` means no timer needs to fire at
+    /// NEG_LIVENESS_DEADLINE_SECS`), and request-claim transfer backoff.
+    /// `None` means no timer needs to fire at
     /// all right now: `runtime::engine_loop`'s `recv_timeout` driver (§3.3)
     /// sleeps forever on the plain `recv()` in that case, exactly matching
     /// the doc's "a light embedder with no deadlines pays nothing".
-    /// Extensible to future timers (backoff, drop-grace debounce) by folding
+    /// Extensible to future timers (drop-grace debounce) by folding
     /// another `.min()` term in here -- the runtime driver itself never
     /// needs to change to pick up a new deadline source.
     ///
-    /// Two of the four terms are durable and therefore fallible, and this
-    /// door hands both failures straight to its caller rather than folding
+    /// The durable terms are fallible, and this door hands their failures
+    /// straight to its caller rather than folding
     /// them into `None` (#763). The distinction is the whole point: `Ok(None)`
     /// tells the driver to park on a plain `recv()` forever, which is correct
     /// only when there is genuinely nothing to wake up for. A read that could
@@ -2638,6 +3394,7 @@ impl<S: EventStore> EngineCore<S> {
     /// the store on `Err`, which is the #122 fact an app already reads.
     pub fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
         let expiry = self.resolver.store().next_expiration()?;
+        let superseded_receipt = self.resolver.store().next_superseded_receipt_deadline()?;
         let neg_liveness = self
             .neg_sessions
             .values()
@@ -2668,10 +3425,28 @@ impl<S: EventStore> EngineCore<S> {
             .values()
             .map(|retry| retry.due)
             .min();
-        Ok([expiry, neg_liveness, delivery, bootstrap]
-            .into_iter()
-            .flatten()
-            .min())
+        let request_claim_transfer = self
+            .pending_request_claim_transfers
+            .values()
+            .map(|pending| pending.due)
+            .min();
+        let request_retry = self
+            .pending_request_retries
+            .values()
+            .map(|pending| pending.due)
+            .min();
+        Ok([
+            expiry,
+            neg_liveness,
+            delivery,
+            bootstrap,
+            request_claim_transfer,
+            request_retry,
+            superseded_receipt,
+        ]
+        .into_iter()
+        .flatten()
+        .min())
     }
 
     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
@@ -2682,7 +3457,7 @@ impl<S: EventStore> EngineCore<S> {
         self.retry_scheduler_blocked = false;
         let mut effects = match msg {
             EngineMsg::Subscribe(query) => self.on_subscribe(query),
-            EngineMsg::FlushWireAdmission => self.flush_wire_admission(),
+            EngineMsg::FlushWireAdmission(now) => self.flush_wire_admission(now),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
             EngineMsg::SubscribeHistory(query) => self.on_subscribe_history(query),
             EngineMsg::RequestRows(id, at_least) => self.on_request_rows(id, at_least),
@@ -2761,15 +3536,8 @@ impl<S: EventStore> EngineCore<S> {
         // would make every ACK cost a full diagnostics rebuild for no new
         // fact. The census is cheap by construction (no formatted detail, no
         // descriptor) precisely so this guard is cheaper than what it skips.
-        if effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::EmitReceipt(..)))
-        {
-            let census = self.stalled_write_census();
-            if census != self.last_stalled_write_census {
-                self.last_stalled_write_census = census;
-                effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
-            }
+        if self.refresh_stalled_write_cache_for_effects(&effects) {
+            effects.push(Effect::DiagnosticsChanged);
         }
         if self.prune_unowned_relay_state() {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
@@ -2861,6 +3629,9 @@ impl EngineCore<nmp_store::RedbStore> {
         self.projection_store_queries.set(0);
         self.router_compiles.set(0);
         self.history_store_queries.set(0);
+        self.pending_atoms_rebuilt.set(0);
+        self.pending_cohort_atoms_reconciled.set(0);
+        self.attribution_atoms_rebuilt.set(0);
     }
 
     /// `(ordinary projection reads, router compiles, history projection
@@ -2872,6 +3643,124 @@ impl EngineCore<nmp_store::RedbStore> {
             self.router_compiles.get(),
             self.history_store_queries.get(),
         )
+    }
+
+    /// `(whole pending-owner rebuild visits, submitted cohort atoms
+    /// reconciled, whole attribution-demand rebuild visits)` since reset.
+    #[doc(hidden)]
+    pub fn bench_admission_local_work(&self) -> (u64, u64, u64) {
+        (
+            self.pending_atoms_rebuilt.get(),
+            self.pending_cohort_atoms_reconciled.get(),
+            self.attribution_atoms_rebuilt.get(),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn bench_reset_admission_work(&mut self) {
+        self.pending_atoms_rebuilt.set(0);
+        self.pending_cohort_atoms_reconciled.set(0);
+        self.attribution_atoms_rebuilt.set(0);
+        self.evidence_candidates_examined.set(0);
+        self.request_target_demand_keys_touched.set(0);
+        self.request_target_candidates_examined.set(0);
+        self.request_claim_entries_examined.set(0);
+        self.request_owner_entries_examined.set(0);
+        self.request_claim_transfer_attempts.set(0);
+        self.request_claim_transfer_claims_attempted.set(0);
+        self.request_claim_transfer_commits.set(0);
+        self.request_claim_transfer_failures.set(0);
+        self.diagnostic_snapshots_built.set(0);
+        self.router.reset_admission_work();
+    }
+
+    #[doc(hidden)]
+    pub fn bench_admission_work(&self) -> CoreAdmissionWork {
+        let router = self.router.admission_work();
+        CoreAdmissionWork {
+            pending_atoms_rebuilt: self.pending_atoms_rebuilt.get(),
+            pending_cohort_atoms_reconciled: self.pending_cohort_atoms_reconciled.get(),
+            attribution_atoms_rebuilt: self.attribution_atoms_rebuilt.get(),
+            evidence_candidates_examined: self.evidence_candidates_examined.get(),
+            request_target_demand_keys_touched: self.request_target_demand_keys_touched.get(),
+            request_target_candidates_examined: self.request_target_candidates_examined.get(),
+            request_claim_entries_examined: self.request_claim_entries_examined.get(),
+            request_owner_entries_examined: self.request_owner_entries_examined.get(),
+            request_claim_transfer_attempts: self.request_claim_transfer_attempts.get(),
+            request_claim_transfer_claims_attempted: self
+                .request_claim_transfer_claims_attempted
+                .get(),
+            request_claim_transfer_commits: self.request_claim_transfer_commits.get(),
+            request_claim_transfer_failures: self.request_claim_transfer_failures.get(),
+            diagnostic_snapshots_built: self.diagnostic_snapshots_built.get(),
+            cohort_compiles: router.cohort_compiles,
+            incumbent_active_entries_visited: router.incumbent_active_entries_visited,
+            incumbent_plan_requests_visited: router.incumbent_plan_requests_visited,
+            incumbent_limited_entries_visited: router.incumbent_limited_entries_visited,
+            incumbent_refusal_entries_visited: router.incumbent_refusal_entries_visited,
+            active_entries_appended: router.active_entries_appended,
+            request_edges_appended: router.request_edges_appended,
+            metadata_entries_examined: router.metadata_entries_examined,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn bench_reset_freshness_work(&self) {
+        self.freshness_candidate_atoms.set(0);
+        self.freshness_incumbent_demand_edges_visited.set(0);
+        self.freshness_plan_request_entries_visited.set(0);
+        self.freshness_coalesce_pair_attempts.set(0);
+    }
+
+    #[doc(hidden)]
+    pub fn bench_freshness_work(&self) -> CoreFreshnessWork {
+        CoreFreshnessWork {
+            candidate_atoms: self.freshness_candidate_atoms.get(),
+            incumbent_demand_edges_visited: self.freshness_incumbent_demand_edges_visited.get(),
+            plan_request_entries_visited: self.freshness_plan_request_entries_visited.get(),
+            coalesce_pair_attempts: self.freshness_coalesce_pair_attempts.get(),
+        }
+    }
+
+    /// Reset exact delta-withdrawal counters independently of projection and
+    /// storage work.
+    #[doc(hidden)]
+    pub fn bench_reset_withdrawal_work(&mut self) {
+        self.withdrawal_handle_detaches.set(0);
+        self.resolver_delta_ops_consumed.set(0);
+        self.resolver_owner_keys_touched.set(0);
+        self.resolver_surviving_atoms_examined.set(0);
+        self.pending_atoms_rebuilt.set(0);
+        self.pending_cohort_atoms_reconciled.set(0);
+        self.attribution_atoms_rebuilt.set(0);
+        self.evidence_candidates_examined.set(0);
+        self.diagnostic_snapshots_built.set(0);
+        self.nip77_plan_children_touched.set(0);
+        self.routing_evidence_owner_keys_touched.set(0);
+        self.router.reset_withdrawal_work();
+    }
+
+    #[doc(hidden)]
+    pub fn bench_withdrawal_work(&self) -> CoreWithdrawalWork {
+        let router = self.router.withdrawal_work();
+        CoreWithdrawalWork {
+            handles_detached: self.withdrawal_handle_detaches.get(),
+            resolver_delta_ops_consumed: self.resolver_delta_ops_consumed.get(),
+            resolver_owner_keys_touched: self.resolver_owner_keys_touched.get(),
+            resolver_surviving_atoms_examined: self.resolver_surviving_atoms_examined.get(),
+            pending_atoms_rebuilt: self.pending_atoms_rebuilt.get(),
+            evidence_candidates_examined: self.evidence_candidates_examined.get(),
+            routing_evidence_owner_keys_touched: self.routing_evidence_owner_keys_touched.get(),
+            diagnostic_snapshots_built: self.diagnostic_snapshots_built.get(),
+            exact_atoms_closed: router.dropped_atoms,
+            request_edges_touched: router.request_edges_touched,
+            plan_request_entries_visited: router.plan_request_entries_visited,
+            requests_closed: router.requests_closed,
+            physical_coverage_edges_released: router.physical_coverage_edges_released,
+            diagnostic_refreshes: router.diagnostic_rebuilds,
+            diagnostic_requests_visited: router.diagnostic_requests_visited,
+            nip77_plan_children_touched: self.nip77_plan_children_touched.get(),
+        }
     }
 
     /// Benchmark-only access to the store work counters used by the

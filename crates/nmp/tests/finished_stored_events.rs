@@ -43,6 +43,10 @@ use nostr::RelayUrl;
 /// short enough that a genuine failure reports rather than hangs. This bounds
 /// the TEST; nothing under test reads a clock.
 const SETTLE: Duration = Duration::from_secs(20);
+/// Longer than the full evidence wait after the relay-side REQ witness fires.
+/// The request is genuinely accepted locally and reaches the relay, but its
+/// EOSE cannot race the assertion that it remains outstanding.
+const WITHHELD_EOSE_DELAY: Duration = Duration::from_secs(40);
 
 const KIND: u16 = 9999;
 
@@ -134,17 +138,19 @@ fn reports(evidence: &[AcquisitionEvidence], relay: &RelayUrl, status: SourceSta
 }
 
 /// The headline. Two relays are asked the same question at the same moment;
-/// one finishes answering and one never does. Before #1235 both read
+/// one finishes answering while the other's accepted request remains
+/// outstanding. Before #1235 both read
 /// `Requesting` with `reconciled_through: None` -- byte-identical evidence for
 /// "done, and there was nothing" and "still going" -- and the only thing that
 /// could tell them apart was how long an app was willing to wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_relay_that_finished_its_request_is_distinguishable_from_one_still_answering() {
     let finished = ScriptedRelay::start(&RelayConfig::default()).await;
-    // "never confirms end of stored events", as staged everywhere else in
-    // this corpus: the relay answers CLOSED and no EOSE ever arrives.
+    // Hold the accepted query before the relay serves stored events and EOSE.
+    // Unlike the old rejection approximation, this creates a real outstanding
+    // request and therefore makes `Requesting` truthful.
     let unfinished = ScriptedRelay::start(&RelayConfig {
-        reject_queries: true,
+        query_delay: Some(WITHHELD_EOSE_DELAY),
         ..RelayConfig::default()
     })
     .await;
@@ -154,12 +160,22 @@ async fn a_relay_that_finished_its_request_is_distinguishable_from_one_still_ans
         .observe(query(&[&finished.url, &unfinished.url], None), None)
         .expect("a two-branch pinned read opens");
 
+    assert!(
+        unfinished.wait_query_for_kind(KIND, SETTLE).await,
+        "the unfinished relay must independently witness the exact inbound REQ"
+    );
+    assert_eq!(
+        unfinished.query_count_for_kind(KIND),
+        1,
+        "the delayed relay must receive exactly the planned kind:{KIND} request"
+    );
+
     // Wait for BOTH facts, not for the first one. The contrast is the whole
     // scenario, and the two relays connect independently: stopping as soon as
     // one has finished can catch the other still `Connecting`, which is a true
     // fact about a race rather than the one being asserted. Both states are
-    // stable once reached -- a `reject_queries` relay stays connected, so it
-    // stays `Requesting` -- so this terminates on facts, not on a clock.
+    // stable inside the relay's delay window, so this terminates on facts,
+    // not on a guessed settlement timeout.
     let evidence = evidence_until(&subscription, |evidence| {
         reports(evidence, &finished.url, SourceStatus::FinishedStoredEvents)
             && reports(evidence, &unfinished.url, SourceStatus::Requesting)
@@ -177,7 +193,7 @@ async fn a_relay_that_finished_its_request_is_distinguishable_from_one_still_ans
     assert_eq!(
         unfinished_source.status,
         SourceStatus::Requesting,
-        "a relay that never confirms end of stored events has an outstanding request and \
+        "a relay that has not yet confirmed end of stored events has an outstanding request and \
          must keep saying so -- waiting longer is not a settlement: {unfinished_source:?}"
     );
     assert_eq!(
@@ -192,6 +208,8 @@ async fn a_relay_that_finished_its_request_is_distinguishable_from_one_still_ans
         "both relays are honestly planned: {evidence:?}"
     );
 
+    drop(subscription);
+    drop(engine);
     finished.shutdown();
     unfinished.shutdown();
 }
@@ -243,7 +261,7 @@ async fn an_empty_result_is_never_proven_by_a_source_that_has_not_answered() {
     let never_connected = RelayUrl::parse(&format!("ws://127.0.0.1:{}", free_port()))
         .expect("a bound-to-nothing loopback url parses");
     let unfinished = ScriptedRelay::start(&RelayConfig {
-        reject_queries: true,
+        query_delay: Some(WITHHELD_EOSE_DELAY),
         ..RelayConfig::default()
     })
     .await;
@@ -253,9 +271,19 @@ async fn an_empty_result_is_never_proven_by_a_source_that_has_not_answered() {
         .observe(query(&[&never_connected, &unfinished.url], None), None)
         .expect("a two-branch pinned read opens");
 
-    // The refusing relay must have got far enough to be refused: a snapshot
-    // taken before it connected would satisfy the negative assertions below
-    // for the wrong reason.
+    assert!(
+        unfinished.wait_query_for_kind(KIND, SETTLE).await,
+        "the unfinished relay must independently witness the exact inbound REQ"
+    );
+    assert_eq!(
+        unfinished.query_count_for_kind(KIND),
+        1,
+        "the delayed relay must receive exactly the planned kind:{KIND} request"
+    );
+
+    // The delayed relay must have got far enough for local acceptance: a
+    // snapshot taken before it connected would satisfy the negative
+    // assertions below for the wrong reason.
     let evidence = evidence_until(&subscription, |evidence| {
         reports(evidence, &unfinished.url, SourceStatus::Requesting)
     });
@@ -265,7 +293,7 @@ async fn an_empty_result_is_never_proven_by_a_source_that_has_not_answered() {
             source.status,
             SourceStatus::FinishedStoredEvents,
             "nothing here has confirmed end of stored events, so nothing may report having \
-             finished -- a source that cannot connect and one that refuses are both still \
+             finished -- a source that cannot connect and one still answering are both open \
              open questions: {source:?}"
         );
         assert_eq!(
@@ -274,5 +302,7 @@ async fn an_empty_result_is_never_proven_by_a_source_that_has_not_answered() {
         );
     }
 
+    drop(subscription);
+    drop(engine);
     unfinished.shutdown();
 }

@@ -128,14 +128,14 @@ fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
     )
 }
 
-/// #565 product-path falsifier: `Freshness::MaxAge` is decided once when
-/// the runtime processes `Cmd::Subscribe`, so that command must first tick
-/// `EngineCore` to the current wall clock. The stored coverage below is
-/// fresh relative to the core's zero initial clock but stale relative to
-/// reality. A missing pre-subscribe tick would therefore suppress all wire
-/// work; the real TCP accept proves the stale handle became `Live` instead.
+/// #565/#1344 product-path falsifier: `Freshness::MaxAge` is decided once when
+/// the runtime processes `Cmd::Subscribe`, using that command's current wall
+/// time directly. The stored coverage below is fresh relative to the core's
+/// zero initial clock but stale relative to reality. Reusing reducer clock
+/// state would suppress all wire work; the real TCP accept proves the stale
+/// handle became `Live` instead, without turning open into a Tick.
 #[test]
-fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
+fn subscribe_uses_current_wall_clock_for_the_one_time_max_age_decision() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind capture relay");
     listener
         .set_nonblocking(true)
@@ -213,7 +213,7 @@ fn subscribe_ticks_wall_clock_before_the_one_time_max_age_decision() {
     };
     assert!(
         connected,
-        "stale MaxAge coverage must become Live after Cmd::Subscribe advances the core to wall time"
+        "stale MaxAge coverage must become Live from Cmd::Subscribe's current wall time"
     );
 
     handle.shutdown();
@@ -312,7 +312,12 @@ fn drain_relay_request_evidence(rx: &RowsReceiver) -> Vec<(u64, u64, bool, Concr
                     else {
                         return None;
                     };
-                    Some((transport_generation, request_revision, replay, filter))
+                    Some((
+                        transport_generation,
+                        request_revision,
+                        replay,
+                        filter.as_ref().clone(),
+                    ))
                 }));
             }
             Err(RecvTimeoutError::Timeout) => break,
@@ -604,6 +609,12 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     let (first, first_rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "alice"))
         .expect("open first query");
+    assert!(
+        relay
+            .wait_query_count_for_kind(1, 1, Duration::from_secs(5))
+            .await,
+        "the relay must independently witness the first kind:1 REQ before quiescence"
+    );
     relay
         .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
         .await;
@@ -634,6 +645,12 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     let (second, second_rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "bob"))
         .expect("open a later admission cohort");
+    assert!(
+        relay
+            .wait_query_count_for_kind(1, 2, Duration::from_secs(5))
+            .await,
+        "the relay must witness the later sibling REQ before quiescence"
+    );
     relay
         .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
         .await;
@@ -682,8 +699,10 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     relay.disconnect().await;
     let replacement = ScriptedRelay::start_on_port(relay_port, &relay_config).await;
     assert!(
-        replacement.wait_contacted(Duration::from_secs(10)).await,
-        "the transport must reconnect to the same relay address"
+        replacement
+            .wait_query_count_for_kind(1, 2, Duration::from_secs(10))
+            .await,
+        "the fresh relay generation must independently witness both replayed kind:1 REQs"
     );
     replacement
         .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
@@ -1373,7 +1392,10 @@ fn boot_catches_up_past_due_expiry() {
 /// (ledger #2/#3 preserved at the top edge; `add_signer`/`remove_signer` are
 /// M4's deliberate lifecycle widening, closing the multi-account and remote
 /// signer detach gaps; `observe_diagnostics` is M5's --
-/// read-only, off the data path, never influences routing/delivery). Asserted
+/// read-only, off the data path, never influences routing/delivery). The two
+/// `bench-instrumentation` methods expose only deterministic ownership and
+/// deadline controls to the governed stress harness; they are reviewed here
+/// explicitly rather than hidden from the source-level guard. Asserted
 /// by reading this crate's own source rather than by reflection (Rust has
 /// none) -- the same "grep-guard" idiom the plan itself names.
 #[test]
@@ -1402,7 +1424,9 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
     let mut expected = vec![
         "add_auth_policy",
         "add_signer",
+        "bench_hold_due_deadline_command",
         "cancel_write",
+        "observation_ownership_census",
         "observe_diagnostics",
         "publish",
         "publish_queue_entries",

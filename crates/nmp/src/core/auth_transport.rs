@@ -88,9 +88,9 @@ impl<S: EventStore> EngineCore<S> {
             .map(|req| WireOp::Close(req.sub_id.clone()))
             .collect();
         (!ops.is_empty()).then(|| {
-            Effect::Wire(WireDelta {
+            Effect::Wire(self.attempted_wire_delta(WireDelta {
                 ops: vec![(session.clone(), ops)],
-            })
+            }))
         })
     }
 
@@ -765,7 +765,9 @@ impl<S: EventStore> EngineCore<S> {
         // the CURRENT read plan admits that exact SESSION.
         let planned_read_reqs = self.router.plan().reqs.get(&session).cloned();
         // Feeds `AcquisitionEvidence.sources[_].status` (`evidence.rs`):
-        // this session is now `Requesting` (or, protected, `AwaitingAuth`),
+        // this session is now ready to report `AwaitingRequest` for Public
+        // work (or `AwaitingAuth` for protected work). It becomes
+        // `Requesting` only after the exact local handoff is accepted, and is
         // never again `Connecting` for the lifetime of this `EngineCore`
         // (`ever_connected_relays` is append-only -- a later drop reads
         // `Disconnected`, not `Connecting`, per the doc's "was connected,
@@ -784,7 +786,7 @@ impl<S: EventStore> EngineCore<S> {
         // callback may follow a REQ that the runtime already accepted on this
         // exact handle; that is not a reconnect and must not erase or resend
         // the accepted subscription.
-        if session.access == AccessContext::Public && !same_wire_generation {
+        if !same_wire_generation {
             self.abandon_session_subs(&session);
         }
         // A behaviorally-proven
@@ -806,43 +808,56 @@ impl<S: EventStore> EngineCore<S> {
                 if !same_wire_generation {
                     self.active_nip77_live
                         .retain(|plan_sub_id, _| plan_sub_id.0 != session.relay);
-                    self.pending_neg_handoffs
-                        .retain(|_, handoff| handoff.probed.url() != &session.relay);
+                    let stale_handoffs: Vec<_> = self
+                        .pending_neg_handoffs
+                        .iter()
+                        .filter_map(|(sub_id, handoff)| {
+                            (handoff.probed.url() == &session.relay).then_some(sub_id.clone())
+                        })
+                        .collect();
+                    for sub_id in stale_handoffs {
+                        self.take_pending_neg_handoff(&sub_id);
+                    }
                 }
 
                 let mut plain_reqs = Vec::new();
                 let mut handoffs = Vec::new();
                 for req in reqs {
+                    self.install_plan_execution_metadata(
+                        req.sub_id.clone(),
+                        req.filter.clone(),
+                        req.coverage_claims.clone(),
+                        req.owner_demands.clone(),
+                    );
                     if self.wire_request_is_live(&session, &req.sub_id, &req.filter, handle) {
                         continue;
                     }
                     if req.filter.limit.is_none() {
                         if let Some(probed) = self.prober.probed(&session.relay) {
-                            handoffs.push((
-                                probed,
-                                req.sub_id.clone(),
-                                req.filter.clone(),
-                                req.absorbed.clone(),
-                            ));
+                            handoffs.push((probed, req.sub_id.clone(), req.filter.clone()));
                             continue;
                         }
                     }
-                    self.record_observed_request(
-                        &session,
-                        &req.sub_id,
-                        &req.filter,
-                        req.absorbed.clone(),
-                        true,
-                        EventFailureTarget::ThisSend,
-                    );
+                    self.record_observed_request(RequestSend {
+                        session: &session,
+                        sub_id: &req.sub_id,
+                        filter: &req.filter,
+                        coverage_claims: req.coverage_claims.clone(),
+                        owner_demands: req.owner_demands.clone(),
+                        replay: true,
+                        event_failure_target: EventFailureTarget::ThisSend,
+                    });
                     plain_reqs.push(req.clone());
                 }
                 // Keep the replay boundary even when every planned request is
                 // already live on this exact handle. The runtime preserves
                 // its empty NMP reconnect preamble without resending anything.
-                effects.push(Effect::Replay(session.clone(), plain_reqs));
-                for (probed, sub_id, filter, absorbed) in handoffs {
-                    self.begin_neg_handoff(probed, sub_id, None, filter, absorbed, &mut effects);
+                effects.push(Effect::Replay(
+                    session.clone(),
+                    self.attempted_replay(&session, plain_reqs),
+                ));
+                for (probed, sub_id, filter) in handoffs {
+                    self.begin_neg_handoff(probed, sub_id, None, filter, &mut effects);
                 }
             }
         }
@@ -855,12 +870,22 @@ impl<S: EventStore> EngineCore<S> {
         if planned_read_reqs.is_some() {
             effects.push(Effect::FetchRelayInformation(session.relay.clone()));
         }
+        let mut request_dispatch = Vec::new();
+        let staged = std::mem::take(&mut effects);
+        for effect in staged {
+            if matches!(effect, Effect::Wire(_) | Effect::Replay(_, _)) {
+                request_dispatch.push(effect);
+            } else {
+                effects.push(effect);
+            }
+        }
         // A relay coming online can flip a handle's `AcquisitionEvidence`
-        // (`Connecting` -> `Requesting`) with no coverage/row change at all
-        // -- refresh so that becomes observable via `EmitRows`, same as an
-        // EOSE-driven watermark advance below.
+        // (`Connecting` -> `AwaitingRequest`) with no coverage/row change at
+        // all. Refresh before dispatch so the accepted callback can only move
+        // that fact forward to `Requesting`, never regress it afterward.
         self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
+        effects.extend(request_dispatch);
         effects.extend(self.wake_relay_lanes(&session, false));
         if open_failure_cleared {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
@@ -954,7 +979,21 @@ impl<S: EventStore> EngineCore<S> {
             && advertises_nip77 != Some(false)
         {
             if let Some(probe) = self.prober.begin_probe(&url) {
+                let attempt_id = self.mint_request_attempt(RequestAttemptState {
+                    session: public_session,
+                    sub_id: probe.sub_id.clone(),
+                    filter_hash: probe.filter.hash(),
+                    filter: probe.filter.clone(),
+                    coverage_claims: BTreeSet::new(),
+                    owner_demands: BTreeSet::new(),
+                    replay: false,
+                    event_failure_target: EventFailureTarget::ThisSend,
+                    request_revision: None,
+                    retry_failures: 0,
+                    purpose: RequestAttemptPurpose::Nip77Probe,
+                });
                 effects.push(Effect::StartProbe(
+                    attempt_id,
                     url,
                     probe.sub_id,
                     probe.filter,
@@ -1020,6 +1059,7 @@ impl<S: EventStore> EngineCore<S> {
             // lanes park, and readiness is revoked.
             self.invalidate_auth_epoch(&session, false, &mut effects);
             self.abandon_session_subs(&session);
+            self.abandon_request_replacements_for_session(&session);
             self.suspend_disconnected_lanes(&session, &mut effects);
             // Negentropy (probe, live reconciliations, one-shot backfills)
             // is PUBLIC-session-only work (#8), so its teardown fires only
@@ -1027,16 +1067,32 @@ impl<S: EventStore> EngineCore<S> {
             // session's disconnect must not kill a reconciliation still
             // healthy on the URL's live Public socket.
             if session.access == AccessContext::Public {
+                self.active_nip77_live
+                    .retain(|plan_sub_id, _| plan_sub_id.0 != session.relay);
                 // Any reconciliation open against this relay dies with the
                 // connection -- there is nothing left to `NEG-CLOSE` (the
                 // socket is already gone), so this is a silent drop, not a
                 // fallback REQ: the relay's own `Supported` verdict stays
                 // cached, and the NEXT `recompile()`/reconnect naturally
                 // re-opens whatever demand still wants this shape.
-                self.neg_sessions
-                    .retain(|_, neg| neg.relay != session.relay);
-                self.pending_neg_handoffs
-                    .retain(|sub_id, _| sub_id.0 != session.relay);
+                let stale_neg: Vec<_> = self
+                    .neg_sessions
+                    .iter()
+                    .filter(|(_, neg)| neg.relay == session.relay)
+                    .map(|(sub_id, _)| sub_id.clone())
+                    .collect();
+                for sub_id in stale_neg {
+                    self.take_neg_session(&sub_id);
+                }
+                let stale_handoffs: Vec<_> = self
+                    .pending_neg_handoffs
+                    .keys()
+                    .filter(|sub_id| sub_id.0 == session.relay)
+                    .cloned()
+                    .collect();
+                for sub_id in stale_handoffs {
+                    self.take_pending_neg_handoff(&sub_id);
+                }
 
                 // One-shot repair REQs are reducer-owned even though the
                 // router never planned them. Remove their state when the
@@ -1049,16 +1105,16 @@ impl<S: EventStore> EngineCore<S> {
                     .cloned()
                     .collect();
                 for sub_id in &stale_temporary {
-                    self.pending_backfills.remove(sub_id);
+                    self.take_pending_backfill(sub_id);
                     self.abandon_sub(sub_id);
                 }
                 if !stale_temporary.is_empty() {
-                    effects.push(Effect::Wire(WireDelta {
+                    effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                         ops: vec![(
                             session.clone(),
                             stale_temporary.into_iter().map(WireOp::Close).collect(),
                         )],
-                    }));
+                    })));
                 }
             }
             // Feeds `AcquisitionEvidence.sources[_].status`: this session is
@@ -1127,9 +1183,11 @@ impl<S: EventStore> EngineCore<S> {
     /// success records the session's planned REQs' attribution snapshots and
     /// replays them (the exact send `on_relay_connected` deliberately
     /// withheld for a protected session), wakes persisted `WaitingAuth`
-    /// lanes, and refreshes evidence (`AwaitingAuth` -> `Requesting`); a
-    /// duplicate OK for the same epoch does nothing (a second snapshot would
-    /// poison the attribution FIFO with a send that never happened).
+    /// lanes, and refreshes evidence (`AwaitingAuth` -> `AwaitingRequest`)
+    /// before dispatch. Exact local acceptance later advances it to
+    /// `Requesting`; a duplicate OK for the same epoch does nothing (a second
+    /// snapshot would poison the attribution FIFO with a send that never
+    /// happened).
     pub(super) fn finish_auth_ok(
         &mut self,
         session: &RelaySessionKey,
@@ -1158,23 +1216,38 @@ impl<S: EventStore> EngineCore<S> {
         effects.push(Effect::ReleaseInitialRead(state.epoch.handle));
         if let Some(reqs) = self.router.plan().reqs.get(session).cloned() {
             for req in &reqs {
-                self.record_observed_request(
-                    session,
-                    &req.sub_id,
-                    &req.filter,
-                    req.absorbed.clone(),
-                    true,
-                    EventFailureTarget::ThisSend,
+                self.install_plan_execution_metadata(
+                    req.sub_id.clone(),
+                    req.filter.clone(),
+                    req.coverage_claims.clone(),
+                    req.owner_demands.clone(),
                 );
+                self.record_observed_request(RequestSend {
+                    session,
+                    sub_id: &req.sub_id,
+                    filter: &req.filter,
+                    coverage_claims: req.coverage_claims.clone(),
+                    owner_demands: req.owner_demands.clone(),
+                    replay: true,
+                    event_failure_target: EventFailureTarget::ThisSend,
+                });
             }
             if !reqs.is_empty() {
-                effects.push(Effect::Replay(session.clone(), reqs));
+                effects.push(Effect::Replay(
+                    session.clone(),
+                    self.attempted_replay(session, reqs),
+                ));
             }
         }
         self.auth_sessions.insert(session.clone(), state);
         effects.extend(self.wake_relay_lanes(session, true));
+        let replay = effects
+            .iter()
+            .position(|effect| matches!(effect, Effect::Replay(_, _)))
+            .map(|index| effects.remove(index));
         self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
+        effects.extend(replay);
         effects
     }
 
@@ -1629,39 +1702,36 @@ impl<S: EventStore> EngineCore<S> {
                 let opens_neg = resolved
                     .as_ref()
                     .is_some_and(|sub_id| self.pending_neg_handoffs.contains_key(sub_id));
-                let settled = completed.is_some_and(|completed| {
+                let committed_coverage = completed.and_then(|completed| {
                     self.persist_attributed_completion(completed, &session.relay, &mut effects)
                 });
-                if let Some(send) = completed_send.filter(|_| !opens_neg && settled) {
-                    self.emit_request_settled(
-                        send,
-                        self.clock,
-                        RequestTerminal::Eose,
-                        &mut effects,
-                    );
+                let settled = committed_coverage.is_some();
+                let terminal_demands = if let Some(send) =
+                    completed_send.filter(|_| !opens_neg && settled)
+                {
+                    self.emit_request_settled(send, self.clock, RequestTerminal::Eose, &mut effects)
                 } else if let Some(send) = completed_send.filter(|_| !opens_neg) {
-                    self.retire_request_evidence(send);
+                    self.retire_request_evidence(send)
+                } else {
+                    BTreeSet::new()
+                };
+                let committed_coverage = committed_coverage.unwrap_or_default();
+                self.refresh_evidence_for_coverage_and_demand_keys(
+                    &committed_coverage,
+                    &terminal_demands,
+                    &mut effects,
+                );
+                if !committed_coverage.is_empty() {
+                    effects.push(Effect::DiagnosticsChanged);
                 }
-                // A watermark advancing can flip a handle's
-                // AcquisitionEvidence (a source's `reconciled_through`) even
-                // with no new rows at all. Coverage cannot mutate canonical
-                // rows, so retain every complete projection and refresh only
-                // its evidence; an incomplete projection falls back to the
-                // full row oracle inside these helpers.
-                self.refresh_all_observation_evidence(&mut effects);
-                self.refresh_all_history_evidence(&mut effects);
-                // Same watermark advance can also flip the diagnostic
-                // surface's own per-(filter, relay) coverage even though
-                // this arm never calls `recompile()` (M5 plan §1.2 step 3:
-                // "after the Event/EOSE ingest arms ... coverage change
-                // points").
-                effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
 
                 if let Some(resolved) = resolved {
+                    let mut nip77_changed = false;
                     // This exact limited REQ is now proven active. Keep it
                     // open, overlap-close its predecessor, and only then
                     // begin Negentropy (#563).
-                    if let Some(handoff) = self.pending_neg_handoffs.remove(&resolved) {
+                    if let Some(handoff) = self.take_pending_neg_handoff(&resolved) {
+                        nip77_changed = true;
                         self.abandon_sub(&resolved);
                         self.activate_live_and_open_neg(handoff, &mut effects);
                     }
@@ -1669,10 +1739,11 @@ impl<S: EventStore> EngineCore<S> {
                     // Every repair REQ is one-shot and outside router-owned
                     // demand. Its EOSE closes it and either unlocks deferred
                     // NEG coverage or completes a handoff-timeout fallback.
-                    if let Some(request) = self.pending_backfills.remove(&resolved) {
-                        effects.push(Effect::Wire(WireDelta {
+                    if let Some(request) = self.take_pending_backfill(&resolved) {
+                        nip77_changed = true;
+                        effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                             ops: vec![(session.clone(), vec![WireOp::Close(resolved.clone())])],
-                        }));
+                        })));
                         self.abandon_sub(&resolved);
                         match request {
                             TemporaryReq::MissingIds {
@@ -1681,21 +1752,31 @@ impl<S: EventStore> EngineCore<S> {
                                 completed_at,
                                 ..
                             } => {
-                                if self.credit_neg_coverage(
+                                let committed_coverage = self.credit_neg_coverage(
                                     &neg_sub_id,
                                     attribution_send,
                                     completed_at,
                                     &session.relay,
                                     &mut effects,
-                                ) {
+                                );
+                                let terminal_demands = if committed_coverage.is_some() {
                                     self.emit_request_settled(
                                         attribution_send,
                                         completed_at,
                                         RequestTerminal::Nip77,
                                         &mut effects,
-                                    );
+                                    )
                                 } else {
-                                    self.retire_request_evidence(attribution_send);
+                                    self.retire_request_evidence(attribution_send)
+                                };
+                                let committed_coverage = committed_coverage.unwrap_or_default();
+                                self.refresh_evidence_for_coverage_and_demand_keys(
+                                    &committed_coverage,
+                                    &terminal_demands,
+                                    &mut effects,
+                                );
+                                if !committed_coverage.is_empty() {
+                                    effects.push(Effect::DiagnosticsChanged);
                                 }
                                 self.abandon_sub(&neg_sub_id);
                             }
@@ -1711,21 +1792,22 @@ impl<S: EventStore> EngineCore<S> {
                                 if let Some(prior) = prior_live_sub_id {
                                     if prior != live_sub_id {
                                         self.abandon_sub(&prior);
-                                        effects.push(Effect::Wire(WireDelta {
-                                            ops: vec![(
-                                                session.clone(),
-                                                vec![WireOp::Close(prior)],
-                                            )],
-                                        }));
+                                        effects.push(Effect::Wire(self.attempted_wire_delta(
+                                            WireDelta {
+                                                ops: vec![(
+                                                    session.clone(),
+                                                    vec![WireOp::Close(prior)],
+                                                )],
+                                            },
+                                        )));
                                     }
                                 }
                             }
                         }
                     }
-                    // State transitions above are diagnostics state in
-                    // their own right; publish them without waiting for a
-                    // later router recompile.
-                    effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+                    if nip77_changed {
+                        effects.push(Effect::DiagnosticsChanged);
+                    }
                 }
             }
             RelayMessage::Ok {
@@ -1825,7 +1907,7 @@ impl<S: EventStore> EngineCore<S> {
                 if self.prober.on_neg_unsupported(&session.relay, wire_id) {
                     // Probe classified Unsupported; cached, never re-probed.
                 } else if let Some(sub_id) = self.attribution.sub_id_for_wire(&session, wire_id) {
-                    if let Some(neg) = self.neg_sessions.remove(&sub_id) {
+                    if let Some(neg) = self.take_neg_session(&sub_id) {
                         self.neg_session_fallback_to_req(sub_id, neg, &mut effects);
                     }
                 }

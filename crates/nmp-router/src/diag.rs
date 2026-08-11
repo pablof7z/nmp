@@ -4,12 +4,16 @@
 //! authors, dropped merge rules, and what each relay advertised about its own
 //! limits.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, RelaySessionKey};
 
+#[cfg(test)]
 use crate::budget::CompileBudget;
 use crate::facts::{Lane, PublicKey};
+#[cfg(test)]
 use crate::plan::RelayPlan;
 use crate::solver::Shortfall;
 
@@ -60,6 +64,7 @@ pub struct Diagnostics {
     pub dropped_merge_rules: Vec<&'static str>,
 }
 
+#[cfg(test)]
 pub(crate) fn build(
     plan: &RelayPlan,
     budget: &CompileBudget,
