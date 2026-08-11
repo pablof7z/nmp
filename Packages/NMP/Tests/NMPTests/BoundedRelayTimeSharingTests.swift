@@ -16,7 +16,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
     /// app relay already published to.
     @MainActor
     func testAutoRoutedWriteProgressesPastAWaitingRelayLaneWithoutClaimingSettlement() async throws {
-        let relay = try ControlledRelayHarness()
+        let relay = try ControlledRelayHarness(withholdingEOSEForKinds: [10_002])
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("nmp-598-swift-host-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -26,10 +26,10 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                 storePath: storePath,
                 appRelays: [relay.relayURL],
                 fallbackRelays: [],
-                nip65: NIP65Config(indexerRelays: ["ws://localhost:1"]),
+                nip65: NIP65Config(indexerRelays: [relay.relayURL]),
                 allowedLocalRelayHosts: ["localhost"],
                 maxRelays: 1,
-                maxAuthCapabilities: 1
+                maxAuthCapabilities: 2
             )
         )
         defer {
@@ -49,8 +49,8 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         XCTAssertEqual(relay.snapshot().nip11Requests, 1)
 
         let secretKey = String(repeating: "0", count: 63) + "1"
-        let account = try await engine.addAccount(secretKey: secretKey)
-        try engine.setActiveAccount(account.publicKey)
+        let routeAccount = try await engine.addAccount(secretKey: secretKey)
+        try engine.setActiveAccount(routeAccount.publicKey)
 
         let routeEvent = try await engine.signEvent(
             NMPUnsignedEvent(
@@ -63,7 +63,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         relay.seed(routeEvent)
 
         let routeQuery = try engine.observe(
-            NMPFilter(kinds: [10_002], authors: .literal([account.publicKey])),
+            NMPFilter(kinds: [10_002], authors: .literal([routeAccount.publicKey])),
             window: .expandable(initial: 1, max: 1)
         )
         let routeProbe = QueryProbe()
@@ -80,8 +80,16 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         let routeFailure = await routeProbe.failure()
         XCTAssertNil(routeFailure)
 
+        // The selected NIP-65 provider uses this same controlled relay as its
+        // indexer, but it receives no route and no EOSE for the account whose
+        // write follows. Routing therefore remains honestly open while the
+        // already-known app-relay lane must still make progress.
+        let publishSecretKey = String(repeating: "0", count: 63) + "2"
+        let publishAccount = try await engine.addAccount(secretKey: publishSecretKey)
+        try engine.setActiveAccount(publishAccount.publicKey)
+
         let query = try engine.observe(
-            NMPFilter(kinds: [1], authors: .literal([account.publicKey])),
+            NMPFilter(kinds: [1], authors: .literal([publishAccount.publicKey])),
             window: .expandable(initial: 1, max: 1)
         )
         let queryProbe = QueryProbe()
@@ -110,7 +118,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                     content: "NMP issue 598 Swift host qualification"
                 ),
                 routing: .auto,
-                identity: .explicit(pubkey: account.publicKey)
+                identity: .explicit(pubkey: publishAccount.publicKey)
             )
         )
         let receiptProbe = ReceiptProbe()
@@ -155,7 +163,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                     // the router, and the fact names that author.
                     return !complete
                         && relays.contains { isSameRelay($0, relay.relayURL) }
-                        && awaiting == [account.publicKey]
+                        && awaiting == [publishAccount.publicKey]
                 }
                 return false
             },
@@ -211,7 +219,8 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         await queryTask.value
         let queryFailure = await queryProbe.failure()
         XCTAssertNil(queryFailure)
-        XCTAssertTrue(try engine.removeAccount(account))
+        XCTAssertTrue(try engine.removeAccount(publishAccount))
+        XCTAssertTrue(try engine.removeAccount(routeAccount))
 
         engine.shutdown()
         let tornDown = await waitForRelay(relay, timeoutSeconds: 5) {
