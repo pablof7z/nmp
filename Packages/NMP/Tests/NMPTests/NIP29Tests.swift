@@ -138,10 +138,18 @@ final class NIP29Tests: XCTestCase {
         )
         XCTAssertNoThrow(try group.leaveRequest(engine: engine, authorPubkeyHex: authorHex))
         XCTAssertNoThrow(
-            try group.addUser(engine: engine, authorPubkeyHex: authorHex, pubkeyHex: subjectHex)
+            try group.addUsers(
+                engine: engine,
+                authorPubkeyHex: authorHex,
+                users: [NMPGroupUser(pubkeyHex: subjectHex)]
+            )
         )
         XCTAssertNoThrow(
-            try group.removeUser(engine: engine, authorPubkeyHex: authorHex, pubkeyHex: subjectHex)
+            try group.removeUsers(
+                engine: engine,
+                authorPubkeyHex: authorHex,
+                pubkeysHex: [subjectHex]
+            )
         )
         XCTAssertNoThrow(
             try group.editMetadata(

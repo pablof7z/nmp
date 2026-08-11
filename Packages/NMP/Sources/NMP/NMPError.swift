@@ -197,6 +197,10 @@ public enum NMPError: Error, Sendable, Equatable {
     /// #1233: a records observation named none of the three records, which
     /// would deliver a permanently empty state.
     case groupNoRecordSelected
+    /// A kind:9000 or kind:9001 operation named no users.
+    case groupUserBatchEmpty
+    /// One kind:9000 operation assigned one user conflicting roles.
+    case groupUserBatchConflictingRoles(pubkey: String)
     /// #1252: a selection handed to `NMPGroupIds.whoseRecordMatches(_:)`
     /// named no kind. It is evaluated with NIP-29's own pin, so it would
     /// match every event the group's host holds.
@@ -281,6 +285,10 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .groupRecordsNotContextScoped(kinds: kinds)
         case .GroupNoRecordSelected:
             self = .groupNoRecordSelected
+        case .GroupUserBatchEmpty:
+            self = .groupUserBatchEmpty
+        case .GroupUserBatchConflictingRoles(let pubkey):
+            self = .groupUserBatchConflictingRoles(pubkey: pubkey)
         case .GroupIdSelectionNamesNoKind:
             self = .groupIdSelectionNamesNoKind
         case .GroupIdSelectionNotAGroupRecordKind(let kind):
@@ -413,6 +421,10 @@ extension NMPError: LocalizedError {
             "Kinds \(kinds) are NIP-29's own relay-signed group records: they key themselves by d, never by h, so no such event could ever match a group content read; observe the group's records instead"
         case .groupNoRecordSelected:
             "A group records observation must name at least one of the three relay-signed records"
+        case .groupUserBatchEmpty:
+            "A NIP-29 user operation must name at least one user"
+        case .groupUserBatchConflictingRoles(let pubkey):
+            "NIP-29 user operation names \(pubkey) with conflicting roles"
         case .groupIdSelectionNamesNoKind:
             "A group-record selection must name at least one of NIP-29's three relay-signed group record kinds"
         case .groupIdSelectionNotAGroupRecordKind(let kind):
