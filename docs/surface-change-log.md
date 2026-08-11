@@ -1531,7 +1531,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Superseded path removed:** retaining safely-unsent `Superseded` receipts, preserving started obsolete delivery obligations, and routing `AlreadyExpired` through permanent refusal custody are deleted. No compatibility alias or old receipt decoder remains.
 - **Human signoff:** the repository owner's explicit direction in issue #1352's originating session is the policy: obsolete replaceable events must be destroyed, safety evidence may live for at most one hour, and at most 500 superseded entries may remain. PR #1353 is the review record; exact-head review remains mandatory before merge.
 
-## 2026-08-11 — Let apps await one terminal publication result ([issue #1356](https://github.com/pablof7z/nmp/issues/1356))
+## 2026-08-11 — Let apps await one terminal publication result ([issue #1356](https://github.com/pablof7z/nmp/issues/1356), [PR #1359](https://github.com/pablof7z/nmp/pull/1359))
 
 - **Failure evidence:** every app that needed to answer “did the relay accept this event?” had to consume `WriteFact` frames, retain the last state per relay, recognize the whole-write terminal outcome, detect a lagged finite FIFO, and manually restart durable replay from the beginning. Mosaico implemented only part of that protocol: it treated NMP's local durable acceptance as remote success, then repeatedly published the same NIP-29 mutation while polling its own materialized view. The missing primitive was not another write door; it was one authoritative reduction over the receipt NMP already owns.
 - **Changed projections:** ffi,kotlin,rust,swift
@@ -1540,7 +1540,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Diagnostics impact:** none. Queue enumeration and diagnostics keep their existing shapes; apps no longer need either one to derive one write's publication answer.
 - **Updated falsifiers:** `receipt_result_returns_one_terminal_answer_without_app_reduction` proves the direct-Rust live door; `restart_reattachment_returns_the_same_terminal_answer_without_cursor_code` proves lookup by stable receipt id; `ffi_reattachment_transparently_traverses_more_than_one_durable_page` proves the result preserves relay truth across durable pagination; `receipt_result_recovers_from_live_fifo_lag_without_exposing_replay` proves FFI owns lag recovery; `terminal_signer_errors_compensate_the_write` proves signer refusal is terminal. WRITES-RECEIPTS-005 through -009 govern live completion, mixed relay truth, signer refusal, lag recovery, and restart retrieval.
 - **Superseded path removed:** no compatibility reducer or second result spelling remains. Apps may still consume raw `WriteFact` frames for progress UI, but they no longer own the terminal reduction or durable-replay algorithm.
-- **Human signoff:** issue #1356 records the product requirement. The pull request and exact-head CI/review are the approval trail before merge.
+- **Human signoff:** issue #1356 records the product requirement. PR #1359 and exact-head CI/review are the approval trail before merge.
 
 ## 2026-08-11 — Publish one NIP-29 moderation event for a user batch ([issue #1357](https://github.com/pablof7z/nmp/issues/1357), [PR #1358](https://github.com/pablof7z/nmp/pull/1358))
 
