@@ -99,6 +99,9 @@ impl NmpWorld {
                 "the group door must refuse a caller-supplied h row before reaching the \
                  publish door, but the publish door itself refused instead: {error:?}"
             ),
+            Err(nmp::nip29::GroupPublishError::Users(error)) => panic!(
+                "an ordinary contextualized publication has no user batch to reject: {error:?}"
+            ),
             Ok(_) => panic!(
                 "the group door must refuse a caller-supplied h row, but the publication \
                  was accepted"

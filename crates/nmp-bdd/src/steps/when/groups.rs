@@ -123,7 +123,7 @@ async fn add_user_with_role(w: &mut NmpWorld, pubkey: String, role: Option<Strin
     let pubkey = w.member_pubkey(&pubkey);
     let author = w.me_pubkey();
     w.group_operation(None, GroupCall::default(), move |group, engine| {
-        group.add_user(engine, author, pubkey, role.as_deref())
+        group.add_users(engine, author, [nmp::nip29::GroupUser { pubkey, role }])
     })
     .await;
 }
@@ -133,7 +133,7 @@ async fn remove_user(w: &mut NmpWorld, pubkey: String) {
     let pubkey = w.member_pubkey(&pubkey);
     let author = w.me_pubkey();
     w.group_operation(None, GroupCall::default(), move |group, engine| {
-        group.remove_user(engine, author, pubkey)
+        group.remove_users(engine, author, [pubkey])
     })
     .await;
 }
@@ -181,7 +181,7 @@ async fn invoke_named_operation(w: &mut NmpWorld, operation: String) {
             let pubkey = w.member_pubkey(SUBJECT);
             let author = w.me_pubkey();
             w.group_operation(None, GroupCall::default(), move |group, engine| {
-                group.remove_user(engine, author, pubkey)
+                group.remove_users(engine, author, [pubkey])
             })
             .await
         }

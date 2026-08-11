@@ -47,32 +47,34 @@ Feature: NIP-29's own operations draft their exact kind and tag schema
 
   # nmp:id=NIP29OPERATIONS-004
   # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::add_user_carries_kind_9000_and_a_bare_p_tag
-  # nmp:falsifier=Changing the add-user kind constant away from 9000 makes the exact owner proof fail.
+  # nmp:evidence=rust:nmp-nip29::add_users_composes_one_event_with_every_user_once_in_pubkey_order
+  # nmp:falsifier=Looping over the users would produce several builders; the evidence requires one kind:9000 draft carrying every p row.
   @nip29
-  Scenario: Adding a user with no role drafts kind 9000 and a bare p tag
-    When I compose adding user "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" to the group with no role
+  Scenario: Adding several users drafts one kind 9000 with every p tag
+    When I compose adding users "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" and "3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad"
     Then the draft is kind 9000
     And the draft carries a p tag naming "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
-    And the p tag carries no role value
+    And the same draft carries a p tag naming "3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad"
 
   # nmp:id=NIP29OPERATIONS-005
   # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::add_user_with_role_carries_the_role_on_the_p_tag
-  # nmp:falsifier=Dropping the role value from the composed p tag makes the exact owner proof fail.
+  # nmp:evidence=rust:nmp-nip29::user_batches_refuse_empty_and_conflicting_role_inputs
+  # nmp:falsifier=Accepting an empty batch would mint a moderation event that names nobody; accepting conflicting roles would make the host choose between two commands for one user.
   @nip29
-  Scenario: Adding a user with a role carries the role on the p tag
-    When I compose adding user "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" to the group with role "moderator"
-    Then the draft carries a p tag naming "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" with role "moderator"
+  Scenario: An empty or internally conflicting user batch is refused before publication
+    When I compose adding no users or assign one user two different roles
+    Then composition is refused
+    And no event or receipt exists
 
   # nmp:id=NIP29OPERATIONS-006
   # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::remove_user_carries_kind_9001_and_a_p_tag
-  # nmp:falsifier=Changing the remove-user kind constant away from 9001 makes the exact owner proof fail.
+  # nmp:evidence=rust:nmp-nip29::remove_users_composes_one_event_with_every_pubkey_once_in_order
+  # nmp:falsifier=Looping over the users would produce several builders; the evidence requires one kind:9001 draft carrying every unique p row.
   @nip29
-  Scenario: Removing a user drafts kind 9001 and a p tag
-    When I compose removing user "3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad" from the group
+  Scenario: Removing several users drafts one kind 9001 with every p tag
+    When I compose removing users "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" and "3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad"
     Then the draft is kind 9001
+    And the draft carries a p tag naming "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
     And the draft carries a p tag naming "3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad3bad"
 
   # nmp:id=NIP29OPERATIONS-007
@@ -156,8 +158,8 @@ Feature: NIP-29's own operations draft their exact kind and tag schema
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip29::join_request_with_code_carries_kind_h_free_code_tag
   # nmp:evidence=rust:nmp-nip29::leave_request_is_kind_9022_with_no_tags
-  # nmp:evidence=rust:nmp-nip29::add_user_carries_kind_9000_and_a_bare_p_tag
-  # nmp:evidence=rust:nmp-nip29::remove_user_carries_kind_9001_and_a_p_tag
+  # nmp:evidence=rust:nmp-nip29::add_users_composes_one_event_with_every_user_once_in_pubkey_order
+  # nmp:evidence=rust:nmp-nip29::remove_users_composes_one_event_with_every_pubkey_once_in_order
   # nmp:evidence=rust:nmp-nip29::edit_metadata_carries_both_fields_when_both_are_supplied
   # nmp:evidence=rust:nmp-nip29::delete_event_carries_kind_9005_and_an_e_tag
   # nmp:evidence=rust:nmp-nip29::create_group_at_the_root_is_kind_9007_with_no_tag_at_all

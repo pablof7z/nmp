@@ -49,6 +49,17 @@
 
 import NMPFFI
 
+/// One user in a kind:9000 add-users moderation event.
+public struct NMPGroupUser: Sendable, Equatable {
+    public let pubkeyHex: String
+    public let role: String?
+
+    public init(pubkeyHex: String, role: String? = nil) {
+        self.pubkeyHex = pubkeyHex
+        self.role = role
+    }
+}
+
 /// The relays a NIP-29 group lives on -- named once, retained privately, and
 /// never asked for again (`nmp::nip29::RelayScope`/`FfiRelayScope` mirror).
 public final class NMPRelayScope: @unchecked Sendable {
@@ -251,29 +262,35 @@ public final class NMPGroup: @unchecked Sendable {
         return Receipt(handle: receipts)
     }
 
-    /// kind:9000 -- add a member, optionally with a role.
-    public func addUser(
+    /// kind:9000 -- add several members in one event, optionally with a role
+    /// per member.
+    public func addUsers(
         engine: NMPEngine,
         authorPubkeyHex: String,
-        pubkeyHex: String,
-        role: String? = nil
+        users: [NMPGroupUser]
     ) throws -> Receipt {
         let receipts = try nmpRethrowing {
-            try ffi.addUser(
-                engine: engine.concreteFfiEngine, author: authorPubkeyHex, pubkey: pubkeyHex, role: role
+            try ffi.addUsers(
+                engine: engine.concreteFfiEngine,
+                author: authorPubkeyHex,
+                users: users.map { FfiGroupUser(pubkey: $0.pubkeyHex, role: $0.role) }
             )
         }
         return Receipt(handle: receipts)
     }
 
-    /// kind:9001 -- remove a member.
-    public func removeUser(
+    /// kind:9001 -- remove several members in one event.
+    public func removeUsers(
         engine: NMPEngine,
         authorPubkeyHex: String,
-        pubkeyHex: String
+        pubkeysHex: [String]
     ) throws -> Receipt {
         let receipts = try nmpRethrowing {
-            try ffi.removeUser(engine: engine.concreteFfiEngine, author: authorPubkeyHex, pubkey: pubkeyHex)
+            try ffi.removeUsers(
+                engine: engine.concreteFfiEngine,
+                author: authorPubkeyHex,
+                pubkeys: pubkeysHex
+            )
         }
         return Receipt(handle: receipts)
     }

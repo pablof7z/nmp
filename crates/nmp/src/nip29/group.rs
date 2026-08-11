@@ -51,6 +51,7 @@ use crate::LiveQuery;
 use nmp_nip29::GroupContextError;
 use nmp_nip29::GroupMetadataEdit;
 use nmp_nip29::GroupRecord;
+use nmp_nip29::{GroupUser, GroupUsersError};
 
 /// Why a group publication never reached the publish door, or what the door
 /// said when it did.
@@ -66,6 +67,9 @@ use nmp_nip29::GroupRecord;
 pub enum GroupPublishError {
     /// The draft or signed event could not be contextualized for this group.
     Context(GroupContextError),
+    /// A multi-user moderation operation named nobody or assigned one user
+    /// conflicting roles. No write was accepted.
+    Users(GroupUsersError),
     /// The publish door refused the intent.
     Engine(EngineError),
 }
@@ -86,6 +90,7 @@ impl std::fmt::Display for GroupPublishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Context(error) => write!(f, "{error}"),
+            Self::Users(error) => write!(f, "{error}"),
             Self::Engine(error) => write!(f, "{error}"),
         }
     }
@@ -240,25 +245,27 @@ impl Group {
         self.publish(engine, author, nmp_nip29::leave_request())
     }
 
-    /// kind:9000 -- add a member, optionally with a role.
-    pub fn add_user(
+    /// kind:9000 -- add several members in one event, optionally with a role
+    /// per member.
+    pub fn add_users(
         &self,
         engine: &Engine,
         author: PublicKey,
-        pubkey: PublicKey,
-        role: Option<&str>,
+        users: impl IntoIterator<Item = GroupUser>,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::add_user(pubkey, role))
+        let builder = nmp_nip29::add_users(users).map_err(GroupPublishError::Users)?;
+        self.publish(engine, author, builder)
     }
 
-    /// kind:9001 -- remove a member.
-    pub fn remove_user(
+    /// kind:9001 -- remove several members in one event.
+    pub fn remove_users(
         &self,
         engine: &Engine,
         author: PublicKey,
-        pubkey: PublicKey,
+        pubkeys: impl IntoIterator<Item = PublicKey>,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::remove_user(pubkey))
+        let builder = nmp_nip29::remove_users(pubkeys).map_err(GroupPublishError::Users)?;
+        self.publish(engine, author, builder)
     }
 
     /// kind:9002 -- state part of the group's metadata (#1282).
@@ -504,8 +511,11 @@ mod tests {
                 group.join_request(&engine, me, Some("code")),
             ),
             ("leave_request", group.leave_request(&engine, me)),
-            ("add_user", group.add_user(&engine, me, subject, None)),
-            ("remove_user", group.remove_user(&engine, me, subject)),
+            (
+                "add_users",
+                group.add_users(&engine, me, [GroupUser::new(subject, None)]),
+            ),
+            ("remove_users", group.remove_users(&engine, me, [subject])),
             (
                 "edit_metadata",
                 group.edit_metadata(
