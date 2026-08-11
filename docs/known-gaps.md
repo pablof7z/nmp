@@ -139,9 +139,11 @@ about current code:
   persisted against an exact lane ordinal. AUTH-required remains resumable and
   cannot appear as a retry cause; subscription closure cannot terminalize a
   write; denial commits before receipt emission and replays with the same
-  source/reason. Every receipt stream ends with exactly one
-  `WriteOutcome`, so an app can always tell a finished write from a dropped
-  subscription.
+  source/reason. Every receipt stream ends with exactly one `WriteOutcome`,
+  and `ReceiptStream::result` (mirrored through UniFFI, Swift, and Kotlin)
+  reduces the stream to that outcome plus every relay's final state. Apps may
+  still consume raw facts for progressive UI, but no app needs its own
+  terminal reducer or durable replay loop.
 - **The governed sign-only path is built; NMP ships no remote-signer provider and no standard platform vault providers.**
   The protocol-neutral signer contract lives in dependency-free `nmp-signer`,
   and the explicit local-key implementation lives in `nmp-local-signer`. NMP

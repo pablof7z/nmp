@@ -130,6 +130,8 @@ sealed class NMPError(message: String) : Exception(message) {
         )
     data class ReceiptReplayUnavailable(val receiptId: ULong) :
         NMPError("retained evidence for receipt $receiptId became unavailable during replay")
+    data class ReceiptClosedWithoutOutcome(val receiptId: ULong) :
+        NMPError("receipt $receiptId closed before its terminal outcome")
     data class InvalidSignature(val got: String) : NMPError("invalid signature: $got")
     object EngineClosed : NMPError("engine already shut down")
     /** `decodeNostrEntity`'s input was not valid bech32, had an
@@ -347,6 +349,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.FactStreamLagged -> FactStreamLagged(ffi.receiptId)
                 is FfiException.ReceiptReplayUnavailable ->
                     ReceiptReplayUnavailable(ffi.receiptId)
+                is FfiException.ReceiptClosedWithoutOutcome ->
+                    ReceiptClosedWithoutOutcome(ffi.receiptId)
                 is FfiException.InvalidSignature -> InvalidSignature(ffi.got)
                 is FfiException.EngineClosed -> EngineClosed
                 is FfiException.InvalidNostrEntity -> InvalidNostrEntity(ffi.reason)

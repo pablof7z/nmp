@@ -36,9 +36,13 @@
 //!
 //! ## Optimistic publishing
 //!
-//! Settlement is INSPECTED, never AWAITED. A locally accepted write is
-//! visible through the app's own live query immediately, reporting cache and
-//! zero relays. Nothing in this module models an app blocking on delivery.
+//! Local visibility never waits for settlement: an accepted write appears in
+//! the app's own live query immediately. When a workflow genuinely needs the
+//! relay answer, [`ReceiptStream::result`](crate::ReceiptStream::result)
+//! awaits the typed terminal and performs reduction/replay inside NMP rather
+//! than making each app reimplement receipt semantics.
+
+mod result;
 
 use std::collections::BTreeSet;
 
@@ -47,6 +51,7 @@ use nostr::{EventId, PublicKey, RelayUrl, Timestamp};
 use crate::core::ReceiptId;
 
 pub use nmp_store::RefuseReason;
+pub use result::{ReceiptResult, ReceiptResultError};
 
 /// Which exact AUTH actor refused a write session.
 ///
@@ -213,6 +218,10 @@ pub enum NotSentReason {
     /// The app explicitly cancelled the obligation before signature
     /// promotion. Compensation committed atomically.
     Cancelled,
+    /// The signer explicitly refused or failed the accepted signing request.
+    /// Compensation proved that no EVENT bytes could have crossed the local
+    /// transport handoff.
+    SignerRefused,
     /// A newer accepted write won the same NIP-01 replaceable/addressable
     /// coordinate, and NMP proved the older bytes did not cross the local
     /// transport handoff. Not a failure — for an app renewing presence it is

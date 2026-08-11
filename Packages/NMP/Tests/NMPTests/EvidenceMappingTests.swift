@@ -13,6 +13,10 @@ final class EvidenceMappingTests: XCTestCase {
             .outcome(.notSent(.superseded))
         )
         XCTAssertEqual(
+            WriteFact(.outcome(outcome: .notSent(reason: .signerRefused))),
+            .outcome(.notSent(.signerRefused))
+        )
+        XCTAssertEqual(
             WriteFact(.outcome(outcome: .superseded)),
             .outcome(.superseded)
         )

@@ -43,6 +43,12 @@ class EvidenceMappingTest {
             ),
         )
         assertEquals(
+            WriteFact.Outcome(WriteOutcome.NotSent(NotSentReason.SignerRefused)),
+            WriteFact.from(
+                FfiWriteFact.Outcome(FfiWriteOutcome.NotSent(FfiNotSentReason.SIGNER_REFUSED)),
+            ),
+        )
+        assertEquals(
             WriteFact.Outcome(WriteOutcome.Superseded),
             WriteFact.from(FfiWriteFact.Outcome(FfiWriteOutcome.Superseded)),
         )

@@ -26,19 +26,19 @@ use crate::auth::{
 use crate::convert::{
     cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, diagnostics_snapshot_to_ffi,
     filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_pubkey, publish_queue_entry_to_ffi,
-    relay_information_error_kind, remove_queue_entry_error_to_ffi, sign_event_failure,
-    sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi, window_from_ffi,
-    write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError, FfiRowPullError,
-    WriteStatusRef,
+    receipt_result_to_ffi, relay_information_error_kind, remove_queue_entry_error_to_ffi,
+    sign_event_failure, sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi,
+    window_from_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError,
+    FfiRowPullError, WriteStatusRef,
 };
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
     FfiFilter, FfiFrame, FfiLiveQuery, FfiPublishQueueEntry, FfiReceiptReattachment,
-    FfiRelayInformation, FfiRelayInformationCachePolicy, FfiRelayInformationDocument,
-    FfiRelayInformationFreshness, FfiRelayInformationLimitations, FfiRemoveQueueEntryError,
-    FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow, FfiWriteFact,
-    FfiWriteIntent,
+    FfiReceiptResult, FfiRelayInformation, FfiRelayInformationCachePolicy,
+    FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
+    FfiRemoveQueueEntryError, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow,
+    FfiWriteFact, FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -470,7 +470,7 @@ impl NmpEngine {
     pub fn publish(&self, intent: FfiWriteIntent) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let write_intent = write_intent_from_ffi(intent)?;
         let receipt = self.engine.publish(write_intent)?;
-        Ok(NmpReceiptStream::new(receipt))
+        Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
     }
 
     /// Attach to a retained receipt without collapsing corrupt durable
@@ -1079,10 +1079,10 @@ enum ReceiptDelivery {
 }
 
 impl NmpReceiptStream {
-    pub(crate) fn new(receipt: nmp::ReceiptStream) -> Arc<Self> {
+    pub(crate) fn new(engine: Arc<nmp::Engine>, receipt: nmp::ReceiptStream) -> Arc<Self> {
         Arc::new(Self {
             id: receipt.id,
-            engine: None,
+            engine: Some(engine),
             delivery: Mutex::new(ReceiptDelivery::Active {
                 receiver: Arc::new(receipt.statuses.into_async()),
                 next_cursor: None,
@@ -1147,39 +1147,37 @@ impl NmpReceiptStream {
             }
         }
     }
-}
 
-#[uniffi::export]
-impl NmpReceiptStream {
-    /// The stable store-issued receipt id, needed for process-later
-    /// reattachment ([`NmpEngine::reattach_receipt`]) and explicit cancellation
-    /// ([`NmpEngine::cancel`]).
-    pub fn id(&self) -> u64 {
-        self.id.0
+    fn replace_page(
+        &self,
+        statuses: nmp::FifoReceiver<nmp::WriteFact>,
+        next_cursor: Option<nmp::ReceiptReplayCursor>,
+    ) -> bool {
+        let replacement = Arc::new(statuses.into_async());
+        let mut delivery = self.delivery.lock().unwrap();
+        match &*delivery {
+            ReceiptDelivery::Active { .. } => {
+                *delivery = ReceiptDelivery::Active {
+                    receiver: replacement,
+                    next_cursor,
+                };
+                true
+            }
+            ReceiptDelivery::Cancelled => {
+                replacement.close();
+                false
+            }
+        }
     }
 
-    /// Await the next `WriteFact`, or `None` once the intent has fully
-    /// resolved or the engine has shut down. [`FfiError::ConcurrentNext`] on an
-    /// overlapping call.
-    pub async fn next(&self) -> Result<Option<FfiWriteFact>, FfiError> {
-        use std::sync::atomic::Ordering;
-
-        if self.reading.swap(true, Ordering::AcqRel) {
-            return Err(FfiError::ConcurrentNext);
-        }
-        let _reading = ReceiptReadingGuard(&self.reading);
-
+    async fn next_fact(&self) -> Result<Option<nmp::WriteFact>, FfiError> {
         loop {
             let Some((receiver, next_cursor)) = self.current_receiver() else {
                 return Ok(None);
             };
             match receiver.next().await {
-                Ok(Some(status)) => {
-                    return Ok(Some(write_status_to_ffi(WriteStatusRef(&status))));
-                }
-                Err(nmp::FifoNextError::ConcurrentNext) => {
-                    return Err(FfiError::ConcurrentNext);
-                }
+                Ok(Some(status)) => return Ok(Some(status)),
+                Err(nmp::FifoNextError::ConcurrentNext) => return Err(FfiError::ConcurrentNext),
                 Err(nmp::FifoNextError::Lagged) => {
                     return Err(FfiError::FactStreamLagged {
                         receipt_id: Some(self.id.0),
@@ -1213,6 +1211,101 @@ impl NmpReceiptStream {
                         receipt_id: self.id.0,
                     });
                 }
+            }
+        }
+    }
+
+    fn restart_replay(&self) -> Result<(), FfiError> {
+        let Some(engine) = &self.engine else {
+            return Err(FfiError::ReceiptReplayUnavailable {
+                receipt_id: self.id.0,
+            });
+        };
+        match engine.reattach_receipt(self.id)? {
+            ReceiptReattachment::Attached {
+                id,
+                statuses,
+                next_cursor,
+            } if id == self.id => {
+                if self.replace_page(statuses, next_cursor) {
+                    Ok(())
+                } else {
+                    Err(FfiError::ReceiptReplayUnavailable {
+                        receipt_id: self.id.0,
+                    })
+                }
+            }
+            ReceiptReattachment::Attached { .. }
+            | ReceiptReattachment::NotFound
+            | ReceiptReattachment::RetainedButUnreadable => {
+                Err(FfiError::ReceiptReplayUnavailable {
+                    receipt_id: self.id.0,
+                })
+            }
+        }
+    }
+}
+
+#[uniffi::export]
+impl NmpReceiptStream {
+    /// The stable store-issued receipt id, needed for process-later
+    /// reattachment ([`NmpEngine::reattach_receipt`]) and explicit cancellation
+    /// ([`NmpEngine::cancel`]).
+    pub fn id(&self) -> u64 {
+        self.id.0
+    }
+
+    /// Await the next `WriteFact`, or `None` once the intent has fully
+    /// resolved or the engine has shut down. [`FfiError::ConcurrentNext`] on an
+    /// overlapping call.
+    pub async fn next(&self) -> Result<Option<FfiWriteFact>, FfiError> {
+        use std::sync::atomic::Ordering;
+
+        if self.reading.swap(true, Ordering::AcqRel) {
+            return Err(FfiError::ConcurrentNext);
+        }
+        let _reading = ReceiptReadingGuard(&self.reading);
+        Ok(self
+            .next_fact()
+            .await?
+            .map(|status| write_status_to_ffi(WriteStatusRef(&status))))
+    }
+
+    /// Await the one terminal publication answer. NMP owns fact reduction and
+    /// automatically restarts from durable replay if live delivery lags.
+    pub async fn result(&self) -> Result<FfiReceiptResult, FfiError> {
+        use std::sync::atomic::Ordering;
+
+        if self.reading.swap(true, Ordering::AcqRel) {
+            return Err(FfiError::ConcurrentNext);
+        }
+        let _reading = ReceiptReadingGuard(&self.reading);
+        self.restart_replay()?;
+        let mut facts = Vec::new();
+        loop {
+            match self.next_fact().await {
+                Ok(Some(fact)) => {
+                    let terminal = matches!(fact, nmp::WriteFact::Outcome(_));
+                    facts.push(fact);
+                    if terminal {
+                        let result = nmp::ReceiptResult::from_facts(facts).map_err(|_| {
+                            FfiError::ReceiptClosedWithoutOutcome {
+                                receipt_id: self.id.0,
+                            }
+                        })?;
+                        return Ok(receipt_result_to_ffi(result));
+                    }
+                }
+                Ok(None) => {
+                    return Err(FfiError::ReceiptClosedWithoutOutcome {
+                        receipt_id: self.id.0,
+                    });
+                }
+                Err(FfiError::FactStreamLagged { .. }) => {
+                    facts.clear();
+                    self.restart_replay()?;
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -1302,6 +1395,46 @@ mod tests {
 
     fn signer_public_key(public_key: nostr::PublicKey) -> nmp::SignerPublicKey {
         nmp::SignerPublicKey::new(public_key.to_bytes())
+    }
+
+    #[tokio::test]
+    async fn receipt_result_recovers_from_live_fifo_lag_without_exposing_replay() {
+        let engine = Arc::new(nmp::Engine::new(nmp::EngineConfig::default()).unwrap());
+        let keys = nostr::Keys::generate();
+        let receipt = engine
+            .publish(nmp::WriteIntent {
+                payload: nmp::WritePayload::Event(
+                    nmp::EventBuilder::new(nostr::Kind::TextNote).content("lagged result"),
+                ),
+                routing: nmp::WriteRouting::Explicit(vec![nostr::RelayUrl::parse(
+                    "wss://lagged-result.invalid",
+                )
+                .unwrap()]),
+                identity: nmp::Identity::Explicit(keys.public_key()),
+                correlation: None,
+            })
+            .unwrap();
+        let receipt_id = receipt.id;
+        engine.cancel(receipt_id).unwrap();
+        let stream = NmpReceiptStream::new(engine.clone(), receipt);
+
+        let (sender, lagged) = nmp::fifo_channel();
+        for _ in 0..=nmp::FACT_CHANNEL_CAPACITY {
+            let _ = sender.send(nmp::WriteFact::Signing(nmp::SigningState::AwaitingSigner {
+                pubkey: keys.public_key(),
+            }));
+        }
+        assert!(stream.replace_page(lagged, None));
+
+        let result = stream.result().await.unwrap();
+        assert_eq!(
+            result.outcome,
+            FfiWriteOutcome::NotSent {
+                reason: FfiNotSentReason::Cancelled
+            }
+        );
+        assert!(result.relays.is_empty());
+        engine.shutdown();
     }
 
     fn signer_unsigned_to_nostr(unsigned: nmp::SignerUnsignedEvent) -> nostr::UnsignedEvent {
