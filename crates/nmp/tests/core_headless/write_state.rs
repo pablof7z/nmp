@@ -44,10 +44,16 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(event_id) if *event_id == accepted_id)));
-    assert!(matches!(
-        receipt_statuses(&effects).last(),
-        Some(WriteFact::Signing(SigningState::Refused { .. }))
-    ));
+    let facts = receipt_statuses(&effects);
+    assert!(facts
+        .iter()
+        .any(|fact| matches!(fact, WriteFact::Signing(SigningState::Refused { .. }))));
+    assert_eq!(
+        facts.last(),
+        Some(&WriteFact::Outcome(WriteOutcome::NotSent(
+            NotSentReason::SignerRefused
+        )))
+    );
 }
 
 #[test]
