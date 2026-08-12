@@ -299,13 +299,13 @@ pub enum WriteFact {
     /// waiting for, and an operator can see whether the wait is a missing
     /// discovery source or a user who has never published a relay list.
     /// Non-empty implies `complete: false`; a settled resolution has nothing
-    /// left to wait on and always names nobody. The converse does NOT hold,
-    /// and the case is worth knowing: an open picture that names nobody is a
-    /// write whose routing has not run at all, because the write is not
-    /// signed yet and there is no frozen recipient set to resolve against.
-    /// It is held on its SIGNER, and [`Self::Signing`] is the fact that says
-    /// so — naming an author here would invent a route lookup that is not
-    /// outstanding.
+    /// left to wait on and always names nobody. The converse does NOT hold.
+    /// An open picture that names nobody can be a write whose routing has not
+    /// run because it is not signed yet — then [`Self::Signing`] says what
+    /// holds it — or a signed Auto route whose canonical parent-provenance
+    /// read hit a persistence fault. The latter is visible in engine
+    /// diagnostics and retried after store recovery; naming an author here
+    /// would invent a route lookup that is not actually outstanding.
     ///
     /// It is deliberately not a rendered string. "Still determining" and
     /// "nowhere to send" were once one English sentence, which no program

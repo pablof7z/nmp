@@ -8,6 +8,7 @@ owns:
   - Auto write routing from neutral author facts
   - author and p-tag directionality
   - operator app and fallback contributions
+  - verified reply-parent provenance contribution
   - settlement versus ignorance
 related:
   - docs/internals/routing/auto-and-explicit.md
@@ -25,9 +26,35 @@ For a signed event:
 1. the event author's `outbound` relays contribute destinations;
 2. operator app relays contribute independently;
 3. each decoded `p` tag contributes that recipient's `inbound` relays;
-4. operator fallback relays may top up a settled thin recipient contribution.
+4. a reply contributes one relay where NMP actually observed its direct
+   parent, when that parent exists in the canonical store with relay
+   provenance;
+5. operator fallback relays may top up a settled thin recipient contribution.
 
-The route remains incomplete while any required author fact is `Unknown`.
+The reply contribution has two deliberately separate inputs:
+
+- `ThreadPosition::read` determines the direct parent event id from the signed
+  event's NIP-10/NIP-22 rows;
+- `EventStore::query(id)` supplies the canonical row, and only
+  `row.provenance.seen` may supply a destination.
+
+The relay cell authored into an `e` tag is never a routing fact. A signature
+proves who authored the hint; it does not prove the named relay carried the
+parent. If the canonical row has several verified observations, Auto takes
+the first relay in normalized sorted order — exactly one, using the same
+temporary deterministic choice the canonical `Row` uses for an emitted hint.
+Choosing the best among several verified sources remains #1243's policy; a
+widely replicated parent must not silently fan one reply out to every source.
+
+A canonical-store read failure is not a canonical miss. The resolver returns
+the author/app/recipient destinations it already knows, keeps the route open,
+and reports the typed persistence error to the store supervisor. Those known
+lanes may connect and publish immediately. Once store recovery succeeds, the
+ordinary queue rewrite reruns the same strategy and appends the parent lane if
+the verified source is then readable.
+
+The route remains incomplete while any required author fact is `Unknown`, or
+while a failed parent-provenance read has not been retried successfully.
 `Present` with empty sets and `Absent` are both settled answers and contribute
 no destinations for that direction.
 

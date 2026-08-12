@@ -240,7 +240,7 @@ mod receipt_allocator_tests {
             nmp_store::sentinel_signature(),
         );
 
-        let answer = core.resolve_routes(&route, &frozen);
+        let answer = core.resolve_routes(&route, &frozen).answer;
         assert_eq!(
             answer.relays,
             BTreeSet::from([a, b]),
@@ -269,7 +269,7 @@ mod receipt_allocator_tests {
             FixtureRoutingFacts::new(),
             10,
         );
-        let unknown = core.resolve_routes(&WriteRouting::Auto, &event);
+        let unknown = core.resolve_routes(&WriteRouting::Auto, &event).answer;
         assert!(
             unknown.relays.is_empty() && !unknown.complete,
             "an unsettled author must park, not terminate: {unknown:?}"
@@ -294,7 +294,7 @@ mod receipt_allocator_tests {
             ),
         ] {
             let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10);
-            let answer = core.resolve_routes(&WriteRouting::Auto, &event);
+            let answer = core.resolve_routes(&WriteRouting::Auto, &event).answer;
 
             assert!(
                 answer.relays.is_empty() && answer.complete,
@@ -332,7 +332,8 @@ mod receipt_allocator_tests {
             FixtureRoutingFacts::new().with_outbound_routes(author, [outbox.clone()]),
             10,
         )
-        .resolve_routes(&WriteRouting::Auto, &event);
+        .resolve_routes(&WriteRouting::Auto, &event)
+        .answer;
 
         // One of them settles as a definitive absence. It contributes no
         // relay, so the destination set cannot move.
@@ -343,7 +344,8 @@ mod receipt_allocator_tests {
                 .with_author_absent(settling),
             10,
         )
-        .resolve_routes(&WriteRouting::Auto, &event);
+        .resolve_routes(&WriteRouting::Auto, &event)
+        .answer;
 
         assert_eq!(
             before.relays, after.relays,
@@ -383,7 +385,9 @@ mod receipt_allocator_tests {
             .with_operator_app([app.clone()]);
         let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10);
 
-        let answer = core.resolve_routes(&WriteRouting::Auto, &frozen_note(author));
+        let answer = core
+            .resolve_routes(&WriteRouting::Auto, &frozen_note(author))
+            .answer;
 
         assert_eq!(answer.relays, BTreeSet::from([app]));
         assert!(
