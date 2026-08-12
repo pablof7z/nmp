@@ -406,8 +406,18 @@ pub struct FfiRow {
     pub tags: Vec<Vec<String>>,
     pub content: String,
     pub sig: String,
+    /// Explicit canonical signature state. `Pending` means `sig` is NMP's
+    /// structurally parseable placeholder, never a verified Nostr signature.
+    pub signature_state: FfiRowSignatureState,
     /// Sorted, deduplicated relay URLs that have delivered this event id.
     pub sources: Vec<String>,
+}
+
+/// `nmp::RowSignatureState` mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum FfiRowSignatureState {
+    Pending,
+    Signed,
 }
 
 /// Immutable NIP-01 event body accepted by the governed sign-only operation.
@@ -508,6 +518,10 @@ pub struct FfiSimpleGroupsList {
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiRowDelta {
     Added {
+        row: FfiRow,
+    },
+    /// The same event id now has a new complete canonical row value.
+    Updated {
         row: FfiRow,
     },
     /// #105: the SAME row already matched; its relay-provenance set grew.

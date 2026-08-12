@@ -104,6 +104,9 @@ impl Projected {
                         *self.added.entry(row.event.id).or_default() += 1;
                         self.rows.insert(row.event.id, row.clone());
                     }
+                    RowDelta::Updated(row) => {
+                        self.rows.insert(row.event.id, row.clone());
+                    }
                     RowDelta::SourcesGrew { id, sources } => {
                         if let Some(row) = self.rows.get_mut(id) {
                             row.sources = sources.clone();
@@ -119,6 +122,10 @@ impl Projected {
 
     fn sources_of(&self, id: &nostr::EventId) -> Option<&BTreeSet<RelayUrl>> {
         self.rows.get(id).map(|row| &row.sources)
+    }
+
+    fn row(&self, id: &nostr::EventId) -> Option<&nmp::Row> {
+        self.rows.get(id)
     }
 
     fn shown(&self) -> Vec<(nostr::EventId, BTreeSet<RelayUrl>)> {
@@ -414,6 +421,61 @@ fn a_write_still_in_flight_is_still_in_the_feed_after_a_restart() {
         "after a real reopen the message is still in the feed, still claiming \
          zero relays -- the write is still owed: {:?}",
         recovered.shown()
+    );
+}
+
+/// A pending row is not merely a process-local optimistic projection. The
+/// canonical row persisted at acceptance remembers that its signature has not
+/// arrived yet, so a cold query after restart must report `Pending` again --
+/// never infer `Signed` merely because every stored row has an `Event` shape.
+#[test]
+fn an_unsigned_write_is_still_explicitly_pending_after_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("pending-signature-restart.redb");
+    let me = Keys::generate();
+    let host = RelayUrl::parse("wss://pending-signature-restart.example").unwrap();
+    let pin = [host.clone()];
+    let expected_id;
+
+    {
+        let store = RedbStore::open(&path).unwrap();
+        let mut core =
+            EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
+        activate(&mut core, &me);
+        let (handle, mut projected, _) = open(&mut core, pinned_strict(&pin, OPTIMISTIC_KIND));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(draft(904, "accepted before its signer answers")),
+            routing: WriteRouting::Explicit(pin.to_vec()),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let (_, _, frozen) = find_sign_request(&accepted);
+        expected_id = frozen.sign_with_keys(&me).unwrap().id;
+        projected.fold(&accepted, handle);
+
+        let row = projected
+            .row(&expected_id)
+            .expect("acceptance inserts the pending canonical row");
+        assert_eq!(row.signature_state, nmp::RowSignatureState::Pending);
+        assert!(
+            row.event.verify().is_err(),
+            "the pending sentinel must not pass cryptographic verification"
+        );
+    }
+
+    let store = RedbStore::open(&path).unwrap();
+    let mut restarted =
+        EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
+    let _ = restarted.recover_on_boot();
+    activate(&mut restarted, &me);
+    let (_, recovered, _) = open(&mut restarted, pinned_strict(&pin, OPTIMISTIC_KIND));
+    let row = recovered
+        .row(&expected_id)
+        .expect("the cold snapshot returns the accepted canonical row");
+    assert_eq!(row.signature_state, nmp::RowSignatureState::Pending);
+    assert!(
+        row.event.verify().is_err(),
+        "restart must preserve the explicit pending state, not bless the sentinel"
     );
 }
 

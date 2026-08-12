@@ -205,6 +205,9 @@ fn apply_deltas(current: &mut BTreeSet<nostr::EventId>, batch: &[RowDelta]) {
             RowDelta::Added(row) => {
                 current.insert(row.event.id);
             }
+            RowDelta::Updated(row) => {
+                current.insert(row.event.id);
+            }
             RowDelta::Removed(id) => {
                 current.remove(id);
             }

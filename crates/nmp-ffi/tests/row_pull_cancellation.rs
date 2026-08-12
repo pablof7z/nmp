@@ -206,6 +206,9 @@ fn apply_ids(ids: &mut BTreeSet<String>, frame: &FfiFrame) {
             FfiRowDelta::Added { row } => {
                 ids.insert(row.id.clone());
             }
+            FfiRowDelta::Updated { row } => {
+                ids.insert(row.id.clone());
+            }
             FfiRowDelta::SourcesGrew { .. } => {}
             FfiRowDelta::Removed { id } => {
                 ids.remove(id);

@@ -14,6 +14,7 @@ final class TaggingTests: XCTestCase {
             tags: tags,
             content: "body",
             sig: String(repeating: "c", count: 128),
+            signatureState: .signed,
             sources: sources
         )
     }

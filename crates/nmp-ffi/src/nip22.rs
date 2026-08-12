@@ -414,6 +414,7 @@ mod tests {
                 .collect(),
             content: composed.content.clone(),
             sig: "".repeat(64),
+            signature_state: crate::types::FfiRowSignatureState::Pending,
             sources: vec![],
         };
         let decoded = decode_comment(row).expect("valid comment must decode");
@@ -431,6 +432,7 @@ mod tests {
             tags: vec![],
             content: String::new(),
             sig: "".repeat(64),
+            signature_state: crate::types::FfiRowSignatureState::Pending,
             sources: vec![],
         };
         let err = decode_comment(row).unwrap_err();

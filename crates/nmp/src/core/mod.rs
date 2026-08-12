@@ -101,7 +101,7 @@ use nmp_store::{
     PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
     PublishQueueTerminalOutcome, PublishQueueTransientCause, ReceiptState, RelayObserved,
-    RemoveQueueEntryOutcome, VerifiedSignature,
+    RemoveQueueEntryOutcome, SigState, VerifiedSignature,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -651,15 +651,48 @@ impl ReceiptReplayPage {
     }
 }
 
-/// The canonical row value (#105): the event plus its sorted, deduplicated
-/// relay-observation set -- `nmp_store::Provenance::seen`'s keys, projected
-/// honestly rather than mirrored into a second parallel provenance store.
+/// Whether a canonical row already carries a cryptographically verified
+/// signature. This is explicit because a locally accepted optimistic row has
+/// its final id and event body before its signer answers; its placeholder
+/// signature must never be mistaken for a valid Nostr signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RowSignatureState {
+    /// Locally accepted and query-visible, but still carrying NMP's internal
+    /// placeholder signature while the exact signer is pending.
+    Pending,
+    /// Carries a signature verified at relay ingest or signer promotion.
+    Signed,
+}
+
+impl RowSignatureState {
+    fn from_store(state: SigState) -> Self {
+        match state {
+            SigState::Pending => Self::Pending,
+            SigState::Signed => Self::Signed,
+        }
+    }
+}
+
+pub(super) fn row_signature_state(provenance: &nmp_store::Provenance) -> RowSignatureState {
+    provenance
+        .local
+        .as_ref()
+        .map_or(RowSignatureState::Signed, |local| {
+            RowSignatureState::from_store(local.sig_state)
+        })
+}
+
+/// The canonical row value (#105): the event, its explicit signature state,
+/// and its sorted, deduplicated relay-observation set --
+/// `nmp_store::Provenance::seen`'s keys, projected honestly rather than
+/// mirrored into a second parallel provenance store.
 /// `sources` only ever grows for a given event id (`Provenance::
 /// merge_observation` never removes an entry), so `Row`/`RowDelta` never
 /// need a "sources shrank" case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub event: nostr::Event,
+    pub signature_state: RowSignatureState,
     pub sources: BTreeSet<RelayUrl>,
 }
 
@@ -736,6 +769,10 @@ pub enum RowDelta {
     /// its current relay-provenance set) so the app never has to look
     /// either up separately.
     Added(Row),
+    /// A row that already matches changed without changing event id. Carries
+    /// the complete current row so signature promotion and simultaneous
+    /// provenance growth compose without either fact being lost.
+    Updated(Row),
     /// The SAME row already matched (#105): its relay-provenance SET grew --
     /// a relay not already in it delivered this exact event id. This is a
     /// `BTreeSet<RelayUrl>` compare, not a timestamp compare: an
@@ -765,17 +802,17 @@ impl RowDelta {
     pub fn id(&self) -> EventId {
         match self {
             RowDelta::Added(row) => row.event.id,
+            RowDelta::Updated(row) => row.event.id,
             RowDelta::SourcesGrew { id, .. } => *id,
             RowDelta::Removed(id) => *id,
         }
     }
 
-    /// The event payload, if this is an `Added` delta (`None` for
-    /// `SourcesGrew`/`Removed` -- the app is expected to already hold the
-    /// event from an earlier `Added`).
+    /// The event payload, if this is an `Added` or complete same-id `Updated`
+    /// delta (`None` for `SourcesGrew`/`Removed`).
     pub fn event(&self) -> Option<&nostr::Event> {
         match self {
-            RowDelta::Added(row) => Some(&row.event),
+            RowDelta::Added(row) | RowDelta::Updated(row) => Some(&row.event),
             RowDelta::SourcesGrew { .. } | RowDelta::Removed(_) => None,
         }
     }
@@ -1567,6 +1604,7 @@ struct PendingHistoryLoad {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RememberedRow {
     created_at: u64,
+    signature_state: RowSignatureState,
     sources: BTreeSet<RelayUrl>,
 }
 

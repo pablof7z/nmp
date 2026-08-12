@@ -102,6 +102,7 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
         .expect("parity fixture signs");
     let row = nmp::Row {
         event: parent.clone(),
+        signature_state: nmp::RowSignatureState::Signed,
         sources: std::collections::BTreeSet::from([relay.clone()]),
     };
 
@@ -429,6 +430,7 @@ struct NormRow {
     tags: Vec<Vec<String>>,
     content: String,
     sig: String,
+    signature_state: String,
     /// #105: the row's relay-provenance set, normalized the same way every
     /// other relay identifier in this file is (loopback placeholder).
     sources: Vec<String>,
@@ -1291,6 +1293,10 @@ fn direct_row(row: &Row, relay: &str) -> NormRow {
         tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
         content: event.content.clone(),
         sig: event.sig.to_string(),
+        signature_state: match row.signature_state {
+            nmp::RowSignatureState::Pending => "pending".to_string(),
+            nmp::RowSignatureState::Signed => "signed".to_string(),
+        },
         sources: row
             .sources
             .iter()
@@ -1303,6 +1309,10 @@ fn apply_direct_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<RowDelt
     for delta in deltas {
         match delta {
             RowDelta::Added(row) => {
+                let normalized = direct_row(&row, relay);
+                rows.insert(normalized.id.clone(), normalized);
+            }
+            RowDelta::Updated(row) => {
                 let normalized = direct_row(&row, relay);
                 rows.insert(normalized.id.clone(), normalized);
             }
@@ -1334,6 +1344,31 @@ fn apply_ffi_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<FfiRowDelt
                     tags: row.tags,
                     content: row.content,
                     sig: row.sig,
+                    signature_state: match row.signature_state {
+                        nmp_ffi::types::FfiRowSignatureState::Pending => "pending".to_string(),
+                        nmp_ffi::types::FfiRowSignatureState::Signed => "signed".to_string(),
+                    },
+                    sources: row
+                        .sources
+                        .iter()
+                        .map(|url| normalize_url(url, relay))
+                        .collect(),
+                };
+                rows.insert(normalized.id.clone(), normalized);
+            }
+            FfiRowDelta::Updated { row } => {
+                let normalized = NormRow {
+                    id: row.id,
+                    pubkey: row.pubkey,
+                    created_at: row.created_at,
+                    kind: row.kind,
+                    tags: row.tags,
+                    content: row.content,
+                    sig: row.sig,
+                    signature_state: match row.signature_state {
+                        nmp_ffi::types::FfiRowSignatureState::Pending => "pending".to_string(),
+                        nmp_ffi::types::FfiRowSignatureState::Signed => "signed".to_string(),
+                    },
                     sources: row
                         .sources
                         .iter()

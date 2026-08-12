@@ -620,9 +620,11 @@ mod history_mutation_tests {
                     event: inserted,
                     observed_relays: BTreeSet::from([relay.clone()]),
                     locally_accepted: false,
+                    signature_state: nmp_store::SigState::Signed,
                 }],
                 removed: vec![removed],
                 provenance_grew: Vec::new(),
+                updated: Vec::new(),
             };
 
             core.history_store_queries.set(0);

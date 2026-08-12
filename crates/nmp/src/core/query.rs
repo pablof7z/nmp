@@ -3310,6 +3310,7 @@ impl<S: EventStore> EngineCore<S> {
                 .clone()
                 .expect("direct projection requires prior evidence");
             let mut added = BTreeMap::<EventId, Row>::new();
+            let mut updated = BTreeMap::<EventId, Row>::new();
             let mut sources_grew = BTreeSet::<EventId>::new();
             let mut removed = BTreeSet::<EventId>::new();
 
@@ -3327,6 +3328,7 @@ impl<S: EventStore> EngineCore<S> {
                     row.event.id,
                     RememberedRow {
                         created_at: row.event.created_at.as_secs(),
+                        signature_state: RowSignatureState::from_store(row.signature_state),
                         sources: sources.clone(),
                     },
                 );
@@ -3338,6 +3340,7 @@ impl<S: EventStore> EngineCore<S> {
                             crate::ingest_attribution::projection_event_clone();
                             row.event.clone()
                         },
+                        signature_state: RowSignatureState::from_store(row.signature_state),
                         sources,
                     },
                 );
@@ -3347,22 +3350,66 @@ impl<S: EventStore> EngineCore<S> {
                     continue;
                 }
                 if let Some(remembered) = state.last_rows.get_mut(&row.event.id) {
+                    let signature_state = RowSignatureState::from_store(row.signature_state);
+                    let signature_changed = remembered.signature_state != signature_state;
                     let prior_len = remembered.sources.len();
                     remembered
                         .sources
                         .extend(row.observed_relays.iter().cloned());
-                    if remembered.sources.len() != prior_len {
+                    remembered.signature_state = signature_state;
+                    if signature_changed {
+                        updated.insert(
+                            row.event.id,
+                            Row {
+                                event: row.event.clone(),
+                                signature_state,
+                                sources: remembered.sources.clone(),
+                            },
+                        );
+                        sources_grew.remove(&row.event.id);
+                    } else if remembered.sources.len() != prior_len {
                         sources_grew.insert(row.event.id);
                     }
                 }
             }
+            for row in &changes.updated {
+                if !matches(&row.event) {
+                    continue;
+                }
+                if let Some(remembered) = state.last_rows.get_mut(&row.event.id) {
+                    let signature_state = RowSignatureState::from_store(row.signature_state);
+                    remembered.signature_state = signature_state;
+                    remembered.sources = row.observed_relays.clone();
+                    if let Some(added_row) = added.get_mut(&row.event.id) {
+                        added_row.event = row.event.clone();
+                        added_row.signature_state = signature_state;
+                        added_row.sources = remembered.sources.clone();
+                    } else {
+                        updated.insert(
+                            row.event.id,
+                            Row {
+                                event: row.event.clone(),
+                                signature_state,
+                                sources: remembered.sources.clone(),
+                            },
+                        );
+                    }
+                    sources_grew.remove(&row.event.id);
+                }
+            }
 
-            let changed_current: BTreeSet<_> =
-                added.keys().chain(sources_grew.iter()).copied().collect();
+            let changed_current: BTreeSet<_> = added
+                .keys()
+                .chain(updated.keys())
+                .chain(sources_grew.iter())
+                .copied()
+                .collect();
             let mut delta = Vec::with_capacity(changed_current.len() + removed.len());
             for event_id in changed_current {
                 if let Some(row) = added.remove(&event_id) {
                     delta.push(RowDelta::Added(row));
+                } else if let Some(row) = updated.remove(&event_id) {
+                    delta.push(RowDelta::Updated(row));
                 } else {
                     delta.push(RowDelta::SourcesGrew {
                         id: event_id,
@@ -3383,7 +3430,7 @@ impl<S: EventStore> EngineCore<S> {
         // insertion/eviction and exact delta ordering straightforward.
         let previous = state.last_rows.clone();
         let mut current = previous.clone();
-        let mut added = BTreeMap::<EventId, Row>::new();
+        let mut complete_rows = BTreeMap::<EventId, Row>::new();
 
         for event in &changes.removed {
             if matches(event) {
@@ -3399,10 +3446,11 @@ impl<S: EventStore> EngineCore<S> {
                 row.event.id,
                 RememberedRow {
                     created_at: row.event.created_at.as_secs(),
+                    signature_state: RowSignatureState::from_store(row.signature_state),
                     sources: sources.clone(),
                 },
             );
-            added.insert(
+            complete_rows.insert(
                 row.event.id,
                 Row {
                     event: {
@@ -3410,6 +3458,7 @@ impl<S: EventStore> EngineCore<S> {
                         crate::ingest_attribution::projection_event_clone();
                         row.event.clone()
                     },
+                    signature_state: RowSignatureState::from_store(row.signature_state),
                     sources,
                 },
             );
@@ -3422,6 +3471,32 @@ impl<S: EventStore> EngineCore<S> {
                 remembered
                     .sources
                     .extend(row.observed_relays.iter().cloned());
+                remembered.signature_state = RowSignatureState::from_store(row.signature_state);
+                complete_rows.insert(
+                    row.event.id,
+                    Row {
+                        event: row.event.clone(),
+                        signature_state: remembered.signature_state,
+                        sources: remembered.sources.clone(),
+                    },
+                );
+            }
+        }
+        for row in &changes.updated {
+            if !matches(&row.event) {
+                continue;
+            }
+            if let Some(remembered) = current.get_mut(&row.event.id) {
+                remembered.signature_state = RowSignatureState::from_store(row.signature_state);
+                remembered.sources = row.observed_relays.clone();
+                complete_rows.insert(
+                    row.event.id,
+                    Row {
+                        event: row.event.clone(),
+                        signature_state: remembered.signature_state,
+                        sources: remembered.sources.clone(),
+                    },
+                );
             }
         }
 
@@ -3451,10 +3526,17 @@ impl<S: EventStore> EngineCore<S> {
         for (event_id, remembered) in &current {
             match previous.get(event_id) {
                 None => delta.push(RowDelta::Added(
-                    added
+                    complete_rows
                         .remove(event_id)
                         .expect("new direct row came from committed insertion"),
                 )),
+                Some(last) if last.signature_state != remembered.signature_state => {
+                    delta.push(RowDelta::Updated(
+                        complete_rows
+                            .remove(event_id)
+                            .expect("signature change carries the complete current row"),
+                    ));
+                }
                 Some(last) if last.sources != remembered.sources => {
                     delta.push(RowDelta::SourcesGrew {
                         id: *event_id,
@@ -3533,6 +3615,7 @@ impl<S: EventStore> EngineCore<S> {
                     *id,
                     RememberedRow {
                         created_at: row.event.created_at.as_secs(),
+                        signature_state: row.signature_state,
                         sources: row.sources.clone(),
                     },
                 )
@@ -3546,6 +3629,9 @@ impl<S: EventStore> EngineCore<S> {
         for (event_id, row) in current {
             match state.last_rows.get(&event_id) {
                 None => delta.push(RowDelta::Added(row)),
+                Some(last) if last.signature_state != row.signature_state => {
+                    delta.push(RowDelta::Updated(row));
+                }
                 Some(last) if last.sources != row.sources => {
                     delta.push(RowDelta::SourcesGrew {
                         id: event_id,
@@ -3789,9 +3875,13 @@ impl<S: EventStore> EngineCore<S> {
                         continue;
                     }
                 }
-                by_id.entry(se.event.id).or_insert_with(|| Row {
-                    event: se.event,
-                    sources: se.provenance.seen.into_keys().collect(),
+                by_id.entry(se.event.id).or_insert_with(|| {
+                    let signature_state = row_signature_state(&se.provenance);
+                    Row {
+                        event: se.event,
+                        signature_state,
+                        sources: se.provenance.seen.into_keys().collect(),
+                    }
                 });
             }
         }

@@ -32,6 +32,9 @@ use super::RowsMsg;
 enum PendingTransition {
     /// Absent at the receiver's baseline, present now.
     Added(Row),
+    /// Present at the receiver's baseline and now, with the latest complete
+    /// row value (currently signature promotion).
+    Updated(Row),
     /// Present at the baseline and now, with the latest complete source set.
     SourcesGrew(BTreeSet<RelayUrl>),
     /// Present at the baseline, absent now.
@@ -68,12 +71,16 @@ impl PendingRows {
         let previous = self.by_id.remove(&id);
         let next = match (previous, delta) {
             (None, RowDelta::Added(row)) => Some(PendingTransition::Added(row)),
+            (None, RowDelta::Updated(row)) => Some(PendingTransition::Updated(row)),
             (None, RowDelta::SourcesGrew { sources, .. }) => {
                 Some(PendingTransition::SourcesGrew(sources))
             }
             (None, RowDelta::Removed(_)) => Some(PendingTransition::Removed),
 
             (Some(PendingTransition::Added(_)), RowDelta::Added(row)) => {
+                Some(PendingTransition::Added(row))
+            }
+            (Some(PendingTransition::Added(_)), RowDelta::Updated(row)) => {
                 Some(PendingTransition::Added(row))
             }
             (Some(PendingTransition::Added(mut row)), RowDelta::SourcesGrew { sources, .. }) => {
@@ -85,6 +92,9 @@ impl PendingRows {
             (Some(PendingTransition::SourcesGrew(_)), RowDelta::Added(row)) => {
                 Some(PendingTransition::SourcesGrew(row.sources))
             }
+            (Some(PendingTransition::SourcesGrew(_)), RowDelta::Updated(row)) => {
+                Some(PendingTransition::Updated(row))
+            }
             (Some(PendingTransition::SourcesGrew(_)), RowDelta::SourcesGrew { sources, .. }) => {
                 Some(PendingTransition::SourcesGrew(sources))
             }
@@ -94,6 +104,9 @@ impl PendingRows {
 
             (Some(PendingTransition::Removed), RowDelta::Added(row)) => {
                 Some(PendingTransition::Replaced(row))
+            }
+            (Some(PendingTransition::Removed), RowDelta::Updated(_)) => {
+                Some(PendingTransition::Removed)
             }
             // `SourcesGrew` is legal only while the row remains present. Once
             // this pending transition has removed it, a source-only delta
@@ -110,11 +123,26 @@ impl PendingRows {
             (Some(PendingTransition::Replaced(_)), RowDelta::Added(row)) => {
                 Some(PendingTransition::Replaced(row))
             }
+            (Some(PendingTransition::Replaced(_)), RowDelta::Updated(row)) => {
+                Some(PendingTransition::Replaced(row))
+            }
             (Some(PendingTransition::Replaced(mut row)), RowDelta::SourcesGrew { sources, .. }) => {
                 row.sources = sources;
                 Some(PendingTransition::Replaced(row))
             }
             (Some(PendingTransition::Replaced(_)), RowDelta::Removed(_)) => {
+                Some(PendingTransition::Removed)
+            }
+
+            (Some(PendingTransition::Updated(_)), RowDelta::Added(row))
+            | (Some(PendingTransition::Updated(_)), RowDelta::Updated(row)) => {
+                Some(PendingTransition::Updated(row))
+            }
+            (Some(PendingTransition::Updated(mut row)), RowDelta::SourcesGrew { sources, .. }) => {
+                row.sources = sources;
+                Some(PendingTransition::Updated(row))
+            }
+            (Some(PendingTransition::Updated(_)), RowDelta::Removed(_)) => {
                 Some(PendingTransition::Removed)
             }
         };
@@ -128,6 +156,7 @@ impl PendingRows {
         for (id, transition) in self.by_id {
             match transition {
                 PendingTransition::Added(row) => deltas.push(RowDelta::Added(row)),
+                PendingTransition::Updated(row) => deltas.push(RowDelta::Updated(row)),
                 PendingTransition::SourcesGrew(sources) => {
                     deltas.push(RowDelta::SourcesGrew { id, sources });
                 }
@@ -375,6 +404,7 @@ mod tests {
             )
             .sign_with_keys(keys)
             .unwrap(),
+            signature_state: crate::core::RowSignatureState::Signed,
             sources: BTreeSet::new(),
         }
     }
@@ -383,6 +413,9 @@ mod tests {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
+                    rows.insert(row.event.id, row.clone());
+                }
+                RowDelta::Updated(row) => {
                     rows.insert(row.event.id, row.clone());
                 }
                 RowDelta::SourcesGrew { id, sources } => {
@@ -523,6 +556,39 @@ mod tests {
             deltas.as_slice(),
             [RowDelta::SourcesGrew { id: delta_id, sources }]
                 if *delta_id == id && sources == &expected
+        ));
+        assert_eq!(evidence, latest_evidence());
+    }
+
+    #[test]
+    fn slow_observer_never_retains_a_pending_row_after_signature_promotion() {
+        let keys = Keys::generate();
+        let signed = row(&keys, 1, "promoted while observer is slow");
+        let mut pending = signed.clone();
+        pending.signature_state = crate::core::RowSignatureState::Pending;
+        pending.event.sig = nmp_store::sentinel_signature();
+
+        let (tx, rx) = rows_channel();
+        send_rows(
+            &tx,
+            vec![RowDelta::Added(pending)],
+            vec![AcquisitionEvidence::default()],
+        );
+        // The receiver has not consumed the optimistic frame. Promotion must
+        // compose into the pending Added and replace its complete payload.
+        send_rows(
+            &tx,
+            vec![RowDelta::Updated(signed.clone())],
+            latest_evidence(),
+        );
+
+        let (deltas, evidence, _) = rx.recv().unwrap();
+        assert!(matches!(
+            deltas.as_slice(),
+            [RowDelta::Added(row)]
+                if row == &signed
+                    && row.signature_state == crate::core::RowSignatureState::Signed
+                    && row.event.verify().is_ok()
         ));
         assert_eq!(evidence, latest_evidence());
     }

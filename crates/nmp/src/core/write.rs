@@ -3043,6 +3043,7 @@ impl<S: EventStore> EngineCore<S> {
         };
 
         let mut co_receipts = Vec::new();
+        let mut signature_promoted = false;
         {
             let intent_id = pending.intent_id;
             if !pending.already_signed {
@@ -3052,6 +3053,7 @@ impl<S: EventStore> EngineCore<S> {
                     .promote_signed(intent_id, verified)
                 {
                     Ok(PromoteOutcome::Promoted { co_signed, .. }) => {
+                        signature_promoted = true;
                         // The store atomically promotes every exact-duplicate
                         // co-owner against the same canonical bytes. Advance
                         // each matching in-memory obligation too; otherwise
@@ -3081,6 +3083,16 @@ impl<S: EventStore> EngineCore<S> {
                         return;
                     }
                 }
+            }
+        }
+
+        if signature_promoted {
+            match self.resolver.react_to_signature_promotion(event.id) {
+                Ok(committed) => self.apply_committed_mutation(committed, effects),
+                // The store promotion is already committed. Preserve it and
+                // degrade the projection rather than compensating a validly
+                // signed obligation or manufacturing observer state.
+                Err(error) => self.degrade_store(error, effects),
             }
         }
 

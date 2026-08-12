@@ -4905,6 +4905,24 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "Updated",
+            discr: None,
+            fields: [
+                Field {
+                    name: "row",
+                    type_: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiRow",
+                    },
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: Some(
+                "The same event id now has a new complete canonical row value.",
+            ),
+        },
+        Variant {
             name: "SourcesGrew",
             discr: None,
             fields: [
@@ -5009,6 +5027,32 @@ enum Enum {
     non_exhaustive: false,
     docstring: Some(
         "Exact lifecycle refusal for the private row-pull ticket used by the native\nSDK bridges (#762).\n\nThe ticket exists before Kotlin enters UniFFI's cancellable async\nREADY/complete split. It is intentionally not an app-facing observation\nnoun: Swift and Kotlin create, receive, and settle it inside their existing\n`AsyncSequence`/`Flow` adapters.",
+    ),
+}
+
+enum Enum {
+    name: "FfiRowSignatureState",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Pending",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Signed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: Some(
+        "`nmp::RowSignatureState` mirror.",
     ),
 }
 
@@ -7981,6 +8025,17 @@ record Record {
             type_: String,
             default: None,
             docstring: None,
+        },
+        Field {
+            name: "signature_state",
+            type_: Enum {
+                module_path: "nmp_ffi",
+                name: "FfiRowSignatureState",
+            },
+            default: None,
+            docstring: Some(
+                "Explicit canonical signature state. `Pending` means `sig` is NMP's\nstructurally parseable placeholder, never a verified Nostr signature.",
+            ),
         },
         Field {
             name: "sources",

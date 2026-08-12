@@ -104,6 +104,9 @@ fn apply(rows: &mut BTreeMap<nostr::EventId, Event>, batch: &HistoryBatch) {
             RowDelta::Added(row) => {
                 assert!(rows.insert(row.event.id, row.event.clone()).is_none());
             }
+            RowDelta::Updated(row) => {
+                assert!(rows.insert(row.event.id, row.event.clone()).is_some());
+            }
             RowDelta::Removed(id) => {
                 assert!(rows.remove(id).is_some());
             }

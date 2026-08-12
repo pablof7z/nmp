@@ -39,9 +39,9 @@ use crate::types::{
     FfiLaneCount, FfiLiveQuery, FfiNotSentReason, FfiPublishQueueEntry, FfiQueueRelayState,
     FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason, FfiRelayDiagnostics,
     FfiRelayInformationErrorKind, FfiRelayState, FfiRelayWaiting, FfiRemoveQueueEntryError,
-    FfiRetryCause, FfiRow, FfiRowDelta, FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact,
-    FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSigningState, FfiSourceAuthority,
-    FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage,
+    FfiRetryCause, FfiRow, FfiRowDelta, FfiRowSignatureState, FfiSelector, FfiSetAlgebra, FfiSetOp,
+    FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSigningState,
+    FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage,
     FfiStalledWriteTotals, FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteFact,
     FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
@@ -1155,6 +1155,7 @@ mod window_conversion_tests {
         let relay = RelayUrl::parse("wss://window.example").unwrap();
         let row = Row {
             event: event.clone(),
+            signature_state: nmp::RowSignatureState::Signed,
             sources: std::collections::BTreeSet::from([relay]),
         };
         let frame = Frame {
@@ -1192,6 +1193,7 @@ mod window_conversion_tests {
         let relay = RelayUrl::parse("wss://unbounded.example").unwrap();
         let row = Row {
             event: event.clone(),
+            signature_state: nmp::RowSignatureState::Signed,
             sources: std::collections::BTreeSet::from([relay]),
         };
         let frame = Frame {
@@ -1541,6 +1543,10 @@ pub fn row_to_ffi_row(row: &Row) -> FfiRow {
         tags: e.tags.iter().map(|t| t.clone().to_vec()).collect(),
         content: e.content.clone(),
         sig: e.sig.to_string(),
+        signature_state: match row.signature_state {
+            nmp::RowSignatureState::Pending => FfiRowSignatureState::Pending,
+            nmp::RowSignatureState::Signed => FfiRowSignatureState::Signed,
+        },
         sources: row.sources.iter().map(RelayUrl::to_string).collect(),
     }
 }
@@ -1548,6 +1554,9 @@ pub fn row_to_ffi_row(row: &Row) -> FfiRow {
 pub fn row_delta_to_ffi(d: &RowDelta) -> FfiRowDelta {
     match d {
         RowDelta::Added(row) => FfiRowDelta::Added {
+            row: row_to_ffi_row(row),
+        },
+        RowDelta::Updated(row) => FfiRowDelta::Updated {
             row: row_to_ffi_row(row),
         },
         RowDelta::SourcesGrew { id, sources } => FfiRowDelta::SourcesGrew {

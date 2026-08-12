@@ -37,7 +37,8 @@ import uniffi.nmp_ffi.repost as ffiRepost
 // nmp-native:endif
 import uniffi.nmp_ffi.withContent as ffiWithContent
 
-internal fun Row.toFfi(): FfiRow = FfiRow(id, pubkey, createdAt, kind, tags, content, sig, sources)
+internal fun Row.toFfi(): FfiRow =
+    FfiRow(id, pubkey, createdAt, kind, tags, content, sig, signatureState.toFfi(), sources)
 
 internal fun FfiEventBuilder.toPayload(): WritePayload =
     WritePayload.Event(kind, tags, content, createdAt)
