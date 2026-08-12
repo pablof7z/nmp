@@ -1,4 +1,4 @@
-schema = 1
+schema = 2
 
 # Cargo owns dependency resolution. Each record below names only the
 # forwarding feature on the one native FFI package and the source files that
@@ -35,6 +35,26 @@ jvm_toolchain = 17
 dependencies = [
   "net.java.dev.jna:jna:5.14.0",
   "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0",
+]
+
+[android]
+project_template = "Packages/NMPAndroid"
+gradle_wrapper_project = "Packages/NMPKotlin"
+project_name = "nmp-android"
+namespace = "com.nmp.sdk"
+artifact_id = "nmp-android"
+min_sdk = 26
+compile_sdk = 35
+build_tools_version = "35.0.0"
+ndk_version = "27.2.12479018"
+cargo_ndk_version = "4.1.2"
+gradle_version = "8.10"
+android_gradle_plugin_version = "8.7.3"
+kotlin_version = "2.0.21"
+jdk_version = 17
+abis = [
+  { name = "arm64-v8a", rust_target = "aarch64-linux-android" },
+  { name = "x86_64", rust_target = "x86_64-linux-android" },
 ]
 
 [core]
@@ -83,7 +103,7 @@ kotlin_sources = [
   { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Receipt.kt", destination = "com/nmp/sdk/Receipt.kt" },
   { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/RelayInformation.kt", destination = "com/nmp/sdk/RelayInformation.kt" },
   { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Row.kt", destination = "com/nmp/sdk/Row.kt" },
-  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/SecureKeyStoreAccountStore.kt", destination = "com/nmp/sdk/SecureKeyStoreAccountStore.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/SecureKeyStoreAccountStore.kt", destination = "com/nmp/sdk/SecureKeyStoreAccountStore.kt", platforms = ["kotlin-jvm"] },
   { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Signing.kt", destination = "com/nmp/sdk/Signing.kt" },
   { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Tagging.kt", destination = "com/nmp/sdk/Tagging.kt" },
   { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Window.kt", destination = "com/nmp/sdk/Window.kt" },

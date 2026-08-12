@@ -48,10 +48,13 @@ python3 tools/nmp-native/nmp_native.py prepare \
   --output path/to/app/Generated/NMP
 ```
 
-Use `--platform kotlin-jvm` for the current desktop-JVM qualification product,
-or repeat `--platform` to produce both. The command asks Cargo to resolve the
-selection, builds one native library, generates UniFFI from that exact library,
-materializes only matching hand-written wrappers, and writes
+Use `--platform kotlin-jvm` for desktop JVM or `--platform android` for one
+feature-selected Android AAR. Platforms may be repeated in one invocation. The
+Android output includes its local Maven repository and exact `arm64-v8a` and
+`x86_64` libraries at API 26; the app still names only `com.nmp.sdk`. The
+command asks Cargo to resolve the selection, builds the target-native library,
+generates UniFFI from that exact contract, materializes only matching
+hand-written wrappers, and writes
 `nmp-native-provenance.json`. It contains no protocol-family branches: adding a
 family adds one catalog record and owned sources. Cargo remains the only
 dependency graph, so a real feature dependency activates and materializes its

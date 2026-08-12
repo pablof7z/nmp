@@ -53,3 +53,17 @@ Feature: Native applications select one exact NMP capability set
       When the application prepares its native NMP library
       Then the generated Swift and Kotlin write-routing surfaces expose only explicit routing
       And no automatic write can enter durable custody through the native boundary
+
+  Rule: Android changes packaging, not feature selection
+
+    # nmp:id=MODULES-NATIVE-SELECTION-005
+    # nmp:status=built
+    # nmp:evidence=script:repository::scripts/check-android-feature-matrix.sh
+    # nmp:falsifier=Remove one ABI, mismatch the generated binding, materialize an unselected wrapper, or diverge the desktop and Android feature inventories; the Android matrix must fail.
+    Scenario: One selected Kotlin surface becomes one Android AAR
+      Given an application feature declaration
+      When the application prepares Kotlin JVM and Android outputs
+      Then Cargo resolves the same feature set for both outputs
+      And both outputs contain the same selected feature wrapper inventory
+      And the Android output contains one matching NMP library for every declared ABI
+      And a clean Android application consumes only com.nmp.sdk from the generated repository

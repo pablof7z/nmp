@@ -354,8 +354,11 @@ about current code:
   acquisition, async MainActor progress, and typed malformed-document refusal
   through the public API. Master packages the complete device + simulator +
   macOS XCFramework slice set, but no headless gate claims iOS runtime behavior;
-  physical-device qualification remains separate. The Kotlin package remains a
-  desktop-JVM projection; this work does not add or qualify an Android AAR.
+  physical-device qualification remains separate. Kotlin now has a
+  source-reproducible feature-selected Android AAR with exact API/ABI,
+  binding/native, wrapper-inventory, semantic-reproducibility, and clean
+  external-consumer checks (#831). A running Android engine, platform lifecycle,
+  and secure recovery remain unqualified until #832–#834.
   **The hidden cache/flight/waiter copy amplification is closed
   (#467).** One immutable payload owns the parsed document (including
   structured maps), exact raw JSON, and revision; cache entries, refreshing

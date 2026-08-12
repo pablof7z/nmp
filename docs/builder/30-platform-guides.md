@@ -53,17 +53,22 @@ composables against the public SDK without adding Compose to the core module.
 It owns no engine, HTTP, timer, polling, cache, or image loader and is not an
 Android artifact qualification; see [Controlled relay identity UI](36-relay-ui.md).
 
-The Android product must include a standard Keystore-backed provider and prove
-process-death receipt/signer reattachment, not merely JVM binding generation.
-Newest-state observation is bounded/conflated while receipt history remains
-recoverable.
+The Android AAR is built from the same app feature manifest as Swift and
+desktop JVM. It packages only the selected `com.nmp.sdk` wrappers and matching
+UniFFI contract, with API 26 and exact `arm64-v8a`/`x86_64` slices. This is a
+packaging/consumption qualification, not yet a running-engine claim.
+
+The supported Android product must still include a standard Keystore-backed
+provider and prove process-death receipt/signer reattachment. Newest-state
+observation is bounded/conflated while receipt history remains recoverable.
 
 The current JVM projection also exposes `NMPInsecureFileAccountStore(Path)` for
 explicit plaintext sandbox persistence. It provides the same restore/clear
 semantics as Swift and the same warning: it is not Keystore or a secure Android
 production provider.
 
-Android AAR/runtime Compose/Keystore and NIP-55 execution remain open work.
+Android emulator runtime, lifecycle, Compose capstone, Keystore, and NIP-55
+execution remain open work (#832–#836).
 
 ## Other platforms
 
