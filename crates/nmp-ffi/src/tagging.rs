@@ -52,6 +52,10 @@ use nmp::{At, InterpolatedContent, Mention};
     feature = "nipc7"
 ))]
 pub(crate) fn row_from_ffi(row: FfiRow) -> Result<nmp::Row, FfiError> {
+    let signature_state = match row.signature_state {
+        crate::types::FfiRowSignatureState::Pending => nmp::RowSignatureState::Pending,
+        crate::types::FfiRowSignatureState::Signed => nmp::RowSignatureState::Signed,
+    };
     let event = signed_event_from_ffi(
         row.id,
         row.pubkey,
@@ -66,7 +70,11 @@ pub(crate) fn row_from_ffi(row: FfiRow) -> Result<nmp::Row, FfiError> {
         .iter()
         .map(|url| crate::convert::parse_relay_url(url))
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-    Ok(nmp::Row { event, sources })
+    Ok(nmp::Row {
+        event,
+        signature_state,
+        sources,
+    })
 }
 
 fn builder_to_ffi(builder: nmp::EventBuilder) -> FfiEventBuilder {
@@ -241,6 +249,7 @@ mod tests {
             .expect("test event signs");
         row_to_ffi_row(&nmp::Row {
             event,
+            signature_state: nmp::RowSignatureState::Signed,
             sources: sources
                 .iter()
                 .map(|url| nostr::RelayUrl::parse(url).expect("test relay parses"))

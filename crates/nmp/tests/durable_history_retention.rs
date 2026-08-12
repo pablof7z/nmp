@@ -41,6 +41,9 @@ fn receive_current_ids(rx: &RowsReceiver) -> BTreeSet<EventId> {
                 RowDelta::Added(row) => {
                     current.insert(row.event.id);
                 }
+                RowDelta::Updated(row) => {
+                    current.insert(row.event.id);
+                }
                 RowDelta::Removed(id) => {
                     current.remove(&id);
                 }

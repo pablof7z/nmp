@@ -770,6 +770,7 @@ private final class DiagnosticsRaceState: @unchecked Sendable {
                     tags: [],
                     content: "deterministic",
                     sig: String(repeating: "3", count: 128),
+                    signatureState: .signed,
                     sources: ["wss://deterministic.example"]
                 )
             )

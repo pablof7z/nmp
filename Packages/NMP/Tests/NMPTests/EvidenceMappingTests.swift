@@ -357,6 +357,7 @@ final class EvidenceMappingTests: XCTestCase {
             tags: [],
             content: "hi",
             sig: "sig",
+            signatureState: .signed,
             sources: ["wss://r0.example"]
         )
         _ = accumulator.fold(
@@ -372,6 +373,30 @@ final class EvidenceMappingTests: XCTestCase {
 
         XCTAssertEqual(last.rows.count, 1, "SourcesGrew must never insert a second row for the same id")
         XCTAssertEqual(last.rows.first?.sources, ["wss://r0.example", "wss://r1.example"])
+    }
+
+    func testRowAccumulatorSignaturePromotionReplacesTheSameRow() throws {
+        let accumulator = RowAccumulator()
+        let evidence = [FfiAcquisitionEvidence(sources: [], shortfall: [])]
+        let pending = FfiRow(
+            id: "same-id", pubkey: "pk", createdAt: 1, kind: 1, tags: [],
+            content: "body", sig: "placeholder", signatureState: .pending, sources: []
+        )
+        _ = accumulator.fold(
+            FfiFrame(deltas: [.added(row: pending)], window: nil, evidence: evidence)
+        )
+        let signed = FfiRow(
+            id: "same-id", pubkey: "pk", createdAt: 1, kind: 1, tags: [],
+            content: "body", sig: "verified", signatureState: .signed, sources: []
+        )
+        let promoted = accumulator.fold(
+            FfiFrame(deltas: [.updated(row: signed)], window: nil, evidence: evidence)
+        )
+
+        XCTAssertEqual(promoted.rows.count, 1)
+        XCTAssertEqual(promoted.rows[0].id, "same-id")
+        XCTAssertEqual(promoted.rows[0].sig, "verified")
+        XCTAssertEqual(promoted.rows[0].signatureState, .signed)
     }
 
     func testDiagnosticsIntervalIsDistinctFromQueryEvidence() {

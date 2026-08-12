@@ -44,6 +44,7 @@ class NIP22Test {
                     ),
                 content = "nice episode",
                 sig = "0".repeat(128),
+                signatureState = RowSignatureState.Signed,
                 sources = emptyList(),
             )
         val decoded = decodeComment(row)
@@ -74,6 +75,7 @@ class NIP22Test {
                     ),
                 content = "",
                 sig = "0".repeat(128),
+                signatureState = RowSignatureState.Signed,
                 sources = emptyList(),
             )
         val error =
@@ -94,6 +96,7 @@ class NIP22Test {
                 tags = tags,
                 content = "",
                 sig = "0".repeat(128),
+                signatureState = RowSignatureState.Signed,
                 sources = emptyList(),
             )
 

@@ -360,8 +360,8 @@ pub use nmp_grammar::{
 // engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
 // design, and never reused as a query-level verdict either.
 pub use crate::core::{
-    AcquisitionEvidence, AuthPhase, Row, RowDelta, ShortfallFact, SourceEvidence, SourceStatus,
-    WindowLoad,
+    AcquisitionEvidence, AuthPhase, Row, RowDelta, RowSignatureState, ShortfallFact,
+    SourceEvidence, SourceStatus, WindowLoad,
 };
 pub use nmp_router::Lane;
 pub use nmp_store::CoverageInterval;

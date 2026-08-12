@@ -155,6 +155,9 @@ fn apply(observed: &mut Observed, deltas: Vec<RowDelta>) {
                     .or_insert_with(|| row.sources.clone());
                 observed.rows.insert(row.event.id, row);
             }
+            RowDelta::Updated(row) => {
+                observed.rows.insert(row.event.id, row);
+            }
             RowDelta::SourcesGrew { id, sources } => {
                 if let Some(row) = observed.rows.get_mut(&id) {
                     row.sources = sources;

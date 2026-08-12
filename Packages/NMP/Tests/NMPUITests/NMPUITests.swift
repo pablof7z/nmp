@@ -330,6 +330,7 @@ final class NMPUITests: XCTestCase {
             tags: [],
             content: "content",
             sig: String(repeating: "ef", count: 64),
+            signatureState: .signed,
             sources: []
         )
     }

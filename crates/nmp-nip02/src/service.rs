@@ -86,6 +86,9 @@ impl Accumulator {
                 RowDelta::Added(row) => {
                     self.rows.insert(row.event.id, row.event);
                 }
+                RowDelta::Updated(row) => {
+                    self.rows.insert(row.event.id, row.event);
+                }
                 RowDelta::Removed(id) => {
                     self.rows.remove(&id);
                 }

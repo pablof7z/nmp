@@ -10,6 +10,7 @@ import uniffi.nmp_ffi.FfiFrame
 import uniffi.nmp_ffi.FfiRequestRowsException
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiRowDelta
+import uniffi.nmp_ffi.FfiRowSignatureState
 import uniffi.nmp_ffi.FfiWindowContents
 import uniffi.nmp_ffi.FfiWindowLoad
 import kotlin.test.Test
@@ -184,6 +185,7 @@ class WindowTest {
             tags = emptyList(),
             content = id,
             sig = "sig",
+            signatureState = FfiRowSignatureState.SIGNED,
             sources = listOf("wss://window.example"),
         )
 }

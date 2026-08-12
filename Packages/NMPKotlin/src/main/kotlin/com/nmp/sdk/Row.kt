@@ -8,9 +8,30 @@ package com.nmp.sdk
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPhase
 import uniffi.nmp_ffi.FfiRow
+import uniffi.nmp_ffi.FfiRowSignatureState
 import uniffi.nmp_ffi.FfiShortfallFact
 import uniffi.nmp_ffi.FfiSourceEvidence
 import uniffi.nmp_ffi.FfiSourceStatus
+
+/** Whether this canonical row already carries a verified Nostr signature. */
+enum class RowSignatureState {
+    Pending,
+    Signed;
+
+    companion object {
+        fun from(ffi: FfiRowSignatureState): RowSignatureState =
+            when (ffi) {
+                FfiRowSignatureState.PENDING -> Pending
+                FfiRowSignatureState.SIGNED -> Signed
+            }
+    }
+
+    internal fun toFfi(): FfiRowSignatureState =
+        when (this) {
+            Pending -> FfiRowSignatureState.PENDING
+            Signed -> FfiRowSignatureState.SIGNED
+        }
+}
 
 /** One delivered event, verbatim. */
 data class Row(
@@ -22,6 +43,8 @@ data class Row(
     val tags: List<List<String>>,
     val content: String,
     val sig: String,
+    /** Pending means sig is NMP's placeholder, not a verified signature. */
+    val signatureState: RowSignatureState,
     /**
      * Sorted, deduplicated relay URLs that have delivered this event id
      * (#105) -- raw tokens, not a formatted/display field either.
@@ -38,6 +61,7 @@ data class Row(
                 tags = ffi.tags,
                 content = ffi.content,
                 sig = ffi.sig,
+                signatureState = RowSignatureState.from(ffi.signatureState),
                 sources = ffi.sources,
             )
     }
