@@ -90,17 +90,22 @@ public enum ContentPart: Sendable, Hashable {
     /// It is a QUOTE and never a thread reply: NIP-18's `q` exists precisely
     /// so *"quote reposts are not pulled and included as replies in threads"*.
     /// Replying is `chatReply(to:)`/`replyTo(_:)`, which point with `e`.
+    // nmp-native:if nip18
     case quote(Row)
+    // nmp-native:endif
 
     func toFfi() -> FfiContentPart {
         switch self {
         case .text(let text): return .text(text: text)
         case .person(let pubkey, let relay): return .person(pubkey: pubkey, relay: relay)
+        // nmp-native:if nip18
         case .quote(let target): return .quote(target: target.toFfi())
+        // nmp-native:endif
         }
     }
 }
 
+// nmp-native:if nipc7
 /// Compose a top-level NIP-C7 kind:9 chat.
 ///
 /// The other half of what `chatReply(to:)` closed: an app that replies no
@@ -116,7 +121,9 @@ public enum ContentPart: Sendable, Hashable {
 public func chat() -> WritePayload {
     WritePayload(NMPFFI.chat())
 }
+// nmp-native:endif
 
+// nmp-native:if nip22
 /// Compose the ordinary reply to `target`.
 ///
 /// Two-way and no more: a text note threads through NIP-10, and everything
@@ -129,7 +136,9 @@ public func chat() -> WritePayload {
 public func replyTo(_ target: Row) throws -> WritePayload {
     try WritePayload(nmpRethrowing { try NMPFFI.replyTo(target: target.toFfi()) })
 }
+// nmp-native:endif
 
+// nmp-native:if nipc7
 /// Compose a NIP-C7 kind:9 chat reply to `target`.
 ///
 /// C7 offers its own verb rather than an arm in the general dispatcher
@@ -144,7 +153,9 @@ public func replyTo(_ target: Row) throws -> WritePayload {
 public func chatReply(to target: Row) throws -> WritePayload {
     try WritePayload(nmpRethrowing { try NMPFFI.chatReply(target: target.toFfi()) })
 }
+// nmp-native:endif
 
+// nmp-native:if nip18
 /// Compose a NIP-18 repost of `target`.
 ///
 /// NIP-18 owns both kinds, so the two-way split happens inside it: a reposted
@@ -153,7 +164,9 @@ public func chatReply(to target: Row) throws -> WritePayload {
 public func repost(_ target: Row) throws -> WritePayload {
     try WritePayload(nmpRethrowing { try NMPFFI.repost(target: target.toFfi()) })
 }
+// nmp-native:endif
 
+// nmp-native:if nip25
 /// What a NIP-25 reaction says.
 ///
 /// Not a string, because NIP-25 assigns fixed meanings to fixed bytes: content
@@ -203,6 +216,7 @@ public func react(to target: Row, with reaction: Reaction) throws -> WritePayloa
             try NMPFFI.reactTo(target: target.toFfi(), reaction: reaction.toFfi())
         })
 }
+// nmp-native:endif
 
 extension Row {
     func toFfi() -> FfiRow {

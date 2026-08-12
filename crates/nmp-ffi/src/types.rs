@@ -477,6 +477,7 @@ impl std::error::Error for FfiSignEventFailure {}
 /// `host_relay` is a canonically SPELLED observed string; it is not a
 /// routing permission and no NIP-29 constructor accepts it implicitly.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
+#[cfg(feature = "nip51")]
 pub struct FfiSimpleGroupEntry {
     pub group_id: String,
     pub host_relay: String,
@@ -491,6 +492,7 @@ pub struct FfiSimpleGroupEntry {
 /// authority. There is deliberately no observation-qualified wrapper,
 /// projection error, or frame proof around it.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
+#[cfg(feature = "nip51")]
 pub struct FfiSimpleGroupsList {
     pub items: Vec<FfiSimpleGroupEntry>,
     pub relays_in_use: Vec<String>,
@@ -620,8 +622,11 @@ pub struct FfiAcquisitionEvidence {
 /// journal row, and no fallback to `Auto`.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiWriteRouting {
+    #[cfg(feature = "nip65")]
     Auto,
-    Explicit { relays: Vec<String> },
+    Explicit {
+        relays: Vec<String>,
+    },
 }
 
 /// `nmp::EventBuilder` mirror: the kind is demanded, everything else is
@@ -692,6 +697,7 @@ pub enum FfiContentPart {
     /// It is a QUOTE and never a thread reply: NIP-18's `q` exists precisely
     /// so *"quote reposts are not pulled and included as replies in threads"*.
     /// Replying is `chat_reply`/`reply_to`, which point with `e`.
+    #[cfg(feature = "nip18")]
     Quote { target: FfiRow },
 }
 
@@ -705,6 +711,7 @@ pub enum FfiContentPart {
 /// with an empty picker result. These are the spec's own three readings and
 /// there is no fourth.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
+#[cfg(feature = "nip25")]
 pub enum FfiReaction {
     /// Rendered `+`.
     Like,

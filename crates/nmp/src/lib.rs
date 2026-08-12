@@ -189,13 +189,13 @@ pub mod asset;
 #[cfg(feature = "blossom")]
 pub mod blossom;
 
-// #1033: the app-facing NIP-29 door. A real facade module, not a re-export of
+// #1033/#824: the app-facing NIP-29 door. A real facade module, not a re-export of
 // `nmp-nip29`: the door retains a relay scope AND mints the one opaque
 // `WriteIntent`, and a crate that is engine-free by construction cannot do the
 // second. `nmp-nip29` stays pure vocabulary below it and this module
-// selectively exposes what an app needs of it. Unconditional, unlike `nip22`
-// above: there is no mechanism crate behind NIP-29 for a feature flag to keep
-// unlinked.
+// selectively exposes what an app needs of it. The family is optional at the
+// native/direct-Rust product boundary just like every other app-facing family.
+#[cfg(feature = "nip29")]
 pub mod nip29;
 
 pub use auth::{

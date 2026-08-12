@@ -62,7 +62,6 @@ Feature: Pointing at something is one door, and it fills what the library knows
     # nmp:id=WRITES-TAGGING-003
     # nmp:status=built
     # nmp:evidence=rust:nmp-grammar::every_pointer_emits_its_author_row_unless_declined
-    # nmp:evidence=rust:nmp-ffi::a_native_chat_reply_is_kind_9_and_points_with_e
     # nmp:falsifier=Stop emitting the companion p row, or drop the author from the reference row's own slot when the p row is declined; the parent author stops being notified with nothing visibly missing, which is the bug quartz shipped.
     Scenario: A pointer carries its author, its hint, and its companion notification
       Given an event NMP observed at a relay
@@ -111,7 +110,6 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-009
     # nmp:status=built
-    # nmp:evidence=rust:nmp-ffi::a_native_top_level_chat_is_kind_9_and_carries_no_rows
     # nmp:evidence=swift:NMP::testChatIsKindNineAndCarriesNoRows
     # nmp:evidence=kotlin:NMPKotlin::chatIsKindNineAndCarriesNoRows
     # nmp:falsifier=Stop projecting the top-level chat composer across the FFI; an app sending an ordinary message states kind 9 itself again, which is the half of the schema the reply verb alone never reached and which no app-side test can catch, because a kind the app chose is a kind the app agrees with.
@@ -134,8 +132,6 @@ Feature: Pointing at something is one door, and it fills what the library knows
 
     # nmp:id=WRITES-TAGGING-010
     # nmp:status=built
-    # nmp:evidence=rust:nmp-ffi::naming_a_person_writes_the_token_and_the_p_row_together
-    # nmp:evidence=rust:nmp-ffi::quoting_an_event_renders_it_and_emits_its_q_row_from_the_same_part
     # nmp:evidence=swift:NMP::testNamingAPersonWritesTheTokenAndThePRowTogether
     # nmp:evidence=kotlin:NMPKotlin::namingAPersonWritesTheTokenAndThePRowTogether
     # nmp:falsifier=Let a native caller hand over a finished content string and its rows separately; an app that lets somebody @-mention a person appends ["p", hex] by hand again and nothing catches it disagreeing with the token in the body, because from the app's side nothing is missing.

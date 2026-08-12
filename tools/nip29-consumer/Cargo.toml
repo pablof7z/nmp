@@ -12,4 +12,4 @@ path = "src/main.rs"
 # This is an application-boundary proof: needing any Rust dependency besides
 # the supported facade is itself a failure of the experiment.
 [dependencies]
-nmp.workspace = true
+nmp = { workspace = true, features = ["nip29"] }

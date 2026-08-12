@@ -18,13 +18,23 @@ package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiContentPart
 import uniffi.nmp_ffi.FfiEventBuilder
-import uniffi.nmp_ffi.FfiReaction
 import uniffi.nmp_ffi.FfiRow
+// nmp-native:if nip25
+import uniffi.nmp_ffi.FfiReaction
+// nmp-native:endif
+// nmp-native:if nipc7
 import uniffi.nmp_ffi.chat as ffiChat
 import uniffi.nmp_ffi.chatReply as ffiChatReply
+// nmp-native:endif
+// nmp-native:if nip25
 import uniffi.nmp_ffi.reactTo as ffiReactTo
+// nmp-native:endif
+// nmp-native:if nip22
 import uniffi.nmp_ffi.replyTo as ffiReplyTo
+// nmp-native:endif
+// nmp-native:if nip18
 import uniffi.nmp_ffi.repost as ffiRepost
+// nmp-native:endif
 import uniffi.nmp_ffi.withContent as ffiWithContent
 
 internal fun Row.toFfi(): FfiRow = FfiRow(id, pubkey, createdAt, kind, tags, content, sig, sources)
@@ -69,14 +79,18 @@ sealed interface ContentPart {
      * "quote reposts are not pulled and included as replies in threads".
      * Replying is [chatReply]/[replyTo], which point with `e`.
      */
+    // nmp-native:if nip18
     data class Quote(val target: Row) : ContentPart
+    // nmp-native:endif
 }
 
 internal fun ContentPart.toFfi(): FfiContentPart =
     when (this) {
         is ContentPart.Text -> FfiContentPart.Text(text)
         is ContentPart.Person -> FfiContentPart.Person(pubkey, relay)
+        // nmp-native:if nip18
         is ContentPart.Quote -> FfiContentPart.Quote(target.toFfi())
+        // nmp-native:endif
     }
 
 /**
@@ -112,6 +126,7 @@ fun WritePayload.withContent(content: List<ContentPart>): WritePayload =
         is WritePayload.Signed -> this
     }
 
+// nmp-native:if nipc7
 /**
  * Compose a top-level NIP-C7 kind:9 chat.
  *
@@ -125,7 +140,9 @@ fun WritePayload.withContent(content: List<ContentPart>): WritePayload =
  * quote needs. A group's `h` row and its relay set come from the group door.
  */
 fun chat(): WritePayload = ffiChat().toPayload()
+// nmp-native:endif
 
+// nmp-native:if nip22
 /**
  * Compose the ordinary reply to [target].
  *
@@ -138,7 +155,9 @@ fun chat(): WritePayload = ffiChat().toPayload()
  * inversion amethyst#629 shipped and this makes unspellable.
  */
 fun replyTo(target: Row): WritePayload = nmpRethrowing { ffiReplyTo(target.toFfi()) }.toPayload()
+// nmp-native:endif
 
+// nmp-native:if nipc7
 /**
  * Compose a NIP-C7 kind:9 chat reply to [target].
  *
@@ -153,7 +172,9 @@ fun replyTo(target: Row): WritePayload = nmpRethrowing { ffiReplyTo(target.toFfi
  */
 fun chatReply(target: Row): WritePayload =
     nmpRethrowing { ffiChatReply(target.toFfi()) }.toPayload()
+// nmp-native:endif
 
+// nmp-native:if nip18
 /**
  * Compose a NIP-18 repost of [target].
  *
@@ -162,7 +183,9 @@ fun chatReply(target: Row): WritePayload =
  * reposted. A caller never picks a kind.
  */
 fun repost(target: Row): WritePayload = nmpRethrowing { ffiRepost(target.toFfi()) }.toPayload()
+// nmp-native:endif
 
+// nmp-native:if nip25
 /**
  * What a NIP-25 reaction says.
  *
@@ -212,3 +235,4 @@ internal fun Reaction.toFfi(): FfiReaction =
  */
 fun react(target: Row, reaction: Reaction): WritePayload =
     nmpRethrowing { ffiReactTo(target.toFfi(), reaction.toFfi()) }.toPayload()
+// nmp-native:endif

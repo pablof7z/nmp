@@ -50,12 +50,20 @@ func rethrowCheckpointFailureAfterRollback(
     throw persistenceError
 }
 
-/// Construction config for `NMPEngine`.
-///
-/// This core native package accepts only neutral operator app/fallback
-/// policy. It exposes no discovery-source setting and no mutable author-route
-/// map: without a separately assembled route provider, `Auto` remains
-/// route-waiting until operator policy supplies a destination.
+// nmp-native:if nip65
+/// Runtime inputs for the NIP-65 assembly selected by this app's native
+/// feature manifest. NMP never supplies hidden indexer relays.
+public struct NIP65Config: Sendable {
+    public var indexerRelays: [String]
+
+    public init(indexerRelays: [String]) {
+        self.indexerRelays = indexerRelays
+    }
+}
+// nmp-native:endif
+
+/// Construction config for `NMPEngine`. Build-time feature selection controls
+/// which fields exist; runtime relay values remain app-owned inputs.
 public struct NMPConfig: Sendable {
     /// `nil` -> in-memory store (nothing survives a restart). A path ->
     /// a persistent store reopened at that path across launches.
@@ -67,6 +75,12 @@ public struct NMPConfig: Sendable {
     /// under the 2-relay-min, suppressed when `appRelays` is non-empty.
     /// Default empty.
     public var fallbackRelays: [String]
+    // nmp-native:if nip65
+    /// Optional runtime NIP-65 assembly. `nil` constructs an
+    /// explicit-routing-only engine. A configured assembly must name at least
+    /// one app-owned indexer relay or construction throws.
+    public var nip65: NIP65Config?
+    // nmp-native:endif
     /// Local/private relay HOSTS to re-admit from OTHER PEOPLE's data. A
     /// loopback / RFC-1918 / link-local relay named by someone else's relay
     /// list or event is refused by default; listing its host here
@@ -104,6 +118,9 @@ public struct NMPConfig: Sendable {
         storePath: String? = nil,
         appRelays: [String] = [],
         fallbackRelays: [String] = [],
+        // nmp-native:if nip65
+        nip65: NIP65Config? = nil,
+        // nmp-native:endif
         allowedLocalRelayHosts: [String] = [],
         torReachable: Bool = false,
         maxRelays: UInt32 = 10,
@@ -112,6 +129,9 @@ public struct NMPConfig: Sendable {
         self.storePath = storePath
         self.appRelays = appRelays
         self.fallbackRelays = fallbackRelays
+        // nmp-native:if nip65
+        self.nip65 = nip65
+        // nmp-native:endif
         self.allowedLocalRelayHosts = allowedLocalRelayHosts
         self.torReachable = torReachable
         self.maxRelays = maxRelays
@@ -123,6 +143,9 @@ public struct NMPConfig: Sendable {
             storePath: storePath,
             appRelays: appRelays,
             fallbackRelays: fallbackRelays,
+            // nmp-native:if nip65
+            nip65: nip65.map { FfiNip65Config(indexerRelays: $0.indexerRelays) },
+            // nmp-native:endif
             allowedLocalRelayHosts: allowedLocalRelayHosts,
             torReachable: torReachable,
             maxRelays: maxRelays,

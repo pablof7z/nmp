@@ -5,7 +5,7 @@ final class FollowingTests: XCTestCase {
     private static let target = String(repeating: "ab", count: 32)
 
     func testSignedOutObservationIsUnknownAndUnavailable() async throws {
-        let engine = try NMPEngine(config: NMPConfig())
+        let engine = try NMPEngine(config: Self.config)
         defer { engine.shutdown() }
 
         let observation = try engine.observeFollowing(Self.target)
@@ -21,22 +21,31 @@ final class FollowingTests: XCTestCase {
     }
 
     func testFollowIsAnNMPActionWithTypedSignedOutFailure() async throws {
-        let engine = try NMPEngine(config: NMPConfig())
+        let engine = try NMPEngine(config: Self.config)
         defer { engine.shutdown() }
 
-        let action = engine.follow(Self.target)
+        let action = try engine.follow(Self.target)
         let statuses = await Self.firstStatuses(from: action, count: 2)
 
         XCTAssertEqual(statuses, [.acquiring, .failed(.signedOut)])
     }
 
     func testInvalidTargetIsTypedActionStateNotANativeException() async throws {
+        let engine = try NMPEngine(config: Self.config)
+        defer { engine.shutdown() }
+
+        let action = try engine.follow("not-a-pubkey")
+        let statuses = await Self.firstStatuses(from: action, count: 1)
+        XCTAssertEqual(statuses, [.failed(.invalidTarget("not-a-pubkey"))])
+    }
+
+    func testProviderlessFollowRefusesBeforeAnActionStreamExists() throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
-        let action = engine.follow("not-a-pubkey")
-        let statuses = await Self.firstStatuses(from: action, count: 1)
-        XCTAssertEqual(statuses, [.failed(.invalidTarget("not-a-pubkey"))])
+        XCTAssertThrowsError(try engine.follow(Self.target)) { error in
+            XCTAssertEqual(error as? NMPError, .automaticRoutingUnavailable)
+        }
     }
 
     private static func firstSnapshot(
@@ -83,5 +92,9 @@ final class FollowingTests: XCTestCase {
             group.cancelAll()
             return result
         }
+    }
+
+    private static var config: NMPConfig {
+        NMPConfig(nip65: NIP65Config(indexerRelays: ["wss://indexer.example"]))
     }
 }

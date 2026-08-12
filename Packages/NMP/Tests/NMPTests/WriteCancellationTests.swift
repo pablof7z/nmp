@@ -38,7 +38,11 @@ final class WriteCancellationTests: XCTestCase {
     }
 
     func testAcceptedUnsignedWriteCancelsStreamsAndReattachesAsCancelled() async throws {
-        let engine = try NMPEngine(config: NMPConfig())
+        let engine = try NMPEngine(
+            config: NMPConfig(
+                nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+            )
+        )
         defer { engine.shutdown() }
 
         // A read-only active identity deliberately has no signer. The

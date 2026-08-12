@@ -223,7 +223,7 @@ fun observeFollowing(engine: NmpEngineInterface, target: String): Flow<Following
  * order. Teardown is collection-scope-tied via `handle.cancel()`. */
 private fun followActionFlow(open: () -> NmpFollowActionStream): Flow<FollowActionStatus> =
     flow {
-        val handle = open()
+        val handle = nmpRethrowing { open() }
         try {
             while (true) {
                 val status = nmpRethrowingAsync { handle.next() } ?: break
@@ -239,7 +239,8 @@ private fun followActionFlow(open: () -> NmpFollowActionStream): Flow<FollowActi
  * preserves the exact kind:3 base, atomically guards that base, signs,
  * routes, and streams the durable receipt. The caller owns none of those
  * steps -- it only observes [FollowAction.status]. Returns immediately;
- * never throws (an invalid [target] surfaces as
+ * collection throws [NMPError.AutomaticRoutingUnavailable] before the action
+ * starts when the engine has no automatic-route provider. An invalid [target] surfaces as
  * `FollowActionStatus.Failed(FollowActionFailure.InvalidTarget)` on the
  * stream, not as a synchronous exception). */
 fun follow(engine: NmpEngineInterface, target: String): FollowAction =

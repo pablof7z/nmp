@@ -71,6 +71,10 @@ pub enum FfiError {
     InvalidRelayUrl {
         got: String,
     },
+    /// A selected NIP-65 runtime assembly named no app-owned indexer relay.
+    /// Engine construction is refused; NMP never installs a hidden default.
+    #[cfg(feature = "nip65")]
+    Nip65IndexerRelaysEmpty,
     /// A raw `[String; N]` tag in a `FfiWriteIntent` did not parse as a
     /// valid nostr tag (`Tag::parse`) -- e.g. an empty array. Rejecting the
     /// whole intent here (rather than silently dropping the malformed tag)
@@ -111,6 +115,11 @@ pub enum FfiError {
     PublishRefused {
         reason: String,
     },
+    /// An Auto write was attempted through an engine constructed without an
+    /// automatic-route provider. Refused before durable acceptance, so no
+    /// receipt, queue row, or delivery residue exists.
+    #[cfg(feature = "nip65")]
+    AutomaticRoutingUnavailable,
     /// `NmpEngine::new`'s `store_path` pointed at a file `RedbStore::open`
     /// could not open: damaged bytes, a refused lock, an unresolvable path,
     /// an I/O failure.
@@ -295,6 +304,7 @@ pub enum FfiError {
     /// (`docs/internals/writes/payload-and-replaceable-edits.md` §5). This
     /// is the payload axis of #951's bug class: a projection door refuses
     /// as a VALUE instead of panicking on an exported path.
+    #[cfg(feature = "nip22")]
     ReplaceableEditHasNoWireForm,
     InvalidCorrelationToken {
         got: String,
@@ -303,6 +313,7 @@ pub enum FfiError {
     /// #572/#1258: an `FfiNip73` failed `nmp_nip73::Nip73`'s constructor
     /// validation (an empty `I`/`K` cell, or a `Url` that is not an
     /// absolute URL and therefore cannot be normalised).
+    #[cfg(feature = "nip22")]
     InvalidNip73 {
         reason: String,
     },
@@ -312,6 +323,7 @@ pub enum FfiError {
     /// the empty string, which NIP-25 reads as `+` and therefore as a LIKE,
     /// and a NIP-30 `:shortcode:`, which needs a companion `emoji` row this
     /// door does not write and would reach every reader as literal colons.
+    #[cfg(feature = "nip25")]
     InvalidReaction {
         reason: String,
     },
@@ -319,33 +331,39 @@ pub enum FfiError {
     /// (`nmp::nip29::RelayScopeError::EmptyRelaySet` mirror). A group must
     /// be hosted somewhere -- there is nothing to read from, nothing to
     /// write to, and no honest evidence to report.
+    #[cfg(feature = "nip29")]
     EmptyRelayScope,
     /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedContext`
     /// mirror). An unsigned draft handed to `FfiGroup::publish` already
     /// carried an `h` row -- the group id retained by the scope is the only
     /// source of that row, so a caller's own is refused whether it matches
     /// this group or not.
+    #[cfg(feature = "nip29")]
     GroupCallerSuppliedContext,
     /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedContextConstraint`
     /// mirror). A read selection handed to `FfiGroup::read` already
     /// constrained `#h` -- the retained group id is the sole semantic
     /// source of that row.
+    #[cfg(feature = "nip29")]
     GroupCallerSuppliedContextConstraint,
     /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedTimeline`
     /// mirror). An unsigned draft already carried a `previous` row, which
     /// the group never mints and never accepts from a caller.
+    #[cfg(feature = "nip29")]
     GroupCallerSuppliedTimeline,
     /// #1281 (`nmp::nip29::GroupContextError::NoGroupNamed` mirror).
     /// `FfiRelayScope::groups` was called with no group id at all. An event
     /// with no `h` row is not in a group, so there is nothing to
     /// contextualize and no honest route to mint -- the same refusal shape
     /// [`Self::EmptyRelayScope`] makes on the relay axis.
+    #[cfg(feature = "nip29")]
     EmptyGroupSet,
     /// #1033/#1281 (`nmp::nip29::GroupContextError::MissingContext` mirror).
     /// A signed event handed to `FfiGroup::validate_context` carries no `h`
     /// row at all. `expected` is
     /// the whole set the door was asked for, in canonical order -- one id
     /// for an `FfiGroup`, several for an `FfiGroups`.
+    #[cfg(feature = "nip29")]
     GroupContextMissing {
         expected: Vec<String>,
     },
@@ -354,6 +372,7 @@ pub enum FfiError {
     /// one validating it -- too few, too many, or the wrong
     /// ones. An event carrying a second `h` row beside the right one reports
     /// both in `found`.
+    #[cfg(feature = "nip29")]
     GroupContextMismatched {
         found: Vec<String>,
         expected: Vec<String>,
@@ -361,6 +380,7 @@ pub enum FfiError {
     /// #1281 (`nmp::nip29::GroupContextError::RepeatedContext` mirror). A
     /// pre-signed event names the right groups but repeats one of them in a
     /// second `h` row, which is not a row the door would ever mint.
+    #[cfg(feature = "nip29")]
     GroupContextRepeated {
         repeated: Vec<String>,
     },
@@ -370,16 +390,20 @@ pub enum FfiError {
     /// themselves by `d`, never by `h`, so the read would match nothing
     /// forever and an app could not tell that apart from a group with no
     /// roster. Read them through `FfiGroup::observe_records` instead.
+    #[cfg(feature = "nip29")]
     GroupRecordsNotContextScoped {
         kinds: Vec<u16>,
     },
     /// #1233 (`nmp::nip29::GroupObserveError::NoRecordSelected` mirror). A
     /// records observation named none of the three records, which would
     /// deliver a permanently empty snapshot.
+    #[cfg(feature = "nip29")]
     GroupNoRecordSelected,
     /// A kind:9000 or kind:9001 operation named no users.
+    #[cfg(feature = "nip29")]
     GroupUserBatchEmpty,
     /// One kind:9000 operation assigned the same user conflicting roles.
+    #[cfg(feature = "nip29")]
     GroupUserBatchConflictingRoles {
         pubkey: String,
     },
@@ -387,6 +411,7 @@ pub enum FfiError {
     /// selection handed to `groups_whose_record_matches` named no kind. It is
     /// evaluated with NIP-29's own pin, so it would match every event the
     /// group's host holds and key the listing on their `d` rows.
+    #[cfg(feature = "nip29")]
     GroupIdSelectionNamesNoKind,
     /// #1252 (`nmp::nip29::GroupPredicateError::NotAGroupRecordKind` mirror).
     /// A selection handed to `groups_whose_record_matches` named a kind that
@@ -395,11 +420,13 @@ pub enum FfiError {
     /// else -- the read would silently under-resolve. Ids that come from the
     /// app's OWN data go through `any_of` as a derived binding carrying its
     /// own authority.
+    #[cfg(feature = "nip29")]
     GroupIdSelectionNotAGroupRecordKind {
         kind: u16,
     },
 }
 
+#[cfg(feature = "nip29")]
 impl From<nmp::nip29::RelayScopeError> for FfiError {
     fn from(err: nmp::nip29::RelayScopeError) -> Self {
         match err {
@@ -408,6 +435,7 @@ impl From<nmp::nip29::RelayScopeError> for FfiError {
     }
 }
 
+#[cfg(feature = "nip29")]
 impl From<nmp::nip29::GroupContextError> for FfiError {
     fn from(err: nmp::nip29::GroupContextError) -> Self {
         match err {
@@ -446,6 +474,7 @@ impl From<nmp::nip29::GroupContextError> for FfiError {
     }
 }
 
+#[cfg(feature = "nip29")]
 impl From<nmp::nip29::GroupPredicateError> for FfiError {
     fn from(err: nmp::nip29::GroupPredicateError) -> Self {
         match err {
@@ -459,6 +488,7 @@ impl From<nmp::nip29::GroupPredicateError> for FfiError {
 
 /// Same re-dispatch discipline as `GroupReadError`: the only variant that is
 /// this door's OWN is the empty record selection.
+#[cfg(feature = "nip29")]
 impl From<nmp::nip29::GroupObserveError> for FfiError {
     fn from(err: nmp::nip29::GroupObserveError) -> Self {
         match err {
@@ -473,6 +503,7 @@ impl From<nmp::nip29::GroupObserveError> for FfiError {
 /// `Context` folds through `GroupContextError`'s own mapping above,
 /// `Declaration` through the existing `LiveQueryError` mapping (#1108) --
 /// so this is a plain re-dispatch, never a second error taxonomy.
+#[cfg(feature = "nip29")]
 impl From<nmp::nip29::GroupReadError> for FfiError {
     fn from(err: nmp::nip29::GroupReadError) -> Self {
         match err {
@@ -485,6 +516,7 @@ impl From<nmp::nip29::GroupReadError> for FfiError {
 /// Same re-dispatch discipline as `GroupReadError` above: `Context` through
 /// `GroupContextError`, `Engine` through the existing `nmp::EngineError`
 /// mapping.
+#[cfg(feature = "nip29")]
 impl From<nmp::nip29::GroupPublishError> for FfiError {
     fn from(err: nmp::nip29::GroupPublishError) -> Self {
         match err {
@@ -620,7 +652,12 @@ impl std::fmt::Display for FfiError {
             Self::InvalidPublicKey { got } => write!(f, "invalid public key hex: {got:?}"),
             Self::InvalidEventId { got } => write!(f, "invalid event id hex: {got:?}"),
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
+            #[cfg(feature = "nip65")]
+            Self::Nip65IndexerRelaysEmpty => {
+                write!(f, "NIP-65 requires at least one app-owned indexer relay")
+            }
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
+            #[cfg(feature = "nip22")]
             Self::ReplaceableEditHasNoWireForm => write!(
                 f,
                 "a replaceable edit crosses this boundary only inside the semantic method that \
@@ -639,6 +676,11 @@ impl std::fmt::Display for FfiError {
                 write!(f, "invalid sign request: {reason}")
             }
             Self::PublishRefused { reason } => write!(f, "{reason}"),
+            #[cfg(feature = "nip65")]
+            Self::AutomaticRoutingUnavailable => write!(
+                f,
+                "automatic routing is unavailable on this engine; construct it with NIP-65 indexer relays"
+            ),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreAlreadyOpen { path } => {
                 write!(f, "persistent store is already open: {path}")
@@ -747,61 +789,77 @@ impl std::fmt::Display for FfiError {
             Self::InvalidCorrelationToken { got, reason } => {
                 write!(f, "invalid correlation token {got:?}: {reason}")
             }
+            #[cfg(feature = "nip22")]
             Self::InvalidNip73 { reason } => write!(f, "invalid NIP-73 external content id: {reason}"),
+            #[cfg(feature = "nip25")]
             Self::InvalidReaction { reason } => write!(f, "invalid reaction: {reason}"),
+            #[cfg(feature = "nip29")]
             Self::EmptyRelayScope => {
                 write!(f, "a NIP-29 relay scope must name at least one host relay")
             }
+            #[cfg(feature = "nip29")]
             Self::GroupCallerSuppliedContext => write!(
                 f,
                 "the 'h' tag belongs to the group, not to the caller"
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupCallerSuppliedContextConstraint => write!(
                 f,
                 "the '#h' constraint belongs to the group, not to the caller's selection"
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupCallerSuppliedTimeline => write!(
                 f,
                 "the 'previous' tag belongs to the group, not to the caller, and the group \
                  never mints one"
             ),
+            #[cfg(feature = "nip29")]
             Self::EmptyGroupSet => write!(
                 f,
                 "a group write must name at least one group: an event with no 'h' row is not \
                  in a group at all"
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupContextMissing { expected } => {
                 write!(f, "pre-signed event carries no 'h' row (expected {expected:?})")
             }
+            #[cfg(feature = "nip29")]
             Self::GroupContextMismatched { found, expected } => write!(
                 f,
                 "pre-signed event names groups {found:?}, expected {expected:?}"
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupContextRepeated { repeated } => write!(
                 f,
                 "pre-signed event names groups {repeated:?} in more than one 'h' row"
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupRecordsNotContextScoped { kinds } => write!(
                 f,
                 "kinds {kinds:?} are NIP-29's own relay-signed group records: they key \
                  themselves by 'd', never by 'h', so no such event could ever match a \
                  group-content read -- read them through the group's records door"
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupNoRecordSelected => f.write_str(
                 "a group-records observation must select at least one of the three relay-signed \
                  records",
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupUserBatchEmpty => {
                 f.write_str("a NIP-29 user operation must name at least one user")
             }
+            #[cfg(feature = "nip29")]
             Self::GroupUserBatchConflictingRoles { pubkey } => write!(
                 f,
                 "NIP-29 user operation names {pubkey} with conflicting roles"
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupIdSelectionNamesNoKind => f.write_str(
                 "a group-record selection must name at least one of NIP-29's three relay-signed \
                  group record kinds",
             ),
+            #[cfg(feature = "nip29")]
             Self::GroupIdSelectionNotAGroupRecordKind { kind } => write!(
                 f,
                 "kind:{kind} is not one of NIP-29's three relay-signed group records; a group \
@@ -1290,6 +1348,7 @@ fn binding_from_ffi(b: FfiBinding, field: LiteralField) -> Result<GBinding, FfiE
 /// rule an arbitrary `#<letter>` tag binding gets. A caller-supplied
 /// `Literal` that is not 32-byte hex is a typed [`FfiError::InvalidPublicKey`],
 /// never a panic two crates downstream.
+#[cfg(feature = "nip29")]
 pub(crate) fn subjects_binding_from_ffi(b: FfiBinding) -> Result<GBinding, FfiError> {
     binding_from_ffi(b, LiteralField::Authors)
 }
@@ -1299,6 +1358,7 @@ pub(crate) fn subjects_binding_from_ffi(b: FfiBinding) -> Result<GBinding, FfiEr
 /// is. Validating them as pubkeys would reject every real group id
 /// ("photographers" is not 32-byte hex), which is why this is a distinct
 /// entry point rather than a reuse of the subjects one.
+#[cfg(feature = "nip29")]
 pub(crate) fn group_ids_binding_from_ffi(b: FfiBinding) -> Result<GBinding, FfiError> {
     binding_from_ffi(b, LiteralField::Tag)
 }
@@ -2404,6 +2464,7 @@ fn identity_from_ffi(identity: FfiIdentity) -> Result<GIdentity, FfiError> {
 /// boundary -- total in both directions, so a protocol crate that changes
 /// which identity it names projects that change faithfully instead of
 /// tripping a closed-contract assertion on an exported path.
+#[cfg(feature = "nip22")]
 pub(crate) fn identity_to_ffi(identity: GIdentity) -> FfiIdentity {
     match identity {
         GIdentity::Active => FfiIdentity::Active,
@@ -2437,6 +2498,7 @@ pub fn parse_relay_url(url: &str) -> Result<RelayUrl, FfiError> {
 /// that changes which route it mints projects that change faithfully instead
 /// of tripping a closed-contract assertion on an exported path (#951's bug
 /// class, on the routing axis).
+#[cfg(feature = "nip22")]
 pub(crate) fn write_routing_to_ffi(routing: nmp::WriteRouting) -> FfiWriteRouting {
     match routing {
         nmp::WriteRouting::Auto => FfiWriteRouting::Auto,
@@ -2453,6 +2515,7 @@ pub(crate) fn write_routing_to_ffi(routing: nmp::WriteRouting) -> FfiWriteRoutin
 /// exported path (#951's bug class, on the payload axis). The one shape
 /// with no wire form refuses as a typed value -- see
 /// [`FfiError::ReplaceableEditHasNoWireForm`].
+#[cfg(feature = "nip22")]
 pub(crate) fn write_payload_to_ffi(payload: GWritePayload) -> Result<FfiWritePayload, FfiError> {
     match payload {
         GWritePayload::Event(builder) => Ok(FfiWritePayload::Event {
@@ -2587,14 +2650,15 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
         }
     };
 
-    // Both routing words project, because both are app vocabulary: an app
-    // saying "publish this event to relay: [user input]" is the same
+    // Every routing word present in this selected native surface projects.
+    // An app saying "publish this event to relay: [user input]" is the same
     // primitive a wiki, DM, or group crate uses, and there is no third word
     // for either of them to reach for. A malformed URL is a typed
     // synchronous refusal here, before any engine call; an EMPTY relay list
     // is refused at the engine's acceptance door (it is a routing rule, not
     // a parsing rule, so it lives in one place for every surface).
     let routing = match intent.routing {
+        #[cfg(feature = "nip65")]
         FfiWriteRouting::Auto => GWriteRouting::Auto,
         FfiWriteRouting::Explicit { relays } => GWriteRouting::Explicit(
             relays
@@ -3277,7 +3341,9 @@ mod tests {
                     created_at: Some(100),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         }
@@ -3294,6 +3360,7 @@ mod tests {
     /// enforced on the Swift and Kotlin surfaces, which no Rust test can
     /// see, by `scripts/check-routing-vocabulary.sh`.
     #[test]
+    #[cfg(feature = "nip22")]
     fn the_routing_vocabulary_is_two_words_in_both_directions() {
         let relay = "wss://chosen.example".to_string();
 
@@ -3367,16 +3434,6 @@ mod tests {
                 "wss://user-typed-relay.example".to_string(),
                 "wss://second.example".to_string()
             ]
-        );
-        assert_eq!(
-            write_routing_to_ffi(GWriteRouting::Explicit(relays)),
-            FfiWriteRouting::Explicit {
-                relays: vec![
-                    "wss://user-typed-relay.example".to_string(),
-                    "wss://second.example".to_string()
-                ]
-            },
-            "the projection back out is the exact inverse"
         );
     }
 
@@ -3569,6 +3626,7 @@ mod tests {
     /// replacement crosses this boundary only inside the semantic method
     /// that owns its precondition.
     #[test]
+    #[cfg(feature = "nip22")]
     fn a_replaceable_edit_refuses_as_a_value_rather_than_panicking() {
         let edit = GWritePayload::ReplaceableEdit {
             builder: GEventBuilder::new(nostr::Kind::ContactList).content("guarded"),
@@ -3584,6 +3642,7 @@ mod tests {
     /// form projects faithfully, so a composer changing which one it mints
     /// crosses intact rather than tripping a closed-contract assertion.
     #[test]
+    #[cfg(feature = "nip22")]
     fn every_payload_with_a_wire_form_projects_faithfully() {
         let builder = GEventBuilder::new(nostr::Kind::TextNote)
             .content("hello")
@@ -3625,7 +3684,9 @@ mod tests {
                 content: event.content.clone(),
                 sig: event.sig.to_string(),
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         };

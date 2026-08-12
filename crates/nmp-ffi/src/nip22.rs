@@ -480,8 +480,13 @@ mod tests {
             Some(correlation.clone()),
         )
         .unwrap();
-        let engine = crate::facade::NmpEngine::new(crate::facade::NmpEngineConfig::default())
-            .expect("engine must build");
+        let engine = crate::facade::NmpEngine::new(crate::facade::NmpEngineConfig {
+            nip65: Some(crate::facade::FfiNip65Config {
+                indexer_relays: vec!["wss://indexer.example".to_string()],
+            }),
+            ..crate::facade::NmpEngineConfig::default()
+        })
+        .expect("engine must build with the provider required by the Auto intent");
         let author = nostr::Keys::generate().public_key();
         engine
             .set_active_account(Some(author.to_hex()))

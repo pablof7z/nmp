@@ -548,8 +548,8 @@ about current code:
 
 ## Protocol modules
 
-- **NIP-65 is shipped as an engine-free Rust module plus a non-default Rust
-  facade assembly (#719/#870).** `nmp-nip65` owns kind:10002 bootstrap
+- **NIP-65 is shipped as an engine-free Rust module plus feature-selected Rust
+  and native facade assembly (#719/#870/#824).** `nmp-nip65` owns kind:10002 bootstrap
   composition, exact demand, canonical winner selection, marker parsing, and
   settlement without depending on `nmp`, router, store, resolver, or
   transport. `BootstrapRelayList::into_write_intent` returns an ordinary
@@ -559,9 +559,14 @@ about current code:
   capstone starts through `Engine::new` with only an indexer, independently
   witnesses Alice-scoped kind:10002 acquisition before any content-relay
   contact, then witnesses the discovered kind:1 request and public row without
-  using the indexer as a content fallback (#1077). **Gap:** FFI, Swift, and
-  Kotlin do not yet project publication or opt-in assembly (#764, blocked by
-  #824) and must not hand-roll either.
+  using the indexer as a content fallback (#1077). Native apps select `nip65`
+  in the same manifest as every other family and supply app-owned indexers
+  through `NIP65Config`; the generated FFI/Swift/Kotlin surface and native
+  library come from that exact Cargo selection. A controlled-relay FFI
+  capstone proves cold kind:10002 discovery reaches the learned outbox.
+  **Remaining gap:** the
+  explicit kind:10002 bootstrap-publication helper is still direct-Rust only
+  (#764); native apps must not hand-roll that separate operation.
 
 - **`nmp-blossom` covers the BUD verbs and their FFI/Swift/Kotlin projection, but not the composition layers (#545 upload, #551 mirror/delete/list, #555 projection, epic #216).** The opt-in crate ships the BUD-11 kind:24242 authorization vocabulary (draft builders for upload/delete/list — BUD-04 mirror deliberately reuses the `upload` builder — plus validate + header encoding), the BUD-02 blob-descriptor parser, and an HTTP client with the engine's admission discipline covering sha256-self-verifying `PUT /upload`, `PUT /mirror` (409/502 kept distinct, same integrity gate), single-blob-bound `DELETE /<sha256>`, and strictly parsed, bounded `GET /list/<pubkey>` (cursor/limit pagination; the deprecated `since`/`until` are not modeled). #555 projects all of it through `nmp-ffi` (`crates/nmp-ffi/src/blossom.rs`: engine-less draft/validate free functions and objects plus the blocking `FfiBlossomClient`, each operation's failure taxonomy crossing as its own typed error enum) and the hand-written SDKs (`Packages/NMP/Sources/NMP/Blossom.swift`, `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Blossom.kt`). Signing note: FFI apps sign a Blossom draft through the existing governed sign-only surface (`NmpEngine::sign_event`), which freezes the author from the ACTIVE ACCOUNT — there is no per-operation identity override on the sign-only path (the `FfiWriteIntent.identity` seam from #550/#974 covers publish intents only), so an app whose Blossom author differs from the active account must sign the draft's `unsigned_event_json` with an external/native signer and validate via `FfiBlossomAuthorization::validate`. Deliberately NOT in this unit, tracked as #216 follow-ups: the `get`/`media` endpoints (the `BlossomVerb` enum models `get` totally, but it has no draft builder), NIP-68 `imeta` picture events (T15-B), and the upload-then-publish composition seam (T15-C).
 

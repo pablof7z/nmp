@@ -97,8 +97,10 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ NIP-02 following — canonical kind:3, guarded tag-preserving follow/unfollow, on **Swift + Kotlin**
 - ✅ NIP-65 Rust module — engine-free values validate and compose the first
   kind:10002; the optional `nmp/nip65` facade publishes it through the ordinary
-  tracked write door and privately assembles automatic route discovery.
-  Native projection remains explicit follow-up work.
+  tracked write door and privately assembles automatic route discovery. Swift
+  and Kotlin apps select `nip65` through the same checked-in feature manifest
+  as every other native family, then supply their own indexer relays at engine
+  runtime; NMP supplies no hidden relay.
 - ✅ NIP-73 external content ids — the `(i, k)` pair naming something that is
   not a Nostr event, in its own crate because several NIPs consume them and
   none owns them. Podcast episodes, `web` URLs (canonicalised: normalised, no
@@ -150,8 +152,8 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Platforms**
 - ✅ Rust core (the source of truth)
-- 🧪 Swift SDK — public-wrapper behavior is qualified by macOS-host XCTest. Every master build packages the full device + simulator + macOS XCFramework slice set, while pull requests use only the host slice needed by XCTest. iOS runtime and physical-device qualification remain separate.
-- 🧪 Kotlin SDK — desktop-JVM projection; **no Android AAR** qualified yet
+- 🧪 Swift SDK — apps prepare one Cargo-resolved, feature-selected local package; public-wrapper behavior is qualified by macOS-host XCTest. iOS runtime and physical-device qualification remain separate.
+- 🧪 Kotlin SDK — apps prepare the same feature-selected desktop-JVM projection; **no Android AAR** qualified yet (#831)
 
 ## Status / maturity
 

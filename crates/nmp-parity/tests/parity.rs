@@ -23,7 +23,8 @@ use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 // stream objects whose `next()` we bridge into the existing mpsc drains via a
 // forwarding Tokio task (all parity tests are `#[tokio::test(multi_thread)]`).
 use nmp_ffi::facade::{
-    NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpReceiptStream, NmpRowStream,
+    FfiNip65Config, NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpReceiptStream,
+    NmpRowStream,
 };
 use nmp_ffi::nip02::{
     FfiFollowActionStatus, FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot,
@@ -54,6 +55,23 @@ const REATTACH_TERMINAL_KIND: u16 = 10_009;
 const QUERY_CREATED_AT: u64 = 1_700_000_100;
 const WRITE_CREATED_AT: u64 = 1_700_000_200;
 const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+const PARITY_INDEXER: &str = "wss://indexer.example";
+
+fn direct_nip65_config() -> EngineConfig {
+    EngineConfig {
+        indexer_relays: vec![PARITY_INDEXER.to_string()],
+        ..EngineConfig::default()
+    }
+}
+
+fn ffi_nip65_config() -> NmpEngineConfig {
+    NmpEngineConfig {
+        nip65: Some(FfiNip65Config {
+            indexer_relays: vec![PARITY_INDEXER.to_string()],
+        }),
+        ..NmpEngineConfig::default()
+    }
+}
 
 #[test]
 fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
@@ -1351,13 +1369,28 @@ fn event_count(relay: &NormRelayDiagnostics, kind: u16) -> u64 {
         .unwrap_or(0)
 }
 
+fn parity_diagnostic_relays(
+    snapshot: &NormDiagnostics,
+) -> Option<(&NormRelayDiagnostics, &NormRelayDiagnostics)> {
+    if snapshot.relays.len() != 2 {
+        return None;
+    }
+    let content = snapshot
+        .relays
+        .iter()
+        .find(|relay| relay.relay == "<loopback-relay>")?;
+    let indexer = snapshot
+        .relays
+        .iter()
+        .find(|relay| relay.relay == PARITY_INDEXER)?;
+    Some((content, indexer))
+}
+
 fn handoff_is_quiescent(
     snapshot: &NormDiagnostics,
     relay_witness: &ScriptedRelay,
 ) -> Option<HandoffBaseline> {
-    let [relay] = snapshot.relays.as_slice() else {
-        return None;
-    };
+    let (relay, indexer) = parity_diagnostic_relays(snapshot)?;
     let has_anchor = relay
         .filters
         .iter()
@@ -1366,7 +1399,7 @@ fn handoff_is_quiescent(
         .filters
         .iter()
         .any(|filter| filter_names_kind(filter, QUERY_KIND));
-    let has_nip65_query = relay
+    let has_nip65_query = indexer
         .filters
         .iter()
         .any(|filter| filter_names_kind(filter, Kind::RelayList.as_u16()));
@@ -1378,15 +1411,14 @@ fn handoff_is_quiescent(
         anchor: relay_witness.query_count_for_kind(SOURCE_ANCHOR_KIND),
         content: relay_witness.query_count_for_kind(QUERY_KIND),
     };
-    // The explicit source-anchor subscription is still owned at this
-    // barrier, so its filter must remain in every current snapshot until the
-    // named cancellation below. This crate builds nmp without the optional
-    // `nip65` feature: the absence of any kind:10002 request is the
-    // load-bearing feature-off truth, while both ordinary requests must route
-    // through the configured app policy.
+    // The explicit source-anchor subscription is still owned at this barrier,
+    // so its filter must remain until the named cancellation below. Both
+    // facades assemble the same NIP-65 provider and therefore expose the same
+    // independent kind:10002 indexer request while ordinary reads route
+    // through app policy.
     (has_anchor
         && has_content
-        && !has_nip65_query
+        && has_nip65_query
         && routed_through_app_policy
         && baseline.anchor != 0
         && baseline.content != 0
@@ -1400,17 +1432,21 @@ fn content_phase_is_quiescent(
     baseline: HandoffBaseline,
     relay_witness: &ScriptedRelay,
 ) -> bool {
-    let [relay] = snapshot.relays.as_slice() else {
+    let Some((relay, indexer)) = parity_diagnostic_relays(snapshot) else {
         return false;
     };
     let has_content = relay
         .filters
         .iter()
         .any(|filter| filter_names_kind(filter, QUERY_KIND));
-    let has_stale_filter = relay.filters.iter().any(|filter| {
-        filter_names_kind(filter, SOURCE_ANCHOR_KIND)
-            || filter_names_kind(filter, Kind::RelayList.as_u16())
-    });
+    let has_stale_anchor = relay
+        .filters
+        .iter()
+        .any(|filter| filter_names_kind(filter, SOURCE_ANCHOR_KIND));
+    let has_nip65_query = indexer
+        .filters
+        .iter()
+        .any(|filter| filter_names_kind(filter, Kind::RelayList.as_u16()));
     let routed_through_app_policy = relay
         .by_lane
         .iter()
@@ -1418,7 +1454,8 @@ fn content_phase_is_quiescent(
     let content_req_count = relay_witness.query_count_for_kind(QUERY_KIND);
     let anchor_req_count = relay_witness.query_count_for_kind(SOURCE_ANCHOR_KIND);
     has_content
-        && !has_stale_filter
+        && !has_stale_anchor
+        && has_nip65_query
         && routed_through_app_policy
         && content_req_count == baseline.content
         && anchor_req_count == baseline.anchor
@@ -1515,9 +1552,9 @@ fn expected_limited_evidence() -> Vec<NormEvidence> {
 ///
 /// #1237 gave the write vocabulary a whole-write terminal
 /// (`WriteOutcome`), and a write whose destination set CLOSES now ends on
-/// it. A write whose destination set never closes — every feature-off `Auto`
-/// scenario in this crate, where no optional provider can settle the
-/// author's route fact — has no such terminal, so those collectors still
+/// it. A write whose destination set never closes — every `Auto` scenario in
+/// this crate, where the identically assembled provider's indexer deliberately
+/// never settles the author's route fact — has no such terminal, so collectors
 /// stop at the relay lane's own terminal. Stating which one is expected
 /// keeps both cases exact instead of trading a hang for a tolerance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1622,10 +1659,10 @@ fn expected_send_preamble(keys: &Keys, route_complete: bool) -> Vec<NormStatus> 
         // #1237: acceptance is `publish` returning `Ok`, so no fact reports
         // it. The first thing the stream can say is that the write is signed.
         NormStatus::Signed(event.id.to_hex()),
-        // These feature-off Auto scenarios get an executable destination
-        // from operator app policy while the author's neutral route fact
-        // remains Unknown. Delivery may finish; routing truthfully stays
-        // open because no optional provider is assembled in this crate.
+        // These Auto scenarios get an executable destination from operator app
+        // policy while the author's neutral route fact remains Unknown.
+        // Delivery may finish; routing truthfully stays open because the
+        // identically assembled provider's indexer never answers.
         // An open picture here is open for exactly one reason -- the
         // author's own neutral route fact is Unknown -- so the park names
         // that one key and a closed picture names nobody.
@@ -1962,11 +1999,11 @@ fn canonical_axes(seen: Vec<NormFollowActionStatus>) -> Vec<NormFollowActionStat
 
 /// Drain through the action's delivery terminal.
 ///
-/// This parity crate deliberately builds feature-off. Operator app policy
-/// supplies an executable route, but no optional protocol provider can settle
-/// the author's neutral route fact, so the routing axis remains open after
-/// delivery. Waiting for stream closure here would falsely require NIP-65
-/// behavior from a build that does not contain it.
+/// Operator app policy supplies an executable route, while the identically
+/// assembled NIP-65 provider waits on a deliberately nonanswering indexer.
+/// The author's neutral route fact therefore remains open after delivery.
+/// Waiting for stream closure here would falsely require settlement the test
+/// environment never supplies.
 fn collect_direct_follow_action(action: FollowAction) -> Vec<NormFollowActionStatus> {
     let deadline = Instant::now() + WAIT;
     let mut result = Vec::new();
@@ -2149,7 +2186,7 @@ async fn run_direct_follow_scenario(
         Engine::new(EngineConfig {
             app_relays: vec![relay.url.to_string()],
             allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-            ..EngineConfig::default()
+            ..direct_nip65_config()
         })
         .expect("direct follow engine must construct"),
     );
@@ -2218,7 +2255,7 @@ async fn run_ffi_follow_scenario(
         app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..NmpEngineConfig::default()
+        ..ffi_nip65_config()
     })
     .expect("FFI follow engine must construct");
     let active = engine
@@ -2234,16 +2271,22 @@ async fn run_ffi_follow_scenario(
     let snapshot_rx = bridge_follow_snapshots(&observation);
     let initial = wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::NotFollowing);
 
-    let follow_action = engine.follow(target.public_key().to_hex());
+    let follow_action = engine
+        .follow(target.public_key().to_hex())
+        .expect("FFI follow action must start with a configured route provider");
     let follow_rx = bridge_follow_actions(&follow_action);
     let follow = collect_ffi_follow_action(&follow_rx);
     let after_follow = wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::Following);
 
-    let no_change_action = engine.follow(target.public_key().to_hex());
+    let no_change_action = engine
+        .follow(target.public_key().to_hex())
+        .expect("FFI no-change action must start with a configured route provider");
     let no_change_rx = bridge_follow_actions(&no_change_action);
     let no_change = collect_ffi_follow_action(&no_change_rx);
 
-    let unfollow_action = engine.unfollow(target.public_key().to_hex());
+    let unfollow_action = engine
+        .unfollow(target.public_key().to_hex())
+        .expect("FFI unfollow action must start with a configured route provider");
     let unfollow_rx = bridge_follow_actions(&unfollow_action);
     let unfollow = collect_ffi_follow_action(&unfollow_rx);
     let after_unfollow =
@@ -2281,7 +2324,7 @@ async fn run_direct_missing_contact_list(
         Engine::new(EngineConfig {
             app_relays: vec![relay.url.to_string()],
             allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-            ..EngineConfig::default()
+            ..direct_nip65_config()
         })
         .expect("direct missing-list engine must construct"),
     );
@@ -2319,7 +2362,7 @@ async fn run_ffi_missing_contact_list(
         app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..NmpEngineConfig::default()
+        ..ffi_nip65_config()
     })
     .expect("FFI missing-list engine must construct");
     let active = engine
@@ -2335,7 +2378,9 @@ async fn run_ffi_missing_contact_list(
     let snapshot_rx = bridge_follow_snapshots(&observation);
     let snapshot =
         wait_for_ffi_follow_availability(&snapshot_rx, FfiFollowAvailability::NoContactList);
-    let action_handle = engine.follow(target.public_key().to_hex());
+    let action_handle = engine
+        .follow(target.public_key().to_hex())
+        .expect("FFI follow action must start with a configured route provider");
     let action_rx = bridge_follow_actions(&action_handle);
     let action = collect_ffi_follow_action(&action_rx);
 
@@ -2351,10 +2396,9 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
-        // This feature-off parity crate routes the loopback through explicit
-        // operator app policy. No kind:10002 query or protocol lane exists.
+        // Both facades assemble the same optional provider and app policy.
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..EngineConfig::default()
+        ..direct_nip65_config()
     })
     .expect("direct engine must construct");
     let pubkey = engine
@@ -2500,9 +2544,9 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
-        // Same feature-off operator policy as `run_direct_success`.
+        // Same provider and operator policy as `run_direct_success`.
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..NmpEngineConfig::default()
+        ..ffi_nip65_config()
     })
     .expect("FFI engine must construct");
     let registration = engine
@@ -2594,7 +2638,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     }
 }
 
-/// #8 U2 fail-closed AUTH park, direct half. Same feature-off operator-source
+/// #8 U2 fail-closed AUTH park, direct half. Same provider/operator-source
 /// preamble as `run_direct_success`, but the relay answers the
 /// unauthenticated durable EVENT with `["AUTH", challenge]` +
 /// `["OK", id, false, "auth-required: ..."]`. No AUTH policy registry
@@ -2616,7 +2660,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..EngineConfig::default()
+        ..direct_nip65_config()
     })
     .expect("direct auth-parked engine must construct");
     let pubkey = engine
@@ -2679,7 +2723,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..NmpEngineConfig::default()
+        ..ffi_nip65_config()
     })
     .expect("FFI auth-parked engine must construct");
     let registration = engine
@@ -2739,7 +2783,7 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..EngineConfig::default()
+        ..direct_nip65_config()
     })
     .expect("direct override engine must construct");
     let active_pubkey = engine
@@ -2797,7 +2841,7 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..NmpEngineConfig::default()
+        ..ffi_nip65_config()
     })
     .expect("FFI override engine must construct");
     let active_pubkey = engine
@@ -2845,7 +2889,7 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
-        ..EngineConfig::default()
+        ..direct_nip65_config()
     })
     .expect("direct tampered engine must construct");
     let mut event = nostr::EventBuilder::new(Kind::Custom(WRITE_KIND), "original")
@@ -2884,7 +2928,7 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
-        ..NmpEngineConfig::default()
+        ..ffi_nip65_config()
     })
     .expect("FFI tampered engine must construct");
     let event = nostr::EventBuilder::new(Kind::Custom(WRITE_KIND), "original")
@@ -2983,7 +3027,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
     // A per-run `Keys::generate()` would make the two halves disagree by
     // construction; a shared fixed key makes the payload-parity real.
     let keys = fixed_keys();
-    let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
+    let engine = Engine::new(direct_nip65_config()).expect("direct engine must construct");
     engine
         .set_active_account(Some(keys.public_key()))
         .expect("direct account must activate");
@@ -3052,7 +3096,7 @@ async fn run_ffi_reattach_live() -> ReattachProof {
     // there: the reattach `AwaitingSigner` payload is now the frozen
     // author pubkey, and the direct-vs-FFI proof compares it.
     let keys = fixed_keys();
-    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
+    let engine = NmpEngine::new(ffi_nip65_config()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("FFI account must activate");
@@ -3137,7 +3181,7 @@ struct CorrelationProof {
 
 fn run_direct_correlation() -> CorrelationProof {
     let keys = fixed_keys();
-    let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
+    let engine = Engine::new(direct_nip65_config()).expect("direct engine must construct");
     engine
         .set_active_account(Some(keys.public_key()))
         .expect("direct account must activate");
@@ -3201,7 +3245,7 @@ fn run_direct_correlation() -> CorrelationProof {
 
 fn run_ffi_correlation() -> CorrelationProof {
     let keys = fixed_keys();
-    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
+    let engine = NmpEngine::new(ffi_nip65_config()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("FFI account must activate");
@@ -3281,7 +3325,7 @@ struct CancellationProof {
 
 fn run_direct_cancellation() -> CancellationProof {
     let keys = fixed_keys();
-    let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
+    let engine = Engine::new(direct_nip65_config()).expect("direct engine must construct");
     engine
         .set_active_account(Some(keys.public_key()))
         .expect("direct account must activate");
@@ -3333,7 +3377,7 @@ fn run_direct_cancellation() -> CancellationProof {
 
 async fn run_ffi_cancellation() -> CancellationProof {
     let keys = fixed_keys();
-    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("FFI engine must construct");
+    let engine = NmpEngine::new(ffi_nip65_config()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("FFI account must activate");
@@ -3764,9 +3808,9 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
     // follow write acked.
     //
     // Asserted per AXIS rather than as one total order. Routing and delivery
-    // advance independently. In this feature-off crate the app relay makes
-    // delivery executable, while the author fact remains Unknown because no
-    // optional provider exists to settle it.
+    // advance independently. The app relay makes delivery executable, while
+    // the author fact remains Unknown because the identically assembled
+    // provider's indexer deliberately never answers.
     for (label, seen) in [("follow", &direct.follow), ("unfollow", &direct.unfollow)] {
         assert_eq!(
             delivery_axis(seen),
@@ -3789,7 +3833,7 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
         assert_eq!(
             routing_axis(seen).last(),
             Some(&"routed"),
-            "{label}: feature-off delivery must not fabricate route settlement: {seen:?}"
+            "{label}: delivery must not fabricate route settlement: {seen:?}"
         );
     }
 }

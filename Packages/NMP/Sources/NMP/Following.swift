@@ -208,15 +208,20 @@ extension NMPEngine {
         try NMPFollowingObservation(engine: ffi, target: target)
     }
 
-    /// The simple NMP-owned follow action. It returns immediately with a
-    /// stream covering acquisition, no-op, atomic conflict, signing,
-    /// routing, and relay receipt states.
-    public func follow(_ target: String) -> NMPFollowAction {
-        NMPFollowAction(handle: ffi.follow(target: target))
+    /// The simple NMP-owned follow action. It refuses before starting when
+    /// this engine has no automatic-route provider; otherwise it returns a
+    /// stream covering acquisition, no-op, atomic conflict, signing, routing,
+    /// and relay receipt states.
+    public func follow(_ target: String) throws -> NMPFollowAction {
+        try NMPFollowAction(handle: nmpRethrowing {
+            try ffi.follow(target: target)
+        })
     }
 
-    public func unfollow(_ target: String) -> NMPFollowAction {
-        NMPFollowAction(handle: ffi.unfollow(target: target))
+    public func unfollow(_ target: String) throws -> NMPFollowAction {
+        try NMPFollowAction(handle: nmpRethrowing {
+            try ffi.unfollow(target: target)
+        })
     }
 }
 
@@ -309,7 +314,14 @@ public final class NMPFollowing: ObservableObject {
 
     private func start(desiredFollowing: Bool) {
         guard !isActing else { return }
-        let action = desiredFollowing ? engine.follow(target) : engine.unfollow(target)
+        let action: NMPFollowAction
+        do {
+            action = try (desiredFollowing ? engine.follow(target) : engine.unfollow(target))
+        } catch {
+            self.desiredFollowing = nil
+            self.isActing = false
+            return
+        }
         self.desiredFollowing = desiredFollowing
         self.isActing = true
         self.actionStatus = .acquiring
