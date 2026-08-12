@@ -9,8 +9,8 @@ explicitly unstable test infrastructure.
 
 Opt-in protocol crates provide semantic operations over that same facade. A
 direct-Rust app selects facade Cargo features. A Swift or Kotlin app selects
-stable app-facing feature keys in one checked-in manifest and runs the generic
-`tools/nmp-native/nmp_native.py prepare` command. Cargo resolves that selection
+stable app-facing capability keys and product inputs in one committed
+`.nmp.toml`, then runs the first-class Rust `nmp prepare` command. Cargo resolves that selection
 into one `nmp-ffi` library; UniFFI is generated from that exact binary, and only
 matching Swift/Kotlin wrappers are materialized. `native/features.toml` is the
 machine-readable surface catalog. The build tool contains no protocol-family
@@ -50,7 +50,7 @@ ordinary `LiveQuery` per group or discovery predicate, never a group-specific
 observe door. `nmp-ffi` projects the full `FfiRelayScope`/`FfiGroup`/
 `FfiGroupPredicate`/`FfiGroupIds` read-and-write surface; the selected Swift and
 Kotlin wrappers project the same relay-scope operations. This is a native SDK
-surface claim. `nmp-native --platform android` packages the exact same selected
+surface claim. The `android` product packages the exact same selected
 Kotlin wrapper inventory and Cargo-resolved FFI contract into one AAR with one
 `libnmp_ffi.so` for each declared ABI; it adds no Android feature vocabulary or
 family artifact. Packaging and clean external consumption are qualified by

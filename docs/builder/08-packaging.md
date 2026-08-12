@@ -26,33 +26,35 @@ they do not assemble the resolver, store, router, and transport crates by hand.
 
 ## One feature-selected native library
 
-A Swift or Kotlin app checks in one compile-time feature manifest:
+A Swift or Kotlin app checks in one `.nmp.toml`:
 
 ```toml
 schema = 1
-features = ["nip29", "nip65"]
+capabilities = ["nip29", "nip65"]
+products = ["apple"]
 ```
 
-The keys are stable app-facing families, not workspace crate names. Runtime
+The keys are stable app-facing capabilities, not workspace crate names. Runtime
 values such as indexer relays, group relay scopes, accounts, signers, and store
 paths never enter this file. The catalog and current keys live in
 `native/features.toml`; `native/examples/core.toml` and
 `native/examples/normal-client.toml` are starting points.
 
-From the NMP checkout, prepare the app's exact local product:
+Install the Rust CLI from the NMP checkout, then prepare the app's exact local
+product from the application repository:
 
 ```bash
-python3 tools/nmp-native/nmp_native.py prepare \
-  --manifest path/to/app/nmp.toml \
-  --platform apple \
-  --output path/to/app/Generated/NMP
+cargo install --locked --path crates/nmp-cli
+cd path/to/app
+nmp prepare --output Generated/NMP
+nmp verify --output Generated/NMP
 ```
 
-Use `--platform kotlin-jvm` for desktop JVM or `--platform android` for one
-feature-selected Android AAR. Platforms may be repeated in one invocation. The
+Use `products = ["kotlin-jvm"]` for desktop JVM or `products = ["android"]`
+for one feature-selected Android AAR. Products may be combined. The
 Android output includes its local Maven repository and exact `arm64-v8a` and
 `x86_64` libraries at API 26; the app still names only `com.nmp.sdk`. The
-command asks Cargo to resolve the selection, builds the target-native library,
+CLI asks Cargo to resolve the selection, builds the target-native library,
 generates UniFFI from that exact contract, materializes only matching
 hand-written wrappers, and writes
 `nmp-native-provenance.json`. It contains no protocol-family branches: adding a
@@ -60,12 +62,13 @@ family adds one catalog record and owned sources. Cargo remains the only
 dependency graph, so a real feature dependency activates and materializes its
 surface without a second rule.
 
-The cache identity includes the canonical resolved features, NMP source,
+The cache identity includes the canonical resolved capabilities, NMP source,
 catalog, target/toolchain/profile, and relevant build inputs. Reordering the
 same features is a cache hit; changing the set is not. The output is a generated
 local artifact, not a published matrix of every possible combination. Ordinary
 Xcode/Gradle incremental builds consume it without invoking Cargo. Clean CI
-runs the same command from the checked-in app manifest.
+runs the same command from the checked-in `.nmp.toml`. Neither preparation nor
+consumer compilation invokes Python.
 
 ## Swift
 

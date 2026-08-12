@@ -1,27 +1,36 @@
 # Native feature preparation
 
-An app checks in one TOML manifest containing only its compile-time NMP
-capabilities:
+An app checks in one `.nmp.toml` containing only its compile-time NMP
+capabilities and stable product inputs:
 
 ```toml
 schema = 1
-features = ["nip29", "nip65"]
+capabilities = ["nip29", "nip65"]
+products = ["apple"]
 ```
 
-Prepare the exact Apple package or host Kotlin/JVM module with the generic
-command using Python 3.11 or newer:
+Install the first-class Rust application tool once from the NMP checkout:
 
 ```bash
-scripts/nmp-native prepare \
-  --manifest path/to/app/nmp.toml \
-  --platform apple \
-  --output path/to/app/Generated/NMP
+cargo install --locked --path crates/nmp-cli
 ```
 
-Use `--platform kotlin-jvm` for the desktop-JVM qualification artifact, or
-repeat `--platform` to produce both under the same output. `--apple-target`
-may select a subset of the catalog's Apple targets for a host-only or
-simulator-only developer loop. Clean CI invokes the same command and manifest.
+Then initialize and prepare from a clean application repository:
+
+```bash
+nmp init --product apple --capability groups --capability "outbox routing"
+nmp prepare --output Generated/NMP
+nmp verify --output Generated/NMP
+```
+
+`nmp capability list`, `add`, and `remove` edit the same declaration without
+adding capability-specific commands. Use `products = ["android"]` for an
+Android AAR, or select several products in the same file. `apple_targets` may
+select a stable subset of the catalog targets. Clean CI invokes the same
+`nmp prepare` command from the committed `.nmp.toml`. The installed binary
+remembers the NMP source checkout it was built from; `--source`/`NMP_SOURCE`
+selects another checkout explicitly. Python is not used by initialization,
+preparation, or generated consumer builds.
 
 `features.toml` is the one machine-readable ownership catalog. It maps stable
 app keys to forwarding Cargo features and hand-written SDK sources. The tool
@@ -38,8 +47,8 @@ The output contains:
   toolchains, targets, profile, canonical requested/resolved features, relevant
   build environment, and output hashes.
 
-The cache is content-addressed. Reordering the manifest's feature list does not
-change its identity. A changed feature set, relevant source, toolchain, target,
+The cache is content-addressed. Reordering the manifest's capability list does not
+change its identity. A changed capability set, relevant source, toolchain, target,
 or profile does. The tool refuses unknown/internal keys, unregistered active
 Cargo features, missing catalog sources, or overwriting a non-generated output
 directory.
@@ -74,4 +83,6 @@ knowledge of any particular family.
 The checked examples cover the linear build shapes: `core.toml`, the
 NIP-65-selected `normal-client.toml`, `representative-mix.toml` (independent
 families plus the real `blossom` to `asset` Cargo feature dependency), and
-`all.toml`.
+`all.toml`; Android-specific examples select the same four shapes without a
+second capability graph. `fixtures/native-cli-app/.nmp.toml` is the clean
+application declaration selecting groups plus outbox routing.

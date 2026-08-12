@@ -1,17 +1,15 @@
 # NMP Android
 
-This is the checked Android project template used by `nmp-native`. It is not a
+This is the checked Android project template used by `nmp prepare`. It is not a
 second Kotlin SDK: the preparation command copies this platform packaging and
 materializes the exact Cargo-resolved `com.nmp.sdk` sources, generated UniFFI
 binding, and `libnmp_ffi.so` ABI slices selected by the application's
-`nmp.toml`.
+`.nmp.toml`.
 
 From the repository root:
 
 ```sh
-scripts/nmp-native prepare \
-  --manifest native/examples/normal-client.toml \
-  --platform android \
+nmp --manifest native/examples/android-normal-client.toml prepare \
   --output /tmp/nmp-native-android
 ```
 
