@@ -6,7 +6,7 @@
 #
 # 1. Build the nmp-ffi cdylib for the HOST triple (JVM target -- this is a
 #    desktop-JVM smoke-test falsifier. The Android product is prepared by the
-#    canonical `scripts/nmp-native --platform android` backend instead.
+#    canonical `nmp prepare` Android product instead.
 # 2. Run uniffi-bindgen in LIBRARY mode against the compiled cdylib to
 #    generate the Kotlin bindings (uniffi/nmp_ffi/nmp_ffi.kt) -- no .udl
 #    file, metadata is read straight out of the compiled binary, same as

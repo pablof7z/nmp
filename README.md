@@ -98,7 +98,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ NIP-65 Rust module — engine-free values validate and compose the first
   kind:10002; the optional `nmp/nip65` facade publishes it through the ordinary
   tracked write door and privately assembles automatic route discovery. Swift
-  and Kotlin apps select `nip65` through the same checked-in feature manifest
+  and Kotlin apps select `nip65` through the same committed `.nmp.toml`
   as every other native family, then supply their own indexer relays at engine
   runtime; NMP supplies no hidden relay.
 - ✅ NIP-73 external content ids — the `(i, k)` pair naming something that is

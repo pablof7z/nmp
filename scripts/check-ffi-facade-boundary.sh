@@ -47,8 +47,8 @@ ffi = tomllib.loads(ffi_path.read_text(encoding="utf-8"))
 facade = tomllib.loads(facade_path.read_text(encoding="utf-8"))
 catalog = tomllib.loads(catalog_path.read_text(encoding="utf-8"))
 
-if catalog.get("schema") != 2:
-    fail("native feature catalog schema must be 2")
+if catalog.get("schema") != 3:
+    fail("native feature catalog schema must be 3")
 records = catalog.get("features")
 if not isinstance(records, list) or not records:
     fail("native feature catalog must contain app-facing records")
