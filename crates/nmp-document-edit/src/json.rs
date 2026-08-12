@@ -25,6 +25,12 @@ pub struct JsonEditOutcome {
 pub struct JsonApplyMetrics {
     pub source_bytes: usize,
     pub object_members: usize,
+    /// Source bytes copied into a replacement candidate. A no-op remains
+    /// zero: identity patches are discarded before any full-document copy.
+    pub source_bytes_copied: usize,
+    /// Escaped object keys that required transient decoding for semantic
+    /// comparison. Ordinary unescaped keys are compared as borrowed slices.
+    pub escaped_keys_decoded: usize,
     pub emitted_patches: usize,
     pub replacement_bytes: usize,
 }
@@ -51,7 +57,7 @@ impl DocumentEditPlan {
 
 #[derive(Clone, Debug)]
 struct Member {
-    decoded_key: String,
+    ordinal: usize,
     key_start: usize,
     value: Range<usize>,
     comma_before: Option<usize>,
@@ -59,13 +65,16 @@ struct Member {
 }
 
 struct ObjectSpans {
+    /// Only members whose decoded key matches the requested field. The scan
+    /// never retains one metadata row per unrelated object member.
     members: Vec<Member>,
+    member_count: usize,
     close: usize,
+    escaped_keys_decoded: usize,
 }
 
 fn apply_json_edit(edit: &JsonFieldEdit, source: &str) -> Result<JsonEditOutcome, JsonApplyError> {
     edit.validate()?;
-    let object = parse_object_spans(source)?;
     let (name, occurrences) = match edit {
         JsonFieldEdit::Set {
             name, occurrences, ..
@@ -74,12 +83,8 @@ fn apply_json_edit(edit: &JsonFieldEdit, source: &str) -> Result<JsonEditOutcome
             name, occurrences, ..
         } => (name, *occurrences),
     };
-    let matches = object
-        .members
-        .iter()
-        .enumerate()
-        .filter_map(|(index, member)| (member.decoded_key == *name).then_some(index))
-        .collect::<Vec<_>>();
+    let object = parse_object_spans(source, name)?;
+    let matches = (0..object.members.len()).collect::<Vec<_>>();
     let selected = select_occurrences(&matches, occurrences);
 
     let mut patches = match edit {
@@ -108,21 +113,26 @@ fn apply_json_edit(edit: &JsonFieldEdit, source: &str) -> Result<JsonEditOutcome
         JsonFieldEdit::Remove { .. } => removal_patches(&object, &selected),
     };
 
-    let replacement = if patches.is_empty() {
-        None
+    // A Set to the exact existing JSON bytes is already the desired
+    // document. Remove those identity patches before constructing a full
+    // candidate; mixed patch sets remain equivalent because each dropped
+    // range would have replaced bytes with themselves.
+    patches.retain(|patch| source.get(patch.start..patch.end) != Some(patch.replacement.as_str()));
+
+    let (replacement, source_bytes_copied) = if patches.is_empty() {
+        (None, 0)
     } else {
-        let candidate = apply_patches(source, &patches)?;
-        if candidate == source {
-            patches.clear();
-            None
-        } else {
-            Some(candidate)
-        }
+        let (candidate, source_bytes_copied) = apply_patches(source, &patches)?;
+        (Some(candidate), source_bytes_copied)
     };
+    #[cfg(not(any(test, feature = "bench-instrumentation")))]
+    let _ = (source_bytes_copied, object.escaped_keys_decoded);
     #[cfg(any(test, feature = "bench-instrumentation"))]
     let metrics = JsonApplyMetrics {
         source_bytes: source.len(),
-        object_members: object.members.len(),
+        object_members: object.member_count,
+        source_bytes_copied,
+        escaped_keys_decoded: object.escaped_keys_decoded,
         emitted_patches: patches.len(),
         replacement_bytes: replacement.as_ref().map_or(0, String::len),
     };
@@ -149,7 +159,7 @@ fn insert_field_patch(
     value: &str,
 ) -> Result<JsonSpanPatch, JsonApplyError> {
     let encoded_name = serde_json::to_string(name).map_err(|_| JsonApplyError::InvalidJson)?;
-    let separator = if object.members.is_empty() { "" } else { "," };
+    let separator = if object.member_count == 0 { "" } else { "," };
     let replacement = format!("{separator}{encoded_name}:{value}");
     if !source.is_char_boundary(object.close) {
         return Err(JsonApplyError::InvalidPatchSet);
@@ -169,14 +179,17 @@ fn removal_patches(object: &ObjectSpans, selected: &[usize]) -> Vec<JsonSpanPatc
     let mut run_start = 0;
     while run_start < selected.len() {
         let mut run_end = run_start + 1;
-        while run_end < selected.len() && selected[run_end] == selected[run_end - 1] + 1 {
+        while run_end < selected.len()
+            && object.members[selected[run_end]].ordinal
+                == object.members[selected[run_end - 1]].ordinal + 1
+        {
             run_end += 1;
         }
         let first_index = selected[run_start];
         let last_index = selected[run_end - 1];
         let first = &object.members[first_index];
         let last = &object.members[last_index];
-        let has_kept_after = last_index + 1 < object.members.len();
+        let has_kept_after = last.ordinal + 1 < object.member_count;
         let (start, end) = if has_kept_after {
             (
                 first.key_start,
@@ -198,7 +211,10 @@ fn removal_patches(object: &ObjectSpans, selected: &[usize]) -> Vec<JsonSpanPatc
     patches
 }
 
-fn apply_patches(source: &str, patches: &[JsonSpanPatch]) -> Result<String, JsonApplyError> {
+fn apply_patches(
+    source: &str,
+    patches: &[JsonSpanPatch],
+) -> Result<(String, usize), JsonApplyError> {
     let mut order = (0..patches.len()).collect::<Vec<_>>();
     order.sort_by_key(|index| (patches[*index].start, patches[*index].end));
     let mut cursor = 0;
@@ -209,6 +225,7 @@ fn apply_patches(source: &str, patches: &[JsonSpanPatch]) -> Result<String, Json
                 .map(|patch| patch.replacement.len())
                 .sum::<usize>(),
     );
+    let mut source_bytes_copied = 0;
     for index in order {
         let patch = &patches[index];
         if patch.start < cursor
@@ -220,14 +237,16 @@ fn apply_patches(source: &str, patches: &[JsonSpanPatch]) -> Result<String, Json
             return Err(JsonApplyError::InvalidPatchSet);
         }
         output.push_str(&source[cursor..patch.start]);
+        source_bytes_copied += patch.start - cursor;
         output.push_str(&patch.replacement);
         cursor = patch.end;
     }
     output.push_str(&source[cursor..]);
-    Ok(output)
+    source_bytes_copied += source.len() - cursor;
+    Ok((output, source_bytes_copied))
 }
 
-fn parse_object_spans(source: &str) -> Result<ObjectSpans, JsonApplyError> {
+fn parse_object_spans(source: &str, name: &str) -> Result<ObjectSpans, JsonApplyError> {
     // Validate without materializing a parallel `serde_json::Value` tree. The
     // second pass below discovers exact source spans and is the only document
     // representation retained by this operation.
@@ -245,15 +264,29 @@ fn parse_object_spans(source: &str) -> Result<ObjectSpans, JsonApplyError> {
     at += 1;
     let mut members = Vec::new();
     let mut comma_before = None;
+    let mut escaped_keys_decoded = 0;
+    let mut member_count = 0;
     loop {
         at = skip_ws(bytes, at);
         if bytes.get(at) == Some(&b'}') {
-            return Ok(ObjectSpans { members, close: at });
+            return Ok(ObjectSpans {
+                members,
+                member_count,
+                close: at,
+                escaped_keys_decoded,
+            });
         }
         let key_start = at;
         let key_end = scan_string(bytes, at)?;
-        let decoded_key = serde_json::from_str::<String>(&source[key_start..key_end])
-            .map_err(|_| JsonApplyError::InvalidJson)?;
+        let raw_key = &source[key_start + 1..key_end - 1];
+        let matches_name = if raw_key.as_bytes().contains(&b'\\') {
+            escaped_keys_decoded += 1;
+            serde_json::from_str::<String>(&source[key_start..key_end])
+                .map_err(|_| JsonApplyError::InvalidJson)?
+                == name
+        } else {
+            raw_key == name
+        };
         at = skip_ws(bytes, key_end);
         if bytes.get(at) != Some(&b':') {
             return Err(JsonApplyError::InvalidJson);
@@ -267,20 +300,28 @@ fn parse_object_spans(source: &str) -> Result<ObjectSpans, JsonApplyError> {
         } else {
             None
         };
-        members.push(Member {
-            decoded_key,
-            key_start,
-            value: value_start..value_end,
-            comma_before,
-            comma_after_end,
-        });
+        if matches_name {
+            members.push(Member {
+                ordinal: member_count,
+                key_start,
+                value: value_start..value_end,
+                comma_before,
+                comma_after_end,
+            });
+        }
+        member_count += 1;
         match bytes.get(at) {
             Some(b',') => {
                 comma_before = Some(at);
                 at += 1;
             }
             Some(b'}') => {
-                return Ok(ObjectSpans { members, close: at });
+                return Ok(ObjectSpans {
+                    members,
+                    member_count,
+                    close: at,
+                    escaped_keys_decoded,
+                });
             }
             _ => return Err(JsonApplyError::InvalidJson),
         }
@@ -397,6 +438,18 @@ mod tests {
         let plan = DocumentEditPlan::json_object(
             JsonFieldEdit::set("x", "9", Occurrences::Last, JsonMissing::NoChange).unwrap(),
         );
+
+        let first = DocumentEditPlan::json_object(
+            JsonFieldEdit::set("x", "7", Occurrences::First, JsonMissing::NoChange).unwrap(),
+        );
+        assert_eq!(
+            first
+                .apply_json_object(source)
+                .unwrap()
+                .replacement
+                .as_deref(),
+            Some(r#"{"x":7,"\u0078":2,"x":3}"#)
+        );
         assert_eq!(
             plan.apply_json_object(source)
                 .unwrap()
@@ -460,5 +513,31 @@ mod tests {
         assert!(outcome.patches.is_empty());
         assert_eq!(outcome.metrics.emitted_patches, 0);
         assert_eq!(outcome.metrics.replacement_bytes, 0);
+        assert_eq!(outcome.metrics.source_bytes_copied, 0);
+    }
+
+    #[test]
+    fn large_json_no_op_scans_borrowed_keys_without_building_a_candidate() {
+        let mut source = String::from(r#"{"target":"exact""#);
+        for index in 0..20_000 {
+            source.push_str(&format!(r#", "key-{index}":"{}""#, "v".repeat(64)));
+        }
+        source.push('}');
+        let plan = DocumentEditPlan::json_object(
+            JsonFieldEdit::set(
+                "target",
+                r#""exact""#,
+                Occurrences::All,
+                JsonMissing::NoChange,
+            )
+            .unwrap(),
+        );
+
+        let outcome = plan.apply_json_object(&source).unwrap();
+        assert_eq!(outcome.replacement, None);
+        assert!(outcome.patches.is_empty());
+        assert_eq!(outcome.metrics.object_members, 20_001);
+        assert_eq!(outcome.metrics.escaped_keys_decoded, 0);
+        assert_eq!(outcome.metrics.source_bytes_copied, 0);
     }
 }

@@ -59,6 +59,23 @@ impl DocumentEditPlan {
     }
 }
 
+impl TagItemSelector {
+    /// Whether this capability-owned logical item exists in the raw tag
+    /// document. Consumers use the same selector for observation and edit
+    /// construction, so legacy/current identity cannot drift between them.
+    pub fn matches_any<R: AsRef<[String]>>(&self, source: &[R]) -> bool {
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        let mut metrics = TagApplyMetrics::default();
+        find_first(
+            self,
+            source,
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            &mut metrics,
+        )
+        .is_some()
+    }
+}
+
 fn apply_partitioned_tag_edit<P: AsRef<[String]>, Q: AsRef<[String]>>(
     edit: &PartitionedTagEdit,
     public: &[P],
@@ -492,6 +509,116 @@ mod tests {
         );
         assert_eq!(outcome.private.replacement, None);
         assert_eq!(outcome.private.metrics.source_rows_copied, 0);
+    }
+
+    #[test]
+    fn public_and_private_partitions_edit_and_preserve_order_independently() {
+        let public = vec![
+            row(&["keep", "public-a"]),
+            row(&["drop", "public"]),
+            row(&["keep", "public-b"]),
+        ];
+        let private = vec![
+            row(&["keep", "private-a"]),
+            row(&["drop", "private"]),
+            row(&["keep", "private-b"]),
+            row(&["drop", "private"]),
+        ];
+        let edit = PartitionedTagEdit::new(
+            Some(TagEdit::remove(selector(vec![vec![vec![
+                "drop", "public",
+            ]]]))),
+            Some(
+                TagEdit::rewrite(
+                    vec![selector(vec![vec![vec!["drop", "private"]]])],
+                    vec![row(&["current", "private"])],
+                    TagInsertion::first_match_or(Boundary::End),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let outcome = DocumentEditPlan::partitioned_tags(edit)
+            .unwrap()
+            .apply_partitioned_tags(&public, &private)
+            .unwrap();
+
+        assert_eq!(
+            outcome.public.replacement,
+            Some(vec![row(&["keep", "public-a"]), row(&["keep", "public-b"]),])
+        );
+        assert_eq!(
+            outcome.private.replacement,
+            Some(vec![
+                row(&["keep", "private-a"]),
+                row(&["current", "private"]),
+                row(&["keep", "private-b"]),
+            ])
+        );
+    }
+
+    #[test]
+    fn exact_rows_and_anchored_insertions_have_executable_meaning() {
+        let exact = TagItemSelector::one(
+            TagItemPattern::new(vec![TagRowPattern::exact(row(&["x", "id"]), 2).unwrap()]).unwrap(),
+        );
+        let anchor = selector(vec![vec![vec!["anchor"]]]);
+        let source = vec![
+            row(&["x", "id", "legacy-extra"]),
+            row(&["anchor"]),
+            row(&["tail"]),
+        ];
+
+        let before = TagEdit::ensure_present(
+            exact.clone(),
+            vec![row(&["x", "id"])],
+            TagInsertion::before_first(anchor.clone(), Boundary::End),
+        )
+        .unwrap();
+        assert_eq!(
+            DocumentEditPlan::tags(before)
+                .apply_tags(&source)
+                .unwrap()
+                .replacement,
+            Some(vec![
+                row(&["x", "id", "legacy-extra"]),
+                row(&["x", "id"]),
+                row(&["anchor"]),
+                row(&["tail"]),
+            ])
+        );
+
+        let after = TagEdit::rewrite(
+            vec![exact],
+            vec![row(&["replacement"])],
+            TagInsertion::after_last(anchor, Boundary::Start),
+        )
+        .unwrap();
+        assert_eq!(
+            DocumentEditPlan::tags(after)
+                .apply_tags(&[row(&["x", "id"]), row(&["anchor"]), row(&["tail"])])
+                .unwrap()
+                .replacement,
+            Some(vec![
+                row(&["anchor"]),
+                row(&["replacement"]),
+                row(&["tail"]),
+            ])
+        );
+
+        let at_start = TagEdit::ensure_present(
+            selector(vec![vec![vec!["new"]]]),
+            vec![row(&["new"])],
+            TagInsertion::start(),
+        )
+        .unwrap();
+        assert_eq!(
+            DocumentEditPlan::tags(at_start)
+                .apply_tags(&[row(&["tail"])])
+                .unwrap()
+                .replacement,
+            Some(vec![row(&["new"]), row(&["tail"])])
+        );
     }
 
     #[test]
