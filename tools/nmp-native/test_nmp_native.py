@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import tempfile
 import textwrap
 import tomllib
 import unittest
+import zipfile
 from pathlib import Path
 from typing import Mapping, Sequence
+from unittest.mock import patch
 
 import nmp_native
 
@@ -92,6 +95,17 @@ class FakeRunner(nmp_native.CommandRunner):
             bindgen.write_text("fixture executable\n")
             bindgen.chmod(0o755)
             return nmp_native.CommandResult()
+        if command[:2] == ("cargo", "ndk"):
+            out = Path(command[command.index("--output-dir") + 1])
+            indices = [index for index, item in enumerate(command) if item == "--target"]
+            for index in indices:
+                target = command[index + 1]
+                destination = out / target
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / "libsample_ffi.so").write_bytes(
+                    f"android-{target}".encode()
+                )
+            return nmp_native.CommandResult()
         if Path(command[0]).name == "uniffi-bindgen":
             language = command[command.index("--language") + 1]
             out = Path(command[command.index("--out-dir") + 1])
@@ -115,7 +129,50 @@ class FakeRunner(nmp_native.CommandRunner):
             output.mkdir(parents=True, exist_ok=True)
             (output / "Info.plist").write_text("fixture\n")
             return nmp_native.CommandResult()
+        if Path(command[0]).name == "gradlew":
+            project = Path(command[command.index("-p") + 1])
+            aar = project / "build" / "outputs" / "aar" / "sample-android-release.aar"
+            aar.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(aar, "w") as archive:
+                archive.writestr("classes.jar", b"fixture")
+            repository_arg = next(item for item in command if item.startswith("-PnmpRepository="))
+            repository = Path(repository_arg.split("=", 1)[1])
+            artifact = repository / "test" / "sample" / "sample-android" / "0.0.0"
+            artifact.mkdir(parents=True, exist_ok=True)
+            (artifact / "sample-android-0.0.0.aar").write_bytes(aar.read_bytes())
+            (artifact / "sample-android-0.0.0.pom").write_text("<project />\n")
+            return nmp_native.CommandResult()
         raise AssertionError(f"unexpected fake command: {command}")
+
+
+class FakeAndroidPreparer(nmp_native.NativePreparer):
+    def _android_sdk_home(self) -> Path:
+        return self.repo_root / "fake-android-sdk"
+
+    def _android_ndk_home(self, sdk: Path) -> Path:
+        return sdk / "ndk" / self.catalog.android.ndk_version
+
+    def _android_context(self) -> Mapping[str, object]:
+        return {
+            "project_name": self.catalog.android.project_name,
+            "namespace": self.catalog.android.namespace,
+            "maven_coordinate": "test.sample:sample-android:0.0.0",
+            "min_sdk": 26,
+            "compile_sdk": 35,
+            "sdk_revision": "fixture",
+            "build_tools": "35.0.0",
+            "ndk": "27.2.12479018",
+            "cargo_ndk": "4.1.2",
+            "gradle": "8.10",
+            "android_gradle_plugin": "8.7.3",
+            "kotlin": "2.0.21",
+            "jdk": "fixture 17",
+            "clang": "fixture clang",
+            "abis": [
+                {"name": item.name, "rust_target": item.rust_target}
+                for item in self.catalog.android.abis
+            ],
+        }
 
 
 def write(path: Path, text: str) -> None:
@@ -168,11 +225,12 @@ def fixture_repo(root: Path) -> Path:
     )
     write(root / "sdk" / "Alpha.kt", "package test\nval alpha = true\n")
     write(root / "sdk" / "Beta.kt", "package test\nval beta = true\n")
+    write(root / "sdk" / "Desktop.kt", "package test\nclass DesktopOnly\n")
     catalog = root / "native" / "features.toml"
     write(
         catalog,
         """
-        schema = 1
+        schema = 2
 
         [artifact]
         ffi_package = "sample-ffi"
@@ -198,6 +256,26 @@ def fixture_repo(root: Path) -> Path:
         jvm_toolchain = 17
         dependencies = ["net.java.dev.jna:jna:5.14.0"]
 
+        [android]
+        project_template = "android-template"
+        gradle_wrapper_project = "gradle-wrapper"
+        project_name = "sample-android"
+        namespace = "test.sample"
+        artifact_id = "sample-android"
+        min_sdk = 26
+        compile_sdk = 35
+        build_tools_version = "35.0.0"
+        ndk_version = "27.2.12479018"
+        cargo_ndk_version = "4.1.2"
+        gradle_version = "8.10"
+        android_gradle_plugin_version = "8.7.3"
+        kotlin_version = "2.0.21"
+        jdk_version = 17
+        abis = [
+          { name = "arm64-v8a", rust_target = "aarch64-linux-android" },
+          { name = "x86_64", rust_target = "x86_64-linux-android" },
+        ]
+
         [core]
         ffi_sources = ["crates/sample-ffi/src/lib.rs"]
         swift_sources = [
@@ -205,6 +283,7 @@ def fixture_repo(root: Path) -> Path:
         ]
         kotlin_sources = [
           { path = "sdk/Core.kt", destination = "test/Core.kt" },
+          { path = "sdk/Desktop.kt", destination = "test/Desktop.kt", platforms = ["kotlin-jvm"] },
         ]
 
         [[features]]
@@ -229,6 +308,21 @@ def fixture_repo(root: Path) -> Path:
           { path = "sdk/Beta.kt", destination = "test/Beta.kt" },
         ]
         """,
+    )
+    write(
+        root / "android-template" / "build.gradle.kts",
+        'plugins {\n  id("com.android.library") version "8.7.3"\n'
+        '  kotlin("android") version "2.0.21"\n}\n',
+    )
+    write(root / "android-template" / "settings.gradle.kts", "rootProject.name = \"sample\"\n")
+    write(root / "android-template" / "src/main/AndroidManifest.xml", "<manifest />\n")
+    write(root / "gradle-wrapper" / "gradlew", "#!/bin/sh\n")
+    (root / "gradle-wrapper" / "gradlew").chmod(0o755)
+    write(root / "gradle-wrapper" / "gradlew.bat", "@echo off\n")
+    write(root / "gradle-wrapper" / "gradle/wrapper/gradle-wrapper.jar", "fixture\n")
+    write(
+        root / "gradle-wrapper" / "gradle/wrapper/gradle-wrapper.properties",
+        "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10-bin.zip\n",
     )
     return catalog
 
@@ -522,6 +616,62 @@ class PreparationTests(unittest.TestCase):
         ).read_text()
         self.assertIn("alphaInCore", core)
         self.assertNotIn("betaInCore", core)
+
+    def test_android_is_the_same_selected_kotlin_surface_in_one_aar(self) -> None:
+        preparer = FakeAndroidPreparer(
+            repo_root=self.root,
+            catalog=self.catalog,
+            runner=self.runner,
+            cache_dir=self.root / "android-cache",
+            system="Darwin",
+            machine="arm64",
+        )
+        output = self.root / "android-output"
+        result = preparer.prepare(
+            manifest=self.manifest(["beta"], "android.toml"),
+            output=output,
+            platforms=("android", "kotlin-jvm"),
+            profile="release",
+        )
+        self.assertEqual(result["resolved_features"], ["alpha", "beta"])
+        self.assertEqual(result["android_abis"], ["arm64-v8a", "x86_64"])
+        for abi in result["android_abis"]:
+            self.assertTrue(
+                (
+                    output
+                    / "android"
+                    / "src"
+                    / "main"
+                    / "jniLibs"
+                    / abi
+                    / "libsample_ffi.so"
+                ).is_file()
+            )
+        self.assertTrue(
+            (output / "android" / "artifacts" / "sample-android-0.0.0.aar").is_file()
+        )
+        android_sources = json.loads(
+            (output / "android" / "nmp-kotlin-sources.json").read_text()
+        )
+        jvm_sources = json.loads(
+            (output / "kotlin-jvm" / "nmp-kotlin-sources.json").read_text()
+        )
+        android_destinations = {item["destination"] for item in android_sources}
+        jvm_destinations = {item["destination"] for item in jvm_sources}
+        self.assertEqual(
+            android_destinations,
+            {"test/Core.kt", "test/Alpha.kt", "test/Beta.kt"},
+        )
+        self.assertEqual(jvm_destinations - android_destinations, {"test/Desktop.kt"})
+
+    def test_android_uses_catalog_ndk_not_runner_default(self) -> None:
+        sdk = self.root / "android-sdk"
+        expected = sdk / "ndk" / self.catalog.android.ndk_version
+        wrong = sdk / "ndk" / "27.3.13750724"
+        write(expected / "source.properties", "Pkg.Revision = 27.2.12479018\n")
+        write(wrong / "source.properties", "Pkg.Revision = 27.3.13750724\n")
+        with patch.dict(os.environ, {"ANDROID_NDK_HOME": str(wrong)}, clear=False):
+            self.assertEqual(self.preparer._android_ndk_home(sdk), expected)
 
     def test_unknown_and_unregistered_active_features_fail_before_build(self) -> None:
         with self.assertRaisesRegex(nmp_native.NativePrepareError, "unknown or internal-only"):

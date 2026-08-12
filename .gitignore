@@ -19,6 +19,8 @@ Cargo.lock.orig
 xcuserdata/
 /ios/**/build/
 /android/**/build/
+/fixtures/android-aar-consumer/app/build/
+/fixtures/android-aar-consumer/.kotlin/
 .gradle/
 *.swp
 

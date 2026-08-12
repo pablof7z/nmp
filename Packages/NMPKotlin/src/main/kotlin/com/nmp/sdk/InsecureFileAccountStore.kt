@@ -50,7 +50,13 @@ class NMPInsecureFileAccountStore(private val file: Path) : NMPLocalAccountCheck
 
     override fun loadSecretKey(): String? =
         synchronized(lock) {
-            if (!Files.exists(file)) null else Files.readString(file, StandardCharsets.UTF_8)
+            if (!Files.exists(file)) {
+                null
+            } else {
+                Files.newBufferedReader(file, StandardCharsets.UTF_8).use { reader ->
+                    reader.readText()
+                }
+            }
         }
 
     override fun saveSecretKey(secretKey: String) {
@@ -73,13 +79,12 @@ class NMPInsecureFileAccountStore(private val file: Path) : NMPLocalAccountCheck
             }
             val temporary = Files.createTempFile(directory, ".${file.fileName}.", ".tmp")
             try {
-                Files.writeString(
+                Files.newBufferedWriter(
                     temporary,
-                    secretKey,
                     StandardCharsets.UTF_8,
                     StandardOpenOption.TRUNCATE_EXISTING,
                     StandardOpenOption.WRITE,
-                )
+                ).use { writer -> writer.write(secretKey) }
                 try {
                     Files.setPosixFilePermissions(
                         temporary,

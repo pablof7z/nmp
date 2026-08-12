@@ -19,3 +19,13 @@ kotlin_manifests = [
   "Packages/NMPKotlin/settings.gradle.kts",
 ]
 kotlin_sources = ["Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk"]
+
+[android]
+gradle_project = ":nmp-android"
+namespace = "com.nmp.sdk"
+maven_coordinate = "com.nmp:nmp-android"
+manifests = [
+  "Packages/NMPAndroid/build.gradle.kts",
+  "Packages/NMPAndroid/settings.gradle.kts",
+]
+sources = ["Packages/NMPAndroid/src/main"]

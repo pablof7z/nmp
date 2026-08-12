@@ -45,7 +45,7 @@ repository today?
 | Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |
 | Diagnostics | raw connection, AUTH, retry, error, and limit evidence remains incomplete | [#51](https://github.com/pablof7z/nmp/issues/51) |
-| Android | desktop-JVM Flow and a narrow relay Compose proof exist; Android AAR/runtime/Keystore falsification does not | [#40](https://github.com/pablof7z/nmp/issues/40) |
+| Android | feature-selected API-26 AAR packaging and clean external consumption exist; emulator runtime, lifecycle, Keystore, NIP-55, and capstone proof remain | [#40](https://github.com/pablof7z/nmp/issues/40) |
 
 The umbrella ordering and design-signoff trail live in
 [#43](https://github.com/pablof7z/nmp/issues/43).
