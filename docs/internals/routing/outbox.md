@@ -43,8 +43,9 @@ proves who authored the hint; it does not prove the named relay carried the
 parent. If the canonical row has several verified observations, Auto takes
 the first relay in normalized sorted order — exactly one, using the same
 temporary deterministic choice the canonical `Row` uses for an emitted hint.
-Choosing the best among several verified sources remains #1243's policy; a
-widely replicated parent must not silently fan one reply out to every source.
+Issue #1243's tagging-door record deliberately deferred choosing among several
+verified sources; #1378 now owns that policy. A widely replicated parent must
+not silently fan one reply out to every source.
 
 A canonical-store read failure is not a canonical miss. The resolver returns
 the author/app/recipient destinations it already knows, keeps the route open,

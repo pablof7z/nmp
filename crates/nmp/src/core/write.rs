@@ -3577,8 +3577,7 @@ impl<S: EventStore> EngineCore<S> {
         //    the same deterministic first-sorted verified-source policy the
         //    canonical `Row` uses when it writes a relay hint. This prevents a
         //    widely replicated parent from turning one reply into unbounded
-        //    fan-out while leaving the future best-source policy (#1243) in
-        //    its existing owner.
+        //    fan-out while leaving the future best-source policy to #1378.
         if let Some(parent_id) = reply_parent_event_id(event) {
             match self
                 .resolver

@@ -700,9 +700,10 @@ pub struct Row {
 ///
 /// Both an emitted reference hint and Auto's reply-parent lane use this same
 /// door. Keeping the selection here prevents those two consumers from
-/// drifting into different answers while #1243 owns the future best-source
-/// policy. Sources are already normalized ordered collections, so the first
-/// entry is deterministic.
+/// drifting into different answers. #1243's tagging-door record deliberately
+/// deferred source ranking; #1378 owns the future best-source policy. Sources
+/// are already normalized ordered collections, so the first entry is
+/// deterministic.
 fn first_verified_source<'a>(sources: impl IntoIterator<Item = &'a RelayUrl>) -> Option<RelayUrl> {
     sources.into_iter().next().cloned()
 }

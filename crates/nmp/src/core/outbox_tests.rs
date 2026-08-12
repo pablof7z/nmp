@@ -381,7 +381,7 @@ mod outbox_resolver_tests {
     }
 
     /// A parent copied across many relays must not turn one reply into a
-    /// publication flood. Until #1243 owns a better ranking policy, the same
+    /// publication flood. Until #1378 owns a better ranking policy, the same
     /// deterministic first-sorted verified source used for canonical row
     /// hints is the one source Auto adds.
     #[test]
