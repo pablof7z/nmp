@@ -40,7 +40,12 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$OUTPUT_DIR"
 cd "$ROOT"
-BUILD_TARGET=${SURFACE_BUILD_TARGET_DIR:-$TMP/build-target}
+# Rustdoc writes one shared `<crate>.json` path even when Cargo fingerprints
+# distinct feature sets. Keep the complete governed surface below its own
+# stable namespace so a preceding default-feature build cannot make an
+# all-feature regeneration silently reuse a truncated document.
+BUILD_TARGET_ROOT=${SURFACE_BUILD_TARGET_DIR:-$TMP/build-target}
+BUILD_TARGET="$BUILD_TARGET_ROOT/complete-feature-surface"
 mkdir -p "$BUILD_TARGET"
 
 CATALOG_BIN=${SURFACE_CATALOG_BIN:-}
@@ -63,7 +68,7 @@ fi
   echo "# rust toolchain: $SURFACE_RUST_TOOLCHAIN"
   echo "# crate: nmp"
   CARGO_TARGET_DIR="$BUILD_TARGET/public-api" \
-    cargo "+$SURFACE_RUST_TOOLCHAIN" public-api -p nmp --simplified
+    cargo "+$SURFACE_RUST_TOOLCHAIN" public-api -p nmp --all-features --simplified
   echo
   (
     cd "$RUST_FACADE_TOOL_DIR"
@@ -74,11 +79,12 @@ fi
   )
 } > "$TMP/nmp-facade.txt"
 
-# The supported facade has dozens of explicit roots, not arbitrary dependency
-# method inventories. These generous ceilings catch accidental recursive impl
-# expansion while leaving substantial room for intentional surface growth.
-RUST_FACADE_MAX_LINES=30000
-RUST_FACADE_MAX_BYTES=8000000
+# The complete feature-selected facade has dozens of explicit roots, not
+# arbitrary dependency method inventories. These generous ceilings catch
+# accidental recursive impl expansion while leaving substantial room for
+# intentional surface growth across the full all-feature governance build.
+RUST_FACADE_MAX_LINES=60000
+RUST_FACADE_MAX_BYTES=12000000
 RUST_FACADE_LINES=$(wc -l < "$TMP/nmp-facade.txt")
 RUST_FACADE_BYTES=$(wc -c < "$TMP/nmp-facade.txt")
 (( RUST_FACADE_LINES <= RUST_FACADE_MAX_LINES )) || {
@@ -157,10 +163,14 @@ while IFS= read -r -d '' key <&3; do
   owner_marker="$TMP/owners/$owner"
   mkdir -p "$TMP/owners"
   if [[ ! -f "$owner_marker" ]]; then
+    # Governance snapshots describe the owner's complete supported surface,
+    # independent of any one app manifest. App artifacts use the native
+    # prepare command's exact `--no-default-features --features ...` build.
     CARGO_TARGET_DIR="$owner_target" \
       cargo "+$SURFACE_RUST_TOOLCHAIN" build --quiet --locked \
         --manifest-path "$ROOT/$manifest" \
         --package "$package" \
+        --all-features \
         --lib
     case "$(uname -s)" in
       Darwin) library="$owner_target/debug/lib$library_stem.dylib" ;;
