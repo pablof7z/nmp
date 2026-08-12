@@ -50,7 +50,11 @@ ordinary `LiveQuery` per group or discovery predicate, never a group-specific
 observe door. `nmp-ffi` projects the full `FfiRelayScope`/`FfiGroup`/
 `FfiGroupPredicate`/`FfiGroupIds` read-and-write surface; the selected Swift and
 Kotlin wrappers project the same relay-scope operations. This is a native SDK
-surface claim, not an Android AAR/runtime qualification claim (#831).
+surface claim. `nmp-native --platform android` packages the exact same selected
+Kotlin wrapper inventory and Cargo-resolved FFI contract into one AAR with one
+`libnmp_ffi.so` for each declared ABI; it adds no Android feature vocabulary or
+family artifact. Packaging and clean external consumption are qualified by
+#831. Running-engine and lifecycle claims remain #832–#833.
 
 `nmp-ffi` is a feature-gated projection of that facade. The repository uses UniFFI proc
 macros and extracts component metadata from a compiled library; there is no UDL

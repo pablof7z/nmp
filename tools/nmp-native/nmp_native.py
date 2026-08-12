@@ -26,12 +26,19 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = 1
+APP_MANIFEST_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
+OUTPUT_SCHEMA_VERSION = 1
 GENERATED_MARKER = ".nmp-native-generated"
 PROVENANCE_FILE = "nmp-native-provenance.json"
 KEY_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PROFILE_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+ANDROID_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+ANDROID_NAMESPACE_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$"
+)
+TOOL_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[-+][A-Za-z0-9.-]+)?$")
 IF_MARKER_RE = re.compile(
     r"^(?P<prefix>\s*(?://+|\*)\s*)nmp-native:if\s+"
     r"(?P<key>[a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?P<suffix>\s*(?:\*/)?\s*)$"
@@ -50,6 +57,7 @@ class SourceSpec:
     path: str
     destination: str
     target: str | None = None
+    platforms: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -104,11 +112,37 @@ class KotlinSpec:
 
 
 @dataclasses.dataclass(frozen=True)
+class AndroidAbi:
+    name: str
+    rust_target: str
+
+
+@dataclasses.dataclass(frozen=True)
+class AndroidSpec:
+    project_template: str
+    gradle_wrapper_project: str
+    project_name: str
+    namespace: str
+    artifact_id: str
+    min_sdk: int
+    compile_sdk: int
+    build_tools_version: str
+    ndk_version: str
+    cargo_ndk_version: str
+    gradle_version: str
+    android_gradle_plugin_version: str
+    kotlin_version: str
+    jdk_version: int
+    abis: tuple[AndroidAbi, ...]
+
+
+@dataclasses.dataclass(frozen=True)
 class Catalog:
     path: Path
     artifact: ArtifactSpec
     apple: AppleSpec
     kotlin: KotlinSpec
+    android: AndroidSpec
     core_ffi_sources: tuple[str, ...]
     core_swift_sources: tuple[SourceSpec, ...]
     core_kotlin_sources: tuple[SourceSpec, ...]
@@ -223,8 +257,23 @@ def _relative_path(value: Any, where: str) -> str:
 
 def _parse_source(value: Any, where: str, *, swift: bool) -> SourceSpec:
     table = _expect_table(value, where)
-    allowed = {"path", "destination", "target"} if swift else {"path", "destination"}
+    allowed = (
+        {"path", "destination", "target"}
+        if swift
+        else {"path", "destination", "platforms"}
+    )
     _strict_keys(table, allowed, where)
+    platforms = ()
+    if not swift and "platforms" in table:
+        platforms = _string_list(table.get("platforms"), f"{where}.platforms")
+        unknown = sorted(set(platforms) - {"kotlin-jvm", "android"})
+        if unknown:
+            raise NativePrepareError(
+                f"{where}.platforms contains unsupported Kotlin platform(s): "
+                + ", ".join(unknown)
+            )
+        if not platforms:
+            raise NativePrepareError(f"{where}.platforms must not be empty")
     source = SourceSpec(
         path=_relative_path(table.get("path"), f"{where}.path"),
         destination=_relative_path(
@@ -233,6 +282,7 @@ def _parse_source(value: Any, where: str, *, swift: bool) -> SourceSpec:
         target=(
             _expect_string(table.get("target"), f"{where}.target") if swift else None
         ),
+        platforms=platforms,
     )
     if swift and not NAME_RE.fullmatch(source.target or ""):
         raise NativePrepareError(f"{where}.target is not a valid Swift target name")
@@ -252,10 +302,10 @@ def load_manifest(path: Path) -> AppManifest:
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise NativePrepareError(f"cannot read app manifest {path}: {error}") from error
     _strict_keys(data, {"schema", "features"}, f"app manifest {path}")
-    if data.get("schema") != SCHEMA_VERSION:
+    if data.get("schema") != APP_MANIFEST_SCHEMA_VERSION:
         raise NativePrepareError(
             f"app manifest {path} has unsupported schema {data.get('schema')!r}; "
-            f"expected {SCHEMA_VERSION}"
+            f"expected {APP_MANIFEST_SCHEMA_VERSION}"
         )
     features = _string_list(data.get("features"), f"app manifest {path}.features")
     for key in features:
@@ -271,13 +321,13 @@ def load_catalog(path: Path, repo_root: Path) -> Catalog:
         raise NativePrepareError(f"cannot read native catalog {path}: {error}") from error
     _strict_keys(
         data,
-        {"schema", "artifact", "apple", "kotlin", "core", "features"},
+        {"schema", "artifact", "apple", "kotlin", "android", "core", "features"},
         f"native catalog {path}",
     )
-    if data.get("schema") != SCHEMA_VERSION:
+    if data.get("schema") != CATALOG_SCHEMA_VERSION:
         raise NativePrepareError(
             f"native catalog {path} has unsupported schema {data.get('schema')!r}; "
-            f"expected {SCHEMA_VERSION}"
+            f"expected {CATALOG_SCHEMA_VERSION}"
         )
 
     artifact_data = _expect_table(data.get("artifact"), "catalog.artifact")
@@ -408,6 +458,134 @@ def load_catalog(path: Path, repo_root: Path) -> Catalog:
             kotlin_data.get("dependencies"), "catalog.kotlin.dependencies"
         ),
     )
+    if not ANDROID_NAMESPACE_RE.fullmatch(kotlin.group):
+        raise NativePrepareError("catalog.kotlin.group is not a valid package name")
+    if not ANDROID_TOKEN_RE.fullmatch(kotlin.version):
+        raise NativePrepareError("catalog.kotlin.version has invalid characters")
+
+    android_data = _expect_table(data.get("android"), "catalog.android")
+    _strict_keys(
+        android_data,
+        {
+            "project_template",
+            "gradle_wrapper_project",
+            "project_name",
+            "namespace",
+            "artifact_id",
+            "min_sdk",
+            "compile_sdk",
+            "build_tools_version",
+            "ndk_version",
+            "cargo_ndk_version",
+            "gradle_version",
+            "android_gradle_plugin_version",
+            "kotlin_version",
+            "jdk_version",
+            "abis",
+        },
+        "catalog.android",
+    )
+    min_sdk = android_data.get("min_sdk")
+    compile_sdk = android_data.get("compile_sdk")
+    if not isinstance(min_sdk, int) or min_sdk < 21:
+        raise NativePrepareError("catalog.android.min_sdk must be an integer >= 21")
+    if not isinstance(compile_sdk, int) or compile_sdk < min_sdk:
+        raise NativePrepareError(
+            "catalog.android.compile_sdk must be an integer >= catalog.android.min_sdk"
+        )
+    jdk_version = android_data.get("jdk_version")
+    if not isinstance(jdk_version, int) or jdk_version < 8:
+        raise NativePrepareError("catalog.android.jdk_version must be an integer >= 8")
+    android_abis: list[AndroidAbi] = []
+    for index, raw in enumerate(
+        _expect_list(android_data.get("abis"), "catalog.android.abis")
+    ):
+        where = f"catalog.android.abis[{index}]"
+        table = _expect_table(raw, where)
+        _strict_keys(table, {"name", "rust_target"}, where)
+        android_abis.append(
+            AndroidAbi(
+                name=_expect_string(table.get("name"), f"{where}.name"),
+                rust_target=_expect_string(
+                    table.get("rust_target"), f"{where}.rust_target"
+                ),
+            )
+        )
+    if not android_abis:
+        raise NativePrepareError("catalog.android.abis must not be empty")
+    if len({item.name for item in android_abis}) != len(android_abis):
+        raise NativePrepareError("catalog.android.abis contains duplicate ABI names")
+    if len({item.rust_target for item in android_abis}) != len(android_abis):
+        raise NativePrepareError("catalog.android.abis contains duplicate Rust targets")
+    android = AndroidSpec(
+        project_template=_relative_path(
+            android_data.get("project_template"),
+            "catalog.android.project_template",
+        ),
+        gradle_wrapper_project=_relative_path(
+            android_data.get("gradle_wrapper_project"),
+            "catalog.android.gradle_wrapper_project",
+        ),
+        project_name=_expect_string(
+            android_data.get("project_name"), "catalog.android.project_name"
+        ),
+        namespace=_expect_string(
+            android_data.get("namespace"), "catalog.android.namespace"
+        ),
+        artifact_id=_expect_string(
+            android_data.get("artifact_id"), "catalog.android.artifact_id"
+        ),
+        min_sdk=min_sdk,
+        compile_sdk=compile_sdk,
+        build_tools_version=_expect_string(
+            android_data.get("build_tools_version"),
+            "catalog.android.build_tools_version",
+        ),
+        ndk_version=_expect_string(
+            android_data.get("ndk_version"), "catalog.android.ndk_version"
+        ),
+        cargo_ndk_version=_expect_string(
+            android_data.get("cargo_ndk_version"),
+            "catalog.android.cargo_ndk_version",
+        ),
+        gradle_version=_expect_string(
+            android_data.get("gradle_version"), "catalog.android.gradle_version"
+        ),
+        android_gradle_plugin_version=_expect_string(
+            android_data.get("android_gradle_plugin_version"),
+            "catalog.android.android_gradle_plugin_version",
+        ),
+        kotlin_version=_expect_string(
+            android_data.get("kotlin_version"), "catalog.android.kotlin_version"
+        ),
+        jdk_version=jdk_version,
+        abis=tuple(android_abis),
+    )
+    for value, where in (
+        (android.project_name, "project_name"),
+        (android.artifact_id, "artifact_id"),
+    ):
+        if not ANDROID_TOKEN_RE.fullmatch(value):
+            raise NativePrepareError(f"catalog.android.{where} has invalid characters")
+    if not ANDROID_NAMESPACE_RE.fullmatch(android.namespace):
+        raise NativePrepareError("catalog.android.namespace is not a valid package name")
+    for value, where in (
+        (android.build_tools_version, "build_tools_version"),
+        (android.ndk_version, "ndk_version"),
+        (android.cargo_ndk_version, "cargo_ndk_version"),
+        (android.gradle_version, "gradle_version"),
+        (android.android_gradle_plugin_version, "android_gradle_plugin_version"),
+        (android.kotlin_version, "kotlin_version"),
+    ):
+        if not TOOL_VERSION_RE.fullmatch(value):
+            raise NativePrepareError(f"catalog.android.{where} is not a safe tool version")
+    for index, item in enumerate(android.abis):
+        if not ANDROID_TOKEN_RE.fullmatch(item.name) or not ANDROID_TOKEN_RE.fullmatch(
+            item.rust_target
+        ):
+            raise NativePrepareError(
+                f"catalog.android.abis[{index}] has unsafe target characters"
+            )
 
     core_data = _expect_table(data.get("core"), "catalog.core")
     _strict_keys(
@@ -477,6 +655,7 @@ def load_catalog(path: Path, repo_root: Path) -> Catalog:
         artifact=artifact,
         apple=apple,
         kotlin=kotlin,
+        android=android,
         core_ffi_sources=core_ffi_sources,
         core_swift_sources=core_swift_sources,
         core_kotlin_sources=core_kotlin_sources,
@@ -528,6 +707,27 @@ def _validate_catalog_paths(catalog: Catalog, repo_root: Path) -> None:
         resolved = _resolve_repo_path(repo_root, relative, where)
         if required_for_every_selection and not resolved.is_file():
             raise NativePrepareError(f"{where} does not exist as a file: {relative}")
+
+    project_template = _resolve_repo_path(
+        repo_root, catalog.android.project_template, "catalog.android.project_template"
+    )
+    if not project_template.is_dir():
+        raise NativePrepareError("catalog.android.project_template must be a directory")
+    wrapper_project = _resolve_repo_path(
+        repo_root,
+        catalog.android.gradle_wrapper_project,
+        "catalog.android.gradle_wrapper_project",
+    )
+    for relative in (
+        "gradlew",
+        "gradlew.bat",
+        "gradle/wrapper/gradle-wrapper.jar",
+        "gradle/wrapper/gradle-wrapper.properties",
+    ):
+        if not (wrapper_project / relative).is_file():
+            raise NativePrepareError(
+                "catalog.android.gradle_wrapper_project is missing " + relative
+            )
 
     target_names = {target.name for target in catalog.apple.targets}
     reserved_names = {catalog.apple.binary_target, catalog.apple.ffi_target}
@@ -793,7 +993,7 @@ class NativePreparer:
             raise NativePrepareError("at least one --platform is required")
         if len(platforms) != len(set(platforms)):
             raise NativePrepareError("--platform contains duplicates")
-        unknown_platforms = sorted(set(platforms) - {"apple", "kotlin-jvm"})
+        unknown_platforms = sorted(set(platforms) - {"apple", "kotlin-jvm", "android"})
         if unknown_platforms:
             raise NativePrepareError(
                 "unsupported native platform(s): " + ", ".join(unknown_platforms)
@@ -808,7 +1008,12 @@ class NativePreparer:
         effective_apple_targets = self._effective_apple_targets(apple_targets)
         if "apple" not in platforms:
             effective_apple_targets = ()
-        host_target = self._host_target() if "kotlin-jvm" in platforms else None
+        host_target = (
+            self._host_target()
+            if {"kotlin-jvm", "android"} & set(platforms)
+            else None
+        )
+        android_context = self._android_context() if "android" in platforms else None
         identity_inputs = self._identity_inputs(
             manifest=manifest,
             resolution=resolution,
@@ -816,6 +1021,7 @@ class NativePreparer:
             profile=profile,
             apple_targets=effective_apple_targets,
             host_target=host_target,
+            android_context=android_context,
         )
         identity = hashlib.sha256(_canonical_json(identity_inputs)).hexdigest()
         cache_entry = self.cache_dir / identity
@@ -849,9 +1055,22 @@ class NativePreparer:
                         profile=profile,
                         host_target=host_target,
                     )
+                if "android" in platforms:
+                    assert host_target is not None
+                    assert android_context is not None
+                    self._build_android(
+                        output=build_output / "android",
+                        build_root=staging / "build-android",
+                        resolution=resolution,
+                        selected_keys=selected_keys,
+                        profile=profile,
+                        host_target=host_target,
+                        identity=identity,
+                        identity_inputs=identity_inputs,
+                    )
                 contents = _content_inventory(build_output)
                 provenance = {
-                    "schema": SCHEMA_VERSION,
+                    "schema": OUTPUT_SCHEMA_VERSION,
                     "identity": identity,
                     "identity_inputs": identity_inputs,
                     "contents": contents,
@@ -860,7 +1079,11 @@ class NativePreparer:
                     json.dumps(provenance, sort_keys=True, indent=2).encode("utf-8") + b"\n"
                 )
                 (build_output / GENERATED_MARKER).write_text(identity + "\n", encoding="utf-8")
-                for transient in (staging / "build-apple", staging / "build-kotlin"):
+                for transient in (
+                    staging / "build-apple",
+                    staging / "build-kotlin",
+                    staging / "build-android",
+                ):
                     if transient.exists():
                         shutil.rmtree(transient)
                 try:
@@ -885,6 +1108,11 @@ class NativePreparer:
             "output": str(output.resolve()),
             "requested_features": list(manifest.features),
             "resolved_features": [feature.key for feature in resolution.resolved_features],
+            "android_abis": (
+                [item.name for item in self.catalog.android.abis]
+                if "android" in platforms
+                else []
+            ),
             "contents": provenance["contents"],
         }
 
@@ -927,6 +1155,174 @@ class NativePreparer:
                 return line.removeprefix("host: ").strip()
         raise NativePrepareError("rustc -vV did not report a host target")
 
+    def _android_sdk_home(self) -> Path:
+        configured = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+        if not configured:
+            raise NativePrepareError(
+                "Android preparation requires ANDROID_HOME or ANDROID_SDK_ROOT"
+            )
+        sdk = Path(configured).resolve()
+        platform_dir = sdk / "platforms" / f"android-{self.catalog.android.compile_sdk}"
+        if not (platform_dir / "android.jar").is_file():
+            raise NativePrepareError(
+                "Android SDK is missing "
+                f"platforms/android-{self.catalog.android.compile_sdk}"
+            )
+        platform_properties = platform_dir / "source.properties"
+        if not platform_properties.is_file() or _property_value(
+            platform_properties, "AndroidVersion.ApiLevel"
+        ) != str(self.catalog.android.compile_sdk):
+            raise NativePrepareError(
+                f"Android platform {self.catalog.android.compile_sdk} has mismatched provenance"
+            )
+        build_tools = sdk / "build-tools" / self.catalog.android.build_tools_version
+        if not build_tools.is_dir():
+            raise NativePrepareError(
+                "Android SDK is missing build-tools;"
+                + self.catalog.android.build_tools_version
+            )
+        build_properties = build_tools / "source.properties"
+        if not build_properties.is_file() or _property_value(
+            build_properties, "Pkg.Revision"
+        ) != self.catalog.android.build_tools_version:
+            raise NativePrepareError(
+                f"Android build-tools {self.catalog.android.build_tools_version} "
+                "has missing or mismatched provenance"
+            )
+        return sdk
+
+    def _android_ndk_home(self, sdk: Path) -> Path:
+        configured = os.environ.get("NMP_ANDROID_NDK_HOME")
+        ndk = (
+            Path(configured).resolve()
+            if configured
+            else sdk / "ndk" / self.catalog.android.ndk_version
+        )
+        properties = ndk / "source.properties"
+        if not properties.is_file():
+            raise NativePrepareError(
+                f"Android NDK {self.catalog.android.ndk_version} not found at {ndk}"
+            )
+        revision = _property_value(properties, "Pkg.Revision")
+        if revision != self.catalog.android.ndk_version:
+            raise NativePrepareError(
+                f"Android NDK {self.catalog.android.ndk_version} is required; "
+                f"found {revision or 'unknown'}"
+            )
+        return ndk
+
+    def _android_context(self) -> Mapping[str, Any]:
+        spec = self.catalog.android
+        sdk = self._android_sdk_home()
+        ndk = self._android_ndk_home(sdk)
+
+        java_home = os.environ.get("JAVA_HOME")
+        if not java_home:
+            raise NativePrepareError(
+                f"Android preparation requires JAVA_HOME naming JDK {spec.jdk_version}"
+            )
+        java = Path(java_home).resolve() / "bin" / "java"
+        if not java.is_file():
+            raise NativePrepareError(f"JAVA_HOME does not contain an executable java: {java}")
+        java_result = self.runner.run([str(java), "-version"], cwd=self.repo_root, capture=True)
+        java_version = (java_result.stderr or java_result.stdout).strip()
+        java_match = re.search(r'version\s+"(?P<major>[0-9]+)', java_version)
+        if java_match is None or int(java_match.group("major")) != spec.jdk_version:
+            found = java_match.group("major") if java_match else "unknown"
+            raise NativePrepareError(
+                f"JDK {spec.jdk_version} is required; JAVA_HOME reports {found}"
+            )
+
+        cargo_ndk_result = self.runner.run(
+            ["cargo", "ndk", "--version"], cwd=self.repo_root, capture=True
+        )
+        cargo_ndk_version = (cargo_ndk_result.stdout or cargo_ndk_result.stderr).strip()
+        version_match = re.search(r"cargo-ndk\s+([0-9][^\s]*)", cargo_ndk_version)
+        if version_match is None or version_match.group(1) != spec.cargo_ndk_version:
+            found = version_match.group(1) if version_match else "unknown"
+            raise NativePrepareError(
+                f"cargo-ndk {spec.cargo_ndk_version} is required; found {found}"
+            )
+
+        template = _resolve_repo_path(
+            self.repo_root, spec.project_template, "catalog.android.project_template"
+        )
+        build_gradle = (template / "build.gradle.kts").read_text(encoding="utf-8")
+        for label, expected, pattern in (
+            (
+                "Android Gradle Plugin",
+                spec.android_gradle_plugin_version,
+                r'id\("com\.android\.library"\)\s+version\s+"([^"]+)"',
+            ),
+            (
+                "Kotlin",
+                spec.kotlin_version,
+                r'kotlin\("android"\)\s+version\s+"([^"]+)"',
+            ),
+        ):
+            match = re.search(pattern, build_gradle)
+            if match is None or match.group(1) != expected:
+                found = match.group(1) if match else "unknown"
+                raise NativePrepareError(
+                    f"{label} template pin must be {expected}; found {found}"
+                )
+
+        wrapper_project = _resolve_repo_path(
+            self.repo_root,
+            spec.gradle_wrapper_project,
+            "catalog.android.gradle_wrapper_project",
+        )
+        wrapper_properties = wrapper_project / "gradle" / "wrapper" / "gradle-wrapper.properties"
+        distribution = _property_value(wrapper_properties, "distributionUrl") or ""
+        gradle_match = re.search(r"gradle-([0-9][^-]*)-bin\.zip$", distribution)
+        if gradle_match is None or gradle_match.group(1) != spec.gradle_version:
+            found = gradle_match.group(1) if gradle_match else "unknown"
+            raise NativePrepareError(
+                f"Gradle wrapper {spec.gradle_version} is required; found {found}"
+            )
+
+        clang_candidates = sorted(
+            path
+            for path in (ndk / "toolchains" / "llvm" / "prebuilt").glob("*/bin/clang")
+            if path.is_file()
+        )
+        if len(clang_candidates) != 1:
+            raise NativePrepareError(
+                f"Android NDK must contain exactly one host clang; found {len(clang_candidates)}"
+            )
+        clang_result = self.runner.run(
+            [str(clang_candidates[0]), "--version"], cwd=self.repo_root, capture=True
+        )
+
+        sdk_properties = sdk / "platforms" / f"android-{spec.compile_sdk}" / "source.properties"
+        sdk_revision = (
+            _property_value(sdk_properties, "Pkg.Revision")
+            if sdk_properties.is_file()
+            else "unknown"
+        )
+        return {
+            "project_name": spec.project_name,
+            "namespace": spec.namespace,
+            "maven_coordinate": (
+                f"{self.catalog.kotlin.group}:{spec.artifact_id}:{self.catalog.kotlin.version}"
+            ),
+            "min_sdk": spec.min_sdk,
+            "compile_sdk": spec.compile_sdk,
+            "sdk_revision": sdk_revision,
+            "build_tools": spec.build_tools_version,
+            "ndk": spec.ndk_version,
+            "cargo_ndk": spec.cargo_ndk_version,
+            "gradle": spec.gradle_version,
+            "android_gradle_plugin": spec.android_gradle_plugin_version,
+            "kotlin": spec.kotlin_version,
+            "jdk": java_version,
+            "clang": clang_result.stdout.strip(),
+            "abis": [
+                {"name": item.name, "rust_target": item.rust_target}
+                for item in spec.abis
+            ],
+        }
+
     def _identity_inputs(
         self,
         *,
@@ -936,6 +1332,7 @@ class NativePreparer:
         profile: str,
         apple_targets: tuple[str, ...],
         host_target: str | None,
+        android_context: Mapping[str, Any] | None,
     ) -> Mapping[str, Any]:
         toolchains: dict[str, str] = {
             "cargo": self.runner.run(["cargo", "-V"], cwd=self.repo_root, capture=True).stdout.strip(),
@@ -982,8 +1379,9 @@ class NativePreparer:
             for key in sorted(fixed_environment_keys | dynamic_environment_keys)
         }
         return {
-            "schema": SCHEMA_VERSION,
-            "manifest_schema": SCHEMA_VERSION,
+            "schema": OUTPUT_SCHEMA_VERSION,
+            "manifest_schema": APP_MANIFEST_SCHEMA_VERSION,
+            "catalog_schema": CATALOG_SCHEMA_VERSION,
             "catalog_sha256": _sha256_file(self.catalog.path),
             "source_revision": revision,
             "source_sha256": source_digest,
@@ -999,6 +1397,7 @@ class NativePreparer:
             "profile": profile,
             "apple_targets": list(apple_targets),
             "host_target": host_target,
+            "android": android_context,
         }
 
     def _source_digest(self, resolution: CargoResolution) -> str:
@@ -1042,6 +1441,31 @@ class NativePreparer:
             selected_sources.extend(source.path for source in feature.kotlin_sources)
         for relative in selected_sources:
             paths.add(_resolve_repo_path(self.repo_root, relative, "catalog source"))
+
+        template = _resolve_repo_path(
+            self.repo_root,
+            self.catalog.android.project_template,
+            "Android project template",
+        )
+        for candidate in template.rglob("*"):
+            relative_parts = candidate.relative_to(template).parts
+            if not candidate.is_file() or any(
+                part in {"build", ".gradle"} for part in relative_parts
+            ):
+                continue
+            paths.add(candidate.resolve())
+        wrapper = _resolve_repo_path(
+            self.repo_root,
+            self.catalog.android.gradle_wrapper_project,
+            "Android Gradle wrapper project",
+        )
+        for relative in (
+            "gradlew",
+            "gradlew.bat",
+            "gradle/wrapper/gradle-wrapper.jar",
+            "gradle/wrapper/gradle-wrapper.properties",
+        ):
+            paths.add((wrapper / relative).resolve())
 
         digest = hashlib.sha256()
         for path in sorted(paths, key=lambda item: item.as_posix()):
@@ -1302,12 +1726,23 @@ class NativePreparer:
         binding_destination.mkdir(parents=True)
         shutil.copy2(generated_binding, binding_destination / generated_binding.name)
 
+        selected_sources = self._selected_kotlin_sources(
+            resolution, platform="kotlin-jvm"
+        )
         self._materialize_sources(
-            sources=self._selected_kotlin_sources(resolution),
+            sources=selected_sources,
             output=output,
             platform_name="Kotlin",
             selected_keys=selected_keys,
             swift=False,
+        )
+        (output / "nmp-kotlin-sources.json").write_bytes(
+            json.dumps(
+                self._kotlin_source_inventory(selected_sources),
+                sort_keys=True,
+                indent=2,
+            ).encode("utf-8")
+            + b"\n"
         )
         prefix = self._jna_prefix()
         resource = output / "src" / "main" / "resources" / prefix
@@ -1321,6 +1756,243 @@ class NativePreparer:
             f'rootProject.name = "{self.catalog.kotlin.project_name}"\n', encoding="utf-8"
         )
         (output / "build.gradle.kts").write_text(self._kotlin_gradle(), encoding="utf-8")
+
+    def _build_android(
+        self,
+        *,
+        output: Path,
+        build_root: Path,
+        resolution: CargoResolution,
+        selected_keys: set[str],
+        profile: str,
+        host_target: str,
+        identity: str,
+        identity_inputs: Mapping[str, Any],
+    ) -> None:
+        if self.system not in {"Darwin", "Linux"}:
+            raise NativePrepareError(
+                f"Android native packaging supports Darwin and Linux, not {self.system}"
+            )
+        spec = self.catalog.android
+        template = _resolve_repo_path(
+            self.repo_root, spec.project_template, "catalog.android.project_template"
+        )
+        wrapper_project = _resolve_repo_path(
+            self.repo_root,
+            spec.gradle_wrapper_project,
+            "catalog.android.gradle_wrapper_project",
+        )
+        output.mkdir(parents=True)
+        build_root.mkdir(parents=True)
+        shutil.copytree(template, output, dirs_exist_ok=True)
+        for relative in (
+            "gradlew",
+            "gradlew.bat",
+            "gradle/wrapper/gradle-wrapper.jar",
+            "gradle/wrapper/gradle-wrapper.properties",
+        ):
+            source = wrapper_project / relative
+            destination = output / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+
+        sdk = self._android_sdk_home()
+        ndk = self._android_ndk_home(sdk)
+        cargo_env = self._cargo_env()
+        cargo_env.update(
+            {
+                "ANDROID_HOME": str(sdk),
+                "ANDROID_SDK_ROOT": str(sdk),
+                "ANDROID_NDK_HOME": str(ndk),
+            }
+        )
+        if java_home := os.environ.get("JAVA_HOME"):
+            cargo_env["JAVA_HOME"] = java_home
+
+        installed = set(
+            self.runner.run(
+                ["rustup", "target", "list", "--installed"],
+                cwd=self.repo_root,
+                capture=True,
+            ).stdout.splitlines()
+        )
+        missing = [item.rust_target for item in spec.abis if item.rust_target not in installed]
+        if missing:
+            self.runner.run(["rustup", "target", "add", *missing], cwd=self.repo_root)
+
+        jni_root = output / "src" / "main" / "jniLibs"
+        jni_root.mkdir(parents=True)
+        ndk_args = ["cargo", "ndk"]
+        for item in spec.abis:
+            ndk_args.extend(["--target", item.name])
+        ndk_args.extend(
+            [
+                "--platform",
+                str(spec.min_sdk),
+                "--output-dir",
+                str(jni_root),
+                "build",
+                "--locked",
+                "--package",
+                self.catalog.artifact.ffi_package,
+                "--no-default-features",
+                *self._cargo_feature_args(resolution),
+                *self._profile_args(profile),
+                "--lib",
+            ]
+        )
+        self.runner.run(ndk_args, cwd=self.repo_root, env=cargo_env)
+        library_name = f"lib{self.catalog.artifact.library_stem}.so"
+        android_libraries: list[Path] = []
+        for item in spec.abis:
+            library = jni_root / item.name / library_name
+            if not library.is_file():
+                raise NativePrepareError(
+                    f"cargo-ndk did not produce {library_name} for Android ABI {item.name}"
+                )
+            android_libraries.append(library)
+
+        bindgen_args = [
+            "cargo",
+            "build",
+            "--locked",
+            "--package",
+            self.catalog.artifact.ffi_package,
+            "--bin",
+            self.catalog.artifact.bindgen_bin,
+            "--no-default-features",
+            *self._profile_args(profile),
+            "--target",
+            host_target,
+        ]
+        target_env = self._target_cargo_env(cargo_env, host_target)
+        self.runner.run(bindgen_args, cwd=self.repo_root, env=target_env)
+        bindgen = (
+            Path(cargo_env["CARGO_TARGET_DIR"])
+            / host_target
+            / self._profile_dir(profile)
+            / self.catalog.artifact.bindgen_bin
+        )
+        if not bindgen.is_file():
+            raise NativePrepareError(f"Cargo did not produce expected bindgen tool {bindgen}")
+
+        uniffi_config = build_root / "uniffi.toml"
+        uniffi_config.write_text(
+            "[bindings.kotlin]\n"
+            "android = true\n"
+            f'kotlin_target_version = "{spec.kotlin_version}"\n',
+            encoding="utf-8",
+        )
+        generated = build_root / "generated"
+        generated.mkdir()
+        self.runner.run(
+            [
+                str(bindgen),
+                "generate",
+                "--library",
+                str(android_libraries[0]),
+                "--language",
+                "kotlin",
+                "--config",
+                str(uniffi_config),
+                "--out-dir",
+                str(generated),
+                "--no-format",
+            ],
+            cwd=self.repo_root,
+            env=target_env,
+        )
+        stem = self.catalog.artifact.library_stem
+        generated_binding = generated / "uniffi" / stem / f"{stem}.kt"
+        if not generated_binding.is_file():
+            raise NativePrepareError(
+                f"UniFFI did not produce expected Android Kotlin binding {generated_binding}"
+            )
+        binding_destination = output / "src" / "main" / "kotlin" / "uniffi" / stem
+        binding_destination.mkdir(parents=True)
+        shutil.copy2(generated_binding, binding_destination / generated_binding.name)
+
+        selected_sources = self._selected_kotlin_sources(resolution, platform="android")
+        self._materialize_sources(
+            sources=selected_sources,
+            output=output,
+            platform_name="Android Kotlin",
+            selected_keys=selected_keys,
+            swift=False,
+        )
+        (output / "nmp-kotlin-sources.json").write_bytes(
+            json.dumps(
+                self._kotlin_source_inventory(selected_sources),
+                sort_keys=True,
+                indent=2,
+            ).encode("utf-8")
+            + b"\n"
+        )
+        selection = {
+            "schema": OUTPUT_SCHEMA_VERSION,
+            "identity": identity,
+            "requested_features": list(identity_inputs["requested_features"]),
+            "resolved_features": list(identity_inputs["resolved_features"]),
+            "active_ffi_features": list(identity_inputs["active_ffi_features"]),
+            "android": identity_inputs["android"],
+            "profile": profile,
+            "source_sha256": identity_inputs["source_sha256"],
+        }
+        selection_bytes = (
+            json.dumps(selection, sort_keys=True, indent=2).encode("utf-8") + b"\n"
+        )
+        (output / "nmp-native-selection.json").write_bytes(selection_bytes)
+        resource = output / "src" / "main" / "assets" / "nmp"
+        resource.mkdir(parents=True)
+        (resource / "selection.json").write_bytes(selection_bytes)
+
+        (output / "gradle.properties").write_text(
+            "android.useAndroidX=true\n"
+            "org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8\n"
+            "kotlin.code.style=official\n"
+            f"nmpGroup={self.catalog.kotlin.group}\n"
+            f"nmpVersion={self.catalog.kotlin.version}\n"
+            f"nmpArtifactId={spec.artifact_id}\n"
+            f"nmpNamespace={spec.namespace}\n"
+            f"nmpCompileSdk={spec.compile_sdk}\n"
+            f"nmpMinSdk={spec.min_sdk}\n"
+            f"nmpNdkVersion={spec.ndk_version}\n",
+            encoding="utf-8",
+        )
+
+        repository = build_root / "repository"
+        gradle = output / "gradlew"
+        self.runner.run(
+            [
+                str(gradle),
+                "--no-daemon",
+                "--console=plain",
+                "-p",
+                str(output),
+                f"-PnmpRepository={repository}",
+                "clean",
+                "assembleRelease",
+                "publishReleasePublicationToNmpNativeRepository",
+            ],
+            cwd=self.repo_root,
+            env=cargo_env,
+        )
+        built_aar = output / "build" / "outputs" / "aar" / f"{spec.project_name}-release.aar"
+        if not built_aar.is_file():
+            raise NativePrepareError(f"Gradle did not produce expected Android AAR {built_aar}")
+        artifacts = output / "artifacts"
+        artifacts.mkdir()
+        artifact_name = f"{spec.artifact_id}-{self.catalog.kotlin.version}.aar"
+        shutil.copy2(built_aar, artifacts / artifact_name)
+        if not repository.is_dir():
+            raise NativePrepareError("Gradle did not publish the Android Maven repository")
+        for metadata in repository.rglob("maven-metadata*.xml*"):
+            if metadata.is_file():
+                metadata.unlink()
+        shutil.copytree(repository, output / "repository")
+        for transient in (output / "build", output / ".gradle"):
+            if transient.exists():
+                shutil.rmtree(transient)
 
     def _jna_prefix(self) -> str:
         os_name = {"Darwin": "darwin", "Linux": "linux"}[self.system]
@@ -1358,12 +2030,30 @@ class NativePreparer:
         return _dedupe_sources(sources, "Swift")
 
     def _selected_kotlin_sources(
-        self, resolution: CargoResolution
+        self, resolution: CargoResolution, *, platform: str
     ) -> tuple[SourceSpec, ...]:
         sources = list(self.catalog.core_kotlin_sources)
         for feature in resolution.resolved_features:
             sources.extend(feature.kotlin_sources)
-        return _dedupe_sources(sources, "Kotlin")
+        selected = [
+            source
+            for source in sources
+            if not source.platforms or platform in source.platforms
+        ]
+        return _dedupe_sources(selected, f"Kotlin ({platform})")
+
+    @staticmethod
+    def _kotlin_source_inventory(
+        sources: Sequence[SourceSpec],
+    ) -> list[Mapping[str, Any]]:
+        return [
+            {
+                "source": source.path,
+                "destination": source.destination,
+                "platforms": list(source.platforms),
+            }
+            for source in sources
+        ]
 
     def _materialize_sources(
         self,
@@ -1547,6 +2237,17 @@ def _append_flag(existing: str, flag: str) -> str:
     return f"{existing} {flag}".strip()
 
 
+def _property_value(path: Path, key: str) -> str | None:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        candidate = line.strip()
+        if not candidate or candidate.startswith("#") or "=" not in candidate:
+            continue
+        name, value = candidate.split("=", 1)
+        if name.strip() == key:
+            return value.strip().replace("\\:", ":")
+    return None
+
+
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1585,7 +2286,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     prepare.add_argument(
         "--platform",
         action="append",
-        choices=("apple", "kotlin-jvm"),
+        choices=("apple", "kotlin-jvm", "android"),
         required=True,
     )
     prepare.add_argument("--profile", default="release")

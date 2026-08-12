@@ -153,7 +153,9 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 **Platforms**
 - ✅ Rust core (the source of truth)
 - 🧪 Swift SDK — apps prepare one Cargo-resolved, feature-selected local package; public-wrapper behavior is qualified by macOS-host XCTest. iOS runtime and physical-device qualification remain separate.
-- 🧪 Kotlin SDK — apps prepare the same feature-selected desktop-JVM projection; **no Android AAR** qualified yet (#831)
+- 🧪 Kotlin SDK — apps prepare the same feature-selected desktop-JVM module or
+  Android AAR. The AAR has exact API-26 `arm64-v8a`/`x86_64` packaging and
+  clean-consumer qualification; emulator/runtime/lifecycle proof remains #832–#833.
 
 ## Status / maturity
 
@@ -206,13 +208,13 @@ Built for **bounded memory and streaming — never first-N truncation.** Measure
 
 ## Platforms in one line
 
-Rust core is the truth · **Swift** behavior qualified on the macOS host (full Apple slices packaged on master; iOS runtime pending) · **Kotlin** desktop-JVM only (no Android AAR yet).
+Rust core is the truth · **Swift** behavior qualified on the macOS host (full Apple slices packaged on master; iOS runtime pending) · **Kotlin** desktop-JVM plus a source-reproducible feature-selected Android AAR (runtime qualification pending).
 
 ## Roadmap / where it's heading
 
 - Govern the provisional demand / receipt / signer shapes toward a **v2 freeze**
 - Encode lifecycle invariants **as types**, not conventions
-- Close **platform qualification** — physical iOS runtime evidence, an Android AAR
+- Close **platform qualification** — physical iOS runtime evidence and Android runtime/lifecycle/security qualification
 - Finish **bounded delivery** with an explicit shortfall contract everywhere
 - Land NIP-51 list editing; broaden opt-in protocol modules
 - Project NIP-68 + `nmp-media` composition through FFI/Swift/Kotlin, batched together (currently Rust-only)

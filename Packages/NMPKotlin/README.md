@@ -5,10 +5,12 @@ two-noun surface (`observe(filter): Flow<RowBatch>`, `publish(intent):
 Flow<WriteStatus>`, `observeDiagnostics(): Flow<DiagnosticsSnapshot>`) ports
 cleanly onto Kotlin's `Flow`, using the SAME canonical Rust facade
 (`crates/nmp-ffi`) Swift already ships against. This is **not** the M6
-Android app -- the root SDK has no Compose dependency, Gradle Android plugin,
-AAR, or cargo-ndk cross-compilation. The optional `:ui` child now contains the
-narrow controlled relay identity family from #198, using desktop-JVM Compose
-only; it is not an Android runtime or packaging claim. Both projects target
+Android app -- the root SDK has no Compose dependency. `nmp-native --platform
+android` now materializes this same selected facade into an API-26 AAR with
+the declared Android ABI libraries; governed emulator/runtime qualification
+remains separate. The optional `:ui` child contains the narrow controlled
+relay identity family from #198, using desktop-JVM Compose only; it is not an
+Android runtime claim. Both checked desktop projects target
 desktop JVM, the cheapest
 environment that can prove or falsify the Flow mapping before the M5
 human library-vs-framework verdict gates building the real app. See
