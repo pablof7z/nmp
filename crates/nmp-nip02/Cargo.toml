@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 nostr.workspace = true
 nmp.workspace = true
+nmp-document-edit.workspace = true
 nmp-grammar.workspace = true
 # #704: the follow observer/action workers are async tasks on the engine
 # runtime; the acquisition loop's per-snapshot deadline uses `tokio::time`.
