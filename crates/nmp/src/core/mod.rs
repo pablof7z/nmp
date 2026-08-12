@@ -696,6 +696,18 @@ pub struct Row {
     pub sources: BTreeSet<RelayUrl>,
 }
 
+/// The one current policy for choosing one relay from verified provenance.
+///
+/// Both an emitted reference hint and Auto's reply-parent lane use this same
+/// door. Keeping the selection here prevents those two consumers from
+/// drifting into different answers. #1243's tagging-door record deliberately
+/// deferred source ranking; #1378 owns the future best-source policy. Sources
+/// are already normalized ordered collections, so the first entry is
+/// deterministic.
+fn first_verified_source<'a>(sources: impl IntoIterator<Item = &'a RelayUrl>) -> Option<RelayUrl> {
+    sources.into_iter().next().cloned()
+}
+
 impl Row {
     /// The relay hint a reference row to this event carries.
     ///
@@ -717,7 +729,7 @@ impl Row {
     /// deterministic rather than arbitrary; an app that knows better states
     /// its own with `from_relay`.
     fn verified_hint(&self) -> Option<RelayUrl> {
-        self.sources.iter().next().cloned()
+        first_verified_source(&self.sources)
     }
 }
 
