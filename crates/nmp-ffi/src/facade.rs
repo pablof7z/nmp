@@ -1679,7 +1679,7 @@ mod tests {
             correlation: None,
         });
         assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
-        assert!(engine.publish_queue().unwrap().is_empty());
+        assert!(engine.publish_queue(None, u8::MAX).unwrap().is_empty());
         engine.shutdown();
     }
 
@@ -1697,7 +1697,7 @@ mod tests {
             .expect("the native account activates");
         let result = engine.follow(nostr::Keys::generate().public_key().to_hex());
         assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
-        assert!(engine.publish_queue().unwrap().is_empty());
+        assert!(engine.publish_queue(None, u8::MAX).unwrap().is_empty());
         engine.shutdown();
     }
 
