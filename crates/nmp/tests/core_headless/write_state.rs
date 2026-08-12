@@ -571,7 +571,9 @@ fn expired_local_acceptance_is_refused_before_custody_and_retains_nothing() {
         "expired work must be rejected before custody -- got {effects:?}"
     );
     assert!(
-        core.publish_queue_entries().unwrap().is_empty(),
+        core.publish_queue_entries(None, u8::MAX)
+            .unwrap()
+            .is_empty(),
         "an attempt rejected before custody must not allocate a receipt"
     );
 }
@@ -634,7 +636,7 @@ fn superseded_safety_receipt_is_pruned_by_the_engine_deadline() {
         correlation: None,
     }));
 
-    let before = core.publish_queue_entries().unwrap();
+    let before = core.publish_queue_entries(None, u8::MAX).unwrap();
     assert!(before.iter().any(|entry| {
         entry.receipt_id == older_receipt && entry.outcome == Some(WriteOutcome::Superseded)
     }));
@@ -648,7 +650,7 @@ fn superseded_safety_receipt_is_pruned_by_the_engine_deadline() {
     core.handle(EngineMsg::Tick(Timestamp::from(
         100u64 + nmp_store::SUPERSEDED_RECEIPT_MAX_AGE_SECS,
     )));
-    let after = core.publish_queue_entries().unwrap();
+    let after = core.publish_queue_entries(None, u8::MAX).unwrap();
     assert_eq!(after.len(), 1, "only the current replaceable write remains");
     assert!(after.iter().all(|entry| entry.receipt_id != older_receipt));
 }

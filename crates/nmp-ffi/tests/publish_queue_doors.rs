@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
 use nmp_ffi::types::{
-    FfiIdentity, FfiRefuseReason, FfiRemoveQueueEntryError, FfiSigningState, FfiWriteFact,
-    FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiIdentity, FfiPublishQueueError, FfiRefuseReason, FfiRemoveQueueEntryError, FfiSigningState,
+    FfiWriteFact, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 use nmp_store::{EventStore, RefuseReason};
 
@@ -64,7 +64,7 @@ async fn a_refused_entry_is_enumerable_with_both_ids_and_removal_is_its_only_exi
     })
     .expect("engine opens over the seeded store");
 
-    let entries = engine.publish_queue().expect("engine is open");
+    let entries = engine.publish_queue(None, u8::MAX).expect("engine is open");
     assert_eq!(entries.len(), 1, "exactly the refused entry: {entries:?}");
     let entry = &entries[0];
     assert_eq!(entry.receipt_id, receipt_id);
@@ -92,7 +92,10 @@ async fn a_refused_entry_is_enumerable_with_both_ids_and_removal_is_its_only_exi
         .remove_publish_queue_entry(receipt_id)
         .expect("a permanently-failed entry is removable");
     assert!(
-        engine.publish_queue().expect("engine is open").is_empty(),
+        engine
+            .publish_queue(None, u8::MAX)
+            .expect("engine is open")
+            .is_empty(),
         "removal is a real termination path: the entry is gone"
     );
 
@@ -109,13 +112,24 @@ async fn a_refused_entry_is_enumerable_with_both_ids_and_removal_is_its_only_exi
 #[test]
 fn removing_a_receipt_that_never_existed_is_an_unknown_receipt() {
     let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine builds");
+    assert!(engine
+        .publish_queue_for_event("00".repeat(32), None, u8::MAX)
+        .expect("an exact absent event is an empty page")
+        .is_empty());
+    assert!(matches!(
+        engine.publish_queue_for_event("not-an-event-id".to_owned(), None, u8::MAX),
+        Err(FfiPublishQueueError::InvalidEventId { .. })
+    ));
     assert_eq!(
         engine.remove_publish_queue_entry(u64::MAX),
         Err(FfiRemoveQueueEntryError::UnknownReceipt {
             receipt_id: u64::MAX
         })
     );
-    assert!(engine.publish_queue().expect("engine is open").is_empty());
+    assert!(engine
+        .publish_queue(None, u8::MAX)
+        .expect("engine is open")
+        .is_empty());
     engine.shutdown();
 }
 
@@ -188,7 +202,7 @@ async fn removing_an_entry_with_open_delivery_work_is_still_active() {
     );
     assert!(
         engine
-            .publish_queue()
+            .publish_queue(None, u8::MAX)
             .expect("engine is open")
             .iter()
             .any(|entry| entry.receipt_id == receipt_id),

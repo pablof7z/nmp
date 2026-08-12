@@ -1388,8 +1388,9 @@ fn boot_catches_up_past_due_expiry() {
 
 /// Structural grep-guard (M3 plan §5 test 14, widened by M4/M5 and #3 U4):
 /// `Handle`'s public surface is the original verbs plus diagnostics and the
-/// the stable-receipt operations (`publish`/`reattach_receipt` plus
-/// cursor-based `reattach_receipt_from` for finite replay pages) and the
+/// stable-receipt operations (`publish`/bounded queue inspection/
+/// `reattach_receipt` plus cursor-based `reattach_receipt_from` for finite
+/// replay pages) and the
 /// governed sign-only operation's blocking/completion doors -- no `relays:`
 /// parameter, no open-REQ method anywhere on it
 /// (ledger #2/#3 preserved at the top edge; `add_signer`/`remove_signer` are
@@ -1433,6 +1434,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "observe_diagnostics",
         "publish",
         "publish_queue_entries",
+        "publish_queue_entries_for_event",
         "reattach_by_correlation",
         "reattach_receipt",
         "reattach_receipt_from",

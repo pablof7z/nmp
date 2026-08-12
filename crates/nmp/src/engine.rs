@@ -26,7 +26,8 @@ use std::sync::Mutex;
 
 use crate::core::ReceiptId;
 use crate::publish_queue::{
-    PublishQueueEntry, ReceiptResult, ReceiptResultError, RemoveQueueEntryError,
+    PublishQueueEntry, PublishQueueReadError, ReceiptResult, ReceiptResultError,
+    RemoveQueueEntryError,
 };
 use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
@@ -741,7 +742,7 @@ impl Engine {
         self.with_handle(|handle| handle.reattach_by_correlation(token))
     }
 
-    /// Read the app's own publish queue back (#1039).
+    /// Read one bounded page of the app's own publish queue (#903/#1039).
     ///
     /// Every write NMP still holds a receipt for, with what it knows about
     /// each one right now: signing state, the intended destination set and
@@ -752,14 +753,33 @@ impl Engine {
     /// locally accepted write is already visible through the app's own live
     /// query long before it appears here as settled.
     ///
-    /// Enumerating everything is the actual question being asked here, which
-    /// is why the answer is the whole retained set. It is NOT the route to
-    /// one write's frozen event id: acceptance already answered that
-    /// ([`ReceiptStream::event_id`]), and asking here instead spends the size
-    /// of a set nothing bounds yet (#46) on one write (#1314).
-    pub fn publish_queue(&self) -> Result<Vec<PublishQueueEntry>, RemoveQueueEntryError> {
-        self.with_handle(|handle| handle.publish_queue_entries())
-            .map_err(|_| RemoveQueueEntryError::EngineClosed)?
+    /// `after` is an exclusive stable receipt-id cursor. `limit` is a `u8`
+    /// so one request can never materialize more than 255 complete entries.
+    pub fn publish_queue(
+        &self,
+        after: Option<ReceiptId>,
+        limit: u8,
+    ) -> Result<Vec<PublishQueueEntry>, PublishQueueReadError> {
+        self.with_handle(|handle| handle.publish_queue_entries(after, limit))
+            .map_err(|_| PublishQueueReadError::EngineClosed)?
+    }
+
+    /// Reach the currently open write obligations for one event id (#903).
+    ///
+    /// A LiveQuery row already carries this id. The result contains no event
+    /// content and no terminal receipt history: it is the exact join from
+    /// that row to each active `ReceiptId`, whose retained-plus-live facts the
+    /// app can observe with [`Self::reattach_receipt`]. More than one receipt
+    /// can own identical event bytes, so the result is bounded and paged
+    /// rather than choosing one and hiding the rest.
+    pub fn publish_queue_for_event(
+        &self,
+        event_id: EventId,
+        after: Option<ReceiptId>,
+        limit: u8,
+    ) -> Result<Vec<PublishQueueEntry>, PublishQueueReadError> {
+        self.with_handle(|handle| handle.publish_queue_entries_for_event(event_id, after, limit))
+            .map_err(|_| PublishQueueReadError::EngineClosed)?
     }
 
     /// Forget one queue entry (#1039).
@@ -1266,7 +1286,7 @@ mod tests {
             .publish(absent_intent())
             .expect("an absent transaction can be accepted once after reconstruction");
         assert_eq!(absent_recovered.event_id, absent_event.id);
-        assert_eq!(engine.publish_queue().unwrap().len(), 3);
+        assert_eq!(engine.publish_queue(None, u8::MAX).unwrap().len(), 3);
 
         engine.shutdown();
     }
@@ -1304,7 +1324,7 @@ mod tests {
             .publish(intent("ordinary next write"))
             .expect("a non-reopenable refusal does not replace the healthy store handle");
         assert_eq!(faults.reopen_attempt_count(), 0);
-        assert_eq!(engine.publish_queue().unwrap().len(), 1);
+        assert_eq!(engine.publish_queue(None, u8::MAX).unwrap().len(), 1);
 
         engine.shutdown();
     }

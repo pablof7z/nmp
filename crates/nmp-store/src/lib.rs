@@ -2089,6 +2089,21 @@ pub trait EventStore {
         &self,
     ) -> Result<Vec<PublishQueueReceipt>, PersistenceError>;
 
+    /// Read at most `limit` retained receipts whose ids are strictly greater
+    /// than `after`, in ascending receipt-id order (#903).
+    ///
+    /// This is the bounded app-inspection primitive. The public limit is a
+    /// `u8`, and `EngineCore` rejects a backend page that exceeds it, crosses
+    /// the exclusive cursor backwards, or is not strictly ordered. Every
+    /// store must still provide the bounded read directly; there is
+    /// deliberately no default that first materializes the complete retained
+    /// queue and truncates it afterward.
+    fn publish_queue_receipts_after(
+        &self,
+        after: Option<u64>,
+        limit: u8,
+    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError>;
+
     /// Permanently remove superseded receipt evidence once it is one hour old
     /// or outside the newest 500 entries. Open obligations and every other
     /// receipt state are outside this disposal class.
