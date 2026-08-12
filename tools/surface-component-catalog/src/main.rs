@@ -1170,25 +1170,24 @@ fn check_stable_active(base: &Descriptor, head: &Descriptor) -> Result<()> {
             )));
         }
     }
-    let base_android = base.android.as_ref();
-    let head_android = head.android.as_ref();
-    if base_android.map(|android| {
-        (
-            &android.gradle_project,
-            &android.namespace,
-            &android.maven_coordinate,
-        )
-    }) != head_android.map(|android| {
-        (
-            &android.gradle_project,
-            &android.namespace,
-            &android.maven_coordinate,
-        )
-    }) {
-        return Err(invalid(format!(
-            "active component {} changed stable Android package identities",
-            base.key
-        )));
+    match (base.android.as_ref(), head.android.as_ref()) {
+        // Android is an optional projection, so an existing component needs
+        // one reachable transition that declares it for the first time. Head
+        // catalog validation above proves the complete record and its paths.
+        (None, Some(_)) | (None, None) => {}
+        (Some(base_android), Some(head_android))
+            if base_android.gradle_project == head_android.gradle_project
+                && base_android.namespace == head_android.namespace
+                && base_android.maven_coordinate == head_android.maven_coordinate => {}
+        // Once declared, absence and identity churn are both forbidden. A
+        // platform cannot silently disappear, and package identity is not a
+        // mutable release setting.
+        (Some(_), None) | (Some(_), Some(_)) => {
+            return Err(invalid(format!(
+                "active component {} changed stable Android package identities",
+                base.key
+            )));
+        }
     }
     Ok(())
 }
