@@ -82,6 +82,9 @@ impl FeedState {
                 RowDelta::Added(row) => {
                     self.rows.insert(row.event.id, row);
                 }
+                RowDelta::Updated(row) => {
+                    self.rows.insert(row.event.id, row);
+                }
                 // #105: the event body is unchanged, so this replaces the
                 // row's source set and nothing else -- the "whole value, not
                 // a patch" shape the delta itself carries. A row this handle

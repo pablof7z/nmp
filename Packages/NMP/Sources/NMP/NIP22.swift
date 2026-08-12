@@ -178,7 +178,8 @@ public func commentThreadDemand(root: CommentRoot) throws -> NMPDemand {
 public func decodeComment(_ row: Row) throws -> DecodedComment {
     let ffiRow = FfiRow(
         id: row.id, pubkey: row.pubkey, createdAt: row.createdAt, kind: row.kind,
-        tags: row.tags, content: row.content, sig: row.sig, sources: row.sources
+        tags: row.tags, content: row.content, sig: row.sig,
+        signatureState: row.signatureState.ffi, sources: row.sources
     )
     do {
         return try DecodedComment(NMPFFI.decodeComment(row: ffiRow))

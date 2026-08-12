@@ -20,6 +20,7 @@ class NIP51Test {
                 ),
             content = "encrypted-private-items",
             sig = "caller-chosen-signature",
+            signatureState = RowSignatureState.Signed,
             sources = emptyList(),
         )
 

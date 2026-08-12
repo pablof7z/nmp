@@ -27,6 +27,9 @@ impl Observed {
                 RowDelta::Added(row) => {
                     self.rows.insert(row.event.id, row);
                 }
+                RowDelta::Updated(row) => {
+                    self.rows.insert(row.event.id, row);
+                }
                 RowDelta::SourcesGrew { id, sources } => {
                     self.source_growth.insert(id);
                     if let Some(row) = self.rows.get_mut(&id) {

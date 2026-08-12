@@ -451,7 +451,9 @@ impl<S: EventStore> EngineCore<S> {
                     .iter()
                     .filter_map(|delta| match delta {
                         RowDelta::Added(row) => Some(row.event.id),
-                        RowDelta::SourcesGrew { .. } | RowDelta::Removed(_) => None,
+                        RowDelta::Updated(_)
+                        | RowDelta::SourcesGrew { .. }
+                        | RowDelta::Removed(_) => None,
                     })
                     .collect();
                 let pending = self
@@ -818,6 +820,9 @@ impl<S: EventStore> EngineCore<S> {
         for (event_id, row) in current {
             match state.last_rows.get(&event_id) {
                 None => deltas.push(RowDelta::Added(row)),
+                Some(previous) if previous.signature_state != row.signature_state => {
+                    deltas.push(RowDelta::Updated(row));
+                }
                 Some(previous) if previous.sources != row.sources => {
                     deltas.push(RowDelta::SourcesGrew {
                         id: event_id,
@@ -954,11 +959,13 @@ impl<S: EventStore> EngineCore<S> {
                         .saturating_add(rows.len() as u64),
                 );
                 for stored in rows {
+                    let signature_state = row_signature_state(&stored.provenance);
                     let sources: BTreeSet<RelayUrl> = stored.provenance.seen.into_keys().collect();
                     match by_id.entry(stored.event.id) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
                             entry.insert(Row {
                                 event: stored.event,
+                                signature_state,
                                 sources,
                             });
                         }
@@ -1058,11 +1065,13 @@ impl<S: EventStore> EngineCore<S> {
                         .saturating_add(rows.len() as u64),
                 );
                 for stored in rows {
+                    let signature_state = row_signature_state(&stored.provenance);
                     let sources: BTreeSet<RelayUrl> = stored.provenance.seen.into_keys().collect();
                     match candidates.entry(stored.event.id) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
                             entry.insert(Row {
                                 event: stored.event,
+                                signature_state,
                                 sources,
                             });
                         }
@@ -1208,9 +1217,13 @@ impl<S: EventStore> EngineCore<S> {
                     .store()
                     .query(&nostr::Filter::new().id(changed.event.id))
                 {
-                    Ok(mut rows) => rows.pop().map(|stored| Row {
-                        event: stored.event,
-                        sources: stored.provenance.seen.into_keys().collect(),
+                    Ok(mut rows) => rows.pop().map(|stored| {
+                        let signature_state = row_signature_state(&stored.provenance);
+                        Row {
+                            event: stored.event,
+                            signature_state,
+                            sources: stored.provenance.seen.into_keys().collect(),
+                        }
                     }),
                     Err(error) => {
                         self.histories
@@ -1229,6 +1242,7 @@ impl<S: EventStore> EngineCore<S> {
                             crate::ingest_attribution::projection_event_clone();
                             changed.event.clone()
                         },
+                        signature_state: RowSignatureState::from_store(changed.signature_state),
                         sources: changed.observed_relays.clone(),
                     }),
                 );
@@ -1283,6 +1297,7 @@ impl<S: EventStore> EngineCore<S> {
                         crate::ingest_attribution::projection_event_clone();
                         row.event.clone()
                     },
+                    signature_state: RowSignatureState::from_store(row.signature_state),
                     sources: row.observed_relays.clone(),
                 };
                 state
@@ -1296,12 +1311,14 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 if state.last_rows.contains_key(&row.event.id) {
                     remember(row.event.id, state, &mut before);
-                    state
+                    let remembered = state
                         .last_rows
                         .get_mut(&row.event.id)
-                        .expect("provenance target was checked above")
+                        .expect("provenance target was checked above");
+                    remembered
                         .sources
                         .extend(row.observed_relays.iter().cloned());
+                    remembered.signature_state = RowSignatureState::from_store(row.signature_state);
                 } else if pinned_relays.is_some() && visible_under_pin(row) {
                     // An event already cached from an unpinned relay can
                     // enter a Strict projection when this committed duplicate
@@ -1318,6 +1335,21 @@ impl<S: EventStore> EngineCore<S> {
                         projected.event.id,
                     ));
                     state.last_rows.insert(projected.event.id, projected);
+                }
+            }
+            for row in &changes.updated {
+                if !matches(&row.event) || !visible_under_pin(row) {
+                    continue;
+                }
+                if state.last_rows.contains_key(&row.event.id) {
+                    remember(row.event.id, state, &mut before);
+                    let remembered = state
+                        .last_rows
+                        .get_mut(&row.event.id)
+                        .expect("same-id update target was checked above");
+                    remembered.event = row.event.clone();
+                    remembered.signature_state = RowSignatureState::from_store(row.signature_state);
+                    remembered.sources = row.observed_relays.clone();
                 }
             }
         }
@@ -1389,9 +1421,11 @@ impl<S: EventStore> EngineCore<S> {
                 before
                     .entry(event_id)
                     .or_insert_with(|| state.last_rows.get(&event_id).cloned());
+                let signature_state = row_signature_state(&stored.provenance);
                 let sources: BTreeSet<_> = stored.provenance.seen.into_keys().collect();
                 let row = Row {
                     event: stored.event,
+                    signature_state,
                     sources: sources.clone(),
                 };
                 let remembered = row.clone();
@@ -1444,6 +1478,11 @@ impl<S: EventStore> EngineCore<S> {
             match (prior, state.last_rows.get(event_id)) {
                 (None, Some(current)) => deltas.push(RowDelta::Added(current.clone())),
                 (Some(_), None) => deltas.push(RowDelta::Removed(*event_id)),
+                (Some(prior), Some(current))
+                    if prior.signature_state != current.signature_state =>
+                {
+                    deltas.push(RowDelta::Updated(current.clone()));
+                }
                 (Some(prior), Some(current)) if prior.sources != current.sources => {
                     deltas.push(RowDelta::SourcesGrew {
                         id: *event_id,

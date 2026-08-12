@@ -60,7 +60,8 @@ final class NIP22Tests: XCTestCase {
                     ["i", "podcast:item:guid:guid-1"],
                     ["k", "podcast:item:guid"],
                 ],
-                content: "nice episode", sig: String(repeating: "0", count: 128), sources: []
+                content: "nice episode", sig: String(repeating: "0", count: 128),
+                signatureState: .signed, sources: []
             )
         )
         let decoded = try! decodeComment(row)
@@ -84,7 +85,8 @@ final class NIP22Tests: XCTestCase {
                     ["i", "guid-1"],
                     ["k", "podcast:item:guid"],
                 ],
-                content: "", sig: String(repeating: "0", count: 128), sources: []
+                content: "", sig: String(repeating: "0", count: 128),
+                signatureState: .signed, sources: []
             )
         )
         XCTAssertThrowsError(try decodeComment(row)) { error in
@@ -99,7 +101,8 @@ final class NIP22Tests: XCTestCase {
             Row(
                 FfiRow(
                     id: String(repeating: "1", count: 64), pubkey: author, createdAt: 1, kind: 1111,
-                    tags: tags, content: "", sig: String(repeating: "0", count: 128), sources: []
+                    tags: tags, content: "", sig: String(repeating: "0", count: 128),
+                    signatureState: .signed, sources: []
                 )
             )
         }

@@ -316,6 +316,7 @@ mod history_mailbox_tests {
             )
             .sign_with_keys(keys)
             .unwrap(),
+            signature_state: crate::core::RowSignatureState::Signed,
             sources: BTreeSet::new(),
         }
     }
@@ -343,6 +344,9 @@ mod history_mailbox_tests {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
+                    rows.insert(row.event.id, row.clone());
+                }
+                RowDelta::Updated(row) => {
                     rows.insert(row.event.id, row.clone());
                 }
                 RowDelta::SourcesGrew { id, sources } => {

@@ -14,29 +14,50 @@ Feature: Publishing tells the truth, per relay
     And the receipt reports the note rejected by "flaky-relay"
 
   # nmp:id=WRITES-RECEIPTS-002
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::an_unsigned_write_is_still_explicitly_pending_after_a_restart
+  # nmp:evidence=rust:nmp::pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates
+  # nmp:falsifier=Infer signed from the stored Event shape after reopen; the cold query reports the sentinel row as signed instead of preserving Pending and the same durable obligation.
   @ledger-9 @ledger-15
   Scenario: Durable acceptance survives restart through the ordinary store
     Given an unsigned kind 9999 draft matches an open ordinary query
     When the durable write is accepted and the process stops immediately
     And I reconstruct the engine from the same durable store
-    Then the ordinary query shows the same pending row
+    Then the ordinary query shows the same final event id and body as pending
+    And it does not present the placeholder signature as a signed event
     And the receipt can be reattached by its stable id
 
   # nmp:id=WRITES-RECEIPTS-003
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::delayed_signer_promotes_the_same_visible_row_from_pending_to_signed
+  # nmp:evidence=rust:nmp::signer_unavailable_keeps_accepted_row_visible
+  # nmp:evidence=rust:nmp::slow_observer_never_retains_a_pending_row_after_signature_promotion
+  # nmp:evidence=swift:NMP::testRowAccumulatorSignaturePromotionReplacesTheSameRow
+  # nmp:evidence=kotlin:NMPKotlin::signaturePromotionReplacesTheSameRow
+  # nmp:falsifier=Omit signature state from remembered-row comparison or mailbox composition; the open or slow observation retains the sentinel, while a native accumulator may append a duplicate.
   @ledger-10 @ledger-19
-  Scenario: An offline remote signer leaves a durable obligation
-    Given a NIP-46 signer is registered for the current pubkey but is offline
+  Scenario: A delayed signer promotes the row an open query already received
+    Given an ordinary query is open for an unsigned kind 9999 draft
+    And the matching signer has not answered
     When I publish an unsigned kind 9999 draft
-    Then the canonical pending row is visible to matching queries
+    Then the query receives the canonical row as pending
     And the receipt reports awaiting that pubkey's signer
-    When the matching signer provider reattaches
-    Then the same row is promoted to signed after exact validation
+    When a signer for a different pubkey attaches
+    Then the same row remains pending with no update
+    When the matching signer answers with an exactly valid signature
+    Then the query updates that same event id to signed
+    And the updated row carries the verified signature instead of the placeholder
+
+  # nmp:id=WRITES-RECEIPTS-010
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::ordinary_room_batch_queries_only_the_matching_handle_and_skips_router_compile
+  # nmp:falsifier=Classify every row without local provenance as pending; a relay-verified event reaches the ordinary query with the wrong signature state.
+  @ledger-15
+  Scenario: A verified relay event is signed rather than locally pending
+    Given a relay sends a valid signed event matching an ordinary query
+    When NMP verifies and stores that event
+    Then the query reports the row as signed
+    And the row carries the relay's verified signature
 
   # nmp:id=WRITES-RECEIPTS-004
   # nmp:status=specified

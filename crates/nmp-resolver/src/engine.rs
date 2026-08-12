@@ -13,7 +13,7 @@ use nmp_grammar::{
 };
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, EventStore, InsertOutcome, PersistenceError,
-    RelayObserved, StoredEvent,
+    RelayObserved, SigState, StoredEvent,
 };
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
@@ -98,6 +98,10 @@ pub struct CommittedCurrentRow {
     pub event: nostr::Event,
     pub observed_relays: BTreeSet<RelayUrl>,
     pub locally_accepted: bool,
+    /// Canonical row-level signature state. Relay-only rows are always
+    /// `Signed`; locally accepted rows retain the store's explicit
+    /// `Pending`/`Signed` provenance state.
+    pub signature_state: SigState,
 }
 
 /// Net canonical event changes after consolidating transient rows inside one
@@ -109,6 +113,17 @@ pub struct CommittedRowChanges {
     pub inserted: Vec<CommittedCurrentRow>,
     pub removed: Vec<nostr::Event>,
     pub provenance_grew: Vec<CommittedCurrentRow>,
+    /// Same-id canonical row replacements that do not affect NIP-01
+    /// selection. Signature promotion is the current producer: event id and
+    /// body stay frozen while the sentinel signature becomes verified.
+    pub updated: Vec<CommittedCurrentRow>,
+}
+
+fn stored_signature_state(row: &StoredEvent) -> SigState {
+    row.provenance
+        .local
+        .as_ref()
+        .map_or(SigState::Signed, |local| local.sig_state)
 }
 
 fn committed_current_row(row: &StoredEvent) -> CommittedCurrentRow {
@@ -116,6 +131,7 @@ fn committed_current_row(row: &StoredEvent) -> CommittedCurrentRow {
         event: row.event.clone(),
         observed_relays: row.provenance.seen.keys().cloned().collect(),
         locally_accepted: row.provenance.local.is_some(),
+        signature_state: stored_signature_state(row),
     }
 }
 
@@ -137,6 +153,9 @@ fn committed_row_changes(
                     .observed_relays
                     .extend(current.observed_relays.iter().cloned());
                 prior.locally_accepted |= current.locally_accepted;
+                if current.signature_state == SigState::Signed {
+                    prior.signature_state = SigState::Signed;
+                }
             })
             .or_insert(current);
     }
@@ -157,6 +176,7 @@ fn committed_row_changes(
             .filter_map(|(event_id, event)| (!transient.contains(&event_id)).then_some(event))
             .collect(),
         provenance_grew: Vec::new(),
+        updated: Vec::new(),
     }
 }
 
@@ -913,6 +933,9 @@ impl<S: EventStore> Engine<S> {
                         observed_relays: observed_relays.clone(),
                         // A relay insert is a row this node had never held.
                         locally_accepted: false,
+                        // Relay ingest reaches this door only after signature
+                        // verification; it can never create a pending row.
+                        signature_state: SigState::Signed,
                     }
                 })
                 .collect(),
@@ -934,9 +957,13 @@ impl<S: EventStore> Engine<S> {
                         event: clone_relay_ingest_event(event),
                         observed_relays: observed_relays.clone(),
                         locally_accepted: locally_accepted_ids.contains(&event_id),
+                        // A verified relay copy atomically satisfies any
+                        // matching local pending owners in the store.
+                        signature_state: SigState::Signed,
                     }
                 })
                 .collect(),
+            updated: Vec::new(),
         };
         let changed_events: Vec<_> = inserted
             .iter()
@@ -1110,6 +1137,46 @@ impl<S: EventStore> Engine<S> {
                 delta,
                 affected_handles,
                 row_changes,
+            },
+        })
+    }
+
+    /// Project an already-committed signature promotion through the same
+    /// canonical-row notification result every other store mutation uses.
+    ///
+    /// `promote_signed` may have updated a displaced stash row, or synthesized
+    /// signed bytes for an intent whose row is no longer current. Querying the
+    /// exact id after the commit is therefore the authority for whether any
+    /// app-visible canonical row actually changed. No synthetic row is pushed
+    /// from the signer callback.
+    pub fn react_to_signature_promotion(
+        &mut self,
+        event_id: nostr::EventId,
+    ) -> Result<CommittedMutationResult, PersistenceError> {
+        let mut rows = self.store.query(&nostr::Filter::new().id(event_id))?;
+        let Some(row) = rows.pop() else {
+            return Ok(CommittedMutationResult {
+                delta: DemandDelta::default(),
+                affected_handles: BTreeSet::new(),
+                row_changes: CommittedRowChanges::default(),
+            });
+        };
+        if stored_signature_state(&row) != SigState::Signed {
+            return Ok(CommittedMutationResult {
+                delta: DemandDelta::default(),
+                affected_handles: BTreeSet::new(),
+                row_changes: CommittedRowChanges::default(),
+            });
+        }
+
+        let shapes = self.projection_shapes();
+        let affected_handles = self.affected_handles(&shapes, std::slice::from_ref(&row.event));
+        Ok(CommittedMutationResult {
+            delta: DemandDelta::default(),
+            affected_handles,
+            row_changes: CommittedRowChanges {
+                updated: vec![committed_current_row(&row)],
+                ..CommittedRowChanges::default()
             },
         })
     }

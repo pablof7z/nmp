@@ -101,6 +101,7 @@ mod tests {
             ],
             content: "encrypted-private-items".to_owned(),
             sig: "caller-chosen-signature".to_owned(),
+            signature_state: crate::types::FfiRowSignatureState::Signed,
             sources: vec![],
         }
     }

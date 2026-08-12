@@ -1016,6 +1016,7 @@ pub nmp::RowDelta::Removed(nostr::event::id::EventId)
 pub nmp::RowDelta::SourcesGrew
 pub nmp::RowDelta::SourcesGrew::id: nostr::event::id::EventId
 pub nmp::RowDelta::SourcesGrew::sources: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
+pub nmp::RowDelta::Updated(nmp::Row)
 impl nmp::RowDelta
 pub fn nmp::RowDelta::event(&self) -> core::option::Option<&nostr::event::Event>
 pub fn nmp::RowDelta::id(&self) -> nostr::event::id::EventId
@@ -1030,6 +1031,27 @@ impl core::marker::Unpin for nmp::RowDelta
 impl core::marker::UnsafeUnpin for nmp::RowDelta
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RowDelta
 impl core::panic::unwind_safe::UnwindSafe for nmp::RowDelta
+pub enum nmp::RowSignatureState
+pub nmp::RowSignatureState::Pending
+pub nmp::RowSignatureState::Signed
+impl core::clone::Clone for nmp::RowSignatureState
+pub fn nmp::RowSignatureState::clone(&self) -> nmp::RowSignatureState
+impl core::cmp::Eq for nmp::RowSignatureState
+impl core::cmp::PartialEq for nmp::RowSignatureState
+pub fn nmp::RowSignatureState::eq(&self, &nmp::RowSignatureState) -> bool
+impl core::fmt::Debug for nmp::RowSignatureState
+pub fn nmp::RowSignatureState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nmp::RowSignatureState
+pub fn nmp::RowSignatureState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nmp::RowSignatureState
+impl core::marker::StructuralPartialEq for nmp::RowSignatureState
+impl core::marker::Freeze for nmp::RowSignatureState
+impl core::marker::Send for nmp::RowSignatureState
+impl core::marker::Sync for nmp::RowSignatureState
+impl core::marker::Unpin for nmp::RowSignatureState
+impl core::marker::UnsafeUnpin for nmp::RowSignatureState
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RowSignatureState
+impl core::panic::unwind_safe::UnwindSafe for nmp::RowSignatureState
 pub enum nmp::ShortfallFact
 pub nmp::ShortfallFact::LocalLimit
 pub nmp::ShortfallFact::LocalLimit::atom: nmp_grammar::concrete::ConcreteFilter
@@ -1740,6 +1762,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationSnapshot
 impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationSnapshot
 pub struct nmp::Row
 pub nmp::Row::event: nostr::event::Event
+pub nmp::Row::signature_state: nmp::RowSignatureState
 pub nmp::Row::sources: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
 impl core::clone::Clone for nmp::Row
 pub fn nmp::Row::clone(&self) -> nmp::Row

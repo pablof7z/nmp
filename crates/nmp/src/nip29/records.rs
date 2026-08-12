@@ -377,7 +377,8 @@ impl Accumulator {
     fn apply(&mut self, deltas: Vec<RowDelta>) {
         for delta in deltas {
             match delta {
-                RowDelta::Added(Row { event, sources }) => {
+                RowDelta::Added(Row { event, sources, .. })
+                | RowDelta::Updated(Row { event, sources, .. }) => {
                     self.rows.insert(event.id, (event, sources));
                 }
                 RowDelta::Removed(id) => {

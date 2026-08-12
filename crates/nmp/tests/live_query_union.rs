@@ -200,6 +200,9 @@ impl Projection {
                     RowDelta::Added(row) => {
                         self.rows.insert(row.event.id, row.sources.clone());
                     }
+                    RowDelta::Updated(row) => {
+                        self.rows.insert(row.event.id, row.sources.clone());
+                    }
                     RowDelta::SourcesGrew { id, sources } => {
                         self.rows.insert(*id, sources.clone());
                     }

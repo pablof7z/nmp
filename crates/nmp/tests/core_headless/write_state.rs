@@ -22,9 +22,12 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     }));
     let (id, generation, accepted_template) = find_sign_request(&effects);
     let accepted_id = accepted_template.clone().sign_with_keys(&a).unwrap().id;
-    assert!(all_row_deltas(&effects)
-        .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == accepted_id)));
+    assert!(all_row_deltas(&effects).iter().any(|delta| matches!(
+        delta,
+        RowDelta::Added(row)
+            if row.event.id == accepted_id
+                && row.signature_state == nmp::RowSignatureState::Pending
+    )));
     assert!(
         effects
             .iter()
@@ -38,6 +41,12 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
 
     let tampered = signed_draft(&draft(10, "different signer output"), &a);
     let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(tampered)));
+    assert!(
+        all_row_deltas(&effects)
+            .iter()
+            .all(|delta| !matches!(delta, RowDelta::Updated(_))),
+        "an invalid signer result must never promote the optimistic row to signed"
+    );
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
@@ -195,12 +204,14 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
 #[test]
 fn signer_unavailable_keeps_accepted_row_visible() {
     let a = Keys::generate();
+    let wrong = Keys::generate();
     let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
-    core.handle_and_flush(EngineMsg::Subscribe(literal_query(
+    let opened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
+    let first_handle = subscribed_handle(&opened);
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(1, "awaiting signer")),
         routing: WriteRouting::Auto,
@@ -208,20 +219,62 @@ fn signer_unavailable_keeps_accepted_row_visible() {
         correlation: None,
     }));
     let (id, generation, template) = find_sign_request(&effects);
-    let expected_id = template.sign_with_keys(&a).unwrap().id;
+    let expected_id = template.clone().sign_with_keys(&a).unwrap().id;
     let effects = core.handle(EngineMsg::SignerUnavailable(id, generation));
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::AwaitingSigner { pubkey }))
             if *rid == id && *pubkey == a.public_key()
     )));
+    let wrong_attach = core.handle(EngineMsg::SignerAttached(wrong.public_key()));
+    assert!(
+        wrong_attach.is_empty(),
+        "attaching a different key must neither rearm nor mutate this write"
+    );
+
     let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
     )));
-    assert!(all_row_deltas(&fresh)
-        .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == expected_id)));
+    let second_handle = subscribed_handle(&fresh);
+    assert!(all_row_deltas(&fresh).iter().any(|delta| matches!(
+        delta,
+        RowDelta::Added(row)
+            if row.event.id == expected_id
+                && row.signature_state == nmp::RowSignatureState::Pending
+    )));
+
+    let exact_attach = core.handle(EngineMsg::SignerAttached(a.public_key()));
+    let (rearmed_id, rearmed_generation, rearmed_template) = find_sign_request(&exact_attach);
+    assert_eq!(rearmed_id, id);
+    assert_eq!(rearmed_template, template);
+    let promoted = core.handle(EngineMsg::SignerCompleted(
+        id,
+        rearmed_generation,
+        Ok(rearmed_template.sign_with_keys(&a).unwrap()),
+    ));
+    assert!(all_row_deltas(&promoted).iter().any(|delta| matches!(
+        delta,
+        RowDelta::Updated(row)
+            if row.event.id == expected_id
+                && row.signature_state == nmp::RowSignatureState::Signed
+                && row.event.verify().is_ok()
+    )));
+    for handle in [first_handle, second_handle] {
+        let same_id_updates = promoted
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::EmitRows(candidate, deltas, _) if *candidate == handle => Some(deltas),
+                _ => None,
+            })
+            .flatten()
+            .filter(|delta| matches!(delta, RowDelta::Updated(row) if row.event.id == expected_id))
+            .count();
+        assert_eq!(
+            same_id_updates, 1,
+            "the exact signer promotes the row once for observation {handle:?}"
+        );
+    }
 }
 
 // ---- explicit per-write identity (#47) -----------------------------------

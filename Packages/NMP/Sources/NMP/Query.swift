@@ -146,6 +146,12 @@ final class RowAccumulator: @unchecked Sendable {
                     order.append(row.id)
                 }
                 byId[row.id] = row
+            case .updated(let ffiRow):
+                let row = Row(ffiRow)
+                if byId[row.id] == nil {
+                    order.append(row.id)
+                }
+                byId[row.id] = row
             case .sourcesGrew(let id, let sources):
                 // #105: the SAME row already matched; only its relay-provenance
                 // set grew. Replace it in place -- `order` is untouched, this is
