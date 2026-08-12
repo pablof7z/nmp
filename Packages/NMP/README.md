@@ -68,14 +68,32 @@ For the SwiftUI product and live Gallery, see
 
 ## Building from a clean clone (#18)
 
-`Package.swift` declares a `binaryTarget` at `NMP.xcframework` and a
+An application checks in one NMP feature manifest and prepares one exact local
+package from the repository root:
+
+```sh
+python3 tools/nmp-native/nmp_native.py prepare \
+  --manifest path/to/app/nmp.toml \
+  --platform apple \
+  --output path/to/app/Generated/NMP
+```
+
+Add `Generated/NMP/apple` to the app as a local Swift package dependency. It
+contains one matching XCFramework, UniFFI generated from that binary, and only
+the Swift wrappers selected by Cargo. Re-run prepare after changing the app
+manifest, NMP source, or relevant target/toolchain inputs; ordinary Xcode
+incrementals consume the generated package without running Cargo. See
+[`native/README.md`](../../native/README.md).
+
+This repository's complete-surface qualification template declares a
+`binaryTarget` at `NMP.xcframework` and a
 generated-bindings target (`NMPFFI` / `Sources/NMPFFI/nmp_ffi.swift`).
 Neither is committed (see `.gitignore`) -- both are build output of the
 Rust `nmp-ffi` crate, and committing a binary xcframework would make the
 Swift SDK's actual proof-of-correctness (that it's built from the source in
 this repo) unverifiable.
 
-That means `swift build` / `swift test` in this directory do **not** work
+That means maintainer `swift build` / `swift test` in this directory do **not** work
 straight after `git clone` until the artifacts exist once. Generate them
 from the **repo root**:
 
@@ -107,6 +125,9 @@ Re-run `scripts/build-swift-xcframework.sh` after any change to `nmp-ffi`'s
 public UniFFI surface (new/changed exported types or methods) -- the
 generated bindings and the compiled staticlib both need to stay in sync
 with the Rust source.
+
+The fixed all-feature script is repository qualification machinery, not the
+app feature-selection workflow.
 
 CI proves the package builds from a clean checkout in
 `.github/workflows/ci.yml`; missing generated bindings or binary artifacts fail

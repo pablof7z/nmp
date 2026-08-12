@@ -43,7 +43,11 @@ final class CorrelationTests: XCTestCase {
     }
 
     func testDoubleSubmitWithTheSameTokenReattachesInsteadOfEnqueuingASecondWrite() async throws {
-        let engine = try NMPEngine(config: NMPConfig())
+        let engine = try NMPEngine(
+            config: NMPConfig(
+                nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+            )
+        )
         defer { engine.shutdown() }
         try engine.setActiveAccount(author)
 
@@ -97,7 +101,11 @@ final class CorrelationTests: XCTestCase {
     }
 
     func testReattachByCorrelationRecoversAReceiptTheCallerNeverLearnedTheIdOf() async throws {
-        let engine = try NMPEngine(config: NMPConfig())
+        let engine = try NMPEngine(
+            config: NMPConfig(
+                nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+            )
+        )
         defer { engine.shutdown() }
         try engine.setActiveAccount(author)
 

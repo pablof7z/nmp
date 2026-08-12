@@ -16,6 +16,24 @@ publish.workspace = true
 crate-type = ["staticlib", "cdylib", "lib"]
 name = "nmp_ffi"
 
+[features]
+default = []
+
+# #824: these are the stable app-facing selection keys consumed by the native
+# feature manifest. Each key only forwards into its real Cargo dependency;
+# Cargo remains the sole dependency graph.
+nip02 = ["dep:nmp-nip02", "nip65"]
+nip18 = ["nmp/nip18"]
+nip22 = ["nmp/nip22", "nip65"]
+nip25 = ["nmp/nip25"]
+nip29 = ["nmp/nip29"]
+nip51 = ["nmp/nip51"]
+nip65 = ["nmp/nip65"]
+nipc7 = ["nmp/nipc7"]
+asset = ["nmp/asset"]
+blossom = ["nmp/blossom", "asset"]
+content = ["nmp/content"]
+
 # `cargo run -p nmp-ffi --bin uniffi-bindgen generate --library <staticlib> \
 #   --language swift --out-dir gen/` (M4 plan §3 step 3, library mode -- reads
 # exported metadata straight from the compiled staticlib, no .udl file).
@@ -45,16 +63,7 @@ nostr.workspace = true
 # families reachable from Swift and not from direct Rust. Now that the facade
 # offers each one, a direct edge here would be a second owner of the same
 # values -- exactly what #851 closed for `nmp-nip22`.
-nmp = { workspace = true, features = [
-    "nip18",
-    "nip22",
-    "nip25",
-    "nip51",
-    "nipc7",
-    "asset",
-    "blossom",
-    "content",
-] }
+nmp = { workspace = true }
 uniffi = { workspace = true, features = ["cli"] }
 # The ONE family that cannot come through the facade: `nmp-nip02` depends on
 # `nmp` (a `protocol-service` in `scripts/dependency-direction-policy.json`,
@@ -63,7 +72,7 @@ uniffi = { workspace = true, features = ["cli"] }
 # unit of work: the follow service's engine coupling has to be inverted before
 # the facade can own its vocabulary. Until then this edge is the only way the
 # staticlib every Swift and Kotlin app links can project the follow door.
-nmp-nip02.workspace = true
+nmp-nip02 = { workspace = true, optional = true }
 # #555: `FfiBlossomAuthorization::validate_signed_event` reassembles an
 # `FfiSignedEvent` record into canonical event JSON for nostr's strict
 # `Event::from_json` parser (typed refusal on malformed id/sig hex).
@@ -87,6 +96,7 @@ tokio = { version = "1", features = ["rt", "time", "net"] }
 # resolve `nmp_grammar::` at all, so the compiler itself proves the
 # staticlib/cdylib binds nothing from it.
 nmp-grammar.workspace = true
+nmp-test-support.workspace = true
 nmp-store.workspace = true
 redb = "4.1"
 tempfile = "3"

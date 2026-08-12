@@ -64,7 +64,7 @@ fi
 echo "== 1. cargo build (release, host triple) =="
 cargo fetch --locked
 CARGO_TARGET_DIR="$TARGET_DIR" \
-  cargo build --frozen -p "$CRATE" --release --target "$HOST_TARGET"
+  cargo build --frozen -p "$CRATE" --no-default-features --all-features --release --target "$HOST_TARGET"
 RELEASE_DIR="$TARGET_DIR/$HOST_TARGET/release"
 
 HOST_LIB="$RELEASE_DIR/$LIB_NAME"

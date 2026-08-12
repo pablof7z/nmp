@@ -2136,6 +2136,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-nip02",
  "nmp-store",
+ "nmp-test-support",
  "nostr 0.44.4",
  "redb",
  "serde_json",

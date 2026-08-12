@@ -175,7 +175,9 @@ class NIP22Test {
     @Test
     fun offlineSignerDurableAcceptanceAndCorrelationReattachment() =
         runBlocking {
-            NMPEngine(NMPConfig()).use { engine ->
+            NMPEngine(
+                NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example"))),
+            ).use { engine ->
                 engine.setActiveAccount(author)
 
                 val token = "kotlin-nip22-offline-signer-token"
@@ -259,7 +261,9 @@ class NIP22Test {
     @Test
     fun durableAcceptanceMakesOneCanonicalPendingCommentVisibleThroughTheQueryPath() =
         runBlocking {
-            NMPEngine(NMPConfig()).use { engine ->
+            NMPEngine(
+                NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example"))),
+            ).use { engine ->
                 engine.setActiveAccount(author)
 
                 val root = CommentRoot.External(Nip73.PodcastEpisode("guid-query-path"))

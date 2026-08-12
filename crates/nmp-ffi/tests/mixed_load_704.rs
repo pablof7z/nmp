@@ -1,3 +1,5 @@
+#![cfg(feature = "nip02")]
+
 //! #704 falsifier — mixed engine load makes progress with NO capacity refusal.
 //!
 //! One engine drives, CONCURRENTLY: many live `observe` handles, a NIP-11
@@ -163,7 +165,9 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
                     created_at: Some(0),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         })

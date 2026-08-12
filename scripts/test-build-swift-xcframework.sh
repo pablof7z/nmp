@@ -260,7 +260,7 @@ echo 'ok - help and argument rejection are side-effect-free'
 mac_log="$TMP/macos.log"
 shared_target="$TMP/shared-cache"
 run_script "$mac_log" "$shared_target" --macos-only >/dev/null
-grep -Fq 'cargo build --frozen -p nmp-ffi --release --target aarch64-apple-darwin' "$mac_log"
+grep -Fq 'cargo build --frozen -p nmp-ffi --no-default-features --all-features --release --target aarch64-apple-darwin' "$mac_log"
 grep -Fq -- '--target aarch64-apple-darwin deployment=13.0' "$mac_log"
 grep -Fq 'cflags=-mmacosx-version-min=99.0\ -mmacosx-version-min=13.0' "$mac_log"
 grep -Fq 'cxxflags=-mmacosx-version-min=99.0\ -mmacosx-version-min=13.0' "$mac_log"

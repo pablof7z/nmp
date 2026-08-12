@@ -31,6 +31,7 @@ nmp = { workspace = true, features = [
     "nip18",
     "nip22",
     "nip25",
+    "nip29",
     "nip51",
     "nipc7",
 ] }

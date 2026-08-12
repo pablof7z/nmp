@@ -146,13 +146,13 @@ fi
 
 build_target() {
   CARGO_TARGET_DIR="$TARGET_DIR" \
-    cargo build --frozen -p "$CRATE" --release --target "$1" 1>&2
+    cargo build --frozen -p "$CRATE" --no-default-features --all-features --release --target "$1" 1>&2
   printf '%s\n' "$TARGET_DIR/$1/release"
 }
 
 build_target_without_macos() {
   env -u MACOSX_DEPLOYMENT_TARGET bash -c \
-    'CARGO_TARGET_DIR="$1" cargo build --frozen -p "$2" --release --target "$3" 1>&2' \
+    'CARGO_TARGET_DIR="$1" cargo build --frozen -p "$2" --no-default-features --all-features --release --target "$3" 1>&2' \
     _ "$TARGET_DIR" "$CRATE" "$1"
   printf '%s\n' "$TARGET_DIR/$1/release"
 }
@@ -197,7 +197,7 @@ fi
 echo "== 3. uniffi-bindgen (library mode) -> Swift bindings =="
 mkdir -p "$GEN_DIR"
 env -u MACOSX_DEPLOYMENT_TARGET \
-  cargo run --locked -p "$CRATE" --bin "$BINDGEN_BIN" -- generate \
+  cargo run --locked -p "$CRATE" --bin "$BINDGEN_BIN" --no-default-features --all-features -- generate \
   --library "$BINDGEN_LIB" \
   --language swift \
   --out-dir "$GEN_DIR"

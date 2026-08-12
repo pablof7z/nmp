@@ -31,6 +31,12 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidPublicKey(val got: String) : NMPError("invalid public key: $got")
     data class InvalidEventId(val got: String) : NMPError("invalid event id: $got")
     data class InvalidRelayUrl(val got: String) : NMPError("invalid relay url: $got")
+    // nmp-native:if nip65
+    object Nip65IndexerRelaysEmpty :
+        NMPError("NIP-65 requires at least one app-owned indexer relay")
+    object AutomaticRoutingUnavailable :
+        NMPError("automatic routing is unavailable; construct the engine with NIP-65 indexers")
+    // nmp-native:endif
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
     object InvalidSecretKey : NMPError("invalid secret key")
     data class InvalidSigner(val reason: String) : NMPError("invalid signer: $reason")
@@ -202,18 +208,23 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidCorrelationToken(val got: String, val reason: String) :
         NMPError("invalid correlation token $got: $reason")
 
+    // nmp-native:if nip22
     /** #572/#1258: an `Nip73` failed its constructor validation (an empty
      * `I`/`K` cell, or a `Url` that is not an absolute URL and therefore
      * cannot be normalised). */
     data class InvalidNip73(val reason: String) :
         NMPError("invalid NIP-73 external content id: $reason")
+    // nmp-native:endif
 
+    // nmp-native:if nip25
     /** #155: a [Reaction.Emoji] said something the caller did not mean -- the
      * empty string, which NIP-25 reads as a like, or a NIP-30 `:shortcode:`,
      * which needs a companion `emoji` row this door does not write. */
     data class InvalidReaction(val reason: String) :
         NMPError("invalid reaction: $reason")
+    // nmp-native:endif
 
+    // nmp-native:if nip22
     /** #973: a composer returned a compare-and-swap replaceable edit, which
      * has no wire form on purpose -- a replaceable precondition crosses this
      * boundary only inside the semantic method that owns it
@@ -224,7 +235,9 @@ sealed class NMPError(message: String) : Exception(message) {
             "a replaceable edit crosses this boundary only inside the semantic method that owns " +
                 "its precondition, never as a payload",
         )
+    // nmp-native:endif
 
+    // nmp-native:if nip29
     /** #1033: `NMPRelayScope.on`/`FfiRelayScope.on` was given an empty relay
      * set -- a group must be hosted somewhere. */
     object EmptyRelayScope :
@@ -327,6 +340,7 @@ sealed class NMPError(message: String) : Exception(message) {
             "kind $kind is not one of NIP-29's three relay-signed group records; a group host " +
                 "is not authoritative for it",
         )
+    // nmp-native:endif
 
     companion object {
         fun from(ffi: FfiException): NMPError =
@@ -335,6 +349,10 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidPublicKey -> InvalidPublicKey(ffi.got)
                 is FfiException.InvalidEventId -> InvalidEventId(ffi.got)
                 is FfiException.InvalidRelayUrl -> InvalidRelayUrl(ffi.got)
+                // nmp-native:if nip65
+                is FfiException.Nip65IndexerRelaysEmpty -> Nip65IndexerRelaysEmpty
+                is FfiException.AutomaticRoutingUnavailable -> AutomaticRoutingUnavailable
+                // nmp-native:endif
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)
                 is FfiException.InvalidSecretKey -> InvalidSecretKey
                 is FfiException.InvalidSigner -> InvalidSigner(ffi.reason)
@@ -377,9 +395,16 @@ sealed class NMPError(message: String) : Exception(message) {
                     RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
                 is FfiException.InvalidCorrelationToken ->
                     InvalidCorrelationToken(ffi.got, ffi.reason)
+                // nmp-native:if nip22
                 is FfiException.InvalidNip73 -> InvalidNip73(ffi.reason)
+                // nmp-native:endif
+                // nmp-native:if nip25
                 is FfiException.InvalidReaction -> InvalidReaction(ffi.reason)
+                // nmp-native:endif
+                // nmp-native:if nip22
                 is FfiException.ReplaceableEditHasNoWireForm -> ReplaceableEditHasNoWireForm
+                // nmp-native:endif
+                // nmp-native:if nip29
                 is FfiException.EmptyRelayScope -> EmptyRelayScope
                 is FfiException.GroupCallerSuppliedContext -> GroupCallerSuppliedContext
                 is FfiException.GroupCallerSuppliedContextConstraint ->
@@ -399,6 +424,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.GroupIdSelectionNamesNoKind -> GroupIdSelectionNamesNoKind
                 is FfiException.GroupIdSelectionNotAGroupRecordKind ->
                     GroupIdSelectionNotAGroupRecordKind(ffi.kind)
+                // nmp-native:endif
             }
     }
 }

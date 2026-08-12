@@ -31,6 +31,7 @@ use crate::convert::{
     window_from_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError,
     FfiRowPullError, WriteStatusRef,
 };
+#[cfg(feature = "nip02")]
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
@@ -48,6 +49,7 @@ use nmp::ReceiptReattachment;
 /// `Failed(InvalidTarget)` fact. The status FIFO is delivered pull-based over
 /// [`NmpFollowActionStream`], so no worker or drain thread is held by the
 /// action.
+#[cfg(feature = "nip02")]
 fn start_following_action(
     engine: Arc<nmp::Engine>,
     target: String,
@@ -62,12 +64,8 @@ fn start_following_action(
     NmpFollowActionStream::new(action.into_async())
 }
 
-/// Construction config for [`NmpEngine::new`].
-///
-/// This core native assembly accepts only neutral operator app/fallback
-/// policy. It exposes no discovery-source setting and no mutable author-route
-/// map: without a separately assembled route provider, `Auto` remains
-/// route-waiting until operator policy supplies a destination.
+/// Construction config for [`NmpEngine::new`]. Build-time feature selection
+/// controls which fields exist; runtime relay values remain app-owned inputs.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct NmpEngineConfig {
     /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
@@ -79,6 +77,13 @@ pub struct NmpEngineConfig {
     pub app_relays: Vec<String>,
     /// Operator fallback relay set (`Lane::OperatorFallback`). Default empty.
     pub fallback_relays: Vec<String>,
+    /// Optional runtime assembly for automatic NIP-65 routing. This field
+    /// exists only in a native build that selected the `nip65` app feature.
+    /// `None` constructs an explicit-routing-only engine; `Some` must name at
+    /// least one app-owned indexer relay or construction is refused.
+    #[cfg(feature = "nip65")]
+    #[uniffi(default = None)]
+    pub nip65: Option<FfiNip65Config>,
     /// Local/private relay HOSTS to re-admit from OTHER PEOPLE's data
     /// (issues #121, #1251). A loopback / RFC-1918 / link-local relay named by
     /// someone else's relay list or event is rejected by default; listing its
@@ -126,6 +131,15 @@ pub struct NmpEngineConfig {
     pub max_auth_capabilities: u32,
 }
 
+/// App-owned runtime inputs for the selected NIP-65 assembly. These values do
+/// not participate in the native artifact's feature or cache identity.
+#[cfg(feature = "nip65")]
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiNip65Config {
+    /// Relays queried for kind:10002 relay lists. NMP supplies no defaults.
+    pub indexer_relays: Vec<String>,
+}
+
 /// The default relay-count ceiling for a freshly-constructed engine config
 /// (#20). Update BOTH this const AND the `#[uniffi(default = N)]` literal
 /// on [`NmpEngineConfig::max_relays`] above — they must match.
@@ -142,6 +156,8 @@ impl Default for NmpEngineConfig {
             store_path: None,
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
+            #[cfg(feature = "nip65")]
+            nip65: None,
             allowed_local_relay_hosts: Vec::new(),
             tor_reachable: false,
             max_relays: DEFAULT_MAX_RELAYS,
@@ -183,6 +199,12 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
     fn from(config: NmpEngineConfig) -> Self {
         nmp::EngineConfig {
             store_path: config.store_path,
+            #[cfg(feature = "nip65")]
+            indexer_relays: config
+                .nip65
+                .map(|nip65| nip65.indexer_relays)
+                .unwrap_or_default(),
+            #[cfg(not(feature = "nip65"))]
             indexer_relays: Vec::new(),
             app_relays: config.app_relays,
             fallback_relays: config.fallback_relays,
@@ -204,6 +226,28 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
 #[derive(uniffi::Object)]
 pub struct NmpEngine {
     pub(crate) engine: Arc<nmp::Engine>,
+    #[cfg(feature = "nip65")]
+    automatic_routing: AutomaticRoutingAssembly,
+}
+
+#[cfg(feature = "nip65")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutomaticRoutingAssembly {
+    Unavailable,
+    Nip65,
+}
+
+#[cfg(feature = "nip65")]
+impl AutomaticRoutingAssembly {
+    fn from_config(config: &NmpEngineConfig) -> Result<Self, FfiError> {
+        match &config.nip65 {
+            None => Ok(Self::Unavailable),
+            Some(nip65) if nip65.indexer_relays.is_empty() => {
+                Err(FfiError::Nip65IndexerRelaysEmpty)
+            }
+            Some(_) => Ok(Self::Nip65),
+        }
+    }
 }
 
 #[uniffi::export]
@@ -268,8 +312,14 @@ impl NmpEngine {
 
     #[uniffi::constructor]
     pub fn new(config: NmpEngineConfig) -> Result<Arc<Self>, FfiError> {
+        #[cfg(feature = "nip65")]
+        let automatic_routing = AutomaticRoutingAssembly::from_config(&config)?;
         let engine = Arc::new(nmp::Engine::new(config.into())?);
-        Ok(Arc::new(Self { engine }))
+        Ok(Arc::new(Self {
+            engine,
+            #[cfg(feature = "nip65")]
+            automatic_routing,
+        }))
     }
 
     /// Register an account from its secret key (hex or bech32 `nsec`). The
@@ -364,37 +414,6 @@ impl NmpEngine {
         }))
     }
 
-    /// Observe the active account's relationship to `target` through the
-    /// NMP-owned NIP-02 resource (#680). Awaiting [`NmpFollowStream::next`]
-    /// costs no NMP-owned OS thread: the relationship snapshot is folded inline
-    /// over the engine's waker-driven async row mailbox. Contact-list
-    /// semantics and acquisition state stay in Rust and arrive as complete
-    /// self-contained snapshots.
-    pub fn observe_following(&self, target: String) -> Result<Arc<NmpFollowStream>, FfiError> {
-        let target = parse_pubkey(&target)?;
-        let observation = nmp_nip02::observe_following_async(self.engine.clone(), target)?;
-        Ok(NmpFollowStream::new(observation))
-    }
-
-    /// Ask NMP to follow `target`. This is the complete NIP-02 action: it
-    /// waits for the module's source-evidence policy, preserves the exact
-    /// kind:3 base, atomically guards that base, signs, routes, and streams
-    /// the durable receipt. The native button owns none of those steps; it
-    /// only awaits [`NmpFollowActionStream::next`].
-    pub fn follow(&self, target: String) -> Arc<NmpFollowActionStream> {
-        start_following_action(self.engine.clone(), target, nmp_nip02::FollowChange::Follow)
-    }
-
-    /// The inverse of [`Self::follow`], with the same acquisition,
-    /// compare-and-swap, signer, routing, and receipt guarantees.
-    pub fn unfollow(&self, target: String) -> Arc<NmpFollowActionStream> {
-        start_following_action(
-            self.engine.clone(),
-            target,
-            nmp_nip02::FollowChange::Unfollow,
-        )
-    }
-
     /// Open a live subscription (#680). Delivery is pull-based: await
     /// [`NmpRowStream::next`], which parks a waker on the engine-owned mailbox
     /// rather than blocking a dedicated OS thread — opening one costs no native
@@ -469,6 +488,12 @@ impl NmpEngine {
     /// same shape: a typed `FfiError` and no receipt id.
     pub fn publish(&self, intent: FfiWriteIntent) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let write_intent = write_intent_from_ffi(intent)?;
+        #[cfg(feature = "nip65")]
+        if matches!(write_intent.routing, nmp::WriteRouting::Auto)
+            && self.automatic_routing == AutomaticRoutingAssembly::Unavailable
+        {
+            return Err(FfiError::AutomaticRoutingUnavailable);
+        }
         let receipt = self.engine.publish(write_intent)?;
         Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
     }
@@ -595,6 +620,47 @@ impl NmpEngine {
     /// own serialized lifecycle gate, see that type's doc).
     pub fn shutdown(&self) {
         self.engine.shutdown();
+    }
+}
+
+#[cfg(feature = "nip02")]
+#[uniffi::export]
+impl NmpEngine {
+    /// Observe the active account's relationship to `target` through the
+    /// NMP-owned NIP-02 resource (#680). Awaiting [`NmpFollowStream::next`]
+    /// costs no NMP-owned OS thread: the relationship snapshot is folded inline
+    /// over the engine's waker-driven async row mailbox. Contact-list
+    /// semantics and acquisition state stay in Rust and arrive as complete
+    /// self-contained snapshots.
+    pub fn observe_following(&self, target: String) -> Result<Arc<NmpFollowStream>, FfiError> {
+        let target = parse_pubkey(&target)?;
+        let observation = nmp_nip02::observe_following_async(self.engine.clone(), target)?;
+        Ok(NmpFollowStream::new(observation))
+    }
+
+    /// Ask NMP to follow `target`. This is the complete NIP-02 action.
+    pub fn follow(&self, target: String) -> Result<Arc<NmpFollowActionStream>, FfiError> {
+        if self.automatic_routing == AutomaticRoutingAssembly::Unavailable {
+            return Err(FfiError::AutomaticRoutingUnavailable);
+        }
+        Ok(start_following_action(
+            self.engine.clone(),
+            target,
+            nmp_nip02::FollowChange::Follow,
+        ))
+    }
+
+    /// The inverse of [`Self::follow`], with the same acquisition,
+    /// compare-and-swap, signer, routing, and receipt guarantees.
+    pub fn unfollow(&self, target: String) -> Result<Arc<NmpFollowActionStream>, FfiError> {
+        if self.automatic_routing == AutomaticRoutingAssembly::Unavailable {
+            return Err(FfiError::AutomaticRoutingUnavailable);
+        }
+        Ok(start_following_action(
+            self.engine.clone(),
+            target,
+            nmp_nip02::FollowChange::Unfollow,
+        ))
     }
 }
 
@@ -1544,6 +1610,146 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "nip65")]
+    fn selected_nip65_refuses_an_empty_runtime_indexer_set() {
+        let result = NmpEngine::new(NmpEngineConfig {
+            nip65: Some(FfiNip65Config {
+                indexer_relays: Vec::new(),
+            }),
+            ..NmpEngineConfig::default()
+        });
+        assert!(matches!(result, Err(FfiError::Nip65IndexerRelaysEmpty)));
+    }
+
+    #[test]
+    #[cfg(feature = "nip65")]
+    fn selected_nip65_projects_only_the_app_owned_indexers() {
+        let config = NmpEngineConfig {
+            nip65: Some(FfiNip65Config {
+                indexer_relays: vec!["wss://indexer.example".to_string()],
+            }),
+            ..NmpEngineConfig::default()
+        };
+        let projected = nmp::EngineConfig::from(config.clone());
+        assert_eq!(projected.indexer_relays, ["wss://indexer.example"]);
+
+        let engine = NmpEngine::new(config).expect("a nonempty app-owned indexer set is valid");
+        engine.shutdown();
+    }
+
+    #[test]
+    #[cfg(feature = "nip65")]
+    fn providerless_auto_refuses_before_acceptance_and_leaves_no_residue() {
+        let engine = NmpEngine::new(NmpEngineConfig::default())
+            .expect("an explicit-routing-only engine is valid");
+        let result = engine.publish(FfiWriteIntent {
+            payload: FfiWritePayload::Event {
+                builder: crate::types::FfiEventBuilder {
+                    kind: 1,
+                    tags: Vec::new(),
+                    content: "must not park".to_string(),
+                    created_at: Some(10),
+                },
+            },
+            routing: FfiWriteRouting::Auto,
+            identity: FfiIdentity::Active,
+            correlation: None,
+        });
+        assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
+        assert!(engine.publish_queue().unwrap().is_empty());
+        engine.shutdown();
+    }
+
+    #[test]
+    #[cfg(feature = "nip02")]
+    fn providerless_follow_refuses_before_the_action_starts_or_leaves_residue() {
+        let author = nostr::Keys::generate();
+        let engine = NmpEngine::new(NmpEngineConfig::default())
+            .expect("an explicit-routing-only engine is valid");
+        let registration = engine
+            .add_account(author.secret_key().to_secret_hex())
+            .expect("the native account registers");
+        engine
+            .set_active_account(Some(registration.public_key()))
+            .expect("the native account activates");
+        let result = engine.follow(nostr::Keys::generate().public_key().to_hex());
+        assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
+        assert!(engine.publish_queue().unwrap().is_empty());
+        engine.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(feature = "nip65")]
+    async fn selected_nip65_native_engine_discovers_and_publishes_to_the_cold_outbox() {
+        use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
+
+        let author = nostr::Keys::generate();
+        let indexer = ScriptedRelay::start(&RelayConfig::default()).await;
+        let outbox = ScriptedRelay::start(&RelayConfig::default()).await;
+        indexer
+            .seed_relay_list(&author, &[outbox.url.to_string()], &[], 1_700_000_000)
+            .await;
+
+        let engine = NmpEngine::new(NmpEngineConfig {
+            nip65: Some(FfiNip65Config {
+                indexer_relays: vec![indexer.url.to_string()],
+            }),
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
+            ..NmpEngineConfig::default()
+        })
+        .expect("the selected native NIP-65 assembly constructs");
+        let registration = engine
+            .add_account(author.secret_key().to_secret_hex())
+            .expect("the native account registers");
+        engine
+            .set_active_account(Some(registration.public_key()))
+            .expect("the native account activates");
+
+        let receipt = engine
+            .publish(FfiWriteIntent {
+                payload: FfiWritePayload::Event {
+                    builder: crate::types::FfiEventBuilder {
+                        kind: 1,
+                        tags: Vec::new(),
+                        content: "cold native outbox".to_string(),
+                        created_at: Some(1_700_000_001),
+                    },
+                },
+                routing: FfiWriteRouting::Auto,
+                identity: FfiIdentity::Active,
+                correlation: None,
+            })
+            .expect("the automatic native write is accepted");
+
+        let published_relay = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match receipt
+                    .next()
+                    .await
+                    .expect("the receipt stream remains valid")
+                {
+                    Some(FfiWriteFact::Relay {
+                        relay,
+                        state: crate::types::FfiRelayState::Published,
+                    }) => break relay,
+                    Some(_) => {}
+                    None => panic!("the receipt ended before a relay published"),
+                }
+            }
+        })
+        .await
+        .expect("cold NIP-65 discovery and delivery complete within the bound");
+
+        assert_eq!(published_relay, outbox.url.to_string());
+        assert_eq!(outbox.admitted_events().len(), 1);
+        assert!(indexer.admitted_events().is_empty());
+
+        engine.shutdown();
+        outbox.shutdown();
+        indexer.shutdown();
+    }
+
+    #[test]
     fn ffi_account_registration_is_explicit_repeatable_and_stale_safe() {
         let engine = NmpEngine::new(NmpEngineConfig {
             max_auth_capabilities: 1,
@@ -2264,7 +2470,9 @@ mod tests {
                 content: "tampered".to_string(),
                 sig: event.sig.to_string(),
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         };
@@ -2310,7 +2518,9 @@ mod tests {
                     created_at: Some(nostr::Timestamp::now().as_secs()),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Explicit {
                 pubkey: overridden.public_key().to_hex(),
             },
@@ -2363,7 +2573,9 @@ mod tests {
                     created_at: Some(10),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         };
@@ -2451,7 +2663,9 @@ mod tests {
                     created_at: Some(nostr::Timestamp::now().as_secs()),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         };
@@ -2530,7 +2744,9 @@ mod tests {
                         created_at: Some(nostr::Timestamp::now().as_secs()),
                     },
                 },
-                routing: FfiWriteRouting::Auto,
+                routing: FfiWriteRouting::Explicit {
+                    relays: vec!["wss://write.example".to_string()],
+                },
                 identity: FfiIdentity::Active,
                 correlation: None,
             };
@@ -2759,7 +2975,9 @@ mod tests {
                     created_at: Some(nostr::Timestamp::now().as_secs()),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         };

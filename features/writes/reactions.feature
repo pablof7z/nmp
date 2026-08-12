@@ -30,7 +30,6 @@ Feature: A reaction is a schema NMP owns, not four rows an app assembles
     # nmp:id=WRITES-REACTIONS-001
     # nmp:status=built
     # nmp:evidence=rust:nmp-nip25::a_reaction_carries_the_hint_the_author_slot_the_p_row_and_the_k_row
-    # nmp:evidence=rust:nmp-ffi::a_native_reaction_is_kind_7_and_carries_what_the_one_door_fills
     # nmp:evidence=swift:NMP::testReactionIsKindSevenAndCarriesWhatTheOneDoorFills
     # nmp:evidence=kotlin:NMPKotlin::reactionIsKindSevenAndCarriesWhatTheOneDoorFills
     # nmp:falsifier=Let the reaction build its own rows instead of taking them from the one tagging door; the relay hint, the author slot and the "k" row go missing exactly as they did in both apps' hand-written pairs, and nothing visible to the composing app is absent.
@@ -44,7 +43,6 @@ Feature: A reaction is a schema NMP owns, not four rows an app assembles
     # nmp:id=WRITES-REACTIONS-002
     # nmp:status=built
     # nmp:evidence=rust:nmp-nip25::reacting_to_a_reply_names_the_reply_and_never_its_root
-    # nmp:evidence=rust:nmp-ffi::a_native_reaction_to_a_reply_names_the_reply_and_never_its_root
     # nmp:evidence=swift:NMP::testReactingToAReplyNamesTheReplyAndNeverItsRoot
     # nmp:evidence=kotlin:NMPKotlin::reactingToAReplyNamesTheReplyAndNeverItsRoot
     # nmp:falsifier=Thread a reaction's rows the way a reply threads them; reacting to a reply then emits the thread root's "e" row first, and a client tallying reactions by the first "e" credits the root with a reaction nobody gave it.
@@ -68,7 +66,6 @@ Feature: A reaction is a schema NMP owns, not four rows an app assembles
     # nmp:id=WRITES-REACTIONS-004
     # nmp:status=built
     # nmp:evidence=rust:nmp-nip25::the_three_readings_nip25_defines_render_as_plus_minus_and_the_emoji
-    # nmp:evidence=rust:nmp-ffi::the_native_reaction_vocabulary_is_nip25s_three_readings
     # nmp:evidence=swift:NMP::testTheReactionVocabularyIsNip25sThreeReadings
     # nmp:evidence=kotlin:NMPKotlin::theReactionVocabularyIsNip25sThreeReadings
     # nmp:falsifier=Let a caller pass the reaction's content as a string; "like" becomes spellable three ways, and an emoji picker that returns nothing publishes an upvote nobody asked for, because NIP-25 reads the empty string as "+".
@@ -81,7 +78,6 @@ Feature: A reaction is a schema NMP owns, not four rows an app assembles
     # nmp:status=built
     # nmp:evidence=rust:nmp-nip25::an_empty_emoji_refuses_rather_than_silently_becoming_a_like
     # nmp:evidence=rust:nmp-nip25::a_custom_emoji_shortcode_refuses_because_its_companion_row_is_not_written
-    # nmp:evidence=rust:nmp-ffi::an_emoji_that_would_say_something_else_refuses_before_a_builder_exists
     # nmp:evidence=swift:NMP::testAnEmojiThatWouldSaySomethingElseRefuses
     # nmp:evidence=kotlin:NMPKotlin::anEmojiThatWouldSaySomethingElseRefuses
     # nmp:falsifier=Accept any string as an emoji reaction; an empty one publishes a like, and a ":shortcode:" publishes literal colons because the NIP-30 "emoji" row that resolves it is not written here -- the same half-formed reference the deleted quote-shaped chat reply shipped.

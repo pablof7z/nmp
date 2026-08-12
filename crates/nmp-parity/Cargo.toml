@@ -11,8 +11,8 @@ doctest = false
 
 [dependencies]
 nostr.workspace = true
-nmp.workspace = true
-nmp-ffi.workspace = true
+nmp = { workspace = true, features = ["nip65"] }
+nmp-ffi = { workspace = true, features = ["content", "nip02", "nip22"] }
 nmp-content.workspace = true
 nmp-grammar.workspace = true
 nmp-nip02.workspace = true

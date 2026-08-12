@@ -102,7 +102,6 @@ Feature: NIP-29's own operations draft their exact kind and tag schema
   # nmp:id=NIP29OPERATIONS-012
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip29::edit_metadata_composes_the_picture_row_and_both_marker_rows
-  # nmp:evidence=rust:nmp-ffi::the_metadata_edit_door_composes_the_picture_and_marker_rows
   # nmp:falsifier=Composing only name and about -- the shape kind:9002 had before #1282 -- makes edit_metadata_composes_the_picture_row_and_both_marker_rows observe a two-row draft instead of the four-row one, which is the state that forced a real consumer to hand-write ["closed"] and therefore to hand-assemble a whole 9002.
   @nip29
   Scenario: Editing metadata drafts NIP-29's picture row and its marker rows
@@ -136,7 +135,6 @@ Feature: NIP-29's own operations draft their exact kind and tag schema
   # nmp:evidence=rust:nmp-nip29::create_group_under_a_parent_carries_the_parent_row_on_the_create
   # nmp:evidence=rust:nmp-nip29::create_group_at_the_root_is_kind_9007_with_no_tag_at_all
   # nmp:evidence=rust:nmp-nip29::the_parent_row_carries_the_group_id_verbatim
-  # nmp:evidence=rust:nmp-ffi::the_create_door_composes_the_parent_row_and_omits_it_for_a_root
   # nmp:falsifier=Dropping the parent argument from create_group -- the shape kind:9007 had before #1301 -- makes create_group_under_a_parent_carries_the_parent_row_on_the_create observe a draft with no rows at all, which is the state that forced a real consumer to append ["parent", id] to NMP's own builder by hand. Emitting the row unconditionally instead makes create_group_at_the_root_is_kind_9007_with_no_tag_at_all observe a root group declaring an empty parent, which the relay refuses outright.
   @nip29
   Scenario: Creating a subgroup drafts NIP-29's parent row on the create itself

@@ -24,9 +24,50 @@ storage conventions. They must not define a second routing, receipt, query, or
 identity model. Direct Rust consumers use the same facade projected over FFI;
 they do not assemble the resolver, store, router, and transport crates by hand.
 
+## One feature-selected native library
+
+A Swift or Kotlin app checks in one compile-time feature manifest:
+
+```toml
+schema = 1
+features = ["nip29", "nip65"]
+```
+
+The keys are stable app-facing families, not workspace crate names. Runtime
+values such as indexer relays, group relay scopes, accounts, signers, and store
+paths never enter this file. The catalog and current keys live in
+`native/features.toml`; `native/examples/core.toml` and
+`native/examples/normal-client.toml` are starting points.
+
+From the NMP checkout, prepare the app's exact local product:
+
+```bash
+python3 tools/nmp-native/nmp_native.py prepare \
+  --manifest path/to/app/nmp.toml \
+  --platform apple \
+  --output path/to/app/Generated/NMP
+```
+
+Use `--platform kotlin-jvm` for the current desktop-JVM qualification product,
+or repeat `--platform` to produce both. The command asks Cargo to resolve the
+selection, builds one native library, generates UniFFI from that exact library,
+materializes only matching hand-written wrappers, and writes
+`nmp-native-provenance.json`. It contains no protocol-family branches: adding a
+family adds one catalog record and owned sources. Cargo remains the only
+dependency graph, so a real feature dependency activates and materializes its
+surface without a second rule.
+
+The cache identity includes the canonical resolved features, NMP source,
+catalog, target/toolchain/profile, and relevant build inputs. Reordering the
+same features is a cache hit; changing the set is not. The output is a generated
+local artifact, not a published matrix of every possible combination. Ordinary
+Xcode/Gradle incremental builds consume it without invoking Cargo. Clean CI
+runs the same command from the checked-in app manifest.
+
 ## Swift
 
-The intended consumer experience is one Swift Package Manager product:
+The intended consumer experience is one generated local Swift Package Manager
+product:
 
 ```swift
 import NMP
@@ -38,13 +79,31 @@ That product contains a matched native Rust binary, generated bindings, and a
 small hand-written Swift layer. Applications import only the public `NMP`
 module. Generated `Ffi` records and callback protocols do not enter app code.
 
+Add the prepared `Generated/NMP/apple` directory as a local package dependency.
+It contains its own XCFramework, generated `NMPFFI`, and only the selected
+wrapper sources.
+
 The package must support device and simulator builds and expose observations as
 native asynchronous sequences and values. Secret-backed signer providers use
 platform secure storage; the event/delivery database does not become a key vault.
 
 ## Kotlin and Android
 
-The intended Android product is an AAR containing the native libraries for its
+The prepared Kotlin/JVM product is consumed as a Gradle composite build:
+
+```kotlin
+// settings.gradle.kts
+includeBuild("Generated/NMP/kotlin-jvm")
+
+// app build.gradle.kts
+dependencies {
+    implementation("com.nmp:nmp-kotlin:0.0.0")
+}
+```
+
+`0.0.0` is a deterministic local coordinate; the provenance file, not that
+placeholder, identifies the exact content. The intended Android product is an
+AAR containing the native libraries for its
 supported ABIs, generated Kotlin bindings, and the hand-written `Flow`
 projection:
 
@@ -61,7 +120,9 @@ capabilities, not in application event storage.
 
 Desktop JVM proof does not by itself make the Android package complete. The AAR,
 ABI matrix, cancellation, process restart, secure storage, and real-device
-falsifier all belong to the Android acceptance gate.
+falsifier all belong to the Android acceptance gate (#831). Android consumes
+the same manifest/resolver and one selected native library; it must not recreate
+feature selection or publish one AAR per family.
 
 ## Rust
 
@@ -104,8 +165,8 @@ The composition root links the facade and each enabled module. That is the whole
 mechanism. There is no registration list, no claim vocabulary, and no engine
 construction parameter carrying module identity — #859 deleted the
 `ModuleRegistration`/`KindClaim` design and #757/#758 (which would have wired it
-into routing) are closed NOT_PLANNED. A Swift or Kotlin product projects the same
-build choice as a closed configuration or precomposed package.
+into routing) are closed NOT_PLANNED. A Swift or Kotlin product projects the
+same Cargo-resolved choice through the generated local package described above.
 
 Modules install no callbacks, perform no startup side effects, and own no
 lifecycle or second engine. An app enabling zero modules links no module code and

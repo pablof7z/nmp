@@ -61,7 +61,9 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
                     created_at: Some(nostr::Timestamp::now().as_secs()),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         })

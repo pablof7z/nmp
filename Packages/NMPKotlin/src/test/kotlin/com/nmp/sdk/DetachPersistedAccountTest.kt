@@ -176,7 +176,10 @@ class DetachPersistedAccountTest {
             val checkpoint = root.resolve("local-account.nsec")
             val database = root.resolve("nmp.redb")
             val store = NMPInsecureFileAccountStore(checkpoint)
-            val config = NMPConfig(storePath = database.toString())
+            val config = NMPConfig(
+                storePath = database.toString(),
+                nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example")),
+            )
             val cachedKind = 30_333.toUShort()
 
             NMPEngine(config, store).use { seed ->

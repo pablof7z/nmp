@@ -152,7 +152,9 @@ async fn removing_an_entry_with_open_delivery_work_is_still_active() {
                     created_at: Some(1_000),
                 },
             },
-            routing: FfiWriteRouting::Auto,
+            routing: FfiWriteRouting::Explicit {
+                relays: vec!["ws://127.0.0.1:1/".to_string()],
+            },
             identity: FfiIdentity::Active,
             correlation: None,
         })

@@ -15,7 +15,9 @@ class WriteCancellationTest {
     @Test
     fun acceptedUnsignedWriteCancelsStreamsAndReattachesAsCancelled() =
         runBlocking {
-            NMPEngine(NMPConfig()).use { engine ->
+            NMPEngine(
+                NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example"))),
+            ).use { engine ->
                 // A read-only active identity deliberately has no signer. The
                 // unsigned write therefore remains accepted and cancellable
                 // until the explicit receipt-id transition below.

@@ -82,7 +82,6 @@ Feature: Asking for a group's roster through the wrong door says no
   # nmp:id=GROUPS-RECORDSNOTCONTENT-005
   # nmp:status=built
   # nmp:evidence=rust:nmp::an_empty_record_selection_is_refused_rather_than_observed
-  # nmp:evidence=rust:nmp-ffi::an_empty_record_selection_is_a_typed_refusal_at_the_boundary
   # nmp:falsifier=Open the observation anyway when the app named no record; it would deliver a permanently empty state forever, indistinguishable from a group nothing has been published about -- the same silent failure this feature exists to close, reintroduced on the door that replaced it.
   @nip29
   Scenario: Watching no records at all is refused too

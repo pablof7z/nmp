@@ -12,6 +12,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 
 class FollowingTest {
@@ -22,7 +24,7 @@ class FollowingTest {
     @Test
     fun signedOutObservationIsUnknownAndUnavailable() =
         runBlocking {
-            NMPEngine(NMPConfig()).use { engine ->
+            NMPEngine(config()).use { engine ->
                 val snapshot =
                     withTimeoutOrNull(3_000) {
                         engine.observeFollowing(TARGET).first()
@@ -40,7 +42,7 @@ class FollowingTest {
     @Test
     fun followIsAnNMPActionWithTypedSignedOutFailure() =
         runBlocking {
-            NMPEngine(NMPConfig()).use { engine ->
+            NMPEngine(config()).use { engine ->
                 val action = engine.follow(TARGET)
                 val statuses = withTimeoutOrNull(3_000) { action.status.take(2).toList() }
 
@@ -57,7 +59,7 @@ class FollowingTest {
     @Test
     fun invalidTargetIsTypedActionStateNotANativeException() =
         runBlocking {
-            NMPEngine(NMPConfig()).use { engine ->
+            NMPEngine(config()).use { engine ->
                 val action = engine.follow("not-a-pubkey")
                 val statuses = withTimeoutOrNull(3_000) { action.status.take(1).toList() }
 
@@ -69,4 +71,19 @@ class FollowingTest {
                 )
             }
         }
+
+    @Test
+    fun providerlessFollowRefusesBeforeTheActionStarts() {
+        NMPEngine(NMPConfig()).use { engine ->
+            val action = engine.follow(TARGET)
+            val error =
+                assertThrows(NMPError::class.java) {
+                    runBlocking { action.status.first() }
+                }
+            assertSame(NMPError.AutomaticRoutingUnavailable, error)
+        }
+    }
+
+    private fun config(): NMPConfig =
+        NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example")))
 }

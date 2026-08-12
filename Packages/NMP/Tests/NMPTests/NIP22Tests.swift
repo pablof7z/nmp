@@ -168,7 +168,11 @@ final class NIP22Tests: XCTestCase {
     /// `sources`/the all-zero sig sentinel itself), and prove the SAME token
     /// reattaches the identical obligation.
     func testOfflineSignerDurableAcceptanceAndCorrelationReattachment() async throws {
-        let engine = try NMPEngine(config: NMPConfig())
+        let engine = try NMPEngine(
+            config: NMPConfig(
+                nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+            )
+        )
         defer { engine.shutdown() }
         try engine.setActiveAccount(author)
 
@@ -230,7 +234,11 @@ final class NIP22Tests: XCTestCase {
     }
 
     func testDurableAcceptanceMakesOneCanonicalPendingCommentVisibleThroughTheQueryPath() async throws {
-        let engine = try NMPEngine(config: NMPConfig())
+        let engine = try NMPEngine(
+            config: NMPConfig(
+                nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+            )
+        )
         defer { engine.shutdown() }
         try engine.setActiveAccount(author)
 

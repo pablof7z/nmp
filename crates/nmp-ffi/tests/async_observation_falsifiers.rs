@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
-use nmp_ffi::types::{FfiFilter, FfiFrame};
+use nmp_ffi::types::FfiFilter;
+#[cfg(feature = "nip02")]
+use nmp_ffi::types::FfiFrame;
 
 /// Consume every immediately-available frame (an observation delivers its
 /// initial current-state frame on open) so a subsequent ticket genuinely parks
@@ -31,6 +33,7 @@ async fn quiesce(stream: &NmpRowStream) {
     }
 }
 
+#[cfg(feature = "nip02")]
 async fn next_committed(stream: &NmpRowStream) -> Option<FfiFrame> {
     let pull = stream.begin_next().expect("stream is open");
     let frame = pull.receive().await.expect("ticket lifecycle is valid");
@@ -39,6 +42,7 @@ async fn next_committed(stream: &NmpRowStream) -> Option<FfiFrame> {
     frame
 }
 
+#[cfg(feature = "nip02")]
 const TEST_SECRET_KEY_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 
@@ -58,6 +62,7 @@ fn note_query() -> FfiFilter {
 /// operation is refused for a global native-task-capacity reason (there is no
 /// such concept any more), and the current-state stream (diagnostics) delivers.
 #[tokio::test]
+#[cfg(feature = "nip02")]
 async fn dense_composition_never_refuses_and_delivers_current_state() {
     let engine = engine();
     let account = engine
@@ -98,7 +103,9 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
                     created_at: Some(0),
                 },
             },
-            routing: nmp_ffi::types::FfiWriteRouting::Auto,
+            routing: nmp_ffi::types::FfiWriteRouting::Explicit {
+                relays: vec!["wss://write.example".to_string()],
+            },
             identity: nmp_ffi::types::FfiIdentity::Active,
             correlation: None,
         })

@@ -77,7 +77,9 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
                         created_at: Some(1_700_000_000 + i as u64),
                     },
                 },
-                routing: FfiWriteRouting::Auto,
+                routing: FfiWriteRouting::Explicit {
+                    relays: vec!["wss://write.example".to_string()],
+                },
                 identity: FfiIdentity::Active,
                 correlation: None,
             })
