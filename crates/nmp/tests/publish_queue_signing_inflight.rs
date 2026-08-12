@@ -176,7 +176,7 @@ fn a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer()
     );
 
     let entries = handle
-        .publish_queue_entries()
+        .publish_queue_entries(None, u8::MAX)
         .expect("enumerating the publish queue");
     assert_eq!(entries.len(), 2, "both writes are in custody");
     let in_flight = entry_for(&entries, held_pubkey);

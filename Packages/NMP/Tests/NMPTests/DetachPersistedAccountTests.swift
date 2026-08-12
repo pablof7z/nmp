@@ -196,7 +196,7 @@ final class DetachPersistedAccountTests: XCTestCase {
         // assert is the queue entry it left behind -- read back through the
         // ordinary inspection door, not awaited on the stream.
         XCTAssertTrue(
-            try seed.publishQueue().contains { $0.receiptID == receipt.id },
+            try seed.publishQueue(limit: .max).contains { $0.receiptID == receipt.id },
             "the write must be durably accepted into the store before detach"
         )
         seed.shutdown()

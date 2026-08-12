@@ -280,6 +280,14 @@ impl EventStore for RedbStore {
         publish_queue_ops::enumerate_publish_queue_receipts(self)
     }
 
+    fn publish_queue_receipts_after(
+        &self,
+        after: Option<u64>,
+        limit: u8,
+    ) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
+        publish_queue_ops::publish_queue_receipts_after(self, after, limit)
+    }
+
     fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,

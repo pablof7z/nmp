@@ -19,14 +19,14 @@ use nmp::{
     DiagnosticsSnapshot, EventBuilder as GEventBuilder, Filter as GFilter, FilterCoverageEntry,
     Frame, Freshness as GFreshness, Identity as GIdentity, IdentityField as GIdentityField,
     IndexedTagName, Lane, NotSentReason as GNotSentReason, PublishQueueEntry as GPublishQueueEntry,
-    RefuseReason as GRefuseReason, RelayDiagnosticsSnapshot, RelayState as GRelayState,
-    RelayWaiting as GRelayWaiting, RemoveQueueEntryError as GRemoveQueueEntryError,
-    RequestRowsError, RetryCause as GRetryCause, Row, RowDelta, Selector as GSelector,
-    SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact, SigningState as GSigningState,
-    SourceAuthority as GSourceAuthority, SourceEvidence, SourceStatus, StalledWrite,
-    StalledWriteStage, StalledWriteTotals, Window, WindowLoad, WriteFact as GWriteStatus,
-    WriteIntent as GWriteIntent, WriteOutcome as GWriteOutcome, WritePayload as GWritePayload,
-    WriteRouting as GWriteRouting,
+    PublishQueueReadError as GPublishQueueReadError, RefuseReason as GRefuseReason,
+    RelayDiagnosticsSnapshot, RelayState as GRelayState, RelayWaiting as GRelayWaiting,
+    RemoveQueueEntryError as GRemoveQueueEntryError, RequestRowsError, RetryCause as GRetryCause,
+    Row, RowDelta, Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
+    ShortfallFact, SigningState as GSigningState, SourceAuthority as GSourceAuthority,
+    SourceEvidence, SourceStatus, StalledWrite, StalledWriteStage, StalledWriteTotals, Window,
+    WindowLoad, WriteFact as GWriteStatus, WriteIntent as GWriteIntent,
+    WriteOutcome as GWriteOutcome, WritePayload as GWritePayload, WriteRouting as GWriteRouting,
 };
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
@@ -36,14 +36,15 @@ use crate::types::{
     FfiAuthPhase, FfiBinding, FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome,
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiEventBuilder, FfiFilter,
     FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
-    FfiLaneCount, FfiLiveQuery, FfiNotSentReason, FfiPublishQueueEntry, FfiQueueRelayState,
-    FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason, FfiRelayDiagnostics,
-    FfiRelayInformationErrorKind, FfiRelayState, FfiRelayWaiting, FfiRemoveQueueEntryError,
-    FfiRetryCause, FfiRow, FfiRowDelta, FfiRowSignatureState, FfiSelector, FfiSetAlgebra, FfiSetOp,
-    FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSigningState,
-    FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage,
-    FfiStalledWriteTotals, FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteFact,
-    FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
+    FfiLaneCount, FfiLiveQuery, FfiNotSentReason, FfiPublishQueueEntry, FfiPublishQueueError,
+    FfiQueueRelayState, FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason,
+    FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRelayState, FfiRelayWaiting,
+    FfiRemoveQueueEntryError, FfiRetryCause, FfiRow, FfiRowDelta, FfiRowSignatureState,
+    FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
+    FfiSignEventRequest, FfiSignedEvent, FfiSigningState, FfiSourceAuthority, FfiSourceEvidence,
+    FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow,
+    FfiWindowContents, FfiWindowLoad, FfiWriteFact, FfiWriteIntent, FfiWriteOutcome,
+    FfiWritePayload, FfiWriteRouting,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -1957,6 +1958,15 @@ pub fn remove_queue_entry_error_to_ffi(error: GRemoveQueueEntryError) -> FfiRemo
             }
         }
         GRemoveQueueEntryError::EngineClosed => FfiRemoveQueueEntryError::EngineClosed,
+    }
+}
+
+pub fn publish_queue_error_to_ffi(error: GPublishQueueReadError) -> FfiPublishQueueError {
+    match error {
+        GPublishQueueReadError::PersistenceFailed { reason } => {
+            FfiPublishQueueError::PersistenceFailed { reason }
+        }
+        GPublishQueueReadError::EngineClosed => FfiPublishQueueError::EngineClosed,
     }
 }
 

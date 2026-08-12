@@ -154,6 +154,13 @@ macro_rules! delegate_publish_queue_door {
         ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
             self.$inner.enumerate_publish_queue_receipts()
         }
+        fn publish_queue_receipts_after(
+            &self,
+            after: Option<u64>,
+            limit: u8,
+        ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
+            self.$inner.publish_queue_receipts_after(after, limit)
+        }
         fn remove_publish_queue_entry(
             &mut self,
             receipt_id: u64,

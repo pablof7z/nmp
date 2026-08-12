@@ -365,6 +365,26 @@ impl PublishQueueEntry {
     }
 }
 
+/// Typed failure from bounded publish-queue inspection (#903).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishQueueReadError {
+    PersistenceFailed { reason: String },
+    EngineClosed,
+}
+
+impl std::fmt::Display for PublishQueueReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PersistenceFailed { reason } => {
+                write!(f, "could not inspect the publish queue: {reason}")
+            }
+            Self::EngineClosed => write!(f, "engine already shut down"),
+        }
+    }
+}
+
+impl std::error::Error for PublishQueueReadError {}
+
 /// Why removing a queue entry did not happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoveQueueEntryError {

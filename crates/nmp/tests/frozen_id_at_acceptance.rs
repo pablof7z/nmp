@@ -2,9 +2,9 @@
 //!
 //! The value was always decided by the acceptance transaction and always
 //! dropped on the floor, so the only way an app could learn its own write's
-//! identity was `Engine::publish_queue()` — which materializes EVERY retained
-//! receipt, and retained receipts grow without bound (#46). That made the cost
-//! of asking about one write grow with every write the app had ever made.
+//! identity was the old zero-argument `Engine::publish_queue()` — which
+//! materialized EVERY retained receipt. #903 has since deleted that spelling
+//! in favor of bounded pages plus direct event-id lookup.
 //!
 //! What these falsify is not the ergonomics but the VALUE: the id `publish`
 //! returns must be the post-restamp one in every case, must be what the queue
@@ -74,7 +74,7 @@ fn acceptance_answers_the_same_event_id_the_queue_reports() {
         "a Signed payload's identity is already in its bytes"
     );
     let entry = engine
-        .publish_queue()
+        .publish_queue(None, u8::MAX)
         .expect("the queue reads back")
         .into_iter()
         .find(|entry| entry.receipt_id == receipt.id)
@@ -151,7 +151,7 @@ fn a_restamped_replaceable_edit_reports_its_post_restamp_id() {
     );
     assert_eq!(
         engine
-            .publish_queue()
+            .publish_queue(None, u8::MAX)
             .expect("the queue reads back")
             .into_iter()
             .find(|entry| entry.receipt_id == receipt.id)
@@ -270,7 +270,10 @@ fn the_answer_does_not_grow_with_the_retained_receipt_set() {
         "the answer is the same whether the store holds one receipt or many"
     );
     assert_eq!(
-        engine.publish_queue().expect("the queue reads back").len(),
+        engine
+            .publish_queue(None, u8::MAX)
+            .expect("the queue reads back")
+            .len(),
         RETAINED + 1,
         "the only other route to this one fact materializes every retained \
          receipt, which is what makes it the wrong door for a write path"
@@ -286,9 +289,8 @@ fn the_answer_does_not_grow_with_the_retained_receipt_set() {
 /// ```
 ///
 /// It publishes `n` durable writes owed to a relay nothing connects to, and
-/// reads each one's frozen id back the way an app had to before this change —
-/// `publish_queue()` plus a match on the receipt id. `#[ignore]`d because it
-/// builds a real on-disk store with thousands of intents and reports
+/// reads each one's frozen id back through #903's exact event-id lookup.
+/// `#[ignore]`d because it builds a real on-disk store with thousands of intents and reports
 /// wall-clock numbers, neither of which belongs in the ordinary suite.
 #[test]
 #[ignore = "manual cost qualification"]
@@ -309,8 +311,8 @@ fn measure_frozen_id_read_cost() {
 
             let started = std::time::Instant::now();
             let scanned = engine
-                .publish_queue()
-                .expect("the queue reads back")
+                .publish_queue_for_event(receipt.event_id, None, u8::MAX)
+                .expect("the exact active-obligation lookup reads back")
                 .into_iter()
                 .find(|entry| entry.receipt_id == receipt.id)
                 .map(|entry| entry.event_id);
