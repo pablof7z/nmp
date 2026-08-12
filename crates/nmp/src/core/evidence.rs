@@ -157,8 +157,11 @@ pub enum SourceStatus {
         phase: AuthPhase,
     },
     AuthDenied,
-    /// The exact session's current AUTH policy/signer/send operation failed.
-    /// This is not an aggregate relay-health judgment.
+    /// This exact source cannot currently acquire its planned work: its
+    /// required worker failed its current connection attempt, its connected REQ
+    /// has neither an accepted placement nor an exact retry owner, or its
+    /// current AUTH policy/signer/send operation failed. This is never an
+    /// aggregate relay-health judgment and carries no global sync claim.
     Error,
 }
 
@@ -211,6 +214,7 @@ pub(crate) struct AcquisitionEvidenceContext<'a, S> {
     pub(crate) connected: &'a BTreeSet<RelaySessionKey>,
     pub(crate) auth_status: &'a BTreeMap<RelaySessionKey, SourceStatus>,
     pub(crate) ever_connected: &'a BTreeSet<RelaySessionKey>,
+    pub(crate) relay_open_failures: &'a BTreeMap<RelaySessionKey, String>,
     pub(crate) finished_stored_events: &'a BTreeSet<(RelaySessionKey, SubId)>,
     pub(crate) placed_requests: &'a BTreeSet<(RelaySessionKey, SubId)>,
     pub(crate) awaiting_requests: &'a BTreeSet<(RelaySessionKey, SubId)>,
@@ -247,8 +251,10 @@ pub(crate) struct AcquisitionEvidenceContext<'a, S> {
 ///   `Requesting`, and a planned request with neither owner is `Error`.
 ///   Connected PROTECTED sessions retain their exact AUTH phase until ready,
 ///   then use the same placement reducer; absent AUTH state defaults to
-///   `AwaitingAuth { AwaitingChallenge }`. A non-connected session is
-///   `Disconnected` after a prior connection and otherwise `Connecting`.
+///   `AwaitingAuth { AwaitingChallenge }`. A non-connected required session
+///   with a current connection-attempt failure is `Error`; otherwise it is
+///   `Disconnected` after a prior connection and `Connecting` before its
+///   first connection.
 ///   A session that would read `Requesting` reads
 ///   [`SourceStatus::FinishedStoredEvents`] instead once EVERY wire request
 ///   absorbing an atom it covers appears in `finished_stored_events` — the
@@ -265,6 +271,7 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
         connected,
         auth_status,
         ever_connected,
+        relay_open_failures,
         finished_stored_events,
         placed_requests,
         awaiting_requests,
@@ -374,6 +381,8 @@ pub(crate) fn acquisition_evidence<S: EventStore>(
                             status => status,
                         }
                     }
+                } else if relay_open_failures.contains_key(&session) {
+                    SourceStatus::Error
                 } else if ever_connected.contains(&session) {
                     SourceStatus::Disconnected
                 } else {
@@ -538,6 +547,7 @@ mod tests {
                 connected: &BTreeSet::new(),
                 auth_status: &BTreeMap::new(),
                 ever_connected: &BTreeSet::new(),
+                relay_open_failures: &BTreeMap::new(),
                 finished_stored_events: &BTreeSet::new(),
                 placed_requests: &BTreeSet::new(),
                 awaiting_requests: &BTreeSet::new(),
@@ -573,6 +583,7 @@ mod tests {
                 connected: &BTreeSet::new(),
                 auth_status: &BTreeMap::new(),
                 ever_connected: &BTreeSet::new(),
+                relay_open_failures: &BTreeMap::new(),
                 finished_stored_events: &BTreeSet::new(),
                 placed_requests: &BTreeSet::new(),
                 awaiting_requests: &BTreeSet::new(),
@@ -586,6 +597,49 @@ mod tests {
             evidence.shortfall,
             vec![ShortfallFact::LocalLimit { atom: atom.filter }]
         );
+    }
+
+    #[test]
+    fn never_connected_open_failure_is_scoped_source_error() {
+        let atom = atom();
+        let relay = RelayUrl::parse("wss://unavailable.example").unwrap();
+        let session = RelaySessionKey::public(relay.clone());
+        let plan = RelayPlan {
+            reqs: BTreeMap::from([(
+                session.clone(),
+                vec![WireReq {
+                    sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access),
+                    filter: atom.filter.clone(),
+                    source: atom.source.clone(),
+                    provenance: BTreeSet::new(),
+                    coverage_claims: BTreeSet::from([coverage_key(&atom)]),
+                    owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
+                    coverage_assignments: BTreeSet::new(),
+                }],
+            )]),
+            ..RelayPlan::default()
+        };
+
+        let evidence = acquisition_evidence(
+            &BTreeSet::from([atom]),
+            &plan,
+            AcquisitionEvidenceContext {
+                store: &MemoryStore::new(),
+                connected: &BTreeSet::new(),
+                auth_status: &BTreeMap::new(),
+                ever_connected: &BTreeSet::new(),
+                relay_open_failures: &BTreeMap::from([(session, "connection refused".to_string())]),
+                finished_stored_events: &BTreeSet::new(),
+                placed_requests: &BTreeSet::new(),
+                awaiting_requests: &BTreeSet::new(),
+                acquisition: EvidenceAcquisition::Live,
+            },
+        )
+        .expect("MemoryStore coverage never fails");
+
+        assert_eq!(evidence.sources.len(), 1);
+        assert_eq!(evidence.sources[0].relay, relay);
+        assert_eq!(evidence.sources[0].status, SourceStatus::Error);
     }
 
     #[test]
@@ -635,6 +689,7 @@ mod tests {
                     connected: &connected,
                     auth_status: &BTreeMap::from([(session.clone(), status)]),
                     ever_connected: &connected,
+                    relay_open_failures: &BTreeMap::new(),
                     finished_stored_events: &BTreeSet::new(),
                     placed_requests: &placed,
                     awaiting_requests: &BTreeSet::new(),
@@ -653,6 +708,7 @@ mod tests {
                 connected: &connected,
                 auth_status: &BTreeMap::new(),
                 ever_connected: &connected,
+                relay_open_failures: &BTreeMap::new(),
                 finished_stored_events: &BTreeSet::new(),
                 placed_requests: &BTreeSet::new(),
                 awaiting_requests: &BTreeSet::new(),
@@ -696,6 +752,7 @@ mod tests {
                 connected: &BTreeSet::new(),
                 auth_status: &BTreeMap::new(),
                 ever_connected: &BTreeSet::new(),
+                relay_open_failures: &BTreeMap::new(),
                 finished_stored_events: &BTreeSet::new(),
                 placed_requests: &BTreeSet::new(),
                 awaiting_requests: &BTreeSet::new(),

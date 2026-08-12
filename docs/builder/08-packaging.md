@@ -114,7 +114,7 @@ supported ABIs, generated Kotlin bindings, and the hand-written `Flow`
 projection:
 
 ```kotlin
-val engine = NmpEngine(configuration)
+val engine = NMPEngine(NMPConfig())
 engine.observe(demand).collect { snapshot ->
     appState = appState.withSnapshot(snapshot)
 }
@@ -124,11 +124,14 @@ The Compose app owns coroutine and UI scope. NMP owns demand lifetime beneath
 the observation. Android secure signer providers belong behind Keystore-backed
 capabilities, not in application event storage.
 
-Desktop JVM proof does not by itself make the Android package complete. The AAR,
-ABI matrix, cancellation, process restart, secure storage, and real-device
-falsifier all belong to the Android acceptance gate (#831). Android consumes
-the same manifest/resolver and one selected native library; it must not recreate
-feature selection or publish one AAR per family.
+Desktop JVM proof does not by itself make the Android package complete. The AAR
+and ABI matrix are qualified by #831; #832 additionally runs the generated
+Maven artifact through cancellation, fresh-process cache reopen, scoped network
+failure/recovery, teardown, and bounded-load falsifiers on API 35. Secure
+storage, lifecycle ownership, and a physical-device falsifier remain separate
+Android gates. Android consumes the same manifest/resolver and one selected
+native library; it must not recreate feature selection or publish one AAR per
+family.
 
 ## Rust
 
