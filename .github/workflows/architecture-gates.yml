@@ -13,11 +13,8 @@
 # parsing rule and #879's pure content/locator boundary). Same character, same
 # trust properties.
 #
-# This is a separate workflow file on purpose: .github/workflows/ci.yml is a
-# protected surface-governance program (scripts/check-surface-governance.sh
-# rejects ordinary-PR edits to it), while these checks require no secrets and
-# make no pull_request_target trust decisions -- an ordinary reviewable
-# workflow is the right home.
+# These checks require no secrets and make no pull_request_target trust
+# decisions, so an ordinary reviewable workflow is the right home.
 #
 # Gates 5 and 6 are intended to be branch-protection REQUIRED checks (an
 # owner/admin setting; see the gate doc). Every job here gates on content only

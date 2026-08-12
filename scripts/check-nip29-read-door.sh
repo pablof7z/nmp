@@ -25,8 +25,6 @@
 # the full width an app can call NIP-29 from. It is a separate script (and a
 # separate top-level workflow, per AGENTS.md) rather than an edit to
 # `scripts/check-nip29-ownership.sh`'s own CI wiring, because
-# `.github/workflows/architecture-gates.yml` is a protected path
-# (`docs/internals/conventions/protected-path-signoff.md`).
 #
 # Each of the files below declares ONLY group/relay-scope/predicate/record
 # types -- never `Engine`/`NMPEngine`/`FfiEngine` -- so an unqualified

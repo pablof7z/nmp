@@ -7,9 +7,6 @@ on:
 
 permissions:
   contents: read
-  issues: read
-  pull-requests: read
-  statuses: read
 
 # Every step runs through one hardened shell (#1170). GitHub's default `run:`
 # shell honours BASH_ENV, $ENV, profile files, and shell functions inherited
@@ -71,7 +68,6 @@ jobs:
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/src" \
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src"
           paths=(
-            scripts/check-surface-migration-authorization.py
             scripts/check-surface-governance.sh
             scripts/check-sdk-parity.sh
             scripts/check-sdk-parity-allowlist.toml
@@ -81,7 +77,6 @@ jobs:
             scripts/report-surface-governance-verdict.sh
             scripts/run-surface-regeneration-governance.sh
             scripts/test-install-surface-tools.sh
-            scripts/test-surface-migration-authorization.py
             scripts/test-surface-governance.sh
             tools/surface-toolchain.env
             tools/component-interface-snapshot/Cargo.toml
@@ -165,7 +160,6 @@ jobs:
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/renamed-package/src" \
             "$TRUSTED_DIR/tools/rust-facade-snapshot/tests/fixtures/renamed-workspace/nested-package/src"
           paths=(
-            scripts/check-surface-migration-authorization.py
             scripts/check-surface-governance.sh
             scripts/check-sdk-parity.sh
             scripts/check-sdk-parity-allowlist.toml
@@ -175,7 +169,6 @@ jobs:
             scripts/report-surface-governance-verdict.sh
             scripts/run-surface-regeneration-governance.sh
             scripts/test-install-surface-tools.sh
-            scripts/test-surface-migration-authorization.py
             scripts/test-surface-governance.sh
             tools/surface-toolchain.env
             tools/component-interface-snapshot/Cargo.toml
@@ -208,47 +201,6 @@ jobs:
           done
           chmod +x "$TRUSTED_DIR/scripts/"*.sh
 
-      - name: Fetch PR and owner-status records without executing head code
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          TRUSTED_DIR: ${{ runner.temp }}/nmp-surface-regeneration
-        run: |
-          mkdir -p "$TRUSTED_DIR/authorization"
-          gh api \
-            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
-            > "$TRUSTED_DIR/authorization/pull-request.json"
-          if ! gh api \
-              "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/statuses?per_page=100" \
-              > "$TRUSTED_DIR/authorization/statuses.json"; then
-            # A fork head may not be addressable through the base repository's
-            # status endpoint. That is ordinary non-migration work; an actual
-            # migration still fails closed because [] cannot authorize it.
-            printf '[]\n' > "$TRUSTED_DIR/authorization/statuses.json"
-          fi
-          printf '{}\n' > "$TRUSTED_DIR/authorization/issue.json"
-          target_url=$(
-            jq -r --arg context "nmp/surface-governance-migration" '
-              [.[] | select(
-                type == "object" and .context == $context
-              )]
-              | sort_by([
-                  (.created_at // ""),
-                  (if (.id | type) == "number" then .id else -1 end)
-                ])
-              | if length == 0 then "" else (.[-1].target_url // "") end
-            ' "$TRUSTED_DIR/authorization/statuses.json"
-          )
-          issue_number=${target_url##*/}
-          if [[ $issue_number =~ ^[1-9][0-9]*$ &&
-                $target_url == "https://github.com/${GITHUB_REPOSITORY}/issues/${issue_number}" ]] &&
-              gh api "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" \
-                > "$TRUSTED_DIR/authorization/issue.tmp"; then
-            mv "$TRUSTED_DIR/authorization/issue.tmp" \
-              "$TRUSTED_DIR/authorization/issue.json"
-          fi
-
       - name: Install checksum-pinned surface tool
         # No working-directory and no environment: the installer names every
         # toolchain explicitly and finds its own toolchain definition next to
@@ -263,9 +215,6 @@ jobs:
           SURFACE_HEAD_REF: ${{ github.event.pull_request.head.sha }}
           SURFACE_PR_NUMBER: ${{ github.event.pull_request.number }}
           SURFACE_PR_URL: ${{ github.event.pull_request.html_url }}
-          SURFACE_PR_RECORD: ${{ runner.temp }}/nmp-surface-regeneration/authorization/pull-request.json
-          SURFACE_ISSUE_RECORD: ${{ runner.temp }}/nmp-surface-regeneration/authorization/issue.json
-          SURFACE_STATUS_RECORDS: ${{ runner.temp }}/nmp-surface-regeneration/authorization/statuses.json
           SURFACE_CATALOG_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/catalog
           SURFACE_BUILD_TARGET_DIR: ${{ runner.temp }}/nmp-surface-regeneration-target/build
         # The changed-projection context is derived by the same trusted checker

@@ -12,7 +12,6 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROGRAM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 REPORT="$SCRIPT_DIR/report-surface-governance-verdict.sh"
 PARITY="$SCRIPT_DIR/check-sdk-parity.sh"
-MIGRATION_TEST="$SCRIPT_DIR/test-surface-migration-authorization.py"
 # The checker's three-way exit contract (#1264). A suite that only asserted
 # "nonzero" could not tell a verdict about the head from the gate breaking --
 # which is the exact confusion the reporting split exists to remove, so the
@@ -28,7 +27,6 @@ git -C "$ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || {
   echo "test-surface-governance: workspace root is not a Git worktree: $ROOT" >&2
   exit 2
 }
-PYTHONDONTWRITEBYTECODE=1 python3 "$MIGRATION_TEST"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -144,7 +142,6 @@ PROGRAM="$TMP/program"
 mkdir -p "$PROGRAM/scripts/lib" "$PROGRAM/tools"
 for program_file in \
   check-surface-governance.sh \
-  check-surface-migration-authorization.py \
   check-sdk-parity.sh \
   report-surface-governance-verdict.sh \
   run-surface-regeneration-governance.sh; do
@@ -395,37 +392,10 @@ checker_projections() {
     "$CHECK" --print-projections
 }
 
-# The workflow always supplies the three fetched API records, so the fixture
-# supplies them too. Without them the checker cannot reach the authorization
-# question at all, and a protected-path case would pass on an unreadable file
-# rather than on the missing owner status it was written to prove.
-write_api_records() {
-  local repo=$1 base=$2 dir=$3
-  local head
-  head=$(git -C "$repo" rev-parse HEAD)
-  mkdir -p "$dir"
-  cat > "$dir/pull-request.json" <<EOF
-{
-  "number": 999,
-  "state": "open",
-  "merged": false,
-  "html_url": "https://github.com/pablof7z/nmp/pull/999",
-  "base": {"sha": "$base", "repo": {"full_name": "pablof7z/nmp"}},
-  "head": {"sha": "$head", "repo": {"full_name": "pablof7z/nmp"}}
-}
-EOF
-  printf '{}\n' > "$dir/issue.json"
-  printf '[]\n' > "$dir/statuses.json"
-}
-
 run_checker() {
   local repo=$1 base=$2
-  local projections records
+  local projections
   projections=$(checker_projections "$repo" "$base")
-  # Outside the fixture worktree: the checker refuses a dirty checkout, and the
-  # records are the job's scratch state, not the head's content.
-  records=$(mktemp -d "$TMP/records-XXXXXX")
-  write_api_records "$repo" "$base" "$records"
   SURFACE_CATALOG_BIN="$CATALOG_BIN" \
   SURFACE_ROOT="$repo" \
   SURFACE_BASE_REF="$base" \
@@ -433,9 +403,6 @@ run_checker() {
   SURFACE_PR_NUMBER=999 \
   SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
   SURFACE_CHANGED_PROJECTIONS="$projections" \
-  SURFACE_PR_RECORD="$records/pull-request.json" \
-  SURFACE_ISSUE_RECORD="$records/issue.json" \
-  SURFACE_STATUS_RECORDS="$records/statuses.json" \
     "$CHECK"
 }
 
@@ -916,7 +883,7 @@ expect_fail "component removal cannot mask surviving parity failure" env \
   SDK_PARITY_ROOT="$repo" SDK_PARITY_HEAD_REF=HEAD \
   SDK_PARITY_CATALOG_BIN="$CATALOG_BIN" bash "$PARITY" --quiet
 
-# End-to-end checker: regeneration, evidence, projections, protected program,
+# End-to-end checker: regeneration, evidence, projections, base-trusted program,
 # bootstrap refusal in steady state, and dirty checkout behavior.
 repo="$TMP/checker-valid"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 printf 'component "alpha"\nnamespace "alpha_ffi"\nrecord "v2"\n' \
@@ -1010,36 +977,7 @@ SURFACE_CHANGED_PROJECTIONS=correction \
   "$CHECK" >/dev/null
 echo "ok - configured evidence path owns correction recognition"
 
-for protected in \
-  scripts/check-surface-migration-authorization.py \
-  scripts/check-surface-governance.sh \
-  scripts/check-sdk-parity.sh \
-  scripts/lib/require-commands.sh \
-  scripts/run-surface-regeneration-governance.sh \
-  scripts/test-surface-migration-authorization.py \
-  .github/workflows/architecture-gates.yml \
-  .github/workflows/ci.yml \
-  .github/workflows/surface-governance.yml \
-  tools/component-interface-snapshot/Cargo.lock \
-  tools/component-interface-snapshot/Cargo.toml \
-  tools/component-interface-snapshot/src/main.rs \
-  tools/surface-component-catalog/src/main.rs; do
-  repo="$TMP/checker-protected-$(basename "$protected")"
-  new_repo "$repo"
-  mkdir -p "$repo/$(dirname "$protected")"
-  if [[ ! -f "$repo/$protected" ]]; then
-    printf 'fixture\n' > "$repo/$protected"
-    commit_case "$repo" protected-base
-  fi
-  base=$(git -C "$repo" rev-parse HEAD)
-  printf '# tamper\n' >> "$repo/$protected"
-  commit_case "$repo" tamper
-  expect_verdict "protected program tamper: $protected" \
-    "protected governance migration is not exactly authorized" \
-    run_checker "$repo" "$base"
-done
-
-expected_permissions=$'contents:read\nissues:read\npull-requests:read\nstatuses:read'
+expected_permissions='contents:read'
 for entry in \
   "$ROOT/.github/workflows/surface-governance.yml:surface-governance" \
   "$ROOT/.github/workflows/ci.yml:surface-regeneration"; do
@@ -1047,16 +985,9 @@ for entry in \
   gate=${entry##*:}
   [[ $(workflow_permissions "$workflow") == "$expected_permissions" ]] ||
     fail "trusted workflow permissions are not the exact least-read set: $workflow"
-  grep -Fq 'check-surface-migration-authorization.py' "$workflow" ||
-    fail "trusted workflow does not extract the base migration verifier: $workflow"
-  grep -Fq 'test-surface-migration-authorization.py' "$workflow" ||
-    fail "trusted workflow does not extract the base migration falsifier: $workflow"
-  grep -Fq 'SURFACE_PR_RECORD:' "$workflow" ||
-    fail "trusted workflow does not pass its PR API record: $workflow"
-  grep -Fq 'SURFACE_ISSUE_RECORD:' "$workflow" ||
-    fail "trusted workflow does not pass its issue API record: $workflow"
-  grep -Fq 'SURFACE_STATUS_RECORDS:' "$workflow" ||
-    fail "trusted workflow does not pass its status API record: $workflow"
+  if grep -Eq 'surface-migration-authorization|SURFACE_(PR|ISSUE|STATUS)_RECORD' "$workflow"; then
+    fail "workflow retains deleted protected-path authorization plumbing: $workflow"
+  fi
   grep -Fq 'git show "$BASE_SHA:$path" > "$TRUSTED_DIR/$path"' "$workflow" ||
     fail "trusted workflow does not extract governance bytes from the base: $workflow"
   if grep -Eq \
@@ -1238,9 +1169,8 @@ echo "ok - every workflow step runs the command its workflow names"
 # For the same reason, the claims this suite makes have to survive in the
 # proposed tree. A head that keeps a mechanism but deletes its proof passes --
 # correctly, the head is sound -- and then becomes the base, at which point the
-# mechanism can be removed with nothing left to fail. That asymmetry is what
-# docs/internals/conventions/protected-path-signoff.md 5 is about, and it is
-# the reason this list exists rather than trusting each new base to be honest.
+# mechanism can be removed with nothing left to fail. The list below makes the
+# remaining base-trust claims self-checking.
 #
 # Every needle below is BUILT, never written out whole, because this file is
 # the file being searched: a list of literal needles matches itself, so
@@ -1327,8 +1257,7 @@ done
 # regenerator it executes -- and each one records that it ran. Neither may
 # fire, and the gate must not accept the head on the strength of them: before
 # this was fixed, `exit 0` in the head's tools/surface-toolchain.env made the
-# base-trusted checker exit 0, which the outcome reporter reads as `accepted`,
-# before authorization was ever consulted.
+# base-trusted checker exit 0, which the outcome reporter reads as `accepted`.
 falsify_head_supplied_tooling_is_never_run() {
   local repo="$TMP/head-tooling"
   local sourced="$TMP/head-tooling-sourced"
@@ -1354,17 +1283,13 @@ EOF
   # catalog build fails and the gate reports a malfunction. If it sources the
   # head's copy instead, the gate exits 0 and the witness appears.
   mkdir -p "$program/scripts/lib" "$program/tools/surface-component-catalog"
-  cp "$SCRIPT_DIR/check-surface-governance.sh" \
-    "$SCRIPT_DIR/check-surface-migration-authorization.py" \
-    "$program/scripts/"
+  cp "$SCRIPT_DIR/check-surface-governance.sh" "$program/scripts/"
   cp "$PROGRAM/scripts/regenerate-surface-snapshots.sh" "$program/scripts/"
   chmod +x "$program/scripts/"*.sh
   printf 'SURFACE_RUST_TOOLCHAIN=nmp-gate-fixture-toolchain\n' \
     > "$program/tools/surface-toolchain.env"
 
-  local records status=0
-  records=$(mktemp -d "$TMP/head-tooling-records-XXXXXX")
-  write_api_records "$repo" "$base" "$records"
+  local status=0
   env \
     SURFACE_ROOT="$repo" \
     SURFACE_BASE_REF="$base" \
@@ -1372,9 +1297,6 @@ EOF
     SURFACE_PR_NUMBER=999 \
     SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
     SURFACE_CHANGED_PROJECTIONS=none \
-    SURFACE_PR_RECORD="$records/pull-request.json" \
-    SURFACE_ISSUE_RECORD="$records/issue.json" \
-    SURFACE_STATUS_RECORDS="$records/statuses.json" \
     SURFACE_CATALOG_TARGET_DIR="$TMP/head-tooling-target" \
     "$program/scripts/check-surface-governance.sh" >/dev/null 2>&1 || status=$?
   [[ ! -e $sourced ]] ||
@@ -1393,9 +1315,6 @@ EOF
     SURFACE_PR_NUMBER=999 \
     SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
     SURFACE_CHANGED_PROJECTIONS=none \
-    SURFACE_PR_RECORD="$records/pull-request.json" \
-    SURFACE_ISSUE_RECORD="$records/issue.json" \
-    SURFACE_STATUS_RECORDS="$records/statuses.json" \
     "$program/scripts/check-surface-governance.sh" >/dev/null 2>&1 || status=$?
   [[ ! -e $executed ]] ||
     fail "the head's scripts/regenerate-surface-snapshots.sh was executed by the base-trusted gate"
@@ -1406,12 +1325,6 @@ falsify_head_supplied_tooling_is_never_run
 echo "ok - the gate runs its own tooling and never the head's"
 
 falsify_missing_base_governance_artifact
-if grep -Fq 'migration_candidate' "$ROOT/scripts/check-surface-governance.sh"; then
-  fail "shell wrapper duplicates the verifier's migration activation authority"
-fi
-grep -Fq 'python3 "$MIGRATION_CHECK" "${migration_args[@]}" verify' \
-  "$ROOT/scripts/check-surface-governance.sh" ||
-  fail "shell wrapper does not invoke the base-owned verifier unconditionally"
 echo "ok - workflows use least-read permissions and base-only governance bytes"
 
 repo="$TMP/checker-wrong-pr"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
@@ -1474,22 +1387,20 @@ expect_malfunction "untracked dirty checkout" \
 # scratch state, its wiring, and the gate process itself -- and each one has to
 # come out with the malfunction exit code and prefix rather than a verdict line.
 
-repo="$TMP/checker-protected-for-malfunction"; new_repo "$repo"
+repo="$TMP/checker-for-malfunction"; new_repo "$repo"
 base=$(git -C "$repo" rev-parse HEAD)
 printf '# tamper\n' >> "$repo/.github/workflows/ci.yml"
-commit_case "$repo" protected-change
-protected_repo=$repo
-protected_base=$base
+commit_case "$repo" ordinary-change
+fixture_repo=$repo
+fixture_base=$base
 
 run_checker_with() {
   # run_checker, but with the named environment overridden, so one induced
   # break at a time is the only difference from the verdict case above.
   local repo=$1 base=$2
   shift 2
-  local projections records
+  local projections
   projections=$(checker_projections "$repo" "$base")
-  records=$(mktemp -d "$TMP/records-XXXXXX")
-  write_api_records "$repo" "$base" "$records"
   env \
     SURFACE_CATALOG_BIN="$CATALOG_BIN" \
     SURFACE_ROOT="$repo" \
@@ -1498,41 +1409,18 @@ run_checker_with() {
     SURFACE_PR_NUMBER=999 \
     SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \
     SURFACE_CHANGED_PROJECTIONS="$projections" \
-    SURFACE_PR_RECORD="$records/pull-request.json" \
-    SURFACE_ISSUE_RECORD="$records/issue.json" \
-    SURFACE_STATUS_RECORDS="$records/statuses.json" \
     "$@" \
     "$CHECK"
 }
 
-# The same protected head that renders a verdict above renders a malfunction
-# once the gate's own machinery is broken. Same input, different report.
-expect_verdict "protected head is a verdict while the gate is sound" \
-  "protected governance migration is not exactly authorized" \
-  run_checker "$protected_repo" "$protected_base"
-
 expect_malfunction "the gate's tool is missing" \
   "component catalog tool is unavailable" \
-  run_checker_with "$protected_repo" "$protected_base" \
+  run_checker_with "$fixture_repo" "$fixture_base" \
   SURFACE_CATALOG_BIN="$TMP/no-such-catalog-tool"
-
-corrupt_records=$(mktemp -d "$TMP/corrupt-records-XXXXXX")
-write_api_records "$protected_repo" "$protected_base" "$corrupt_records"
-printf 'this is not json\n' > "$corrupt_records/statuses.json"
-expect_malfunction "the gate's scratch state is corrupt" \
-  "the migration verifier did not reach a verdict" \
-  run_checker_with "$protected_repo" "$protected_base" \
-  SURFACE_STATUS_RECORDS="$corrupt_records/statuses.json"
-
-rm -f "$corrupt_records/pull-request.json"
-expect_malfunction "a fetched record never arrived" \
-  "the migration verifier did not reach a verdict" \
-  run_checker_with "$protected_repo" "$protected_base" \
-  SURFACE_PR_RECORD="$corrupt_records/pull-request.json"
 
 expect_malfunction "the gate is wired to a commit that does not exist" \
   "base commit is unavailable" \
-  run_checker_with "$protected_repo" "$protected_base" \
+  run_checker_with "$fixture_repo" "$fixture_base" \
   SURFACE_BASE_REF=0000000000000000000000000000000000000000
 
 # Staleness: the head is not on the current base, so nothing about it was
@@ -1545,9 +1433,9 @@ commit_case "$repo" advance-base
 advanced_base=$(git -C "$repo" rev-parse HEAD)
 git -C "$repo" checkout -q -b proposed-head "$root_commit"
 printf '# tamper\n' >> "$repo/.github/workflows/ci.yml"
-commit_case "$repo" protected-change-on-stale-branch
+commit_case "$repo" change-on-stale-branch
 expect_stale_base "head is not descended from the current PR base" \
-  "protected migration head is not descended from the current PR base" \
+  "head is not descended from the current PR base" \
   run_checker "$repo" "$advanced_base"
 
 # The reporter is what turns those exit codes into a check name. Its mapping is
@@ -1607,10 +1495,7 @@ expect_report "reporter: nothing to run is not a verdict" \
   "$REPORT" "$TMP/no-such-gate-program"
 
 # End to end through the real checker: one fixture, one reporter, two induced
-# situations, two different reports. This is the pair the whole change exists
-# for.
-sound_records=$(mktemp -d "$TMP/sound-records-XXXXXX")
-write_api_records "$protected_repo" "$protected_base" "$sound_records"
+# situations, two different reports.
 real_gate() {
   # A file, not an exported shell function: the reporter runs whatever program
   # it is handed, and handing it a function would make this suite depend on the
@@ -1620,22 +1505,19 @@ real_gate() {
 #!/usr/bin/env bash
 exec env \\
   SURFACE_CATALOG_BIN="$catalog" \\
-  SURFACE_ROOT="$protected_repo" \\
-  SURFACE_BASE_REF="$protected_base" \\
+  SURFACE_ROOT="$fixture_repo" \\
+  SURFACE_BASE_REF="$fixture_base" \\
   SURFACE_HEAD_REF=HEAD \\
   SURFACE_PR_NUMBER=999 \\
   SURFACE_PR_URL=https://github.com/pablof7z/nmp/pull/999 \\
   SURFACE_CHANGED_PROJECTIONS=none \\
-  SURFACE_PR_RECORD="$sound_records/pull-request.json" \\
-  SURFACE_ISSUE_RECORD="$sound_records/issue.json" \\
-  SURFACE_STATUS_RECORDS="$sound_records/statuses.json" \\
   SURFACE_SKIP_REGEN=1 \\
   "$CHECK"
 GATE
   chmod +x "$script"
   printf '%s\n' "$script"
 }
-expect_report "reporter: the real gate rejecting a protected head" rejected 0 \
+expect_report "reporter: the real gate accepting an ordinary head" accepted 0 \
   "$REPORT" "$(real_gate sound "$CATALOG_BIN")"
 expect_report "reporter: the real gate broken on the same head" \
   no-verdict "$CHECK_MALFUNCTION_EXIT" \

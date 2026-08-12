@@ -8,11 +8,8 @@
 # detached Cargo workspace that does not depend on that runner, so governance
 # survives its retirement (#1113).
 #
-# This is its own workflow file because .github/workflows/architecture-gates.yml
-# is an exact protected path of the surface-governance migration policy
-# (scripts/check-surface-migration-authorization.py), the same reason
-# dependency-direction.yml is a separate file. Triggers
-# and strictness are identical to the gate workflow; only the file differs.
+# This is its own workflow so traceability failures have a dedicated check
+# name. Triggers and strictness are identical to the gate workflow.
 
 name: Behavioral traceability
 
@@ -67,7 +64,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: rustup toolchain install "$TRACE_TOOLCHAIN" --profile minimal
 
-      # This protected workflow step reads untrusted feature text only as data.
+      # This workflow step reads feature text only as data.
       # The token is scoped to this step and never reaches the head-built Rust
       # checker. The snapshot is sorted, deduplicated, and exact.
       - name: Resolve governed issue state without exposing credentials to head code

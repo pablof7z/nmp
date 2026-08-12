@@ -8,11 +8,9 @@
 # feature. This is the property `nmp-audit` did not have (#859) -- it
 # discovered crates only through their voluntary dependency on it.
 #
-# This is its own workflow file because .github/workflows/architecture-gates.yml
-# is an exact protected path of the surface-governance migration policy
-# (scripts/check-surface-migration-authorization.py), and this gate needs
-# neither that file's owner authorization nor any secret: it runs one repo
-# script over repo content and executes no PR-provided code.
+# This is its own workflow so dependency-direction failures have a dedicated
+# check name. It runs one repository script over repository content and uses no
+# secret.
 
 name: Dependency direction
 
