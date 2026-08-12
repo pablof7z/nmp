@@ -146,6 +146,18 @@ mod tests {
             .0
             .contains("do not exactly match"));
 
+        let incomplete = snapshot(&format!("{HEADER}\n")).unwrap();
+        assert!(incomplete
+            .verify_exact(&BTreeSet::from([12]))
+            .unwrap_err()
+            .0
+            .contains("do not exactly match"));
+        assert!(open
+            .verify_exact(&BTreeSet::new())
+            .unwrap_err()
+            .0
+            .contains("do not exactly match"));
+
         let closed = snapshot(&format!("{HEADER}\n12\tclosed\n")).unwrap();
         assert_eq!(closed.state(12).unwrap(), IssueState::Closed);
         assert!(snapshot(&format!("{HEADER}\n12\tunreadable\n"))

@@ -98,7 +98,9 @@ targets. CI builds it from a neutral temporary directory and Cargo home; root
 workspace dependencies and repository Cargo configuration cannot enter its
 executable graph. A protected credentialed step resolves only the exact
 deduplicated issue-number/state snapshot, then the head-built checker runs
-without a GitHub token.
+without a GitHub token. Live issue numbers and states are never mirrored in
+checker source or unit-test fixtures: unit tests use synthetic snapshots, while
+only the credential-free injected CI snapshot validates the canonical corpus.
 Rust locators do not trust source-file syntax. After that credential boundary,
 the checker runs pinned Cargo metadata and `cargo test --no-run` from a neutral
 directory with isolated Cargo home/target state, exact workspace package IDs,

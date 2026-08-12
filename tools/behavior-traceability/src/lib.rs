@@ -37,78 +37,6 @@ pub fn validate_repository(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
-
-    /// The real governed corpus's `specified`/`known-violation` issue
-    /// references, as of this checkpoint: `<issue number> -> <its real
-    /// state>`. This self-test does not hold a GitHub token (the head-built
-    /// checker never does), so it hard-codes the exact live set rather than
-    /// fetching it — mirroring the *shape* of the trusted CI snapshot
-    /// (`IssueSnapshot`) instead of refusing every lookup outright. A
-    /// governed scenario that names an issue this map does not carry is a
-    /// real traceability bug this test must catch, not silently pass;
-    /// `verify_exact` below catches the opposite drift, a stale entry
-    /// nothing governs any more.
-    ///
-    /// Update this map in the same change that adds, removes, or closes a
-    /// governed `nmp:issue` reference — exactly as a real PR must keep the
-    /// CI-built trusted snapshot in step with the corpus it validates.
-    ///
-    /// One entry as of #1214: `QUERIES-COMPOSED-027` names #1215, the open
-    /// gap that no runtime test can assert the native live query keeps its
-    /// branch storage private and unforgeable. As of #1105,
-    /// `ROUTING-REMOVEDROUTES-004/-005/-007` name #1320, the open gap that
-    /// three of the removal contract's claims have no executing proof. As of
-    /// #1023, `WRITES-PREVIEW-001` through `-014` name #978, the open gap
-    /// that `Engine::preview_route` does not exist yet. `ROUTING-PHYSICAL-002`
-    /// and `-003` name #1341, the open exact-residual/composite-coverage gap.
-    struct KnownLiveIssues(BTreeMap<u64, IssueState>);
-
-    impl KnownLiveIssues {
-        fn current() -> Self {
-            Self(BTreeMap::from([
-                (978, IssueState::Open),
-                (1215, IssueState::Open),
-                (1253, IssueState::Open),
-                (1320, IssueState::Open),
-                (1341, IssueState::Open),
-            ]))
-        }
-    }
-
-    impl IssueLookup for KnownLiveIssues {
-        fn state(&self, issue: u64) -> Result<IssueState, TraceError> {
-            self.0.get(&issue).copied().ok_or_else(|| {
-                TraceError(format!(
-                    "self-test fixture KnownLiveIssues does not carry issue #{issue}; add its \
-                     real state to tools/behavior-traceability/src/lib.rs in the same change \
-                     that adds this governed `nmp:issue` reference"
-                ))
-            })
-        }
-
-        fn verify_exact(&self, required: &BTreeSet<u64>) -> Result<(), TraceError> {
-            let supplied: BTreeSet<_> = self.0.keys().copied().collect();
-            if supplied != *required {
-                return Err(TraceError(format!(
-                    "self-test fixture KnownLiveIssues does not exactly match governed \
-                     metadata: expected {required:?}, got {supplied:?}"
-                )));
-            }
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn repositorys_governed_slice_resolves_to_real_owner_and_ci_lane() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
-        let corpus = crate::corpus::load(&root.join("features")).unwrap();
-        crate::validate::validate(root, &corpus, &KnownLiveIssues::current()).unwrap();
-    }
 
     fn write_feature(dir: &Path, name: &str, source: &str) {
         std::fs::write(dir.join(name), source).unwrap();
@@ -141,10 +69,17 @@ mod tests {
         temp
     }
 
-    /// Falsifier 1 (#1197): a `specified` scenario naming a real open issue
-    /// passes the lane. Falsifier 4: emptying the fixture again makes it red.
+    fn issue_snapshot(records: &str) -> IssueSnapshot {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("issues.tsv");
+        std::fs::write(&path, format!("nmp-behavior-issue-snapshot-v1\n{records}")).unwrap();
+        IssueSnapshot::from_path(&path).unwrap()
+    }
+
+    /// A `specified` scenario accepts an injected open issue. An incomplete
+    /// production-format snapshot makes the same scenario red.
     #[test]
-    fn specified_scenario_naming_a_known_open_issue_validates() {
+    fn specified_scenario_naming_an_injected_open_issue_validates() {
         let temp = minimal_cargo_root();
         let features = temp.path().join("features");
         std::fs::create_dir_all(&features).unwrap();
@@ -155,27 +90,25 @@ mod tests {
              # nmp:id=FALSIFIER-OPEN-001\n  \
              # nmp:status=specified\n  \
              # nmp:gap=evidence\n  \
-             # nmp:issue=#1189\n  \
+             # nmp:issue=#424201\n  \
              Scenario: specified behaviour, honestly unproven\n    Given truth\n",
         );
         let corpus = crate::corpus::load(&features).unwrap();
 
-        let known = KnownLiveIssues(BTreeMap::from([(1189, IssueState::Open)]));
+        let known = issue_snapshot("424201\topen\n");
         crate::validate::validate(temp.path(), &corpus, &known).unwrap();
 
-        // Falsifier 4: emptying the fixture again must make this red.
-        let emptied = KnownLiveIssues::current();
+        let emptied = issue_snapshot("");
         let error = crate::validate::validate(temp.path(), &corpus, &emptied).unwrap_err();
         assert!(
-            error.0.contains("does not carry issue #1189"),
+            error.0.contains("issue #424201 is missing or unreadable"),
             "unexpected error: {error}"
         );
     }
 
-    /// Falsifier 2 (#1197): a `known-violation` scenario naming a real open
-    /// issue passes the lane.
+    /// A `known-violation` scenario uses the same injected snapshot boundary.
     #[test]
-    fn known_violation_scenario_naming_a_known_open_issue_validates() {
+    fn known_violation_scenario_naming_an_injected_open_issue_validates() {
         let temp = minimal_cargo_root();
         let features = temp.path().join("features");
         std::fs::create_dir_all(&features).unwrap();
@@ -185,36 +118,37 @@ mod tests {
             "Feature: falsifier two\n  \
              # nmp:id=FALSIFIER-VIOLATION-001\n  \
              # nmp:status=known-violation\n  \
-             # nmp:issue=#1190\n  \
+             # nmp:issue=#424202\n  \
              Scenario: behaviour the code contradicts today\n    Given truth\n",
         );
         let corpus = crate::corpus::load(&features).unwrap();
 
-        let known = KnownLiveIssues(BTreeMap::from([(1190, IssueState::Open)]));
+        let known = issue_snapshot("424202\topen\n");
         crate::validate::validate(temp.path(), &corpus, &known).unwrap();
 
-        let emptied = KnownLiveIssues::current();
+        let emptied = issue_snapshot("");
         let error = crate::validate::validate(temp.path(), &corpus, &emptied).unwrap_err();
         assert!(
-            error.0.contains("does not carry issue #1190"),
+            error.0.contains("issue #424202 is missing or unreadable"),
             "unexpected error: {error}"
         );
     }
 
-    /// Falsifier 3 (#1197): a scenario naming an issue that does not exist
-    /// still fails, distinguishably from a fixture error — proven against
-    /// the real production `IssueLookup` (`IssueSnapshot`), not the
-    /// self-test double, since that is the mechanism a nonexistent issue
-    /// actually goes through in CI.
+    /// A scenario naming an issue absent from the injected snapshot fails by
+    /// issue number through the same production `IssueSnapshot` used in CI.
     #[test]
     fn nonexistent_issue_fails_by_name_not_as_a_fixture_error() {
         let temp = tempfile::tempdir().unwrap();
         let issues_path = temp.path().join("issues.tsv");
-        std::fs::write(&issues_path, "nmp-behavior-issue-snapshot-v1\n1189\topen\n").unwrap();
+        std::fs::write(
+            &issues_path,
+            "nmp-behavior-issue-snapshot-v1\n424201\topen\n",
+        )
+        .unwrap();
         let snapshot = crate::IssueSnapshot::from_path(&issues_path).unwrap();
 
-        let error = snapshot.state(9999).unwrap_err();
-        assert!(error.0.contains("#9999"), "{error}");
+        let error = snapshot.state(424299).unwrap_err();
+        assert!(error.0.contains("#424299"), "{error}");
         assert!(error.0.contains("missing or unreadable"), "{error}");
         assert!(!error.0.to_lowercase().contains("fixture"), "{error}");
     }
