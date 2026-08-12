@@ -5,9 +5,8 @@
 # target:
 #
 # 1. Build the nmp-ffi cdylib for the HOST triple (JVM target -- this is a
-#    desktop-JVM smoke-test falsifier, not the M6 Android AAR; cargo-ndk
-#    cross-compiling to Android ABIs is that later builder's job, see
-#    Packages/NMPKotlin/README.md).
+#    desktop-JVM smoke-test falsifier. The Android product is prepared by the
+#    canonical `scripts/nmp-native --platform android` backend instead.
 # 2. Run uniffi-bindgen in LIBRARY mode against the compiled cdylib to
 #    generate the Kotlin bindings (uniffi/nmp_ffi/nmp_ffi.kt) -- no .udl
 #    file, metadata is read straight out of the compiled binary, same as
