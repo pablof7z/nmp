@@ -22893,6 +22893,94 @@ reexport nmp::EventStore => nmp_store::EventStore
                 "params": [],
                 "where_predicates": []
               },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": true,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "tuple": []
+                            }
+                          },
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "PersistenceError",
+                                "resolved_item": {
+                                  "definition": {
+                                    "attrs": [],
+                                    "inner": {
+                                      "struct": {
+                                        "generics": {
+                                          "params": [],
+                                          "where_predicates": []
+                                        },
+                                        "kind": {
+                                          "plain": {
+                                            "fields": [],
+                                            "has_stripped_fields": true
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "name": "PersistenceError",
+                                    "visibility": "public"
+                                  },
+                                  "path": "nmp_store::PersistenceError"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Result",
+                    "resolved_item": {
+                      "path": "core::result::Result"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "reopen_after_failure",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
               "has_body": false,
               "header": {
                 "abi": "Rust",
@@ -23698,23 +23786,7 @@ reexport nmp::EventStore => nmp_store::EventStore
                                 "path": "PersistenceError",
                                 "resolved_item": {
                                   "definition": {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct": {
-                                        "generics": {
-                                          "params": [],
-                                          "where_predicates": []
-                                        },
-                                        "kind": {
-                                          "plain": {
-                                            "fields": [],
-                                            "has_stripped_fields": true
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "PersistenceError",
-                                    "visibility": "public"
+                                    "previously_defined": "nmp_store::PersistenceError"
                                   },
                                   "path": "nmp_store::PersistenceError"
                                 }
