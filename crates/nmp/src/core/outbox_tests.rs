@@ -79,6 +79,27 @@ mod outbox_resolver_tests {
         )
     }
 
+    /// A frozen NIP-22 direct comment whose uppercase `E` row names the
+    /// parent. This exercises the other reply grammar accepted by Auto.
+    fn nip22_comment(author: PublicKey, parent: EventId) -> SignedEvent {
+        let created_at = Timestamp::from(1_700_000_001);
+        let kind = Kind::from(nmp_grammar::COMMENT_KIND);
+        let parent_hex = parent.to_hex();
+        let tags = nostr::Tags::from_list(vec![
+            Tag::parse(["E", parent_hex.as_str()]).expect("fixture NIP-22 parent tag")
+        ]);
+        let content = "comment".to_string();
+        SignedEvent::new(
+            EventId::new(&author, &created_at, &kind, &tags, &content),
+            author,
+            created_at,
+            kind,
+            tags,
+            content,
+            nmp_store::sentinel_signature(),
+        )
+    }
+
     /// Resolve `event` under `Auto` against exactly these facts.
     fn route(facts: FixtureRoutingFacts, event: &SignedEvent) -> RouteAnswer {
         route_with_store(MemoryStore::new(), facts, event)
@@ -316,6 +337,45 @@ mod outbox_resolver_tests {
                 conversation,
             ]),
             "verified canonical provenance is additive, while raw hint text contributes nothing: {answer:?}"
+        );
+        assert!(answer.complete, "every contribution is settled: {answer:?}");
+    }
+
+    /// NIP-22 uses an uppercase `E` root row instead of NIP-10's marked
+    /// lowercase `e` row. Both go through the same shared thread grammar and
+    /// then the same verified-provenance lookup.
+    #[test]
+    fn a_nip22_comment_routes_through_its_verified_parent_provenance() {
+        let author = Keys::generate().public_key();
+        let parent_author = Keys::generate();
+        let parent = EventBuilder::new(Kind::TextNote, "comment root")
+            .custom_created_at(Timestamp::from(1_699_999_999))
+            .sign_with_keys(&parent_author)
+            .expect("sign parent fixture");
+        let conversation = relay("nip22-conversation-relay");
+        let mut store = MemoryStore::new();
+        store
+            .insert(
+                parent.clone(),
+                RelayObserved::new(conversation.clone(), Timestamp::from(1_700_000_000)),
+            )
+            .expect("seed canonical parent provenance");
+
+        let answer = route_with_store(
+            store,
+            FixtureRoutingFacts::new()
+                .with_outbound_routes(author, relays(["author-write-1", "author-write-2"])),
+            &nip22_comment(author, parent.id),
+        );
+
+        assert_eq!(
+            answer.relays,
+            BTreeSet::from([
+                relay("author-write-1"),
+                relay("author-write-2"),
+                conversation,
+            ]),
+            "the shared thread grammar resolves an uppercase NIP-22 parent row: {answer:?}"
         );
         assert!(answer.complete, "every contribution is settled: {answer:?}");
     }
