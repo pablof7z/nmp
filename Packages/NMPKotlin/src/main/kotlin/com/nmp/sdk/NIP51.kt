@@ -91,6 +91,7 @@ fun parseSimpleGroupsListTolerant(row: Row): SimpleGroupsList {
             tags = row.tags,
             content = row.content,
             sig = row.sig,
+            signatureState = row.signatureState.toFfi(),
             sources = row.sources,
         )
     return SimpleGroupsList.from(ffiParseSimpleGroupsListTolerant(ffiRow))

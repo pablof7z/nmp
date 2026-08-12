@@ -106,6 +106,9 @@ fn wait_for_rows(
                         RowDelta::Added(row) => {
                             current.insert(row.event.id, row.event);
                         }
+                        RowDelta::Updated(row) => {
+                            current.insert(row.event.id, row.event);
+                        }
                         RowDelta::SourcesGrew { .. } => {}
                         RowDelta::Removed(id) => {
                             current.remove(&id);
@@ -842,6 +845,9 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
         for delta in frame.deltas {
             match delta {
                 RowDelta::Added(row) => {
+                    delivered.insert(row.event.id);
+                }
+                RowDelta::Updated(row) => {
                     delivered.insert(row.event.id);
                 }
                 RowDelta::Removed(event_id) => {

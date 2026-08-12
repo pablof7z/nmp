@@ -203,6 +203,7 @@ mod affected_handle_invalidation_tests {
                     event_id,
                     RememberedRow {
                         created_at: row.event.created_at.as_secs(),
+                        signature_state: row.signature_state,
                         sources: row.sources,
                     },
                 )
@@ -833,7 +834,9 @@ mod affected_handle_invalidation_tests {
         assert_eq!(batches.len(), 1);
         assert!(matches!(
             batches[0],
-            [RowDelta::Added(row)] if row.event.id == arriving.id
+            [RowDelta::Added(row)]
+                if row.event.id == arriving.id
+                    && row.signature_state == RowSignatureState::Signed
         ));
 
         // A byte-for-byte duplicate observation is a true no-op: no handle
@@ -1388,6 +1391,9 @@ mod affected_handle_invalidation_tests {
             for delta in row_batches(&effects).into_iter().flatten() {
                 match delta {
                     RowDelta::Added(row) => {
+                        app_rows.insert(row.event.id, row.clone());
+                    }
+                    RowDelta::Updated(row) => {
                         app_rows.insert(row.event.id, row.clone());
                     }
                     RowDelta::SourcesGrew { id, sources } => {

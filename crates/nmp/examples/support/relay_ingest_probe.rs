@@ -490,6 +490,7 @@ impl ObservationState {
                         .get_or_insert_with(|| ingest_started.elapsed());
                     self.last_row = Some(ingest_started.elapsed());
                 }
+                RowDelta::Updated(_) => {}
                 RowDelta::SourcesGrew { .. } => self.source_growth += 1,
                 RowDelta::Removed(id) => {
                     self.removed_rows += 1;

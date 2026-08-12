@@ -80,6 +80,9 @@ fn wait_for_rows(
                         RowDelta::Added(row) => {
                             current.insert(row.event.id, row.event);
                         }
+                        RowDelta::Updated(row) => {
+                            current.insert(row.event.id, row.event);
+                        }
                         RowDelta::SourcesGrew { .. } => {}
                         RowDelta::Removed(id) => {
                             current.remove(&id);

@@ -297,6 +297,9 @@ fn main() {
                                 row.sources.len(),
                             );
                         }
+                        RowDelta::Updated(row) => {
+                            known_notes.insert(row.event.id, row.event);
+                        }
                         RowDelta::SourcesGrew { id, sources } => {
                             if known_notes.contains_key(&id) {
                                 println!(

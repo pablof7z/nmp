@@ -221,6 +221,7 @@ fun decodeComment(row: Row): DecodedComment {
             tags = row.tags,
             content = row.content,
             sig = row.sig,
+            signatureState = row.signatureState.toFfi(),
             sources = row.sources,
         )
     try {

@@ -26,6 +26,7 @@ import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiRetryCause
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiRowDelta
+import uniffi.nmp_ffi.FfiRowSignatureState
 
 class EvidenceMappingTest {
     @Test
@@ -98,6 +99,7 @@ class EvidenceMappingTest {
                 tags = emptyList(),
                 content = "hi",
                 sig = "sig",
+                signatureState = FfiRowSignatureState.SIGNED,
                 sources = listOf("wss://r0.example"),
             )
 
@@ -110,6 +112,31 @@ class EvidenceMappingTest {
 
         assertEquals(1, order.size, "SourcesGrew must never insert a second row for the same id")
         assertEquals(listOf("wss://r0.example", "wss://r1.example"), byId["abc"]?.sources)
+    }
+
+    @Test
+    fun signaturePromotionReplacesTheSameRow() {
+        val order = mutableListOf<String>()
+        val byId = mutableMapOf<String, Row>()
+        val pending =
+            FfiRow(
+                id = "same-id", pubkey = "pk", createdAt = 1uL, kind = 1u,
+                tags = emptyList(), content = "body", sig = "placeholder",
+                signatureState = FfiRowSignatureState.PENDING, sources = emptyList(),
+            )
+        applyRowDelta(order, byId, FfiRowDelta.Added(pending))
+        val signed =
+            FfiRow(
+                id = "same-id", pubkey = "pk", createdAt = 1uL, kind = 1u,
+                tags = emptyList(), content = "body", sig = "verified",
+                signatureState = FfiRowSignatureState.SIGNED, sources = emptyList(),
+            )
+        applyRowDelta(order, byId, FfiRowDelta.Updated(signed))
+
+        assertEquals(listOf("same-id"), order)
+        assertEquals(1, byId.size)
+        assertEquals("verified", byId["same-id"]?.sig)
+        assertEquals(RowSignatureState.Signed, byId["same-id"]?.signatureState)
     }
 
     @Test

@@ -149,6 +149,11 @@ internal fun applyRowDelta(
             if (!byId.containsKey(row.id)) order.add(row.id)
             byId[row.id] = row
         }
+        is FfiRowDelta.Updated -> {
+            val row = Row.from(delta.row)
+            if (!byId.containsKey(row.id)) order.add(row.id)
+            byId[row.id] = row
+        }
         is FfiRowDelta.SourcesGrew -> {
             // #105: the SAME row already matched; only its relay-provenance
             // set grew. Replace in place -- `order` is untouched, this is

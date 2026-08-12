@@ -90,7 +90,7 @@ impl RuntimeAssembly {
             .iter()
             .filter_map(|row| match row {
                 RowDelta::Removed(id) => Some(*id),
-                RowDelta::Added(_) | RowDelta::SourcesGrew { .. } => None,
+                RowDelta::Added(_) | RowDelta::Updated(_) | RowDelta::SourcesGrew { .. } => None,
             })
             .collect::<Vec<_>>();
         let events = rows
@@ -334,6 +334,7 @@ mod tests {
             .expect("relay-list fixture signs");
         let row = RowDelta::Added(Row {
             event,
+            signature_state: crate::core::RowSignatureState::Signed,
             sources: BTreeSet::from([source.clone()]),
         });
         let mut core = EngineCore::new(MemoryStore::new(), 8);
@@ -442,6 +443,7 @@ mod tests {
             .expect("truthful kind:10002 fixture signs");
         let row = RowDelta::Added(Row {
             event: relay_list,
+            signature_state: crate::core::RowSignatureState::Signed,
             sources: BTreeSet::from([source.clone()]),
         });
         let mut assembly = RuntimeAssembly::new([source]);
@@ -600,6 +602,7 @@ mod provenance {
         let handle = assembly.handle.expect("the author need opens one query");
         let row = RowDelta::Added(Row {
             event: list_event(keys, rows),
+            signature_state: crate::core::RowSignatureState::Signed,
             sources: BTreeSet::from([source]),
         });
         let _effects = assembly

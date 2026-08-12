@@ -5,6 +5,26 @@
 
 import NMPFFI
 
+/// Whether this canonical row already carries a verified Nostr signature.
+public enum RowSignatureState: Sendable, Hashable {
+    case pending
+    case signed
+
+    init(_ ffi: FfiRowSignatureState) {
+        switch ffi {
+        case .pending: self = .pending
+        case .signed: self = .signed
+        }
+    }
+
+    var ffi: FfiRowSignatureState {
+        switch self {
+        case .pending: return .pending
+        case .signed: return .signed
+        }
+    }
+}
+
 /// One delivered event, verbatim. `Identifiable` so a SwiftUI `List(rows)`
 /// works with zero extra ceremony (the §7 canary's whole point).
 public struct Row: Sendable, Identifiable, Hashable {
@@ -16,6 +36,9 @@ public struct Row: Sendable, Identifiable, Hashable {
     public let tags: [[String]]
     public let content: String
     public let sig: String
+    /// `pending` means `sig` is NMP's placeholder and must not be treated as
+    /// a valid Nostr signature.
+    public let signatureState: RowSignatureState
     /// Sorted, deduplicated relay URLs that have delivered this event id
     /// (#105) -- raw tokens, not a formatted/display field either.
     public let sources: [String]
@@ -28,6 +51,7 @@ public struct Row: Sendable, Identifiable, Hashable {
         tags = ffi.tags
         content = ffi.content
         sig = ffi.sig
+        signatureState = RowSignatureState(ffi.signatureState)
         sources = ffi.sources
     }
 
@@ -36,7 +60,7 @@ public struct Row: Sendable, Identifiable, Hashable {
     /// claim about signature validity, provenance, or canonical-store status.
     public init(
         id: String, pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]],
-        content: String, sig: String, sources: [String]
+        content: String, sig: String, signatureState: RowSignatureState, sources: [String]
     ) {
         self.id = id
         self.pubkey = pubkey
@@ -45,6 +69,7 @@ public struct Row: Sendable, Identifiable, Hashable {
         self.tags = tags
         self.content = content
         self.sig = sig
+        self.signatureState = signatureState
         self.sources = sources
     }
 
@@ -54,7 +79,7 @@ public struct Row: Sendable, Identifiable, Hashable {
     func withSources(_ sources: [String]) -> Row {
         Row(
             id: id, pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags,
-            content: content, sig: sig, sources: sources
+            content: content, sig: sig, signatureState: signatureState, sources: sources
         )
     }
 }

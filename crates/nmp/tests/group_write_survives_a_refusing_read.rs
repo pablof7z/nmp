@@ -120,6 +120,9 @@ fn apply(current: &mut BTreeMap<EventId, Row>, deltas: Vec<RowDelta>) {
             RowDelta::Added(row) => {
                 current.insert(row.event.id, row);
             }
+            RowDelta::Updated(row) => {
+                current.insert(row.event.id, row);
+            }
             RowDelta::SourcesGrew { id, sources } => {
                 if let Some(row) = current.get_mut(&id) {
                     row.sources = sources;
