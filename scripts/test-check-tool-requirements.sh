@@ -45,10 +45,7 @@ assert_missing_tool_refused \
 
 # Sweep every current checker. With an actually empty PATH, each must stop at
 # its declared prerequisites and must not reach a usage branch or an `ok`.
-# `check-surface-governance.sh` is the one base-trusted program that an
-# ordinary PR is structurally forbidden to edit. Its existing `set -euo
-# pipefail` still makes the first absent `git` invocation fatal, so exercise
-# that refusal without requiring the shared helper to appear in the file.
+# Every checker declares its external prerequisites through the same helper.
 mkdir "$TMP/empty-path"
 checker_count=0
 for checker in "$ROOT"/scripts/check-*.sh; do
@@ -57,11 +54,6 @@ for checker in "$ROOT"/scripts/check-*.sh; do
   log="$TMP/$checker_name.log"
   if PATH="$TMP/empty-path" "$BASH_BIN" "$checker" >"$log" 2>&1; then
     fail "$checker_name passed with every external command absent"
-  fi
-  if [[ $checker_name == check-surface-governance.sh ]]; then
-    grep -Fq 'git: command not found' "$log" ||
-      fail "$checker_name did not fail at its first absent verification tool"
-    continue
   fi
   grep -Fq 'check-tools: required command(s) unavailable:' "$log" ||
     fail "$checker_name reached something other than its prerequisite refusal"

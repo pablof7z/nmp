@@ -255,10 +255,8 @@ allowlist entry.
 **CI wiring.** The check runs as a blocking job (`sdk-parity`) in
 `.github/workflows/architecture-gates.yml` on every PR and on pushes to
 `master`. It lives in its own workflow file because
-`.github/workflows/ci.yml` is a protected surface-governance program that an
-ordinary PR must not modify. Marking the job branch-protection **required**
-is a repo-admin setting; until it is flipped, the job is still red/green on
-every PR.
+Marking the job branch-protection **required** is a repo-admin setting; until
+it is flipped, the job is still red/green on every PR.
 
 ---
 

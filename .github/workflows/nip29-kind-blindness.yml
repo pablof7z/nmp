@@ -2,10 +2,8 @@
 # path stays kind-blind -- no kind constant it does not itself define, and no
 # branch anywhere that reads an app-selected kind.
 #
-# This is its own top-level workflow file, mirroring `nip29-read-door.yml`'s
-# own reasoning, because `.github/workflows/architecture-gates.yml` is a
-# protected path (`docs/internals/conventions/protected-path-signoff.md`) and
-# this check must run directly (not via a step embedded in that file) so its
+# This is its own top-level workflow file because this check must run directly
+# (not via a step embedded in another workflow) so its
 # exact executable path is this job's own #1074 evidence locator
 # (`script:repository::scripts/check-nip29-kind-blindness.sh`,
 # `features/groups/kind-blindness.feature`).

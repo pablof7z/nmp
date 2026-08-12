@@ -98,7 +98,9 @@ targets. CI builds it from a neutral temporary directory and Cargo home; root
 workspace dependencies and repository Cargo configuration cannot enter its
 executable graph. A protected credentialed step resolves only the exact
 deduplicated issue-number/state snapshot, then the head-built checker runs
-without a GitHub token.
+without a GitHub token. Live issue numbers and states are never mirrored in
+checker source or unit-test fixtures: unit tests use synthetic snapshots, while
+only the credential-free injected CI snapshot validates the canonical corpus.
 Rust locators do not trust source-file syntax. After that credential boundary,
 the checker runs pinned Cargo metadata and `cargo test --no-run` from a neutral
 directory with isolated Cargo home/target state, exact workspace package IDs,
@@ -116,12 +118,9 @@ trailing command are not proof: the proof must be the terminal command in its
 shell context, and a step that disables errexit or follows the proof with
 anything else is rejected. A non-Bash `shell:` carries no lane claim at all.
 
-This grammar decides *whether a required lane runs the named proof*, not
-whether that lane's shell can be subverted from inside the workflow that owns
-it. `.github/workflows/ci.yml` is an owner-protected path of the
-surface-governance migration policy, so a pull request cannot introduce a
-command shadow there without owner authorization; that protection, not this
-grammar, is what keeps the mapped lane honest.
+This grammar decides *whether a required lane runs the named proof*. Workflow
+integrity is reviewed and tested like other repository code; there is no
+separate protected-path or owner-status authorization system.
 
 ```text
 features/

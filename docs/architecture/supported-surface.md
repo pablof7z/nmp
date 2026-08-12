@@ -149,15 +149,15 @@ falsifiers, and tool pins from the PR's base commit, then judges the proposed
 head with those trusted files. The head is checked out without persisted
 credentials under a read-only token and no secrets. That trusted-target job
 treats the head strictly as git data: it never compiles head code and never
-executes a head file. The base checker rejects changes to its own workflow,
-ordinary regeneration workflow, scripts, and tool pins, preventing a PR from
-replacing its judge, companion regeneration check, catalog, or component
-extractor with an `exit 0`/stale-output program.
+executes a head file. Repository files are not assigned a separate
+"protected-path" authorization class; changes to checks and workflows use the
+same pull-request and review process as other repository changes.
 
 Deterministic cargo-public-api/component regeneration runs separately in the
 ordinary `pull_request` trust domain, where compiling proposed code belongs.
-That job has no secrets or persisted credentials, and the trusted-target gate
-proves its workflow and invoked scripts are byte-identical to the base.
+That job has no secrets or persisted credentials. The checker program it runs
+is extracted from the PR base while the proposed head remains the data under
+judgment.
 
 ### What each check name claims
 
@@ -184,19 +184,18 @@ success under GitHub branch protection, so
 names rather than only the two verdict names.
 
 The split is carried by exit codes, never by message text.
-`scripts/check-surface-governance.sh` and
-`scripts/check-surface-migration-authorization.py` exit `1` for a verdict on the
-head, `4` when the head is not on the current base, and `70` when they could not
+`scripts/check-surface-governance.sh` exits `1` for a verdict on the head, `4`
+when the head is not on the current base, and `70` when it could not
 reach a verdict at all. `scripts/report-surface-governance-verdict.sh` maps
 those onto the names above and treats every unclassified exit — including a gate
 that is killed and never exits on its own terms — as "no verdict". Every one of
 those codes is nonzero, and every one of them blocks.
 
-Both workflows always extract the catalog/checker/regenerator program from the
-base. The base-trusted target checker necessarily rejects replacement of its
-own program, so only the repository owner's protected update procedure can land
-a change to it. Absence of any base governance artifact fails closed instead of
-executing proposed code.
+Both workflows extract the catalog/checker/regenerator program from the base.
+Absence of a required base artifact fails closed instead of executing proposed
+code. This trust boundary controls what a particular CI run executes; it does
+not create a privileged class of repository paths or a second authorization
+protocol for changing them.
 
 Extraction only holds if the extracted program then runs the extracted copy, so
 each governance program resolves what it executes — the regenerator, the
@@ -222,116 +221,6 @@ with it. A new protocol or content family is now an ordinary co-located
 namespace record whose `artifact_owner` points at `nmp-core`
 (`docs/surface/components/README.md`), never a second bootstrap record with
 its own artifact.
-
-Steady-state protected-program evolution uses one reusable exact protocol, not
-an issue-specific exception. The base verifier owns the complete protected
-exact-path and directory-prefix inventory, including itself, its shell wrapper,
-their falsifiers, the trusted workflows, and every invoked governance tool.
-The shell invokes that verifier for every PR. Exit 3 means no protected path
-changed; every other nonzero result fails closed, classified as above into a
-verdict (1), a stale base (4), or a gate that never decided (70). No second
-shell path list can drift from the activation authority.
-
-Protection reserves namespaces across deletion and type replacement. An exact
-path protects both that leaf and every `path/` descendant; a directory prefix
-protects both its slashless root and every descendant. Thus deleting a
-protected blob or tree cannot later turn its old name into an ungoverned
-directory, blob, or symlink.
-
-Authorization is a GitHub commit-status record, not an environment switch, PR
-title/body convention, label, allowlist, or file supplied by the proposed head.
-Both workflows fetch the pull request, latest exact-context statuses, and the
-status target's issue through base-owned code with read-only permissions. The
-base verifier requires:
-
-- the fixed `pablof7z` creator and immutable GitHub user ID `779813`;
-- context `nmp/surface-governance-migration`;
-- a readable open same-repository issue target that is not a pull request;
-- an open, unmerged, same-repository PR on the event's exact base and head; and
-- a head descended from that current API-confirmed PR base, so the derived
-  merge base is exactly the bound base rather than a stale branch point; and
-- a successful description whose digest binds all those facts.
-
-The payload is derived, not declared by the PR. From the explicit PR base and
-head, the verifier derives the merge base and runs one raw recursive tree diff
-with full object IDs and rename/copy detection disabled. Its canonical tuple
-contains every changed repository path—not only protected paths—plus status,
-old/new mode, and old/new object ID. Additions and deletions use explicit
-absence markers; rename/copy is the deterministic delete/add form. Each
-affected protected directory prefix also contributes its complete head tree,
-or an explicit absent-tree marker for an authorized full deletion. The
-domain-separated digest uses explicit byte lengths and NUL terminators.
-Consequently an extra ordinary file, mode-only edit, rename, deletion, changed
-blob, rebase, or different PR produces a different authority record.
-
-The status is the per-migration owner decision. The verifier contains no fixed
-issue, PR, or payload tuple, so #1074 and a later #922 protected migration can
-each receive their own exact status without editing the verifier between them.
-Editing the verifier or checker itself is protected and follows the same
-protocol.
-
-The owner procedure is intentionally two-step and auditable:
-
-1. freeze and independently review the exact migration head, then use the
-   landed base checker’s `--print-migration-authorization` mode to derive the
-   context, description, and issue target for that PR/base/head;
-2. create that success status as repository owner and rerun the same failed
-   PR jobs without changing the head.
-
-From a clean checkout of the landed base with the exact proposed head
-available, the owner action is:
-
-```bash
-root=$(git rev-parse --show-toplevel)
-base=EXACT_PR_BASE_SHA
-head=EXACT_PR_HEAD_SHA
-pr=1095
-issue=1074
-projections=$(
-  SURFACE_ROOT="$root" \
-  SURFACE_BASE_REF="$base" \
-  SURFACE_HEAD_REF="$head" \
-    "$root/scripts/check-surface-governance.sh" --print-projections
-)
-record=$(mktemp)
-SURFACE_ROOT="$root" \
-SURFACE_BASE_REF="$base" \
-SURFACE_HEAD_REF="$head" \
-SURFACE_PR_NUMBER="$pr" \
-SURFACE_PR_URL="https://github.com/pablof7z/nmp/pull/$pr" \
-SURFACE_CHANGED_PROJECTIONS="$projections" \
-SURFACE_MIGRATION_ISSUE="$issue" \
-  "$root/scripts/check-surface-governance.sh" \
-    --print-migration-authorization > "$record"
-context=$(sed -n 's/^context=//p' "$record")
-description=$(sed -n 's/^description=//p' "$record")
-target_url=$(sed -n 's/^target_url=//p' "$record")
-gh api --method POST "repos/pablof7z/nmp/statuses/$head" \
-  -f state=success \
-  -f context="$context" \
-  -f description="$description" \
-  -f target_url="$target_url"
-rm "$record"
-```
-
-The command uses the owner’s existing local `gh` authentication; no token is
-printed, committed, passed to the proposed head, or added to a workflow.
-
-Repeated jobs for that same open PR/base/head are deterministic verification
-of one authorization, not additional consumptions. After merge the PR is no
-longer eligible, so the status cannot be replayed. A distinct later protected
-migration requires its own open issue, PR/base/head, full diff/object tuple,
-and fresh owner status.
-
-There is one unavoidable bootstrap: today's base checker rejects edits to its
-own protected program, so it cannot authorize the PR that first installs this
-protocol. Repository settings are currently advisory and unprotected, as
-recorded on #1144; the repository owner must land that independently reviewed
-exact PR under the existing settings boundary. That is a one-time reality, not
-a code switch. Once landed, the reusable protocol governs its own evolution.
-Issue #608 separately owns installation and falsification of required-check
-repository settings; this change neither weakens protection nor grants write
-permissions to workflows.
 
 The checker receives the actual PR number/URL and independently derived changed
 projection set from the trusted workflow. Entries must link that exact PR,

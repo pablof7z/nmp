@@ -9,11 +9,8 @@
 # previous checks could not see: a third word appearing on ONE SDK while
 # every Rust test stays green.
 #
-# This is its own workflow file because .github/workflows/architecture-gates.yml
-# is an exact protected path of the surface-governance migration policy
-# (scripts/check-surface-migration-authorization.py), and editing it would
-# demand an owner-bound authorization status this gate has no need of: it
-# runs two repository shell scripts over repository content, uses no secret,
+# This is its own workflow so vocabulary failures have a dedicated check name.
+# It runs two repository shell scripts over repository content, uses no secret,
 # makes no pull_request_target trust decision, and executes no PR-provided
 # code. Same reasoning and same shape as dependency-direction.yml (#922),
 # and macos-qualification.yml. Triggers are identical to
