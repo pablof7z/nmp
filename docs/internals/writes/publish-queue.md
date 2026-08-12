@@ -17,6 +17,7 @@ related:
   - docs/internals/writes/relay-worker-demand.md
   - docs/internals/conventions/schema-epoch-discard.md
 issues:
+  - https://github.com/pablof7z/nmp/issues/903
   - https://github.com/pablof7z/nmp/issues/1027
   - https://github.com/pablof7z/nmp/issues/1026
   - https://github.com/pablof7z/nmp/issues/771
@@ -37,6 +38,28 @@ diagnostics, fixtures, and documentation all use `PublishQueue`: for example
 `PublishQueueReceipt`, and `recover_publish_queue`. There is no compatibility
 alias for either retired execution-side spelling (`outbox_*`, then
 `delivery_*`).
+
+## Bounded app inspection
+
+The general app door is `Engine::publish_queue(after, limit)`. `after` is an
+exclusive stable receipt-id cursor and `limit` is a `u8`, so one call returns
+at most 255 retained entries. This is enforced at `EventStore`: every backend
+must implement the bounded range door directly. Redb starts at the cursor's
+big-endian receipt key and stops at the limit; MemoryStore retains only the
+smallest requested ids while scanning its unordered map. There is no trait
+fallback that enumerates the full retained queue and truncates it afterward.
+
+`Engine::publish_queue_for_event(event_id, after, limit)` answers the narrower
+question a `LiveQuery` row creates: which still-active write obligations own
+these exact frozen event bytes? Acceptance records the event-to-receipt
+relationship before signing, the reducer maintains it through signing and
+delivery, and boot rebuilds it from durable open intents. Identical event bytes
+may have more than one receipt, so the result is paged and never chooses one
+arbitrarily. Terminal receipt history is deliberately excluded from this exact
+join but remains visible through the general retained queue until removal.
+Each returned `ReceiptId` can be handed to `reattach_receipt` for retained facts
+and live progress; the lookup does not create another observer or duplicate
+the receipt stream.
 
 Durable table names carry no version suffix. `SCHEMA_VERSION` is the single
 epoch authority for the whole durable model; a per-table `_v1`/`_v6`/`_v8`

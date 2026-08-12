@@ -1741,6 +1741,45 @@ pub(super) fn enumerate_publish_queue_receipts(
     Ok(out)
 }
 
+/// Read one bounded page of retained receipts in receipt-id order (#903).
+/// The range begins after the exclusive cursor, so a later page does not
+/// walk or materialize the prefix the caller already consumed.
+pub(super) fn publish_queue_receipts_after(
+    store: &RedbStore,
+    after: Option<u64>,
+    limit: u8,
+) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
+    if limit == 0 || after == Some(u64::MAX) {
+        return Ok(Vec::new());
+    }
+    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let receipts = match read_txn.open_table(PUBLISH_QUEUE_RECEIPTS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(persist_err(error)),
+    };
+    let first = receipt_key(after.map_or(0, |receipt_id| receipt_id + 1));
+    let mut out = Vec::with_capacity(usize::from(limit));
+    for row in receipts.range::<&[u8; 8]>(&first..).map_err(persist_err)? {
+        let (key, value) = row.map_err(persist_err)?;
+        let receipt_id = u64::from_be_bytes(*key.value());
+        let record =
+            decode_receipt(value.value()).map_err(|error| codec_error("receipt", error))?;
+        out.push(crate::PublishQueueReceipt {
+            receipt_id,
+            intent_id: record.intent_id,
+            frozen_id: record.frozen_id,
+            expected_pubkey: record.expected_pubkey,
+            accepted_at: record.accepted_at,
+            state: record.state,
+        });
+        if out.len() == usize::from(limit) {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 /// Forget one retained receipt and every piece of evidence keyed to it
 /// (#1039). Refuses while the receipt still owns an open intent row.
 pub(super) fn remove_publish_queue_entry(

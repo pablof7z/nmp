@@ -272,7 +272,16 @@ class RowPullCancellationTest {
 
         override fun `publish`(`intent`: FfiWriteIntent): NmpReceiptStream = unusedByThisFalsifier()
 
-        override fun `publishQueue`(): List<FfiPublishQueueEntry> = unusedByThisFalsifier()
+        override fun `publishQueue`(
+            `afterReceiptId`: ULong?,
+            `limit`: UByte,
+        ): List<FfiPublishQueueEntry> = unusedByThisFalsifier()
+
+        override fun `publishQueueForEvent`(
+            `eventId`: String,
+            `afterReceiptId`: ULong?,
+            `limit`: UByte,
+        ): List<FfiPublishQueueEntry> = unusedByThisFalsifier()
 
         override fun `removePublishQueueEntry`(`receiptId`: ULong): Unit = unusedByThisFalsifier()
 

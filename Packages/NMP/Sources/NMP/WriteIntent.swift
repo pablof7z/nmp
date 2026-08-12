@@ -410,7 +410,7 @@ public enum WriteOutcome: Sendable, Hashable {
     case superseded
     /// The store answered the acceptance instruction with a semantic no. The
     /// write is in custody as a permanently-failed entry: one row, payload
-    /// intact, readable and removable through `Engine.publishQueue()`.
+    /// intact, readable and removable through bounded `Engine.publishQueue` pages.
     case refused(RefuseReason)
 
     init(_ ffi: FfiWriteOutcome) {

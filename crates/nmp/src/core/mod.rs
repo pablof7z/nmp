@@ -100,8 +100,8 @@ use nmp_store::{
     IntentSigState, PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttemptHandoff,
     PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
-    PublishQueueTerminalOutcome, PublishQueueTransientCause, ReceiptState, RelayObserved,
-    RemoveQueueEntryOutcome, SigState, VerifiedSignature,
+    PublishQueueReceipt, PublishQueueTerminalOutcome, PublishQueueTransientCause, ReceiptState,
+    RelayObserved, RemoveQueueEntryOutcome, SigState, VerifiedSignature,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -2108,6 +2108,12 @@ pub struct EngineCore<S: EventStore> {
     /// the entire publish queue on the read-plane hot path.
     cached_stalled_writes: Vec<StalledWrite>,
     cached_stalled_write_totals: StalledWriteTotals,
+    /// Active durable obligations grouped by their final frozen event id.
+    /// Used both to correlate relay OK frames after signing and, #903, to
+    /// join an ordinary query row directly to every live receipt that owns
+    /// those exact bytes. It includes signer-parked writes from acceptance
+    /// onward, excludes terminal retained history, and is rebuilt from the
+    /// store's open intents on every boot.
     event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
     /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
     /// finding E5): `receipt_for_intent` used to be a full linear scan of

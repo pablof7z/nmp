@@ -384,7 +384,15 @@ class NMPEngine(
      * Answers "what have I got outstanding, and what went wrong with it"
      * without having held a receipt stream open since acceptance. This is
      * INSPECTION: it never blocks and never waits for settlement. */
-    fun publishQueue(): List<PublishQueueEntry> = publishQueue(ffi)
+    fun publishQueue(afterReceiptId: ULong? = null, limit: UByte): List<PublishQueueEntry> =
+        publishQueue(ffi, afterReceiptId, limit)
+
+    /** Read one bounded page of open obligations for an exact query-row event id. */
+    fun publishQueueForEvent(
+        eventId: String,
+        afterReceiptId: ULong? = null,
+        limit: UByte,
+    ): List<PublishQueueEntry> = publishQueueForEvent(ffi, eventId, afterReceiptId, limit)
 
     /** Forget one queue entry.
      *

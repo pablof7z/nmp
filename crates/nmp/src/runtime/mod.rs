@@ -106,8 +106,8 @@ use crate::core::{
     ReceiptId, RelayAdmissionPolicy, RequestAttemptId, RequestHandoffOutcome, Row, RowDelta,
 };
 use crate::publish_queue::{
-    CancelWriteError, CancelWriteOutcome, PublishQueueEntry, ReceiptResult, ReceiptResultError,
-    RemoveQueueEntryError, SigningState, WriteFact, WriteOutcome,
+    CancelWriteError, CancelWriteOutcome, PublishQueueEntry, PublishQueueReadError, ReceiptResult,
+    ReceiptResultError, RemoveQueueEntryError, SigningState, WriteFact, WriteOutcome,
 };
 use crate::relay_information_service::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
@@ -619,10 +619,10 @@ pub struct ReceiptStream {
     /// CAS-ed, so it is the post-restamp value in every case.
     ///
     /// It is here because the same transaction that issued `id` decided it.
-    /// The alternative is reading it back out of
-    /// [`Handle::publish_queue_entries`], which materializes the whole
-    /// retained receipt set — a set nothing bounds yet (#46) — so a question
-    /// about one write would cost every write that app has ever made (#1314).
+    /// Before #903, the alternative was reading it back out of the old
+    /// zero-argument queue enumeration, which materialized the whole retained
+    /// receipt set. Queue inspection is now bounded, and an event-id lookup
+    /// is direct, but acceptance still must return the value it just decided.
     pub event_id: EventId,
     pub statuses: FifoReceiver<WriteFact>,
     handle: std::panic::AssertUnwindSafe<Handle>,
@@ -1012,7 +1012,10 @@ enum Cmd {
     },
     /// #1039: read the app's own publish queue back.
     PublishQueueEntries {
-        reply: Sender<Result<Vec<PublishQueueEntry>, RemoveQueueEntryError>>,
+        event_id: Option<EventId>,
+        after: Option<ReceiptId>,
+        limit: u8,
+        reply: Sender<Result<Vec<PublishQueueEntry>, PublishQueueReadError>>,
     },
     /// #1039: forget one queue entry. A termination path, not housekeeping.
     RemovePublishQueueEntry {
@@ -4615,8 +4618,8 @@ fn engine_loop<S>(
                 Cmd::PublishTracked { reply, .. } => {
                     let _ = reply.send(Err(PublishError::EngineShuttingDown));
                 }
-                Cmd::PublishQueueEntries { reply } => {
-                    let _ = reply.send(Err(RemoveQueueEntryError::EngineClosed));
+                Cmd::PublishQueueEntries { reply, .. } => {
+                    let _ = reply.send(Err(PublishQueueReadError::EngineClosed));
                 }
                 Cmd::RemovePublishQueueEntry { reply, .. } => {
                     let _ = reply.send(Err(RemoveQueueEntryError::EngineClosed));
@@ -5274,13 +5277,22 @@ fn engine_loop<S>(
                 let _ = entered.send(());
                 let _ = release.recv();
             }
-            Cmd::PublishQueueEntries { reply } => {
-                let _ = reply.send(core.publish_queue_entries().map_err(|error| {
-                    RemoveQueueEntryError::PersistenceFailed {
-                        receipt_id: ReceiptId(0),
-                        reason: error.to_string(),
-                    }
-                }));
+            Cmd::PublishQueueEntries {
+                event_id,
+                after,
+                limit,
+                reply,
+            } => {
+                let result = match event_id {
+                    Some(event_id) => core.publish_queue_entries_for_event(event_id, after, limit),
+                    None => core.publish_queue_entries(after, limit),
+                };
+                let _ =
+                    reply.send(
+                        result.map_err(|error| PublishQueueReadError::PersistenceFailed {
+                            reason: error.to_string(),
+                        }),
+                    );
             }
             Cmd::RemovePublishQueueEntry { id, reply } => {
                 let result = core.remove_publish_queue_entry(id);
@@ -7193,14 +7205,44 @@ impl Handle {
     ///
     /// Inspection, never waiting: this returns what NMP knows right now and
     /// never blocks on settlement.
-    pub fn publish_queue_entries(&self) -> Result<Vec<PublishQueueEntry>, RemoveQueueEntryError> {
+    pub fn publish_queue_entries(
+        &self,
+        after: Option<ReceiptId>,
+        limit: u8,
+    ) -> Result<Vec<PublishQueueEntry>, PublishQueueReadError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
-            .send(Cmd::PublishQueueEntries { reply: reply_tx })
-            .map_err(|_| RemoveQueueEntryError::EngineClosed)?;
+            .send(Cmd::PublishQueueEntries {
+                event_id: None,
+                after,
+                limit,
+                reply: reply_tx,
+            })
+            .map_err(|_| PublishQueueReadError::EngineClosed)?;
         reply_rx
             .recv()
-            .map_err(|_| RemoveQueueEntryError::EngineClosed)?
+            .map_err(|_| PublishQueueReadError::EngineClosed)?
+    }
+
+    /// Read one bounded page of currently open obligations for `event_id`.
+    pub fn publish_queue_entries_for_event(
+        &self,
+        event_id: EventId,
+        after: Option<ReceiptId>,
+        limit: u8,
+    ) -> Result<Vec<PublishQueueEntry>, PublishQueueReadError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::PublishQueueEntries {
+                event_id: Some(event_id),
+                after,
+                limit,
+                reply: reply_tx,
+            })
+            .map_err(|_| PublishQueueReadError::EngineClosed)?;
+        reply_rx
+            .recv()
+            .map_err(|_| PublishQueueReadError::EngineClosed)?
     }
 
     /// Forget one queue entry (#1039). How a write parked forever on a

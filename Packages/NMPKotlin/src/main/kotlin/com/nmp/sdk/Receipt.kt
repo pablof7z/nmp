@@ -6,6 +6,7 @@ import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiReceiptResult
 import uniffi.nmp_ffi.FfiCancelWriteException
 import uniffi.nmp_ffi.FfiRemoveQueueEntryException
+import uniffi.nmp_ffi.FfiPublishQueueException
 import uniffi.nmp_ffi.FfiCancelWriteOutcome
 import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.NmpReceiptStream
@@ -121,16 +122,51 @@ sealed class NMPQueueEntryRemovalError(message: String) : Exception(message) {
     }
 }
 
+sealed class NMPPublishQueueError(message: String) : Exception(message) {
+    data class InvalidEventId(val reason: String) :
+        NMPPublishQueueError("invalid event id: $reason")
+
+    data class PersistenceFailed(val reason: String) :
+        NMPPublishQueueError("could not inspect the publish queue: $reason")
+
+    object EngineClosed : NMPPublishQueueError("engine already shut down")
+
+    companion object {
+        internal fun from(error: FfiPublishQueueException): NMPPublishQueueError =
+            when (error) {
+                is FfiPublishQueueException.InvalidEventId -> InvalidEventId(error.reason)
+                is FfiPublishQueueException.PersistenceFailed -> PersistenceFailed(error.reason)
+                is FfiPublishQueueException.EngineClosed -> EngineClosed
+            }
+    }
+}
+
 /** Read the app's own publish queue back.
  *
  * Answers "what have I got outstanding, and what went wrong with it" without
  * having held a receipt stream open since acceptance. This is INSPECTION: it
  * never blocks and never waits for settlement. */
-internal fun publishQueue(engine: NmpEngineInterface): List<PublishQueueEntry> =
+internal fun publishQueue(
+    engine: NmpEngineInterface,
+    afterReceiptId: ULong?,
+    limit: UByte,
+): List<PublishQueueEntry> =
     try {
-        engine.publishQueue().map { PublishQueueEntry.from(it) }
-    } catch (error: FfiRemoveQueueEntryException) {
-        throw NMPQueueEntryRemovalError.from(error)
+        engine.publishQueue(afterReceiptId, limit).map { PublishQueueEntry.from(it) }
+    } catch (error: FfiPublishQueueException) {
+        throw NMPPublishQueueError.from(error)
+    }
+
+internal fun publishQueueForEvent(
+    engine: NmpEngineInterface,
+    eventId: String,
+    afterReceiptId: ULong?,
+    limit: UByte,
+): List<PublishQueueEntry> =
+    try {
+        engine.publishQueueForEvent(eventId, afterReceiptId, limit).map { PublishQueueEntry.from(it) }
+    } catch (error: FfiPublishQueueException) {
+        throw NMPPublishQueueError.from(error)
     }
 
 /** Forget one queue entry.

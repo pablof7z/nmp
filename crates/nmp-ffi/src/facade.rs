@@ -25,18 +25,19 @@ use crate::auth::{
 };
 use crate::convert::{
     cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, diagnostics_snapshot_to_ffi,
-    filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_pubkey, publish_queue_entry_to_ffi,
-    receipt_result_to_ffi, relay_information_error_kind, remove_queue_entry_error_to_ffi,
-    sign_event_failure, sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi,
-    window_from_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError,
-    FfiRowPullError, WriteStatusRef,
+    filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_event_id, parse_pubkey,
+    publish_queue_entry_to_ffi, publish_queue_error_to_ffi, receipt_result_to_ffi,
+    relay_information_error_kind, remove_queue_entry_error_to_ffi, sign_event_failure,
+    sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi, window_from_ffi,
+    write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError, FfiRowPullError,
+    WriteStatusRef,
 };
 #[cfg(feature = "nip02")]
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
-    FfiFilter, FfiFrame, FfiLiveQuery, FfiPublishQueueEntry, FfiReceiptReattachment,
-    FfiReceiptResult, FfiRelayInformation, FfiRelayInformationCachePolicy,
+    FfiFilter, FfiFrame, FfiLiveQuery, FfiPublishQueueEntry, FfiPublishQueueError,
+    FfiReceiptReattachment, FfiReceiptResult, FfiRelayInformation, FfiRelayInformationCachePolicy,
     FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
     FfiRemoveQueueEntryError, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow,
     FfiWriteFact, FfiWriteIntent,
@@ -569,11 +570,33 @@ impl NmpEngine {
     ///
     /// INSPECTION, never waiting: this returns what NMP knows right now and
     /// never blocks on settlement.
-    pub fn publish_queue(&self) -> Result<Vec<FfiPublishQueueEntry>, FfiRemoveQueueEntryError> {
+    pub fn publish_queue(
+        &self,
+        after_receipt_id: Option<u64>,
+        limit: u8,
+    ) -> Result<Vec<FfiPublishQueueEntry>, FfiPublishQueueError> {
         self.engine
-            .publish_queue()
+            .publish_queue(after_receipt_id.map(nmp::ReceiptId), limit)
             .map(|entries| entries.iter().map(publish_queue_entry_to_ffi).collect())
-            .map_err(remove_queue_entry_error_to_ffi)
+            .map_err(publish_queue_error_to_ffi)
+    }
+
+    /// Read one bounded page of currently open obligations for the exact
+    /// event id carried by a query row (#903).
+    pub fn publish_queue_for_event(
+        &self,
+        event_id: String,
+        after_receipt_id: Option<u64>,
+        limit: u8,
+    ) -> Result<Vec<FfiPublishQueueEntry>, FfiPublishQueueError> {
+        let event_id =
+            parse_event_id(&event_id).map_err(|error| FfiPublishQueueError::InvalidEventId {
+                reason: error.to_string(),
+            })?;
+        self.engine
+            .publish_queue_for_event(event_id, after_receipt_id.map(nmp::ReceiptId), limit)
+            .map(|entries| entries.iter().map(publish_queue_entry_to_ffi).collect())
+            .map_err(publish_queue_error_to_ffi)
     }
 
     /// Forget one queue entry (#1039). How a write parked forever on a
@@ -1656,7 +1679,7 @@ mod tests {
             correlation: None,
         });
         assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
-        assert!(engine.publish_queue().unwrap().is_empty());
+        assert!(engine.publish_queue(None, u8::MAX).unwrap().is_empty());
         engine.shutdown();
     }
 
@@ -1674,7 +1697,7 @@ mod tests {
             .expect("the native account activates");
         let result = engine.follow(nostr::Keys::generate().public_key().to_hex());
         assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
-        assert!(engine.publish_queue().unwrap().is_empty());
+        assert!(engine.publish_queue(None, u8::MAX).unwrap().is_empty());
         engine.shutdown();
     }
 
@@ -2489,7 +2512,10 @@ mod tests {
             other => panic!("expected FfiError::PublishRefused, got {other:?}"),
         }
         assert!(
-            engine.publish_queue().expect("engine is open").is_empty(),
+            engine
+                .publish_queue(None, u8::MAX)
+                .expect("engine is open")
+                .is_empty(),
             "a refused call takes no custody -- there is no queue entry to inspect"
         );
 

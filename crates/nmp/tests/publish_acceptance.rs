@@ -31,7 +31,7 @@ fn already_expired_publish_is_refused_before_receipt_custody() {
     }
     assert!(
         engine
-            .publish_queue()
+            .publish_queue(None, u8::MAX)
             .expect("publish queue inspection must succeed")
             .is_empty(),
         "pre-custody expiry must retain neither a body nor a receipt"

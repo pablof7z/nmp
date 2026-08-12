@@ -1313,6 +1313,28 @@ pub struct FfiQueueRelayState {
     pub state: FfiRelayState,
 }
 
+/// Typed failure from bounded publish-queue inspection (#903).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiPublishQueueError {
+    InvalidEventId { reason: String },
+    PersistenceFailed { reason: String },
+    EngineClosed,
+}
+
+impl std::fmt::Display for FfiPublishQueueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidEventId { reason } => write!(f, "invalid event id: {reason}"),
+            Self::PersistenceFailed { reason } => {
+                write!(f, "could not inspect the publish queue: {reason}")
+            }
+            Self::EngineClosed => write!(f, "engine already shut down"),
+        }
+    }
+}
+
+impl std::error::Error for FfiPublishQueueError {}
+
 /// Typed refusal from the queue-entry removal door (#1039).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiRemoveQueueEntryError {

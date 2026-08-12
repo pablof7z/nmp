@@ -763,6 +763,28 @@ impl core::marker::Unpin for nmp::NotSentReason
 impl core::marker::UnsafeUnpin for nmp::NotSentReason
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::NotSentReason
 impl core::panic::unwind_safe::UnwindSafe for nmp::NotSentReason
+pub enum nmp::PublishQueueReadError
+pub nmp::PublishQueueReadError::EngineClosed
+pub nmp::PublishQueueReadError::PersistenceFailed
+pub nmp::PublishQueueReadError::PersistenceFailed::reason: alloc::string::String
+impl core::clone::Clone for nmp::PublishQueueReadError
+pub fn nmp::PublishQueueReadError::clone(&self) -> nmp::PublishQueueReadError
+impl core::cmp::Eq for nmp::PublishQueueReadError
+impl core::cmp::PartialEq for nmp::PublishQueueReadError
+pub fn nmp::PublishQueueReadError::eq(&self, &nmp::PublishQueueReadError) -> bool
+impl core::error::Error for nmp::PublishQueueReadError
+impl core::fmt::Debug for nmp::PublishQueueReadError
+pub fn nmp::PublishQueueReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::PublishQueueReadError
+pub fn nmp::PublishQueueReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::PublishQueueReadError
+impl core::marker::Freeze for nmp::PublishQueueReadError
+impl core::marker::Send for nmp::PublishQueueReadError
+impl core::marker::Sync for nmp::PublishQueueReadError
+impl core::marker::Unpin for nmp::PublishQueueReadError
+impl core::marker::UnsafeUnpin for nmp::PublishQueueReadError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::PublishQueueReadError
+impl core::panic::unwind_safe::UnwindSafe for nmp::PublishQueueReadError
 pub enum nmp::ReceiptReattachment
 pub nmp::ReceiptReattachment::Attached
 pub nmp::ReceiptReattachment::Attached::id: nmp::ReceiptId
@@ -1449,7 +1471,8 @@ pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::En
 pub fn nmp::Engine::observe(&self, nmp_grammar::live_query::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
 pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::ReceiptStream, nmp::EngineError>
-pub fn nmp::Engine::publish_queue(&self) -> core::result::Result<alloc::vec::Vec<nmp::PublishQueueEntry>, nmp::RemoveQueueEntryError>
+pub fn nmp::Engine::publish_queue(&self, core::option::Option<nmp::ReceiptId>, u8) -> core::result::Result<alloc::vec::Vec<nmp::PublishQueueEntry>, nmp::PublishQueueReadError>
+pub fn nmp::Engine::publish_queue_for_event(&self, nostr::event::id::EventId, core::option::Option<nmp::ReceiptId>, u8) -> core::result::Result<alloc::vec::Vec<nmp::PublishQueueEntry>, nmp::PublishQueueReadError>
 pub fn nmp::Engine::reattach_by_correlation(&self, alloc::string::String) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::reattach_receipt(&self, nmp::ReceiptId) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::receipt_result(&self, nmp::ReceiptId) -> core::result::Result<nmp::ReceiptResult, nmp::ReceiptResultError>
@@ -28724,6 +28747,133 @@ reexport nmp::EventStore => nmp_store::EventStore
             }
           },
           "name": "enumerate_publish_queue_receipts",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": false,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ],
+                  [
+                    "after",
+                    {
+                      "resolved_path": {
+                        "args": {
+                          "angle_bracketed": {
+                            "args": [
+                              {
+                                "type": {
+                                  "primitive": "u64"
+                                }
+                              }
+                            ],
+                            "constraints": []
+                          }
+                        },
+                        "path": "Option",
+                        "resolved_item": {
+                          "path": "core::option::Option"
+                        }
+                      }
+                    }
+                  ],
+                  [
+                    "limit",
+                    {
+                      "primitive": "u8"
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": {
+                                  "angle_bracketed": {
+                                    "args": [
+                                      {
+                                        "type": {
+                                          "resolved_path": {
+                                            "args": null,
+                                            "path": "PublishQueueReceipt",
+                                            "resolved_item": {
+                                              "definition": {
+                                                "previously_defined": "nmp_store::PublishQueueReceipt"
+                                              },
+                                              "path": "nmp_store::PublishQueueReceipt"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ],
+                                    "constraints": []
+                                  }
+                                },
+                                "path": "Vec",
+                                "resolved_item": {
+                                  "path": "alloc::vec::Vec"
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "PersistenceError",
+                                "resolved_item": {
+                                  "definition": {
+                                    "previously_defined": "nmp_store::PersistenceError"
+                                  },
+                                  "path": "nmp_store::PersistenceError"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Result",
+                    "resolved_item": {
+                      "path": "core::result::Result"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "publish_queue_receipts_after",
           "visibility": "default"
         },
         {
