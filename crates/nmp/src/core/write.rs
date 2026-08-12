@@ -304,13 +304,20 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     /// Remove a permanently-discarded pending write's entries from the
-    /// `intent_receipts` and `receipts_by_lane_relay` indexes (epic #507
-    /// finding E5). Call this at every REAL removal from `self.pending` --
+    /// `intent_receipts`, `event_to_receipts`, and `receipts_by_lane_relay`
+    /// indexes (epic #507 finding E5, #903). Call this at every REAL removal
+    /// from `self.pending` --
     /// never at `fail_and_compensate`'s transient remove-then-reinsert
     /// (`CompensateOutcome::NotFound`/`Err`), which must leave both indexes
     /// untouched because the obligation and its lanes are still live.
     pub(super) fn forget_pending_indexes(&mut self, id: ReceiptId, pending: &PendingWrite) {
         self.intent_receipts.remove(&pending.intent_id);
+        if let Some(receipts) = self.event_to_receipts.get_mut(&pending.frozen.id) {
+            receipts.remove(&id);
+            if receipts.is_empty() {
+                self.event_to_receipts.remove(&pending.frozen.id);
+            }
+        }
         // A removed write owns no projection to reconcile, so its bootstrap
         // gap is closed by the removal. Leaving the entry would keep
         // rearming a deadline for a receipt that can never bootstrap again
@@ -642,7 +649,7 @@ impl<S: EventStore> EngineCore<S> {
     /// dropped subscription. That silence is the original defect this
     /// vocabulary exists to remove.
     pub(super) fn close_if_all_lanes_terminal(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
-        let Some((intent_id, event_id)) = self
+        let Some(intent_id) = self
             .pending
             .get(&id)
             .filter(|pending| {
@@ -656,7 +663,7 @@ impl<S: EventStore> EngineCore<S> {
                     && pending.route_blocked_relays.is_empty()
                     && pending.lane_projection.can_close()
             })
-            .map(|pending| (pending.intent_id, pending.event_id))
+            .map(|pending| pending.intent_id)
         else {
             return;
         };
@@ -667,14 +674,6 @@ impl<S: EventStore> EngineCore<S> {
         };
         if let Some(pending) = self.pending.remove(&id) {
             self.forget_pending_indexes(id, &pending);
-        }
-        if let Some(event_id) = event_id {
-            if let Some(receipts) = self.event_to_receipts.get_mut(&event_id) {
-                receipts.remove(&id);
-                if receipts.is_empty() {
-                    self.event_to_receipts.remove(&event_id);
-                }
-            }
         }
         effects.push(Effect::EmitReceipt(
             id,
@@ -1347,6 +1346,10 @@ impl<S: EventStore> EngineCore<S> {
                         frozen: intent.frozen.clone(),
                     },
                 );
+                self.event_to_receipts
+                    .entry(intent.frozen.id)
+                    .or_default()
+                    .insert(id);
                 effects.push(Effect::EmitReceipt(
                     id,
                     WriteFact::Signing(SigningState::Refused { reason }),
@@ -1396,13 +1399,14 @@ impl<S: EventStore> EngineCore<S> {
             self.intent_receipts.insert(intent.intent_id, id);
             recovered_ids.push(id);
 
-            if !already_signed {
-                continue;
-            }
             self.event_to_receipts
                 .entry(intent.frozen.id)
                 .or_default()
                 .insert(id);
+
+            if !already_signed {
+                continue;
+            }
 
             let revisions = match self
                 .resolver
@@ -2478,6 +2482,10 @@ impl<S: EventStore> EngineCore<S> {
         // finding E5).
         if let Some(intent_id) = intent_id {
             self.intent_receipts.insert(intent_id, id);
+            self.event_to_receipts
+                .entry(frozen.id)
+                .or_default()
+                .insert(id);
         }
 
         for retired in retired_intents {
@@ -2490,14 +2498,6 @@ impl<S: EventStore> EngineCore<S> {
             self.emit_write_fact(retired_id, WriteFact::Outcome(outcome), &mut effects);
             if let Some(retired_pending) = self.pending.remove(&retired_id) {
                 self.forget_pending_indexes(retired_id, &retired_pending);
-                if let Some(event_id) = retired_pending.event_id {
-                    if let Some(receipts) = self.event_to_receipts.get_mut(&event_id) {
-                        receipts.remove(&retired_id);
-                        if receipts.is_empty() {
-                            self.event_to_receipts.remove(&event_id);
-                        }
-                    }
-                }
             } else {
                 self.intent_receipts.remove(&retired.intent_id);
             }
@@ -2696,8 +2696,59 @@ impl<S: EventStore> EngineCore<S> {
     /// Superseded safety receipts are automatically age/count bounded. Other
     /// terminal receipt classes remain app-removable and #46 continues to own
     /// their general retention policy.
-    pub fn publish_queue_entries(&self) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
-        let receipts = self.resolver.store().enumerate_publish_queue_receipts()?;
+    pub fn publish_queue_entries(
+        &self,
+        after: Option<ReceiptId>,
+        limit: u8,
+    ) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
+        let receipts = self
+            .resolver
+            .store()
+            .publish_queue_receipts_after(after.map(|id| id.0), limit)?;
+        validate_publish_queue_page(
+            after.map(|id| id.0),
+            limit,
+            receipts.iter().map(|receipt| receipt.receipt_id),
+        )?;
+        self.project_publish_queue_entries(receipts)
+    }
+
+    /// Look up the currently open obligations for one canonical event id
+    /// (#903). The in-memory reverse index is rebuilt from durable intents at
+    /// boot and updated at acceptance, so this does not scan retained history.
+    pub fn publish_queue_entries_for_event(
+        &self,
+        event_id: EventId,
+        after: Option<ReceiptId>,
+        limit: u8,
+    ) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
+        let Some(ids) = self.event_to_receipts.get(&event_id) else {
+            return Ok(Vec::new());
+        };
+        let receipts = ids
+            .iter()
+            .copied()
+            .filter(|id| after.is_none_or(|after| *id > after))
+            .take(usize::from(limit))
+            .map(|id| {
+                self.resolver
+                    .store()
+                    .reattach_receipt(id.0)?
+                    .ok_or_else(|| {
+                        PersistenceError::invariant(format!(
+                            "active event index names missing receipt {}",
+                            id.0
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.project_publish_queue_entries(receipts)
+    }
+
+    fn project_publish_queue_entries(
+        &self,
+        receipts: Vec<PublishQueueReceipt>,
+    ) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
         let mut entries = Vec::with_capacity(receipts.len());
         for receipt in receipts {
             let id = ReceiptId(receipt.receipt_id);
@@ -2749,7 +2800,7 @@ impl<S: EventStore> EngineCore<S> {
                 receipt_id: id,
                 event_id: receipt.frozen_id,
                 pubkey: receipt.expected_pubkey,
-                accepted_at: pending.map_or(Timestamp::from(0u64), |pending| pending.accepted_at),
+                accepted_at: receipt.accepted_at.unwrap_or_else(|| Timestamp::from(0u64)),
                 signing,
                 relays: pending
                     .map(|pending| pending.durable_routes.clone())
@@ -2867,6 +2918,7 @@ impl<S: EventStore> EngineCore<S> {
                     .cancel_write(quarantined.intent_id)
                 {
                     Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
+                        let event_id = quarantined.frozen.id;
                         match self
                             .resolver
                             .react_to_compensation(quarantined.frozen, &outcome)
@@ -2875,6 +2927,12 @@ impl<S: EventStore> EngineCore<S> {
                             Err(error) => self.degrade_store(error, &mut effects),
                         }
                         self.quarantined_auth_receipts.remove(&id);
+                        if let Some(receipts) = self.event_to_receipts.get_mut(&event_id) {
+                            receipts.remove(&id);
+                            if receipts.is_empty() {
+                                self.event_to_receipts.remove(&event_id);
+                            }
+                        }
                         effects.push(Effect::EmitReceipt(
                             id,
                             WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled)),
@@ -4148,5 +4206,53 @@ impl<S: EventStore> EngineCore<S> {
                 | PublishQueueLaneState::Terminal { .. } => {}
             }
         }
+    }
+}
+
+/// Defend the public bounded-page contract even when an application supplies
+/// its own [`EventStore`] implementation. Built-in stores perform the bounded
+/// range read directly; this boundary check prevents a faulty backend from
+/// exposing an oversized, overlapping, duplicated, or reordered page.
+fn validate_publish_queue_page(
+    after: Option<u64>,
+    limit: u8,
+    receipt_ids: impl IntoIterator<Item = u64>,
+) -> Result<(), PersistenceError> {
+    let mut previous = after;
+    let mut count = 0usize;
+    for receipt_id in receipt_ids {
+        count += 1;
+        if count > usize::from(limit) {
+            return Err(PersistenceError::invariant(format!(
+                "publish queue backend returned more than limit {limit}"
+            )));
+        }
+        if previous.is_some_and(|previous| receipt_id <= previous) {
+            return Err(PersistenceError::invariant(format!(
+                "publish queue backend returned receipt {receipt_id} after {previous:?}"
+            )));
+        }
+        previous = Some(receipt_id);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod bounded_publish_queue_page_tests {
+    use super::validate_publish_queue_page;
+
+    #[test]
+    fn accepts_only_strictly_ordered_receipts_after_the_exclusive_cursor() {
+        assert!(validate_publish_queue_page(Some(7), 3, [8, 9, 12]).is_ok());
+        assert!(validate_publish_queue_page(Some(7), 3, [7]).is_err());
+        assert!(validate_publish_queue_page(Some(7), 3, [9, 8]).is_err());
+        assert!(validate_publish_queue_page(None, 3, [8, 8]).is_err());
+    }
+
+    #[test]
+    fn refuses_a_backend_that_overruns_the_public_limit() {
+        assert!(validate_publish_queue_page(None, 2, [1, 2, 3]).is_err());
+        assert!(validate_publish_queue_page(None, 0, [1]).is_err());
+        assert!(validate_publish_queue_page(None, 0, []).is_ok());
     }
 }

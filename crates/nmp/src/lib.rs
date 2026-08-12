@@ -287,9 +287,9 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // thing the same way.
 pub use crate::core::ReceiptId;
 pub use crate::publish_queue::{
-    AuthDenialSource, NotSentReason, PublishQueueEntry, ReceiptResult, ReceiptResultError,
-    RefuseReason, RelayState, RelayWaiting, RemoveQueueEntryError, RetryCause, SigningState,
-    WriteFact, WriteOutcome,
+    AuthDenialSource, NotSentReason, PublishQueueEntry, PublishQueueReadError, ReceiptResult,
+    ReceiptResultError, RefuseReason, RelayState, RelayWaiting, RemoveQueueEntryError, RetryCause,
+    SigningState, WriteFact, WriteOutcome,
 };
 pub use crate::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,

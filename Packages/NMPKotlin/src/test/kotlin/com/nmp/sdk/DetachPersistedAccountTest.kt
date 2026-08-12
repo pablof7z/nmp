@@ -202,7 +202,7 @@ class DetachPersistedAccountTest {
                 // detach is the queue entry it now owns.
                 assertEquals(
                     listOf(receipt.id),
-                    seed.publishQueue().map { it.receiptId },
+                    seed.publishQueue(limit = UByte.MAX_VALUE).map { it.receiptId },
                 )
             }
 

@@ -160,17 +160,56 @@ public enum NMPQueueEntryRemovalError: Error, Sendable, Equatable {
     }
 }
 
+/// Typed failures from bounded publish-queue inspection.
+public enum NMPPublishQueueError: Error, Sendable, Equatable {
+    case invalidEventID(reason: String)
+    case persistenceFailed(reason: String)
+    case engineClosed
+
+    init(_ ffi: FfiPublishQueueError) {
+        switch ffi {
+        case .InvalidEventId(let reason): self = .invalidEventID(reason: reason)
+        case .PersistenceFailed(let reason): self = .persistenceFailed(reason: reason)
+        case .EngineClosed: self = .engineClosed
+        }
+    }
+}
+
 extension NMPEngine {
     /// Read your own publish queue back.
     ///
     /// Answers "what have I got outstanding, and what went wrong with it"
     /// without having held a receipt stream open since acceptance. This is
     /// INSPECTION: it never blocks and never waits for settlement.
-    public func publishQueue() throws -> [PublishQueueEntry] {
+    public func publishQueue(
+        afterReceiptID: UInt64? = nil,
+        limit: UInt8
+    ) throws -> [PublishQueueEntry] {
         do {
-            return try ffi.publishQueue().map(PublishQueueEntry.init)
-        } catch let error as FfiRemoveQueueEntryError {
-            throw NMPQueueEntryRemovalError(error)
+            return try ffi.publishQueue(
+                afterReceiptId: afterReceiptID,
+                limit: limit
+            ).map(PublishQueueEntry.init)
+        } catch let error as FfiPublishQueueError {
+            throw NMPPublishQueueError(error)
+        }
+    }
+
+    /// Read one bounded page of currently open obligations for a query row's
+    /// exact event id. Reattach each returned receipt id to observe progress.
+    public func publishQueue(
+        forEventID eventID: String,
+        afterReceiptID: UInt64? = nil,
+        limit: UInt8
+    ) throws -> [PublishQueueEntry] {
+        do {
+            return try ffi.publishQueueForEvent(
+                eventId: eventID,
+                afterReceiptId: afterReceiptID,
+                limit: limit
+            ).map(PublishQueueEntry.init)
+        } catch let error as FfiPublishQueueError {
+            throw NMPPublishQueueError(error)
         }
     }
 

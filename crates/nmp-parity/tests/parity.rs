@@ -2943,7 +2943,7 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
         Err(other) => panic!("expected EngineError::PublishRefused, got {other:?}"),
     };
     let queue_len = engine
-        .publish_queue()
+        .publish_queue(None, u8::MAX)
         .expect("the direct engine is open")
         .len();
     engine.shutdown();
@@ -2989,7 +2989,7 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
         Err(other) => panic!("expected FfiError::PublishRefused, got {other:?}"),
     };
     let queue_len = engine
-        .publish_queue()
+        .publish_queue(None, u8::MAX)
         .expect("the FFI engine is open")
         .len();
     engine.shutdown();
@@ -4038,7 +4038,7 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
         Err(other) => panic!("expected EngineError::PublishRefused, got {other:?}"),
     };
     let direct_queue_len = engine
-        .publish_queue()
+        .publish_queue(None, u8::MAX)
         .expect("the direct engine is open")
         .len();
     engine.shutdown();
@@ -4075,7 +4075,7 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
         Err(other) => panic!("expected FfiError::PublishRefused, got {other:?}"),
     };
     let ffi_queue_len = ffi_engine
-        .publish_queue()
+        .publish_queue(None, u8::MAX)
         .expect("the FFI engine is open")
         .len();
     ffi_engine.shutdown();

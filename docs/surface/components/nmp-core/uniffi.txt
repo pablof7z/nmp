@@ -4231,6 +4231,54 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiPublishQueueError",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "InvalidEventId",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "PersistenceFailed",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "EngineClosed",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Error {
+        flat: false,
+    },
+    non_exhaustive: false,
+    docstring: Some(
+        "Typed failure from bounded publish-queue inspection (#903).",
+    ),
+}
+
+enum Enum {
     name: "FfiReaction",
     module_path: "nmp_ffi",
     remote: false,
@@ -14709,7 +14757,24 @@ object Object {
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
-            arguments: [],
+            arguments: [
+                Argument {
+                    name: "after_receipt_id",
+                    type_: Optional {
+                        inner_type: UInt64,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "limit",
+                    type_: UInt8,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
             return_type: Some(
                 Sequence {
                     inner_type: Record {
@@ -14728,6 +14793,16 @@ object Object {
                             "NmpEngine",
                         ),
                     },
+                    FfiArgument {
+                        name: "after_receipt_id",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "limit",
+                        type_: UInt8,
+                    },
                 ],
                 return_type: Some(
                     RustBuffer(
@@ -14743,13 +14818,102 @@ object Object {
             throws: Some(
                 Enum {
                     module_path: "nmp_ffi",
-                    name: "FfiRemoveQueueEntryError",
+                    name: "FfiPublishQueueError",
                 },
             ),
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish_queue",
             checksum: Some(
-                37738,
+                50804,
+            ),
+        },
+        Method {
+            name: "publish_queue_for_event",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "event_id",
+                    type_: String,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "after_receipt_id",
+                    type_: Optional {
+                        inner_type: UInt64,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "limit",
+                    type_: UInt8,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Sequence {
+                    inner_type: Record {
+                        module_path: "nmp_ffi",
+                        name: "FfiPublishQueueEntry",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_publish_queue_for_event",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "event_id",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "after_receipt_id",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                    FfiArgument {
+                        name: "limit",
+                        type_: UInt8,
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: Some(
+                "Read one bounded page of currently open obligations for the exact\nevent id carried by a query row (#903).",
+            ),
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiPublishQueueError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_publish_queue_for_event",
+            checksum: Some(
+                19496,
             ),
         },
         Method {

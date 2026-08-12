@@ -2475,6 +2475,31 @@ impl EventStore for MemoryStore {
         Ok(self.publish_queue_receipts.values().cloned().collect())
     }
 
+    fn publish_queue_receipts_after(
+        &self,
+        after: Option<u64>,
+        limit: u8,
+    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
+        let limit = usize::from(limit);
+        let mut page = Vec::with_capacity(limit);
+        for receipt in self
+            .publish_queue_receipts
+            .values()
+            .filter(|receipt| after.is_none_or(|after| receipt.receipt_id > after))
+        {
+            let index = page
+                .binary_search_by_key(&receipt.receipt_id, |held: &PublishQueueReceipt| {
+                    held.receipt_id
+                })
+                .unwrap_or_else(|index| index);
+            page.insert(index, receipt.clone());
+            if page.len() > limit {
+                page.pop();
+            }
+        }
+        Ok(page)
+    }
+
     fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,

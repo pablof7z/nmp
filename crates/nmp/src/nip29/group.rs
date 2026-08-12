@@ -487,7 +487,9 @@ mod tests {
                 EventBuilder::new(Kind::from(9u16)).content("first light"),
             )
             .expect("the publish door accepts a group write");
-        let queued = engine.publish_queue().expect("the queue reads back");
+        let queued = engine
+            .publish_queue(None, u8::MAX)
+            .expect("the queue reads back");
         assert!(
             queued.iter().any(|entry| entry.receipt_id == receipt.id),
             "the id a group publication returns must name a real queue entry"
