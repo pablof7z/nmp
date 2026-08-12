@@ -590,6 +590,68 @@ expect_fail "incomplete Android paths" catalog_validate "$repo"
 
 # Transition invariants: stable identities, exact tombstones, reservations,
 # path resurrection, owner/child order, and immutable retirement.
+repo="$TMP/android-first-declaration"; new_repo "$repo"
+base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/android/alpha/src"
+printf 'android\n' > "$repo/android/alpha/build.gradle.kts"
+printf 'class Alpha\n' > "$repo/android/alpha/src/Alpha.kt"
+cat >> "$repo/docs/surface/components/alpha/component.toml" <<'EOF'
+
+[android]
+gradle_project = ":alpha"
+namespace = "dev.nmp.alpha"
+maven_coordinate = "dev.nmp:alpha"
+manifests = ["android/alpha/build.gradle.kts"]
+sources = ["android/alpha/src"]
+EOF
+commit_case "$repo" declare-android
+expect_pass "first Android projection declaration" \
+  "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/android-identity-change"; new_repo "$repo"
+mkdir -p "$repo/android/alpha/src"
+printf 'android\n' > "$repo/android/alpha/build.gradle.kts"
+printf 'class Alpha\n' > "$repo/android/alpha/src/Alpha.kt"
+cat >> "$repo/docs/surface/components/alpha/component.toml" <<'EOF'
+
+[android]
+gradle_project = ":alpha"
+namespace = "dev.nmp.alpha"
+maven_coordinate = "dev.nmp:alpha"
+manifests = ["android/alpha/build.gradle.kts"]
+sources = ["android/alpha/src"]
+EOF
+commit_case "$repo" declare-android
+base=$(git -C "$repo" rev-parse HEAD)
+sed -i.bak 's/maven_coordinate = "dev.nmp:alpha"/maven_coordinate = "dev.nmp:renamed"/' \
+  "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/component.toml.bak"
+commit_case "$repo" change-android-identity
+expect_fail "declared Android package identities are stable" \
+  "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
+repo="$TMP/android-removal"; new_repo "$repo"
+mkdir -p "$repo/android/alpha/src"
+printf 'android\n' > "$repo/android/alpha/build.gradle.kts"
+printf 'class Alpha\n' > "$repo/android/alpha/src/Alpha.kt"
+cat >> "$repo/docs/surface/components/alpha/component.toml" <<'EOF'
+
+[android]
+gradle_project = ":alpha"
+namespace = "dev.nmp.alpha"
+maven_coordinate = "dev.nmp:alpha"
+manifests = ["android/alpha/build.gradle.kts"]
+sources = ["android/alpha/src"]
+EOF
+commit_case "$repo" declare-android
+base=$(git -C "$repo" rev-parse HEAD)
+sed -i.bak '/^\[android\]$/,$d' \
+  "$repo/docs/surface/components/alpha/component.toml"
+rm "$repo/docs/surface/components/alpha/component.toml.bak"
+commit_case "$repo" remove-android
+expect_fail "declared Android projection cannot disappear" \
+  "$CATALOG_BIN" transition "$repo" "$base" HEAD 999 https://github.com/pablof7z/nmp/pull/999
+
 repo="$TMP/retire"; new_repo "$repo"; base=$(git -C "$repo" rev-parse HEAD)
 "$CATALOG_BIN" render-tombstone "$repo" "$base" alpha 999 \
   https://github.com/pablof7z/nmp/pull/999 \

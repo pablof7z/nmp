@@ -27,7 +27,9 @@ contains it:
 - The optional `[android]` table is all-or-nothing: `gradle_project`,
   `namespace`, `maven_coordinate`, `manifests`, and `sources`. These stable
   package identities are catalog data; versions and per-target ABI identities
-  remain release provenance.
+  remain release provenance. An active component may declare its first Android
+  projection in an ordinary governed transition. Once declared, the projection
+  cannot disappear and its package identities cannot change.
 
 Descriptors are limited to 32,768 bytes, snapshots to 20,000 lines and
 2,000,000 bytes, and the catalog to 128 records. Snapshots are UTF-8, LF-only,
