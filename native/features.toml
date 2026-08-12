@@ -1,4 +1,4 @@
-schema = 2
+schema = 3
 
 # Cargo owns dependency resolution. Each record below names only the
 # forwarding feature on the one native FFI package and the source files that
@@ -112,6 +112,7 @@ kotlin_sources = [
 
 [[features]]
 key = "asset"
+capability = "verified assets"
 cargo_feature = "asset"
 ffi_sources = ["crates/nmp-ffi/src/asset.rs"]
 swift_sources = [
@@ -123,6 +124,7 @@ kotlin_sources = [
 
 [[features]]
 key = "blossom"
+capability = "Blossom uploads"
 cargo_feature = "blossom"
 ffi_sources = ["crates/nmp-ffi/src/blossom.rs"]
 swift_sources = [
@@ -134,6 +136,7 @@ kotlin_sources = [
 
 [[features]]
 key = "content"
+capability = "rich content"
 cargo_feature = "content"
 ffi_sources = ["crates/nmp-ffi/src/content.rs"]
 swift_sources = [
@@ -145,6 +148,7 @@ kotlin_sources = [
 
 [[features]]
 key = "nip02"
+capability = "following"
 cargo_feature = "nip02"
 ffi_sources = ["crates/nmp-ffi/src/nip02.rs"]
 swift_sources = [
@@ -156,6 +160,7 @@ kotlin_sources = [
 
 [[features]]
 key = "nip18"
+capability = "reposts"
 cargo_feature = "nip18"
 ffi_sources = ["crates/nmp-ffi/src/tagging.rs"]
 swift_sources = [
@@ -167,6 +172,7 @@ kotlin_sources = [
 
 [[features]]
 key = "nip22"
+capability = "comments"
 cargo_feature = "nip22"
 ffi_sources = [
   "crates/nmp-ffi/src/nip22.rs",
@@ -183,6 +189,7 @@ kotlin_sources = [
 
 [[features]]
 key = "nip25"
+capability = "reactions"
 cargo_feature = "nip25"
 ffi_sources = ["crates/nmp-ffi/src/tagging.rs"]
 swift_sources = [
@@ -194,6 +201,7 @@ kotlin_sources = [
 
 [[features]]
 key = "nip29"
+capability = "groups"
 cargo_feature = "nip29"
 ffi_sources = ["crates/nmp-ffi/src/nip29.rs"]
 swift_sources = [
@@ -205,6 +213,7 @@ kotlin_sources = [
 
 [[features]]
 key = "nip51"
+capability = "lists"
 cargo_feature = "nip51"
 ffi_sources = ["crates/nmp-ffi/src/nip51.rs"]
 swift_sources = [
@@ -216,6 +225,7 @@ kotlin_sources = [
 
 [[features]]
 key = "nip65"
+capability = "outbox routing"
 cargo_feature = "nip65"
 ffi_sources = ["crates/nmp-ffi/src/facade.rs"]
 swift_sources = []
@@ -223,6 +233,7 @@ kotlin_sources = []
 
 [[features]]
 key = "nipc7"
+capability = "chat replies"
 cargo_feature = "nipc7"
 ffi_sources = ["crates/nmp-ffi/src/tagging.rs"]
 swift_sources = [

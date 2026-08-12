@@ -106,9 +106,7 @@ An application checks in one NMP feature manifest and prepares one exact local
 Kotlin/JVM build from the repository root:
 
 ```sh
-python3 tools/nmp-native/nmp_native.py prepare \
-  --manifest path/to/app/nmp.toml \
-  --platform kotlin-jvm \
+nmp --manifest path/to/app/.nmp.toml prepare \
   --output path/to/app/Generated/NMP
 ```
 

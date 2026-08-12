@@ -33,6 +33,8 @@ repository today?
   reproducible surface snapshots with an append-only governance gate.
 - The Swift falsifier app runs against public relays as a normal SwiftUI app.
 - A desktop-JVM Kotlin package proves cold `Flow` observation and cancellation.
+- The Rust `nmp` CLI initializes `.nmp.toml` and prepares one exact cached
+  Apple/Kotlin/Android product without Python in the application workflow.
 
 ## Target contract not yet complete
 
