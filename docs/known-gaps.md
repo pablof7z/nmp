@@ -369,8 +369,11 @@ about current code:
   physical-device qualification remains separate. Kotlin now has a
   source-reproducible feature-selected Android AAR with exact API/ABI,
   binding/native, wrapper-inventory, semantic-reproducibility, and clean
-  external-consumer checks (#831). A running Android engine, platform lifecycle,
-  and secure recovery remain unqualified until #832–#834.
+  external-consumer checks (#831). A pinned API-35 external app now proves the
+  supported facade through controlled live observation, pre-connect failure and
+  recovery, cancellation, app-private fresh-process reopen, deterministic close,
+  wrong-ABI refusal, and bounded 64-collector performance (#832). Configuration
+  lifecycle and secure recovery remain unqualified until #833–#834.
   **The hidden cache/flight/waiter copy amplification is closed
   (#467).** One immutable payload owns the parsed document (including
   structured maps), exact raw JSON, and revision; cache entries, refreshing

@@ -1000,10 +1000,11 @@ pub enum EngineMsg {
     /// close must never resurrect the session).
     RelayDisconnected(TransportRelayHandle, RelaySessionKey, DisconnectReason),
     RelayHealth(TransportRelayHandle, RelaySessionKey, RelayHealth),
-    /// Runtime could not create a required relay worker. Observational only:
-    /// current demand remains the retry owner and diagnostics retain the
-    /// exact failure instead of silently presenting a merely connecting
-    /// session forever.
+    /// Runtime could not create a required relay worker, or that live worker
+    /// reported a transient failure during its current connection attempt.
+    /// Observational only: current demand remains the retry owner while
+    /// diagnostics and query-scoped evidence retain the exact failure
+    /// instead of silently presenting a merely connecting session forever.
     RelayOpenFailed(RelaySessionKey, String),
     RelayFrame(TransportRelayHandle, RelaySessionKey, RelayFrame),
     RelayFrames(Vec<(TransportRelayHandle, RelaySessionKey, RelayFrame)>),
@@ -3575,7 +3576,10 @@ impl<S: EventStore> EngineCore<S> {
                     .is_some_and(|required| required.all.contains(&session))
                 {
                     self.relay_open_failures.insert(session, reason);
-                    vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
+                    let mut effects = vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())];
+                    self.refresh_all_observations(&mut effects);
+                    self.refresh_all_histories(&mut effects);
+                    effects
                 } else {
                     Vec::new()
                 }
