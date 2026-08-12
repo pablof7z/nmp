@@ -62,14 +62,14 @@ Feature: Relay events are proven before NMP accepts them
   # nmp:gap=implementation
   # nmp:issue=#755
   Scenario Outline: Invalid event bytes identify the relay that supplied them
-    Given NMP receives event 1 from relay B
+    Given NMP receives event 1 from <relay>
     And event 1 is invalid because "<failure>"
     When NMP checks event 1 at the relay boundary
     Then event 1 is rejected before storage, routing, acquisition evidence, or app delivery
-    And the app can see that relay B supplied an event rejected for cryptographic misbehavior
+    And the app can see that <relay> supplied an event rejected for cryptographic misbehavior
     And NMP does not turn that fact into an automatic ban or a global relay verdict
 
     Examples:
-      | failure                                                        |
-      | its Schnorr signature does not verify                          |
-      | its signature bytes differ from the signature known for its id |
+      | relay   | failure                                                        |
+      | relay A | its Schnorr signature does not verify                          |
+      | relay B | its signature bytes differ from the signature known for its id |
