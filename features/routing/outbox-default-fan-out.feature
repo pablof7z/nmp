@@ -13,11 +13,12 @@ Feature: Where an ordinary event goes when the app says nothing
 
   > the app should be able to say "publish this event" and it would default to using outbox.
 
-  The first three contributions are built. The fourth is a known violation:
-  the current resolver reads only `RoutingFacts`, scans `p` tags, and discards
-  the canonical store provenance of an event referenced as the reply parent.
-  That can publish a reply everywhere except the relay where the conversation
-  was actually observed.
+  The first three contributions come from `RoutingFacts`. The fourth resolves
+  the signed event's direct reply-parent id through NMP's canonical thread
+  grammar, then reads that canonical row's verified relay provenance. A reply
+  can therefore publish to known author/app/recipient lanes immediately while
+  author-route discovery is still open, without losing the relay context where
+  NMP actually found the conversation.
 
   Parent provenance is NMP's own observation, not arbitrary text in a tag. A
   relay hint authored into an `e` tag does not become verified merely because
@@ -127,7 +128,7 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # nmp:id=ROUTING-OUTBOXDEFAULT-006
   # nmp:status=built
-  # nmp:evidence=rust:nmp::the_three_outbox_sources_compose_by_union_with_no_precedence
+  # nmp:evidence=rust:nmp::the_built_outbox_sources_compose_by_union_with_no_precedence
   # nmp:falsifier=Give the three sources precedence instead of unioning them, so a recipient's inbox replaces the author's outbox; the exact five-destination witness fails.
   Scenario: All three sources land in one route, not three competing ones
     # The composition case. There is no precedence between the sources and no
@@ -156,7 +157,7 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # nmp:id=ROUTING-OUTBOXDEFAULT-008
   # nmp:status=built
-  # nmp:evidence=rust:nmp::the_outbox_answer_never_names_a_relay_outside_its_three_sources
+  # nmp:evidence=rust:nmp::the_outbox_answer_never_names_a_relay_outside_its_evidence_owned_sources
   # nmp:falsifier=Let the resolver read every author the directory happens to hold rather than only identities the event names; an unrelated cached author's relays enter the route.
   Scenario: An unrelated cached author's relays never enter the route
     # Parent provenance adds a new evidence-owned source; it does not license
@@ -173,8 +174,10 @@ Feature: Where an ordinary event goes when the app says nothing
   # ---- replies retain their observed relay context ----------------------
 
   # nmp:id=ROUTING-OUTBOXDEFAULT-009
-  # nmp:status=known-violation
-  # nmp:issue=#1365
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_reply_unions_one_verified_parent_source_and_ignores_the_authored_hint
+  # nmp:evidence=rust:nmp::verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does_not
+  # nmp:falsifier=Drop the canonical parent-provenance contribution; the mechanism answer and real relay witness both lose conversation-relay while all author/app/recipient behavior stays green.
   Scenario: A reply returns to the relay where NMP observed its parent
     # The missing fourth contribution. The parent has exactly one verified
     # source, so this scenario does not smuggle in an unanswered choice among
@@ -188,9 +191,10 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the reply is routed to exactly "author-write-1", "author-write-2", and "conversation-relay"
 
   # nmp:id=ROUTING-OUTBOXDEFAULT-010
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1365
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::an_unverified_parent_hint_never_widens_auto_routing
+  # nmp:evidence=rust:nmp::verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does_not
+  # nmp:falsifier=Read the relay cell from the signed parent tag as a destination; the live negative-control relay is contacted and receives the reply despite never carrying its parent.
   Scenario: An unverified parent relay hint does not widen Auto routing
     # The negative boundary. Signed bytes prove who authored the hint; they do
     # not prove the named relay ever held the parent. Explicit routing remains

@@ -4,6 +4,7 @@
 //! attempts and acknowledgements, cancellation/compensation, and boot recovery.
 
 use super::*;
+use nmp_grammar::ThreadPosition;
 
 fn public_retry_cause(cause: PublishQueueTransientCause) -> Option<RetryCause> {
     match cause {
@@ -86,6 +87,21 @@ pub(super) struct RouteAnswer {
     pub(super) complete: bool,
 }
 
+/// One strategy pass, including a store-read failure that prevented the
+/// parent-provenance contribution from settling.
+///
+/// The partial answer is still useful: an author/app/recipient lane that is
+/// already known must start immediately even if the canonical parent lookup
+/// hit an I/O failure. `parent_provenance_error` keeps the route open and is
+/// handed to the ordinary store supervisor, so recovery can rerun the same
+/// strategy instead of either blocking known lanes or falsely retiring the
+/// write.
+#[derive(Debug)]
+pub(super) struct RouteResolution {
+    pub(super) answer: RouteAnswer,
+    pub(super) parent_provenance_error: Option<PersistenceError>,
+}
+
 /// Every pubkey this signed event `p`-tags, in tag order, deduplicated.
 ///
 /// Read off the SIGNED bytes, so the recipient set a resolution is evaluated
@@ -104,6 +120,24 @@ fn p_tagged_authors(event: &SignedEvent) -> BTreeSet<PublicKey> {
             PublicKey::parse(value).ok()
         })
         .collect()
+}
+
+/// The event id this event replies to, using NMP's one thread grammar rather
+/// than re-parsing `e` rows in the router.
+///
+/// A direct reply names its target as the thread root; a nested reply names a
+/// distinct parent. In both cases the direct target is `parent.or(root)`.
+/// The pointer's relay cell is intentionally ignored here: authored tag text
+/// is a hint, not proof that any relay carried the referenced event.
+fn reply_parent_event_id(event: &SignedEvent) -> Option<EventId> {
+    if event.kind != nostr::Kind::TextNote && event.kind.as_u16() != nmp_grammar::COMMENT_KIND {
+        return None;
+    }
+    let position = ThreadPosition::read(event);
+    position
+        .parent
+        .or(position.root)
+        .and_then(|pointer| pointer.event_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1445,7 +1479,11 @@ impl<S: EventStore> EngineCore<S> {
             // down gets a lane, and a relay the intent already reached is
             // left completely alone.
             if routing_valid {
-                let answer = self.resolve_routes(&self.pending[&id].routing, &intent.frozen);
+                let resolution = self.resolve_routes(&self.pending[&id].routing, &intent.frozen);
+                if let Some(error) = resolution.parent_provenance_error {
+                    self.record_store_failure(&error);
+                }
+                let answer = resolution.answer;
                 let new_routes = answer
                     .relays
                     .difference(&durable_relays)
@@ -3178,7 +3216,7 @@ impl<S: EventStore> EngineCore<S> {
         // that comes up short here parks and is re-executed at every later
         // moment (`resolution-lifecycle.md` §5) rather than killing a
         // durable, already-journaled obligation.
-        let Some(answer) = self
+        let Some(resolution) = self
             .pending
             .get(&id)
             .map(|pending| self.resolve_routes(&pending.routing, &event))
@@ -3198,7 +3236,14 @@ impl<S: EventStore> EngineCore<S> {
             .entry(event.id)
             .or_default()
             .insert(id);
+        let RouteResolution {
+            answer,
+            parent_provenance_error,
+        } = resolution;
         self.apply_route_answer(id, intent_id, answer, effects);
+        if let Some(error) = parent_provenance_error {
+            self.degrade_store(error, effects);
+        }
         self.resync_route_needs(effects);
     }
 
@@ -3453,9 +3498,12 @@ impl<S: EventStore> EngineCore<S> {
     ///
     /// `Auto` runs the built-in outbox derivation
     /// (`docs/internals/routing/outbox.md` §4): the event author's neutral
-    /// outbound relays, operator app relays, and every tagged public key's
-    /// neutral inbound relays. A settled `Absent` contributes nothing and
-    /// blocks nothing; `Unknown` keeps the obligation live.
+    /// outbound relays, operator app relays, every tagged public key's
+    /// neutral inbound relays, and one verified canonical-store source for
+    /// the reply parent. A settled `Absent` contributes nothing and blocks
+    /// nothing; `Unknown` keeps the obligation live. A parent store-read
+    /// failure returns a partial answer plus the typed failure so already-
+    /// known lanes progress while the route remains open for recovery.
     ///
     /// `Explicit` never consults the directory at all: the answer is exactly
     /// the relays the caller named, nothing here adds to them, and it has no
@@ -3469,25 +3517,29 @@ impl<S: EventStore> EngineCore<S> {
         &self,
         routing: &WriteRouting,
         event: &SignedEvent,
-    ) -> RouteAnswer {
+    ) -> RouteResolution {
         match routing {
             WriteRouting::Auto => self.resolve_outbox(event),
-            WriteRouting::Explicit(relays) => RouteAnswer {
-                relays: relays.iter().cloned().collect(),
-                // Verbatim execution reads nothing, so nothing can still be
-                // unlearned. An accepted `Explicit` is complete the instant
-                // it resolves, before any relay is contacted.
-                author_route_needs: BTreeSet::new(),
-                complete: !relays.is_empty(),
+            WriteRouting::Explicit(relays) => RouteResolution {
+                answer: RouteAnswer {
+                    relays: relays.iter().cloned().collect(),
+                    // Verbatim execution reads nothing, so nothing can still be
+                    // unlearned. An accepted `Explicit` is complete the instant
+                    // it resolves, before any relay is contacted.
+                    author_route_needs: BTreeSet::new(),
+                    complete: !relays.is_empty(),
+                },
+                parent_provenance_error: None,
             },
         }
     }
 
     /// The built-in outbox resolver — what `Auto` falls back to when no
     /// registered strategy claims the kind (`docs/internals/routing/outbox.md`).
-    fn resolve_outbox(&self, event: &SignedEvent) -> RouteAnswer {
+    fn resolve_outbox(&self, event: &SignedEvent) -> RouteResolution {
         let mut answer = RouteAnswer::default();
         let mut thin_recipient = false;
+        let mut parent_provenance_error = None;
 
         // 1. the author's own outbox. A write fans out to EVERY write relay
         //    its author has, and one relay of my own is a fact about where I
@@ -3512,6 +3564,37 @@ impl<S: EventStore> EngineCore<S> {
             // resolution open, and the top-up is decided again when it lands.
             if let Some(reach) = self.contribute(recipient, RouteDirection::Inbound, &mut answer) {
                 thin_recipient |= reach < COVERAGE_MIN;
+            }
+        }
+
+        // 4. the reply parent's observed relay context. The event's thread
+        //    grammar gives us only the referenced id; the destination comes
+        //    from the canonical row's `Provenance::seen`, which proves NMP
+        //    actually received that exact event from that relay. The relay
+        //    hint authored into the `e` tag is never read.
+        //
+        //    A row can have many observations. Auto adds exactly one, using
+        //    the same deterministic first-sorted verified-source policy the
+        //    canonical `Row` uses when it writes a relay hint. This prevents a
+        //    widely replicated parent from turning one reply into unbounded
+        //    fan-out while leaving the future best-source policy (#1243) in
+        //    its existing owner.
+        if let Some(parent_id) = reply_parent_event_id(event) {
+            match self
+                .resolver
+                .store()
+                .query(&nostr::Filter::new().id(parent_id))
+            {
+                Ok(rows) => {
+                    if let Some(relay) = rows
+                        .into_iter()
+                        .next()
+                        .and_then(|row| first_verified_source(row.provenance.seen.keys()))
+                    {
+                        answer.relays.insert(relay);
+                    }
+                }
+                Err(error) => parent_provenance_error = Some(error),
             }
         }
 
@@ -3548,17 +3631,24 @@ impl<S: EventStore> EngineCore<S> {
             // forever on knowledge that has already arrived and said no.
             // (Owner ruling on #1237/#1031; this reverses the older doctrine
             // that a zero-destination answer could never retire.)
-            let still_learning = !answer.author_route_needs.is_empty();
+            let still_learning_authors = !answer.author_route_needs.is_empty();
+            let still_learning = still_learning_authors || parent_provenance_error.is_some();
             answer.complete = !still_learning;
-            if still_learning {
+            if still_learning_authors {
                 answer.author_route_needs.insert(author);
                 answer.author_route_needs.extend(recipients);
             }
-            return answer;
+            return RouteResolution {
+                answer,
+                parent_provenance_error,
+            };
         }
 
-        answer.complete = answer.author_route_needs.is_empty();
-        answer
+        answer.complete = answer.author_route_needs.is_empty() && parent_provenance_error.is_none();
+        RouteResolution {
+            answer,
+            parent_provenance_error,
+        }
     }
 
     /// Fold one contributing author's three-valued answer into `answer`.
@@ -3727,8 +3817,14 @@ impl<S: EventStore> EngineCore<S> {
             return;
         }
         let intent_id = pending.intent_id;
-        let answer = self.resolve_routes(&pending.routing, &pending.frozen);
+        let RouteResolution {
+            answer,
+            parent_provenance_error,
+        } = self.resolve_routes(&pending.routing, &pending.frozen);
         self.apply_route_answer(id, intent_id, answer, effects);
+        if let Some(error) = parent_provenance_error {
+            self.degrade_store(error, effects);
+        }
     }
 
     /// Commit one [`RouteAnswer`] against an intent's durable route log and

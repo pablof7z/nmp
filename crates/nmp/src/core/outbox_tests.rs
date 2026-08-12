@@ -1,4 +1,4 @@
-//! Falsifiers for the built-in outbox resolver: its three sources, its
+//! Falsifiers for the built-in outbox resolver: its four sources, its
 //! per-recipient coverage top-up, and its three-valued settlement.
 //!
 //! These own the executable half of `features/routing/outbox-default-fan-out`,
@@ -16,8 +16,8 @@ mod outbox_resolver_tests {
 
     use crate::core::write::RouteAnswer;
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::MemoryStore;
-    use nostr::{Keys, Kind};
+    use nmp_store::{EventStore, MemoryStore, RelayObserved};
+    use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn relay(name: &str) -> RelayUrl {
         RelayUrl::parse(&format!("wss://{name}.example")).expect("fixture relay url")
@@ -50,13 +50,55 @@ mod outbox_resolver_tests {
         )
     }
 
-    /// Resolve `event` under `Auto` against exactly these facts.
-    fn route(facts: FixtureRoutingFacts, event: &SignedEvent) -> RouteAnswer {
-        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10)
-            .resolve_routes(&WriteRouting::Auto, event)
+    /// A frozen NIP-10 direct reply. `hint` is authored tag text and is
+    /// deliberately allowed to disagree with canonical provenance.
+    fn reply(
+        author: PublicKey,
+        parent: EventId,
+        recipient: PublicKey,
+        hint: &RelayUrl,
+    ) -> SignedEvent {
+        let created_at = Timestamp::from(1_700_000_001);
+        let kind = Kind::TextNote;
+        let parent_hex = parent.to_hex();
+        let hint_text = hint.to_string();
+        let tags = nostr::Tags::from_list(vec![
+            Tag::parse(["e", parent_hex.as_str(), hint_text.as_str(), "reply"])
+                .expect("fixture parent tag"),
+            Tag::public_key(recipient),
+        ]);
+        let content = "reply".to_string();
+        SignedEvent::new(
+            EventId::new(&author, &created_at, &kind, &tags, &content),
+            author,
+            created_at,
+            kind,
+            tags,
+            content,
+            nmp_store::sentinel_signature(),
+        )
     }
 
-    // ---- the three sources ------------------------------------------------
+    /// Resolve `event` under `Auto` against exactly these facts.
+    fn route(facts: FixtureRoutingFacts, event: &SignedEvent) -> RouteAnswer {
+        route_with_store(MemoryStore::new(), facts, event)
+    }
+
+    fn route_with_store(
+        store: MemoryStore,
+        facts: FixtureRoutingFacts,
+        event: &SignedEvent,
+    ) -> RouteAnswer {
+        let resolution = EngineCore::new_with_fixture_routing_facts(store, facts, 10)
+            .resolve_routes(&WriteRouting::Auto, event);
+        assert!(
+            resolution.parent_provenance_error.is_none(),
+            "the in-memory fixture store cannot fail: {resolution:?}"
+        );
+        resolution.answer
+    }
+
+    // ---- the four sources -------------------------------------------------
 
     /// App relays are source 2 unconditionally, not a top-up for a thin
     /// source 1: an event addressed to nobody, whose author has two healthy
@@ -172,7 +214,7 @@ mod outbox_resolver_tests {
     /// Composition: there is no precedence between the three sources and no
     /// "most specific wins" -- the answer is a set union.
     #[test]
-    fn the_three_outbox_sources_compose_by_union_with_no_precedence() {
+    fn the_built_outbox_sources_compose_by_union_with_no_precedence() {
         let author = Keys::generate().public_key();
         let bob = Keys::generate().public_key();
 
@@ -202,7 +244,7 @@ mod outbox_resolver_tests {
     /// and the p-tagged recipients, and nothing else. A stranger the
     /// directory happens to know about is not a source.
     #[test]
-    fn the_outbox_answer_never_names_a_relay_outside_its_three_sources() {
+    fn the_outbox_answer_never_names_a_relay_outside_its_evidence_owned_sources() {
         let author = Keys::generate().public_key();
         let bob = Keys::generate().public_key();
         let stranger = Keys::generate().public_key();
@@ -230,6 +272,185 @@ mod outbox_resolver_tests {
             ]),
             "an author nobody named is not a source, however warm the directory is on them: {answer:?}"
         );
+    }
+
+    /// The fourth source is not a hint parser. NMP first resolves the direct
+    /// reply target id through its canonical thread grammar, then takes the
+    /// relay from the stored row's verified observation map.
+    #[test]
+    fn a_reply_unions_one_verified_parent_source_and_ignores_the_authored_hint() {
+        let author = Keys::generate().public_key();
+        let parent_author = Keys::generate();
+        let parent = EventBuilder::new(Kind::TextNote, "parent")
+            .custom_created_at(Timestamp::from(1_699_999_999))
+            .sign_with_keys(&parent_author)
+            .expect("sign parent fixture");
+        let conversation = relay("conversation-relay");
+        let unverified_hint = relay("unverified-hint-relay");
+        let mut store = MemoryStore::new();
+        store
+            .insert(
+                parent.clone(),
+                RelayObserved::new(conversation.clone(), Timestamp::from(1_700_000_000)),
+            )
+            .expect("seed canonical parent provenance");
+
+        let answer = route_with_store(
+            store,
+            FixtureRoutingFacts::new()
+                .with_outbound_routes(author, relays(["author-write-1", "author-write-2"]))
+                .with_author_absent(parent_author.public_key()),
+            &reply(
+                author,
+                parent.id,
+                parent_author.public_key(),
+                &unverified_hint,
+            ),
+        );
+
+        assert_eq!(
+            answer.relays,
+            BTreeSet::from([
+                relay("author-write-1"),
+                relay("author-write-2"),
+                conversation,
+            ]),
+            "verified canonical provenance is additive, while raw hint text contributes nothing: {answer:?}"
+        );
+        assert!(answer.complete, "every contribution is settled: {answer:?}");
+    }
+
+    /// A parent copied across many relays must not turn one reply into a
+    /// publication flood. Until #1243 owns a better ranking policy, the same
+    /// deterministic first-sorted verified source used for canonical row
+    /// hints is the one source Auto adds.
+    #[test]
+    fn several_verified_parent_sources_contribute_exactly_one_deterministic_relay() {
+        let author = Keys::generate().public_key();
+        let parent_author = Keys::generate();
+        let parent = EventBuilder::new(Kind::TextNote, "widely copied parent")
+            .custom_created_at(Timestamp::from(1_699_999_999))
+            .sign_with_keys(&parent_author)
+            .expect("sign parent fixture");
+        let first = relay("a-conversation-relay");
+        let second = relay("z-conversation-relay");
+        let authored_hint = relay("authored-hint");
+        let mut store = MemoryStore::new();
+        for (relay, at) in [
+            (second.clone(), 1_700_000_000),
+            (first.clone(), 1_700_000_001),
+        ] {
+            store
+                .insert(
+                    parent.clone(),
+                    RelayObserved::new(relay, Timestamp::from(at)),
+                )
+                .expect("merge canonical parent provenance");
+        }
+
+        let answer = route_with_store(
+            store,
+            FixtureRoutingFacts::new()
+                .with_outbound_routes(author, relays(["author-write-1", "author-write-2"]))
+                .with_author_absent(parent_author.public_key()),
+            &reply(
+                author,
+                parent.id,
+                parent_author.public_key(),
+                &authored_hint,
+            ),
+        );
+
+        assert_eq!(
+            answer.relays,
+            BTreeSet::from([
+                relay("author-write-1"),
+                relay("author-write-2"),
+                first,
+            ]),
+            "one deterministic verified source is added; the other observation and raw hint are excluded: {answer:?}"
+        );
+    }
+
+    /// A syntactically valid hint does not become evidence merely because the
+    /// reply was signed. With no matching canonical row, only the other Auto
+    /// sources remain.
+    #[test]
+    fn an_unverified_parent_hint_never_widens_auto_routing() {
+        let author = Keys::generate().public_key();
+        let parent_author = Keys::generate();
+        let unknown_parent = EventId::all_zeros();
+        let unverified_hint = relay("unverified-hint-relay");
+
+        let answer = route(
+            FixtureRoutingFacts::new()
+                .with_outbound_routes(author, relays(["author-write-1", "author-write-2"]))
+                .with_author_absent(parent_author.public_key()),
+            &reply(
+                author,
+                unknown_parent,
+                parent_author.public_key(),
+                &unverified_hint,
+            ),
+        );
+
+        assert_eq!(
+            answer.relays,
+            relays(["author-write-1", "author-write-2"]),
+            "raw tag text is not a routing source: {answer:?}"
+        );
+        assert!(answer.complete, "the canonical miss is settled: {answer:?}");
+    }
+
+    /// An `e` row is not universally a reply. Reactions, reposts and other
+    /// protocol events may point at an event for their own semantics; only
+    /// NIP-10 text replies and NIP-22 comments own a reply-parent lane.
+    #[test]
+    fn an_e_tag_on_a_non_reply_kind_does_not_become_parent_routing() {
+        let author = Keys::generate().public_key();
+        let target_author = Keys::generate();
+        let target = EventBuilder::new(Kind::TextNote, "reaction target")
+            .custom_created_at(Timestamp::from(1_699_999_999))
+            .sign_with_keys(&target_author)
+            .expect("sign target fixture");
+        let target_relay = relay("target-source");
+        let target_hex = target.id.to_hex();
+        let mut store = MemoryStore::new();
+        store
+            .insert(
+                target.clone(),
+                RelayObserved::new(target_relay.clone(), Timestamp::from(1_700_000_000)),
+            )
+            .expect("seed target provenance");
+        let created_at = Timestamp::from(1_700_000_001);
+        let kind = Kind::Reaction;
+        let tags = nostr::Tags::from_list(vec![
+            Tag::parse(["e", target_hex.as_str()]).expect("reaction e tag")
+        ]);
+        let content = "+".to_string();
+        let reaction = SignedEvent::new(
+            EventId::new(&author, &created_at, &kind, &tags, &content),
+            author,
+            created_at,
+            kind,
+            tags,
+            content,
+            nmp_store::sentinel_signature(),
+        );
+
+        let answer = route_with_store(
+            store,
+            FixtureRoutingFacts::new()
+                .with_outbound_routes(author, relays(["author-write-1", "author-write-2"])),
+            &reaction,
+        );
+
+        assert_eq!(
+            answer.relays,
+            relays(["author-write-1", "author-write-2"]),
+            "a non-reply e tag has no parent-routing meaning: {answer:?}"
+        );
+        assert!(!answer.relays.contains(&target_relay));
     }
 
     // ---- the operator fallback top-up -------------------------------------
