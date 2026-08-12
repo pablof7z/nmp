@@ -1574,7 +1574,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Superseded path removed:** no app is expected to inspect the sentinel bytes or reopen a query to discover promotion. Every exhaustive Rust, UniFFI, Swift, and Kotlin row/delta consumer moves in the same hard cut; there is no legacy `Added`-only projection or alias left beside `Updated`.
 - **Human signoff:** issue #1369 records the required shape and behavioral distinctions. PR #1370 is the review record; exact-head owner authorization and independent protected-surface review remain required before merge.
 
-## 2026-08-12 — Bound publish-queue inspection and join query rows to active obligations ([issue #903](https://github.com/pablof7z/nmp/issues/903))
+## 2026-08-12 — Bound publish-queue inspection and join query rows to active obligations ([issue #903](https://github.com/pablof7z/nmp/issues/903), [PR #1372](https://github.com/pablof7z/nmp/pull/1372))
 
 - **Failure evidence:** the only app inspection door returned the complete retained receipt set, whose general retention is deliberately not bounded by this issue. Asking which write obligation belongs to one `LiveQuery` row therefore required loading unrelated history and choosing a receipt by linear scan; identical accepted event bytes can legitimately own more than one receipt, so choosing the first also hid active obligations. This made queue inspection cost grow with every retained write and left no exact row-to-progress path.
 - **Changed projections:** ffi,kotlin,rust,swift.
