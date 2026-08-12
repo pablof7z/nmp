@@ -3,11 +3,8 @@
 # surface an app can hold one from -- the two Rust crates, the Rust FFI
 # boundary, Swift, and Kotlin.
 #
-# This is its own top-level workflow file, mirroring
-# `behavioral-traceability.yml`'s own reasoning, because
-# `.github/workflows/architecture-gates.yml` is a protected path
-# (`docs/internals/conventions/protected-path-signoff.md`) and this check
-# must run directly (not via `bash`) so its exact executable path is this
+# This is its own top-level workflow because this check must run directly (not
+# via `bash`) so its exact executable path is this
 # job's own #1074 evidence locator
 # (`script:repository::scripts/check-nip29-read-door.sh`,
 # `features/groups/reads-through-the-one-door.feature`).

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 70
+require_commands awk cargo cmp diff dirname git grep head mkdir mktemp rm sed tail tr wc || exit 70
+
 # Three outcomes, three exit codes, so a caller never has to read prose to know
 # what happened (#1264):
 #
@@ -19,8 +25,8 @@ STALE_BASE_EXIT=4
 # Two roots, and conflating them is what #1186 is about.
 #
 # PROGRAM_ROOT is where this program lives. Every tool it runs -- the
-# regenerator, the component catalog, the toolchain definition it sources, the
-# migration verifier -- is resolved from there and from nowhere else. In CI
+# regenerator, the component catalog, and the toolchain definition it sources
+# are resolved from there and from nowhere else. In CI
 # that directory is the scratch copy the workflow extracted from the base
 # commit, so the base-trusted judge runs base-trusted tooling by construction
 # rather than because a caller remembered to say so in five environment
@@ -33,7 +39,6 @@ PROGRAM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 REGEN_CMD="$PROGRAM_ROOT/scripts/regenerate-surface-snapshots.sh"
 CATALOG_TOOL_DIR="$PROGRAM_ROOT/tools/surface-component-catalog"
 TOOLCHAIN_ENV="$PROGRAM_ROOT/tools/surface-toolchain.env"
-MIGRATION_CHECK="$SCRIPT_DIR/check-surface-migration-authorization.py"
 
 ROOT=${SURFACE_ROOT:-$(git rev-parse --show-toplevel)}
 BASE_REF=${SURFACE_BASE_REF:-}
@@ -65,6 +70,8 @@ git cat-file -e "$BASE_REF^{commit}" 2>/dev/null ||
   malfunction "base commit is unavailable: $BASE_REF"
 git cat-file -e "$HEAD_REF^{commit}" 2>/dev/null ||
   malfunction "head commit is unavailable: $HEAD_REF"
+git merge-base --is-ancestor "$BASE_REF" "$HEAD_REF" ||
+  stale_base "head is not descended from the current PR base"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -72,8 +79,8 @@ trap 'rm -rf "$TMP"' EXIT
 CATALOG_BIN=${SURFACE_CATALOG_BIN:-}
 if [[ -z "$CATALOG_BIN" ]]; then
   # Sourcing runs whatever is in the file, so the file has to be this program's
-  # own. Reading the head's copy here would have let a proposed head put
-  # `exit 0` in it and be accepted before authorization was ever consulted.
+  # own. Reading the head's copy here would let a proposed head replace the
+  # toolchain used to judge its generated surface.
   [[ -f "$TOOLCHAIN_ENV" ]] ||
     malfunction "this program has no toolchain definition: $TOOLCHAIN_ENV"
   # shellcheck disable=SC1091
@@ -110,11 +117,8 @@ if [[ $mode == "--print-projections" ]]; then
   [[ $# -eq 1 ]] || malfunction "usage: $0 [--print-projections]"
   projection_set
   exit 0
-elif [[ $mode == "--print-migration-authorization" ]]; then
-  [[ $# -eq 1 ]] ||
-    malfunction "usage: $0 [--print-projections|--print-migration-authorization]"
 elif [[ $# -ne 0 ]]; then
-  malfunction "usage: $0 [--print-projections|--print-migration-authorization]"
+  malfunction "usage: $0 [--print-projections]"
 fi
 
 PR_NUMBER=${SURFACE_PR_NUMBER:-}
@@ -140,61 +144,8 @@ transition_mode=$(< "$TMP/transition-mode")
 [[ $transition_mode == steady ]] ||
   malfunction "component catalog returned an unknown transition mode: $transition_mode"
 
-[[ -f "$MIGRATION_CHECK" ]] ||
-  malfunction "base-trusted migration verifier is unavailable: $MIGRATION_CHECK"
-migration_args=(
-  --root "$ROOT"
-  --base "$BASE_REF"
-  --head "$HEAD_REF"
-  --pr-number "$PR_NUMBER"
-)
-if [[ $mode == "--print-migration-authorization" ]]; then
-  [[ ${SURFACE_MIGRATION_ISSUE:-} =~ ^[1-9][0-9]*$ ]] ||
-    malfunction "SURFACE_MIGRATION_ISSUE must name the open owning issue"
-  print_status=0
-  python3 "$MIGRATION_CHECK" "${migration_args[@]}" print-status \
-    --issue-number "$SURFACE_MIGRATION_ISSUE" || print_status=$?
-  case "$print_status" in
-    0) ;;
-    "$MALFUNCTION_EXIT")
-      malfunction "the migration verifier did not reach a verdict" ;;
-    *) fail "the proposed governance migration cannot be authorized" ;;
-  esac
-  exit 0
-fi
-
-# Reusable authorization is a GitHub commit-status record fetched by the
-# base-owned workflow. The helper owns both protected-path activation and the
-# complete PR/diff/object/issue/status verification. Exit 3 means the PR does
-# not touch a protected governance surface.
-# `set +e` would not do here: the ERR trap fires on a nonzero status whether or
-# not errexit is on, and every one of the verifier's codes below is expected.
-migration_status=0
-python3 "$MIGRATION_CHECK" "${migration_args[@]}" verify \
-  --pr-url "$PR_URL" \
-  --pull-request-record "${SURFACE_PR_RECORD:-}" \
-  --issue-record "${SURFACE_ISSUE_RECORD:-}" \
-  --status-records "${SURFACE_STATUS_RECORDS:-}" >/dev/null || migration_status=$?
-# The verifier's own exit codes carry the same three-way split: 1 is a verdict
-# on the head, 4 says the head is not on the current base, and 70 says the
-# verifier never got far enough to decide.
-case "$migration_status" in
-  0) ;;
-  3) ;;
-  # A verdict, and a narrow one: it is about authorization, not about the
-  # surface. Everything below this step is skipped, so the line says so rather
-  # than leaving a reader to reconstruct it from a convention document.
-  1) fail "protected governance migration is not exactly authorized; the change-log and regeneration checks below it did not run" ;;
-  "$STALE_BASE_EXIT")
-    stale_base "protected migration head is not descended from the current PR base" ;;
-  "$MALFUNCTION_EXIT")
-    malfunction "the migration verifier did not reach a verdict" ;;
-  *)
-    malfunction "the migration verifier exited $migration_status without a verdict" ;;
-esac
-
 # The ordinary pull_request job runs deterministic regeneration with the same
-# protected checker/CI program. The pull_request_target job sets SKIP_REGEN and
+# base-trusted checker/CI program. The pull_request_target job sets SKIP_REGEN and
 # treats the untrusted head strictly as Git data; it never compiles head code.
 if [[ ${SURFACE_SKIP_REGEN:-0} != 1 ]]; then
   # A dirty checkout is something the job did to itself; the head cannot cause

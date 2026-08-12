@@ -118,12 +118,9 @@ trailing command are not proof: the proof must be the terminal command in its
 shell context, and a step that disables errexit or follows the proof with
 anything else is rejected. A non-Bash `shell:` carries no lane claim at all.
 
-This grammar decides *whether a required lane runs the named proof*, not
-whether that lane's shell can be subverted from inside the workflow that owns
-it. `.github/workflows/ci.yml` is an owner-protected path of the
-surface-governance migration policy, so a pull request cannot introduce a
-command shadow there without owner authorization; that protection, not this
-grammar, is what keeps the mapped lane honest.
+This grammar decides *whether a required lane runs the named proof*. Workflow
+integrity is reviewed and tested like other repository code; there is no
+separate protected-path or owner-status authorization system.
 
 ```text
 features/

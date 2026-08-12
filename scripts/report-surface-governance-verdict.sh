@@ -45,9 +45,8 @@ elif [[ ! -f $1 || ! -x $1 ]]; then
   #   missing, no set -e  bash 3.2.57          -> 127   bash 5.3.15 -> 127
   #
   # This script sets `set -e`, and 1 is the code that means "the head was
-  # rejected". So on macOS's /bin/bash -- which runs the falsifier suite locally
-  # and the by-hand signoff in protected-path-signoff.md 2.1 -- an unrunnable
-  # gate would have rendered as a verdict. On the ubuntu-latest runner it would
+  # rejected". So on macOS's /bin/bash, which runs the falsifier suite locally,
+  # an unrunnable gate would have rendered as a verdict. On the ubuntu-latest runner it would
   # not: 127 and 126 already fall through to no-verdict. Checking first makes
   # the classification independent of which bash is reading it.
   note "the gate program is not an executable file: $1"

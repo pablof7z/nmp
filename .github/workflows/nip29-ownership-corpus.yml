@@ -3,11 +3,8 @@
 # cannot make it report a tombstone violation against text present in no
 # tracked file and in no commit.
 #
-# This is its own top-level workflow file, mirroring `nip29-kind-blindness.yml`
-# and `nip29-read-door.yml`, because `.github/workflows/architecture-gates.yml`
-# -- where the gate itself runs -- is a protected path
-# (`docs/internals/conventions/protected-path-signoff.md`), and a falsifier
-# suite is not a governance migration.
+# This is its own top-level workflow file so the falsifier has a dedicated
+# check name.
 #
 # WHY IT HAS TO RUN AT ALL. The defect it falsifies can never occur here: the
 # checkout is clean, so no stale artifact exists to be judged. That is exactly

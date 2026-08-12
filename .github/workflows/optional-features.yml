@@ -21,13 +21,9 @@
 # from every *production* build and absent from every *build* are different
 # claims, and only the first was ever justified.
 #
-# This is its own workflow file because .github/workflows/ci.yml and
-# .github/workflows/architecture-gates.yml are exact protected paths of the
-# surface-governance migration policy
-# (scripts/check-surface-migration-authorization.py), and this job needs
-# neither owner authorization nor any secret: it runs Cargo over repository
-# content and executes no PR-provided code beyond the crates it compiles.
-# Same reasoning and same shape as dependency-direction.yml (#922) and
+# This is its own workflow so its expensive matrix and failures stay isolated.
+# It uses no secret and runs Cargo over repository content. Same shape as
+# dependency-direction.yml (#922) and
 # routing-vocabulary.yml (#1105). Triggers match ci.yml's so the feature-on
 # build runs on every pull request and every push to master.
 
