@@ -24,16 +24,23 @@ pub enum ComposeFollowError {
     InvalidGeneratedTag,
 }
 
+fn follow_selector(target: PublicKey) -> TagItemSelector {
+    TagItemSelector::one(
+        TagItemPattern::new(vec![TagRowPattern::prefix(vec![
+            "p".to_string(),
+            target.to_hex(),
+        ])
+        .expect("the fixed NIP-02 selector has a non-empty row")])
+        .expect("the fixed NIP-02 selector has one row"),
+    )
+}
+
 /// True when `event` contains any NIP-02 `p` tag for `target`. Relay hints,
 /// petnames, extra tag fields, malformed unrelated tags, and ordering are
 /// deliberately irrelevant to membership and remain untouched by edits.
 pub fn follows(event: &Event, target: PublicKey) -> bool {
-    let target = target.to_hex();
-    event.tags.iter().any(|tag| {
-        let values = tag.as_slice();
-        values.first().map(String::as_str) == Some("p")
-            && values.get(1).map(String::as_str) == Some(target.as_str())
-    })
+    let source = event.tags.iter().map(Tag::as_slice).collect::<Vec<_>>();
+    follow_selector(target).matches_any(&source)
 }
 
 /// Compose a NIP-02 whole-list replacement from an exact local base.
@@ -65,19 +72,11 @@ pub fn compose_follow_change(
     }
 
     let wants_follow = change == FollowChange::Follow;
-    let target = target.to_hex();
-    let selector = TagItemSelector::one(
-        TagItemPattern::new(vec![TagRowPattern::prefix(vec![
-            "p".to_string(),
-            target.clone(),
-        ])
-        .map_err(|_| ComposeFollowError::InvalidGeneratedTag)?])
-        .map_err(|_| ComposeFollowError::InvalidGeneratedTag)?,
-    );
+    let selector = follow_selector(target);
     let edit = if wants_follow {
         TagEdit::ensure_present(
             selector,
-            vec![vec!["p".to_string(), target]],
+            vec![vec!["p".to_string(), target.to_hex()]],
             TagInsertion::end(),
         )
         .map_err(|_| ComposeFollowError::InvalidGeneratedTag)?
@@ -94,6 +93,9 @@ pub fn compose_follow_change(
     let Some(rows) = applied.replacement else {
         return Ok(ComposeFollowResult::NoChange);
     };
+    // `nostr::Tag` owns raw cells. Reparse only reconstructs that foreign
+    // container after the lower transform; focused raw-cell tests pin this
+    // conversion as byte-exact so a future upstream normalization fails.
     let tags = rows
         .into_iter()
         .map(Tag::parse)
@@ -279,5 +281,17 @@ mod tests {
             compose_follow_change(&wrong_kind, target.public_key(), FollowChange::Follow,).err(),
             Some(ComposeFollowError::BaseHasWrongKind)
         );
+    }
+
+    #[test]
+    fn nostr_tag_reconstruction_keeps_raw_cells_exact() {
+        let raw = vec![
+            "unknown".to_string(),
+            "01".to_string(),
+            "1e+09".to_string(),
+            "extra".to_string(),
+        ];
+        let reconstructed = Tag::parse(raw.clone()).expect("non-empty raw tag");
+        assert_eq!(reconstructed.as_slice(), raw.as_slice());
     }
 }
