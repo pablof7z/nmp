@@ -21,6 +21,9 @@ members = [
     "crates/nmp",
     "crates/nmp-consumer-check",
     "crates/nmp-demo",
+    # First-class application tooling: `.nmp.toml` capability selection and
+    # prepared Apple/Android products (#1392).
+    "crates/nmp-cli",
     # #1201: a real-relay application falsifier for the supported NIP-29
     # facade. It deliberately names `nmp` as its only Rust dependency.
     "tools/nip29-consumer",
@@ -134,3 +137,9 @@ base64 = "0.22"
 # the same reason cannot route through `nostr`'s own hashing. Already at
 # 0.10.9 in Cargo.lock via transitive resolution.
 sha2 = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+regex = "1"
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"
+walkdir = "2"

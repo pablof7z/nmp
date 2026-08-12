@@ -5,4 +5,4 @@ capabilities = [
   "nip29",
   "nip65",
 ]
-products = ["apple"]
+products = ["android"]

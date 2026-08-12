@@ -11,15 +11,17 @@ source "$script_dir/lib/require-commands.sh" || exit 2
 require_commands git || exit 2
 
 repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+cargo build --locked -q --release -p nmp-cli
+nmp_cli="${CARGO_TARGET_DIR:-$repo_root/target}/release/nmp"
 manifest=${1:?usage: check-android-aar.sh <manifest> <output> <cache>}
 output=${2:?usage: check-android-aar.sh <manifest> <output> <cache>}
 cache=${3:?usage: check-android-aar.sh <manifest> <output> <cache>}
 consumer="$repo_root/fixtures/android-aar-consumer"
 gradle="$repo_root/Packages/NMPKotlin/gradlew"
 
-"$repo_root/scripts/nmp-native" prepare \
+"$nmp_cli" prepare \
     --manifest "$manifest" \
-    --platform android \
     --output "$output" \
     --cache-dir "$cache"
 

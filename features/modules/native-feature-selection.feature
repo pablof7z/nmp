@@ -9,7 +9,7 @@ Feature: Native applications select one exact NMP capability set
     # nmp:id=MODULES-NATIVE-SELECTION-001
     # nmp:status=built
     # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
-    # nmp:evidence=rust:nmp-ffi::native_feature_selection_tool_contract
+    # nmp:evidence=rust:nmp-cli::capability_language_resolves_to_catalog_keys_without_builder_branches
     # nmp:falsifier=Put a feature key or dependency edge in builder code instead of the catalog and Cargo; the genericity and dependency-activation proofs must fail.
     Scenario: An application prepares an arbitrary set of protocol families
       Given an application feature declaration selecting NIP-29 and NIP-65
@@ -21,7 +21,7 @@ Feature: Native applications select one exact NMP capability set
     # nmp:id=MODULES-NATIVE-SELECTION-002
     # nmp:status=built
     # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
-    # nmp:evidence=rust:nmp-ffi::native_feature_selection_tool_contract
+    # nmp:evidence=rust:nmp-cli::manifest_is_canonical_and_runtime_fields_are_refused
     # nmp:falsifier=Materialize an unselected family source or let core resolve an optional Cargo feature; the exact-output proofs must fail.
     Scenario: An unselected protocol family is absent rather than disabled at runtime
       Given an application feature declaration that does not select NIP-29
@@ -46,7 +46,7 @@ Feature: Native applications select one exact NMP capability set
     # nmp:id=MODULES-NATIVE-SELECTION-004
     # nmp:status=built
     # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
-    # nmp:evidence=rust:nmp-ffi::native_feature_selection_tool_contract
+    # nmp:evidence=rust:nmp-cli::source_filter_keeps_only_selected_capability_blocks
     # nmp:falsifier=Leave Auto in either generated core SDK or accept it through core FFI; the feature-off source and compile proofs must fail.
     Scenario: A native build without NIP-65 cannot request automatic routing
       Given an application feature declaration that does not select NIP-65

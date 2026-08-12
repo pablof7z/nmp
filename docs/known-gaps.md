@@ -323,6 +323,18 @@ about current code:
   graph, derived-set, wire, relay, ordinary-result, receipt, ingestion, and
   scheduler bounds do not yet share an explicit shortfall contract. Silent
   first-N behavior is forbidden.
+- **Native product preparation is first-class; runtime qualification remains
+  platform work.** The Rust `nmp` executable now initializes and edits one
+  committed `.nmp.toml`, resolves its generic capability selection through the
+  checked catalog and Cargo, validates platform inputs before staging, and
+  prepares cached Apple/Kotlin/Android products without Python. Rust targets
+  are acquired through rustup; Apple and Android SDK/JDK/NDK inputs are
+  validated with actionable refusals rather than mandating an undocumented
+  host patch set. Clean Swift/Gradle consumption and the linear product matrix
+  remain the packaging falsifiers. This does not claim an iOS simulator/device
+  runtime (#1401), Android running-engine/lifecycle proof (#832–#833), public
+  package-repository release policy, or automatic installation of Xcode and
+  Android SDKs.
 - **NIP-11 cache is process-local.** The engine now owns bounded one-shot
   acquisition, per-relay single-flight with shared async waiters, HTTP
   validators/freshness directives, typed advisory limitation claims, raw JSON,

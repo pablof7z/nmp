@@ -53,7 +53,7 @@ composables against the public SDK without adding Compose to the core module.
 It owns no engine, HTTP, timer, polling, cache, or image loader and is not an
 Android artifact qualification; see [Controlled relay identity UI](36-relay-ui.md).
 
-The Android AAR is built from the same app feature manifest as Swift and
+The Android AAR is built from the same app `.nmp.toml` capability declaration as Swift and
 desktop JVM. It packages only the selected `com.nmp.sdk` wrappers and matching
 UniFFI contract, with API 26 and exact `arm64-v8a`/`x86_64` slices. This is a
 packaging/consumption qualification, not yet a running-engine claim.
