@@ -2069,9 +2069,10 @@ acceptance into a closed, capability-neutral structural edit format.
 The choice does not change the stable behavior required above. It changes where
 replay semantics execute and which failure states exist.
 
-### 22.8 What the first registry experiment proved
+### 22.8 What the #1412 experiments proved
 
-The isolated #1412 experiment proved that:
+The #1412 experiment now has two evidence layers. Its first, isolated registry
+prototype proved that:
 
 - two independently packaged capability implementations can register through
   one NMP-owned contract;
@@ -2082,7 +2083,8 @@ The isolated #1412 experiment proved that:
 - handler code can run outside the store lock and commit through an exact
   source/revision/generation fence.
 
-Exploratory release measurements over nine samples of 100,000 operations found
+Exploratory release measurements over nine samples of 100,000 stateless
+dispatch iterations—not a backlog of unpublished operations—found
 approximately:
 
 ```text
@@ -2096,36 +2098,108 @@ These captured numbers show a small dispatch tax for the prototype. Nanosecond
 microbenchmarks remain host- and load-sensitive; they are evidence for
 feasibility, not a performance contract.
 
-The experiment's JSON whole-map persistence took about three seconds for a
-1,500-resource recovery mix. That is an acknowledged prototype artifact, not
-evidence for the proposed production store.
+The second layer routes a genuinely bodyless semantic payload through the real
+public Rust `Engine::publish(WriteIntent)` door. At measured head
+`283132d2617dc5dff2be538e5385385554420140`, it proved that:
 
-### 22.9 What the first registry experiment did not prove
+- semantic acceptance uses the ordinary receipt and intent-id allocators,
+  caller-correlation index, and redb database; there is no second public
+  acceptance method;
+- the returned stable receipt initially has no event id, then names the event
+  id installed by materialization; two receipts can share that event id;
+- exact ordered operation bytes and both receipts survive close/reopen, and a
+  handler registered later can materialize them;
+- a source can advance before the first materialization or after an installed
+  materialization; the former uses the qualified successor as its base, while
+  the latter installs a successor event id under the same receipt;
+- handler execution remains outside the serialized engine/store owner, and
+  installation compares the exact target, selected source event id, ordered
+  operation digest, and generation;
+- a deliberately delayed stale completion is observably processed as stale
+  before the test inspects current state;
+- exactly four handlers execute concurrently, and work deferred behind full
+  capacity resumes after success, refusal, or panic; and
+- a blocked handler does not block an ordinary publication, and engine
+  shutdown does not wait for a native callback that never returns.
 
-Its most important limitation is architectural: it used a spike-local
-acceptance method rather than the real `WriteIntent -> receipt` transaction.
-That would be a forbidden second lifecycle in production.
+Release measurements on an Apple M3 Max used nine fresh-process batches. The
+final experiment/report head is
+`566b5ef246152267a94728bd31517beceb3156a3`; its raw artifact, SHA-256
+`fd350429f85a5a947639dec0174bc761cf09c05cd0f3702da2659a74e80b30b0`,
+retains every iteration. The medians and 95th percentiles were:
 
-It also did not prove:
+| Workload | Median | p95 |
+|---|---:|---:|
+| Ordinary in-memory event acceptance | 66 microseconds | 220 microseconds |
+| Bodyless semantic in-memory acceptance | 28 microseconds | 226 microseconds |
+| Ordinary redb event acceptance | 5.84 milliseconds | 11.52 milliseconds |
+| Bodyless semantic redb acceptance | 10.37 milliseconds | 20.05 milliseconds |
+| Ready semantic acceptance through installed body | 78 microseconds | 1.11 milliseconds |
+| Reopen until exactly 100 receipts are inspection-ready | 16.1 milliseconds | 48.8 milliseconds |
+| Late registration through all 100 reopened redb installs | 1.66 seconds | 1.99 seconds |
+| Reopen, register, and install one source-driven successor | 26.7 milliseconds | 29.7 milliseconds |
+| One hundred 5-millisecond handler jobs, end to end | 156.8 milliseconds | 179.5 milliseconds |
 
-- current redb schema integration;
+The slow-handler workload observed exactly four active callbacks. Exact
+ordered sequences of 1, 10, and 100 retained operations all passed their
+materialization oracle; median registration-to-install time was respectively
+18.8, 17.4, and 20.2 milliseconds. Those realistic sizes revealed no practical
+preparation cliff that justifies adding paged scheduling now.
+
+The ordinary and bodyless acceptance rows perform different work and end in
+different states. They describe the prototype workloads; they are not a claim
+that the difference is an architecture tax or regression.
+
+### 22.9 What the #1412 experiments did not prove
+
+Using the real acceptance door proves the front half of one public lifecycle;
+it does not yet prove the ordinary lifecycle after a body is installed. The
+experiment stores semantic operation, resource, and receipt projections in
+parallel experimental JSON tables inside the same redb database. Sharing a
+database and id allocators does not make those records the canonical pending
+event, signing obligation, delivery lanes, or terminal receipt state.
+
+The experiment therefore did not prove:
+
+- a production binary schema or migration for semantic operations;
 - canonical optimistic query transitions;
-- source-qualified atomic rematerialization;
+- the full source-plan and access-context qualification model described in
+  this document;
+- atomic replacement of canonical source and effective query state;
 - current publish-queue successor delivery;
+- signing or routing of an installed semantic materialization;
+- event-qualified relay attempts, acknowledgements, retry, or settlement;
 - cancellation with shared materializations;
+- removal or compaction of semantic receipts and operations;
 - complete Rust/FFI/Swift/Kotlin projection;
 - arbitrary native handler callbacks;
 - hostile or permanently non-returning handlers;
 - shutdown while callbacks remain in flight;
-- long-sequence compaction and recovery bounds.
+- capability-defined normalization and production storage bounds.
 
-The active #1412 follow-up experiment is now attempting to place the semantic
-payload through the real public `WriteIntent`, ordinary receipt allocation,
-durable acceptance transaction, and queue projection while preserving ordinary
-`Event` and `Signed` behavior. At the time of this document, only its store-side
-acceptance work compiles; it has not yet produced runtime tests or performance
-results. Its eventual results may change this architecture section. They do not
-change the problem statement or stable behavioral requirements.
+Relay ingest now extracts the changed replaceable coordinate and prepares only
+that target, but this is code-inspected rather than proven by a two-target
+runtime falsifier. Queue inspection is bounded at the public door and uses
+cursor-ranged receipt pages in redb; the in-memory experimental backend still
+scans its held receipt map to construct that bounded page.
+
+Handler execution is bounded, but handler registration and restart recovery
+still enumerate every active semantic resource and eagerly clone all ready
+jobs before the 32-slot executor defers excess targets. Supporting 100,000
+simultaneously unpublished semantic operations is deliberately out of scope:
+it is not a product requirement established by this work, and paged or bounded
+preparation solely for that hypothetical load would be premature complexity.
+The 1, 10, and 100-operation measurements above are the current decision
+evidence. Enormous eager backlogs remain a non-blocking scale limitation;
+batching should be added only if it is nearly free or measurements of plausible
+product workloads reveal a practical problem.
+
+The detached-worker shutdown behavior prevents one non-returning callback from
+hanging one engine shutdown, but it cannot pre-empt native code. Repeated
+engines could leave stuck worker threads behind. Panic catching also cannot
+contain process abort, unsafe memory corruption, hostile CPU use, or hostile
+allocation. Native trust/isolation and callback lifetime therefore remain open
+architecture decisions.
 
 ### 22.10 Likely implementation sequence if the candidate survives
 
@@ -2142,8 +2216,9 @@ This is a dependency order, not a promise that each item is already designed:
 6. Key crypto, signer, route, delivery, and relay facts by exact generation.
 7. Add one ordinary replaceable and one addressable capability consumer; keep
    kind `3` as a consumer rather than a special branch.
-8. Add restart, fault, stale-result, partial-route, and long-sequence stress
-   proofs.
+8. Add restart, fault, stale-result, partial-route, and realistic
+   operation-sequence/recovery proofs; add batching only when implementation
+   cost is negligible or measured product workloads require it.
 9. Project only the capability workflows and truthful receipt facts across
    FFI, Swift, and Kotlin; do not expose raw opaque bytes as an app API.
 10. Update README, known gaps, bug-class ledger, feature corpus, supported
