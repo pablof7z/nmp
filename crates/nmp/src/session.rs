@@ -203,6 +203,42 @@ impl RestoredSession {
             .filter(|account| account.signer.is_some())
             .count()
     }
+
+    pub(crate) fn snapshot(&self) -> SessionSnapshot {
+        let mut accounts = self
+            .accounts
+            .iter()
+            .map(|account| SessionAccount {
+                public_key: account.public_key,
+                provider: account.signer.as_ref().map(|_| SessionProvider::LocalKey),
+                signing: if account.signer.is_some() {
+                    SigningAvailability::Available
+                } else {
+                    SigningAvailability::Unsupported
+                },
+            })
+            .collect::<Vec<_>>();
+        accounts.sort_by_key(|account| account.public_key.to_bytes());
+        SessionSnapshot {
+            accounts,
+            current_pubkey: self.current_pubkey,
+        }
+    }
+
+    pub(crate) fn encode(&self) -> SessionPayload {
+        let descriptors = self
+            .accounts
+            .iter()
+            .filter_map(|account| {
+                account
+                    .signer
+                    .as_ref()
+                    .and_then(SigningCapability::persistence_descriptor)
+                    .map(|descriptor| (account.public_key, descriptor))
+            })
+            .collect();
+        encode(&self.snapshot(), descriptors)
+    }
 }
 
 pub(crate) fn decode(payload: &SessionPayload) -> Result<RestoredSession, SessionRestoreError> {

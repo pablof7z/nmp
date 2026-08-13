@@ -1037,6 +1037,17 @@ enum Cmd {
     SessionExportSources {
         reply: Sender<RuntimeSessionExportSources>,
     },
+    PrepareSessionReplacement {
+        session: RestoredSession,
+        reply: Sender<Result<PreparedSessionReplacement, AddSignerError>>,
+    },
+    ActivateSessionReplacement {
+        prepared: PreparedSessionReplacement,
+        reply: Sender<()>,
+    },
+    DiscardSessionReplacement {
+        id: u64,
+    },
     CurrentSessionPubkey {
         reply: Sender<Option<PublicKey>>,
     },
@@ -1161,6 +1172,15 @@ impl std::ops::DerefMut for RuntimeSessionState {
 pub(crate) struct RuntimeSessionExportSources {
     pub snapshot: SessionSnapshot,
     pub providers: Vec<(PublicKey, Arc<nmp_local_signer::LocalKeySigner>)>,
+}
+
+/// A fully decoded, capacity-reserved session candidate. Creating this value
+/// does not change live membership or current selection; consuming it through
+/// `ActivateSessionReplacement` is the one infallible reducer turn that does.
+pub(crate) struct PreparedSessionReplacement {
+    id: u64,
+    session: RestoredSession,
+    instances: Vec<core::AuthCapabilityInstance>,
 }
 
 impl RuntimeSessionState {
@@ -4610,6 +4630,8 @@ fn engine_loop<S>(
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
     let mut auth_instances = auth::AuthCapabilityInstances::default();
+    let mut next_session_replacement_id = 1u64;
+    let mut reserved_session_replacement: Option<(u64, usize)> = None;
     let mut registry = RuntimeSessionState {
         current_pubkey: initial_session.current_pubkey,
         ..RuntimeSessionState::default()
@@ -4972,6 +4994,13 @@ fn engine_loop<S>(
                 Cmd::SessionExportSources { reply } => {
                     let _ = reply.send(registry.export_sources());
                 }
+                Cmd::PrepareSessionReplacement { reply, .. } => {
+                    let _ = reply.send(Err(AddSignerError::EngineShuttingDown));
+                }
+                Cmd::ActivateSessionReplacement { reply, .. } => {
+                    let _ = reply.send(());
+                }
+                Cmd::DiscardSessionReplacement { .. } => {}
                 Cmd::CurrentSessionPubkey { reply } => {
                     let _ = reply.send(registry.current_pubkey);
                 }
@@ -5273,7 +5302,9 @@ fn engine_loop<S>(
                     .ok_or(AddSignerError::MissingPublicKey)
                     .map(|public_key| PublicKey::from_byte_array(*public_key.as_bytes()))
                     .and_then(|pubkey| {
-                        let live = registry.len().saturating_add(auth_policies.borrow().len());
+                        let providers = reserved_session_replacement
+                            .map_or(registry.len(), |(_, reserved)| registry.len().max(reserved));
+                        let live = providers.saturating_add(auth_policies.borrow().len());
                         if !registry.contains(pubkey) && live >= max_auth_capabilities {
                             return Err(AddSignerError::RegistryFull {
                                 limit: max_auth_capabilities,
@@ -5325,6 +5356,104 @@ fn engine_loop<S>(
             Cmd::SessionExportSources { reply } => {
                 let _ = reply.send(registry.export_sources());
             }
+            Cmd::PrepareSessionReplacement { session, reply } => {
+                let provider_count = session.provider_count();
+                let policy_count = auth_policies.borrow().len();
+                if provider_count.saturating_add(policy_count) > max_auth_capabilities {
+                    let _ = reply.send(Err(AddSignerError::RegistryFull {
+                        limit: max_auth_capabilities,
+                    }));
+                    continue;
+                }
+                let mut instances = Vec::with_capacity(provider_count);
+                let mut exhausted = false;
+                for _ in 0..provider_count {
+                    let Some(instance) = auth_instances.mint() else {
+                        exhausted = true;
+                        break;
+                    };
+                    instances.push(instance);
+                }
+                if exhausted {
+                    let _ = reply.send(Err(AddSignerError::CapabilityInstanceExhausted));
+                    continue;
+                }
+                let id = next_session_replacement_id;
+                next_session_replacement_id = next_session_replacement_id.wrapping_add(1).max(1);
+                reserved_session_replacement = Some((id, provider_count));
+                let _ = reply.send(Ok(PreparedSessionReplacement {
+                    id,
+                    session,
+                    instances,
+                }));
+            }
+            Cmd::ActivateSessionReplacement {
+                prepared,
+                reply,
+            } => {
+                if reserved_session_replacement.map(|(id, _)| id) != Some(prepared.id) {
+                    let _ = reply.send(());
+                    continue;
+                }
+                reserved_session_replacement = None;
+                registry.cancel_all_pending_writes();
+                let removed = registry.drain_instances();
+                registry.accounts.clear();
+                registry.current_pubkey = prepared.session.current_pubkey;
+                let mut instances = prepared.instances.into_iter();
+                let mut attached = Vec::new();
+                for account in prepared.session.accounts {
+                    match account.signer {
+                        Some(signer) => {
+                            let instance = instances
+                                .next()
+                                .expect("prepared provider owns one reserved capability instance");
+                            registry.accounts.insert(
+                                account.public_key,
+                                Some(SessionProvider::LocalKey),
+                            );
+                            registry.add_local(account.public_key, instance, signer);
+                            attached.push(account.public_key);
+                        }
+                        None => {
+                            registry.accounts.insert(account.public_key, None);
+                        }
+                    }
+                }
+                debug_assert!(instances.next().is_none());
+                let mut effects = core.handle(EngineMsg::SetActivePubkey(registry.current_pubkey));
+                for (public_key, instance) in removed {
+                    auth_tasks.borrow_mut().cancel_capability(
+                        public_key,
+                        core::AuthCapability::Signer,
+                        instance,
+                    );
+                    effects.extend(core.handle(EngineMsg::AuthCapabilityInvalidated(
+                        public_key,
+                        core::AuthCapability::Signer,
+                        instance,
+                    )));
+                }
+                for public_key in attached {
+                    effects.extend(core.handle(EngineMsg::SignerAttached(public_key)));
+                }
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &registry,
+                    dispatch_runtime,
+                );
+                let _ = reply.send(());
+            }
+            Cmd::DiscardSessionReplacement { id } => {
+                if reserved_session_replacement.map(|(reserved, _)| reserved) == Some(id) {
+                    reserved_session_replacement = None;
+                }
+            }
             Cmd::CurrentSessionPubkey { reply } => {
                 let _ = reply.send(registry.current_pubkey);
             }
@@ -5337,7 +5466,9 @@ fn engine_loop<S>(
                     .public_key()
                     .and_then(|key| PublicKey::from_slice(key.as_bytes()).ok())
                     .expect("local key signer always has a validated public key");
-                let live = registry.len().saturating_add(auth_policies.borrow().len());
+                let providers = reserved_session_replacement
+                    .map_or(registry.len(), |(_, reserved)| registry.len().max(reserved));
+                let live = providers.saturating_add(auth_policies.borrow().len());
                 if !registry.contains(public_key) && live >= max_auth_capabilities {
                     let _ = reply.send(Err(AddSignerError::RegistryFull {
                         limit: max_auth_capabilities,
@@ -5528,7 +5659,9 @@ fn engine_loop<S>(
                 policy,
                 reply,
             } => {
-                let live = registry.len().saturating_add(auth_policies.borrow().len());
+                let providers = reserved_session_replacement
+                    .map_or(registry.len(), |(_, reserved)| registry.len().max(reserved));
+                let live = providers.saturating_add(auth_policies.borrow().len());
                 if !auth_policies.borrow().contains(expected_pubkey)
                     && live >= max_auth_capabilities
                 {
@@ -7403,6 +7536,42 @@ impl Handle {
             .send(Cmd::SessionExportSources { reply: reply_tx })
             .ok()?;
         reply_rx.recv().ok()
+    }
+
+    pub(crate) fn prepare_session_replacement(
+        &self,
+        session: RestoredSession,
+    ) -> Result<PreparedSessionReplacement, AddSignerError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::PrepareSessionReplacement {
+                session,
+                reply: reply_tx,
+            })
+            .map_err(|_| AddSignerError::EngineShuttingDown)?;
+        reply_rx
+            .recv()
+            .unwrap_or(Err(AddSignerError::EngineShuttingDown))
+    }
+
+    pub(crate) fn activate_session_replacement(
+        &self,
+        prepared: PreparedSessionReplacement,
+    ) -> Option<()> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::ActivateSessionReplacement {
+                prepared,
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.recv().ok()
+    }
+
+    pub(crate) fn discard_session_replacement(&self, prepared: PreparedSessionReplacement) {
+        let _ = self
+            .inbox
+            .send(Cmd::DiscardSessionReplacement { id: prepared.id });
     }
 
     pub(crate) fn current_session_pubkey(&self) -> Option<Option<PublicKey>> {
