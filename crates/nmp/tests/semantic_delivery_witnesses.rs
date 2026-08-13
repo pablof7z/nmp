@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use nmp::{
     AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, Row, RowDelta, SigningState, SourceAuthority, WriteFact,
-    WriteIntent, WriteOutcome, WriteRouting,
+    ReplaceableMaterializerRefusal, ReplaceableSourcePolicy, Row, RowDelta, SigningState,
+    SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
 };
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -201,7 +201,12 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
     let first = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(&base_row, &base_row, alice.to_bytes().to_vec())
+                .operation(
+                    &base_row,
+                    &base_row,
+                    ReplaceableSourcePolicy::Continuing,
+                    alice.to_bytes().to_vec(),
+                )
                 .expect("first operation is complete"),
             routing: WriteRouting::Explicit(vec![relay_one.url.clone()]),
             identity: Identity::Active,
@@ -218,7 +223,12 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
     let second = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(&base_row, &first_current, bob.to_bytes().to_vec())
+                .operation(
+                    &base_row,
+                    &first_current,
+                    ReplaceableSourcePolicy::Continuing,
+                    bob.to_bytes().to_vec(),
+                )
                 .expect("second operation composes over current"),
             routing: WriteRouting::Explicit(vec![relay_one.url.clone(), relay_two.url.clone()]),
             identity: Identity::Active,

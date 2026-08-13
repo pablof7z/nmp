@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nmp_grammar::{EventBuilder, ReplaceableOperationError, WritePayload};
+use nmp_grammar::{EventBuilder, ReplaceableOperationError, ReplaceableSourcePolicy, WritePayload};
 use nostr::UnsignedEvent;
 
 use crate::Row;
@@ -46,7 +46,8 @@ pub(crate) struct ReplaceableMaterializerRegistration {
     pub(crate) materializer: Arc<dyn ReplaceableMaterializer>,
 }
 
-/// Registration-bound constructor for the ordinary write payload.
+/// Registration-bound constructor for the ordinary write payload. The caller
+/// chooses the closed source lifetime policy; the engine owns its execution.
 ///
 /// This handle carries the exact engine installation identity. Publishing its
 /// payload through another engine, or after replacement, is refused before
@@ -61,6 +62,7 @@ impl RegisteredReplaceableMaterializer {
         &self,
         original_source: &Row,
         current: &Row,
+        source_policy: ReplaceableSourcePolicy,
         operation: Vec<u8>,
     ) -> Result<WritePayload, ReplaceableOperationError> {
         let signed = original_source
@@ -77,6 +79,7 @@ impl RegisteredReplaceableMaterializer {
             self.instance,
             UnsignedEvent::from(signed),
             current.body.clone(),
+            source_policy,
             operation,
         )
         .map(WritePayload::ReplaceableOperation)

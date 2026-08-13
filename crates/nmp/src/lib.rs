@@ -316,8 +316,8 @@ pub use crate::runtime::{fifo_channel, FifoSender};
 // app sees exactly one `EventBuilder` and never writes a disambiguating
 // path. `core` aliases the upstream import where it needs it.
 pub use nmp_grammar::{
-    CorrelationToken, CorrelationTokenError, EventBuilder, Identity, WriteIntent, WritePayload,
-    WriteRouting,
+    CorrelationToken, CorrelationTokenError, EventBuilder, Identity, ReplaceableSourcePolicy,
+    WriteIntent, WritePayload, WriteRouting,
 };
 
 // #1243: the one tagging door, as an APP uses it. `reply_to` is the general
