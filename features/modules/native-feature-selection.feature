@@ -35,24 +35,39 @@ Feature: Native applications select one exact NMP capability set
     # nmp:id=MODULES-NATIVE-SELECTION-003
     # nmp:status=built
     # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
+    # nmp:evidence=rust:nmp-cli::outbox_routing_native_surface_is_hard_cut_and_feature_gated
     # nmp:falsifier=Accept an empty configured indexer set, inject a hidden indexer, or accept providerless Auto into custody; at least one runtime proof must fail.
-    Scenario: Selecting NIP-65 does not choose an application's indexers
-      Given an application feature declaration selecting NIP-65
-      When the application supplies an empty NIP-65 indexer configuration
+    Scenario: Selecting outbox routing does not choose an application's indexers
+      Given an application feature declaration selecting outbox routing
+      When the application supplies an empty outbox-routing indexer configuration
       Then engine construction is refused
-      And when the application omits the runtime provider an automatic write is refused before acceptance
+      And when the application omits outbox routing an automatic write is refused before acceptance
       And NMP supplies no hidden indexer relay
 
     # nmp:id=MODULES-NATIVE-SELECTION-004
     # nmp:status=built
     # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
     # nmp:evidence=rust:nmp-cli::source_filter_keeps_only_selected_capability_blocks
-    # nmp:falsifier=Leave Auto in either generated core SDK or accept it through core FFI; the feature-off source and compile proofs must fail.
-    Scenario: A native build without NIP-65 cannot request automatic routing
-      Given an application feature declaration that does not select NIP-65
+    # nmp:evidence=rust:nmp-cli::outbox_routing_native_surface_is_hard_cut_and_feature_gated
+    # nmp:falsifier=Leave Auto or outbox-routing configuration in either generated core SDK, or accept Auto through core FFI; the feature-off source and compile proofs must fail.
+    Scenario: A native build without outbox routing cannot request automatic routing
+      Given an application feature declaration that does not select outbox routing
       When the application prepares its native NMP library
       Then the generated Swift and Kotlin write-routing surfaces expose only explicit routing
       And no automatic write can enter durable custody through the native boundary
+
+    # nmp:id=MODULES-NATIVE-SELECTION-006
+    # nmp:status=built
+    # nmp:evidence=script:repository::scripts/check-native-outbox-routing-runtime.sh
+    # nmp:falsifier=Ignore the configured indexer, query kind 10002 from another relay, contact a relay not learned from the current relay list, or implement discovery in either native consumer; the controlled witness fails.
+    Scenario: Prepared native products discover a cold author outbox
+      Given prepared Swift and Kotlin products with outbox routing selected
+      And the application configures one exact indexer holding an author's relay list
+      And no author route is cached
+      When each product publishes an automatically routed event
+      Then the configured indexer receives the author-scoped kind 10002 request
+      And only the relay learned from that response receives the event
+      And no undeclared relay is contacted
 
   Rule: Android changes packaging, not feature selection
 

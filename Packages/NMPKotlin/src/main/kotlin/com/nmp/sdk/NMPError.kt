@@ -32,10 +32,10 @@ sealed class NMPError(message: String) : Exception(message) {
     data class InvalidEventId(val got: String) : NMPError("invalid event id: $got")
     data class InvalidRelayUrl(val got: String) : NMPError("invalid relay url: $got")
     // nmp-native:if nip65
-    object Nip65IndexerRelaysEmpty :
-        NMPError("NIP-65 requires at least one app-owned indexer relay")
+    object OutboxRoutingIndexersEmpty :
+        NMPError("outbox routing requires at least one app-owned indexer")
     object AutomaticRoutingUnavailable :
-        NMPError("automatic routing is unavailable; construct the engine with NIP-65 indexers")
+        NMPError("automatic routing is unavailable; configure outbox routing indexers")
     // nmp-native:endif
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
     object InvalidSecretKey : NMPError("invalid secret key")
@@ -350,7 +350,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.InvalidEventId -> InvalidEventId(ffi.got)
                 is FfiException.InvalidRelayUrl -> InvalidRelayUrl(ffi.got)
                 // nmp-native:if nip65
-                is FfiException.Nip65IndexerRelaysEmpty -> Nip65IndexerRelaysEmpty
+                is FfiException.OutboxRoutingIndexersEmpty -> OutboxRoutingIndexersEmpty
                 is FfiException.AutomaticRoutingUnavailable -> AutomaticRoutingUnavailable
                 // nmp-native:endif
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)

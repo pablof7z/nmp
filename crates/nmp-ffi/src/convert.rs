@@ -72,10 +72,10 @@ pub enum FfiError {
     InvalidRelayUrl {
         got: String,
     },
-    /// A selected NIP-65 runtime assembly named no app-owned indexer relay.
-    /// Engine construction is refused; NMP never installs a hidden default.
+    /// Selected outbox routing named no app-owned indexer. Engine
+    /// construction is refused; NMP never installs a hidden default.
     #[cfg(feature = "nip65")]
-    Nip65IndexerRelaysEmpty,
+    OutboxRoutingIndexersEmpty,
     /// A raw `[String; N]` tag in a `FfiWriteIntent` did not parse as a
     /// valid nostr tag (`Tag::parse`) -- e.g. an empty array. Rejecting the
     /// whole intent here (rather than silently dropping the malformed tag)
@@ -654,8 +654,8 @@ impl std::fmt::Display for FfiError {
             Self::InvalidEventId { got } => write!(f, "invalid event id hex: {got:?}"),
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
             #[cfg(feature = "nip65")]
-            Self::Nip65IndexerRelaysEmpty => {
-                write!(f, "NIP-65 requires at least one app-owned indexer relay")
+            Self::OutboxRoutingIndexersEmpty => {
+                write!(f, "outbox routing requires at least one app-owned indexer")
             }
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
             #[cfg(feature = "nip22")]
@@ -680,7 +680,7 @@ impl std::fmt::Display for FfiError {
             #[cfg(feature = "nip65")]
             Self::AutomaticRoutingUnavailable => write!(
                 f,
-                "automatic routing is unavailable on this engine; construct it with NIP-65 indexer relays"
+                "automatic routing is unavailable on this engine; configure outbox routing indexers"
             ),
             Self::StoreOpenFailed { reason } => write!(f, "could not open store: {reason}"),
             Self::StoreAlreadyOpen { path } => {

@@ -43,9 +43,9 @@ public enum RetryCause: Sendable, Hashable {
 /// is refused at the door.
 // nmp-native:if nip65
 ///
-/// `.auto` asks the selected NIP-65 assembly to discover author-write and
-/// recipient-read routes. An engine constructed without NIP-65 runtime
-/// indexers refuses it before durable acceptance.
+/// `.auto` asks the selected outbox-routing capability to discover
+/// author-write and recipient-read routes. An engine constructed without
+/// outbox-routing indexers refuses it before durable acceptance.
 // nmp-native:endif
 public enum WriteRouting: Sendable, Hashable {
     // nmp-native:if nip65

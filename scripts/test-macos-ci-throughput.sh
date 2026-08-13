@@ -163,6 +163,6 @@ sed -i.bak \
         run: cargo test' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "portable work drifted onto macOS" "exactly five named Apple qualification steps"
+expect_failure "portable work drifted onto macOS" "exactly six named Apple qualification steps"
 
 echo "macOS CI throughput test: baseline and thirteen mutations passed"

@@ -27,7 +27,7 @@ public enum NMPError: Error, Sendable, Equatable {
     case invalidEventId(String)
     case invalidRelayUrl(String)
     // nmp-native:if nip65
-    case nip65IndexerRelaysEmpty
+    case outboxRoutingIndexersEmpty
     case automaticRoutingUnavailable
     // nmp-native:endif
     case invalidTag([String])
@@ -234,7 +234,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .InvalidEventId(let got): self = .invalidEventId(got)
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)
         // nmp-native:if nip65
-        case .Nip65IndexerRelaysEmpty: self = .nip65IndexerRelaysEmpty
+        case .OutboxRoutingIndexersEmpty: self = .outboxRoutingIndexersEmpty
         case .AutomaticRoutingUnavailable: self = .automaticRoutingUnavailable
         // nmp-native:endif
         case .InvalidTag(let got): self = .invalidTag(got)
@@ -339,10 +339,10 @@ extension NMPError: LocalizedError {
         case .invalidRelayUrl(let got):
             "Invalid relay URL: \(got.debugDescription)"
         // nmp-native:if nip65
-        case .nip65IndexerRelaysEmpty:
-            "NIP-65 requires at least one app-owned indexer relay"
+        case .outboxRoutingIndexersEmpty:
+            "Outbox routing requires at least one app-owned indexer"
         case .automaticRoutingUnavailable:
-            "Automatic routing is unavailable; construct the engine with NIP-65 indexer relays"
+            "Automatic routing is unavailable; configure outbox routing indexers"
         // nmp-native:endif
         case .invalidTag(let got):
             "Invalid tag: \(String(reflecting: got))"

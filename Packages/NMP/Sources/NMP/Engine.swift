@@ -51,13 +51,13 @@ func rethrowCheckpointFailureAfterRollback(
 }
 
 // nmp-native:if nip65
-/// Runtime inputs for the NIP-65 assembly selected by this app's native
-/// feature manifest. NMP never supplies hidden indexer relays.
-public struct NIP65Config: Sendable {
-    public var indexerRelays: [String]
+/// Runtime inputs for outbox routing selected by this app. NMP never supplies
+/// hidden indexers.
+public struct OutboxRoutingConfig: Sendable {
+    public var indexers: [String]
 
-    public init(indexerRelays: [String]) {
-        self.indexerRelays = indexerRelays
+    public init(indexers: [String]) {
+        self.indexers = indexers
     }
 }
 // nmp-native:endif
@@ -76,10 +76,10 @@ public struct NMPConfig: Sendable {
     /// Default empty.
     public var fallbackRelays: [String]
     // nmp-native:if nip65
-    /// Optional runtime NIP-65 assembly. `nil` constructs an
-    /// explicit-routing-only engine. A configured assembly must name at least
-    /// one app-owned indexer relay or construction throws.
-    public var nip65: NIP65Config?
+    /// Optional outbox routing. `nil` constructs an explicit-routing-only
+    /// engine. A configured capability must name at least one app-owned
+    /// indexer or construction throws.
+    public var outboxRouting: OutboxRoutingConfig?
     // nmp-native:endif
     /// Local/private relay HOSTS to re-admit from OTHER PEOPLE's data. A
     /// loopback / RFC-1918 / link-local relay named by someone else's relay
@@ -119,7 +119,7 @@ public struct NMPConfig: Sendable {
         appRelays: [String] = [],
         fallbackRelays: [String] = [],
         // nmp-native:if nip65
-        nip65: NIP65Config? = nil,
+        outboxRouting: OutboxRoutingConfig? = nil,
         // nmp-native:endif
         allowedLocalRelayHosts: [String] = [],
         torReachable: Bool = false,
@@ -130,7 +130,7 @@ public struct NMPConfig: Sendable {
         self.appRelays = appRelays
         self.fallbackRelays = fallbackRelays
         // nmp-native:if nip65
-        self.nip65 = nip65
+        self.outboxRouting = outboxRouting
         // nmp-native:endif
         self.allowedLocalRelayHosts = allowedLocalRelayHosts
         self.torReachable = torReachable
@@ -144,7 +144,7 @@ public struct NMPConfig: Sendable {
             appRelays: appRelays,
             fallbackRelays: fallbackRelays,
             // nmp-native:if nip65
-            nip65: nip65.map { FfiNip65Config(indexerRelays: $0.indexerRelays) },
+            outboxRouting: outboxRouting.map { FfiOutboxRoutingConfig(indexers: $0.indexers) },
             // nmp-native:endif
             allowedLocalRelayHosts: allowedLocalRelayHosts,
             torReachable: torReachable,

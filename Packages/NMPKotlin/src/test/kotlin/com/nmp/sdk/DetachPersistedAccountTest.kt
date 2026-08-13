@@ -178,7 +178,7 @@ class DetachPersistedAccountTest {
             val store = NMPInsecureFileAccountStore(checkpoint)
             val config = NMPConfig(
                 storePath = database.toString(),
-                nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example")),
+                outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example")),
             )
             val cachedKind = 30_333.toUShort()
 
