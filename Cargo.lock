@@ -2140,6 +2140,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-event-edit"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nmp-executor"
 version = "0.1.0"
 
@@ -2205,6 +2214,7 @@ name = "nmp-nip02"
 version = "0.1.0"
 dependencies = [
  "nmp",
+ "nmp-event-edit",
  "nmp-grammar",
  "nostr 0.44.4",
  "tempfile",

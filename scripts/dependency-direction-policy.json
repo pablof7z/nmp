@@ -73,6 +73,7 @@
     "exact": {
       "nmp": "facade",
       "nmp-network-policy": "generic-value",
+      "nmp-event-edit": "generic-value",
       "nmp-grammar": "generic-value",
       "nmp-store": "generic-mechanism",
       "nmp-resolver": "generic-mechanism",
