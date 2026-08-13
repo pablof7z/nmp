@@ -1440,8 +1440,6 @@ mod coverage_evidence_refresh_tests {
 
     use nmp_grammar::{Binding, Filter, IndexedTagName};
     use nmp_store::RedbStore;
-    #[cfg(feature = "bench-instrumentation")]
-    use nmp_store::RedbStore;
     use nostr::{Kind, SubscriptionId};
 
     use super::*;
