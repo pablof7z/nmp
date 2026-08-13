@@ -232,13 +232,6 @@ pub(crate) struct PublishQueueReceiptRecord {
     pub(crate) terminal_bytes: Option<u64>,
 }
 
-fn receipt_event_state(record: &PublishQueueReceiptRecord) -> Option<ReceiptState> {
-    match &record.payload {
-        crate::PublishQueueReceiptPayload::Event { state, .. } => Some(*state),
-        crate::PublishQueueReceiptPayload::ReplaceableOperation { .. } => None,
-    }
-}
-
 /// Update `PUBLISH_QUEUE_RECEIPTS[receipt_id]`'s `state` in place. Absence or corrupt
 /// bytes are persistence failures: returning success would let promotion or
 /// cancellation fabricate a terminal fact that was never retained.
