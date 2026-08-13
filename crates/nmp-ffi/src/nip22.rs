@@ -483,8 +483,8 @@ mod tests {
         )
         .unwrap();
         let engine = crate::facade::NmpEngine::new(crate::facade::NmpEngineConfig {
-            nip65: Some(crate::facade::FfiNip65Config {
-                indexer_relays: vec!["wss://indexer.example".to_string()],
+            outbox_routing: Some(crate::facade::FfiOutboxRoutingConfig {
+                indexers: vec!["wss://indexer.example".to_string()],
             }),
             ..crate::facade::NmpEngineConfig::default()
         })

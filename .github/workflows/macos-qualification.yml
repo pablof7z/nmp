@@ -104,3 +104,12 @@ jobs:
       - name: Test the Swift package
         if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
         run: swift test --package-path Packages/NMP
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Test prepared Swift and Kotlin outbox routing
+        if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
+        run: scripts/check-native-outbox-routing-runtime.sh

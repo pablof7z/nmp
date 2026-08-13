@@ -2651,11 +2651,11 @@ enum Enum {
             docstring: None,
         },
         Variant {
-            name: "Nip65IndexerRelaysEmpty",
+            name: "OutboxRoutingIndexersEmpty",
             discr: None,
             fields: [],
             docstring: Some(
-                "A selected NIP-65 runtime assembly named no app-owned indexer relay.\nEngine construction is refused; NMP never installs a hidden default.",
+                "Selected outbox routing named no app-owned indexer. Engine\nconstruction is refused; NMP never installs a hidden default.",
             ),
         },
         Variant {
@@ -7315,12 +7315,12 @@ record Record {
 }
 
 record Record {
-    name: "FfiNip65Config",
+    name: "FfiOutboxRoutingConfig",
     module_path: "nmp_ffi",
     remote: false,
     fields: [
         Field {
-            name: "indexer_relays",
+            name: "indexers",
             type_: Sequence {
                 inner_type: String,
             },
@@ -7331,7 +7331,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "App-owned runtime inputs for the selected NIP-65 assembly. These values do\nnot participate in the native artifact's feature or cache identity.",
+        "App-owned runtime inputs for outbox routing. These values do not\nparticipate in the native artifact's feature or cache identity.",
     ),
 }
 
@@ -8542,18 +8542,18 @@ record Record {
             ),
         },
         Field {
-            name: "nip65",
+            name: "outbox_routing",
             type_: Optional {
                 inner_type: Record {
                     module_path: "nmp_ffi",
-                    name: "FfiNip65Config",
+                    name: "FfiOutboxRoutingConfig",
                 },
             },
             default: Some(
                 None,
             ),
             docstring: Some(
-                "Optional runtime assembly for automatic NIP-65 routing. This field\nexists only in a native build that selected the `nip65` app feature.\n`None` constructs an explicit-routing-only engine; `Some` must name at\nleast one app-owned indexer relay or construction is refused.",
+                "Optional runtime assembly for outbox routing. This field exists only\nin a native build that selected the `outbox routing` capability.\n`None` constructs an explicit-routing-only engine; `Some` must name at\nleast one app-owned indexer relay or construction is refused.",
             ),
         },
         Field {

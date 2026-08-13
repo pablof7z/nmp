@@ -1,0 +1,4 @@
+schema = 1
+capabilities = ["nip65"]
+products = ["apple", "kotlin-jvm"]
+apple_targets = ["aarch64-apple-darwin"]

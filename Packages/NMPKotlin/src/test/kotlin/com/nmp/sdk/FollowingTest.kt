@@ -85,5 +85,5 @@ class FollowingTest {
     }
 
     private fun config(): NMPConfig =
-        NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example")))
+        NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example")))
 }

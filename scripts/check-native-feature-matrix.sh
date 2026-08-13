@@ -35,13 +35,13 @@ done
 echo "native-feature-matrix: checking all features"
 cargo check --locked -p nmp-ffi --all-features
 
-# The app-facing runtime contract belongs to the selected NIP-65 build, so its
+# The app-facing runtime contract belongs to the selected outbox-routing build, so its
 # proofs run with that exact optional surface rather than pretending a
 # feature-disabled default-build test is executable behavioral evidence.
 for proof in \
-  facade::tests::selected_nip65_refuses_an_empty_runtime_indexer_set \
+  facade::tests::selected_outbox_routing_refuses_an_empty_runtime_indexer_set \
   facade::tests::providerless_auto_refuses_before_acceptance_and_leaves_no_residue \
-  facade::tests::selected_nip65_native_engine_discovers_and_publishes_to_the_cold_outbox
+  facade::tests::selected_outbox_routing_discovers_and_publishes_to_the_cold_outbox
 do
   echo "native-feature-matrix: running $proof"
   cargo test --locked -p nmp-ffi --no-default-features --features nip65 \

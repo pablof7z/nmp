@@ -9,15 +9,15 @@ import kotlinx.coroutines.flow.Flow
 import uniffi.nmp_ffi.NmpEngine
 import uniffi.nmp_ffi.NmpEngineConfig
 // nmp-native:if nip65
-import uniffi.nmp_ffi.FfiNip65Config
+import uniffi.nmp_ffi.FfiOutboxRoutingConfig
 // nmp-native:endif
 import uniffi.nmp_ffi.generateAccountSecretKey as ffiGenerateAccountSecretKey
 import uniffi.nmp_ffi.resetPersistentStore as ffiResetPersistentStore
 
 // nmp-native:if nip65
-/** Runtime inputs for the NIP-65 assembly selected by this app's native
- * feature manifest. NMP never supplies hidden indexer relays. */
-data class NIP65Config(val indexerRelays: List<String>)
+/** Runtime inputs for outbox routing selected by this app. NMP never supplies
+ * hidden indexers. */
+data class OutboxRoutingConfig(val indexers: List<String>)
 // nmp-native:endif
 
 /** Construction config for `NMPEngine`. Build-time feature selection controls
@@ -34,10 +34,10 @@ data class NMPConfig(
      * Default empty. */
     val fallbackRelays: List<String> = emptyList(),
     // nmp-native:if nip65
-    /** Optional runtime NIP-65 assembly. `null` constructs an
-     * explicit-routing-only engine. A configured assembly must name at least
-     * one app-owned indexer relay or construction throws. */
-    val nip65: NIP65Config? = null,
+    /** Optional outbox routing. `null` constructs an explicit-routing-only
+     * engine. A configured capability must name at least one app-owned
+     * indexer or construction throws. */
+    val outboxRouting: OutboxRoutingConfig? = null,
     // nmp-native:endif
     /** Local/private relay HOSTS to re-admit from OTHER PEOPLE's data. A
      * loopback / RFC-1918 / link-local relay named by someone else's relay
@@ -76,7 +76,7 @@ data class NMPConfig(
             appRelays = appRelays,
             fallbackRelays = fallbackRelays,
             // nmp-native:if nip65
-            nip65 = nip65?.let { FfiNip65Config(it.indexerRelays) },
+            outboxRouting = outboxRouting?.let { FfiOutboxRoutingConfig(it.indexers) },
             // nmp-native:endif
             allowedLocalRelayHosts = allowedLocalRelayHosts,
             torReachable = torReachable,
