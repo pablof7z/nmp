@@ -30,7 +30,7 @@ android {
         buildConfigField(
             "boolean",
             "NMP_EXPECT_NATIVE_LOAD",
-            (providers.gradleProperty("nmpMissingRuntimeAar").orNull == null).toString(),
+            providers.gradleProperty("nmpExpectNativeLoad").orNull ?: "true",
         )
     }
 
@@ -52,15 +52,10 @@ kotlin {
 }
 
 dependencies {
-    val missingRuntimeAar = providers.gradleProperty("nmpMissingRuntimeAar").orNull
-    if (missingRuntimeAar == null) {
-        implementation("com.nmp:nmp-android:0.0.0")
-    } else {
-        implementation(files(missingRuntimeAar))
-        implementation("net.java.dev.jna:jna:5.14.0@aar")
-        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
-        implementation("androidx.annotation:annotation:1.9.1")
-    }
+    implementation(
+        providers.gradleProperty("nmpQualificationCoordinate").orNull
+            ?: "com.nmp:nmp-android:0.0.0",
+    )
 
     androidTestImplementation("androidx.test:core-ktx:1.6.1")
     androidTestImplementation("androidx.test:runner:1.6.2")

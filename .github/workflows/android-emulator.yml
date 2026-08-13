@@ -44,13 +44,14 @@ jobs:
           rustup target add aarch64-linux-android x86_64-linux-android
           cargo install cargo-ndk --version 4.1.2 --locked
 
-      - name: Build exact selected AAR and controlled relay
+      - name: Install the NMP CLI and build the exact core-only AAR
         run: |
-          scripts/nmp-native prepare \
-            --manifest native/examples/normal-client.toml \
-            --platform android \
+          cargo install --locked --path crates/nmp-cli
+          nmp --manifest fixtures/android-aar-consumer/.nmp.toml prepare \
             --output "$NMP_ANDROID_RUNTIME_OUTPUT" \
             --cache-dir "$NMP_ANDROID_RUNTIME_CACHE"
+          nmp --manifest fixtures/android-aar-consumer/.nmp.toml verify \
+            --output "$NMP_ANDROID_RUNTIME_OUTPUT"
           scripts/verify-android-aar.py verify \
             --repo "$GITHUB_WORKSPACE" \
             --output "$NMP_ANDROID_RUNTIME_OUTPUT"

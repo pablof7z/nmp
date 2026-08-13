@@ -1,4 +1,4 @@
-Feature: A feature-selected Android artifact runs as an ordinary application
+Feature: A core-only Android product runs as an ordinary application
 
   The Android package is useful only if a clean external app can load it,
   observe real Nostr data through the supported facade, survive a process
@@ -12,7 +12,8 @@ Feature: A feature-selected Android artifact runs as an ordinary application
     # nmp:evidence=rust:nmp-test-support::matching_req_receives_valid_event_eose_and_close
     # nmp:falsifier=Remove the emulator ABI library or bypass com.nmp.sdk; construction or the facade boundary gate must fail before any runtime-success claim.
     Scenario: A clean Android app observes and withdraws controlled relay data
-      Given a feature-selected AAR consumed from its generated Maven repository
+      Given a core-only product prepared from the app's committed .nmp.toml
+      And its AAR is consumed only from the generated Maven repository
       And a controlled host relay reachable through the emulator host alias
       When an ordinary Activity opens a pinned live observation through com.nmp.sdk
       Then the app receives the relay's valid signed event and scoped evidence

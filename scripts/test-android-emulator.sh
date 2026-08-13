@@ -8,12 +8,14 @@ script_dir=${script_path%/*}
 [[ $script_dir != "$script_path" ]] || script_dir=.
 # shellcheck disable=SC1091
 source "$script_dir/lib/require-commands.sh" || exit 2
-require_commands adb cp git grep head mkdir mkfifo mktemp sed timeout unzip zip || exit 2
+require_commands adb awk cp find git grep head mkdir mkfifo mktemp sed shasum timeout tr unzip zip || exit 2
 
 repo_root=$(git rev-parse --show-toplevel)
 runtime_output=${NMP_ANDROID_RUNTIME_OUTPUT:?NMP_ANDROID_RUNTIME_OUTPUT must name #831 output}
 aar="$runtime_output/android/artifacts/nmp-android-0.0.0.aar"
 repository="$runtime_output/android/repository"
+active_repository="$repository"
+provenance="$runtime_output/nmp-native-provenance.json"
 relay_bin="$repo_root/target/release/android_controlled_relay"
 gradle="$repo_root/Packages/NMPKotlin/gradlew"
 artifacts="$repo_root/artifacts/android-emulator"
@@ -31,6 +33,7 @@ offline_url="ws://10.0.2.2:$offline_port"
 relay_pids=()
 started_relay_pid=
 
+rm -rf "$artifacts"
 mkdir -p "$artifacts"
 cp -R "$repo_root/fixtures/android-aar-consumer" "$consumer"
 
@@ -52,11 +55,12 @@ capture_evidence() {
 trap capture_evidence EXIT
 
 [[ -f "$aar" ]] || { echo "error: runtime AAR missing: $aar" >&2; exit 1; }
+[[ -f "$provenance" ]] || { echo "error: prepared-product provenance missing: $provenance" >&2; exit 1; }
 [[ -x "$relay_bin" ]] || { echo "error: controlled relay missing: $relay_bin" >&2; exit 1; }
 
 if git -C "$repo_root" grep -n -E \
-    'uniffi\.nmp_ffi|System\.load|Native\.load|repository-relative' -- \
-    fixtures/android-aar-consumer/app/src/main; then
+    'uniffi\.|System\.(load|loadLibrary)|Native\.load|implementation\((files|project)|api\(project' -- \
+    fixtures/android-aar-consumer/app/src fixtures/android-aar-consumer/app/build.gradle.kts; then
     echo "error: Android runtime consumer bypasses com.nmp.sdk" >&2
     exit 1
 fi
@@ -75,6 +79,8 @@ fi
 } > "$artifacts/runtime-context.txt"
 unzip -l "$aar" > "$artifacts/aar-inventory.txt"
 shasum -a 256 "$aar" > "$artifacts/aar-sha256.txt"
+cp "$repo_root/fixtures/android-aar-consumer/.nmp.toml" "$artifacts/core-product.nmp.toml"
+cp "$provenance" "$artifacts/nmp-native-provenance.json"
 
 start_relay() {
     local name=$1
@@ -114,7 +120,7 @@ assemble_consumer() {
         --no-daemon \
         --console=plain \
         -p "$consumer" \
-        -PnmpAndroidRepository="$repository" \
+        -PnmpAndroidRepository="$active_repository" \
         -PnmpQualificationRelay="$success_url" \
         -PnmpQualificationRecoveryRelay="$recovery_url" \
         -PnmpQualificationOfflineRelay="$offline_url" \
@@ -133,11 +139,31 @@ success_relay_pid=$started_relay_pid
 start_relay recovery "$recovery_port" 2
 
 assemble_consumer :app:clean :app:assembleDebug :app:assembleDebugAndroidTest
+assemble_consumer :app:dependencies --configuration debugRuntimeClasspath \
+    > "$artifacts/resolved-dependencies.txt"
+grep -q 'com.nmp:nmp-android:0.0.0' "$artifacts/resolved-dependencies.txt"
 install_consumer
-cp "$consumer/app/build/outputs/apk/debug/app-debug.apk" \
+app_apk="$consumer/app/build/outputs/apk/debug/app-debug.apk"
+test_apk="$consumer/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+cp "$app_apk" \
     "$artifacts/nmp-runtime-qualification-debug.apk"
-cp "$consumer/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" \
+cp "$test_apk" \
     "$artifacts/nmp-runtime-qualification-androidTest.apk"
+aar_native_sha=$(unzip -p "$aar" jni/x86_64/libnmp_ffi.so | shasum -a 256 | awk '{print $1}')
+apk_native_sha=$(unzip -p "$app_apk" lib/x86_64/libnmp_ffi.so | shasum -a 256 | awk '{print $1}')
+[[ -n "$aar_native_sha" && "$aar_native_sha" == "$apk_native_sha" ]] || {
+    echo "error: APK native payload does not match the prepared core AAR" >&2
+    exit 1
+}
+{
+    echo "manifest_sha256=$(shasum -a 256 "$repo_root/fixtures/android-aar-consumer/.nmp.toml" | awk '{print $1}')"
+    echo "prepared_provenance_sha256=$(shasum -a 256 "$provenance" | awk '{print $1}')"
+    echo "aar_sha256=$(shasum -a 256 "$aar" | awk '{print $1}')"
+    echo "aar_x86_64_native_sha256=$aar_native_sha"
+    echo "apk_sha256=$(shasum -a 256 "$app_apk" | awk '{print $1}')"
+    echo "apk_x86_64_native_sha256=$apk_native_sha"
+    echo "android_test_apk_sha256=$(shasum -a 256 "$test_apk" | awk '{print $1}')"
+} > "$artifacts/exact-product-provenance.txt"
 adb logcat -c
 adb shell pm clear "$package" >/dev/null
 
@@ -179,13 +205,25 @@ reopen_pid=$(sed -n 's/.*NMP_ANDROID_REOPENED pid=\([0-9][0-9]*\).*/\1/p' \
     exit 1
 }
 
-missing_abi_aar="$artifacts/nmp-android-missing-x86_64.aar"
-cp "$aar" "$missing_abi_aar"
+missing_version=0.0.0-missing-x86_64
+missing_repository="$scratch/missing-abi-repository"
+source_version_dir="$repository/com/nmp/nmp-android/0.0.0"
+missing_version_dir="$missing_repository/com/nmp/nmp-android/$missing_version"
+missing_abi_aar="$missing_version_dir/nmp-android-$missing_version.aar"
+missing_abi_pom="$missing_version_dir/nmp-android-$missing_version.pom"
+mkdir -p "$missing_version_dir"
+cp "$source_version_dir/nmp-android-0.0.0.aar" "$missing_abi_aar"
+sed "s/0\\.0\\.0/$missing_version/g" \
+    "$source_version_dir/nmp-android-0.0.0.pom" > "$missing_abi_pom"
 zip -dq "$missing_abi_aar" 'jni/x86_64/libnmp_ffi.so'
 unzip -l "$missing_abi_aar" > "$artifacts/missing-abi-aar-inventory.txt"
+shasum -a 256 "$missing_abi_aar" > "$artifacts/missing-abi-aar-sha256.txt"
+cp "$missing_abi_pom" "$artifacts/missing-abi-pom.xml"
 adb uninstall "$package" >/dev/null || true
+active_repository="$missing_repository"
 assemble_consumer \
-    -PnmpMissingRuntimeAar="$missing_abi_aar" \
+    -PnmpQualificationCoordinate="com.nmp:nmp-android:$missing_version" \
+    -PnmpExpectNativeLoad=false \
     :app:clean :app:assembleDebug :app:assembleDebugAndroidTest
 install_consumer
 run_test missingEmulatorAbiFailsAtNativeConstruction "$artifacts/missing-abi.txt"
