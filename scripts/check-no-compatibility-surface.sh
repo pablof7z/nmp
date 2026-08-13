@@ -10,10 +10,10 @@
 # Deliberately NOT checked, because the check would be mostly false positives
 # and an allowlist is the same maintenance trap as a shim:
 #
-#   *_vN        storage table identifiers (events_v6, postings_meta_v8).
-#               These name the ONE current epoch's tables; they are not a set
-#               of readable epochs. SCHEMA_VERSION refuses any store that is
-#               not exactly current, and no pre-current decoder exists.
+#   *_vN        not a compatibility surface by itself. Production durable
+#               tables are unsuffixed; SCHEMA_VERSION is the one epoch
+#               authority. Remaining *_vN spellings are foreign layouts
+#               (nostrdb), protocol names, or measurement baselines.
 #   *_old       English in local names ("older before newer"), not a surface.
 #   legacy*     one-way import of FOREIGN material. The rule bans
 #               compatibility with OUR OWN retired surface; it does not ban

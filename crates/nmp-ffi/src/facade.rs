@@ -2063,8 +2063,9 @@ mod tests {
     /// variant. An app on this side decides whether to delete a store; it
     /// cannot make that call from `StoreOpenFailed`'s prose.
     ///
-    /// The fixture is the real shape — a marker at the address a superseded
-    /// epoch owned, unreadable to this build, so `found` is `None`.
+    /// The fixture is a nonempty store whose marker this build cannot read,
+    /// so `found` is `None`. The table is one this schema never writes.
+    /// Retired table names are not recorded here.
     #[test]
     fn ffi_superseded_epoch_store_is_its_own_refusal_and_damaged_bytes_are_not() {
         use redb::{Database, TableDefinition};
@@ -2075,12 +2076,11 @@ mod tests {
         {
             let database = Database::create(&superseded).expect("epoch fixture must create");
             let write = database.begin_write().expect("epoch fixture must begin");
-            {
-                let mut marker = write
-                    .open_table(TableDefinition::<&str, u64>::new("schema_meta_v6"))
-                    .expect("epoch fixture must open its retired marker table");
-                marker.insert("version", 10u64).expect("marker must insert");
-            }
+            write
+                .open_table(TableDefinition::<u64, &[u8]>::new(
+                    "a-table-this-schema-never-writes",
+                ))
+                .expect("epoch fixture must open a table this schema never writes");
             write.commit().expect("epoch fixture must commit");
         }
         let refusal = NmpEngine::new(
