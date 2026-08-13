@@ -22,7 +22,6 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::RelayAdmissionPolicy;
 use nmp::mechanism::publish_queue::{PublishQueueEntry, SigningState, WriteFact};
 use nmp::mechanism::runtime::{
     EngineThread, FifoReceiver, FifoRecvTimeoutError, ReceiptReattachment,
@@ -123,7 +122,6 @@ fn a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer()
         FixtureRoutingFacts::new(),
         10,
         Default::default(),
-        RelayAdmissionPolicy::default(),
     )
     .expect("test engine thread construction");
 

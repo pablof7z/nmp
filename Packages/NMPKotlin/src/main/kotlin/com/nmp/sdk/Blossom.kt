@@ -253,9 +253,6 @@ sealed class BlossomUploadError(message: String) : Exception(message) {
                 "uploading blob $expectedSha256Hex",
         )
 
-    data class LocalHostNotAdmitted(val host: String) :
-        BlossomUploadError("refusing Blossom upload: host $host is local and not opted-in")
-
     data class Network(val detail: String) :
         BlossomUploadError("Blossom upload transport failed: $detail")
 
@@ -298,7 +295,6 @@ sealed class BlossomUploadError(message: String) : Exception(message) {
                         BlossomVerb.from(ffi.authorizedVerb),
                         ffi.authorizedBlobSha256Hex,
                     )
-                is FfiBlossomUploadException.LocalHostNotAdmitted -> LocalHostNotAdmitted(ffi.host)
                 is FfiBlossomUploadException.Network -> Network(ffi.detail)
                 is FfiBlossomUploadException.RedirectRefused -> RedirectRefused(ffi.status)
                 is FfiBlossomUploadException.AuthRejected -> AuthRejected(ffi.status, ffi.reason)
@@ -339,9 +335,6 @@ sealed class BlossomMirrorError(message: String) : Exception(message) {
             "authorization ($authorizedVerb, blob $authorizedBlobSha256Hex) does not grant " +
                 "mirroring blob $expectedSha256Hex",
         )
-
-    data class LocalHostNotAdmitted(val host: String) :
-        BlossomMirrorError("refusing Blossom mirror: host $host is local and not opted-in")
 
     data class Network(val detail: String) :
         BlossomMirrorError("Blossom mirror transport failed: $detail")
@@ -398,7 +391,6 @@ sealed class BlossomMirrorError(message: String) : Exception(message) {
                         BlossomVerb.from(ffi.authorizedVerb),
                         ffi.authorizedBlobSha256Hex,
                     )
-                is FfiBlossomMirrorException.LocalHostNotAdmitted -> LocalHostNotAdmitted(ffi.host)
                 is FfiBlossomMirrorException.Network -> Network(ffi.detail)
                 is FfiBlossomMirrorException.RedirectRefused -> RedirectRefused(ffi.status)
                 is FfiBlossomMirrorException.AuthRejected -> AuthRejected(ffi.status, ffi.reason)
@@ -441,9 +433,6 @@ sealed class BlossomDeleteError(message: String) : Exception(message) {
                 "deleting blob $expectedSha256Hex",
         )
 
-    data class LocalHostNotAdmitted(val host: String) :
-        BlossomDeleteError("refusing Blossom delete: host $host is local and not opted-in")
-
     data class Network(val detail: String) :
         BlossomDeleteError("Blossom delete transport failed: $detail")
 
@@ -477,7 +466,6 @@ sealed class BlossomDeleteError(message: String) : Exception(message) {
                         BlossomVerb.from(ffi.authorizedVerb),
                         ffi.authorizedBlobSha256Hex,
                     )
-                is FfiBlossomDeleteException.LocalHostNotAdmitted -> LocalHostNotAdmitted(ffi.host)
                 is FfiBlossomDeleteException.Network -> Network(ffi.detail)
                 is FfiBlossomDeleteException.RedirectRefused -> RedirectRefused(ffi.status)
                 is FfiBlossomDeleteException.AuthRejected -> AuthRejected(ffi.status, ffi.reason)
@@ -510,9 +498,6 @@ sealed class BlossomListError(message: String) : Exception(message) {
 
     data class WrongVerb(val authorizedVerb: BlossomVerb) :
         BlossomListError("authorization verb $authorizedVerb does not grant listing (need `list`)")
-
-    data class LocalHostNotAdmitted(val host: String) :
-        BlossomListError("refusing Blossom list: host $host is local and not opted-in")
 
     data class Network(val detail: String) :
         BlossomListError("Blossom list transport failed: $detail")
@@ -550,7 +535,6 @@ sealed class BlossomListError(message: String) : Exception(message) {
                 is FfiBlossomListException.ClientBuild -> ClientBuild(ffi.reason)
                 is FfiBlossomListException.WrongVerb ->
                     WrongVerb(BlossomVerb.from(ffi.authorizedVerb))
-                is FfiBlossomListException.LocalHostNotAdmitted -> LocalHostNotAdmitted(ffi.host)
                 is FfiBlossomListException.Network -> Network(ffi.detail)
                 is FfiBlossomListException.RedirectRefused -> RedirectRefused(ffi.status)
                 is FfiBlossomListException.AuthRejected -> AuthRejected(ffi.status, ffi.reason)
@@ -741,14 +725,6 @@ class BlossomAuthorization private constructor(internal val ffi: FfiBlossomAutho
 /** `BlossomClient` construction knobs (`FfiBlossomClientConfig` mirror).
  * `null` means the Rust crate's default. */
 data class BlossomClientConfig(
-    /** Operator opt-in local-host allowlist (normalized bare-host form,
-     * lowercase). Empty means NO loopback/private/link-local host may be
-     * dialed. Says nothing about `.onion`, which `torReachable` owns. */
-    val allowedLocalHosts: List<String> = emptyList(),
-    /** Whether this process can reach a Tor hidden service. A Blossom server
-     * URL arrives with no provenance NMP can inspect, so a `.onion` server
-     * needs this declaration; the local-host allowlist grants it nothing. */
-    val torReachable: Boolean = false,
     /** Cap on a single-descriptor response body (upload/mirror). */
     val maxResponseBytes: ULong? = null,
     /** Cap on a `GET /list` response body. */
@@ -758,8 +734,6 @@ data class BlossomClientConfig(
 ) {
     internal fun toFfi(): FfiBlossomClientConfig =
         FfiBlossomClientConfig(
-            allowedLocalHosts = allowedLocalHosts,
-            torReachable = torReachable,
             maxResponseBytes = maxResponseBytes,
             maxListResponseBytes = maxListResponseBytes,
             requestDeadlineSecs = requestDeadlineSeconds,

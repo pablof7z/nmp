@@ -1,9 +1,8 @@
 //! #545 falsifiers for the BUD-02 upload contract: authorization binding,
-//! descriptor integrity, build-time expiration refusal, pre-socket local
-//! host admission, the separated failure taxonomy, and response bounding.
+//! descriptor integrity, build-time expiration refusal, loopback operation,
+//! the separated failure taxonomy, and response bounding.
 //! Each test doc-comment names the invariant it would falsify.
 
-use std::collections::BTreeSet;
 use std::net::TcpListener;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -24,16 +23,8 @@ mod support;
 
 use support::{MockServer, ScriptedResponse};
 
-fn loopback_allowlist() -> BTreeSet<String> {
-    BTreeSet::from(["127.0.0.1".to_string()])
-}
-
 fn loopback_client() -> BlossomClient {
-    BlossomClient::new(BlossomClientConfig {
-        allowed_local_hosts: loopback_allowlist(),
-        ..BlossomClientConfig::default()
-    })
-    .expect("client construction")
+    BlossomClient::new(BlossomClientConfig::default()).expect("client construction")
 }
 
 /// Draft -> sign -> validate, the exact production path an app takes
@@ -369,12 +360,10 @@ fn expired_or_inverted_expiration_is_refused_at_build_time() {
     }
 }
 
-/// Falsifier 4 (#545): with an EMPTY allowlist the upload to 127.0.0.1 is
-/// refused before ANY socket I/O (the mock records ZERO accepted
-/// connections); opting "127.0.0.1" in makes the very same upload succeed
-/// end-to-end against the very same listener.
+/// Falsifier 4 (#1429): a loopback server is an ordinary destination and the
+/// default client reaches it without a policy opt-in.
 #[tokio::test]
-async fn unadmitted_local_host_is_refused_before_any_socket_io() {
+async fn loopback_upload_succeeds_without_opt_in() {
     let blob = b"falsifier-four blob bytes";
     let now = Timestamp::now();
     let keys = Keys::generate();
@@ -383,28 +372,11 @@ async fn unadmitted_local_host_is_refused_before_any_socket_io() {
     let mock = MockServer::serve_one(ok_response(descriptor_json_for(blob)));
     let server = BlossomServerUrl::parse(&mock.base_url).expect("mock server url");
 
-    let default_deny = BlossomClient::new(BlossomClientConfig::default()).expect("client");
-    let err = default_deny
+    BlossomClient::new(BlossomClientConfig::default())
+        .expect("default client")
         .upload(&server, blob, None, &auth)
         .await
-        .expect_err("unadmitted loopback must be refused");
-    assert_eq!(
-        err,
-        UploadError::LocalHostNotAdmitted {
-            host: "127.0.0.1".to_string(),
-        }
-    );
-    assert_eq!(
-        mock.accepted.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "the refusal must happen before any socket I/O"
-    );
-
-    let opted_in = loopback_client();
-    opted_in
-        .upload(&server, blob, None, &auth)
-        .await
-        .expect("opted-in loopback upload succeeds");
+        .expect("loopback upload succeeds without opt-in");
     let requests = mock.join();
     assert_eq!(requests.len(), 1);
 }
@@ -414,7 +386,6 @@ async fn unadmitted_local_host_is_refused_before_any_socket_io() {
 fn taxonomy_slot(error: &UploadError) -> &'static str {
     match error {
         UploadError::AuthorizationBlobMismatch { .. } => "authorization-blob-mismatch",
-        UploadError::LocalHostNotAdmitted { .. } => "local-host-not-admitted",
         UploadError::Network { .. } => "network",
         UploadError::RedirectRefused { .. } => "redirect-refused",
         UploadError::AuthRejected { .. } => "auth-rejected",
@@ -556,7 +527,6 @@ async fn oversized_descriptor_response_is_bounded() {
     let auth = signed_upload_auth(&keys, blob, now);
 
     let client = BlossomClient::new(BlossomClientConfig {
-        allowed_local_hosts: loopback_allowlist(),
         max_response_bytes: 256,
         ..BlossomClientConfig::default()
     })

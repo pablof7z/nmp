@@ -25,7 +25,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::RelayAdmissionPolicy;
 use nmp::mechanism::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp::mechanism::publish_queue::{RelayState, WriteFact};
 use nmp::mechanism::runtime::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
@@ -964,10 +963,6 @@ async fn watermark_cold_start_offline() {
                 reconnect_delay_initial: Some(Duration::from_millis(20)),
                 ..PoolConfig::default()
             },
-            RelayAdmissionPolicy::new(
-                ["127.0.0.1".to_string()],
-                nmp_network_policy::OnionReachability::Unreachable,
-            ),
         )
         .expect("test engine thread construction");
 
@@ -1009,10 +1004,6 @@ async fn watermark_cold_start_offline() {
                 reconnect_delay_initial: Some(Duration::from_secs(3600)),
                 ..PoolConfig::default()
             },
-            RelayAdmissionPolicy::new(
-                ["127.0.0.1".to_string()],
-                nmp_network_policy::OnionReachability::Unreachable,
-            ),
         )
         .expect("test engine thread construction");
 
@@ -1126,10 +1117,6 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
     handle
@@ -1207,10 +1194,6 @@ fn write_ack_per_relay_over_real_relays() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
     let signer_registration = handle
@@ -1357,10 +1340,6 @@ fn auth_policy_denial_keeps_real_relay_work_parked() {
         },
         // #524/#528 resolved-IP admission: the loopback capstone fixture is
         // an explicit operator opt-in, exactly like a real local relay.
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
     let policy_registration = handle
@@ -1415,10 +1394,6 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
         },
         // #524/#528 resolved-IP admission: the loopback capstone fixture is
         // an explicit operator opt-in, exactly like a real local relay.
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
     let signer_registration = handle
@@ -1574,10 +1549,6 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
     let signer_registration = handle

@@ -373,14 +373,6 @@ pub struct DiagnosticsSnapshot {
     pub auth_sessions: Vec<AuthDiagnosticsSnapshot>,
     pub uncovered_author_count: usize,
     pub dropped_merge_rules: Vec<&'static str>,
-    /// Network-derived relay candidates rejected by the engine's SSRF
-    /// admission policy (issue #121) before they could become router
-    /// candidates or neutral route facts. This is a monotonic rejection-
-    /// occurrence tally, not a distinct-host or per-direction count. A
-    /// provider callback rejection counts once before directional projection;
-    /// rejected selector evidence counts once when that exact
-    /// `(selection, evidence)` first becomes current.
-    pub discovered_private_relays_rejected: u64,
     /// Relay session candidates refused by the single whole-demand ceiling,
     /// plus any defense-in-depth dial refusal at the transport boundary.
     pub sessions_rejected_over_cap: u64,
@@ -418,7 +410,6 @@ impl DiagnosticsSnapshot {
             auth_sessions,
             uncovered_author_count,
             dropped_merge_rules,
-            discovered_private_relays_rejected,
             sessions_rejected_over_cap,
             sessions_refused_by_subscription_budget,
             store_degraded,
@@ -437,7 +428,6 @@ impl DiagnosticsSnapshot {
                 .collect(),
             uncovered_author_count,
             dropped_merge_rules,
-            discovered_private_relays_rejected,
             sessions_rejected_over_cap,
             sessions_refused_by_subscription_budget,
             store_degraded,
@@ -558,7 +548,6 @@ mod tests {
             )],
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],
-            discovered_private_relays_rejected: 5,
             sessions_rejected_over_cap: 6,
             sessions_refused_by_subscription_budget: 2,
             store_degraded: Some("read-only".to_string()),
@@ -627,7 +616,6 @@ mod tests {
 
         assert_eq!(facade.uncovered_author_count, 7);
         assert_eq!(facade.dropped_merge_rules, vec!["limit"]);
-        assert_eq!(facade.discovered_private_relays_rejected, 5);
         assert_eq!(facade.sessions_rejected_over_cap, 6);
         assert_eq!(facade.sessions_refused_by_subscription_budget, 2);
         assert_eq!(facade.store_degraded.as_deref(), Some("read-only"));

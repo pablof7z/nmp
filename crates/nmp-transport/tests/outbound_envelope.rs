@@ -24,7 +24,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use nmp_network_policy::{Declarer, DestinationPolicy, OnionReachability};
 use nmp_transport::{Pool, PoolConfig, PoolEvent, WireFrame};
 
 const FRAME_BYTES: usize = 4 * 1024;
@@ -36,10 +35,6 @@ const SEND_ATTEMPTS: usize = 50_000;
 
 fn test_pool_config() -> PoolConfig {
     PoolConfig {
-        destination_policy: std::sync::Arc::new(DestinationPolicy::new(
-            ["127.0.0.1".to_string()],
-            OnionReachability::Unreachable,
-        )),
         command_queue_capacity: 4,
         reconnect_delay_initial: Some(Duration::from_millis(1)),
         reconnect_jitter_max: Some(Duration::ZERO),
@@ -91,9 +86,7 @@ fn a_reconnecting_worker_retains_a_bounded_ordinary_outbound_envelope() {
         .expect("parse relay url");
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
-    let handle = pool
-        .ensure_open(&url, Declarer::Ourselves)
-        .expect("admitted");
+    let handle = pool.ensure_open(&url).expect("admitted");
 
     let accepted = spam_ordinary_frames(&pool, handle, RETAINED_CEILING_BYTES);
     assert!(
@@ -135,9 +128,7 @@ fn a_connected_peer_that_never_reads_cannot_grow_the_process() {
         nostr::RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("parse slow relay url");
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
-    let handle = pool
-        .ensure_open(&url, Declarer::Ourselves)
-        .expect("admitted");
+    let handle = pool.ensure_open(&url).expect("admitted");
 
     let accepted = spam_ordinary_frames(&pool, handle, RETAINED_CEILING_BYTES);
     assert!(accepted >= 1, "at least one frame must be admitted");

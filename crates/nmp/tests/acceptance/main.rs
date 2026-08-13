@@ -105,7 +105,6 @@ async fn cold_public_engine_observes_alices_notes(world: &mut AcceptanceWorld) {
 
     let engine = Engine::new(EngineConfig {
         indexer_relays: vec![indexer_url],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..EngineConfig::default()
     })
     .expect("the public engine starts");

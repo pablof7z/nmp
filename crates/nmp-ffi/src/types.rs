@@ -1009,14 +1009,6 @@ pub struct FfiDiagnosticsSnapshot {
     pub auth_sessions: Vec<FfiAuthDiagnostics>,
     pub uncovered_author_count: u32,
     pub dropped_merge_rules: Vec<String>,
-    /// Network-derived relay candidates rejected by the engine's SSRF
-    /// admission policy (issue #121) before they could become router
-    /// candidates or neutral route facts. This is a monotonic rejection-
-    /// occurrence tally, not a distinct-host or per-direction count. A
-    /// provider callback rejection counts once before directional projection;
-    /// rejected selector evidence counts once when that exact
-    /// `(selection, evidence)` first becomes current.
-    pub discovered_private_relays_rejected: u64,
     /// Session dials the transport pool refused because the configured
     /// `max_relays` ceiling was already reached (issue #121, worker-exhaustion
     /// defense). Always `0` when no cap is configured.

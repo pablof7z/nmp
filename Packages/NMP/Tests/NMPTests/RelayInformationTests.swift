@@ -110,7 +110,7 @@ final class RelayInformationTests: XCTestCase {
             body: #"{"name":"Local","supported_nips":[11,77],"limitation":{"max_limit":500,"auth_required":true}}"#,
             responseDelay: .milliseconds(500)
         )
-        let engine = try NMPEngine(config: NMPConfig(allowedLocalRelayHosts: ["localhost"]))
+        let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
         let request = Task { @MainActor in
@@ -163,7 +163,7 @@ final class RelayInformationTests: XCTestCase {
             gated: true
         )
         defer { server.releaseResponse() }
-        let engine = try NMPEngine(config: NMPConfig(allowedLocalRelayHosts: ["localhost"]))
+        let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
         enum Outcome: Sendable {

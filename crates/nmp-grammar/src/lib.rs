@@ -21,7 +21,6 @@ mod descriptor;
 mod indexed_tag_name;
 mod live_query;
 mod nip19;
-pub mod relay;
 mod selector;
 mod tagging;
 mod text;

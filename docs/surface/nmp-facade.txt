@@ -1508,7 +1508,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for nmp::AuthPolicyRequest
 impl core::panic::unwind_safe::UnwindSafe for nmp::AuthPolicyRequest
 pub struct nmp::DiagnosticsSnapshot
 pub nmp::DiagnosticsSnapshot::auth_sessions: alloc::vec::Vec<nmp::AuthDiagnosticsSnapshot>
-pub nmp::DiagnosticsSnapshot::discovered_private_relays_rejected: u64
 pub nmp::DiagnosticsSnapshot::dropped_merge_rules: alloc::vec::Vec<&'static str>
 pub nmp::DiagnosticsSnapshot::relays: alloc::vec::Vec<nmp::RelayDiagnosticsSnapshot>
 pub nmp::DiagnosticsSnapshot::sessions_refused_by_subscription_budget: u64
@@ -1584,7 +1583,6 @@ impl core::marker::UnsafeUnpin for nmp::Engine
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::Engine
 impl core::panic::unwind_safe::UnwindSafe for nmp::Engine
 pub struct nmp::EngineConfig
-pub nmp::EngineConfig::allowed_local_relay_hosts: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::app_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::fallback_relays: alloc::vec::Vec<alloc::string::String>
 pub nmp::EngineConfig::indexer_relays: alloc::vec::Vec<alloc::string::String>
@@ -1592,7 +1590,6 @@ pub nmp::EngineConfig::max_auth_capabilities: usize
 pub nmp::EngineConfig::max_publish_attempts: u64
 pub nmp::EngineConfig::max_relays: usize
 pub nmp::EngineConfig::store_path: core::option::Option<alloc::string::String>
-pub nmp::EngineConfig::tor_reachable: bool
 impl core::clone::Clone for nmp::EngineConfig
 pub fn nmp::EngineConfig::clone(&self) -> nmp::EngineConfig
 impl core::default::Default for nmp::EngineConfig
@@ -41866,58 +41863,6 @@ reexport nmp::PoolConfig => nmp_transport::pool::PoolConfig
                 }
               },
               "name": "reconnect_jitter_max",
-              "visibility": "public"
-            },
-            {
-              "attrs": [],
-              "inner": {
-                "struct_field": {
-                  "resolved_path": {
-                    "args": {
-                      "angle_bracketed": {
-                        "args": [
-                          {
-                            "type": {
-                              "resolved_path": {
-                                "args": null,
-                                "path": "nmp_network_policy::DestinationPolicy",
-                                "resolved_item": {
-                                  "definition": {
-                                    "attrs": [],
-                                    "inner": {
-                                      "struct": {
-                                        "generics": {
-                                          "params": [],
-                                          "where_predicates": []
-                                        },
-                                        "kind": {
-                                          "plain": {
-                                            "fields": [],
-                                            "has_stripped_fields": true
-                                          }
-                                        }
-                                      }
-                                    },
-                                    "name": "DestinationPolicy",
-                                    "visibility": "public"
-                                  },
-                                  "path": "nmp_network_policy::DestinationPolicy"
-                                }
-                              }
-                            }
-                          }
-                        ],
-                        "constraints": []
-                      }
-                    },
-                    "path": "std::sync::Arc",
-                    "resolved_item": {
-                      "path": "alloc::sync::Arc"
-                    }
-                  }
-                }
-              },
-              "name": "destination_policy",
               "visibility": "public"
             }
           ],

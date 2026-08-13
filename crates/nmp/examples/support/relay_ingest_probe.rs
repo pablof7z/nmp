@@ -12,7 +12,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::{HistoryQuery, RelayAdmissionPolicy, RowDelta};
+use nmp::mechanism::core::{HistoryQuery, RowDelta};
 use nmp::mechanism::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
@@ -723,15 +723,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         ..PoolConfig::default()
     };
     let (engine_thread, handle) = if config.memory_store {
-        EngineThread::spawn(
-            MemoryStore::default(),
-            config.relays,
-            pool_config,
-            RelayAdmissionPolicy::new(
-                ["127.0.0.1".to_string()],
-                nmp_network_policy::OnionReachability::Unreachable,
-            ),
-        )?
+        EngineThread::spawn(MemoryStore::default(), config.relays, pool_config)?
     } else {
         let store = if config.redb_nondurable_diagnostic {
             #[cfg(feature = "bench-instrumentation")]
@@ -745,15 +737,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         } else {
             RedbStore::open(&store_path)?
         };
-        EngineThread::spawn(
-            store,
-            config.relays,
-            pool_config,
-            RelayAdmissionPolicy::new(
-                ["127.0.0.1".to_string()],
-                nmp_network_policy::OnionReachability::Unreachable,
-            ),
-        )?
+        EngineThread::spawn(store, config.relays, pool_config)?
     };
     let live_query = LiveQuery::single(demand);
     let rows = match config.visible_limit {
