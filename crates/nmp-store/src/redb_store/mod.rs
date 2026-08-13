@@ -33,7 +33,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(any(
+    test,
+    feature = "bench-instrumentation",
+    feature = "test-instrumentation"
+))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
