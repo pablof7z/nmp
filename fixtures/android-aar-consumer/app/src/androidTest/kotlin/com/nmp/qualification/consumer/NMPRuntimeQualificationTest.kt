@@ -349,7 +349,7 @@ class NMPRuntimeQualificationTest {
         File(context.noBackupFilesDir, "nmp-runtime-qualification.redb")
 
     private fun assertEngineClosedFromKotlin(engine: NMPEngine) {
-        val failure = runCatching { engine.activeAccount() }.exceptionOrNull()
+        val failure = runCatching { engine.session.current }.exceptionOrNull()
         assertTrue("closed engine still accepted a synchronous verb: $failure", failure is NMPError.EngineClosed)
     }
 

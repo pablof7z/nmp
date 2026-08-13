@@ -2305,7 +2305,7 @@ async fn run_ffi_follow_scenario(
     })
     .expect("FFI follow engine must construct");
     let _account = engine
-        .add_private_key_account(ffi_private_key(&author), true)
+        .add_private_key_account(ffi_private_key(author), true)
         .expect("FFI follow account must register");
 
     let observation = engine
@@ -2405,7 +2405,7 @@ async fn run_ffi_missing_contact_list(
     })
     .expect("FFI missing-list engine must construct");
     let _account = engine
-        .add_private_key_account(ffi_private_key(&author), true)
+        .add_private_key_account(ffi_private_key(author), true)
         .expect("FFI missing-list account must register");
 
     let observation = engine
@@ -2583,7 +2583,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     })
     .expect("FFI engine must construct");
     let _account = engine
-        .add_private_key_account(ffi_private_key(&keys), true)
+        .add_private_key_account(ffi_private_key(keys), true)
         .expect("FFI account must register");
     let pubkey = keys.public_key().to_hex();
 
@@ -2754,7 +2754,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
     })
     .expect("FFI auth-parked engine must construct");
     let _account = engine
-        .add_private_key_account(ffi_private_key(&keys), true)
+        .add_private_key_account(ffi_private_key(keys), true)
         .expect("FFI auth-parked account must register");
     let pubkey = keys.public_key().to_hex();
 
@@ -2865,10 +2865,10 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
     })
     .expect("FFI override engine must construct");
     let _active_account = engine
-        .add_private_key_account(ffi_private_key(&active), true)
+        .add_private_key_account(ffi_private_key(active), true)
         .expect("FFI active account must register");
     let _override_account = engine
-        .add_private_key_account(ffi_private_key(&override_keys), false)
+        .add_private_key_account(ffi_private_key(override_keys), false)
         .expect("FFI override account must register as a secondary");
     let override_pubkey = override_keys.public_key().to_hex();
 
@@ -3921,7 +3921,7 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
     })
     .expect("FFI engine must construct");
     let _account = engine
-        .add_private_key_account(ffi_private_key(&keys), true)
+        .add_private_key_account(ffi_private_key(keys), true)
         .expect("FFI account must register");
     let receipt = engine
         .publish(FfiWriteIntent {

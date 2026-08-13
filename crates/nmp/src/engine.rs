@@ -1154,6 +1154,7 @@ impl Drop for Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::future::Future;
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -1167,6 +1168,26 @@ mod tests {
 
     fn private_key_bytes(keys: &Keys) -> [u8; 32] {
         keys.secret_key().to_secret_bytes()
+    }
+
+    fn receive_added_row(subscription: &Subscription, event_id: EventId) -> crate::Row {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "canonical row {event_id} did not arrive before the deadline"
+            );
+            let frame = subscription
+                .recv_timeout(remaining)
+                .expect("the canonical-row observation stays open");
+            if let Some(row) = frame.deltas.into_iter().find_map(|delta| match delta {
+                crate::RowDelta::Added(row) if row.event.id == event_id => Some(row),
+                _ => None,
+            }) {
+                return row;
+            }
+        }
     }
 
     #[test]
@@ -1352,6 +1373,18 @@ mod tests {
             let account = engine
                 .add_public_key_account(public_key, true)
                 .expect("public-only current account");
+            let query = || {
+                LiveQuery::from_filter(nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+                    authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([
+                        public_key.to_hex()
+                    ]))),
+                    ..nmp_grammar::Filter::default()
+                })
+            };
+            let before_observation = engine
+                .observe(query(), None)
+                .expect("author-and-kind-scoped observation opens");
             let receipt = engine
                 .publish(WriteIntent {
                     payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
@@ -1368,7 +1401,19 @@ mod tests {
                     correlation: None,
                 })
                 .expect("write accepted while signer is absent");
+            let receipt_id = receipt.id;
             let frozen_event_id = receipt.event_id;
+            drop(receipt.statuses);
+            let row_before = receive_added_row(&before_observation, frozen_event_id);
+            assert_eq!(row_before.event.id, frozen_event_id);
+            assert_eq!(row_before.event.pubkey, public_key);
+            assert_eq!(row_before.event.kind, Kind::TextNote);
+            assert_eq!(row_before.event.content, "accepted before session mutation");
+            assert_eq!(
+                row_before.signature_state,
+                crate::RowSignatureState::Pending
+            );
+            drop(before_observation);
             let before = engine
                 .publish_queue_for_event(frozen_event_id, None, 1)
                 .unwrap();
@@ -1387,11 +1432,32 @@ mod tests {
 
             assert!(engine.session().unwrap().accounts.is_empty());
             assert_eq!(engine.session().unwrap().current_pubkey, None);
+            let after_observation = engine
+                .observe(query(), None)
+                .expect("fresh author-and-kind-scoped observation opens");
+            let row_after = receive_added_row(&after_observation, frozen_event_id);
+            assert_eq!(row_after.event.id, frozen_event_id);
+            assert_eq!(row_after.event.pubkey, public_key);
+            assert_eq!(row_after.event.kind, Kind::TextNote);
+            assert_eq!(row_after.event.content, "accepted before session mutation");
+            assert_eq!(row_after.signature_state, crate::RowSignatureState::Pending);
+            assert_eq!(
+                row_after.event, row_before.event,
+                "session mutation must preserve the exact canonical event body"
+            );
+            drop(after_observation);
+            let ReceiptReattachment::Attached { id, .. } = engine
+                .reattach_receipt(receipt_id)
+                .expect("reattach receipt")
+            else {
+                panic!("accepted receipt must remain reattachable after session mutation")
+            };
+            assert_eq!(id, receipt_id, "reattachment must retain receipt identity");
             let after = engine
                 .publish_queue_for_event(frozen_event_id, None, 1)
                 .unwrap();
             assert_eq!(after.len(), 1, "accepted receipt remains retained");
-            assert_eq!(after[0].receipt_id, receipt.id);
+            assert_eq!(after[0].receipt_id, receipt_id);
             assert_eq!(after[0].event_id, frozen_event_id);
             assert_eq!(after[0].pubkey, public_key, "frozen author is unchanged");
             assert_eq!(

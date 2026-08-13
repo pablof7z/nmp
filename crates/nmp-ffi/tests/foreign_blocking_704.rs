@@ -231,6 +231,7 @@ async fn blocking_foreign_completion_never_stalls_unrelated_engine_work() {
     );
 
     let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();
+    let author = keys.public_key();
     engine
         .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
         .expect("account activates");
