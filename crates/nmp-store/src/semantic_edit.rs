@@ -929,6 +929,15 @@ pub(crate) fn advance_source_round(
         (SemanticSourceMemberState::Open(existing), None) if existing == request => {
             SemanticSourceRoundOutcome::AlreadyApplied
         }
+        // An open request is process/transport-generation ownership, not a
+        // durable promise that its callback can still arrive. Recovery opens
+        // a fresh router request for the unfinished member and atomically
+        // replaces the old identity; a later settlement carrying `existing`
+        // then falls through to `Stale`.
+        (SemanticSourceMemberState::Open(_), None) => {
+            *current = SemanticSourceMemberState::Open(request);
+            SemanticSourceRoundOutcome::Advanced
+        }
         (SemanticSourceMemberState::Open(existing), Some(terminal)) if existing == request => {
             *current = SemanticSourceMemberState::Settled { request, terminal };
             SemanticSourceRoundOutcome::Advanced

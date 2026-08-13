@@ -1339,8 +1339,16 @@ impl<S: EventStore> EngineCore<S> {
         // ordinary ingest path can make a raw relay source canonical.
         let events = events
             .into_iter()
-            .filter(|(event, observed, _, _)| {
-                !self.install_semantic_source_successor(event.clone(), observed.clone(), effects)
+            .filter(|(event, observed, _, attribution)| {
+                let owned_request = attribution.as_ref().and_then(|(session, wire_sub_id)| {
+                    self.semantic_source_request_for_wire(session, wire_sub_id)
+                });
+                !self.install_semantic_source_successor(
+                    event.clone(),
+                    observed.clone(),
+                    owned_request.as_ref(),
+                    effects,
+                )
             })
             .collect::<Vec<_>>();
         if events.is_empty() {

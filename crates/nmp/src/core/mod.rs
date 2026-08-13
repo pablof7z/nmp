@@ -63,6 +63,7 @@ mod request_effects;
 #[cfg(test)]
 mod request_replacement_transition_tests;
 mod semantic_delivery;
+mod semantic_sources;
 #[cfg(test)]
 mod transport_tests;
 mod write;
@@ -2256,6 +2257,18 @@ pub struct EngineCore<S: EventStore> {
     /// evidence, this survives EOSE because EOSE settles a request without
     /// closing its subscription.
     live_wire_requests: HashMap<(RelaySessionKey, SubId), LiveWireRequest>,
+    /// Hidden ordinary live-query owners for unfinished finite semantic
+    /// source members. The observation id is the exact bridge from router
+    /// request evidence back to the durable source round.
+    semantic_source_observations: HashMap<ObservationId, semantic_sources::SemanticSourceOwner>,
+    /// Only requests whose accepted handoff was observed by a hidden source
+    /// owner enter this index. Inbound EVENT attribution must match this
+    /// exact session/subscription before it may advance a finite resource.
+    semantic_source_requests:
+        HashMap<(RelaySessionKey, SubId), semantic_sources::OwnedSemanticSourceRequest>,
+    /// Observation ids retired while the current reducer turn is still
+    /// draining their synchronous withdrawal effects.
+    semantic_source_retired_observations: BTreeSet<ObservationId>,
     pending_request_claim_transfers:
         BTreeMap<(RelaySessionKey, SubId), PendingRequestClaimTransfer>,
     /// EngineCore's memory of the exact connection generation and SESSION
@@ -2662,6 +2675,9 @@ impl<S: EventStore> EngineCore<S> {
             active_request_evidence: HashMap::new(),
             active_request_revisions_by_sub: HashMap::new(),
             live_wire_requests: HashMap::new(),
+            semantic_source_observations: HashMap::new(),
+            semantic_source_requests: HashMap::new(),
+            semantic_source_retired_observations: BTreeSet::new(),
             pending_request_claim_transfers: BTreeMap::new(),
             slot_to_relay: HashMap::new(),
             connected_relays: BTreeSet::new(),
@@ -3676,6 +3692,12 @@ impl<S: EventStore> EngineCore<S> {
             }
             EngineMsg::Tick(now) => self.tick(now),
         };
+        // Hidden finite-source queries use the exact same resolver/router
+        // effects as an app query, but their rows and request evidence belong
+        // to the write intent. Consume only those private observation effects
+        // here and leave every ordinary observation untouched.
+        effects = self.consume_semantic_source_effects(effects);
+
         // A write-plane transition can start or end a STALL, and the
         // stalled-write section lives on this same snapshot (#756). Without
         // this, that section would only ever be pushed by unrelated

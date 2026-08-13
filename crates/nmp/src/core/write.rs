@@ -714,6 +714,17 @@ impl<S: EventStore> EngineCore<S> {
     /// dropped subscription. That silence is the original defect this
     /// vocabulary exists to remove.
     pub(super) fn close_if_all_lanes_terminal(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
+        if let Some(coordinate) = self
+            .pending
+            .get(&id)
+            .and_then(|pending| match &pending.target {
+                PendingWriteTarget::ReplaceableOperation(target) => Some(target.coordinate.clone()),
+                PendingWriteTarget::Event => None,
+            })
+        {
+            self.try_close_semantic_cohort(&coordinate, effects);
+            return;
+        }
         let Some(intent_id) = self
             .pending
             .get(&id)
@@ -1393,6 +1404,7 @@ impl<S: EventStore> EngineCore<S> {
         };
         let mut recovered_ids = Vec::new();
         let mut recovered_semantic_owners = Vec::new();
+        let mut recovered_semantic_coordinates = Vec::new();
         // This is the one deterministic, from-scratch rebuild of `pending`
         // (and, with it, every index derived from `pending`) -- the exact
         // moment `receipts_by_lane_relay` can be trusted again regardless of
@@ -1426,6 +1438,9 @@ impl<S: EventStore> EngineCore<S> {
                 let Some(generation) = snapshot.current.generation.as_ref() else {
                     continue;
                 };
+                if !recovered_semantic_coordinates.contains(coordinate) {
+                    recovered_semantic_coordinates.push(coordinate.clone());
+                }
                 if generation.materialization != materialization.receipt.materialization {
                     continue;
                 }
@@ -1716,7 +1731,10 @@ impl<S: EventStore> EngineCore<S> {
         let (rows, totals) = self.stalled_write_projection();
         self.cached_stalled_writes = rows;
         self.cached_stalled_write_totals = totals;
-        effects
+        for coordinate in recovered_semantic_coordinates {
+            self.sync_semantic_source_owners(&coordinate, &mut effects);
+        }
+        self.consume_semantic_source_effects(effects)
     }
 
     /// Drive one intent's freshly established lane set back into ordinary
@@ -2440,6 +2458,7 @@ impl<S: EventStore> EngineCore<S> {
         &mut self,
         source: SignedEvent,
         observed: RelayObserved,
+        owned_request: Option<&super::semantic_sources::OwnedSemanticSourceRequest>,
         effects: &mut Vec<Effect>,
     ) -> bool {
         let kind = source.kind.as_u16();
@@ -2476,6 +2495,25 @@ impl<S: EventStore> EngineCore<S> {
             // evidence for that exact generation, not a new semantic base.
             // Let ordinary ingest adopt it and satisfy the existing owners.
             return false;
+        }
+        if let nmp_store::SemanticSourcePolicy::Finite(round) = &snapshot.source_policy {
+            let Some(owned) = owned_request else {
+                // An active finite resource exclusively owns its coordinate.
+                // A matching event from an unrelated query must not replace
+                // the optimistic canonical generation through ordinary
+                // ingest, and it has no authority to become a successor.
+                return true;
+            };
+            let request_is_current = owned.coordinate == coordinate
+                && owned.request.round == round.id
+                && matches!(
+                    round.sources.get(&owned.request.source),
+                    Some(nmp_store::SemanticSourceMemberState::Open(current))
+                        if current == &owned.request
+                );
+            if !request_is_current {
+                return true;
+            }
         }
         let members = snapshot
             .current
@@ -3164,6 +3202,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
         self.apply_committed_mutation(committed, &mut effects);
+        self.sync_semantic_source_owners(&coordinate, &mut effects);
         effects
     }
 
