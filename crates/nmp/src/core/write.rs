@@ -3600,7 +3600,6 @@ impl<S: EventStore> EngineCore<S> {
                     || semantic_owners.get(&pending.frozen.id) == Some(id);
             if pending.signing_pubkey == pk
                 && is_physical_owner
-                && pending.target.accepts_ordinary_signer()
                 && pending.event_id.is_none()
                 && !pending.already_signed
                 && !pending.sign_request_in_flight
