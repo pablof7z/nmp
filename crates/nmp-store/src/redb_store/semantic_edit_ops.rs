@@ -703,6 +703,10 @@ pub(super) fn accept(
             .as_ref()
             .expect("accepted operation remains active")
             .current();
+        let delivery_transition = plan
+            .removed_generation
+            .clone()
+            .zip(plan.next.as_ref().and_then(|next| next.generation.clone()));
         let installed = apply_plan(
             ingest,
             write_txn,
@@ -717,6 +721,9 @@ pub(super) fn accept(
             )),
             plan,
         )?;
+        if let Some((previous, next)) = delivery_transition {
+            install_successor_delivery_lanes(write_txn, &previous, &next)?;
+        }
         let (installed, predecessor) = match installed {
             SemanticInstallOutcome::Stale => {
                 return Ok(AcceptOutcome::ReplaceableOperationRefused(
@@ -808,7 +815,15 @@ pub(super) fn install(
             }
             Err(refusal) => return Ok(SemanticInstallOutcome::Refused(refusal)),
         };
-        apply_plan(ingest, write_txn, coordinate.clone(), None, plan)
+        let delivery_transition = plan
+            .removed_generation
+            .clone()
+            .zip(plan.next.as_ref().and_then(|next| next.generation.clone()));
+        let outcome = apply_plan(ingest, write_txn, coordinate.clone(), None, plan)?;
+        if let Some((previous, next)) = delivery_transition {
+            install_successor_delivery_lanes(write_txn, &previous, &next)?;
+        }
+        Ok(outcome)
     })?;
     if matches!(
         outcome,

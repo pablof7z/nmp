@@ -1380,6 +1380,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
         let mut recovered_ids = Vec::new();
+        let mut recovered_semantic_owners = Vec::new();
         // This is the one deterministic, from-scratch rebuild of `pending`
         // (and, with it, every index derived from `pending`) -- the exact
         // moment `receipts_by_lane_relay` can be trusted again regardless of
@@ -1428,6 +1429,8 @@ impl<S: EventStore> EngineCore<S> {
                 let Some(row) = row else { continue };
                 let parsed_routing = Self::parse_routing_snapshot(&materialization.routing);
                 let id = ReceiptId(intent.receipt_id);
+                let already_signed = materialization.receipt.sig_state == IntentSigState::Signed;
+                let is_owner = generation.members.first() == Some(&intent.intent_id);
                 self.pending.insert(
                     id,
                     PendingWrite {
@@ -1450,10 +1453,10 @@ impl<S: EventStore> EngineCore<S> {
                         accepted_at: intent.accepted_at,
                         signing_pubkey: intent.expected_pubkey,
                         frozen: row.event.clone(),
-                        already_signed: false,
+                        already_signed,
                         sign_request_in_flight: false,
                         sign_generation: 0,
-                        event_id: None,
+                        event_id: already_signed.then_some(row.event.id),
                         pending_relays: BTreeSet::new(),
                         unstarted_relays: BTreeSet::new(),
                         route_blocked_relays: BTreeSet::new(),
@@ -1471,6 +1474,10 @@ impl<S: EventStore> EngineCore<S> {
                     .entry(generation.materialization.event_id)
                     .or_default()
                     .insert(id);
+                recovered_ids.push(id);
+                if is_owner {
+                    recovered_semantic_owners.push((id, intent.intent_id, already_signed));
+                }
                 continue;
             }
             let Some((frozen, _, routing_snapshot, sig_state)) = intent.event_work() else {
@@ -1644,6 +1651,41 @@ impl<S: EventStore> EngineCore<S> {
                     }
                 };
             self.open_bootstrapped_lanes(id, intent.expected_pubkey, lanes, &mut effects);
+        }
+
+        for (id, intent_id, already_signed) in recovered_semantic_owners {
+            if already_signed {
+                let revisions = match self.resolver.store().recover_route_revisions(intent_id) {
+                    Ok(revisions) => revisions,
+                    Err(error) => {
+                        self.record_store_failure(&error);
+                        self.schedule_lane_bootstrap_retry(intent_id, None);
+                        continue;
+                    }
+                };
+                let durable_relays = revisions
+                    .iter()
+                    .flat_map(|revision| revision.relays.iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                let signing_pubkey = self.pending[&id].signing_pubkey;
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    pending.durable_routes = durable_relays.clone();
+                }
+                match self.bootstrap_projected_lanes(intent_id, Some(&durable_relays)) {
+                    Ok(lanes) => {
+                        self.open_bootstrapped_lanes(id, signing_pubkey, lanes, &mut effects)
+                    }
+                    Err(error) => self.record_store_failure(&error),
+                }
+            } else if let Some(pending) = self.pending.get_mut(&id) {
+                pending.sign_request_in_flight = true;
+                pending.sign_generation = pending.sign_generation.saturating_add(1);
+                effects.push(Effect::RequestSign(
+                    id,
+                    pending.sign_generation,
+                    unsigned_from_frozen(&pending.frozen),
+                ));
+            }
         }
 
         self.retry_scheduler_blocked = false;
@@ -2975,6 +3017,19 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 previous.frozen = frozen.clone();
                 previous.target = parked_target.clone();
+                previous.already_signed = false;
+                previous.sign_request_in_flight = false;
+                previous.sign_generation = previous.sign_generation.saturating_add(1);
+                previous.event_id = None;
+                previous.pending_relays.clear();
+                previous.unstarted_relays.clear();
+                previous.route_blocked_relays.clear();
+                previous.attempt_ordinals.clear();
+                previous.lane_projection = LaneWorkerProjection::default();
+                previous.durable_routes.clear();
+                previous.route_complete = false;
+                previous.destinations_reported = false;
+                previous.route_needs.clear();
             } else {
                 self.pending.insert(
                     member_receipt,
@@ -4805,6 +4860,25 @@ impl<S: EventStore> EngineCore<S> {
         // yet, an unreadable routing snapshot is never resolved at all, and a
         // retired route can never change its answer again.
         if !pending.routing_valid || pending.event_id.is_none() || pending.route_complete {
+            return;
+        }
+        if matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
+            && self
+                .event_to_receipts
+                .get(&pending.frozen.id)
+                .and_then(|receipts| {
+                    receipts
+                        .iter()
+                        .filter_map(|receipt| {
+                            self.pending
+                                .get(receipt)
+                                .map(|candidate| (candidate.intent_id, *receipt))
+                        })
+                        .min_by_key(|(intent, _)| *intent)
+                        .map(|(_, receipt)| receipt)
+                })
+                != Some(id)
+        {
             return;
         }
         let intent_id = pending.intent_id;
