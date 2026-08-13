@@ -45,7 +45,7 @@ fn event_intent_work(
             displaced,
             routing,
             sig_state,
-        } => (frozen, displaced.as_ref(), routing, *sig_state),
+        } => (frozen, displaced.as_deref(), routing, *sig_state),
         PublishQueueWork::ReplaceableOperation { .. } => panic!("expected ordinary event work"),
     }
 }
@@ -123,7 +123,7 @@ fn frozen_from_signed(signed: &Event) -> Event {
 fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         payload: AcceptWritePayload::Event {
-            frozen,
+            frozen: Box::new(frozen),
             replaceable_base: None,
             monotonic_stamp: false,
             routing: "auto".to_string(),

@@ -119,22 +119,6 @@ pub struct RedbStore {
     /// durability barriers at all.
     #[cfg(test)]
     pub(super) unstaged_lane_bootstraps: AtomicU64,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) semantic_coordinate_point_reads: AtomicU64,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) semantic_operation_bodies_examined: AtomicU64,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) semantic_operation_bodies_written: AtomicU64,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) semantic_operation_bodies_removed: AtomicU64,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) semantic_materializations_written: AtomicU64,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) semantic_materializations_removed: AtomicU64,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) semantic_commits: AtomicU64,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) semantic_recovery_rows: AtomicU64,
 }
 
 #[derive(Default)]

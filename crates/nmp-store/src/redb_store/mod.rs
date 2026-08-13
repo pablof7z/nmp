@@ -284,21 +284,24 @@ impl EventStore for RedbStore {
             crate::PromotionTarget::Event(intent_id) => {
                 write_ops::promote_signed(self, intent_id, verified)
             }
-            crate::PromotionTarget::ReplaceableMaterialization {
-                coordinate,
-                expected_source_revision,
-                expected_program_digest,
-                expected_materialization,
-                expected_event_id,
-            } => semantic_edit_ops::promote(
-                self,
-                coordinate,
-                expected_source_revision,
-                expected_program_digest,
-                expected_materialization,
-                expected_event_id,
-                verified,
-            ),
+            crate::PromotionTarget::ReplaceableMaterialization(target) => {
+                let crate::ReplaceableMaterializationTarget {
+                    coordinate,
+                    expected_source_revision,
+                    expected_program_digest,
+                    expected_materialization,
+                    expected_event_id,
+                } = *target;
+                semantic_edit_ops::promote(
+                    self,
+                    coordinate,
+                    expected_source_revision,
+                    expected_program_digest,
+                    expected_materialization,
+                    expected_event_id,
+                    verified,
+                )
+            }
         }
     }
 

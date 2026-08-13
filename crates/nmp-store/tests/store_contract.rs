@@ -1902,7 +1902,7 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
         let accepted = store
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
-                    frozen: frozen_pending,
+                    frozen: Box::new(frozen_pending),
                     replaceable_base: None,
                     monotonic_stamp: false,
                     routing: "coverage-proof".into(),
@@ -2080,7 +2080,7 @@ fn a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_b
         store
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
-                    frozen,
+                    frozen: Box::new(frozen),
                     replaceable_base: None,
                     monotonic_stamp: false,
                     routing: "optimistic-1182".into(),

@@ -1120,7 +1120,9 @@ impl<S: EventStore> Engine<S> {
             // race), and a `Refused` intent never entered the store at all.
             AcceptOutcome::Duplicate { .. }
             | AcceptOutcome::Stale { .. }
-            | AcceptOutcome::Refused(_) => {}
+            | AcceptOutcome::Refused(_)
+            | AcceptOutcome::ReplaceableOperationRefused(_)
+            | AcceptOutcome::ReplaceableOperation { .. } => {}
         }
         let inserted_events: Vec<_> = inserted_rows.iter().map(|row| row.event.clone()).collect();
         let changed_events: Vec<_> = inserted_events

@@ -281,11 +281,11 @@ pub(super) fn accept_write(
             signing_identity_ref,
             accepted_at,
             correlation,
-            operation,
+            *operation,
         );
     }
     let crate::AcceptWritePayload::Event {
-        mut frozen,
+        frozen,
         replaceable_base,
         monotonic_stamp,
         routing,
@@ -294,6 +294,7 @@ pub(super) fn accept_write(
     else {
         unreachable!("replaceable operation returned above")
     };
+    let mut frozen = *frozen;
     // Overridden inside the `Duplicate` branch when the existing row
     // is ALREADY signed (codex-nova ruling) — the shared R7 journal
     // write below uses these instead of the hardcoded `Accepted`/
