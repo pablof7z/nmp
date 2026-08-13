@@ -4,8 +4,8 @@ use super::postings::Family;
 use super::postings_store::{scan_packed, PackedScan};
 use super::publish_queue::{is_suppressed_in_txn, replace_lane_in_txn};
 use super::publish_queue_codec::{
-    codec_error, decode_meta_u64, decode_relay, encode_meta_u64, relay_key, PublishQueueRelayId,
-    PUBLISH_QUEUE_CODEC_VERSION, PUBLISH_QUEUE_CODEC_VERSION_KEY,
+    codec_error, decode_intent, decode_meta_u64, decode_relay, encode_meta_u64, intent_key,
+    relay_key, PublishQueueRelayId, PUBLISH_QUEUE_CODEC_VERSION, PUBLISH_QUEUE_CODEC_VERSION_KEY,
 };
 use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
@@ -33,7 +33,7 @@ use super::{
     PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, RedbStoreOpenError, RelayUrl,
     RequiredLockedFileBackend, StoreOwnership, StoredEvent, StoredEventView, Timestamp,
 };
-use redb::{ReadableDatabase, ReadableTableMetadata, TableHandle};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
 use std::sync::Mutex;
 
 /// The one complete `EventStore` implementation. One Redb database, MVCC,
@@ -403,6 +403,23 @@ impl RedbStore {
         let relay_id = self.publish_queue_relay_id(&key.relay)?;
         let write_txn = self.database()?.begin_write().map_err(persist_err)?;
         let lane = {
+            let intents = write_txn
+                .open_table(PUBLISH_QUEUE_INTENTS)
+                .map_err(persist_err)?;
+            let intent = intents
+                .get(&intent_key(key.intent_id))
+                .map_err(persist_err)?
+                .map(|value| value.value().to_vec())
+                .ok_or_else(|| PersistenceError::invariant("lane intent is not open"))?;
+            let current_event_id = decode_intent(&intent)
+                .map_err(|error| codec_error("lane intent", error))?
+                .current_event_id()
+                .ok_or_else(|| PersistenceError::invariant("lane intent has no current event"))?;
+            if current_event_id != key.event_id {
+                return Err(PersistenceError::invariant(
+                    "delivery lane event is not the intent's current event",
+                ));
+            }
             let mut lanes = write_txn
                 .open_table(PUBLISH_QUEUE_LANES)
                 .map_err(persist_err)?;

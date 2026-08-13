@@ -144,10 +144,18 @@ impl<S: EventStore> EngineCore<S> {
                 // absent, so every route candidate remains conservatively
                 // owned until a retry commits.
                 for relay in candidate_relays.into_iter().flatten() {
-                    self.mark_lane_projection_uncertain(&PublishQueueLaneKey {
-                        intent_id,
-                        relay: relay.clone(),
-                    });
+                    if let Some(event_id) = self
+                        .intent_receipts
+                        .get(&intent_id)
+                        .and_then(|receipt| self.pending.get(receipt))
+                        .map(|pending| pending.frozen.id)
+                    {
+                        self.mark_lane_projection_uncertain(&PublishQueueLaneKey {
+                            intent_id,
+                            event_id,
+                            relay: relay.clone(),
+                        });
+                    }
                 }
                 self.schedule_lane_bootstrap_retry(intent_id, candidate_relays);
                 Err(error)
@@ -569,6 +577,7 @@ mod tests {
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 30);
         let key = PublishQueueLaneKey {
             intent_id: core.pending[&receipt].intent_id,
+            event_id: core.pending[&receipt].frozen.id,
             relay: relay.clone(),
         };
 
@@ -602,6 +611,7 @@ mod tests {
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 31);
         let key = PublishQueueLaneKey {
             intent_id: core.pending[&receipt].intent_id,
+            event_id: core.pending[&receipt].frozen.id,
             relay,
         };
         let before = core.pending[&receipt].lane_projection.clone();

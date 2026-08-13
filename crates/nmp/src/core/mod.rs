@@ -2588,7 +2588,7 @@ struct AttemptCorrelationTarget {
     session: RelaySessionKey,
     /// Durable/AtMostOnce correlations identify the exact persisted lane
     /// ordinal. Ephemeral correlations have no delivery row.
-    lane: Option<(IntentId, u64)>,
+    lane: Option<(PublishQueueLaneKey, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

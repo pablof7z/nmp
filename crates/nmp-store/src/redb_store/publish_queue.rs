@@ -135,6 +135,17 @@ pub(super) enum PublishQueueIntentRecordWork {
 }
 
 impl PublishQueueIntentRecord {
+    pub(super) fn current_event_id(&self) -> Option<EventId> {
+        match &self.work {
+            PublishQueueIntentRecordWork::Event { frozen, .. } => Some(frozen.id),
+            PublishQueueIntentRecordWork::ReplaceableOperation {
+                materialization, ..
+            } => materialization
+                .as_ref()
+                .map(|materialization| materialization.current.event_id),
+        }
+    }
+
     pub(super) fn event(&self) -> Option<(&Event, IntentSigState)> {
         match &self.work {
             PublishQueueIntentRecordWork::Event {
