@@ -1043,8 +1043,9 @@ impl<S: EventStore> EngineCore<S> {
                         // the unauthenticated socket and proves nothing
                         // about an authenticated session's view.
                         let broad = filter.limit.is_none();
+                        let semantic_source = self.owns_semantic_source_demand(&owner_demands);
                         match (
-                            broad && session.access == AccessContext::Public,
+                            broad && !semantic_source && session.access == AccessContext::Public,
                             self.prober.probed(&session.relay),
                         ) {
                             (true, Some(probed)) => {
@@ -2484,7 +2485,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.neg_session_fallback_to_req(sub_id, session, &mut effects);
             }
         }
-        effects
+        self.consume_semantic_source_effects(effects)
     }
 
     /// Drive one inbound `NEG-MSG` round for `sub_id`'s live session, if any
