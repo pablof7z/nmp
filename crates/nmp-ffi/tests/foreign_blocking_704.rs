@@ -313,7 +313,7 @@ async fn blocking_foreign_completion_never_stalls_unrelated_engine_work() {
     .await
     .expect("relay_information resolves within bound while completions are blocked")
     .expect("relay_information reaches a real terminal document");
-    assert_eq!(info.document.name.as_deref(), Some("mock-704-relay"));
+    assert_eq!(info.document().name.as_deref(), Some("mock-704-relay"));
 
     // (c) A follow observation delivers its initial relationship snapshot.
     let follow = nmp_nip02::observe_following_async(Arc::clone(&engine), author)
