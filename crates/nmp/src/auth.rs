@@ -256,7 +256,7 @@ mod tests {
                 panic!("ready constructor must produce a ready runtime op")
             }
         };
-        same_type(Ok(AuthPolicyDecision::Allow), runtime_result);
+        same_type::<AuthPolicyResult>(Ok(AuthPolicyDecision::Allow), runtime_result);
     }
 
     /// The facade sender and the engine op share ONE channel — the newtype
@@ -307,8 +307,8 @@ mod tests {
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
     }
 
-    /// The ready constructors delegate to the engine constructors and carry
-    /// the exact converted result.
+    /// The ready constructors delegate to the runtime constructors and carry
+    /// the exact shared result.
     #[test]
     fn ready_constructors_delegate_with_exact_results() {
         for (op, expected) in [
