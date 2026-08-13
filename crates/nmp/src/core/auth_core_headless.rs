@@ -180,7 +180,7 @@ fn publish_waiting_auth(fixture: &mut Fixture, content: &str) -> (ReceiptId, nos
     }));
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
+        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. })
             if relay == &fixture.session.relay
     )));
     (published_receipt(&effects), event)
@@ -190,7 +190,7 @@ fn publish_waiting_auth(fixture: &mut Fixture, content: &str) -> (ReceiptId, nos
 fn exact_policy_denial_commits_before_emit_and_replays_the_same_terminal_fact() {
     let mut fixture = Fixture::new();
     let (_, policy) = fixture.challenge("policy denial");
-    let (receipt, _) = publish_waiting_auth(&mut fixture, "policy denied write");
+    let (receipt, event) = publish_waiting_auth(&mut fixture, "policy denied write");
     let policy = policy.unwrap();
     bind(&mut fixture, &policy, AuthCapability::Policy, POLICY);
 
@@ -202,6 +202,7 @@ fn exact_policy_denial_commits_before_emit_and_replays_the_same_terminal_fact() 
         },
     ));
     let expected = WriteFact::Relay {
+        event_id: event.id,
         relay: fixture.session.relay.clone(),
         state: RelayState::AuthFailed {
             pubkey: fixture.keys.public_key(),
@@ -276,7 +277,7 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
     let (challenged, token) = fixture.challenge("fast policy denial");
     assert!(challenged.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
+        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. })
             if *id == receipt && relay == &fixture.session.relay
     )));
     let intent = fixture.core.pending[&receipt].intent_id;
@@ -625,7 +626,7 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
         effect,
         Effect::EmitReceipt(
             id,
-            WriteFact::Relay { relay, state: RelayState::AuthFailed { .. } }
+            WriteFact::Relay { relay, state: RelayState::AuthFailed { .. }, .. }
         ) if *id == receipt && relay == &denied_relay
     )));
     assert!(core.pending.contains_key(&receipt));
@@ -656,7 +657,7 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published })
+        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published, .. })
             if *id == receipt && relay == &ordinary_relay
     )));
     assert!(!core.pending.contains_key(&receipt));
@@ -993,7 +994,7 @@ fn only_exact_ready_wakes_the_current_waiting_auth_write_once() {
     }));
     assert!(parked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
+        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. })
             if relay == &fixture.session.relay
     )));
     assert!(!parked
@@ -1046,7 +1047,7 @@ fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
     assert!(parked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
+        Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. })
             if relay == &fixture.session.relay
     )));
 
