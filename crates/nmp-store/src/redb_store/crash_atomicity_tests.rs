@@ -627,10 +627,21 @@ fn terminal_retention_whole_closure_eviction_is_atomic_across_process_death() {
         store.lookup_correlation("retention-crash-token").unwrap(),
         Some(receipt_id)
     );
-    assert_eq!(
-        store.reattach_receipt(receipt_id).unwrap().unwrap().state,
-        ReceiptState::Cancelled
-    );
+    let receipt = store.reattach_receipt(receipt_id).unwrap().unwrap();
+    match receipt.payload {
+        PublishQueueReceiptPayload::Event { event_id, state } => {
+            assert_eq!(
+                state,
+                ReceiptState::Cancelled,
+                "unexpected state for event {event_id}"
+            );
+        }
+        PublishQueueReceiptPayload::ReplaceableOperation { coordinate, state } => {
+            panic!(
+                "expected an event receipt, got replaceable operation {coordinate:?} in state {state:?}"
+            );
+        }
+    }
 }
 
 #[test]

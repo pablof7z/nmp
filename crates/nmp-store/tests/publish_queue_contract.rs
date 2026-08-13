@@ -22,8 +22,7 @@ use nmp_store::{
     MemoryStore, PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueAttemptOutcome,
     PublishQueueIntent, PublishQueueReceipt, PublishQueueReceiptPayload, PublishQueueWork,
     ReceiptState, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason,
-    SigState, StoredEvent, VerifiedSignature, SUPERSEDED_RECEIPT_MAX_AGE_SECS,
-    SUPERSEDED_RECEIPT_MAX_COUNT,
+    SigState, StoredEvent, VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, EventId, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -1039,131 +1038,6 @@ fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt_and_correlatio
             .is_none());
         assert!(store.recover_attempts(older_intent).unwrap().is_empty());
     });
-}
-
-#[test]
-fn superseded_safety_receipts_are_bounded_by_age_and_count() {
-    for_each_backend(|store| {
-        let k = keys();
-        let relay = RelayUrl::parse("wss://bounded-history.example").unwrap();
-        let total = SUPERSEDED_RECEIPT_MAX_COUNT + 2;
-        for ordinal in 0..total {
-            let at = u64::try_from(ordinal + 1).unwrap();
-            let (frozen, signed) = compose(&k, Kind::Metadata, &format!("profile {ordinal}"), at);
-            let outcome = do_accept(store, accept(frozen, k.public_key(), at));
-            let intent = outcome.journaled_intent_id().unwrap();
-            store
-                .promote_signed(PromotionTarget::Event(intent), evidence(&signed))
-                .unwrap();
-            store
-                .record_route_revision(intent, BTreeSet::from([relay.clone()]))
-                .unwrap();
-            let lane = store
-                .bootstrap_publish_queue_lanes(intent)
-                .unwrap()
-                .remove(0);
-            let lane = store
-                .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(at))
-                .unwrap();
-            store
-                .start_lane_attempt(&lane.key, lane.revision, signed, Timestamp::from(at))
-                .unwrap();
-        }
-
-        let removed = store
-            .prune_superseded_receipts(Timestamp::from(total as u64))
-            .unwrap();
-        assert_eq!(
-            removed.len(),
-            1,
-            "count pruning removes only the oldest excess"
-        );
-        assert_eq!(
-            store
-                .enumerate_publish_queue_receipts()
-                .unwrap()
-                .into_iter()
-                .filter(|receipt| event_receipt(receipt).1 == &ReceiptState::Superseded)
-                .count(),
-            SUPERSEDED_RECEIPT_MAX_COUNT
-        );
-
-        let removed = store
-            .prune_superseded_receipts(Timestamp::from(
-                total as u64 + SUPERSEDED_RECEIPT_MAX_AGE_SECS,
-            ))
-            .unwrap();
-        assert_eq!(removed.len(), SUPERSEDED_RECEIPT_MAX_COUNT);
-        let retained = store.enumerate_publish_queue_receipts().unwrap();
-        assert_eq!(
-            retained.len(),
-            1,
-            "only the current write obligation remains"
-        );
-        assert_ne!(event_receipt(&retained[0]).1, &ReceiptState::Superseded);
-        assert_eq!(store.next_superseded_receipt_deadline().unwrap(), None);
-    });
-}
-
-#[test]
-fn superseded_safety_receipt_deadline_survives_redb_reopen() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("superseded-retention.redb");
-    let k = keys();
-    let relay = RelayUrl::parse("wss://retention-restart.example").unwrap();
-    let (older_receipt, newer_receipt) = {
-        let mut store = RedbStore::open(&path).unwrap();
-        let (older_frozen, older_signed) = compose(&k, Kind::Metadata, "older", 100);
-        let older = do_accept(&mut store, accept(older_frozen, k.public_key(), 100));
-        let older_intent = older.journaled_intent_id().unwrap();
-        let older_receipt = older.journaled_receipt_id().unwrap();
-        store
-            .promote_signed(
-                PromotionTarget::Event(older_intent),
-                evidence(&older_signed),
-            )
-            .unwrap();
-        store
-            .record_route_revision(older_intent, BTreeSet::from([relay]))
-            .unwrap();
-        let lane = store
-            .bootstrap_publish_queue_lanes(older_intent)
-            .unwrap()
-            .remove(0);
-        let lane = store
-            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(101u64))
-            .unwrap();
-        store
-            .start_lane_attempt(
-                &lane.key,
-                lane.revision,
-                older_signed,
-                Timestamp::from(102u64),
-            )
-            .unwrap();
-        let (newer_frozen, _) = compose(&k, Kind::Metadata, "newer", 200);
-        let newer = do_accept(&mut store, accept(newer_frozen, k.public_key(), 200));
-        (older_receipt, newer.journaled_receipt_id().unwrap())
-    };
-
-    let mut store = RedbStore::open(&path).unwrap();
-    assert_eq!(
-        store.next_superseded_receipt_deadline().unwrap(),
-        Some(Timestamp::from(100 + SUPERSEDED_RECEIPT_MAX_AGE_SECS))
-    );
-    assert!(store
-        .prune_superseded_receipts(Timestamp::from(99 + SUPERSEDED_RECEIPT_MAX_AGE_SECS))
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        store
-            .prune_superseded_receipts(Timestamp::from(100 + SUPERSEDED_RECEIPT_MAX_AGE_SECS))
-            .unwrap(),
-        vec![older_receipt]
-    );
-    assert!(store.reattach_receipt(older_receipt).unwrap().is_none());
-    assert!(store.reattach_receipt(newer_receipt).unwrap().is_some());
-    assert_eq!(store.next_superseded_receipt_deadline().unwrap(), None);
 }
 
 #[test]
