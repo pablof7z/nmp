@@ -3,39 +3,41 @@
 Feature files preserve product meaning across rewrites. They are not a test
 inventory or project plan.
 
-## Admit behavior deliberately
+## What belongs in a feature file
 
-Add or change a scenario for a product-meaningful:
+Add or change a scenario when it records:
 
-- user correction or contextual distinction;
-- routing, identity, durability, or truthfulness rule;
-- negative guarantee or counterexample;
-- boundary easy to flatten during later work.
+- a user correction that changes an observable result;
+- a rule about routing, identity, durability, or truthful status;
+- a guarantee that something must not happen; or
+- a distinction that a later rewrite could easily erase.
 
-Keep local parser, codec, private-state, and exhaustive cases in their owning
-tests unless they express such a boundary.
+Do not put local parser, codec, private-state, or exhaustive cases in feature
+files unless an app-visible distinction would otherwise be lost.
 
-## Preserve the semantic delta
+## Show exactly what changed
 
-State: which cases were conflated, which axis changes the result, what remains
-unchanged, and the observable consequence. Use the smallest contrasting
-examples that would fail if the cases were conflated again.
+Describe the two situations that were incorrectly treated as the same. Explain
+how their results should differ, what a caller can observe, and which nearby
+behavior should remain unchanged. Use the smallest examples that would fail if
+the situations were treated as the same again.
 
-Organize by behavioral domain, never crate. Use one promise per scenario.
-Prefer app and Nostr terms; avoid private Rust types, tables, reducers, helpers,
-and crate ownership as outcomes.
+Organize scenarios by user behavior, never by crate. Use one promise per
+scenario. Describe results with app and Nostr terms, not private Rust types,
+tables, reducers, helpers, or crate names.
 
-## Stage causes
+## Set up inputs, not answers
 
 Setup must provide real inputs, not the result under proof. For discovery, seed
-the protocol fact at the starting source; do not inject the resolved route.
-Observe through the supported facade or an independent witness.
+the protocol fact where discovery starts; do not insert the route that NMP is
+supposed to discover. Observe the result through the public `nmp` API or a
+separate witness such as a relay log.
 
 Ask: **is this input a cause, or the conclusion being proved?**
 
 ## Metadata
 
-Place one adjacent comment block above each governed scenario:
+Place one adjacent comment block above each scenario that uses NMP metadata:
 
 ```gherkin
 # nmp:id=ROUTING-DISCOVERY-003
@@ -55,27 +57,33 @@ Additional fields:
 
 | Status | Required |
 |---|---|
-| `built` | Evidence line(s) and one falsifier |
+| `built` | Evidence locator(s) and one `nmp:falsifier` |
 | `specified` | `nmp:gap=implementation|evidence|fixture|platform`, open `nmp:issue=#N` |
 | `known-violation` | Open `nmp:issue=#N` |
 
-`@acceptance` selects a built facade capstone; it is not status. Governed files
-reject `@wip`, `@designed`, and `@requires-*` lifecycle tags.
+`nmp:falsifier` describes a small deliberate break that the linked evidence
+must catch. See [Evidence and traceability](evidence-and-traceability.md).
+
+`@acceptance` marks a built scenario that is also tested through the public
+Rust `nmp` API. It is not a status. Files using this metadata reject `@wip`,
+`@designed`, and `@requires-*` tags that try to express incomplete work in a
+second way.
 
 Keep an ID while refining one promise. Split IDs when one scenario contains
 several promises. Never reuse a deleted ID.
 
-Once one scenario in a file has `nmp:*`, govern the whole file. Govern legacy
-before later deleting it.
+Once one scenario in a file has `nmp:*`, every scenario in that file must have
+the required metadata. Add it to older scenarios before deleting or replacing
+them; do not use deletion to avoid the metadata rules.
 
 ## Correct existing behavior
 
-When a correction conflicts with the corpus:
+When a correction conflicts with existing feature text:
 
 1. Correct wrong text in place.
-2. Split conflated contexts.
-3. Add the missing contrast.
-4. Update status, evidence, falsifier, and issue.
+2. Split situations that should produce different results.
+3. Add the example that demonstrates the difference.
+4. Update status, evidence locators, `nmp:falsifier`, and issue.
 
 Do not leave the old claim intact in an appendix or second feature.
 

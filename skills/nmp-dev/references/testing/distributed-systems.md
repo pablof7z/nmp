@@ -1,28 +1,36 @@
 # Distributed-systems testing
 
-Classify the claim before choosing proof.
+First state what kind of promise the test must prove:
 
-| Claim | Proof pattern |
+| Promise | Test it by |
 |---|---|
-| Safety | Property/model test with adversarial schedules |
-| Liveness | Deterministic clock/deadline and controlled recovery |
+| Safety | Trying many operation orders in a property or model test |
+| Liveness | Controlling the clock and deadline, then testing recovery |
 | Durability | Kill/close, reopen, reconstruct |
-| Isolation | Paired contexts and contamination checks |
-| Truthfulness | Independent witness plus typed output |
-| Boundedness | Stress/property test with explicit shortfall |
-| Idempotence | Replay and duplicate schedules |
+| Isolation | Comparing two users, sessions, or requests and checking for leaks |
+| Truthfulness | Comparing the public result with an independent witness |
+| Boundedness | Stressing the limit and reporting when it cuts the result short |
+| Idempotence | Replaying the same work and delivering duplicates |
 
 One happy path cannot prove all of these.
 
 ## Schedules and waits
 
-Use deterministic clocks, barriers, controlled channels, witness signals, or
-bounded polling for observable state. Never use a longer sleep as proof.
+Control clocks, barriers, channels, witness signals, or polling deadlines so
+the test knows when an observable event occurred. Never use a longer sleep as
+proof.
 
-Exercise relevant reorderings, duplication, reconnect, stale responses,
-identity/source changes, partial relay outcomes, and crashes between durable
-phases. Prefer state-machine/model tests; add a facade capstone for a distinct
-public consequence.
+Try every failure or ordering that matters to the promise:
+
+- Reorder or duplicate messages.
+- Disconnect and reconnect.
+- Deliver an old response after the request changed.
+- Change the identity or source.
+- Let only some relays respond.
+- Crash between durable steps.
+
+Prefer a state-machine or model test when many orders are possible. Add one test
+through the public API only when it proves a separate user-visible result.
 
 ## Durability and faults
 
@@ -31,30 +39,39 @@ For a durability claim:
 1. create the fact through the supported operation;
 2. stop at the claimed boundary;
 3. destroy runtime state;
-4. reopen through the facade;
-5. assert public facts;
-6. continue and check duplication and identity drift.
+4. reopen through the public API;
+5. check the public result; and
+6. continue the operation and check for duplicates or a changed identity.
 
-When persisted facts must not diverge, fault before, between, during, and after
-writes/commit/acknowledgement, then reopen. Reading the database before restart
-does not prove reconstruction.
+When stored facts must stay consistent with one another, force failures before,
+between, during, and after their writes, commit, and acknowledgement. Then
+reopen the system. Reading the database before restart does not prove that NMP
+can reconstruct the state.
 
 ## Ambiguity and witnesses
 
-Model lost acknowledgements explicitly. Assert the documented choice: safe
-idempotent retry, durable ambiguity, caller intervention, or harmless duplicate
-publication by exact event identity.
+Test the case where an operation may have succeeded but its acknowledgement was
+lost. Check the documented response: retry safely, preserve the uncertainty in
+durable state for the caller, require caller action, or publish the exact same
+event again without changing its identity.
 
-Use relay, signer, process, filesystem/port, or platform witnesses for external
-effects. Diagnostics explain; they do not self-certify.
+Use relay or signer logs, process state, filesystem or port state, or native
+platform output to prove external effects. Diagnostics may explain what NMP
+believes happened, but they cannot prove their own claim.
 
 ## Reproducibility and isolation
 
-Failure output records seed, schedule, scrubbed identities/requests, witnesses,
-public frames, fault points, artifacts, and replay command.
+Whenever a test fails, record everything needed to replay it:
 
-Each run owns its store/home, relay/port, runtime, identities, environment,
-clock, scheduler, and processes. Teardown proves release.
+- the random seed, when one exists, and the operation order;
+- scrubbed identities and requests;
+- external observations and public frames;
+- injected failure points and saved artifacts; and
+- the replay command.
 
-Use deterministic fixtures for semantics. Use live probes only for field
-compatibility; live results never replace deterministic proof.
+Each test run must have its own store, home directory, relay and port, runtime,
+identities, environment, clock, scheduler, and processes. Teardown must prove
+that it released them.
+
+Use repeatable fixtures to prove behavior. Use live checks only to confirm
+compatibility with real services; live results never replace repeatable tests.
