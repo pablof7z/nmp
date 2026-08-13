@@ -7644,13 +7644,7 @@ reexport nmp::DecryptCapability => nmp_signer::capability::DecryptCapability
                                             "visibility": "public"
                                           },
                                           {
-                                            "attrs": [
-                                              {
-                                                "must_use": {
-                                                  "reason": null
-                                                }
-                                              }
-                                            ],
+                                            "attrs": [],
                                             "inner": {
                                               "function": {
                                                 "default_unstable": null,
