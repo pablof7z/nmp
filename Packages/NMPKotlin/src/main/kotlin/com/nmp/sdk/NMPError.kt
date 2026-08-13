@@ -252,6 +252,13 @@ sealed class NMPError(message: String) : Exception(message) {
         )
     // nmp-native:endif
 
+    /** #1437: registered replaceable operations are capability-owned internal
+     * write payloads. They cannot be projected as a standalone native payload
+     * without losing the registered materializer that gives the bytes their
+     * meaning. */
+    object ReplaceableOperationHasNoWireForm :
+        NMPError("a registered replaceable operation has no standalone FFI payload")
+
     // nmp-native:if nip29
     /** #1033: `NMPRelayScope.on`/`FfiRelayScope.on` was given an empty relay
      * set -- a group must be hosted somewhere. */
@@ -434,6 +441,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 // nmp-native:if nip22
                 is FfiException.ReplaceableEditHasNoWireForm -> ReplaceableEditHasNoWireForm
                 // nmp-native:endif
+                is FfiException.ReplaceableOperationHasNoWireForm ->
+                    ReplaceableOperationHasNoWireForm
                 // nmp-native:if nip29
                 is FfiException.EmptyRelayScope -> EmptyRelayScope
                 is FfiException.GroupCallerSuppliedContext -> GroupCallerSuppliedContext

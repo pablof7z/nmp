@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import uniffi.nmp_ffi.FfiEventBuilder
+import uniffi.nmp_ffi.FfiException
 import uniffi.nmp_ffi.FfiIdentity
 import uniffi.nmp_ffi.FfiWriteIntent
 import uniffi.nmp_ffi.FfiWritePayload
@@ -150,5 +151,16 @@ class WriteIntentTest {
                 ),
             )
         assertEquals(WriteRouting.Explicit(typed), back.routing)
+    }
+
+    /** #1437: the generated binding's internal operation refusal crosses the
+     * one Kotlin error seam exhaustively; it does not create a raw operation
+     * constructor on the supported SDK. */
+    @Test
+    fun replaceableOperationWireRefusalMapsToThePublicErrorOwner() {
+        assertEquals(
+            NMPError.ReplaceableOperationHasNoWireForm,
+            NMPError.from(FfiException.ReplaceableOperationHasNoWireForm()),
+        )
     }
 }
