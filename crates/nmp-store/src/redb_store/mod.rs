@@ -111,7 +111,6 @@ use schema::*;
 pub(crate) mod publish_queue;
 pub(crate) mod publish_queue_codec;
 mod semantic_edit_codec;
-mod semantic_edit_ops;
 #[cfg(test)]
 use publish_queue::*;
 mod canonical;
