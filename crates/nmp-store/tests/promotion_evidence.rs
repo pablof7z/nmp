@@ -59,7 +59,7 @@ fn evidence(signed: &Event) -> VerifiedSignature {
 fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         payload: AcceptWritePayload::Event {
-            frozen,
+            frozen: Box::new(frozen),
             replaceable_base: None,
             monotonic_stamp: false,
             routing: "auto".to_string(),

@@ -85,7 +85,7 @@ fn accept_of(frozen: Event) -> AcceptWrite {
     let expected_pubkey = frozen.pubkey;
     AcceptWrite {
         payload: crate::AcceptWritePayload::Event {
-            frozen,
+            frozen: Box::new(frozen),
             replaceable_base: None,
             monotonic_stamp: false,
             routing: "auto".to_owned(),

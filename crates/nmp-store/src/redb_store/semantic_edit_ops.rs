@@ -711,7 +711,7 @@ pub(super) fn promote(
                 .map_err(persist_err)?
                 .map(|value| value.value().to_vec())
                 .ok_or_else(|| PersistenceError::invariant("materialization member missing"))?;
-            let mut intent = decode_intent(&intent_bytes)
+            let intent = decode_intent(&intent_bytes)
                 .map_err(|error| codec_error("materialization member", error))?;
             let work = match &intent.work {
                 PublishQueueIntentRecordWork::ReplaceableOperation {
@@ -733,7 +733,7 @@ pub(super) fn promote(
                 .map_err(persist_err)?
                 .map(|value| value.value().to_vec())
                 .ok_or_else(|| PersistenceError::invariant("materialization receipt missing"))?;
-            let mut receipt = decode_receipt(&receipt_bytes)
+            let receipt = decode_receipt(&receipt_bytes)
                 .map_err(|error| codec_error("materialization receipt", error))?;
             if receipt.intent_id != Some(*member)
                 || receipt.expected_pubkey != intent.expected_pubkey

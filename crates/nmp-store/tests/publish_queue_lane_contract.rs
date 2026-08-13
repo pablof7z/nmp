@@ -42,7 +42,7 @@ fn signed_and_frozen(keys: &Keys, content: &str, created_at: u64) -> (Event, Eve
 fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         payload: AcceptWritePayload::Event {
-            frozen,
+            frozen: Box::new(frozen),
             replaceable_base: None,
             monotonic_stamp: false,
             routing: "lane-contract".into(),

@@ -387,7 +387,7 @@ fn accepted_signed(
     let outcome = store
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
-                frozen,
+                frozen: Box::new(frozen),
                 replaceable_base: None,
                 monotonic_stamp: false,
                 routing: "range-proof".into(),
@@ -1224,7 +1224,7 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
     let accepted = store
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
-                frozen,
+                frozen: Box::new(frozen),
                 replaceable_base: None,
                 monotonic_stamp: false,
                 routing: "integrity".into(),

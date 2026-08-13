@@ -322,17 +322,6 @@ impl std::fmt::Display for SemanticRefusal {
 
 impl std::error::Error for SemanticRefusal {}
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SemanticStoreCounters {
-    pub coordinate_point_reads: u64,
-    pub operation_bodies_examined: u64,
-    pub operation_bodies_written: u64,
-    pub operation_bodies_removed: u64,
-    pub canonical_bodies_written: u64,
-    pub commits: u64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SemanticResourceState {
     pub(crate) coordinate: Coordinate,
@@ -697,7 +686,7 @@ pub(crate) fn plan_rematerialize(
         .or(previous.last_materialization_id);
     Ok(SemanticTransitionPlan {
         previous: Some(previous),
-        next: (!operations.is_empty()).then(|| SemanticResourceState {
+        next: (!operations.is_empty()).then_some(SemanticResourceState {
             coordinate: rematerialize.coordinate,
             source_revision,
             operations,

@@ -81,7 +81,7 @@ pub(super) fn recover_publish_queue(
                     .map_err(|error| codec_error("displaced event", error))?;
                 crate::PublishQueueWork::Event {
                     frozen,
-                    displaced,
+                    displaced: displaced.map(Box::new),
                     routing,
                     sig_state,
                 }

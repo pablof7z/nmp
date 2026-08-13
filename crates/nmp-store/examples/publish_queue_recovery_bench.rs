@@ -289,7 +289,7 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
         let accepted = store
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
-                    frozen: frozen_event(&signed),
+                    frozen: Box::new(frozen_event(&signed)),
                     replaceable_base: None,
                     monotonic_stamp: false,
                     routing: "fixed-representative-fixture".into(),

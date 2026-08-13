@@ -101,8 +101,6 @@ pub use redb_store::{
     StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
     StoreBenchProcessCounters, StoreBenchVariant,
 };
-#[cfg(any(test, feature = "bench-instrumentation"))]
-pub use semantic_edit::SemanticStoreCounters;
 pub use semantic_edit::{
     AccessContextId, MaterializationCandidate, MaterializationId, OperationResolution,
     OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
@@ -904,13 +902,13 @@ pub struct AcceptWrite {
 /// There is no optional semantic sidecar beside an authoritative event body.
 pub enum AcceptWritePayload {
     Event {
-        frozen: Event,
+        frozen: Box<Event>,
         replaceable_base: Option<Option<EventId>>,
         monotonic_stamp: bool,
         routing: String,
         sig_state: IntentSigState,
     },
-    ReplaceableOperation(SemanticAccept),
+    ReplaceableOperation(Box<SemanticAccept>),
 }
 
 /// The result of an [`EventStore::accept_write`] call — mirrors
@@ -1251,7 +1249,7 @@ impl PublishQueueIntent {
                 displaced,
                 routing,
                 sig_state,
-            } => Some((frozen, displaced.as_ref(), routing, *sig_state)),
+            } => Some((frozen, displaced.as_deref(), routing, *sig_state)),
             PublishQueueWork::ReplaceableOperation { .. } => None,
         }
     }
@@ -1262,7 +1260,7 @@ impl PublishQueueIntent {
 pub enum PublishQueueWork {
     Event {
         frozen: Event,
-        displaced: Option<StoredEvent>,
+        displaced: Option<Box<StoredEvent>>,
         routing: String,
         sig_state: IntentSigState,
     },
@@ -1419,15 +1417,18 @@ pub struct MaterializationRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceableMaterializationTarget {
+    pub coordinate: nostr::nips::nip01::Coordinate,
+    pub expected_source_revision: SourceRevision,
+    pub expected_program_digest: SemanticProgramDigest,
+    pub expected_materialization: MaterializationId,
+    pub expected_event_id: EventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromotionTarget {
     Event(IntentId),
-    ReplaceableMaterialization {
-        coordinate: nostr::nips::nip01::Coordinate,
-        expected_source_revision: SourceRevision,
-        expected_program_digest: SemanticProgramDigest,
-        expected_materialization: MaterializationId,
-        expected_event_id: EventId,
-    },
+    ReplaceableMaterialization(Box<ReplaceableMaterializationTarget>),
 }
 
 /// Versioned, durable evidence for one publication attempt. The key is the

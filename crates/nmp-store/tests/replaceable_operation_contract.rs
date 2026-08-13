@@ -65,7 +65,7 @@ fn accept_operation(
 ) -> (nmp_store::IntentId, u64) {
     let outcome = store
         .accept_write(AcceptWrite {
-            payload: AcceptWritePayload::ReplaceableOperation(accept),
+            payload: AcceptWritePayload::ReplaceableOperation(Box::new(accept)),
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "test-key".into(),
             accepted_at: Timestamp::from(accepted_at),
@@ -220,13 +220,15 @@ fn exercise_bodyless_shared_lifecycle(store: &mut dyn EventStore) {
     .unwrap();
     let promoted = store
         .promote_signed(
-            PromotionTarget::ReplaceableMaterialization {
-                coordinate: coordinate.clone(),
-                expected_source_revision: current.source_revision.clone(),
-                expected_program_digest: current.program_digest,
-                expected_materialization: MaterializationId(1),
-                expected_event_id: generation.materialization.event_id,
-            },
+            PromotionTarget::ReplaceableMaterialization(Box::new(
+                nmp_store::ReplaceableMaterializationTarget {
+                    coordinate: coordinate.clone(),
+                    expected_source_revision: current.source_revision.clone(),
+                    expected_program_digest: current.program_digest,
+                    expected_materialization: MaterializationId(1),
+                    expected_event_id: generation.materialization.event_id,
+                },
+            )),
             VerifiedSignature::verify(&signed).unwrap(),
         )
         .unwrap();

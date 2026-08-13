@@ -102,7 +102,7 @@ fn request_coverage_batch() -> Vec<(ContextualAtom, RelayUrl, CoverageInterval)>
 fn accept(frozen: Event) -> AcceptWrite {
     AcceptWrite {
         payload: crate::AcceptWritePayload::Event {
-            frozen,
+            frozen: Box::new(frozen),
             replaceable_base: None,
             monotonic_stamp: false,
             routing: "u5-fixed-route".into(),
@@ -154,7 +154,7 @@ fn semantic_source() -> crate::SourceEvidence {
 
 fn semantic_accept_write() -> AcceptWrite {
     AcceptWrite {
-        payload: crate::AcceptWritePayload::ReplaceableOperation(crate::SemanticAccept {
+        payload: crate::AcceptWritePayload::ReplaceableOperation(Box::new(crate::SemanticAccept {
             coordinate: semantic_coordinate(),
             program: crate::ReplayProgramId([7; 16]),
             format: crate::ReplayFormatId([9; 16]),
@@ -171,7 +171,7 @@ fn semantic_accept_write() -> AcceptWrite {
             materialized: None,
             contributing_operations: Vec::new(),
             resolved_operations: Vec::new(),
-        }),
+        })),
         expected_pubkey: keys().public_key(),
         signing_identity_ref: "semantic-u5-key".into(),
         accepted_at: Timestamp::from(1_000),
@@ -234,13 +234,15 @@ fn semantic_promotion_target(
     .sign_with_keys(&keys())
     .unwrap();
     (
-        crate::PromotionTarget::ReplaceableMaterialization {
-            coordinate: semantic_coordinate(),
-            expected_source_revision: snapshot.current.source_revision,
-            expected_program_digest: snapshot.current.program_digest,
-            expected_materialization: generation.materialization.materialization_id,
-            expected_event_id: generation.materialization.event_id,
-        },
+        crate::PromotionTarget::ReplaceableMaterialization(Box::new(
+            crate::ReplaceableMaterializationTarget {
+                coordinate: semantic_coordinate(),
+                expected_source_revision: snapshot.current.source_revision,
+                expected_program_digest: snapshot.current.program_digest,
+                expected_materialization: generation.materialization.materialization_id,
+                expected_event_id: generation.materialization.event_id,
+            },
+        )),
         evidence(&signed),
     )
 }

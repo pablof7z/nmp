@@ -200,7 +200,7 @@ fn attempt_durable_write(store: &mut RedbStore, created_at: u64) -> Result<(), P
     store
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
-                frozen,
+                frozen: Box::new(frozen),
                 replaceable_base: None,
                 monotonic_stamp: false,
                 routing: "durability-proof".into(),
@@ -224,7 +224,7 @@ fn reopen_replaces_only_the_database_generation_and_preserves_durable_identity()
     let outcome = store
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
-                frozen: frozen.clone(),
+                frozen: Box::new(frozen.clone()),
                 replaceable_base: None,
                 monotonic_stamp: false,
                 routing: "reopen-proof".into(),

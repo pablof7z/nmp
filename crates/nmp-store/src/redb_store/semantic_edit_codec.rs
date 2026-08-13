@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use nostr::nips::nip01::Coordinate;
-use nostr::{EventId, Kind, PublicKey, Timestamp};
+use nostr::{EventId, Timestamp};
 
 use crate::semantic_edit::{
     AccessContextId, MaterializationId, OperationSourceRequirement, QualifiedSource,
@@ -155,26 +155,6 @@ pub(super) fn coordinate_key(coordinate: &Coordinate) -> Result<Vec<u8>, Persist
     key.extend_from_slice(&(coordinate.identifier.len() as u32).to_be_bytes());
     key.extend_from_slice(coordinate.identifier.as_bytes());
     Ok(key)
-}
-
-pub(super) fn decode_coordinate_key(bytes: &[u8]) -> Result<Coordinate, PersistenceError> {
-    if bytes.len() < 39 || bytes[0] != 1 {
-        return Err(invariant("invalid replaceable-operation coordinate key"));
-    }
-    let len = u32::from_be_bytes(bytes[35..39].try_into().expect("width")) as usize;
-    if len > MAX_COORDINATE_IDENTIFIER_BYTES || bytes.len() != 39 + len {
-        return Err(invariant("invalid replaceable-operation coordinate length"));
-    }
-    let coordinate = Coordinate {
-        kind: Kind::from(u16::from_be_bytes(bytes[1..3].try_into().expect("width"))),
-        public_key: PublicKey::from_slice(&bytes[3..35])
-            .map_err(|_| invariant("invalid replaceable-operation author"))?,
-        identifier: std::str::from_utf8(&bytes[39..])
-            .map_err(|_| invariant("invalid replaceable-operation identifier"))?
-            .to_owned(),
-    };
-    coordinate_key(&coordinate)?;
-    Ok(coordinate)
 }
 
 pub(super) fn operation_key(

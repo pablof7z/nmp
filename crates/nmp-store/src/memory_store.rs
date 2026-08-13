@@ -7,8 +7,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
-#[cfg(any(test, feature = "bench-instrumentation"))]
-use std::sync::Mutex;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nostr::filter::MatchEventOptions;
@@ -22,8 +20,6 @@ use crate::semantic_edit::{
     plan_accept, plan_rematerialize, recovered, validate_resource_state, SemanticAccept,
     SemanticInstallOutcome, SemanticRematerialize, SemanticResourceState,
 };
-#[cfg(any(test, feature = "bench-instrumentation"))]
-use crate::SemanticStoreCounters;
 use crate::{
     handoff_may_have_occurred, AcceptOutcome, AcceptWrite, AcceptWritePayload, AuthDenial,
     CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, EventStore, GcReport,
@@ -64,13 +60,32 @@ struct PublishQueueIntentRecord {
 enum PublishQueueIntentRecordWork {
     Event {
         frozen: Event,
-        routing: String,
         sig_state: IntentSigState,
     },
     ReplaceableOperation {
         coordinate: nostr::nips::nip01::Coordinate,
         materialization: Option<crate::MaterializationWork>,
     },
+}
+
+struct NewSemanticIntent {
+    intent_id: IntentId,
+    receipt_id: u64,
+    expected_pubkey: PublicKey,
+    signing_identity_ref: String,
+    accepted_at: Timestamp,
+    correlation: Option<nmp_grammar::CorrelationToken>,
+}
+
+struct NewEventIntent {
+    intent_id: IntentId,
+    receipt_id: u64,
+    frozen: Event,
+    expected_pubkey: PublicKey,
+    signing_identity_ref: String,
+    sig_state: IntentSigState,
+    accepted_at: Timestamp,
+    displaced: Option<StoredEvent>,
 }
 
 impl PublishQueueIntentRecord {
@@ -241,8 +256,6 @@ pub struct MemoryStore {
     /// inactive, so delayed signatures can never match a recreated body.
     semantic_materialization_high_water:
         BTreeMap<nostr::nips::nip01::Coordinate, crate::MaterializationId>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    semantic_counters: Mutex<SemanticStoreCounters>,
     /// Every still-open kind:5 intent's OWN suppression claims (see
     /// [`SuppressClaim`]'s doc) — dropped wholesale by `promote_signed`
     /// (after committing the deletion for real) or `compensate_write`
@@ -499,28 +512,22 @@ impl MemoryStore {
     /// `PUBLISH_QUEUE_DISPLACED` stash, if any — `accept_write`'s journal half of
     /// the "one atomic commit" (in-memory: same call, no separate
     /// transaction to span).
-    #[allow(clippy::too_many_arguments)]
-    fn journal_intent(
-        &mut self,
-        intent_id: IntentId,
-        receipt_id: u64,
-        frozen: Event,
-        expected_pubkey: PublicKey,
-        signing_identity_ref: String,
-        routing: String,
-        sig_state: IntentSigState,
-        accepted_at: Timestamp,
-        displaced: Option<StoredEvent>,
-    ) {
+    fn journal_intent(&mut self, journal: NewEventIntent) {
+        let NewEventIntent {
+            intent_id,
+            receipt_id,
+            frozen,
+            expected_pubkey,
+            signing_identity_ref,
+            sig_state,
+            accepted_at,
+            displaced,
+        } = journal;
         self.publish_queue_intents.insert(
             intent_id,
             PublishQueueIntentRecord {
                 receipt_id,
-                work: PublishQueueIntentRecordWork::Event {
-                    frozen,
-                    routing,
-                    sig_state,
-                },
+                work: PublishQueueIntentRecordWork::Event { frozen, sig_state },
                 expected_pubkey,
                 signing_identity_ref,
                 accepted_at,
@@ -641,15 +648,10 @@ impl MemoryStore {
     fn apply_semantic_plan(
         &mut self,
         coordinate: nostr::nips::nip01::Coordinate,
-        intent_id: Option<IntentId>,
-        receipt_id: Option<u64>,
-        expected_pubkey: PublicKey,
-        signing_identity_ref: Option<String>,
-        accepted_at: Option<Timestamp>,
-        correlation: Option<nmp_grammar::CorrelationToken>,
+        new_intent: Option<NewSemanticIntent>,
         plan: crate::semantic_edit::SemanticTransitionPlan,
     ) -> Result<SemanticInstallOutcome, PersistenceError> {
-        let new_intent_id = intent_id;
+        let new_intent_id = new_intent.as_ref().map(|intent| intent.intent_id);
         let candidate_work = plan.candidate.as_ref().and_then(|candidate| {
             plan.next
                 .as_ref()
@@ -827,7 +829,7 @@ impl MemoryStore {
             self.index_event(&stored);
             self.by_id.insert(event.id, stored);
             self.addr_index.insert(
-                address_key_for(&event).expect("semantic candidate is replaceable/addressable"),
+                address_key_for(event).expect("semantic candidate is replaceable/addressable"),
                 event.id,
             );
         }
@@ -881,8 +883,14 @@ impl MemoryStore {
             }
         }
 
-        if let (Some(intent_id), Some(receipt_id), Some(signing_identity_ref), Some(accepted_at)) =
-            (intent_id, receipt_id, signing_identity_ref, accepted_at)
+        if let Some(NewSemanticIntent {
+            intent_id,
+            receipt_id,
+            expected_pubkey,
+            signing_identity_ref,
+            accepted_at,
+            correlation,
+        }) = new_intent
         {
             let current = plan
                 .receipt_updates
@@ -926,26 +934,6 @@ impl MemoryStore {
                 self.publish_queue_correlations
                     .insert(correlation.as_ref().to_owned(), receipt_id);
             }
-        }
-
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        {
-            let mut counters = self.semantic_counters.lock().expect("semantic counters");
-            counters.coordinate_point_reads += 1;
-            counters.operation_bodies_examined += plan
-                .previous
-                .as_ref()
-                .map_or(0, |state| state.operations.len() as u64);
-            counters.operation_bodies_written += plan
-                .next
-                .as_ref()
-                .map_or(0, |state| state.operations.len() as u64);
-            counters.operation_bodies_removed += plan
-                .previous
-                .as_ref()
-                .map_or(0, |state| state.operations.len() as u64);
-            counters.canonical_bodies_written += u64::from(plan.candidate.is_some());
-            counters.commits += 1;
         }
 
         let result = match plan.next {
@@ -1008,12 +996,14 @@ impl MemoryStore {
             .current();
         let installed = self.apply_semantic_plan(
             coordinate,
-            Some(candidate_intent),
-            Some(candidate_receipt),
-            expected_pubkey,
-            Some(signing_identity_ref),
-            Some(accepted_at),
-            correlation,
+            Some(NewSemanticIntent {
+                intent_id: candidate_intent,
+                receipt_id: candidate_receipt,
+                expected_pubkey,
+                signing_identity_ref,
+                accepted_at,
+                correlation,
+            }),
             plan,
         )?;
         if let SemanticInstallOutcome::Refused(refusal) = installed {
@@ -2608,19 +2598,20 @@ impl EventStore for MemoryStore {
                 signing_identity_ref,
                 accepted_at,
                 correlation,
-                operation,
+                *operation,
             );
         }
         let AcceptWritePayload::Event {
-            mut frozen,
+            frozen,
             replaceable_base,
             monotonic_stamp,
-            routing,
+            routing: _,
             sig_state,
         } = payload
         else {
             unreachable!("replaceable operation returned above")
         };
+        let mut frozen = *frozen;
 
         // Refused at the door FIRST, same as `insert`: never journaled,
         // nothing to recover, and (R7 correction) neither an `IntentId`
@@ -2796,17 +2787,16 @@ impl EventStore for MemoryStore {
             } else {
                 (frozen, sig_state)
             };
-            self.journal_intent(
+            self.journal_intent(NewEventIntent {
                 intent_id,
                 receipt_id,
-                journaled_frozen,
+                frozen: journaled_frozen,
                 expected_pubkey,
                 signing_identity_ref,
-                routing,
-                journaled_sig_state,
+                sig_state: journaled_sig_state,
                 accepted_at,
-                None,
-            );
+                displaced: None,
+            });
             self.journal_receipt(
                 receipt_id,
                 intent_id,
@@ -2931,17 +2921,16 @@ impl EventStore for MemoryStore {
         };
 
         let frozen_id = frozen.id;
-        self.journal_intent(
+        self.journal_intent(NewEventIntent {
             intent_id,
             receipt_id,
             frozen,
             expected_pubkey,
             signing_identity_ref,
-            routing,
             sig_state,
             accepted_at,
             displaced,
-        );
+        });
         self.journal_receipt(
             receipt_id,
             intent_id,
@@ -2994,8 +2983,7 @@ impl EventStore for MemoryStore {
             }
             Err(refusal) => return Ok(SemanticInstallOutcome::Refused(refusal)),
         };
-        let author = coordinate.public_key;
-        self.apply_semantic_plan(coordinate, None, None, author, None, None, None, plan)
+        self.apply_semantic_plan(coordinate, None, plan)
     }
 
     fn promote_signed(
@@ -3005,13 +2993,14 @@ impl EventStore for MemoryStore {
     ) -> Result<PromoteOutcome, PersistenceError> {
         let intent_id = match target {
             PromotionTarget::Event(intent_id) => intent_id,
-            PromotionTarget::ReplaceableMaterialization {
-                coordinate,
-                expected_source_revision,
-                expected_program_digest,
-                expected_materialization,
-                expected_event_id,
-            } => {
+            PromotionTarget::ReplaceableMaterialization(target) => {
+                let crate::ReplaceableMaterializationTarget {
+                    coordinate,
+                    expected_source_revision,
+                    expected_program_digest,
+                    expected_materialization,
+                    expected_event_id,
+                } = *target;
                 return self.promote_replaceable_materialization(
                     coordinate,
                     expected_source_revision,
@@ -3019,7 +3008,7 @@ impl EventStore for MemoryStore {
                     expected_materialization,
                     expected_event_id,
                     verified,
-                )
+                );
             }
         };
         let Some(intent_record) = self.publish_queue_intents.get(&intent_id) else {
@@ -4294,7 +4283,7 @@ mod lane_atomicity_tests {
         let accepted = store
             .accept_write(AcceptWrite {
                 payload: crate::AcceptWritePayload::Event {
-                    frozen,
+                    frozen: Box::new(frozen),
                     replaceable_base: None,
                     monotonic_stamp: false,
                     routing: "atomic".into(),
