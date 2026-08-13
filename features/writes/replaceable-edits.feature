@@ -138,9 +138,11 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And every original receipt names the same recovered current generation
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-017
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1465
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::relay_source_successors_resume_current_delivery_and_remain_continuing_after_restart
+  # nmp:evidence=rust:nmp::stale_predecessor_delivery_callbacks_cannot_touch_the_current_successor
+  # nmp:evidence=rust:nmp-store::semantic_source_and_effective_successor_are_one_crash_atomic_transition
+  # nmp:falsifier=Forget the unsigned current generation's durable routes during restart or dispatch a predecessor callback by receipt instead of exact event id; E2 does not resume every destination or stale E1 work advances current state.
   Scenario: A successor retires predecessor work and republishes to every destination
     Given relay 1 received current generation E1
     And relay 2 later supplies a newer source version
@@ -163,8 +165,8 @@ Feature: A replaceable edit says which version it replaces, and is checked again
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-019
   # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1465
+  # nmp:gap=implementation
+  # nmp:issue=#1512
   Scenario: Destination completion does not close a continuing semantic operation
     Given every destination for the current semantic generation is terminal
     When its deliberately continuing source policy remains active
