@@ -1,25 +1,25 @@
 //! The scripted fake-relay / ingest harness (M1 plan §2.3) + event builders.
-//! `Harness` wraps `Engine<MemoryStore>`; there is no network, no async —
+//! `Harness` wraps `Engine<RedbStore>`; there is no network, no async —
 //! `deliver` scripts what a real relay push would look like.
 //!
 //! The throwaway `Keys` used by the event builders below are test fixtures,
-//! not a crypto feature — `MemoryStore` never verifies signatures (M1 plan
+//! not a crypto feature — the store does not verify signatures (M1 plan
 //! §8).
 
 use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom, DemandDelta};
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, IntentSigState, MemoryStore,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, IntentSigState, RedbStore,
 };
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
 use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle, SubscribeOutcome};
 
-/// The scripted "fake relay" harness: `Engine<MemoryStore>` plus the
+/// The scripted "fake relay" harness: `Engine<RedbStore>` plus the
 /// pass-through calls the contract tests drive.
 pub struct Harness {
-    engine: Engine<MemoryStore>,
+    engine: Engine<RedbStore>,
 }
 
 impl Default for Harness {
@@ -31,21 +31,21 @@ impl Default for Harness {
 impl Harness {
     pub fn new() -> Self {
         Self {
-            engine: Engine::new(MemoryStore::new()),
+            engine: Engine::new(RedbStore::temporary().expect("temporary Redb store")),
         }
     }
 
     pub fn set_active(&mut self, pk: Option<nostr::PublicKey>) -> DemandDelta {
         self.engine
             .set_active_pubkey(pk)
-            .expect("query persistence (MemoryStore never fails a door)")
+            .expect("temporary Redb query persistence")
     }
 
     pub fn subscribe(&mut self, q: nmp_grammar::Demand) -> (QueryHandle, DemandDelta) {
         match self.engine.subscribe(q) {
             SubscribeOutcome::Opened { handle, delta } => (handle, delta),
             SubscribeOutcome::Refused { error, .. } => {
-                panic!("query persistence (MemoryStore never fails a door): {error}")
+                panic!("temporary Redb query persistence: {error}")
             }
         }
     }
@@ -71,21 +71,21 @@ impl Harness {
     pub fn deliver(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
         self.engine
             .ingest(events)
-            .expect("ingest persistence (MemoryStore never fails a door)")
+            .expect("temporary Redb ingest persistence")
     }
 
     /// Script a LOCAL optimistic write: enter `accept` through the
     /// `EventStore::accept_write` door and let the engine react
     /// (`crashsafe-accepted-2-3-plan.md` §1.2, U2). The pass-through mirror
     /// of `deliver` for the write side; unwraps the persistence `Result`
-    /// (a volatile `MemoryStore` never fails a door) and returns both the
+    /// through the temporary Redb store and returns both the
     /// store outcome (so a test can assert the `Inserted`/`Superseded`/
     /// `Stale` classification) and the `DemandDelta`.
     pub fn accept(&mut self, accept: AcceptWrite) -> (AcceptOutcome, DemandDelta) {
         let accepted = self
             .engine
             .accept_local(accept)
-            .expect("accept_write persistence (MemoryStore never fails a door)");
+            .expect("temporary Redb accept_write persistence");
         (accepted.outcome, accepted.committed.delta)
     }
 
@@ -216,7 +216,7 @@ pub fn kind10003_bookmarks(
 /// Mirrors `nmp-store/tests/store_contract.rs`'s own `deletion_event`
 /// fixture — needed here for #34's retraction-seam contract tests
 /// (`docs/design/retraction-and-negative-deltas.md` §1.2/§2), which drive
-/// `MemoryStore`'s real kind:5 processing through `Harness::deliver` rather
+/// `RedbStore`'s real kind:5 processing through `Harness::deliver` rather
 /// than mocking `InsertOutcome::Kind5Processed` directly.
 pub fn deletion(author: &nostr::Keys, targets: &[nostr::EventId], created_at: u64) -> nostr::Event {
     EventBuilder::new(Kind::EventDeletion, "")

@@ -50,9 +50,10 @@ fn has_metadata_sentinel(line: &str) -> bool {
 /// Does this step sentence say the scenario crosses a process boundary?
 ///
 /// `tests/bdd.rs` asks it of every step BEFORE the scenario runs, and puts a
-/// world that answers yes on a real on-disk store. A `MemoryStore` cannot be
-/// reopened, so "I reconstruct the engine from the same durable store" is
-/// only a genuine restart when the store was chosen with that sentence in
+/// world that answers yes on a retained on-disk path. An engine-owned
+/// temporary Redb directory cannot be reopened after its store is dropped, so
+/// "I reconstruct the engine from the same durable store" is only a genuine
+/// restart when the retained path was chosen with that sentence in
 /// mind -- and the store is chosen once, at start-up, before any `When`
 /// exists to ask. #974 answered this with a `Given` that set a flag; reading
 /// the scenario's own words means a `.feature` never has to name the harness's

@@ -6,7 +6,7 @@ use super::*;
 fn probed_nip77_plan_closes_touch_only_their_exact_children() {
     const PLANS: u16 = 64;
     let relay = RelayUrl::parse("wss://nip77-exact-close.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.prober
         .states
         .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
@@ -50,7 +50,7 @@ fn probed_nip77_plan_closes_touch_only_their_exact_children() {
 #[test]
 fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
     let relay = RelayUrl::parse("wss://admission-scale.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let mut observations = Vec::new();
     core.projection_store_queries.set(0);
     core.router_compiles.set(0);
@@ -130,7 +130,7 @@ fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
 #[test]
 fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
     let relay = RelayUrl::parse("wss://admission-shared-10k.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let mut observations = Vec::with_capacity(10_000);
     for _ in 0..10_000 {
         observations.push(observation_id(
@@ -211,7 +211,7 @@ fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
 #[test]
 fn withdrawing_the_final_routeless_observation_emits_its_diagnostic_retraction() {
     let author = Keys::generate().public_key();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let opened = core.handle(EngineMsg::Subscribe(routeless_outbox_query(author)));
     let observation = observation_id(&opened);
     let admitted = flush(&mut core);
@@ -230,7 +230,7 @@ fn withdrawing_the_final_routeless_observation_emits_its_diagnostic_retraction()
 #[test]
 fn later_exact_owner_routing_evidence_retracts_the_uncovered_diagnostic_on_admission() {
     let author = Keys::generate().public_key();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let routeless = routeless_outbox_atom(author);
     assert!(!core.retain_wire_atom_owner(&routeless));
     let first = flush(&mut core);
@@ -294,7 +294,7 @@ fn later_exact_owner_routing_evidence_retracts_the_uncovered_diagnostic_on_admis
 #[test]
 fn history_open_waits_for_the_same_flush_without_refreshing_an_ordinary_sibling() {
     let relay = RelayUrl::parse("wss://admission-history.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",

@@ -5,10 +5,10 @@ use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
-    CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome, MemoryStore,
+    CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
     PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent, PublishQueueReceipt,
-    PublishQueueRouteRevision, RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason,
-    StoredEvent,
+    PublishQueueRouteRevision, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome,
+    RetractReason, StoredEvent,
 };
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
 
@@ -161,12 +161,12 @@ impl StoreFailureControl {
 }
 
 pub(super) struct ControlledFailureStore {
-    inner: MemoryStore,
+    inner: RedbStore,
     control: StoreFailureControl,
 }
 
 impl ControlledFailureStore {
-    pub(super) fn new(inner: MemoryStore, control: StoreFailureControl) -> Self {
+    pub(super) fn new(inner: RedbStore, control: StoreFailureControl) -> Self {
         Self { inner, control }
     }
 }
@@ -351,7 +351,10 @@ impl EventStore for ControlledFailureStore {
 #[test]
 fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
     let control = StoreFailureControl::default();
-    let store = ControlledFailureStore::new(MemoryStore::new(), control.clone());
+    let store = ControlledFailureStore::new(
+        RedbStore::temporary().expect("temporary Redb store"),
+        control.clone(),
+    );
     let (engine, handle) =
         crate::runtime::EngineThread::spawn(store, 4, nmp_transport::PoolConfig::default())
             .expect("runtime starts before injected canonical-store read failures");
@@ -472,7 +475,10 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
 fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
     let control = StoreFailureControl::default();
     let mut core = EngineCore::new(
-        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+        ControlledFailureStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            control.clone(),
+        ),
         20,
     );
     let baseline = core.observation_ownership_census();
@@ -566,7 +572,7 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .record_coverage(&[(
             atom,
@@ -602,7 +608,7 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
 fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
     let control = StoreFailureControl::default();
     let mut resolver = ResolverEngine::new(ControlledFailureStore::new(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         control.clone(),
     ));
     let first = nmp_grammar::Demand::from_filter(Filter {
@@ -653,7 +659,10 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
         let control = StoreFailureControl::default();
         let relay = RelayUrl::parse("wss://refused-open-withdrawal.example").unwrap();
         let mut core = EngineCore::new(
-            ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+            ControlledFailureStore::new(
+                RedbStore::temporary().expect("temporary Redb store"),
+                control.clone(),
+            ),
             4,
         );
         let mut first = nmp_grammar::Demand::from_filter(Filter {
@@ -745,7 +754,10 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
         let control = StoreFailureControl::default();
         let blocked = control.block_then_fail_query("ordinary refusal won the shutdown race");
         let (engine, handle) = crate::runtime::EngineThread::spawn(
-            ControlledFailureStore::new(MemoryStore::new(), control),
+            ControlledFailureStore::new(
+                RedbStore::temporary().expect("temporary Redb store"),
+                control,
+            ),
             4,
             nmp_transport::PoolConfig::default(),
         )
@@ -772,7 +784,10 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
         let control = StoreFailureControl::default();
         let blocked = control.block_then_fail_query("history refusal won the shutdown race");
         let (engine, handle) = crate::runtime::EngineThread::spawn(
-            ControlledFailureStore::new(MemoryStore::new(), control),
+            ControlledFailureStore::new(
+                RedbStore::temporary().expect("temporary Redb store"),
+                control,
+            ),
             4,
             nmp_transport::PoolConfig::default(),
         )
@@ -851,7 +866,10 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
         .with_outbound_routes(candidate_author, [candidate_relay]);
     let control = StoreFailureControl::default();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+        ControlledFailureStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            control.clone(),
+        ),
         facts,
         1,
     );
@@ -923,7 +941,10 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
         .with_outbound_routes(candidate_author, [candidate_relay]);
     let control = StoreFailureControl::default();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+        ControlledFailureStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            control.clone(),
+        ),
         facts,
         1,
     );
@@ -1015,8 +1036,8 @@ fn event(keys: &Keys, kind: u16, created_at: u64) -> Event {
         .unwrap()
 }
 
-fn seeded_store(events: impl IntoIterator<Item = Event>, relay: &RelayUrl) -> MemoryStore {
-    let mut store = MemoryStore::new();
+fn seeded_store(events: impl IntoIterator<Item = Event>, relay: &RelayUrl) -> RedbStore {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert_batch(
             events
@@ -1075,7 +1096,7 @@ fn boundary_second(core: &EngineCore<ControlledFailureStore>, id: HistorySession
 }
 
 fn open_history(
-    store: MemoryStore,
+    store: RedbStore,
     control: StoreFailureControl,
     query: HistoryQuery,
     active_pubkey: Option<PublicKey>,

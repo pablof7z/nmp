@@ -5,7 +5,7 @@ use super::*;
 #[cfg(test)]
 mod history_mutation_tests {
     use nmp_grammar::{Binding, Derived, Filter, IdentityField, IndexedTagName, Selector};
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     use super::*;
@@ -41,8 +41,8 @@ mod history_mutation_tests {
         events: &[SignedEvent],
         kinds: BTreeSet<u16>,
         relay: &RelayUrl,
-    ) -> (EngineCore<MemoryStore>, HistorySessionId) {
-        let mut store = MemoryStore::new();
+    ) -> (EngineCore<RedbStore>, HistorySessionId) {
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert_batch(
                 events
@@ -229,7 +229,7 @@ mod history_mutation_tests {
         let keys = Keys::generate();
         let wanted = RelayUrl::parse("wss://history-strict.example").unwrap();
         let other = RelayUrl::parse("wss://history-other.example").unwrap();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         for (created_at, relay, ordinal) in [
             (600, other.clone(), 0),
             (500, other.clone(), 1),
@@ -306,7 +306,7 @@ mod history_mutation_tests {
         let wanted_a = room_event(&keys, 47, 1, 300);
         let wanted_b = room_event(&keys, 47, 2, 200);
         let wanted_c = room_event(&keys, 47, 3, 100);
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         for (event, source) in [
             (other_newest.clone(), other.clone()),
             (wanted_a.clone(), wanted.clone()),
@@ -492,7 +492,7 @@ mod history_mutation_tests {
             .custom_created_at(Timestamp::from(100u64))
             .sign_with_keys(&keys)
             .unwrap();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert_batch(
                 [x.clone(), y.clone(), z.clone(), predecessor.clone()]
@@ -654,7 +654,7 @@ mod history_mutation_tests {
         let base: Vec<_> = (0..8)
             .map(|index| addressable(&format!("g{index}"), 100 + index, "base"))
             .collect();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert_batch(
                 base.iter()
@@ -812,7 +812,7 @@ mod history_mutation_tests {
         let events: Vec<_> = (0..9)
             .map(|index| room_event(&keys, 47, index, 100 + index as u64))
             .collect();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert_batch(
                 events

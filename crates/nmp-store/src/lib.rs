@@ -1,4 +1,5 @@
-//! `nmp-store` — `EventStore` trait + `MemoryStore` + `RedbStore`: the one
+//! `nmp-store` — the `EventStore` contract and its one complete
+//! implementation, [`RedbStore`]: the one
 //! mutating door (VISION §4 "the store", bug-class ledger #1), extended in
 //! M3 step A1 with persistence, provenance merge, and coverage watermarks
 //! (VISION §7 ledger #7 / #5).
@@ -71,7 +72,6 @@ mod address_key;
 mod binary_event;
 mod coverage;
 mod coverage_claims;
-mod memory_store;
 mod persistent_store_lifetime;
 mod redb_store;
 mod semantic_edit;
@@ -86,7 +86,6 @@ pub mod ingest_attribution;
 
 pub use coverage::{coverage_key, CoverageInterval, CoverageKey, GcReport, GcRetentionSet};
 pub use coverage_claims::coverage_claim_atoms;
-pub use memory_store::MemoryStore;
 pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
 pub use redb_store::RedbStore;
 #[cfg(feature = "bench-instrumentation")]
@@ -202,14 +201,7 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    /// A fresh `Provenance` recording exactly one observation.
-    pub(crate) fn first_observation(from: RelayObserved) -> Self {
-        let mut seen = BTreeMap::new();
-        seen.insert(from.relay, from.at);
-        Self { seen, local: None }
-    }
-
-    /// A fresh `Provenance` for a row entering through `accept_write`: no
+    /// A fresh `Provenance` for a row entering through local acceptance: no
     /// relay has observed it yet, but it carries local provenance.
     pub(crate) fn local_origin(local: LocalOrigin) -> Self {
         Self {
@@ -390,9 +382,6 @@ pub(crate) fn restamped(frozen: &Event, created_at: Timestamp) -> Event {
 /// about the file, not a reason to abort the host, so every production
 /// decoder of store-owned bytes/JSON reports it through its owning door as
 /// [`PersistenceFault::Invariant`] instead of `.expect()`ing.
-/// `MemoryStore` implements the same fallible signature for backend
-/// uniformity but never actually returns `Err` (it does no I/O and owns no
-/// encoded rows).
 ///
 /// "Do not panic" was only half the contract (#895). The other half is
 /// telling the embedder *what kind* of failure this was, so recovery is a
@@ -956,8 +945,8 @@ pub enum AcceptOutcome {
         receipt_id: u64,
         row: StoredEvent,
     },
-    /// This exact event id was already held (see `Provenance::local_origin`'s
-    /// doc — an edge case, not the relay-echo hand-off, which goes through
+    /// This exact event id was already held with local provenance (an edge
+    /// case, not the relay-echo hand-off, which goes through
     /// ordinary `insert`/dedup instead). Still allocates and journals a
     /// fresh `intent_id`/`receipt_id` — this call is still a distinct
     /// accepted intent, joining the existing row's owner set (issue #2's
@@ -1754,10 +1743,8 @@ pub trait EventStore {
     /// Fallible (issue #122): the ingest door runs on every relay EVENT
     /// frame, so a realistic persistence failure (disk full, I/O error) must
     /// return `Err(PersistenceError)` rather than panic the embedding app.
-    /// The redb backend propagates the real redb error; `MemoryStore` never
-    /// actually returns `Err` (no I/O). Serde/logic invariant violations
-    /// (a corrupt stored row) remain `.expect()`-on-invariant, matching the
-    /// durable-write doors' established convention.
+    /// Redb errors and store-owned decode/invariant failures propagate through
+    /// this result rather than panicking the embedding app.
     fn insert(
         &mut self,
         event: Event,
@@ -1784,9 +1771,8 @@ pub trait EventStore {
     /// a read-path I/O error surfaces as `Err` instead of panicking.
     ///
     /// `filter.limit` is NOT consulted by this LOCAL read path (#124): every
-    /// currently-matching row is returned, in no particular order (neither
-    /// backend orders its internal candidates by `created_at` — both are
-    /// effectively id-keyed), regardless of `limit`. This is DELIBERATE, not
+    /// currently-matching row is returned, in no particular order, regardless
+    /// of `limit`. This is DELIBERATE, not
     /// an oversight — honoring `limit` locally requires a `created_at`-desc
     /// ordering + truncation, and choosing that ordering is an owner-
     /// reserved decision (issue #9's app-defined-sort-vs-closed-`OrderKey`
@@ -1799,8 +1785,8 @@ pub trait EventStore {
     /// LATER local-only call to THIS method returns once the cache holds
     /// more than `limit` matching rows (reconnect replay, multiple relays
     /// each independently capped, etc.) — this method's own answer is
-    /// uncapped regardless. Both backends are cross-checked for this exact
-    /// contract (`store_contract.rs`); when #9 resolves, whoever implements
+    /// uncapped regardless. `store_contract.rs` checks this exact contract;
+    /// when #9 resolves, whoever implements
     /// ordered/truncated local reads updates that test, not just adds one.
     ///
     /// The app never sees this uncapped answer directly, though: the handle
@@ -1901,8 +1887,8 @@ pub trait EventStore {
     /// (created_at == before.created_at && id > before.event_id)`.
     /// This predicate intersects the filter's ordinary inclusive time window;
     /// it never rewrites that window or turns a cursor into relay acquisition
-    /// authority. The default implementation is the `MemoryStore` oracle;
-    /// persistent backends override it with an exact ordered-index range.
+    /// authority. The default implementation states the contract directly;
+    /// Redb overrides it with an exact ordered-index range.
     fn query_newest_before(
         &self,
         filter: &Filter,
@@ -2113,7 +2099,7 @@ pub trait EventStore {
     /// Accept a durably-owned local write intent (issues #2/#3): runs the
     /// SAME tombstone-refusal and replaceable/addressable supersession
     /// rules `insert` runs against `accept.frozen`, but stamps
-    /// `Provenance::local_origin` instead of a `RelayObserved`, and commits
+    /// local [`Provenance`] instead of a `RelayObserved`, and commits
     /// the resulting row together with `accept`'s full journal payload
     /// (`PUBLISH_QUEUE_INTENTS` + `PUBLISH_QUEUE_DISPLACED`, if a predecessor was
     /// evicted) in ONE transaction (Fable checkpoint R7) — a crash mid-call
@@ -2134,7 +2120,7 @@ pub trait EventStore {
     /// (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) are
     /// fallible on the same footing; only serde/logic invariant violations
     /// (a corrupt persisted row) remain `.expect()`-on-invariant by design.
-    /// `MemoryStore` never actually returns `Err` (no I/O).
+    /// Redb propagates backend failures through this result.
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError>;
 
     /// Point-load one active replaceable-operation resource. Opaque replay
@@ -2280,9 +2266,8 @@ pub trait EventStore {
     /// boot (issue #3 §2.3). Read-only: the pending rows themselves are
     /// already live in the store (committed at `accept_write` time) — this
     /// returns only the journal metadata `nmp-engine` needs to rebuild its
-    /// in-memory write-delivery bookkeeping. `MemoryStore` always returns
-    /// empty (Fable checkpoint Q4: crash-safety is a `RedbStore`-only
-    /// backend property, not a contract `EventStore` itself promises).
+    /// in-memory write-delivery bookkeeping. Redb returns the durable open
+    /// obligations required to rebuild that projection.
     ///
     /// Fallible (#790). This used to return a bare `Vec`, which left the
     /// backend nothing to do with a journal row that will not decode except
@@ -2302,10 +2287,8 @@ pub trait EventStore {
     /// reattachable — issue #3's "receipts remain... reattachable" —
     /// rather than disappearing the moment its open-work row is cleaned
     /// up). Unlike `recover_publish_queue`, this is an ordinary retained-data
-    /// lookup, not a boot-only replay: `MemoryStore` answers it faithfully
-    /// for the life of the process (no Q4 "always empty" carve-out here —
-    /// that carve-out is specifically about surviving a REAL crash, which
-    /// this door never claims to do for a volatile backend).
+    /// lookup, not a boot-only replay: Redb answers it from retained durable
+    /// receipt state.
     fn reattach_receipt(
         &self,
         receipt_id: u64,

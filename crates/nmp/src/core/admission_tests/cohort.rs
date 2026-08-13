@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn cache_seed_is_immediate_while_wire_execution_waits_for_admission_flush() {
     let relay = RelayUrl::parse("wss://admission-seed.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
 
     let opened = core.handle(EngineMsg::Subscribe(query(
         &relay,
@@ -32,7 +32,7 @@ fn cache_seed_is_immediate_while_wire_execution_waits_for_admission_flush() {
 #[test]
 fn unbounded_profile_observations_group_without_losing_independent_owners() {
     let relay = RelayUrl::parse("wss://admission-group.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let alice = Keys::generate().public_key();
     let bob = Keys::generate().public_key();
 
@@ -92,7 +92,7 @@ fn unbounded_profile_observations_group_without_losing_independent_owners() {
 #[test]
 fn later_uncovered_demand_opens_a_second_req_without_replacing_the_running_one() {
     let relay = RelayUrl::parse("wss://admission-immutable.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
@@ -129,7 +129,7 @@ fn later_uncovered_demand_opens_a_second_req_without_replacing_the_running_one()
 #[test]
 fn duplicate_running_demand_attaches_without_compile_or_sibling_projection() {
     let relay = RelayUrl::parse("wss://admission-covered.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
@@ -161,7 +161,7 @@ fn duplicate_running_demand_attaches_without_compile_or_sibling_projection() {
 #[test]
 fn cache_only_open_reads_only_its_own_projection_and_never_arms_wire() {
     let relay = RelayUrl::parse("wss://admission-cache-only.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
@@ -189,7 +189,7 @@ fn cache_only_open_reads_only_its_own_projection_and_never_arms_wire() {
 #[test]
 fn cancelling_a_pending_observation_before_flush_sends_nothing() {
     let relay = RelayUrl::parse("wss://admission-cancel.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let opened = core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
@@ -205,7 +205,7 @@ fn cancelling_a_pending_observation_before_flush_sends_nothing() {
 #[test]
 fn reattaching_a_covered_atom_keeps_its_shared_immutable_request_active() {
     let relay = RelayUrl::parse("wss://admission-reattach.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let first_a = observation_id(&core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
@@ -280,7 +280,7 @@ fn reattaching_a_covered_atom_keeps_its_shared_immutable_request_active() {
 #[test]
 fn delayed_accepted_handoff_cannot_resurrect_a_fully_withdrawn_request() {
     let relay = RelayUrl::parse("wss://admission-delayed-handoff.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let observation = observation_id(&core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
@@ -335,7 +335,7 @@ fn pending_handoff_resolves_the_current_exact_owner_set() {
     for close_first_owner in [false, true] {
         let relay = RelayUrl::parse("wss://admission-pending-request-owners.example").unwrap();
         let session = RelaySessionKey::public(relay.clone());
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let first = observation_id(&core.handle(EngineMsg::Subscribe(query(
             &relay,
             "same",
@@ -386,7 +386,7 @@ fn pending_handoff_resolves_the_current_exact_owner_set() {
 fn pending_execution_census_counts_every_revision_queued_under_one_wire_key() {
     let relay = RelayUrl::parse("wss://admission-pending-census.example").unwrap();
     let session = RelaySessionKey::public(relay.clone());
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let observation =
         observation_id(&core.handle(EngineMsg::Subscribe(query(&relay, "same", Freshness::Live))));
     flush(&mut core);

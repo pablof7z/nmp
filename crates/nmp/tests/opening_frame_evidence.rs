@@ -50,7 +50,7 @@ use std::time::Duration;
 use nmp::mechanism::runtime::EngineThread;
 use nmp_grammar::{AccessContext, Demand, Filter, Freshness, LiveQuery, SourceAuthority};
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::MemoryStore;
+use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;
 
@@ -83,7 +83,7 @@ fn every_opening_frame_reports_one_evidence_entry_per_branch() {
 
     for opening in 0..OPENINGS {
         let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-            MemoryStore::new(),
+            RedbStore::temporary().expect("temporary Redb store"),
             FixtureRoutingFacts::new(),
             10,
             PoolConfig {

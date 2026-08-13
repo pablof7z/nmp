@@ -18,7 +18,7 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
         &incumbent.source,
         incumbent.access,
     );
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.attribution.observe_atom(&incumbent);
     core.attribution.observe_atom(&added);
     core.attribution
@@ -113,7 +113,7 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
         &incumbent.source,
         incumbent.access,
     );
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     for atom in [&incumbent, &first_alias, &second_alias] {
         core.attribution.observe_atom(atom);
     }

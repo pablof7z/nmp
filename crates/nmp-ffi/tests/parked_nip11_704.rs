@@ -57,7 +57,7 @@ async fn parked_nip11_waits_hold_no_os_thread_and_cancel_immediately() {
         },
         None,
     )
-    .expect("in-memory engine must build");
+    .expect("temporary Redb engine must build");
 
     let baseline = nmp::nmp_threads_spawned();
 

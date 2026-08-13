@@ -4,11 +4,11 @@ use super::*;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nmp_router::{DemandKey, RequestMetadataUpdate, SubId};
-use nmp_store::{coverage_key, MemoryStore};
+use nmp_store::{coverage_key, RedbStore};
 use nostr::EventId;
 
 struct Fixture {
-    core: EngineCore<MemoryStore>,
+    core: EngineCore<RedbStore>,
     relay: RelayUrl,
     session: RelaySessionKey,
     plan_sub_id: SubId,
@@ -48,7 +48,7 @@ impl Fixture {
         );
         let incumbent_claims = BTreeSet::from([coverage_key(&incumbent)]);
         let incumbent_demands = BTreeSet::from([DemandKey::for_atom(&incumbent)]);
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         core.attribution.observe_atom(&incumbent);
         core.attribution.observe_atom(&added);
         core.attribution

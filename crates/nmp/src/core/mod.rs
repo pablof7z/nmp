@@ -2363,8 +2363,8 @@ pub struct EngineCore<S: EventStore> {
     /// A narrowing INDEX only, never a second source of truth: the store's
     /// `PUBLISH_QUEUE_LANES` table stays authoritative (its keys are intent-first,
     /// and `close_terminal_intent` deliberately never deletes a closed
-    /// intent's own terminal lane rows -- both `MemoryStore` and `RedbStore`
-    /// only drop `PUBLISH_QUEUE_INTENTS`/the deadline indexes there, per that
+    /// intent's own terminal lane rows -- `RedbStore` only drops
+    /// `PUBLISH_QUEUE_INTENTS`/the deadline indexes there, per that
     /// door's own doc comment: "Receipts and all route/attempt/detail
     /// evidence are retained" -- so a durable relay-scoped secondary table
     /// would still index retained garbage and would need transactional

@@ -1010,7 +1010,7 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
 fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://terminal.example").unwrap();
-    let store = nmp_store::MemoryStore::new();
+    let store = nmp_store::RedbStore::temporary().expect("temporary Redb store");
     let mut core =
         EngineCore::new_with_fixture_routing_facts(store, directory(keys.public_key(), relay), 10);
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));

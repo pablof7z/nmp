@@ -119,7 +119,7 @@ mod tests {
     use std::sync::mpsc::{self, TryRecvError};
 
     use nmp_grammar::{Binding, Filter, LiveQuery};
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nmp_transport::{PoolConfig, RelayOpenError, RelaySessionKey};
     use nostr::{Keys, RelayUrl};
 
@@ -181,7 +181,7 @@ mod tests {
             Err(RelayOpenError::AtCapacity { max_relays: 1 })
         ));
 
-        let core = EngineCore::new(MemoryStore::new(), 1);
+        let core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let (first_tx, first_rx) = latest_channel();
         let (second_tx, second_rx) = latest_channel();
         let channels = HashMap::from([(1, first_tx), (2, second_tx)]);
@@ -206,7 +206,7 @@ mod tests {
     fn new_observer_current_snapshot_satisfies_pending_delivery_without_duplicate() {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
-        let core = EngineCore::new(MemoryStore::new(), 1);
+        let core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let mut snapshot = snapshot_with_pool(&core, &pool);
         snapshot.uncovered_author_count = 7;
 
@@ -240,8 +240,12 @@ mod tests {
 
     #[test]
     fn engine_deadline_delivers_the_lazy_withdrawal_snapshot() {
-        let (engine, handle) = EngineThread::spawn(MemoryStore::new(), 1, PoolConfig::default())
-            .expect("test engine construction");
+        let (engine, handle) = EngineThread::spawn(
+            RedbStore::temporary().expect("temporary Redb store"),
+            1,
+            PoolConfig::default(),
+        )
+        .expect("test engine construction");
         let (diagnostics, snapshots) = handle.observe_diagnostics();
         assert_eq!(
             snapshots

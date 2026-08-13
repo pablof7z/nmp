@@ -118,8 +118,9 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
 /// entries delivered across every `EmitRows` batch stays close to N (each
 /// distinct row delivered ~once), nowhere near the O(N^2) blow-up the old
 /// full-set-re-emit behavior produced. Bounded/deterministic: a fixed N,
-/// no network, and a generous wall-clock ceiling so an O(N^2) regression
-/// fails loudly instead of hanging.
+/// no network, and a generous wall-clock ceiling. N=1,000 retains a 250x+
+/// separation between the linear bound and quadratic failure while keeping
+/// the real per-event Redb transaction fixture proportional for local runs.
 #[test]
 fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared() {
     let start = Instant::now();
@@ -134,7 +135,7 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
         &a.public_key().to_hex(),
     )));
 
-    const N: u64 = 2_000;
+    const N: u64 = 1_000;
     let mut total_delta_entries = 0usize;
     let mut distinct_delivered = BTreeSet::new();
     for i in 0..N {
@@ -171,7 +172,7 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
     // THE falsifier: total delivered row-delta entries stays ~O(N) (a small
     // constant multiple covers the initial empty-subscribe batch and any
     // coverage-only re-emits), nowhere near the O(N^2) blow-up a full-set
-    // re-emit would produce (~N*(N+1)/2 = 2,001,000 for N=2,000 -- 500x+
+    // re-emit would produce (~N*(N+1)/2 = 500,500 for N=1,000 -- 250x+
     // this bound).
     let quadratic_blowup = (N * (N + 1)) / 2;
     assert!(
@@ -1242,7 +1243,11 @@ fn later_handle_lifetimes_do_not_rewrite_a_surviving_incumbent() {
     let dir = FixtureRoutingFacts::new()
         .with_outbound_routes(a.public_key(), [r2.clone(), r3.clone()])
         .with_outbound_routes(b.public_key(), [r1.clone(), r2.clone()]);
-    let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 2);
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        dir,
+        2,
+    );
 
     let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[9999],

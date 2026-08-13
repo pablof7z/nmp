@@ -65,7 +65,7 @@ fn delayed_signer_promotes_the_same_visible_row_from_pending_to_signed() {
     let keys = Keys::generate();
     let pubkey = keys.public_key();
     let (started_tx, started_rx) = mpsc::channel();
-    let engine = Engine::new(EngineConfig::default()).expect("the in-memory engine starts");
+    let engine = Engine::new(EngineConfig::default()).expect("the temporary Redb engine starts");
     engine
         .add_public_key_account(pubkey, false)
         .expect("the session account exists");

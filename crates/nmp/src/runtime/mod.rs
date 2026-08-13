@@ -301,7 +301,7 @@ mod history_mailbox_tests {
     use std::time::{Duration, Instant};
 
     use nmp_grammar::{Binding, Filter};
-    use nmp_store::{EventStore, MemoryStore, RelayObserved};
+    use nmp_store::{EventStore, RedbStore, RelayObserved};
     use nostr::{Keys, Kind};
 
     use super::*;
@@ -506,7 +506,7 @@ mod history_mailbox_tests {
             .map(|index| row(&keys, 100 + index, &format!("runtime-{index}")))
             .map(|row| row.signed_event().expect("fixture rows are signed"))
             .collect();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         for event in &events {
             store
                 .insert(
@@ -2164,7 +2164,7 @@ impl EngineThread {
 mod receipt_delivery_lifecycle_tests {
     use super::*;
     use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nostr::{Keys, Kind};
 
     fn parked_write(handle: &Handle, keys: &Keys) -> ReceiptStream {
@@ -2189,8 +2189,12 @@ mod receipt_delivery_lifecycle_tests {
     /// without relying on a later `notify` call to prune a closed mailbox.
     #[test]
     fn parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries() {
-        let (thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default())
-            .expect("test engine thread construction");
+        let (thread, handle) = EngineThread::spawn(
+            RedbStore::temporary().expect("temporary Redb store"),
+            10,
+            PoolConfig::default(),
+        )
+        .expect("test engine thread construction");
         let tracked = parked_write(&handle, &Keys::generate());
         let id = tracked.id;
         assert_eq!(handle.receipt_delivery_count(id), 1);
@@ -2242,7 +2246,7 @@ mod receipt_delivery_lifecycle_tests {
 mod reentrant_shutdown_tests {
     use super::*;
     use nmp_local_signer::LocalKeySigner;
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nostr::{Keys, Kind};
 
     /// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
@@ -2256,8 +2260,12 @@ mod reentrant_shutdown_tests {
     fn runtime() -> (EngineThread, Handle) {
         // #680 removed the configurable native-task limit; the blocking-adapter
         // pool is a fixed internal capacity, so spawn takes no limit argument.
-        EngineThread::spawn(MemoryStore::new(), 1, PoolConfig::default())
-            .expect("engine construction")
+        EngineThread::spawn(
+            RedbStore::temporary().expect("temporary Redb store"),
+            1,
+            PoolConfig::default(),
+        )
+        .expect("engine construction")
     }
 
     fn unsigned(keys: &Keys, content: &str) -> UnsignedEvent {
@@ -3190,7 +3198,7 @@ mod relay_worker_reconciliation_tests {
         WritePayload, WriteRouting,
     };
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nostr::{Keys, Kind};
 
     fn query(author: &str) -> LiveQuery {
@@ -3258,7 +3266,7 @@ mod relay_worker_reconciliation_tests {
         let public = RelaySessionKey::public(relay.clone());
         let signer = Keys::generate().public_key();
         let protected_read = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
-        let mut core = EngineCore::new(MemoryStore::new(), 1);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let mut effects = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
         effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
         assert!(effects.iter().any(
@@ -3290,7 +3298,7 @@ mod relay_worker_reconciliation_tests {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
-        let mut core = EngineCore::new(MemoryStore::new(), 1);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
@@ -3421,7 +3429,7 @@ mod relay_worker_reconciliation_tests {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
-        let mut core = EngineCore::new(MemoryStore::new(), 1);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let opened = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
         let id = opened
             .iter()
@@ -3460,7 +3468,7 @@ mod relay_worker_reconciliation_tests {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
-        let mut core = EngineCore::new(MemoryStore::new(), 1);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
@@ -3577,9 +3585,12 @@ mod relay_worker_reconciliation_tests {
     fn repeated_engine_shutdown_returns_runtime_threads_to_exact_baseline() {
         let _serial = RUNTIME_LIFECYCLE_TEST_LOCK.lock().unwrap();
         for _ in 0..16 {
-            let (engine, handle) =
-                EngineThread::spawn(MemoryStore::new(), 1, PoolConfig::default())
-                    .expect("engine construction");
+            let (engine, handle) = EngineThread::spawn(
+                RedbStore::temporary().expect("temporary Redb store"),
+                1,
+                PoolConfig::default(),
+            )
+            .expect("engine construction");
             let runtime_threads = Arc::clone(&engine.runtime_threads);
             let deadline = Instant::now() + Duration::from_secs(5);
             // #704: the auth-release bridge is gone (the adapter executor was
@@ -3620,7 +3631,11 @@ mod relay_worker_reconciliation_tests {
         let directory = FixtureRoutingFacts::new()
             .with_outbound_routes(PublicKey::from_hex(&author_a).unwrap(), [relay_a.clone()])
             .with_outbound_routes(PublicKey::from_hex(&author_b).unwrap(), [relay_b.clone()]);
-        let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 1);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            RedbStore::temporary().expect("temporary Redb store"),
+            directory,
+            1,
+        );
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
@@ -3737,7 +3752,11 @@ mod relay_worker_reconciliation_tests {
         );
         let directory =
             FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
-        let mut core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 1);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            RedbStore::temporary().expect("temporary Redb store"),
+            directory,
+            1,
+        );
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
 
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
@@ -3836,7 +3855,7 @@ mod relay_worker_reconciliation_tests {
 mod auth_registry_admission_tests {
     use super::*;
     use nmp_local_signer::LocalKeySigner;
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nmp_transport::RelayFrame;
     use nostr::{Keys, RelayMessage};
 
@@ -3913,7 +3932,7 @@ mod auth_registry_admission_tests {
 
     fn runtime(limit: usize) -> (EngineThread, Handle) {
         EngineThread::spawn_with_runtime_config(
-            MemoryStore::new(),
+            RedbStore::temporary().expect("temporary Redb store"),
             1,
             PoolConfig::default(),
             RuntimeConfig {

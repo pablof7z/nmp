@@ -24,7 +24,8 @@ const TEST_SECRET_KEY_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 
 fn test_engine() -> Arc<NmpEngine> {
-    let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("in-memory engine opens");
+    let engine =
+        NmpEngine::new(NmpEngineConfig::default(), None).expect("temporary Redb engine opens");
     engine
         .add_private_key_account(
             FfiPrivateKey::from_bytes(

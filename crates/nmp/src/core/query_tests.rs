@@ -3,7 +3,7 @@
 use super::*;
 use nmp_grammar::{Binding, Demand, Filter};
 use nmp_router::test_relay;
-use nmp_store::MemoryStore;
+use nmp_store::RedbStore;
 use nostr::Keys;
 
 #[test]
@@ -15,7 +15,7 @@ fn author_outbox_queries_need_a_provider_until_a_positive_route_or_withdrawal() 
         authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
         ..Filter::default()
     };
-    let mut core = EngineCore::new(MemoryStore::new(), 8);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
 
     let opened = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(filter.clone())));
     assert!(opened.iter().any(|effect| {
@@ -78,7 +78,7 @@ fn shared_author_outbox_need_retires_only_with_its_last_wire_owner() {
         authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
         ..Filter::default()
     });
-    let mut core = EngineCore::new(MemoryStore::new(), 8);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
 
     let first = core.handle(EngineMsg::Subscribe(query.clone()));
     let first_handle = first
@@ -122,7 +122,7 @@ fn shared_author_outbox_need_retires_only_with_its_last_wire_owner() {
 #[cfg(test)]
 mod affected_handle_invalidation_tests {
     use nmp_grammar::{Binding, Filter, IndexedTagName};
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     use super::*;
@@ -193,7 +193,7 @@ mod affected_handle_invalidation_tests {
             .collect()
     }
 
-    fn assert_remembered_rows_match_oracle(core: &EngineCore<MemoryStore>, id: ObservationId) {
+    fn assert_remembered_rows_match_oracle(core: &EngineCore<RedbStore>, id: ObservationId) {
         let branch = core.observations[&id].branches[0];
         let oracle = core.rows_for(branch).unwrap();
         let oracle: BTreeMap<_, _> = oracle
@@ -216,7 +216,7 @@ mod affected_handle_invalidation_tests {
     fn local_signed_acceptance_updates_unlimited_handle_without_projection_read() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://local-delta.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
 
         let initial = room_event(&keys, 7, 0, 10);
         core.resolver
@@ -252,7 +252,7 @@ mod affected_handle_invalidation_tests {
         let followed = Keys::generate();
         let relay = RelayUrl::parse("wss://local-demand-change.example").unwrap();
         let followed_post = nmp_resolver::testkit::kind1(&followed, "already cached", 10);
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
                 followed_post.clone(),
@@ -298,7 +298,7 @@ mod affected_handle_invalidation_tests {
     fn local_compensation_removes_pending_row_without_projection_read() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://local-compensation.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         core.active_pubkey = Some(keys.public_key());
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(9)));
         let handle = subscribed_handle(&subscribe);
@@ -355,7 +355,7 @@ mod affected_handle_invalidation_tests {
         let relay = RelayUrl::parse("wss://local-top-n.example").unwrap();
         let oldest = room_event(&keys, 10, 0, 10);
         let retained = room_event(&keys, 10, 1, 20);
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert_batch(
                 [oldest.clone(), retained]
@@ -437,7 +437,7 @@ mod affected_handle_invalidation_tests {
             .custom_created_at(Timestamp::from(10u64))
             .sign_with_keys(&keys)
             .unwrap();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
                 predecessor.clone(),
@@ -514,7 +514,7 @@ mod affected_handle_invalidation_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://local-kind5.example").unwrap();
         let target = room_event(&keys, 13, 0, 10);
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
                 target.clone(),
@@ -579,7 +579,7 @@ mod affected_handle_invalidation_tests {
             .custom_created_at(Timestamp::from(50u64))
             .sign_with_keys(&keys)
             .unwrap();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
                 expiring.clone(),
@@ -607,7 +607,7 @@ mod affected_handle_invalidation_tests {
     }
 
     fn apply_local_differential_accept(
-        core: &mut EngineCore<MemoryStore>,
+        core: &mut EngineCore<RedbStore>,
         event: SignedEvent,
         accepted_at: u64,
         direct: bool,
@@ -635,7 +635,7 @@ mod affected_handle_invalidation_tests {
     }
 
     fn apply_local_differential_compensation(
-        core: &mut EngineCore<MemoryStore>,
+        core: &mut EngineCore<RedbStore>,
         intent_id: IntentId,
         pending: SignedEvent,
         direct: bool,
@@ -659,7 +659,7 @@ mod affected_handle_invalidation_tests {
     }
 
     fn apply_local_differential_expiry(
-        core: &mut EngineCore<MemoryStore>,
+        core: &mut EngineCore<RedbStore>,
         now: Timestamp,
         direct: bool,
     ) {
@@ -692,7 +692,7 @@ mod affected_handle_invalidation_tests {
         let seed = [predecessor.clone(), target.clone(), expiring.clone()];
 
         let make_core = || {
-            let mut store = MemoryStore::new();
+            let mut store = RedbStore::temporary().expect("temporary Redb store");
             store
                 .insert_batch(
                     seed.iter()
@@ -716,7 +716,7 @@ mod affected_handle_invalidation_tests {
         let (mut direct, direct_handle) = make_core();
         let (mut oracle, oracle_handle) = make_core();
 
-        let assert_same = |direct: &EngineCore<MemoryStore>, oracle: &EngineCore<MemoryStore>| {
+        let assert_same = |direct: &EngineCore<RedbStore>, oracle: &EngineCore<RedbStore>| {
             assert_remembered_rows_match_oracle(direct, direct_handle);
             assert_remembered_rows_match_oracle(oracle, oracle_handle);
             assert_eq!(
@@ -792,7 +792,7 @@ mod affected_handle_invalidation_tests {
     fn ordinary_room_batch_queries_only_the_matching_handle_and_skips_router_compile() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://affected-room.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
 
         let mut seed = Vec::new();
         for room in 0..HANDLE_COUNT {
@@ -888,7 +888,7 @@ mod affected_handle_invalidation_tests {
     fn top_n_insert_queries_only_its_handle_and_emits_eviction_delta() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://top-n-affected.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let oldest = room_event(&keys, 7, 0, 10);
         let retained = room_event(&keys, 7, 1, 20);
         let unrelated = room_event(&keys, 8, 0, 10);
@@ -936,7 +936,7 @@ mod affected_handle_invalidation_tests {
     fn top_n_visible_removal_uses_one_bounded_backfill_read() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://top-n-backfill.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let oldest = room_event(&keys, 21, 0, 10);
         let middle = room_event(&keys, 21, 1, 20);
         let newest = room_event(&keys, 21, 2, 30);
@@ -995,7 +995,7 @@ mod affected_handle_invalidation_tests {
         pair.sort_by_key(|event| event.id);
         let arriving = pair[0].clone();
         let seeded = pair[1].clone();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         core.resolver
             .store_mut()
             .insert(
@@ -1037,7 +1037,7 @@ mod affected_handle_invalidation_tests {
             .custom_created_at(Timestamp::from(20u64))
             .sign_with_keys(&keys)
             .unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         core.handle(EngineMsg::Subscribe(room_query(23)));
         core.projection_store_queries.set(0);
 
@@ -1065,7 +1065,7 @@ mod affected_handle_invalidation_tests {
         let first = RelayUrl::parse("wss://batch-source-a.example").unwrap();
         let second = RelayUrl::parse("wss://batch-source-b.example").unwrap();
         let event = room_event(&keys, 24, 0, 10);
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         core.handle(EngineMsg::Subscribe(room_query(24)));
         core.projection_store_queries.set(0);
 
@@ -1100,7 +1100,7 @@ mod affected_handle_invalidation_tests {
     fn replaceable_supersession_invalidates_old_and_new_matches_only() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://replaceable-affected.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let replaceable = |room: usize, created_at: u64| {
             EventBuilder::new(Kind::from(10_000u16), format!("winner-{room}"))
                 .tag(Tag::parse(["h".to_owned(), format!("room-{room}")]).unwrap())
@@ -1149,7 +1149,7 @@ mod affected_handle_invalidation_tests {
     fn kind_five_removed_row_invalidates_matching_handle_without_shape_luck() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://deletion-affected.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let target = room_event(&keys, 12, 0, 10);
         core.resolver
             .store_mut()
@@ -1192,7 +1192,7 @@ mod affected_handle_invalidation_tests {
         demand.source = SourceAuthority::Pinned(BTreeSet::from([pinned.clone()]));
         demand.cache = CacheMode::Strict;
 
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
 
         let event = room_event(&keys, 25, 0, 10);
@@ -1234,7 +1234,7 @@ mod affected_handle_invalidation_tests {
         let me = Keys::generate();
         let followed = Keys::generate();
         let relay = RelayUrl::parse("wss://derived-fallback.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let contact_list = EventBuilder::new(Kind::ContactList, "")
             .tag(Tag::public_key(followed.public_key()))
             .custom_created_at(Timestamp::from(10u64))
@@ -1288,7 +1288,7 @@ mod affected_handle_invalidation_tests {
     fn incomplete_projection_forces_one_recovery_read_before_direct_deltas_resume() {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-recovery.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let subscribed = core.handle(EngineMsg::Subscribe(unlimited_room_query(28)));
         let handle = subscribed_handle(&subscribed);
         core.observations
@@ -1331,7 +1331,7 @@ mod affected_handle_invalidation_tests {
         let keys = Keys::generate();
         let first = RelayUrl::parse("wss://differential-a.example").unwrap();
         let second = RelayUrl::parse("wss://differential-b.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(26)));
         let handle = subscribed_handle(&subscribe);
         let mut app_rows = BTreeMap::<EventId, Row>::new();
@@ -1419,7 +1419,7 @@ mod affected_handle_invalidation_tests {
 
     #[test]
     fn resolver_internal_handle_is_filtered_before_any_projection_read() {
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let internal = match core.resolver.subscribe(room_query(1).branches()[0].clone()) {
             SubscribeOutcome::Opened { handle, .. } => handle,
             SubscribeOutcome::Refused { error, .. } => panic!("resolver refused: {error}"),
@@ -1439,7 +1439,7 @@ mod coverage_evidence_refresh_tests {
     use std::borrow::Cow;
 
     use nmp_grammar::{Binding, Filter, IndexedTagName};
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     #[cfg(feature = "bench-instrumentation")]
     use nmp_store::RedbStore;
     use nostr::{Kind, SubscriptionId};
@@ -1502,12 +1502,8 @@ mod coverage_evidence_refresh_tests {
 
     fn connected_core(
         relay: &RelayUrl,
-    ) -> (
-        EngineCore<MemoryStore>,
-        TransportRelayHandle,
-        RelaySessionKey,
-    ) {
-        connected_core_with_store(relay, MemoryStore::new())
+    ) -> (EngineCore<RedbStore>, TransportRelayHandle, RelaySessionKey) {
+        connected_core_with_store(relay, RedbStore::temporary().expect("temporary Redb store"))
     }
 
     fn connected_core_with_store<S: EventStore>(
@@ -1966,7 +1962,7 @@ mod coverage_evidence_refresh_tests {
     #[test]
     fn evidence_only_refresh_falls_back_for_incomplete_projections() {
         let relay = RelayUrl::parse("wss://evidence-recovery.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let live = core.handle(EngineMsg::Subscribe(pinned_query(&relay)));
         let live_id = live
             .iter()

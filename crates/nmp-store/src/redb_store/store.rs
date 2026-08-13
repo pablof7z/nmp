@@ -36,9 +36,9 @@ use super::{
 use redb::{ReadableDatabase, ReadableTableMetadata, TableHandle};
 use std::sync::Mutex;
 
-/// A persistent, `redb`-backed `EventStore`. One database, MVCC, ACID; the
-/// same insert door and coverage/GC contract as [`crate::MemoryStore`], the
-/// oracle it is diffed against in `nmp-store/tests/store_contract.rs`.
+/// The one complete `EventStore` implementation. One Redb database, MVCC,
+/// ACID. Persistent stores open a caller-selected path; isolated engines and
+/// tests use [`Self::temporary`] and keep the same transactions and indexes.
 #[cfg(test)]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +77,11 @@ pub struct RedbStore {
     // token, so no process can open or reset the target until this database
     // handle has finished closing.
     pub(super) _ownership: StoreOwnership,
+    // Temporary Redb stores own their directory after the database and
+    // ownership fields, so Rust closes the handle and releases both locks
+    // before recursive temporary-directory cleanup runs. Persistent stores
+    // leave this as `None`.
+    temporary_directory: Option<tempfile::TempDir>,
     /// Lazy process-local projection of the publish queue relay dictionary.
     /// Dictionary allocation remains transaction-authoritative; this cache
     /// only prevents reparsing a canonical URL for every row that references
@@ -207,6 +212,21 @@ impl Drop for RedbStore {
 }
 
 impl RedbStore {
+    /// Open an isolated filesystem-backed Redb database and own its directory
+    /// for exactly this store's lifetime.
+    ///
+    /// This is the ephemeral construction path for tests and for an
+    /// [`nmp::EngineConfig`](https://docs.rs/nmp) with no store path. It is
+    /// still the production Redb implementation: there is no in-memory
+    /// `EventStore`, compatibility alias, or alternate semantic owner.
+    pub fn temporary() -> Result<Self, RedbStoreOpenError> {
+        let directory = tempfile::tempdir()
+            .map_err(|source| RedbStoreOpenError::TemporaryDirectoryFailed { source })?;
+        let mut store = Self::open(directory.path().join("nmp.redb"))?;
+        store.temporary_directory = Some(directory);
+        Ok(store)
+    }
+
     pub(super) fn database(&self) -> Result<&Database, PersistenceError> {
         self.db.as_ref().ok_or_else(|| {
             PersistenceError::new(
@@ -616,6 +636,7 @@ impl RedbStore {
         let mut store = Self {
             db: Some(db),
             _ownership: ownership,
+            temporary_directory: None,
             publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
@@ -1112,6 +1133,10 @@ fn validate_reopened_schema(db: &Database, path: &Path) -> Result<(), Persistenc
 
 fn reopen_open_error(error: RedbStoreOpenError) -> PersistenceError {
     match error {
+        RedbStoreOpenError::TemporaryDirectoryFailed { source } => PersistenceError::new(
+            crate::PersistenceFault::Invariant,
+            format!("reconstruction unexpectedly tried to create a temporary directory: {source}"),
+        ),
         RedbStoreOpenError::Database(error) => persist_err(error),
         RedbStoreOpenError::StoreAlreadyOpen { path } => PersistenceError::new(
             crate::PersistenceFault::Latched,

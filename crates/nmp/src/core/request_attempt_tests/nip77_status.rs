@@ -3,7 +3,7 @@
 use super::*;
 
 struct Nip77StatusFixture {
-    core: EngineCore<MemoryStore>,
+    core: EngineCore<RedbStore>,
     session: RelaySessionKey,
     handle: TransportRelayHandle,
     observation: ObservationId,
@@ -21,7 +21,7 @@ impl Nip77StatusFixture {
             slot: 98,
             generation: 1,
         };
-        let mut core = EngineCore::new(MemoryStore::new(), 8);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
         core.prober
             .states
             .insert(relay.clone(), crate::negentropy::ProbeState::Supported);

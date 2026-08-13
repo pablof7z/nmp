@@ -117,7 +117,7 @@ pub(super) type RelayKey = u32;
 /// The local sidecar and the relay observations were separate trees, but both
 /// were keyed by (or prefixed with) the event key, so neither was a distinct
 /// key space (#1248) — `event_observations` was already a compound key on it.
-/// `MemoryStore` does not split them at all: local origin and relay
+/// `RedbStore` does not split them at all: local origin and relay
 /// observations live inline on `StoredEvent.provenance`.
 ///
 /// The event key leads, so every column of ONE event is contiguous and

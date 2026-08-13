@@ -23,5 +23,5 @@ nmp-test-support.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # #99: the terminal-retained-receipt reattach scenario needs a real
 # `RedbStore` file (an ephemeral receipt abandoned across a genuine
-# close/reopen), not an in-memory store.
+# close/reopen), not the engine-owned temporary Redb path.
 tempfile = "3"
