@@ -172,6 +172,19 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And a later qualified source may still create one successor generation
     And no terminal receipt is resurrected
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-021
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::finite_sources_are_exact_requests_restart_unfinished_and_close_with_destinations
+  # nmp:falsifier=Stop consuming the retired hidden source observation's evidence; its private Withdrawn fact leaks from the exact two-relay test instead of preserving only the outward wire close.
+  Scenario: A finite semantic operation closes after every owned source and destination is terminal
+    Given relay 1 and relay 2 each own one exact finite source request
+    And relay 1 has settled while relay 2 remains unfinished
+    When a qualified successor arrives through relay 2's active owned request
+    And NMP restarts before relay 2 settles
+    Then only relay 2's unfinished source request is reopened
+    And stale or unrelated request evidence cannot settle or resurrect the source round
+    And after relay 2 and every current destination become terminal the operation cohort settles atomically
+
   # nmp:id=WRITES-REPLACEABLE-EDIT-020
   # nmp:status=built
   # nmp:evidence=rust:nmp::route_only_addition_preserves_signed_e2_and_sends_only_the_new_destination
