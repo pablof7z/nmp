@@ -107,16 +107,11 @@ impl FiniteSemanticSourceRound {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SemanticSourcePolicy {
+    #[default]
     Continuing,
     Finite(FiniteSemanticSourceRound),
-}
-
-impl Default for SemanticSourcePolicy {
-    fn default() -> Self {
-        Self::Continuing
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
