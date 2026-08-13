@@ -599,7 +599,7 @@ fn every_current_fault_variant_has_a_redb_error_that_produces_it() {
         // Above the storage layer: this crate asking redb for a table it
         // never created is a bug in this crate, not a disk event.
         (
-            persist_err(redb::TableError::TableDoesNotExist("events_v9".to_owned())),
+            persist_err(redb::TableError::TableDoesNotExist("events".to_owned())),
             PersistenceFault::Invariant,
         ),
     ];

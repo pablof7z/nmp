@@ -778,8 +778,7 @@ fn apply_deaths(
                 .transpose()
                 .map_err(persist_err)?
             else {
-                // A pre-v8 row is rebuilt by the schema migration; packed
-                // artifacts are not query-authoritative before that flip.
+                // No packed run's range index covers this event.
                 continue;
             };
             let run_id = decode_run_id(candidate.1.value())?;

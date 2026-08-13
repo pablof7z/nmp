@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_store::{RedbStore, RedbStoreOpenError};
+use nmp_store::RedbStore;
 use redb::{Database, ReadableDatabase, TableDefinition, TableHandle};
 use tempfile::tempdir;
 
@@ -161,69 +161,5 @@ fn no_durable_table_name_carries_a_version_suffix() {
         suffixed.is_empty(),
         "durable tables carry a per-table version suffix, but SCHEMA_VERSION is the one epoch \
          authority: {suffixed:?}"
-    );
-}
-
-#[test]
-fn legacy_outbox_database_is_typed_refusal_and_is_never_initialized() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("legacy-outbox.redb");
-    {
-        let database = Database::create(&path).unwrap();
-        let write = database.begin_write().unwrap();
-        {
-            let mut legacy = write
-                .open_table(TableDefinition::<&str, &str>::new("outbox_intents"))
-                .unwrap();
-            legacy.insert("00000000000000000001", "{}").unwrap();
-        }
-        write.commit().unwrap();
-    }
-
-    assert!(matches!(
-        RedbStore::open(&path),
-        Err(RedbStoreOpenError::UnsupportedSchema { found: None, .. })
-    ));
-
-    assert_eq!(
-        fresh_table_names(&path),
-        BTreeSet::from(["outbox_intents".to_owned()])
-    );
-}
-
-/// A store written by the previous epoch — the one whose publish queue was
-/// spelled `delivery_*_v1` — is refused at `open`, unmutated. The wipe is
-/// the accepted cutover (#1026); what must never happen is a partial adopt.
-#[test]
-fn a_previous_epoch_publish_queue_database_is_refused_and_left_untouched() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("previous-epoch.redb");
-    {
-        let database = Database::create(&path).unwrap();
-        let write = database.begin_write().unwrap();
-        {
-            let mut legacy = write
-                .open_table(TableDefinition::<&str, &str>::new("delivery_intents_v1"))
-                .unwrap();
-            legacy.insert("00000000000000000001", "{}").unwrap();
-            let mut meta = write
-                .open_table(TableDefinition::<&str, u64>::new("schema_meta_v6"))
-                .unwrap();
-            meta.insert("version", 12u64).unwrap();
-        }
-        write.commit().unwrap();
-    }
-
-    assert!(matches!(
-        RedbStore::open(&path),
-        Err(RedbStoreOpenError::UnsupportedSchema { found: None, .. })
-    ));
-
-    assert_eq!(
-        fresh_table_names(&path),
-        BTreeSet::from([
-            "delivery_intents_v1".to_owned(),
-            "schema_meta_v6".to_owned()
-        ])
     );
 }

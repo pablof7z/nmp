@@ -316,7 +316,7 @@ struct CrashProbeResult {
 }
 
 const CRASH_PROBE_TABLE: TableDefinition<&str, &str> =
-    TableDefinition::new("storage_engine_crash_probe_v1");
+    TableDefinition::new("storage_engine_crash_probe");
 
 struct LmdbHandle(*mut c_void);
 
