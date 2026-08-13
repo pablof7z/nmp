@@ -377,7 +377,16 @@ fn redb_reopens_bodyless_operation_and_current_generation_without_body_copies() 
     assert_eq!(store.recover_publish_queue().unwrap().len(), 1);
 }
 
-fn exercise_source_successor(store: &mut dyn EventStore) {
+struct SourceSuccessorEvidence {
+    coordinate: Coordinate,
+    source: nostr::Event,
+    intent: nmp_store::IntentId,
+    receipt: u64,
+    predecessor: nostr::EventId,
+    successor: nostr::EventId,
+}
+
+fn exercise_source_successor(store: &mut dyn EventStore) -> SourceSuccessorEvidence {
     let keys = Keys::generate();
     let coordinate = coordinate(&keys);
     let relay = RelayUrl::parse("wss://source-contract.example").unwrap();
@@ -555,16 +564,60 @@ fn exercise_source_successor(store: &mut dyn EventStore) {
     let attempts = store.recover_attempts(intent).unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].event.id, first_id);
+
+    SourceSuccessorEvidence {
+        coordinate,
+        source: newer,
+        intent,
+        receipt,
+        predecessor: first_id,
+        successor: installed.event.id,
+    }
 }
 
 #[test]
 fn qualified_source_and_complete_successor_survive_redb_reopen() {
-    let mut temporary = RedbStore::temporary().expect("temporary Redb store");
-    exercise_source_successor(&mut temporary);
-
     let dir = tempfile::tempdir().unwrap();
-    let mut redb = RedbStore::open(dir.path().join("source-successor.redb")).unwrap();
-    exercise_source_successor(&mut redb);
+    let path = dir.path().join("source-successor.redb");
+    let evidence = {
+        let mut redb = RedbStore::open(&path).unwrap();
+        exercise_source_successor(&mut redb)
+    };
+
+    let reopened = RedbStore::open(&path).unwrap();
+    let snapshot = reopened
+        .replaceable_operation_snapshot(&evidence.coordinate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.source.unwrap().event, evidence.source);
+    assert_eq!(
+        snapshot
+            .current
+            .generation
+            .unwrap()
+            .materialization
+            .event_id,
+        evidence.successor
+    );
+    assert_eq!(
+        receipt_ids(&reopened, evidence.receipt),
+        (evidence.predecessor, evidence.successor)
+    );
+    let mut lanes = reopened
+        .recover_publish_queue_lanes(evidence.intent)
+        .unwrap();
+    assert_eq!(lanes.len(), 1);
+    let successor_lane = lanes.remove(0);
+    assert_eq!(successor_lane.key.event_id, evidence.successor);
+    assert_eq!(successor_lane.last_ordinal, 1);
+    assert_eq!(
+        successor_lane.state,
+        PublishQueueLaneState::WaitingConnection
+    );
+    assert_eq!(reopened.next_publish_queue_deadline().unwrap(), None);
+    let attempts = reopened.recover_attempts(evidence.intent).unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].event.id, evidence.predecessor);
 }
 
 #[test]
