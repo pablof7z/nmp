@@ -561,8 +561,8 @@ never as the mechanism). `Range`/`Set` kill the legacy per-kind repetition.
    every test that builds an engine (`EngineCore::new`, `core/mod.rs:311` grows
    a claim-registration path) → catches the common case at the first
    `cargo test`. **This is where `EngineCore::new`'s signature changes** —
-   coordinate with every construction site: `facade.rs:58`, `nmp-demo/src/
-   main.rs:149`, `nmp-bdd/src/world.rs:457`, and the engine test harnesses
+   coordinate with every construction site: `facade.rs:58`, `nmp-bdd/src/
+   world.rs:457`, and the engine test harnesses
    (`diagnostics_headless.rs:32`, `core_headless.rs:77`, `discovery_churn.rs`,
    `self_bootstrap_outbox.rs`). Default (no modules) = empty claim table =
    today's all-`Automatic` behavior, so existing call sites pass an empty

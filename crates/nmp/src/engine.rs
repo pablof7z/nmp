@@ -1,7 +1,6 @@
 //! [`Engine`] -- the one supported construction call plus the two nouns
 //! (canonical-facade-52-plan.md §1). Owns config -> store/routing-fact
-//! selection and the router cap both `nmp-ffi` and `nmp-demo` used to
-//! duplicate by hand.
+//! selection and the router cap `nmp-ffi` used to duplicate by hand.
 //!
 //! No `Signed`-payload verify lives here: that guarantee moved to
 //! `crate::core::EngineCore::on_publish`'s acceptance boundary (Unit
@@ -348,8 +347,7 @@ impl Engine {
     }
 
     /// The ONE construction call: config -> store/routing-fact selection,
-    /// router cap, everything `nmp-ffi` and
-    /// `nmp-demo`'s hand-rolled assembly used to duplicate independently.
+    /// router cap, everything `nmp-ffi` used to duplicate by hand.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
         Self::new_with_initial_session(config, crate::session::RestoredSession::empty())
     }
@@ -2893,8 +2891,8 @@ mod tests {
     }
 
     /// A `store_path` must select the on-disk store, opened at that exact
-    /// path -- the config -> store-selection branch `nmp-ffi`/`nmp-demo`
-    /// used to each hand-roll.
+    /// path -- the config -> store-selection branch `nmp-ffi` used to
+    /// hand-roll.
     #[test]
     fn config_with_store_path_selects_redb_store() {
         let dir = tempfile::tempdir().expect("tempdir");

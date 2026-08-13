@@ -76,8 +76,6 @@ active wire work, not a hypothetical replan of that suppressed handle.
 
 - [apps/Falsifier](https://github.com/pablof7z/nmp/tree/master/apps/Falsifier) is the iOS library-vs-framework
   falsifier and permanent diagnostics screen.
-- [crates/nmp-demo](https://github.com/pablof7z/nmp/tree/master/crates/nmp-demo) exercises the current direct-Rust
-  path.
 - [Packages/NMP](https://github.com/pablof7z/nmp/tree/master/Packages/NMP) is the Swift package.
 - [Packages/NMPKotlin](https://github.com/pablof7z/nmp/tree/master/Packages/NMPKotlin) is the desktop-JVM Flow
   projection.

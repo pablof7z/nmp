@@ -9,7 +9,7 @@
 //!
 //! - [`Engine::new`] -- config in, a running engine out. Owns
 //!   config -> store/neutral-routing-fact selection and the router cap that
-//!   `nmp-ffi`/`nmp-demo` used to each assemble by hand.
+//!   `nmp-ffi` used to assemble by hand.
 //! - [`Engine::observe`] -- a live query (and an optional [`Window`]) in, a
 //!   [`Subscription`] streaming [`Frame`]s out.
 //! - [`Engine::publish`] -- a [`WriteIntent`] in, a receipt stream of

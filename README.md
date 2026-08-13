@@ -39,19 +39,6 @@ YOUR APP  ── live queries / write intents ──▶  NMP  ──▶  Nostr r
 
 ## See it work
 
-With [Rust](https://www.rust-lang.org/tools/install) installed:
-
-```bash
-git clone https://github.com/pablof7z/nmp.git
-cd nmp
-cargo run -p nmp-demo -- --secs 20
-```
-
-- Opts into the NIP-65 module, queries two exact operator sources, discovers
-  neutral author-route facts, and streams real events.
-- Prints the relay plan and wire activity it observed.
-- No Nostr key required. It's a running falsifier, not the shape of the public API.
-
 ## What you get today
 
 Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
@@ -256,7 +243,6 @@ Diagnostics are a **permanent, read-only proof surface** — source plan, wire f
 - `crates/nmp-{store,resolver,router,transport,engine,signer,executor}` — internal seams, not alternate APIs
 - `crates/nmp-content` — optional parser-only semantic document layer
 - `crates/nmp-{nip02,nip29,nip51,nip65,blossom,nip68,media}` — opt-in protocol modules
-- `crates/nmp-demo` — the read-only CLI falsifier
 - `Packages/NMP` (Swift) · `Packages/NMPKotlin` (Kotlin/JVM)
 - `apps/Falsifier`, `apps/UIGallery` — SwiftUI proving grounds
 - `docs/` — vision, design record, known gaps, surface baselines

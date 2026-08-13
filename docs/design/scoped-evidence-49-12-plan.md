@@ -427,7 +427,6 @@ reshaped in the same PR; none are optional):
    `nmp-store/lib.rs:226`, `nmp-grammar/concrete.rs:45`,
    `nmp-ffi/facade.rs:49` ("authoritative"). Sweep in U5.
 
-`crates/nmp-demo` has zero coverage consumers — confirmed clean.
 
 ### The three owner decisions — resolved
 

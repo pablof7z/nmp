@@ -19,11 +19,6 @@ engine **independently**, and each re-derives its own safety guarantees:
   `ROUTER_CAP = 10` (facade.rs:38), calls
   `EngineThread::spawn(store, directory, ROUTER_CAP, PoolConfig::default())`, and
   then drives the raw `nmp_engine::runtime::Handle`.
-- **`nmp-demo` (`crates/nmp-demo/src/main.rs`)** does the *same assembly by
-  hand*: builds `LiveDirectory` (main.rs:149), always picks `MemoryStore`
-  (main.rs:180), hardcodes its own `ROUTER_CAP = 10` (main.rs:51), calls the
-  same `EngineThread::spawn` (main.rs:180-185), and drives the raw `Handle`.
-
 Both depend directly on the mechanism crates — `nmp-store`, `nmp-router`,
 `nmp-transport`, `nmp-signer`, `nmp-resolver`, `nmp-grammar` (see each
 `Cargo.toml`'s `[dependencies]`). So "how to build an NMP app in Rust" is
@@ -179,10 +174,6 @@ semantic:
 - **Deps:** drop `nmp-store`, `nmp-router`, `nmp-transport`, `nmp-resolver` from
   `nmp-ffi/Cargo.toml` (now transitive via `nmp`); keep `nmp-grammar` (type
   mirrors) and add `nmp`.
-- `nmp-demo` migrates to `nmp::Engine::new(EngineConfig { .. })` and drops its
-  direct mechanism-crate deps; the follow-feed query builder (main.rs:436) uses
-  the grammar re-exported from `nmp`.
-
 Result: FFI and direct-Rust are the same product; the only FFI-specific code is
 type mirroring and string parsing.
 
@@ -331,7 +322,6 @@ remains provisional" bullet is updated to point at this now-enforced protocol.
 |---|---|---|---|---|
 | **A. Facade crate** | new `crates/nmp/*`; workspace `Cargo.toml`. `EngineConfig`, `Engine::new`, two nouns, diagnostics, `add_account`/`set_active_account`, **`publish` Signed-verify**, `EngineError`, re-exports, unstable `from_parts`. | config→store/directory selection; `add_account` from nsec+hex; **tampered `Signed` publish → `InvalidSignedEvent`**; shutdown idempotency. | — (first) | No |
 | **B. FFI rethread** | `crates/nmp-ffi/{facade,convert,lib,types}.rs`, `Cargo.toml`; regenerate `gen/*`. FFI wraps `nmp::Engine`; drop independent verify + mechanism deps; `From<EngineError>` for `FfiError`. | existing `convert.rs` tests stay green; verify inherited (tampered `Signed` still rejected via facade). | A | **Yes — FFI seam. Coordinate with `build-ffi-signed-publish`.** |
-| **C. Demo migration** | `crates/nmp-demo/src/main.rs`, `Cargo.toml`. Replace hand-assembly with `nmp::Engine::new`. | existing `parse_args`/query-builder tests stay green; runs against real relays. | A | No |
 | **D. Parity harness** | `crates/nmp-parity`. Same ops via facade + FFI over isolated instances of the shared scripted relay. | identical rows/`AcquisitionEvidence`/ordered receipts/diagnostics; tampered-`Signed` `Failed`-first-and-only with zero relay contact. | A, B | Implemented by this change; reuses `nmp-bdd` helper without copying it. |
 | **E. Drift CI + snapshots — implemented** | `docs/surface/*`, `scripts/regenerate-surface-snapshots.sh`, `.github/workflows/ci.yml` (proc-macro component snapshot + Rust inventory). | snapshot regen matches committed; Rust or FFI shape drift fails the fast job. | A, B | No |
 | **F. Governance — implemented** | `docs/surface-change-log.md`, `.github/pull_request_template.md`, `surface-governance` gate, README/architecture/known-gaps edits. | stale snapshot, missing append, historical edit/delete fail; valid paired update passes. | E | No |
