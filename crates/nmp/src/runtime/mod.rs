@@ -2504,7 +2504,7 @@ fn forward_pool_event(event: PoolEvent, engine_inbox: &Sender<Cmd>) -> bool {
 #[cfg(test)]
 mod pool_bridge_tests {
     use super::*;
-    use nmp_transport::{PoolEventSink, RelayFrame, RelayHandle};
+    use nmp_transport::{ConnState, PoolEventSink, RelayFrame, RelayHandle, RelayHealth};
     use nostr::{EventBuilder, Keys, RelayMessage, SubscriptionId};
 
     fn notice_frame(text: &str) -> RelayFrame {
@@ -2527,6 +2527,58 @@ mod pool_bridge_tests {
             RelayUrl::parse("wss://relay.example.com").unwrap(),
             nmp_grammar::AccessContext::Nip42(nostr::Keys::generate().public_key()),
         )
+    }
+
+    #[test]
+    fn never_connected_health_becomes_session_scoped_open_failure() {
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        let session = test_session();
+        let message = translate_pool_event(PoolEvent::Health {
+            handle,
+            session: session.clone(),
+            health: RelayHealth {
+                state: ConnState::Connecting,
+                last_error: Some("connection refused".to_string()),
+                ..RelayHealth::default()
+            },
+        });
+
+        assert!(matches!(
+            message,
+            Some(EngineMsg::RelayOpenFailed(current, reason))
+                if current == session && reason == "connection refused"
+        ));
+    }
+
+    #[test]
+    fn connected_health_remains_generation_scoped() {
+        let handle = RelayHandle {
+            slot: 1,
+            generation: 2,
+        };
+        let session = test_session();
+        let health = RelayHealth {
+            state: ConnState::Connected,
+            last_error: Some("invalid frame".to_string()),
+            invalid_signature_count: 1,
+            ..RelayHealth::default()
+        };
+        let message = translate_pool_event(PoolEvent::Health {
+            handle,
+            session: session.clone(),
+            health: health.clone(),
+        });
+
+        assert!(matches!(
+            message,
+            Some(EngineMsg::RelayHealth(current, current_session, current_health))
+                if current == handle
+                    && current_session == session
+                    && current_health == health
+        ));
     }
 
     #[test]
@@ -3206,6 +3258,45 @@ mod relay_worker_reconciliation_tests {
         assert!(pool.live_session_handle(&session).is_none());
 
         pool.shutdown();
+    }
+
+    #[test]
+    fn relay_open_failure_refreshes_query_scoped_error_evidence() {
+        let signer = Keys::generate().public_key();
+        let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+        let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
+        let mut core = EngineCore::new(MemoryStore::new(), 1);
+        let opened = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, ..) => Some(*id),
+                _ => None,
+            })
+            .expect("protected subscription handle");
+        core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
+
+        let failed = core.handle(EngineMsg::RelayOpenFailed(
+            session,
+            "connection refused".to_string(),
+        ));
+        let evidence = failed
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(current, _, evidence) if *current == id => Some(evidence),
+                _ => None,
+            })
+            .expect("open failure refreshes the exact observation");
+
+        assert!(evidence
+            .iter()
+            .flat_map(|branch| &branch.sources)
+            .any(|source| { source.relay == relay && source.status == core::SourceStatus::Error }));
+        assert!(core
+            .diagnostics_snapshot()
+            .transport_degraded
+            .as_deref()
+            .is_some_and(|reason| reason.contains("connection refused")));
     }
 
     #[test]
@@ -3957,7 +4048,18 @@ fn translate_pool_event(event: PoolEvent) -> Option<EngineMsg> {
             handle,
             session,
             health,
-        } => Some(EngineMsg::RelayHealth(handle, session, health)),
+        } => {
+            // A worker that is still retrying reports its pre-connect failure
+            // as health. Handle-scoped health is deliberately unreachable
+            // until RelayConnected establishes this generation, so preserve
+            // the failure through the existing session-scoped owner.
+            if health.state == nmp_transport::ConnState::Connecting {
+                if let Some(reason) = health.last_error.clone() {
+                    return Some(EngineMsg::RelayOpenFailed(session, reason));
+                }
+            }
+            Some(EngineMsg::RelayHealth(handle, session, health))
+        }
         PoolEvent::EventHandoff {
             correlation,
             result,
@@ -5757,7 +5859,9 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
 }
 
 /// Release workers no longer owned by the reducer, then execute its effects.
-/// Release MUST happen first: when a cap-sized plan replaces every relay,
+/// Terminal CLOSE frames for an obsolete session travel WITH its retirement
+/// so the connected worker flushes them before socket teardown. Release must
+/// otherwise happen first: when a cap-sized plan replaces every relay,
 /// keeping the old workers through `apply_wire_delta` would make every new
 /// `ensure_open` fail even though the new plan itself is within the cap.
 /// `relay_worker_requirements` includes nonterminal durable/ephemeral write work,
@@ -5776,7 +5880,26 @@ fn dispatch_core_effects<S: EventStore>(
     runtime: DispatchRuntime<'_>,
 ) {
     if let Some(required) = core.relay_worker_requirements() {
-        for event in pool.close_unrequired_sessions(&required.all) {
+        let mut terminal_frames: BTreeMap<RelaySessionKey, Vec<String>> = BTreeMap::new();
+        for effect in &effects {
+            let Effect::Wire(delta) = effect else {
+                continue;
+            };
+            for (session, ops) in &delta.ops {
+                if required.all.contains(session) {
+                    continue;
+                }
+                for op in ops {
+                    if let WireOp::Close(sub_id) = op {
+                        terminal_frames
+                            .entry(session.clone())
+                            .or_default()
+                            .push(close_frame_text(sub_id));
+                    }
+                }
+            }
+        }
+        for event in pool.close_unrequired_sessions(&required.all, terminal_frames) {
             if let Some(msg) = translate_pool_event(event) {
                 let _ = runtime.self_inbox.send(Cmd::Engine(msg));
             }

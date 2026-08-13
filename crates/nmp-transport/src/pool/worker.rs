@@ -491,6 +491,10 @@ pub(super) struct WorkerHandle {
     /// the source of truth the worker checks at EVERY drain/wait point; it is
     /// set (and the worker woken) without ever touching the data queue.
     shutdown: Arc<AtomicBool>,
+    /// Final connection-scoped text frames that must be written and flushed
+    /// before a connected worker retires. Owned out-of-band so retirement
+    /// cannot lose them behind the bounded ordinary command lane.
+    terminal_frames: Arc<Mutex<Vec<String>>>,
     /// The finite retained-bytes envelope shared with the worker (issue
     /// #506). Ordinary frames are charged here on admission and released when
     /// a socket accepts them, so this — not the transit channel — is what a
@@ -647,7 +651,15 @@ impl WorkerHandle {
     /// All three steps are non-blocking, so `retire` cannot stall the pool
     /// lock. The returned `JoinHandle` is joined LATER, off-lock, by the
     /// retirement reaper (`spawn_reaper`).
-    pub(super) fn retire(mut self) -> JoinHandle<()> {
+    #[cfg(test)]
+    pub(super) fn retire(self) -> JoinHandle<()> {
+        self.retire_with_frames(Vec::new())
+    }
+
+    pub(super) fn retire_with_frames(mut self, frames: Vec<String>) -> JoinHandle<()> {
+        if let Ok(mut terminal) = self.terminal_frames.lock() {
+            *terminal = frames;
+        }
         self.shutdown.store(true, Ordering::SeqCst);
         self.wake();
         // Best-effort nudge for a recv-parked worker; dropped-if-full is safe
@@ -698,6 +710,8 @@ pub(super) fn spawn(
     // drain/wait point so shutdown never depends on the data queue.
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_for_thread = Arc::clone(&shutdown);
+    let terminal_frames = Arc::new(Mutex::new(Vec::new()));
+    let terminal_frames_for_thread = Arc::clone(&terminal_frames);
     let join = spawner
         .spawn(
             thread::Builder::new().name(format!("nmp-transport-relay-{slot}")),
@@ -712,6 +726,7 @@ pub(super) fn spawn(
                     reconnect_preamble_for_thread,
                     waker_for_thread,
                     &shutdown_for_thread,
+                    &terminal_frames_for_thread,
                     keepalive_idle,
                     keepalive_pong_timeout,
                     reconnect_delay_initial,
@@ -730,6 +745,7 @@ pub(super) fn spawn(
         command_tx,
         reconnect_preamble,
         shutdown,
+        terminal_frames,
         outbound,
         waker: waker_slot,
         join: Some(join),
@@ -763,6 +779,7 @@ fn run_worker(
     reconnect_preamble: Arc<ReconnectPreambleOwner>,
     waker_slot: Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
+    terminal_frames: &Mutex<Vec<String>>,
     keepalive_idle: Duration,
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
@@ -860,6 +877,7 @@ fn run_worker(
                     &command_rx,
                     &waker_slot,
                     shutdown,
+                    terminal_frames,
                     &mut pending,
                     &mut socket,
                     &mut keepalive,
@@ -1259,6 +1277,7 @@ fn run_connected(
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
+    terminal_frames: &Mutex<Vec<String>>,
     pending: &mut VecDeque<AdmittedFrame>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
@@ -1281,6 +1300,7 @@ fn run_connected(
         command_rx,
         waker_slot,
         shutdown,
+        terminal_frames,
         pending,
         socket,
         keepalive,
@@ -1316,6 +1336,7 @@ fn run_connected_inner(
     command_rx: &Receiver<WorkerCommand>,
     waker_slot: &Arc<Mutex<Option<Waker>>>,
     shutdown: &AtomicBool,
+    terminal_frames: &Mutex<Vec<String>>,
     pending: &mut VecDeque<AdmittedFrame>,
     socket: &mut RelaySocket,
     keepalive: &mut KeepaliveState,
@@ -1355,6 +1376,7 @@ fn run_connected_inner(
             // nudge dropped by a full command queue, so the atomic — not the
             // 250 ms deadline — is what guarantees a prompt exit.
             if shutdown_requested(shutdown) {
+                flush_terminal_frames(socket, terminal_frames);
                 resolve_queued_durables_on_shutdown(command_rx, event_tx, slot, generation);
                 let _ = socket.close(None);
                 return ConnectedOutcome::Shutdown;
@@ -1442,6 +1464,7 @@ fn run_connected_inner(
         // check is what guarantees the loop exits even when the nudge was
         // dropped and `drain_commands` only saw ordinary data.
         if shutdown_requested(shutdown) {
+            flush_terminal_frames(socket, terminal_frames);
             // Settle any durables still in the CHANNEL before exiting (#506
             // Fix 2). `resolve_generation_end` (called by `run_connected`
             // right after this returns) only drains the worker-local `durable`
@@ -1579,6 +1602,24 @@ fn run_connected_inner(
             return outcome;
         }
     }
+}
+
+/// Best-effort final connection-scoped delivery during exact worker
+/// retirement. These frames are already the reducer's terminal lifecycle
+/// output (for example NIP-01 CLOSE), never replayable demand. A successful
+/// return from `write` plus `flush` is the only path that places them on the
+/// socket; retirement still remains bounded if the peer has already gone.
+fn flush_terminal_frames(socket: &mut RelaySocket, terminal_frames: &Mutex<Vec<String>>) {
+    let frames = terminal_frames
+        .lock()
+        .map(|mut frames| std::mem::take(&mut *frames))
+        .unwrap_or_default();
+    for frame in frames {
+        if socket.write(Message::Text(frame.into())).is_err() {
+            return;
+        }
+    }
+    let _ = socket.flush();
 }
 
 fn complete_initial_read(
@@ -2346,6 +2387,18 @@ mod tests {
         (client, server)
     }
 
+    #[test]
+    fn terminal_retirement_frames_flush_before_socket_close() {
+        let (mut socket, mut peer) = real_websocket_pair();
+        let expected = r#"["CLOSE","android-qualification"]"#.to_string();
+        let frames = Mutex::new(vec![expected.clone()]);
+
+        flush_terminal_frames(&mut socket, &frames);
+
+        assert_eq!(peer.read().unwrap().into_text().unwrap(), expected);
+        assert!(frames.lock().unwrap().is_empty());
+    }
+
     fn begin_real_unconfirmed_write(
         socket: &mut RelaySocket,
         correlation: AttemptCorrelation,
@@ -2615,6 +2668,7 @@ mod tests {
                 &command_rx,
                 &worker_waker,
                 &shutdown,
+                &Mutex::new(Vec::new()),
                 &mut pending,
                 &mut socket,
                 &mut keepalive,
@@ -2692,6 +2746,7 @@ mod tests {
                 &command_rx,
                 &worker_waker,
                 &shutdown,
+                &Mutex::new(Vec::new()),
                 &mut pending,
                 &mut socket,
                 &mut keepalive,
@@ -2798,6 +2853,7 @@ mod tests {
                 &command_rx,
                 &worker_waker,
                 &shutdown,
+                &Mutex::new(Vec::new()),
                 &mut pending,
                 &mut socket,
                 &mut keepalive,
@@ -3148,6 +3204,7 @@ mod tests {
             command_tx,
             reconnect_preamble,
             shutdown: Arc::clone(&shutdown),
+            terminal_frames: Arc::new(Mutex::new(Vec::new())),
             outbound: Arc::new(OutboundEnvelope::new(OUTBOUND_ENVELOPE_BYTES)),
             waker: Arc::clone(&waker_slot),
             // No real worker thread backs this handle in these tests --

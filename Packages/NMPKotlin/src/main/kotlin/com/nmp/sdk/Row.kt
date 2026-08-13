@@ -126,6 +126,8 @@ sealed class SourceStatus {
 
     object AuthDenied : SourceStatus()
 
+    /** This exact source cannot currently acquire its planned work: worker
+     * open, request placement, or AUTH failed. Never a global sync verdict. */
     object Error : SourceStatus()
 
     companion object {

@@ -580,6 +580,56 @@ async fn runtime_admission_deadline_groups_a_rapid_query_burst() {
     relay.shutdown();
 }
 
+/// #832: withdrawing the last demand for a relay makes its worker obsolete,
+/// but the reducer still owns one terminal NIP-01 `CLOSE`. Retirement must
+/// flush that frame on the exact connected generation before tearing down the
+/// socket. Closing the worker first and dispatching `CLOSE` afterward makes
+/// the frame unreachable and is falsified by the relay's real wire record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdrawing_last_demand_flushes_close_before_worker_retirement() {
+    let relay = ScriptedRelay::start(&RelayConfig {
+        advertised_limits: Some(AdvertisedLimits::default()),
+        ..RelayConfig::default()
+    })
+    .await;
+    let (engine_thread, handle) = EngineThread::spawn(
+        MemoryStore::new(),
+        10,
+        PoolConfig::default(),
+        RelayAdmissionPolicy::new(
+            ["127.0.0.1".to_string()],
+            nmp_network_policy::OnionReachability::Unreachable,
+        ),
+    )
+    .expect("spawn runtime");
+
+    let (query, _rows) = handle
+        .subscribe(pinned_tag_value(&relay.url, "android-close-proof"))
+        .expect("open query");
+    assert!(
+        relay
+            .wait_query_count_for_kind(1, 1, Duration::from_secs(5))
+            .await,
+        "the relay must witness the owned REQ before withdrawal"
+    );
+    let request_id = relay.wire_record().reqs_naming_tag('p')[0].sub_id.clone();
+
+    handle.unsubscribe(query);
+    relay
+        .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
+        .await;
+    let withdrawn = relay.wire_record();
+    assert_eq!(
+        withdrawn.closes,
+        vec![request_id],
+        "last-demand withdrawal must put the exact CLOSE on the wire before the obsolete worker disconnects: {withdrawn:#?}"
+    );
+
+    handle.shutdown();
+    engine_thread.join();
+    relay.shutdown();
+}
+
 /// #1075/#1341: one accepted `(session, sub-id, filter, transport generation)`
 /// remains immutable until close or disconnect. A later admission cohort may
 /// reuse exact existing coverage or open a sibling request, but cannot rewrite
