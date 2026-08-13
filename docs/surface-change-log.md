@@ -1726,3 +1726,14 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Diagnostics impact:** none.
 - **Updated falsifiers:** `temporary_store_removes_its_redb_directory_on_drop` proves no-path lifetime. `full_semantic_trace_survives_redb_reopen_after_every_operation`, crash seams, corruption tests, and reopen contracts retain store semantic and recovery evidence. Mixed-filter planner tests derive expected IDs directly from fixtures.
 - **Superseded path removed:** `MemoryStore`, its module/export/tests, the relay-ingest memory-store mode, and MemoryStore-vs-Redb parity claims are deleted. No alias, compatibility path, HashMap replacement, or general-purpose fake store remains. Issue #520 becomes obsolete after this change merges.
+
+## 2026-08-13 — Map the replaceable-operation wire refusal in both native SDKs ([issue #1437](https://github.com/pablof7z/nmp/issues/1437), [PR #1443](https://github.com/pablof7z/nmp/pull/1443))
+
+- **Failure evidence:** PR #1436 added the generated `ReplaceableOperationHasNoWireForm` FFI exception, but the hand-written Kotlin and Swift exhaustive mappings did not cover it. Exact generated-package compilation therefore failed after merge instead of projecting the refusal through the existing public `NMPError` owner.
+- **Changed projections:** kotlin,swift
+- **Rust / FFI / Swift / Kotlin impact:** Rust behavior and the all-features FFI concept set are unchanged. The core FFI refusal is no longer incorrectly hidden behind NIP-22 when generating a feature-selected product. Kotlin maps the generated exception to `NMPError.ReplaceableOperationHasNoWireForm`; Swift maps it to `NMPError.replaceableOperationHasNoWireForm`. The NIP-22-only replaceable-edit refusal remains feature-gated.
+- **Persistence impact:** none. Store schemas, codecs, receipts, operations, rows, routes, and correlations are unchanged.
+- **Diagnostics impact:** none. This repairs projection of an existing synchronous pre-custody refusal and adds no diagnostic state.
+- **Updated falsifiers:** Kotlin `replaceableOperationWireRefusalMapsToThePublicErrorOwner` and Swift `testReplaceableOperationWireRefusalMapsToThePublicErrorOwner` prove the generated exception maps to the existing SDK error owner. A prepared core/no-NIP-22 Kotlin product compiles with the refusal present and the NIP-22-only replaceable-edit refusal absent. `scripts/check-sdk-parity.sh` proves the hand-written Swift and Kotlin roots cover the FFI concept.
+- **Superseded path removed:** the missing exhaustive branches and the incorrect NIP-22 gate on the core refusal are removed. There is no compatibility alias, wildcard mapping, or second error owner.
+- **Human signoff:** issue #1437 records the post-merge compiler failure and narrow repair. PR #1443 is the review record; exact-head CI and requested review remain the approval trail before merge.
