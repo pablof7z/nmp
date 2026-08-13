@@ -11,7 +11,7 @@ use super::postings_store::crash_if_postings;
 use super::postings_store::PostingsBatch;
 use super::schema::{
     persist_err, EventKey, ADDR_INDEX, EXPIRATION_INDEX, PUBLISH_QUEUE_DISPLACED,
-    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_RECEIPTS,
+    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS,
     PUBLISH_QUEUE_SUPPRESS_BY_ADDR, PUBLISH_QUEUE_SUPPRESS_BY_ID, TOMBSTONES,
 };
 #[cfg(feature = "bench-instrumentation")]
@@ -167,6 +167,7 @@ pub(super) struct RedbIngestTxn<'txn, 'batch> {
     pub(super) expiration_index: redb::Table<'txn, &'static [u8; 40], EventKey>,
     pub(super) publish_queue_intents: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
     pub(super) publish_queue_receipts: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
+    pub(super) publish_queue_meta: redb::Table<'txn, &'static [u8], &'static [u8]>,
     pub(super) publish_queue_displaced: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
     pub(super) publish_queue_kind5_claims: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
     pub(super) publish_queue_suppress_by_id: redb::Table<'txn, &'static [u8; 64], &'static [u8]>,
@@ -191,6 +192,9 @@ impl<'txn, 'batch> RedbIngestTxn<'txn, 'batch> {
                 .map_err(persist_err)?,
             publish_queue_receipts: write_txn
                 .open_table(PUBLISH_QUEUE_RECEIPTS)
+                .map_err(persist_err)?,
+            publish_queue_meta: write_txn
+                .open_table(PUBLISH_QUEUE_META)
                 .map_err(persist_err)?,
             publish_queue_displaced: write_txn
                 .open_table(PUBLISH_QUEUE_DISPLACED)

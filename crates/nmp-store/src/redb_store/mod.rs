@@ -288,6 +288,14 @@ impl EventStore for RedbStore {
         publish_queue_ops::publish_queue_receipts_after(self, after, limit)
     }
 
+    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError> {
+        publish_queue_ops::prune_superseded_receipts(self, now)
+    }
+
+    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        publish_queue_ops::next_superseded_receipt_deadline(self)
+    }
+
     fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,

@@ -211,6 +211,11 @@ fn update_publish_queue_receipt<T: GovernedIngestTxn>(
         })?;
     let mut record = decode_receipt(&encoded)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
+    if record.state == ReceiptState::Superseded || state == ReceiptState::Superseded {
+        return Err(PersistenceError::invariant(
+            "governed ingest cannot transition superseded receipt evidence",
+        ));
+    }
     record.state = state;
     txn.publish_queue_put(
         GovernedPublishQueueMap::Receipts,
