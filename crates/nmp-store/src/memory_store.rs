@@ -3,10 +3,12 @@
 //! (`nmp-store/tests/store_contract.rs`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-instrumentation"))]
 use std::sync::atomic::AtomicU64;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-instrumentation"))]
 use std::sync::atomic::Ordering;
+#[cfg(any(test, feature = "bench-instrumentation"))]
+use std::sync::Mutex;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nostr::filter::MatchEventOptions;
@@ -16,6 +18,14 @@ use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_
 use crate::coverage::{
     coverage_key, merge_interval, shrink_after_eviction, window_erase, GcVictimIndex,
 };
+use crate::semantic_edit::{
+    plan_accept, plan_rematerialize, promote_current, recovered, validate_active_receipts,
+    validate_resource_state, OperationId, SemanticAccept, SemanticEditReceipt, SemanticEditStore,
+    SemanticPromotion, SemanticPromotionOutcome, SemanticRematerialize, SemanticResourceState,
+    SemanticStoreError,
+};
+#[cfg(any(test, feature = "bench-instrumentation"))]
+use crate::SemanticStoreCounters;
 use crate::{
     handoff_may_have_occurred, AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome,
     CompensateOutcome, CoverageInterval, CoverageKey, EventStore, GcReport, GcRetentionSet,
@@ -194,6 +204,21 @@ pub struct MemoryStore {
     publish_queue_deadlines_by_intent: BTreeMap<IntentId, BTreeSet<(Timestamp, RelayUrl)>>,
     /// Append-only resolved route revisions, keyed by `(intent, ordinal)`.
     publish_queue_route_revisions: BTreeMap<(IntentId, u64), PublishQueueRouteRevision>,
+    /// One current semantic-edit resource per replaceable/addressable
+    /// coordinate. Each resource retains one opaque body per still-
+    /// contributing operation and one shared current materialization.
+    semantic_resources: BTreeMap<nostr::nips::nip01::Coordinate, SemanticResourceState>,
+    /// Monotonic generation fence retained even after a coordinate becomes
+    /// inactive, so delayed signatures can never match a recreated body.
+    semantic_materialization_high_water:
+        BTreeMap<nostr::nips::nip01::Coordinate, crate::MaterializationId>,
+    /// Independent, retention-owned operation receipts. Resolved operation
+    /// bodies can disappear from `semantic_resources` without erasing these.
+    semantic_receipts: BTreeMap<OperationId, SemanticEditReceipt>,
+    /// Monotonic semantic-operation id; never inferred from open resources.
+    next_semantic_operation_id: u64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    semantic_counters: Mutex<SemanticStoreCounters>,
     /// Every still-open kind:5 intent's OWN suppression claims (see
     /// [`SuppressClaim`]'s doc) — dropped wholesale by `promote_signed`
     /// (after committing the deletion for real) or `compensate_write`
@@ -3553,6 +3578,245 @@ impl EventStore for MemoryStore {
         self.mark_terminal_receipt(receipt_id, crate::terminal_retention::wall_clock_now())?;
         self.maintain_terminal_receipts()?;
         Ok(receipt_id)
+    }
+}
+
+impl SemanticEditStore for MemoryStore {
+    fn accept_semantic_edit(
+        &mut self,
+        accept: SemanticAccept,
+    ) -> Result<(SemanticEditReceipt, crate::SemanticCurrentState), SemanticStoreError> {
+        let coordinate = accept.coordinate.clone();
+        let previous = self.semantic_resources.get(&coordinate).cloned();
+        let receipts = previous
+            .as_ref()
+            .map(|state| {
+                state
+                    .operations
+                    .iter()
+                    .map(|operation| {
+                        self.semantic_receipts
+                            .get(&operation.operation_id)
+                            .cloned()
+                            .ok_or(SemanticStoreError::UnknownOperation(operation.operation_id))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let operation_id = OperationId(
+            self.next_semantic_operation_id
+                .checked_add(1)
+                .ok_or(SemanticStoreError::OperationIdExhausted)?,
+        );
+        let materialization_high_water = self
+            .semantic_materialization_high_water
+            .get(&coordinate)
+            .copied();
+        let plan = plan_accept(
+            previous,
+            &receipts,
+            materialization_high_water,
+            operation_id,
+            accept,
+        )?;
+        let next = plan
+            .next
+            .as_ref()
+            .expect("accept planner creates a resource");
+        let current = next.current()?;
+        let receipt = plan
+            .receipt_updates
+            .iter()
+            .find(|receipt| receipt.operation_id == operation_id)
+            .cloned()
+            .expect("accept planner creates the new operation receipt");
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        let materialization_written = u64::from(
+            plan.next
+                .as_ref()
+                .is_some_and(|state| state.generation.is_some()),
+        );
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        let materialization_removed = u64::from(
+            plan.previous
+                .as_ref()
+                .is_some_and(|state| state.generation.is_some()),
+        );
+        self.next_semantic_operation_id = operation_id.0;
+        self.semantic_resources.insert(
+            coordinate,
+            plan.next.expect("accept planner creates a resource"),
+        );
+        if let Some(high_water) = plan.materialization_high_water {
+            self.semantic_materialization_high_water
+                .insert(receipt.coordinate.clone(), high_water);
+        }
+        for receipt in plan.receipt_updates {
+            self.semantic_receipts.insert(receipt.operation_id, receipt);
+        }
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        {
+            let mut counters = self.semantic_counters.lock().expect("semantic counters");
+            counters.coordinate_point_reads += 1;
+            counters.operation_bodies_examined += plan.operation_bodies_examined;
+            counters.operation_bodies_written += plan.operation_bodies_written;
+            counters.operation_bodies_removed += plan.operation_bodies_removed;
+            counters.materializations_written += materialization_written;
+            counters.materializations_removed += materialization_removed;
+            counters.commits += 1;
+        }
+        Ok((receipt, current))
+    }
+
+    fn rematerialize_semantic_edit(
+        &mut self,
+        rematerialize: SemanticRematerialize,
+    ) -> Result<Option<crate::SemanticCurrentState>, SemanticStoreError> {
+        let coordinate = rematerialize.coordinate.clone();
+        let previous = self
+            .semantic_resources
+            .get(&coordinate)
+            .cloned()
+            .ok_or(SemanticStoreError::CurrentMaterializationChanged)?;
+        let receipts = previous
+            .operations
+            .iter()
+            .map(|operation| {
+                self.semantic_receipts
+                    .get(&operation.operation_id)
+                    .cloned()
+                    .ok_or(SemanticStoreError::UnknownOperation(operation.operation_id))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let plan = plan_rematerialize(previous, rematerialize, &receipts)?;
+        let current = plan
+            .next
+            .as_ref()
+            .map(crate::semantic_edit::SemanticResourceState::current)
+            .transpose()?;
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        let materialization_written = u64::from(
+            plan.next
+                .as_ref()
+                .is_some_and(|state| state.generation.is_some()),
+        );
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        let materialization_removed = u64::from(
+            plan.previous
+                .as_ref()
+                .is_some_and(|state| state.generation.is_some()),
+        );
+        match plan.next {
+            Some(next) => {
+                self.semantic_resources.insert(coordinate.clone(), next);
+            }
+            None => {
+                self.semantic_resources.remove(&coordinate);
+            }
+        }
+        if let Some(high_water) = plan.materialization_high_water {
+            self.semantic_materialization_high_water
+                .insert(coordinate.clone(), high_water);
+        }
+        for receipt in plan.receipt_updates {
+            self.semantic_receipts.insert(receipt.operation_id, receipt);
+        }
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        {
+            let mut counters = self.semantic_counters.lock().expect("semantic counters");
+            counters.coordinate_point_reads += 1;
+            counters.operation_bodies_examined += plan.operation_bodies_examined;
+            counters.operation_bodies_written += plan.operation_bodies_written;
+            counters.operation_bodies_removed += plan.operation_bodies_removed;
+            counters.materializations_written += materialization_written;
+            counters.materializations_removed += materialization_removed;
+            counters.commits += 1;
+        }
+        Ok(current)
+    }
+
+    fn promote_semantic_materialization(
+        &mut self,
+        promotion: SemanticPromotion,
+    ) -> Result<SemanticPromotionOutcome, SemanticStoreError> {
+        let Some(current) = self.semantic_resources.get(&promotion.coordinate).cloned() else {
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            {
+                self.semantic_counters
+                    .lock()
+                    .expect("semantic counters")
+                    .coordinate_point_reads += 1;
+            }
+            return Ok(SemanticPromotionOutcome::Stale);
+        };
+        let (outcome, next) = promote_current(current, &promotion)?;
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        {
+            let mut counters = self.semantic_counters.lock().expect("semantic counters");
+            counters.coordinate_point_reads += 1;
+            if next.is_some() {
+                counters.materializations_written += 1;
+                counters.materializations_removed += 1;
+                counters.commits += 1;
+            }
+        }
+        if let Some(next) = next {
+            self.semantic_resources.insert(promotion.coordinate, next);
+        }
+        Ok(outcome)
+    }
+
+    fn recover_semantic_resources(
+        &self,
+    ) -> Result<Vec<crate::RecoveredSemanticResource>, SemanticStoreError> {
+        let states = self
+            .semantic_resources
+            .values()
+            .map(|state| {
+                validate_resource_state(state)?;
+                let receipts = state
+                    .operations
+                    .iter()
+                    .map(|operation| {
+                        self.semantic_receipts
+                            .get(&operation.operation_id)
+                            .cloned()
+                            .ok_or(SemanticStoreError::UnknownOperation(operation.operation_id))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                validate_active_receipts(state, &receipts)?;
+                recovered(state.clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        {
+            let mut counters = self.semantic_counters.lock().expect("semantic counters");
+            counters.recovery_rows += states.len() as u64;
+            counters.operation_bodies_examined += states
+                .iter()
+                .map(|resource| resource.operations.len() as u64)
+                .sum::<u64>();
+        }
+        Ok(states)
+    }
+
+    fn semantic_receipt(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<Option<SemanticEditReceipt>, SemanticStoreError> {
+        Ok(self.semantic_receipts.get(&operation_id).cloned())
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    fn semantic_store_counters(&self) -> SemanticStoreCounters {
+        *self.semantic_counters.lock().expect("semantic counters")
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    fn reset_semantic_store_counters(&self) {
+        *self.semantic_counters.lock().expect("semantic counters") =
+            SemanticStoreCounters::default();
     }
 }
 

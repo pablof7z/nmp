@@ -110,6 +110,7 @@ mod schema;
 use schema::*;
 pub(crate) mod publish_queue;
 pub(crate) mod publish_queue_codec;
+mod semantic_edit_codec;
 #[cfg(test)]
 use publish_queue::*;
 mod canonical;
@@ -130,6 +131,7 @@ pub use store::RedbStore;
 mod event_ops;
 mod ingest;
 pub(crate) mod publish_queue_ops;
+mod semantic_edit_ops;
 mod write_ops;
 
 impl EventStore for RedbStore {
@@ -494,6 +496,53 @@ impl EventStore for RedbStore {
         reason: crate::RefuseReason,
     ) -> Result<u64, PersistenceError> {
         publish_queue_ops::accept_refused(self, frozen_id, expected_pubkey, reason)
+    }
+}
+
+impl crate::SemanticEditStore for RedbStore {
+    fn accept_semantic_edit(
+        &mut self,
+        accept: crate::SemanticAccept,
+    ) -> Result<(crate::SemanticEditReceipt, crate::SemanticCurrentState), crate::SemanticStoreError>
+    {
+        semantic_edit_ops::accept(self, accept)
+    }
+
+    fn rematerialize_semantic_edit(
+        &mut self,
+        rematerialize: crate::SemanticRematerialize,
+    ) -> Result<Option<crate::SemanticCurrentState>, crate::SemanticStoreError> {
+        semantic_edit_ops::rematerialize(self, rematerialize)
+    }
+
+    fn promote_semantic_materialization(
+        &mut self,
+        promotion: crate::SemanticPromotion,
+    ) -> Result<crate::SemanticPromotionOutcome, crate::SemanticStoreError> {
+        semantic_edit_ops::promote(self, promotion)
+    }
+
+    fn recover_semantic_resources(
+        &self,
+    ) -> Result<Vec<crate::RecoveredSemanticResource>, crate::SemanticStoreError> {
+        semantic_edit_ops::recover(self)
+    }
+
+    fn semantic_receipt(
+        &self,
+        operation_id: crate::OperationId,
+    ) -> Result<Option<crate::SemanticEditReceipt>, crate::SemanticStoreError> {
+        semantic_edit_ops::receipt(self, operation_id)
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    fn semantic_store_counters(&self) -> crate::SemanticStoreCounters {
+        semantic_edit_ops::counters(self)
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    fn reset_semantic_store_counters(&self) {
+        semantic_edit_ops::reset_counters(self);
     }
 }
 
