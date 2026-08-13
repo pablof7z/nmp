@@ -1095,6 +1095,310 @@ mod semantic_successor_tests {
                     .is_empty()
         }));
     }
+
+    #[test]
+    fn stale_predecessor_delivery_callbacks_cannot_touch_the_current_successor() {
+        let author = Keys::generate();
+        let person = Keys::generate().public_key();
+        let source_relay = RelayUrl::parse("wss://semantic-source.example").unwrap();
+        let handoff_relay = RelayUrl::parse("wss://stale-handoff.example").unwrap();
+        let ack_relay = RelayUrl::parse("wss://stale-ack.example").unwrap();
+        let auth_relay = RelayUrl::parse("wss://stale-auth.example").unwrap();
+        let timeout_relay = RelayUrl::parse("wss://stale-timeout.example").unwrap();
+        let retry_relay = RelayUrl::parse("wss://stale-retry.example").unwrap();
+        let destinations = [
+            handoff_relay.clone(),
+            ack_relay.clone(),
+            auth_relay.clone(),
+            timeout_relay.clone(),
+            retry_relay.clone(),
+        ];
+        let base = source(&author, 1, "base", &[]);
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        store
+            .insert(
+                base.clone(),
+                RelayObserved::new(source_relay.clone(), Timestamp::from(1)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        let instance = [15; 16];
+        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
+            instance,
+            program: [16; 16],
+            format: [17; 16],
+            materializer: Arc::new(AddPeople),
+        });
+
+        let original = UnsignedEvent::from(base);
+        let operation = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            instance,
+            original.clone(),
+            original,
+            nmp_grammar::ReplaceableSourcePolicy::Continuing,
+            person.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(operation),
+            routing: WriteRouting::Explicit(destinations.to_vec()),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let (receipt, e1_generation, e1_unsigned) = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("E1 requests one signature");
+        let e1 = e1_unsigned.sign_with_keys(&author).unwrap();
+        core.handle(EngineMsg::SignerCompleted(
+            receipt,
+            e1_generation,
+            Ok(e1.clone()),
+        ));
+
+        let sessions = destinations
+            .iter()
+            .cloned()
+            .map(|relay| RelaySessionKey::new(relay, AccessContext::Nip42(author.public_key())))
+            .collect::<Vec<_>>();
+        let handles = sessions
+            .iter()
+            .enumerate()
+            .map(|(slot, _)| TransportRelayHandle {
+                slot: u32::try_from(slot).unwrap(),
+                generation: 1,
+            })
+            .collect::<Vec<_>>();
+        let mut e1_correlations = BTreeMap::new();
+        for ((handle, session), relay) in handles.iter().zip(&sessions).zip(&destinations) {
+            core.handle(EngineMsg::RelayConnected(*handle, session.clone()));
+            let released = core.handle(EngineMsg::AuthProbeReleased(*handle, session.clone()));
+            let correlation = released
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::PublishEvent(candidate, event, correlation)
+                        if candidate == session && event.id == e1.id =>
+                    {
+                        Some(*correlation)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("E1 did not start on {relay}"));
+            e1_correlations.insert(relay.clone(), correlation);
+        }
+
+        for relay in [&ack_relay, &auth_relay, &timeout_relay, &retry_relay] {
+            core.handle(EngineMsg::EventHandoff(
+                e1_correlations[relay],
+                HandoffResult::Written,
+            ));
+        }
+        core.handle(EngineMsg::RelayFrame(
+            handles[4],
+            sessions[4].clone(),
+            RelayFrame::from(nostr::RelayMessage::ok(
+                e1.id,
+                false,
+                "rate-limited: retry later",
+            )),
+        ));
+
+        let e1_intent = core.pending[&receipt].intent_id;
+        let e1_lanes = core
+            .resolver
+            .store()
+            .recover_publish_queue_lanes(e1_intent)
+            .unwrap();
+        let state_for = |relay: &RelayUrl| {
+            e1_lanes
+                .iter()
+                .find(|lane| &lane.key.relay == relay)
+                .unwrap_or_else(|| panic!("missing E1 lane for {relay}"))
+                .state
+                .clone()
+        };
+        assert!(matches!(
+            state_for(&handoff_relay),
+            PublishQueueLaneState::InFlight {
+                phase: PublishQueueInFlightPhase::AwaitingHandoff,
+                ..
+            }
+        ));
+        for relay in [&ack_relay, &auth_relay, &timeout_relay] {
+            assert!(matches!(
+                state_for(relay),
+                PublishQueueLaneState::InFlight {
+                    phase: PublishQueueInFlightPhase::AwaitingAck { .. },
+                    ..
+                }
+            ));
+        }
+        let retry_due = match state_for(&retry_relay) {
+            PublishQueueLaneState::Transient { eligible_at, .. } => eligible_at,
+            state => panic!("E1 retry lane is not transient: {state:?}"),
+        };
+        let timeout_due = match state_for(&timeout_relay) {
+            PublishQueueLaneState::InFlight {
+                phase: PublishQueueInFlightPhase::AwaitingAck { deadline },
+                ..
+            } => deadline,
+            state => panic!("E1 timeout lane is not awaiting an ACK: {state:?}"),
+        };
+
+        let newer = source(&author, 5, "newer source", &[]);
+        let mut installed = Vec::new();
+        core.ingest_relay_events(
+            vec![(newer, RelayObserved::new(source_relay, Timestamp::from(5)))],
+            &mut installed,
+        );
+        let (e2_generation, e2_unsigned) = installed
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(candidate, generation, unsigned) if *candidate == receipt => {
+                    Some((*generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("E2 requests one signature");
+        let e2 = e2_unsigned.sign_with_keys(&author).unwrap();
+        assert_ne!(e2.id, e1.id);
+        // Keep E2's own ACK deadline strictly after both retired E1
+        // deadlines. The later ticks below are therefore stale E1 inputs,
+        // not legitimate current-generation timeouts.
+        core.clock = Timestamp::from(10_000u64);
+        let e2_started = core.handle(EngineMsg::SignerCompleted(
+            receipt,
+            e2_generation,
+            Ok(e2.clone()),
+        ));
+        assert_eq!(
+            e2_started
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    Effect::PublishEvent(_, event, _) if event.id == e2.id
+                ))
+                .count(),
+            destinations.len(),
+            "E2 must own one fresh attempt at every current destination"
+        );
+        for correlation in e2_started.iter().filter_map(|effect| match effect {
+            Effect::PublishEvent(_, event, correlation) if event.id == e2.id => Some(*correlation),
+            _ => None,
+        }) {
+            core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
+        }
+
+        let e2_lanes_before = core
+            .resolver
+            .store()
+            .recover_publish_queue_lanes(e1_intent)
+            .unwrap();
+        assert_eq!(e2_lanes_before.len(), destinations.len());
+        assert!(e2_lanes_before.iter().all(|lane| {
+            lane.key.event_id == e2.id
+                && matches!(
+                    lane.state,
+                    PublishQueueLaneState::InFlight {
+                        phase: PublishQueueInFlightPhase::AwaitingAck { .. },
+                        ..
+                    }
+                )
+        }));
+        let semantic_before = core
+            .resolver
+            .store()
+            .replaceable_operation_snapshot(&Coordinate {
+                kind: Kind::ContactList,
+                public_key: author.public_key(),
+                identifier: String::new(),
+            })
+            .unwrap();
+        let receipt_before = core.reattach_receipt(receipt).facts;
+        let e2_generation_before = core.pending[&receipt].sign_generation;
+
+        let stale_batches = [
+            core.handle(EngineMsg::EventHandoff(
+                e1_correlations[&handoff_relay],
+                HandoffResult::Written,
+            )),
+            core.handle(EngineMsg::RelayFrame(
+                handles[1],
+                sessions[1].clone(),
+                RelayFrame::from(nostr::RelayMessage::ok(e1.id, true, "saved")),
+            )),
+            core.handle(EngineMsg::RelayFrame(
+                handles[2],
+                sessions[2].clone(),
+                RelayFrame::from(nostr::RelayMessage::ok(
+                    e1.id,
+                    false,
+                    "auth-required: authenticate",
+                )),
+            )),
+            core.handle(EngineMsg::Tick(retry_due)),
+            core.handle(EngineMsg::Tick(timeout_due)),
+        ];
+        for effects in &stale_batches {
+            assert!(
+                effects.iter().all(|effect| !matches!(
+                    effect,
+                    Effect::PublishEvent(_, event, _) if event.id == e1.id
+                )),
+                "a stale predecessor callback put E1 back on the wire: {effects:#?}"
+            );
+            assert!(
+                effects.iter().all(|effect| !matches!(
+                    effect,
+                    Effect::EmitReceipt(_, WriteFact::Relay { event_id, .. })
+                        if *event_id == e1.id || *event_id == e2.id
+                )),
+                "a stale predecessor callback advanced a current or retired relay fact: {effects:#?}"
+            );
+        }
+
+        let e2_lanes_after = core
+            .resolver
+            .store()
+            .recover_publish_queue_lanes(e1_intent)
+            .unwrap();
+        assert_eq!(
+            e2_lanes_after, e2_lanes_before,
+            "stale E1 handoff, ACK, AUTH-required result, timeout, or retry changed E2"
+        );
+        assert_eq!(
+            core.resolver
+                .store()
+                .replaceable_operation_snapshot(&Coordinate {
+                    kind: Kind::ContactList,
+                    public_key: author.public_key(),
+                    identifier: String::new(),
+                })
+                .unwrap(),
+            semantic_before,
+            "stale delivery callbacks changed the semantic generation"
+        );
+        assert_eq!(core.reattach_receipt(receipt).facts, receipt_before);
+        assert_eq!(core.pending[&receipt].frozen.id, e2.id);
+        assert_eq!(
+            core.pending[&receipt].sign_generation, e2_generation_before,
+            "stale delivery callbacks advanced the current signer generation"
+        );
+        assert!(
+            !core.auth_required_sessions.contains(&sessions[2]),
+            "an auth-required result for retired E1 must not park E2"
+        );
+        assert!(
+            !core.retry_scheduler_blocked,
+            "retired E1 deadlines must be gone rather than poisoning the current scheduler"
+        );
+    }
 }
 
 /// The receipt-replay cursor must keep the two persistence stalls apart.
