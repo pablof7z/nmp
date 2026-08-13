@@ -172,6 +172,18 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And a later qualified source may still create one successor generation
     And no terminal receipt is resurrected
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-020
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::route_only_addition_preserves_signed_e2_and_sends_only_the_new_destination
+  # nmp:falsifier=Re-enqueue every destination when routing knowledge grows instead of only the new exact event-relay lane; relay A or relay B receives E2 more than once.
+  @acceptance
+  Scenario: A later destination receives the same signed generation without resending completed destinations
+    Given semantic generation E2 is signed and relay A has accepted it
+    And E2 is still waiting for one recipient's relay list
+    When that relay list adds relay B as a destination
+    Then relay B receives the exact same E2 event id and signature once
+    And relay A does not receive E2 again
+
   # ---- the precondition --------------------------------------------------
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-001
