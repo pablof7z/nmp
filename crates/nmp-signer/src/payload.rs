@@ -161,7 +161,6 @@ impl TransientPlaintext {
         &self.0
     }
 
-    #[must_use]
     pub fn as_str(&self) -> Result<&str, std::str::Utf8Error> {
         std::str::from_utf8(&self.0)
     }
