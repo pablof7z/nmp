@@ -779,9 +779,6 @@ impl<S: EventStore> EngineCore<S> {
             self.attribution
                 .retain_added_live_request_claims(&pending.sub_id, &committed);
         }
-        effects.extend(committed.iter().map(|claim| {
-            Effect::RecordCoverage(*claim, pending.session.relay.clone(), pending.interval)
-        }));
         committed
     }
 
@@ -2683,8 +2680,8 @@ impl<S: EventStore> EngineCore<S> {
     /// The one facts-before-claims persistence door shared by ordinary EOSE
     /// and NEG completion. A poisoned completion performs no store I/O.
     /// Every retained shape is resolved before one atomic request-level
-    /// coverage transaction starts, and success effects are emitted only
-    /// after that whole transaction commits.
+    /// coverage transaction starts. Only after that whole transaction commits
+    /// does this return the committed keys for evidence refresh.
     pub(super) fn persist_attributed_completion(
         &mut self,
         completed: CompletedAttribution,
@@ -2733,15 +2730,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        let mut committed = BTreeSet::new();
-        for claim in claims {
-            committed.insert(claim.key);
-            effects.push(Effect::RecordCoverage(
-                claim.key,
-                relay.clone(),
-                claim.interval,
-            ));
-        }
+        let committed = claims.into_iter().map(|claim| claim.key).collect();
         Some(committed)
     }
 
