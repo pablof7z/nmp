@@ -62,6 +62,7 @@ mod request_attempt_tests;
 mod request_effects;
 #[cfg(test)]
 mod request_replacement_transition_tests;
+mod semantic_delivery;
 #[cfg(test)]
 mod transport_tests;
 mod write;
