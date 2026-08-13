@@ -2107,12 +2107,11 @@ mod tests {
     /// file; damaged current-epoch bytes are not, and discarding them
     /// destroys the only copy of accepted-but-unpublished writes.
     ///
-    /// The epoch fixture is the shape a real store hit: a marker written at
-    /// the address a superseded epoch owned (`schema_meta_v6`/`version`),
-    /// which this build cannot read, so `found` is `None` — "not this
-    /// epoch", not "no data". That fixture is exactly what made the refusal
-    /// text ("predates the schema marker") read as indistinguishable from an
-    /// unreadable file, and it is why the branch has to be a type.
+    /// The epoch fixture is a nonempty store whose marker this build cannot
+    /// read, so `found` is `None` — "not this epoch", not "no data". The
+    /// table is one this schema never writes. Retired table names are not
+    /// recorded here: that list would be knowledge of layouts this
+    /// repository does not keep.
     #[test]
     fn superseded_epoch_and_damaged_bytes_are_different_typed_open_refusals() {
         use redb::{Database, TableDefinition};
@@ -2123,12 +2122,11 @@ mod tests {
         {
             let database = Database::create(&superseded).expect("epoch fixture must create");
             let write = database.begin_write().expect("epoch fixture must begin");
-            {
-                let mut marker = write
-                    .open_table(TableDefinition::<&str, u64>::new("schema_meta_v6"))
-                    .expect("epoch fixture must open its retired marker table");
-                marker.insert("version", 10u64).expect("marker must insert");
-            }
+            write
+                .open_table(TableDefinition::<u64, &[u8]>::new(
+                    "a-table-this-schema-never-writes",
+                ))
+                .expect("epoch fixture must open a table this schema never writes");
             write.commit().expect("epoch fixture must commit");
         }
         let error = Engine::new(EngineConfig {
