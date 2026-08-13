@@ -130,6 +130,36 @@ Feature: Publishing tells the truth, per relay
     Then NMP traverses retained pages and returns its terminal answer
     And the app implements no cursor or replay loop
 
+  Rule: NMP bounds completed receipt history without weakening retained evidence
+
+    # nmp:id=WRITES-RECEIPTS-011
+    # nmp:status=built
+    # nmp:evidence=rust:nmp-store::retained_terminal_receipt_keeps_full_history_until_whole_eviction
+    # nmp:evidence=rust:nmp-store::terminal_retention_whole_closure_eviction_is_atomic_across_process_death
+    # nmp:falsifier=Delete only the terminal receipt row; its correlation or per-relay attempt facts survive as an orphan after reopen.
+    Scenario: Retained terminal receipts keep their complete history until whole eviction
+      Given completed receipts with different outcomes and detailed relay attempts
+      When their internal terminal-history boundary has not been reached
+      Then reattachment returns the same complete facts as before termination
+      And the app sees no compacted summary or retention policy
+      When the oldest terminal receipt crosses the internal boundary
+      Then NMP removes that receipt and all of its exclusively-owned evidence together
+      And no still-open receipt is removed
+
+    # nmp:id=WRITES-RECEIPTS-012
+    # nmp:status=built
+    # nmp:evidence=rust:nmp-store::all_terminal_receipt_kinds_share_one_fifo
+    # nmp:evidence=rust:nmp-store::terminal_age_count_and_bytes_each_force_whole_eviction
+    # nmp:evidence=rust:nmp-store::terminal_receipt_fifo_survives_redb_reopen
+    # nmp:evidence=rust:nmp-store::retained_terminal_receipt_keeps_full_history_until_whole_eviction
+    # nmp:evidence=rust:nmp-store::a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safety_evidence
+    # nmp:falsifier=Order terminal retention by receipt allocation rather than completion; two writes completing in reverse order evict the wrong receipt.
+    Scenario: All terminal outcomes share one internal oldest-first history
+      Given completed writes include acknowledgements, refusals, cancellations, no destinations, and superseded attempts
+      When completed history reaches its internal boundary
+      Then the oldest completed receipt is removed regardless of its outcome
+      And no app configures a per-kind or per-coordinate retention policy
+
   Rule: A persistent Engine owns recovery from a transient storage failure
 
     # nmp:id=WRITES-STORE-RECOVERY-001

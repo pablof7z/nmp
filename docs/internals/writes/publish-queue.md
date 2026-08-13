@@ -23,6 +23,7 @@ issues:
   - https://github.com/pablof7z/nmp/issues/771
   - https://github.com/pablof7z/nmp/issues/889
   - https://github.com/pablof7z/nmp/issues/1134
+  - https://github.com/pablof7z/nmp/issues/753
 ---
 
 # Publish queue storage
@@ -75,8 +76,8 @@ The authority for this cut is the repository owner’s wording:
 
 ## Fresh-store cut
 
-The whole Redb schema epoch is version 15. Publish queue has a second,
-explicit codec marker with version 2 in `publish_queue_meta`. A new database
+The whole Redb schema epoch is version 16. Publish queue has a second,
+explicit codec marker with version 3 in `publish_queue_meta`. A new database
 creates only `publish_queue_*` execution tables. It never opens, drains,
 transforms, dual-writes, or deletes a legacy execution table.
 
@@ -91,14 +92,26 @@ canonical events, coverage, accepted obligations, receipts, correlations,
 routes, lanes, attempts, details, and deadlines share transactions. Carrying a
 partial compatibility decoder would make that atomic model dishonest.
 
-Schema 15 adds the superseded-safety-receipt cleanup index inside the existing
-`publish_queue_meta` key space. One scalar count and keys ordered by
-`(accepted_at, receipt_id)` change in the same transaction as each receipt
-transition or removal. A runtime deadline peek reads only the count and first
-ordered key; pruning walks only age-due or count-excess superseded keys.
-Unrelated retained terminal receipts are never enumerated for scheduler work.
-This indexes the existing one-hour/newest-500 policy; it does not add broader
-terminal-history retention (#1415; #753 remains open).
+Schema 16 replaces the superseded-only cleanup mechanism with one store-owned
+FIFO for every whole terminal receipt closure. Each terminal transition writes
+a monotonic completion sequence, wall-clock completion time, and logical
+encoded-byte charge in the same transaction as the receipt state. The FIFO and
+its count/byte scalars live in the existing `publish_queue_meta` key space.
+Maintenance evicts oldest whole closures while any private limit is exceeded:
+24 hours, 100,000 terminal receipts, or 256 MiB of logical encoded closure
+bytes. These values cover roughly one day of the observed 27-session renewal
+load (77,760 completions/day) while bounding both cardinality and unusually
+large attempt histories. They are implementation policy, not app configuration.
+
+Retained receipts are not compacted. Receipt, correlation, route revisions,
+lanes, attempts, and attempt details remain available for normal reattachment
+until eviction removes all receipt-owned evidence atomically. Open intents
+never enter the FIFO. Maintenance runs inside `nmp-store` after acceptance,
+terminalization, and terminal-producing ingest, and on Redb open/reopen; the
+engine has no retention deadline, scan, timer, or policy door. After whole-closure
+eviction, queue inspection omits the receipt, reattachment returns not found,
+and its correlation token resolves to nothing; there is no separate public
+retired or compacted state.
 
 ## Physical model
 
@@ -112,21 +125,21 @@ Every ordering-sensitive key is fixed width and big-endian:
 | attempt and attempt detail | `intent:u64 \| relay_id:u32 \| ordinal:u64` |
 | route revision | `intent:u64 \| ordinal:u64` |
 | ordered deadline | `at:u64 \| intent:u64 \| relay_id:u32` |
-| superseded receipt cleanup | `meta-prefix \| accepted_at:u64 \| receipt_id:u64` |
+| terminal receipt FIFO | `meta-prefix \| completion_sequence:u64 \| receipt_id:u64` |
 | deadline cleanup index | `intent:u64 \| at:u64 \| relay_id:u32` |
 | correlation and address suppression | bounded bytes, with binary values |
 | id suppression | raw `event_id:[u8;32] \| pubkey:[u8;32]` |
 
 The namespace consists of:
 
-`publish_queue_intents_v1`, `publish_queue_displaced_v1`,
-`publish_queue_receipts_v1`, `publish_queue_correlations_v1`,
-`publish_queue_route_revisions_v1`, `publish_queue_lanes_v1`,
-`publish_queue_attempts_v1`, `publish_queue_attempt_details_v1`,
-`publish_queue_deadlines_v1`, `publish_queue_deadlines_by_intent_v1`,
-`publish_queue_relays_v1`, `publish_queue_relay_ids_v1`,
-`publish_queue_kind5_claims_v1`, `publish_queue_suppress_by_id_v1`,
-`publish_queue_suppress_by_addr_v1`, and `publish_queue_meta_v1`.
+`publish_queue_intents`, `publish_queue_displaced`,
+`publish_queue_receipts`, `publish_queue_correlations`,
+`publish_queue_route_revisions`, `publish_queue_lanes`,
+`publish_queue_attempts`, `publish_queue_attempt_details`,
+`publish_queue_deadlines`, `publish_queue_deadlines_by_intent`,
+`publish_queue_relays`, `publish_queue_relay_ids`,
+`publish_queue_kind5_claims`, `publish_queue_suppress_by_id`,
+`publish_queue_suppress_by_addr`, and `publish_queue_meta`.
 
 Values use an explicit eight-byte envelope: four ASCII magic bytes, one codec
 version byte, and three zero reserved bytes. Integers are big-endian; variants
@@ -179,7 +192,9 @@ records the selected fact. In particular:
 - lane cursor, immutable attempt, additive detail, and both deadline indexes
   change in the same transition transaction;
 - terminal close removes bounded open-work rows only after every persisted lane
-  is terminal, while retained receipt and attempt evidence survive.
+  is terminal, while retained receipt and attempt evidence survive;
+- terminalization and FIFO admission are one transaction, while a later
+  maintenance transaction removes the entire oldest closure or nothing.
 
 The cut deliberately does **not** persist reducer `route_complete`. Under
 [#1134](https://github.com/pablof7z/nmp/issues/1134), an Auto-routed obligation

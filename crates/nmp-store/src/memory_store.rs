@@ -172,17 +172,20 @@ pub struct MemoryStore {
     /// caller-side receipt-id counter has `IntentId`'s exact reuse hazard).
     next_receipt_id: u64,
     /// `PUBLISH_QUEUE_RECEIPTS` mirror: retained receipt records, independent of
-    /// open intent rows. Superseded safety receipts are age/count pruned;
-    /// other terminal classes survive until the app removes them.
+    /// open intent rows.
     publish_queue_receipts: HashMap<u64, PublishQueueReceipt>,
-    /// Ordered projection of only disposable supersession evidence. The
-    /// receipt map remains authoritative; every receipt mutation updates this
-    /// projection in the same `MemoryStore` call so deadline work never scans
-    /// unrelated retained terminal history (#1415).
-    superseded_receipts: BTreeSet<(Timestamp, u64)>,
+    /// One global oldest-first projection of whole terminal closures.
+    terminal_receipts: BTreeSet<(u64, u64)>,
+    terminal_receipt_times: HashMap<u64, Timestamp>,
+    terminal_receipt_bytes: HashMap<u64, u64>,
+    terminal_receipt_total_bytes: u64,
+    next_terminal_sequence: u64,
     /// `PUBLISH_QUEUE_CORRELATIONS` mirror (#591): caller correlation token ->
     /// the receipt id it was journaled under. Removed with its receipt.
     publish_queue_correlations: HashMap<String, u64>,
+    /// Reverse ownership makes whole-closure deletion O(one receipt), never a
+    /// scan of every correlation token accepted over the store lifetime.
+    publish_queue_receipt_correlations: HashMap<u64, String>,
     /// Typed mirror of `PUBLISH_QUEUE_ATTEMPTS`, keyed by its complete stable key.
     publish_queue_attempts: BTreeMap<(IntentId, RelayUrl, u64), PublishQueueAttempt>,
     publish_queue_attempt_details: BTreeMap<(IntentId, RelayUrl, u64), PublishQueueAttemptDetails>,
@@ -515,8 +518,11 @@ impl MemoryStore {
         // #591: journal the caller's correlation token alongside the
         // receipt id it now names -- same call, same in-memory mutation.
         if let Some(token) = correlation {
+            let token = token.as_ref().to_string();
             self.publish_queue_correlations
-                .insert(token.as_ref().to_string(), receipt_id);
+                .insert(token.clone(), receipt_id);
+            self.publish_queue_receipt_correlations
+                .insert(receipt_id, token);
         }
     }
 
@@ -525,30 +531,179 @@ impl MemoryStore {
             .publish_queue_receipts
             .get_mut(&receipt_id)
             .expect("receipt state transition requires a retained receipt");
-        if receipt.state == ReceiptState::Superseded {
-            let accepted_at = receipt
-                .accepted_at
-                .expect("superseded receipt must have an acceptance time");
-            assert!(self.superseded_receipts.remove(&(accepted_at, receipt_id)));
-        }
         receipt.state = state;
-        if state == ReceiptState::Superseded {
-            let accepted_at = receipt
-                .accepted_at
-                .expect("superseded receipt must have an acceptance time");
-            assert!(self.superseded_receipts.insert((accepted_at, receipt_id)));
-        }
     }
 
     fn remove_receipt(&mut self, receipt_id: u64) -> Option<PublishQueueReceipt> {
         let receipt = self.publish_queue_receipts.remove(&receipt_id)?;
-        if receipt.state == ReceiptState::Superseded {
-            let accepted_at = receipt
-                .accepted_at
-                .expect("superseded receipt must have an acceptance time");
-            assert!(self.superseded_receipts.remove(&(accepted_at, receipt_id)));
+        if let Some(bytes) = self.terminal_receipt_bytes.remove(&receipt_id) {
+            self.terminal_receipt_times
+                .remove(&receipt_id)
+                .expect("terminal receipt bytes require completion time");
+            let terminal_key = self
+                .terminal_receipts
+                .iter()
+                .find(|(_, candidate)| *candidate == receipt_id)
+                .copied()
+                .expect("terminal receipt bytes require FIFO ownership");
+            assert!(self.terminal_receipts.remove(&terminal_key));
+            self.terminal_receipt_total_bytes = self
+                .terminal_receipt_total_bytes
+                .checked_sub(bytes)
+                .expect("terminal receipt byte accounting underflow");
         }
         Some(receipt)
+    }
+
+    fn terminal_receipt_logical_bytes(
+        &self,
+        receipt_id: u64,
+        terminal_sequence: u64,
+        terminal_at: Timestamp,
+    ) -> Result<u64, PersistenceError> {
+        use crate::redb_store::publish_queue::PublishQueueReceiptRecord;
+        use crate::redb_store::publish_queue_codec::{
+            encode_attempt, encode_attempt_details, encode_lane, encode_receipt, encode_route,
+            terminal_receipt_key,
+        };
+
+        let receipt = self
+            .publish_queue_receipts
+            .get(&receipt_id)
+            .ok_or_else(|| PersistenceError::invariant("terminal receipt is missing"))?;
+        let correlation = self
+            .publish_queue_receipt_correlations
+            .get(&receipt_id)
+            .cloned();
+        let record = PublishQueueReceiptRecord {
+            intent_id: receipt.intent_id,
+            frozen_id: receipt.frozen_id,
+            expected_pubkey: receipt.expected_pubkey,
+            accepted_at: receipt.accepted_at,
+            state: receipt.state,
+            correlation: correlation.clone(),
+            terminal_sequence: Some(terminal_sequence),
+            terminal_at: Some(terminal_at),
+            terminal_bytes: Some(0),
+        };
+        let mut total = (8 + encode_receipt(&record).len()) as u64
+            + terminal_receipt_key(terminal_sequence, receipt_id).len() as u64
+            + correlation.map_or(0, |token| (token.len() + 8) as u64);
+        let Some(intent_id) = receipt.intent_id else {
+            return Ok(total);
+        };
+        for route in self
+            .publish_queue_route_revisions
+            .values()
+            .filter(|route| route.intent_id == intent_id)
+        {
+            let relay_ids = (1..=route.relays.len())
+                .map(|id| u32::try_from(id).expect("route count is codec bounded"))
+                .collect::<Vec<_>>();
+            total += 16
+                + encode_route(&relay_ids)
+                    .map_err(|error| PersistenceError::invariant(error.to_string()))?
+                    .len() as u64;
+        }
+        if let Some(lanes) = self.publish_queue_lanes.get(&intent_id) {
+            for lane in lanes.values() {
+                total += 12
+                    + encode_lane(lane.revision, lane.last_ordinal, &lane.state)
+                        .map_err(|error| PersistenceError::invariant(error.to_string()))?
+                        .len() as u64;
+            }
+        }
+        for attempt in self
+            .publish_queue_attempts
+            .values()
+            .filter(|attempt| attempt.intent_id == intent_id)
+        {
+            total += 20
+                + encode_attempt(&attempt.event, &attempt.outcome)
+                    .map_err(|error| PersistenceError::invariant(error.to_string()))?
+                    .len() as u64;
+        }
+        for detail in self
+            .publish_queue_attempt_details
+            .values()
+            .filter(|detail| detail.intent_id == intent_id)
+        {
+            total += 20
+                + encode_attempt_details(detail)
+                    .map_err(|error| PersistenceError::invariant(error.to_string()))?
+                    .len() as u64;
+        }
+        Ok(total)
+    }
+
+    fn mark_terminal_receipt(
+        &mut self,
+        receipt_id: u64,
+        observed_at: Timestamp,
+    ) -> Result<(), PersistenceError> {
+        if self.terminal_receipt_bytes.contains_key(&receipt_id) {
+            return Ok(());
+        }
+        let sequence = self.next_terminal_sequence;
+        let next_sequence = self
+            .next_terminal_sequence
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError::invariant("terminal receipt sequence exhausted"))?;
+        let terminal_at = self
+            .terminal_receipts
+            .last()
+            .and_then(|(_, previous)| self.terminal_receipt_times.get(previous))
+            .map_or(observed_at, |previous| {
+                Timestamp::from(previous.as_secs().max(observed_at.as_secs()))
+            });
+        let bytes = self.terminal_receipt_logical_bytes(receipt_id, sequence, terminal_at)?;
+        self.next_terminal_sequence = next_sequence;
+        if !self.terminal_receipts.insert((sequence, receipt_id)) {
+            return Err(PersistenceError::invariant(
+                "terminal receipt already exists in FIFO",
+            ));
+        }
+        self.terminal_receipt_times.insert(receipt_id, terminal_at);
+        self.terminal_receipt_bytes.insert(receipt_id, bytes);
+        self.terminal_receipt_total_bytes = self
+            .terminal_receipt_total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| PersistenceError::invariant("terminal receipt bytes overflow"))?;
+        Ok(())
+    }
+
+    pub(crate) fn maintain_terminal_receipts_at(
+        &mut self,
+        now: Timestamp,
+        limits: crate::terminal_retention::TerminalRetentionLimits,
+    ) -> Result<Vec<u64>, PersistenceError> {
+        let mut removed = Vec::new();
+        while let Some((_sequence, receipt_id)) = self.terminal_receipts.first().copied() {
+            let terminal_at = self.terminal_receipt_times[&receipt_id];
+            let age_due =
+                now.as_secs() >= terminal_at.as_secs().saturating_add(limits.max_age_secs);
+            let pressure = self.terminal_receipts.len() as u64 > limits.max_count
+                || self.terminal_receipt_total_bytes > limits.max_bytes;
+            if !age_due && !pressure {
+                break;
+            }
+            match self.remove_publish_queue_entry(receipt_id)? {
+                crate::RemoveQueueEntryOutcome::Removed => removed.push(receipt_id),
+                _ => {
+                    return Err(PersistenceError::invariant(
+                        "terminal FIFO references a non-removable receipt",
+                    ))
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    fn maintain_terminal_receipts(&mut self) -> Result<Vec<u64>, PersistenceError> {
+        self.maintain_terminal_receipts_at(
+            crate::terminal_retention::wall_clock_now(),
+            crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
+        )
     }
 
     /// Retire older delivery obligations made useless by a newer winner at
@@ -624,11 +779,20 @@ impl MemoryStore {
             }
             if *retain_safety_receipt {
                 self.set_receipt_state(*receipt_id, ReceiptState::Superseded);
+                self.mark_terminal_receipt(
+                    *receipt_id,
+                    crate::terminal_retention::wall_clock_now(),
+                )
+                .expect("in-memory terminal receipt accounting");
             } else {
                 self.remove_receipt(*receipt_id)
                     .expect("open delivery intent must retain its receipt");
-                self.publish_queue_correlations
-                    .retain(|_, journaled| journaled != receipt_id);
+                if let Some(token) = self.publish_queue_receipt_correlations.remove(receipt_id) {
+                    assert_eq!(
+                        self.publish_queue_correlations.remove(&token),
+                        Some(*receipt_id)
+                    );
+                }
             }
         }
 
@@ -1603,6 +1767,9 @@ impl EventStore for MemoryStore {
 
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::memory_insert(insert_started.elapsed());
+        if matches!(&outcome, InsertOutcome::Superseded { .. }) {
+            self.maintain_terminal_receipts()?;
+        }
         Ok(outcome)
     }
 
@@ -2156,6 +2323,7 @@ impl EventStore for MemoryStore {
             &correlation,
         );
 
+        self.maintain_terminal_receipts()?;
         Ok(outcome)
     }
 
@@ -2493,6 +2661,8 @@ impl EventStore for MemoryStore {
         }
 
         self.set_receipt_state(receipt_id, terminal_state);
+        self.mark_terminal_receipt(receipt_id, crate::terminal_retention::wall_clock_now())?;
+        self.maintain_terminal_receipts()?;
 
         Ok(CompensateOutcome::Compensated { restored, revealed })
     }
@@ -2528,44 +2698,6 @@ impl EventStore for MemoryStore {
         Ok(page)
     }
 
-    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError> {
-        let excess = self
-            .superseded_receipts
-            .len()
-            .saturating_sub(crate::SUPERSEDED_RECEIPT_MAX_COUNT);
-        let candidates = self
-            .superseded_receipts
-            .iter()
-            .enumerate()
-            .take_while(|(index, (accepted_at, _))| {
-                *index < excess || now >= *accepted_at + crate::SUPERSEDED_RECEIPT_MAX_AGE_SECS
-            })
-            .map(|(_, (_, receipt_id))| *receipt_id)
-            .collect::<Vec<_>>();
-        for receipt_id in &candidates {
-            match self.remove_publish_queue_entry(*receipt_id)? {
-                crate::RemoveQueueEntryOutcome::Removed => {}
-                crate::RemoveQueueEntryOutcome::NotFound
-                | crate::RemoveQueueEntryOutcome::StillOpen => {
-                    return Err(PersistenceError::invariant(
-                        "superseded receipt index disagrees with retained receipt",
-                    ));
-                }
-            }
-        }
-        Ok(candidates)
-    }
-
-    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        if self.superseded_receipts.len() > crate::SUPERSEDED_RECEIPT_MAX_COUNT {
-            return Ok(Some(Timestamp::from(0)));
-        }
-        Ok(self
-            .superseded_receipts
-            .first()
-            .map(|(accepted_at, _)| *accepted_at + crate::SUPERSEDED_RECEIPT_MAX_AGE_SECS))
-    }
-
     fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,
@@ -2573,14 +2705,35 @@ impl EventStore for MemoryStore {
         let Some(receipt) = self.publish_queue_receipts.get(&receipt_id) else {
             return Ok(crate::RemoveQueueEntryOutcome::NotFound);
         };
-        if let Some(intent_id) = receipt.intent_id {
+        let intent_id = receipt.intent_id;
+        if let Some(intent_id) = intent_id {
             if self.publish_queue_intents.contains_key(&intent_id) {
                 return Ok(crate::RemoveQueueEntryOutcome::StillOpen);
             }
+            if self.publish_queue_kind5_claims.contains_key(&intent_id) {
+                return Err(PersistenceError::invariant(
+                    "terminal receipt still owns provisional suppression claims",
+                ));
+            }
         }
         self.remove_receipt(receipt_id);
-        self.publish_queue_correlations
-            .retain(|_, journaled| *journaled != receipt_id);
+        if let Some(token) = self.publish_queue_receipt_correlations.remove(&receipt_id) {
+            assert_eq!(
+                self.publish_queue_correlations.remove(&token),
+                Some(receipt_id)
+            );
+        }
+        if let Some(intent_id) = intent_id {
+            self.publish_queue_displaced.remove(&intent_id);
+            self.publish_queue_attempts
+                .retain(|(candidate, _, _), _| *candidate != intent_id);
+            self.publish_queue_attempt_details
+                .retain(|(candidate, _, _), _| *candidate != intent_id);
+            self.publish_queue_lanes.remove(&intent_id);
+            self.publish_queue_route_revisions
+                .retain(|(candidate, _), _| *candidate != intent_id);
+            self.forget_open_work(intent_id);
+        }
         Ok(crate::RemoveQueueEntryOutcome::Removed)
     }
 
@@ -3332,7 +3485,14 @@ impl EventStore for MemoryStore {
                 "intent lanes are not non-empty and terminal",
             ));
         }
+        let receipt_id = self
+            .publish_queue_intents
+            .get(&intent_id)
+            .map(|intent| intent.receipt_id)
+            .ok_or_else(|| PersistenceError::invariant("closed intent receipt is missing"))?;
         self.forget_open_work(intent_id);
+        self.mark_terminal_receipt(receipt_id, crate::terminal_retention::wall_clock_now())?;
+        self.maintain_terminal_receipts()?;
         Ok(CloseIntentOutcome::Closed)
     }
 
@@ -3353,7 +3513,14 @@ impl EventStore for MemoryStore {
             let receipt_id = record.receipt_id;
             self.set_receipt_state(receipt_id, ReceiptState::NoDestination);
         }
+        let receipt_id = self
+            .publish_queue_intents
+            .get(&intent_id)
+            .map(|record| record.receipt_id)
+            .ok_or_else(|| PersistenceError::invariant("unroutable intent receipt is missing"))?;
         self.forget_open_work(intent_id);
+        self.mark_terminal_receipt(receipt_id, crate::terminal_retention::wall_clock_now())?;
+        self.maintain_terminal_receipts()?;
         Ok(CloseIntentOutcome::Closed)
     }
 
@@ -3383,6 +3550,8 @@ impl EventStore for MemoryStore {
                 state: ReceiptState::Refused(reason),
             },
         );
+        self.mark_terminal_receipt(receipt_id, crate::terminal_retention::wall_clock_now())?;
+        self.maintain_terminal_receipts()?;
         Ok(receipt_id)
     }
 }

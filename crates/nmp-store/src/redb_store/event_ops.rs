@@ -60,6 +60,13 @@ pub(super) fn insert(
 ) -> Result<InsertOutcome, PersistenceError> {
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|tables, _write_txn| insert_with_tables(tables, event, from))?;
+    if matches!(&outcome, InsertOutcome::Superseded { .. }) {
+        super::publish_queue_ops::maintain_terminal_receipts_in_txn(
+            write.transaction(),
+            crate::terminal_retention::wall_clock_now(),
+            crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
+        )?;
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     let outcome = write.commit_prepared(outcome)?;
@@ -95,6 +102,16 @@ pub(super) fn insert_batch(
         crate::ingest_attribution::apply_events(apply_started.elapsed());
         Ok(())
     })?;
+    if outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, InsertOutcome::Superseded { .. }))
+    {
+        super::publish_queue_ops::maintain_terminal_receipts_in_txn(
+            write.transaction(),
+            crate::terminal_retention::wall_clock_now(),
+            crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
+        )?;
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     let outcomes = write.commit_prepared(outcomes)?;

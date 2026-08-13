@@ -9,13 +9,13 @@ use super::mutation::{
     tombstone_refuses,
 };
 use super::publish_queue::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, is_suppressed_in_txn,
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, is_suppressed_in_txn, mark_terminal_receipt,
     remove_addr_claimant_in_txn, remove_claimant_in_txn, update_publish_queue_receipt,
     PublishQueueIntentRecord, PublishQueueReceiptRecord, SuppressClaimRecord,
 };
 use super::publish_queue_codec::{
     attempt_range, codec_error, deadline_intent_range, deadline_key, decode_attempt_handoff,
-    decode_claims, decode_deadline, decode_displaced, decode_intent, encode_claims,
+    decode_claims, decode_deadline, decode_displaced, decode_intent, decode_receipt, encode_claims,
     encode_displaced, encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
     parse_deadline_by_intent_key, parse_lane_key, receipt_key, route_revision_range,
 };
@@ -34,6 +34,7 @@ use super::{
     PersistenceError, PromoteOutcome, Provenance, ReceiptState, RefuseReason, SigState,
     StoredEvent, Timestamp,
 };
+use crate::terminal_retention::{wall_clock_now, TerminalRetentionLimits};
 use crate::{handoff_may_have_occurred, RetiredIntent, VerifiedSignature};
 use redb::ReadableTable;
 
@@ -212,35 +213,39 @@ fn retire_superseded_owners_in_txn(
         if *retain_safety_receipt {
             update_publish_queue_receipt(
                 &mut ingest.publish_queue_receipts,
-                &mut ingest.publish_queue_meta,
                 *receipt_id,
                 ReceiptState::Superseded,
             )?;
+            mark_terminal_receipt(
+                &mut ingest.publish_queue_receipts,
+                &mut ingest.publish_queue_meta,
+                *receipt_id,
+                wall_clock_now(),
+                0,
+            )?;
             continue;
         }
-        if ingest
+        let removed_receipt = ingest
             .publish_queue_receipts
             .remove(&receipt_key(*receipt_id))
             .map_err(persist_err)?
-            .is_none()
-        {
-            return Err(PersistenceError::invariant(
-                "open delivery intent must retain its receipt",
-            ));
-        }
-        let stale_tokens = correlations
-            .iter()
-            .map_err(persist_err)?
-            .filter_map(|row| match row {
-                Ok((token, journaled)) if u64::from_be_bytes(*journaled.value()) == *receipt_id => {
-                    Some(Ok(token.value().to_vec()))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(persist_err(error))),
-            })
-            .collect::<Result<Vec<_>, PersistenceError>>()?;
-        for token in stale_tokens {
-            correlations.remove(token.as_slice()).map_err(persist_err)?;
+            .map(|guard| guard.value().to_vec())
+            .ok_or_else(|| {
+                PersistenceError::invariant("open delivery intent must retain its receipt")
+            })?;
+        let removed_record = decode_receipt(&removed_receipt)
+            .map_err(|error| codec_error("retired receipt", error))?;
+        if let Some(token) = removed_record.correlation {
+            let mapped = correlations
+                .get(token.as_bytes())
+                .map_err(persist_err)?
+                .map(|guard| u64::from_be_bytes(*guard.value()));
+            if mapped != Some(*receipt_id) {
+                return Err(PersistenceError::invariant(
+                    "receipt correlation reverse ownership disagrees",
+                ));
+            }
+            correlations.remove(token.as_bytes()).map_err(persist_err)?;
         }
     }
 
@@ -700,6 +705,10 @@ pub(super) fn accept_write(
                 expected_pubkey,
                 accepted_at: Some(accepted_at),
                 state: receipt_state,
+                correlation: correlation.as_ref().map(|token| token.as_ref().to_owned()),
+                terminal_sequence: None,
+                terminal_at: None,
+                terminal_bytes: None,
             };
             let encoded_receipt = encode_receipt(&receipt_record);
             ingest
@@ -732,6 +741,11 @@ pub(super) fn accept_write(
     ) {
         return Ok(outcome);
     }
+    super::publish_queue_ops::maintain_terminal_receipts_in_txn(
+        write.transaction(),
+        wall_clock_now(),
+        TerminalRetentionLimits::PRODUCTION,
+    )?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::AcceptBeforeCommit);
     write.commit_prepared(outcome)
@@ -1242,9 +1256,15 @@ pub(super) fn compensate_write_with_state(
 
                     update_publish_queue_receipt(
                         &mut ingest.publish_queue_receipts,
-                        &mut ingest.publish_queue_meta,
                         intent_record.receipt_id,
                         terminal_state,
+                    )?;
+                    mark_terminal_receipt(
+                        &mut ingest.publish_queue_receipts,
+                        &mut ingest.publish_queue_meta,
+                        intent_record.receipt_id,
+                        wall_clock_now(),
+                        0,
                     )?;
 
                     CompensateOutcome::Compensated { restored, revealed }
@@ -1253,6 +1273,11 @@ pub(super) fn compensate_write_with_state(
         };
         Ok(outcome)
     })?;
+    super::publish_queue_ops::maintain_terminal_receipts_in_txn(
+        write.transaction(),
+        wall_clock_now(),
+        TerminalRetentionLimits::PRODUCTION,
+    )?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::CompensateBeforeCommit);
     write.commit_prepared(outcome)
