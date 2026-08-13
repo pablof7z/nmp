@@ -142,7 +142,7 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:id=WRITES-REPLACEABLE-EDIT-017
   # nmp:status=specified
   # nmp:gap=evidence
-  # nmp:issue=#1434
+  # nmp:issue=#1465
   Scenario: A successor retires predecessor work and republishes to every destination
     Given relay 1 received current generation E1
     And relay 2 later supplies a newer source version
@@ -155,7 +155,7 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:id=WRITES-REPLACEABLE-EDIT-018
   # nmp:status=specified
   # nmp:gap=evidence
-  # nmp:issue=#1434
+  # nmp:issue=#1465
   Scenario: Shared operation receipts observe one physical generation delivery
     Given Alice and Bob have distinct operation receipts sharing current generation E2
     And their destination plans overlap
@@ -166,7 +166,7 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:id=WRITES-REPLACEABLE-EDIT-019
   # nmp:status=specified
   # nmp:gap=evidence
-  # nmp:issue=#1434
+  # nmp:issue=#1465
   Scenario: Destination completion does not close a continuing semantic operation
     Given every destination for the current semantic generation is terminal
     When its deliberately continuing source policy remains active
