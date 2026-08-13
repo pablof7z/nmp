@@ -1,249 +1,89 @@
 # Behavioral specification
 
-Feature files are NMP's durable behavioral memory. Their purpose is to preserve meaning that would otherwise be lost across agent sessions, implementation rewrites, issue closure, and test refactors.
+Feature files preserve product meaning across rewrites. They are not a test
+inventory or project plan.
 
-They are not merely Cucumber input.
+## Admit behavior deliberately
 
-## What must enter the feature corpus
+Add or change a scenario for a product-meaningful:
 
-Capture a behavior when the user provides any of the following:
+- user correction or contextual distinction;
+- routing, identity, durability, or truthfulness rule;
+- negative guarantee or counterexample;
+- boundary easy to flatten during later work.
 
-- a correction: “that is not how it should work”;
-- a contextual distinction: “in this case, but not in that case”;
-- a non-obvious routing or identity rule;
-- a negative guarantee: “this must never cause…”;
-- a durability claim: “this must still be true after restart”;
-- a truthfulness requirement: “do not call this complete merely because…”;
-- a counterexample that invalidates the current abstraction;
-- an explicit preference between plausible product behaviors;
-- a clarification that a familiar word such as “sync,” “coverage,” “accepted,” or “account” is too broad.
+Keep local parser, codec, private-state, and exhaustive cases in their owning
+tests unless they express such a boundary.
 
-Do not wait until implementation begins. The correction itself is the reason to update the behavioral memory.
+## Preserve the semantic delta
 
-## Extract the semantic delta
+State: which cases were conflated, which axis changes the result, what remains
+unchanged, and the observable consequence. Use the smallest contrasting
+examples that would fail if the cases were conflated again.
 
-Before writing a scenario, state the distinction in one sentence:
+Organize by behavioral domain, never crate. Use one promise per scenario.
+Prefer app and Nostr terms; avoid private Rust types, tables, reducers, helpers,
+and crate ownership as outcomes.
 
-> Previously these cases were treated as equivalent; the user has now established that **X** changes the result while **Y** must not.
+## Stage causes
 
-Then identify:
+Setup must provide real inputs, not the result under proof. For discovery, seed
+the protocol fact at the starting source; do not inject the resolved route.
+Observe through the supported facade or an independent witness.
 
-- the contextual axis that differs;
-- the action whose meaning is affected;
-- the observable consequence;
-- the incorrect shortcut or conflation the example prevents.
+Ask: **is this input a cause, or the conclusion being proved?**
 
-This produces better scenarios than paraphrasing the user's message line by line.
+## Metadata
 
-## Prefer contrastive examples
-
-A single positive example often fails to preserve the nuance. When the behavior depends on context, write the smallest pair or set of scenarios that separates the cases.
-
-```gherkin
-Feature: Active-account routing
-
-  Rule: Only demand that depends on the active account reroutes
-
-    # nmp:id=ROUTING-ACCOUNT-001
-    # nmp:status=built
-    # nmp:evidence=rust:nmp-router::reactive_demand_reroots_on_active_account_change
-    # nmp:falsifier=Make all demand reroot on active-account change; this scenario must fail.
-    Scenario: Reactive demand follows the new active account
-      Given a query whose author set depends on the active account
-      And Alice is the active account
-      When the active account changes to Bob
-      Then the query uses Bob's derived sources
-
-    # nmp:id=ROUTING-ACCOUNT-002
-    # nmp:status=built
-    # nmp:evidence=rust:nmp-router::literal_demand_remains_pinned
-    # nmp:falsifier=Reroot literal demand on active-account change; this scenario must fail.
-    Scenario: Literal demand remains pinned
-      Given a query with Alice's pubkey as a literal author
-      And Alice is the active account
-      When the active account changes to Bob
-      Then the query still uses Alice's sources
-```
-
-The second scenario is not redundant. It preserves the boundary of the rule.
-
-## Choose the right Gherkin construct
-
-### `Feature`
-
-Use a feature for a stable behavioral capability such as routing, write durability, acquisition evidence, or trust-domain reset.
-
-### `Rule`
-
-Use a rule for the principle that explains several examples. Put the “why these cases differ” statement here.
-
-### `Scenario`
-
-Use a scenario for one discriminating example with one promise in its title.
-
-### `Scenario Outline`
-
-Use an outline when a small, finite matrix is itself meaningful to readers. Do not use it to enumerate a state space better covered by property tests.
-
-### Prose and tables
-
-Short explanatory prose and decision tables are allowed inside feature files. Do not force every invariant into ceremonial Given/When/Then syntax. The requirement is precise, durable behavioral meaning and valid Gherkin where scenarios are used.
-
-## Write in behavioral vocabulary
-
-Use words an application or protocol-aware developer can reason about:
-
-- app, account, identity, query, source, relay, request, write, receipt;
-- cached rows, acquisition evidence, EOSE, unavailable source, shortfall;
-- accepted, awaiting signer, signed, attempted, acknowledged, rejected;
-- restart, reconstruct, reconnect, reset.
-
-Avoid implementation vocabulary unless the implementation boundary is itself contractual:
-
-- private Rust type names;
-- table names;
-- reducer variants;
-- internal channels;
-- exact helper calls;
-- crate ownership claims disguised as product behavior.
-
-Bad:
-
-```gherkin
-Then the resolver's LiveDirectory contains Alice's relay
-```
-
-Better:
-
-```gherkin
-Then Alice's content is requested from the relay named by her relay-list event
-```
-
-## Stage causes, not answers
-
-A scenario that claims discovery must stage the discoverable fact, not directly inject the discovered result.
-
-Bad self-bootstrap fixture:
-
-- insert Alice's write relay directly into the engine directory;
-- assert that Alice's relay is later contacted.
-
-Truthful fixture:
-
-- configure only the indexer initially;
-- seed Alice's relay-list event at the indexer;
-- observe the indexer request;
-- observe the discovered relay being contacted afterward;
-- observe the final result through the public facade.
-
-Ask of every `Given`:
-
-> Is this an input the real product receives, or is it the internal conclusion the product is supposed to derive?
-
-## Scenario metadata
-
-Every governed scenario uses a structured comment block immediately above it.
-Once one scenario in a file carries `nmp:*`, the whole file is governed. New,
-changed, moved, or deleted behavior must be governed; unchanged ungoverned
-legacy is temporary migration debt. An ungoverned legacy file cannot disappear
-directly: govern it first so a later deletion has a traceable identity.
+Place one adjacent comment block above each governed scenario:
 
 ```gherkin
 # nmp:id=ROUTING-DISCOVERY-003
 # nmp:status=built
 # nmp:evidence=rust:nmp::self_bootstrap_discovers_write_relay
-# nmp:evidence=rust:nmp-nip65::relay_list_decodes_write_relay
-# nmp:falsifier=Disable relay-list ingestion; the content relay must never be contacted.
+# nmp:falsifier=Disable relay-list ingestion; the content relay is not contacted.
 @acceptance
 Scenario: An author relay is discovered without an app-supplied route
-  ...
 ```
 
-### Required fields
+Required:
 
-- `nmp:id`: stable, unique behavioral identifier.
-- `nmp:status`: exactly one of `built`, `specified`, or `known-violation`.
+- `nmp:id=<DOMAIN>-<CONTEXT>-<NNN>`: unique and stable;
+- `nmp:status=built|specified|known-violation`.
 
-For `built`:
+Additional fields:
 
-- one or more `nmp:evidence` lines;
-- one `nmp:falsifier` line.
-
-For `specified`:
-
-- `nmp:gap=implementation`, `evidence`, `fixture`, or `platform`;
-- `nmp:issue=#N`.
-
-For `known-violation`:
-
-- `nmp:issue=#N`;
-
-### Status meaning
-
-| Status | Meaning |
+| Status | Required |
 |---|---|
-| `built` | Current behavior is implemented and mapped evidence passes |
-| `specified` | Behavior is agreed, but implementation or sufficient evidence has not been promoted |
-| `known-violation` | The scenario states the intended current contract, and current code is known to contradict it |
+| `built` | Evidence line(s) and one falsifier |
+| `specified` | `nmp:gap=implementation|evidence|fixture|platform`, open `nmp:issue=#N` |
+| `known-violation` | Open `nmp:issue=#N` |
 
-Do not use ambiguous `@wip`, `@designed`, or `@requires-*`
-lifecycle/capability tags in governed files, including tags inherited from a
-Feature, Rule, Scenario, or Examples block. The exact gap must be stated.
+`@acceptance` selects a built facade capstone; it is not status. Governed files
+reject `@wip`, `@designed`, and `@requires-*` lifecycle tags.
 
-`@acceptance` means the scenario itself is executed as a facade-level acceptance capstone. It is not a status. An `@acceptance` scenario must be `built`.
+Keep an ID while refining one promise. Split IDs when one scenario contains
+several promises. Never reuse a deleted ID.
 
-## Stable IDs
+Once one scenario in a file has `nmp:*`, govern the whole file. Govern legacy
+before later deleting it.
 
-Use IDs of the form:
+## Correct existing behavior
 
-```text
-<DOMAIN>-<CONTEXT>-<NNN>
-```
+When a correction conflicts with the corpus:
 
-Examples:
+1. Correct wrong text in place.
+2. Split conflated contexts.
+3. Add the missing contrast.
+4. Update status, evidence, falsifier, and issue.
 
-- `ROUTING-ACCOUNT-001`
-- `EVIDENCE-EOSE-004`
-- `WRITES-RESTART-002`
-- `MUSTNEVER-AUTH-003`
+Do not leave the old claim intact in an appendix or second feature.
 
-Keep an ID when refining the same promise. Split into new IDs when one scenario concealed several independently meaningful promises. Delete obsolete behavior rather than preserving historical contradictions. Never reuse a deleted ID for different meaning.
+## Quality check
 
-## Updating existing behavior
+A scenario must answer:
 
-When a user correction conflicts with an existing scenario:
-
-1. Decide whether the old scenario was wrong, incomplete, or described a different context.
-2. Correct it in place if it was wrong.
-3. Split it if it conflated distinct contexts.
-4. Add a contrasting scenario if the boundary is the new information.
-5. Update status and evidence.
-6. Open or update the implementation issue when current code no longer satisfies the corrected contract.
-
-Do not add an appendix that leaves the old claim intact. Do not create a second feature that quietly contradicts the first.
-
-## What does not need a feature scenario
-
-Do not add a scenario solely because a test exists. A local implementation detail usually needs only executable evidence.
-
-Feature scenarios are warranted when the behavior is:
-
-- product-meaningful;
-- nuanced or easy to flatten;
-- externally consequential;
-- a user-provided correction;
-- a durable boundary between valid and invalid interpretations;
-- useful to an agent deciding what code should do.
-
-A parser edge case, exhaustive codec matrix, private enum transition, or arbitrary regression may remain only in its owning test suite unless it expresses one of those distinctions.
-
-## Quality test for a scenario
-
-A strong scenario answers all four questions:
-
-1. What context matters?
-2. What action occurs?
+1. Which context matters?
+2. What happens?
 3. What observable result follows?
-4. What tempting incorrect interpretation does this example rule out?
-
-If the fourth answer is unclear, the scenario may be decorative rather than useful behavioral memory.
+4. Which tempting wrong interpretation does it exclude?
