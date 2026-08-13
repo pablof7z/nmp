@@ -74,6 +74,7 @@ mod coverage_claims;
 mod memory_store;
 mod persistent_store_lifetime;
 mod redb_store;
+mod semantic_edit;
 #[cfg(test)]
 mod semantic_oracle;
 mod terminal_retention;
@@ -99,6 +100,15 @@ pub use redb_store::{
     StoreBenchMetrics, StoreBenchPreparedBatch, StoreBenchPreparedCorpus,
     StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
     StoreBenchProcessCounters, StoreBenchVariant,
+};
+#[cfg(any(test, feature = "bench-instrumentation"))]
+pub use semantic_edit::SemanticStoreCounters;
+pub use semantic_edit::{
+    CurrentMaterialization, MaterializationId, OperationId, OperationResolution,
+    RecoveredSemanticResource, ResolvedOperation, SemanticAccept, SemanticCurrentState,
+    SemanticEditReceipt, SemanticEditStore, SemanticGeneration, SemanticOperation, SemanticPlan,
+    SemanticPromotion, SemanticPromotionOutcome, SemanticRematerialize, SemanticStoreError,
+    SourceRevision,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

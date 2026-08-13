@@ -7,13 +7,17 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use nmp_grammar::{AccessContext, SourceAuthority};
-use nostr::{EventBuilder, Filter, JsonUtil, Keys, Kind};
+use nostr::nips::nip01::Coordinate;
+use nostr::{EventBuilder, Filter, JsonUtil, Keys, Kind, Tag, UnsignedEvent};
 use redb::ReadableTableMetadata;
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
 use super::*;
-use crate::{sentinel_signature, HandoffEvidence};
+use crate::{
+    sentinel_signature, CurrentMaterialization, HandoffEvidence, SemanticAccept, SemanticEditStore,
+    SemanticPlan, SemanticPromotion, SemanticRematerialize,
+};
 
 /// The verified, intent-bound evidence `promote_signed` takes (#768). Every
 /// event promoted below is one this fixture just signed itself, so the
@@ -127,6 +131,37 @@ fn accepted(store: &mut RedbStore) -> (IntentId, u64) {
         outcome.journaled_intent_id().expect("intent id"),
         outcome.journaled_receipt_id().expect("receipt id"),
     )
+}
+
+fn semantic_coordinate() -> Coordinate {
+    Coordinate::new(Kind::from(30_001u16), keys().public_key()).identifier("crash-semantic")
+}
+
+fn semantic_unsigned(created_at: u64, content: &str) -> UnsignedEvent {
+    let coordinate = semantic_coordinate();
+    let mut event = UnsignedEvent::new(
+        coordinate.public_key,
+        Timestamp::from(created_at),
+        coordinate.kind,
+        [Tag::identifier(coordinate.identifier)],
+        content,
+    );
+    event.ensure_id();
+    event
+}
+
+fn semantic_accept(created_at: u64, content: &str) -> SemanticAccept {
+    SemanticAccept {
+        coordinate: semantic_coordinate(),
+        expected_source_revision: None,
+        expected_current_materialization: None,
+        source: None,
+        accepted_at: Timestamp::from(created_at),
+        plan: SemanticPlan::new(1, content.as_bytes().to_vec()).unwrap(),
+        materialized: Some(semantic_unsigned(created_at, content)),
+        contributing_operations: Vec::new(),
+        resolved_operations: Vec::new(),
+    }
 }
 
 fn fixture() -> (TempDir, std::path::PathBuf) {
@@ -257,6 +292,50 @@ fn redb_crash_worker() {
                     .expect("open worker store");
             let intent = store.recover_publish_queue().expect("recover delivery")[0].intent_id;
             let _ = store.promote_signed(intent, evidence(&signed));
+        }
+        "semantic-accept-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::SemanticAcceptBeforeCommit)
+                    .expect("open semantic accept worker store");
+            let _ = store.accept_semantic_edit(semantic_accept(1, "first"));
+        }
+        "semantic-rematerialize-before-commit" => {
+            let mut store = RedbStore::open_with_crash_point(
+                path,
+                RedbCrashPoint::SemanticRematerializeBeforeCommit,
+            )
+            .expect("open semantic rematerialize worker store");
+            let recovered = store.recover_semantic_resources().unwrap().remove(0);
+            let generation = recovered.current.generation.as_ref().unwrap();
+            let _ = store.rematerialize_semantic_edit(SemanticRematerialize {
+                coordinate: recovered.coordinate,
+                expected_source_revision: recovered.current.source_revision,
+                expected_current_materialization: Some(generation.materialization_id),
+                source: None,
+                materialized: Some(semantic_unsigned(2, "second")),
+                contributing_operations: recovered
+                    .operations
+                    .iter()
+                    .map(|operation| operation.operation_id)
+                    .collect(),
+                resolved_operations: Vec::new(),
+            });
+        }
+        "semantic-promote-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::SemanticPromoteBeforeCommit)
+                    .expect("open semantic promotion worker store");
+            let recovered = store.recover_semantic_resources().unwrap().remove(0);
+            let generation = recovered.current.generation.as_ref().unwrap();
+            let signed = semantic_unsigned(1, "first")
+                .sign_with_keys(&keys())
+                .unwrap();
+            let _ = store.promote_semantic_materialization(SemanticPromotion {
+                coordinate: recovered.coordinate,
+                expected_source_revision: recovered.current.source_revision,
+                expected_materialization: generation.materialization_id,
+                verified: VerifiedSignature::verify(&signed).unwrap(),
+            });
         }
         "compensate-before-commit" => {
             let mut store =
@@ -541,6 +620,103 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
         );
         drop(reopened);
         assert_path_canonical_integrity(&path);
+    }
+}
+
+#[test]
+fn semantic_accept_rematerialize_and_promotion_are_process_death_atomic() {
+    {
+        let (_dir, path) = fixture();
+        RedbStore::open(&path).expect("initialize semantic accept fixture");
+        crash(&path, "semantic-accept-before-commit");
+        let mut reopened = RedbStore::open(&path).unwrap();
+        assert!(reopened.recover_semantic_resources().unwrap().is_empty());
+        assert!(reopened
+            .semantic_receipt(crate::OperationId(1))
+            .unwrap()
+            .is_none());
+        let (receipt, current) = reopened
+            .accept_semantic_edit(semantic_accept(1, "first"))
+            .unwrap();
+        assert_eq!(receipt.operation_id, crate::OperationId(1));
+        assert_eq!(
+            current.generation.unwrap().materialization_id,
+            crate::MaterializationId(1)
+        );
+    }
+
+    {
+        let (_dir, path) = fixture();
+        let receipt = {
+            let mut store = RedbStore::open(&path).unwrap();
+            store
+                .accept_semantic_edit(semantic_accept(1, "first"))
+                .unwrap()
+                .0
+        };
+        crash(&path, "semantic-rematerialize-before-commit");
+        let mut reopened = RedbStore::open(&path).unwrap();
+        let recovered = reopened.recover_semantic_resources().unwrap().remove(0);
+        let generation = recovered.current.generation.as_ref().unwrap();
+        assert_eq!(generation.materialization_id, crate::MaterializationId(1));
+        assert_eq!(generation.event.unsigned().content, "first");
+        assert_eq!(
+            reopened
+                .semantic_receipt(receipt.operation_id)
+                .unwrap()
+                .unwrap()
+                .current_materialization,
+            Some(crate::MaterializationId(1))
+        );
+        let next = reopened
+            .rematerialize_semantic_edit(SemanticRematerialize {
+                coordinate: recovered.coordinate,
+                expected_source_revision: recovered.current.source_revision,
+                expected_current_materialization: Some(generation.materialization_id),
+                source: None,
+                materialized: Some(semantic_unsigned(2, "second")),
+                contributing_operations: vec![receipt.operation_id],
+                resolved_operations: Vec::new(),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            next.generation.unwrap().materialization_id,
+            crate::MaterializationId(2)
+        );
+    }
+
+    {
+        let (_dir, path) = fixture();
+        {
+            let mut store = RedbStore::open(&path).unwrap();
+            store
+                .accept_semantic_edit(semantic_accept(1, "first"))
+                .unwrap();
+        }
+        crash(&path, "semantic-promote-before-commit");
+        let mut reopened = RedbStore::open(&path).unwrap();
+        let recovered = reopened.recover_semantic_resources().unwrap().remove(0);
+        let generation = recovered.current.generation.as_ref().unwrap();
+        assert!(matches!(
+            generation.event,
+            CurrentMaterialization::Pending(_)
+        ));
+        let signed = semantic_unsigned(1, "first")
+            .sign_with_keys(&keys())
+            .unwrap();
+        let outcome = reopened
+            .promote_semantic_materialization(SemanticPromotion {
+                coordinate: recovered.coordinate,
+                expected_source_revision: recovered.current.source_revision,
+                expected_materialization: generation.materialization_id,
+                verified: VerifiedSignature::verify(&signed).unwrap(),
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::SemanticPromotionOutcome::Promoted(_)
+        ));
     }
 }
 

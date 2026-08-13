@@ -18,7 +18,8 @@ use super::schema::{
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
     PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS_BY_ADDR,
     PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_IDS, SCHEMA_VERSION,
-    SCHEMA_VERSION_KEY, STORE_META, TOMBSTONES,
+    SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_META, SEMANTIC_OPERATIONS,
+    SEMANTIC_RECEIPTS, SEMANTIC_RESOURCES, STORE_META, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -57,6 +58,9 @@ pub(super) enum RedbCrashPoint {
     TerminalRetentionBeforeCommit,
     ObservationBeforeCommit,
     ObservationAfterCommit,
+    SemanticAcceptBeforeCommit,
+    SemanticRematerializeBeforeCommit,
+    SemanticPromoteBeforeCommit,
     CoverageBeforeCommit,
     CoverageAfterCommit,
     GcBeforeCommit,
@@ -115,6 +119,22 @@ pub struct RedbStore {
     /// durability barriers at all.
     #[cfg(test)]
     pub(super) unstaged_lane_bootstraps: AtomicU64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) semantic_coordinate_point_reads: AtomicU64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) semantic_operation_bodies_examined: AtomicU64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) semantic_operation_bodies_written: AtomicU64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) semantic_operation_bodies_removed: AtomicU64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) semantic_materializations_written: AtomicU64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) semantic_materializations_removed: AtomicU64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) semantic_commits: AtomicU64,
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) semantic_recovery_rows: AtomicU64,
 }
 
 #[derive(Default)]
@@ -599,6 +619,11 @@ impl RedbStore {
                 write_txn.open_table(PUBLISH_QUEUE_CORRELATIONS)?;
                 write_txn.open_table(PUBLISH_QUEUE_RELAYS)?;
                 write_txn.open_table(PUBLISH_QUEUE_RELAY_IDS)?;
+                write_txn.open_table(SEMANTIC_RESOURCES)?;
+                write_txn.open_table(SEMANTIC_OPERATIONS)?;
+                write_txn.open_table(SEMANTIC_RECEIPTS)?;
+                write_txn.open_table(SEMANTIC_MATERIALIZATION_HIGH_WATER)?;
+                write_txn.open_table(SEMANTIC_META)?;
                 let mut store_meta = write_txn.open_table(STORE_META)?;
                 store_meta.insert(POSTINGS_READY, 1)?;
                 store_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
@@ -630,6 +655,22 @@ impl RedbStore {
             route_revision_range_rows: AtomicU64::new(0),
             #[cfg(test)]
             unstaged_lane_bootstraps: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            semantic_coordinate_point_reads: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            semantic_operation_bodies_examined: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            semantic_operation_bodies_written: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            semantic_operation_bodies_removed: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            semantic_materializations_written: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            semantic_materializations_removed: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            semantic_commits: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            semantic_recovery_rows: AtomicU64::new(0),
         };
         super::publish_queue_ops::maintain_terminal_receipts(&mut store).map_err(|error| {
             RedbStoreOpenError::Database(redb::Error::Corrupted(format!(
