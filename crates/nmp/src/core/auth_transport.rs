@@ -1332,6 +1332,18 @@ impl<S: EventStore> EngineCore<S> {
         let phase_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let phase_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
+        // Active semantic resources own their source/effective transition.
+        // Consume those events through the one atomic store door before the
+        // ordinary ingest path can make a raw relay source canonical.
+        let events = events
+            .into_iter()
+            .filter(|(event, observed, _, _)| {
+                !self.install_semantic_source_successor(event.clone(), observed.clone(), effects)
+            })
+            .collect::<Vec<_>>();
+        if events.is_empty() {
+            return;
+        }
         let event_failure_attributions: Vec<_> = events
             .iter()
             .filter_map(|(_, _, _, attribution)| attribution.clone())

@@ -962,6 +962,13 @@ impl EventStore for BranchReadFailureStore {
         self.inner
             .install_replaceable_materialization(rematerialize)
     }
+    fn install_replaceable_source_materialization(
+        &mut self,
+        install: nmp_store::SemanticSourceInstall,
+    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
+        self.inner
+            .install_replaceable_source_materialization(install)
+    }
     fn enumerate_publish_queue_receipts(
         &self,
     ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
