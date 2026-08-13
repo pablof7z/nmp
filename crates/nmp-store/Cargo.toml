@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+# Store-owned corruption fixtures used by integration tests in other crates.
+# Normal engine and native builds do not compile these destructive helpers.
+test-instrumentation = []
 # Opt-in counters for evidence binaries. Kept out of production builds so the
 # query hot path pays no atomic-increment cost merely to support benchmarks.
 # Being absent from every production build is not being absent from every

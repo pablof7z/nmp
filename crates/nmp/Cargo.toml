@@ -159,6 +159,7 @@ libc = { version = "0.2", optional = true }
 # path an app has -- instead of through a second `nmp-nip51` dev edge.
 nmp = { path = ".", features = ["nip29", "nip51", "nip65", "test-instrumentation"] }
 nmp-test-support.workspace = true
+nmp-store = { workspace = true, features = ["test-instrumentation"] }
 cucumber = "0.21"
 # In-process test relay for the runtime (C) integration tests: reconnection
 # replay (test 6) and the end-to-end subscribe/publish/reconnect drive.
