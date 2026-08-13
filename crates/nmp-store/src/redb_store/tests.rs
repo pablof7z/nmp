@@ -1,4 +1,4 @@
-use super::publish_queue_codec::PUBLISH_QUEUE_CODEC_VERSION_KEY;
+use super::publish_queue_codec::{NEXT_RELAY_ID_KEY, PUBLISH_QUEUE_CODEC_VERSION_KEY};
 use super::*;
 
 /// The refcount half of one `relays` row, for falsifiers that assert
@@ -461,6 +461,65 @@ fn configured_lane_start_failure_rolls_back_the_precommit_transaction() {
     );
     assert!(store.recover_attempts(intent).unwrap().is_empty());
     assert!(store.recover_attempt_details(intent).unwrap().is_empty());
+}
+
+#[test]
+fn configured_route_revision_failure_rolls_back_the_precommit_transaction() {
+    let keys = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://blocked-route-revision.example").unwrap();
+    let dir = tempfile::tempdir().expect("route rollback tempdir");
+    let path = dir.path().join("route-rollback.redb");
+    let intent = {
+        let mut store = RedbStore::open_with_route_revision_write_failure(&path)
+            .expect("persistent Redb route-failure fixture");
+        let (intent, _signed) = accepted_signed(&mut store, &keys, "blocked route", 1_000);
+
+        let error = store
+            .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+            .expect_err("configured route revision must fail before commit");
+        assert_eq!(
+            error.to_string(),
+            "durable-store persistence failure: injected route revision failure"
+        );
+        assert!(store.recover_route_revisions(intent).unwrap().is_empty());
+        let read_txn = store.raw_database().begin_read().unwrap();
+        assert_eq!(
+            read_txn
+                .open_table(PUBLISH_QUEUE_RELAYS)
+                .unwrap()
+                .len()
+                .unwrap(),
+            0,
+            "relay dictionary allocation is part of the refused transaction"
+        );
+        assert_eq!(
+            read_txn
+                .open_table(PUBLISH_QUEUE_RELAY_IDS)
+                .unwrap()
+                .len()
+                .unwrap(),
+            0,
+            "relay reverse dictionary allocation is part of the refused transaction"
+        );
+        assert!(
+            read_txn
+                .open_table(PUBLISH_QUEUE_META)
+                .unwrap()
+                .get(NEXT_RELAY_ID_KEY)
+                .unwrap()
+                .is_none(),
+            "relay dictionary counter is part of the refused transaction"
+        );
+        intent
+    };
+
+    let mut reopened = RedbStore::open(&path).expect("reopen healthy Redb store");
+    assert!(reopened.recover_route_revisions(intent).unwrap().is_empty());
+    let revision = reopened
+        .record_route_revision(intent, BTreeSet::from([relay.clone()]))
+        .expect("healthy reopen records route revision");
+    assert_eq!(revision.ordinal, 1);
+    assert_eq!(revision.relays, BTreeSet::from([relay]));
 }
 
 /// Issue #87's measurable bound: 128 unrelated intents must add zero

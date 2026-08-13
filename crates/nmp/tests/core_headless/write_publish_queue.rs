@@ -849,7 +849,8 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
         let changed =
             FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [new.clone()]);
         let mut core = EngineCore::new_with_fixture_routing_facts(
-            RedbFailStartStore::open_with_route_failure(&path),
+            RedbStore::open_with_route_revision_write_failure(&path)
+                .expect("open Redb route-revision failure fixture"),
             changed,
             10,
         );
@@ -954,7 +955,8 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
         let directory =
             FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
         let mut core = EngineCore::new_with_fixture_routing_facts(
-            RedbFailStartStore::open_with_route_failure(&path),
+            RedbStore::open_with_route_revision_write_failure(&path)
+                .expect("open Redb route-revision failure fixture"),
             directory,
             10,
         );
@@ -975,6 +977,12 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
         assert!(receipt_statuses(&effects)
             .iter()
             .any(|fact| fact == &route_stalled(event_id, &relay)));
+        assert!(
+            !receipt_statuses(&effects)
+                .iter()
+                .any(|fact| matches!(fact, WriteFact::Outcome(WriteOutcome::NoDestination))),
+            "a named relay whose route revision failed to persist is stalled, not absent"
+        );
     }
     let store = RedbStore::open(&path).unwrap();
     let intent = store.recover_publish_queue().expect("recover delivery")[0].intent_id;
