@@ -572,18 +572,32 @@ impl<S: EventStore> EngineCore<S> {
         fact: WriteFact,
         effects: &mut Vec<Effect>,
     ) {
+        let recipients = match &fact {
+            WriteFact::Relay { event_id, .. } => self
+                .event_to_receipts
+                .get(event_id)
+                .cloned()
+                .unwrap_or_else(|| BTreeSet::from([id])),
+            _ => BTreeSet::from([id]),
+        };
         if let WriteFact::Relay {
             state: RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }),
             ..
         } = &fact
         {
-            if let Some(pending) = self.pending.get_mut(&id) {
-                if pending.persistence_fault.is_none() {
-                    pending.persistence_fault = Some(detail.clone());
+            for recipient in &recipients {
+                if let Some(pending) = self.pending.get_mut(recipient) {
+                    if pending.persistence_fault.is_none() {
+                        pending.persistence_fault = Some(detail.clone());
+                    }
                 }
             }
         }
-        effects.push(Effect::EmitReceipt(id, fact));
+        effects.extend(
+            recipients
+                .into_iter()
+                .map(|recipient| Effect::EmitReceipt(recipient, fact.clone())),
+        );
     }
 
     /// One lane attempt ended in a way that PERMITS another try; the ceiling
@@ -2558,6 +2572,20 @@ impl<S: EventStore> EngineCore<S> {
         let Some(generation) = current.generation.as_ref() else {
             return true;
         };
+        let Some(delivery_owner) = super::semantic_delivery::MaterializationDeliveryOwner::new(
+            generation.materialization,
+            generation.members.iter().copied(),
+        ) else {
+            self.degrade_store(
+                nmp_store::PersistenceError::invariant(
+                    "installed semantic generation has no delivery owner",
+                ),
+                effects,
+            );
+            return true;
+        };
+        debug_assert_eq!(delivery_owner.materialization(), generation.materialization);
+        debug_assert_eq!(delivery_owner.members().count(), generation.members.len());
         let target =
             PendingWriteTarget::ReplaceableOperation(Box::new(ReplaceableMaterializationTarget {
                 coordinate,
@@ -2585,10 +2613,28 @@ impl<S: EventStore> EngineCore<S> {
             pending.sign_request_in_flight = false;
             pending.sign_generation = pending.sign_generation.saturating_add(1);
             pending.event_id = None;
+            pending.pending_relays.clear();
+            pending.unstarted_relays.clear();
+            pending.route_blocked_relays.clear();
+            pending.attempt_ordinals.clear();
+            pending.lane_projection = LaneWorkerProjection::default();
             self.event_to_receipts
                 .entry(installed.event.id)
                 .or_default()
                 .insert(receipt);
+        }
+        let owner_receipt = self
+            .intent_receipts
+            .get(&delivery_owner.physical_owner())
+            .copied()
+            .expect("semantic delivery owner was runtime-preflighted");
+        if let Some(pending) = self.pending.get_mut(&owner_receipt) {
+            pending.sign_request_in_flight = true;
+            effects.push(Effect::RequestSign(
+                owner_receipt,
+                pending.sign_generation,
+                unsigned_from_frozen(&pending.frozen),
+            ));
         }
         self.apply_committed_mutation(committed, effects);
         true
@@ -2962,6 +3008,25 @@ impl<S: EventStore> EngineCore<S> {
                 .entry(frozen.id)
                 .or_default()
                 .insert(member_receipt);
+        }
+        if let Some(owner) = current
+            .generation
+            .as_ref()
+            .and_then(|generation| generation.members.first())
+            .and_then(|owner| self.intent_receipts.get(owner))
+            .copied()
+        {
+            if let Some(pending) = self.pending.get_mut(&owner) {
+                if !pending.sign_request_in_flight && !pending.already_signed {
+                    pending.sign_request_in_flight = true;
+                    pending.sign_generation = pending.sign_generation.saturating_add(1);
+                    effects.push(Effect::RequestSign(
+                        owner,
+                        pending.sign_generation,
+                        unsigned_from_frozen(&pending.frozen),
+                    ));
+                }
+            }
         }
         self.apply_committed_mutation(committed, &mut effects);
         effects
@@ -3453,8 +3518,33 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
         let mut effects = Vec::new();
+        let semantic_owners = self
+            .event_to_receipts
+            .iter()
+            .filter_map(|(event_id, receipts)| {
+                receipts
+                    .iter()
+                    .filter_map(|receipt| {
+                        self.pending
+                            .get(receipt)
+                            .filter(|pending| {
+                                matches!(
+                                    pending.target,
+                                    PendingWriteTarget::ReplaceableOperation(_)
+                                )
+                            })
+                            .map(|pending| (pending.intent_id, *receipt))
+                    })
+                    .min_by_key(|(intent, _)| *intent)
+                    .map(|(_, receipt)| (*event_id, receipt))
+            })
+            .collect::<BTreeMap<_, _>>();
         for (id, pending) in &mut self.pending {
+            let is_physical_owner =
+                !matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
+                    || semantic_owners.get(&pending.frozen.id) == Some(id);
             if pending.signing_pubkey == pk
+                && is_physical_owner
                 && pending.target.accepts_ordinary_signer()
                 && pending.event_id.is_none()
                 && !pending.already_signed
