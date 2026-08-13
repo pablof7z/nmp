@@ -167,6 +167,7 @@ fn semantic_accept_write() -> AcceptWrite {
                 source: crate::StartingSource::Absent,
             },
             source: semantic_source(),
+            source_event: None,
             plan: crate::SemanticPlan::new(1, vec![42]).unwrap(),
             materialized: None,
             contributing_operations: Vec::new(),
@@ -204,6 +205,137 @@ fn semantic_rematerialize(store: &RedbStore) -> crate::SemanticRematerialize {
         }),
         contributing_operations: vec![snapshot.operations[0].intent_id],
         resolved_operations: Vec::new(),
+    }
+}
+
+fn qualified_source(content: &str, created_at: u64) -> Event {
+    EventBuilder::new(Kind::ContactList, content)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(&keys())
+        .expect("sign semantic source")
+}
+
+fn seed_qualified_semantic_generation(store: &mut RedbStore) -> (u64, EventId, EventId) {
+    let relay = RelayUrl::parse(RELAY).unwrap();
+    let source = qualified_source("B0", 1);
+    store
+        .insert(
+            source.clone(),
+            RelayObserved::new(relay, Timestamp::from(1)),
+        )
+        .unwrap();
+    let stored = store
+        .query(&Filter::new().id(source.id))
+        .unwrap()
+        .pop()
+        .unwrap();
+    let evidence = crate::SourceEvidence {
+        plan: crate::SourcePlanId([3; 32]),
+        access: crate::AccessContextId([4; 32]),
+        qualified: crate::QualifiedSource::Event {
+            event_id: source.id,
+            created_at: source.created_at,
+        },
+    };
+    let outcome = store
+        .accept_write(AcceptWrite {
+            payload: crate::AcceptWritePayload::ReplaceableOperation(Box::new(
+                crate::SemanticAccept {
+                    coordinate: semantic_coordinate(),
+                    program: crate::ReplayProgramId([7; 16]),
+                    format: crate::ReplayFormatId([9; 16]),
+                    expected_source_revision: None,
+                    expected_program_digest: None,
+                    expected_current_materialization: None,
+                    starting_source: crate::StartingSourceRequirement {
+                        plan: crate::SourcePlanId([3; 32]),
+                        access: crate::AccessContextId([4; 32]),
+                        source: crate::StartingSource::Event(source.id),
+                    },
+                    source: evidence,
+                    source_event: Some(stored),
+                    plan: crate::SemanticPlan::new(1, vec![42]).unwrap(),
+                    materialized: Some(crate::MaterializationCandidate {
+                        event: UnsignedEvent::new(
+                            keys().public_key(),
+                            Timestamp::from(2),
+                            Kind::ContactList,
+                            Vec::new(),
+                            "E1",
+                        ),
+                        routing: "semantic-source-route".into(),
+                        sig_state: crate::PendingMaterializationState::Pending,
+                    }),
+                    contributing_operations: Vec::new(),
+                    resolved_operations: Vec::new(),
+                },
+            )),
+            expected_pubkey: keys().public_key(),
+            signing_identity_ref: "semantic-source-key".into(),
+            accepted_at: Timestamp::from(0),
+            correlation: None,
+        })
+        .unwrap();
+    let AcceptOutcome::ReplaceableOperation {
+        receipt_id,
+        installed: Some(installed),
+        ..
+    } = outcome
+    else {
+        panic!("expected initial complete semantic generation, got {outcome:?}");
+    };
+    (receipt_id, installed.event.id, source.id)
+}
+
+fn semantic_source_install(store: &RedbStore) -> crate::SemanticSourceInstall {
+    let snapshot = store
+        .replaceable_operation_snapshot(&semantic_coordinate())
+        .unwrap()
+        .unwrap();
+    let source = qualified_source("B5", 5);
+    let mut seen = BTreeMap::new();
+    seen.insert(RelayUrl::parse(RELAY).unwrap(), Timestamp::from(5));
+    crate::SemanticSourceInstall {
+        source: StoredEvent {
+            event: source.clone(),
+            provenance: Provenance { seen, local: None },
+        },
+        successor: crate::SemanticRematerialize {
+            coordinate: semantic_coordinate(),
+            expected_source_revision: snapshot.current.source_revision.clone(),
+            expected_program_digest: snapshot.current.program_digest,
+            expected_current_materialization: snapshot
+                .current
+                .generation
+                .as_ref()
+                .map(|generation| generation.materialization.materialization_id),
+            source: crate::SourceEvidence {
+                plan: crate::SourcePlanId([3; 32]),
+                access: crate::AccessContextId([4; 32]),
+                qualified: crate::QualifiedSource::Event {
+                    event_id: source.id,
+                    created_at: source.created_at,
+                },
+            },
+            evaluated_at: Timestamp::from(5),
+            materialized: Some(crate::MaterializationCandidate {
+                event: UnsignedEvent::new(
+                    keys().public_key(),
+                    Timestamp::from(6),
+                    Kind::ContactList,
+                    Vec::new(),
+                    "E2",
+                ),
+                routing: "semantic-source-route".into(),
+                sig_state: crate::PendingMaterializationState::Pending,
+            }),
+            contributing_operations: snapshot
+                .operations
+                .iter()
+                .map(|operation| operation.intent_id)
+                .collect(),
+            resolved_operations: Vec::new(),
+        },
     }
 }
 
@@ -383,6 +515,15 @@ fn redb_crash_worker() {
             .expect("open semantic install worker store");
             let rematerialize = semantic_rematerialize(&store);
             let _ = store.install_replaceable_materialization(rematerialize);
+        }
+        "semantic-source-install-before-commit" => {
+            let mut store = RedbStore::open_with_crash_point(
+                path,
+                RedbCrashPoint::SemanticSourceInstallBeforeCommit,
+            )
+            .expect("open semantic source install worker store");
+            let install = semantic_source_install(&store);
+            let _ = store.install_replaceable_source_materialization(install);
         }
         "semantic-promote-before-commit" => {
             let mut store =
@@ -776,6 +917,97 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
         MaterializationId(1)
     );
     drop(store);
+    assert_path_canonical_integrity(&path);
+}
+
+#[test]
+fn semantic_source_and_effective_successor_are_one_crash_atomic_transition() {
+    let (_dir, path) = fixture();
+    let (receipt_id, first_id, base_id) = {
+        let mut store = RedbStore::open(&path).unwrap();
+        seed_qualified_semantic_generation(&mut store)
+    };
+
+    crash(&path, "semantic-source-install-before-commit");
+    {
+        let store = RedbStore::open(&path).expect("reopen source install crash");
+        let snapshot = store
+            .replaceable_operation_snapshot(&semantic_coordinate())
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.source.unwrap().event.id, base_id);
+        assert_eq!(
+            snapshot
+                .current
+                .generation
+                .unwrap()
+                .materialization
+                .event_id,
+            first_id
+        );
+        let receipt = store.reattach_receipt(receipt_id).unwrap().unwrap();
+        assert!(matches!(
+            receipt.payload,
+            PublishQueueReceiptPayload::ReplaceableOperation {
+                state: ReplaceableOperationReceiptState::Contributing {
+                    current: Some(MaterializationReceipt {
+                        materialization: MaterializationRef { event_id, .. },
+                        ..
+                    })
+                },
+                ..
+            } if event_id == first_id
+        ));
+        let row = store
+            .query(
+                &Filter::new()
+                    .kind(Kind::ContactList)
+                    .author(keys().public_key()),
+            )
+            .unwrap();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].event.id, first_id);
+        assert_ne!(row[0].event.content, "B5");
+    }
+
+    {
+        let mut store = RedbStore::open(&path).unwrap();
+        let install = semantic_source_install(&store);
+        let newer_id = install.source.event.id;
+        let SemanticInstallOutcome::Installed { installed, .. } = store
+            .install_replaceable_source_materialization(install)
+            .unwrap()
+        else {
+            panic!("source successor must install after the rolled-back crash");
+        };
+        let snapshot = store
+            .replaceable_operation_snapshot(&semantic_coordinate())
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.source.unwrap().event.id, newer_id);
+        assert_eq!(
+            snapshot
+                .current
+                .generation
+                .unwrap()
+                .materialization
+                .event_id,
+            installed.event.id
+        );
+        let receipt = store.reattach_receipt(receipt_id).unwrap().unwrap();
+        assert!(matches!(
+            receipt.payload,
+            PublishQueueReceiptPayload::ReplaceableOperation {
+                state: ReplaceableOperationReceiptState::Contributing {
+                    current: Some(MaterializationReceipt {
+                        materialization: MaterializationRef { event_id, .. },
+                        ..
+                    })
+                },
+                ..
+            } if event_id == installed.event.id
+        ));
+    }
     assert_path_canonical_integrity(&path);
 }
 

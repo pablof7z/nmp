@@ -2324,6 +2324,256 @@ impl<S: EventStore> EngineCore<S> {
 
     // ---- publish queue (D: intent -> signed -> routed -> sent -> acked) --
 
+    /// Prepare a complete successor from one verified relay source, then ask
+    /// the store to adopt the source and effective body in one CAS commit.
+    /// Returns `true` when this active semantic resource consumed the relay
+    /// event (installed or deliberately retained the prior complete value).
+    pub(super) fn install_semantic_source_successor(
+        &mut self,
+        source: SignedEvent,
+        observed: RelayObserved,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        let kind = source.kind.as_u16();
+        if !matches!(kind, 0 | 3 | 10_000..=19_999 | 30_000..=39_999) {
+            return false;
+        }
+        let coordinate = Coordinate {
+            kind: source.kind,
+            public_key: source.pubkey,
+            identifier: source.tags.identifier().unwrap_or("").to_owned(),
+        };
+        let snapshot = match self
+            .resolver
+            .store()
+            .replaceable_operation_snapshot(&coordinate)
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return false,
+            Err(error) => {
+                self.degrade_store(error, effects);
+                return true;
+            }
+        };
+        let Some(first) = snapshot.operations.first() else {
+            return false;
+        };
+        if snapshot
+            .current
+            .generation
+            .as_ref()
+            .is_some_and(|generation| generation.materialization.event_id == source.id)
+        {
+            // A relay echo of the current generation is signature/provenance
+            // evidence for that exact generation, not a new semantic base.
+            // Let ordinary ingest adopt it and satisfy the existing owners.
+            return false;
+        }
+        let members = snapshot
+            .current
+            .generation
+            .as_ref()
+            .map(|generation| generation.members.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut member_receipts = Vec::with_capacity(members.len());
+        for member in &members {
+            let Some(receipt) = self.intent_receipts.get(member).copied() else {
+                self.degrade_store(
+                    nmp_store::PersistenceError::invariant(
+                        "active semantic member is missing its runtime receipt",
+                    ),
+                    effects,
+                );
+                return true;
+            };
+            let Some(pending) = self.pending.get(&receipt) else {
+                self.degrade_store(
+                    nmp_store::PersistenceError::invariant(
+                        "active semantic member is missing its runtime pending write",
+                    ),
+                    effects,
+                );
+                return true;
+            };
+            if pending.intent_id != *member {
+                self.degrade_store(
+                    nmp_store::PersistenceError::invariant(
+                        "semantic runtime receipt points at another intent",
+                    ),
+                    effects,
+                );
+                return true;
+            }
+            member_receipts.push((*member, receipt));
+        }
+        let Some(registration) = self
+            .replaceable_materializers
+            .values()
+            .find(|registration| {
+                ReplayProgramId(registration.program) == first.program
+                    && ReplayFormatId(registration.format) == first.format
+            })
+        else {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+            return true;
+        };
+        let source_unsigned = UnsignedEvent::from(source.clone());
+        let operations = snapshot
+            .operations
+            .iter()
+            .map(|operation| ReplaceableMaterializerOperation::new(operation.plan.bytes()))
+            .collect::<Vec<_>>();
+        let builder = match registration.materializer.materialize(
+            &source_unsigned,
+            &source_unsigned,
+            &operations,
+        ) {
+            Ok(builder) => builder,
+            Err(_) => {
+                effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+                return true;
+            }
+        };
+        if builder.kind != coordinate.kind
+            || nostr::Tags::from_list(builder.tags.clone())
+                .identifier()
+                .unwrap_or("")
+                != coordinate.identifier
+        {
+            return true;
+        }
+        let operation_time = snapshot
+            .operations
+            .iter()
+            .map(|operation| operation.accepted_at.as_secs())
+            .max()
+            .unwrap_or(0);
+        let Some(source_time) = source.created_at.as_secs().checked_add(1) else {
+            return true;
+        };
+        let Some(prior_time) = snapshot
+            .current
+            .generation
+            .as_ref()
+            .map(|generation| generation.created_at.as_secs().checked_add(1))
+            .unwrap_or(Some(0))
+        else {
+            return true;
+        };
+        let mut event = UnsignedEvent::new(
+            source.pubkey,
+            Timestamp::from(operation_time.max(source_time).max(prior_time)),
+            builder.kind,
+            builder.tags,
+            builder.content,
+        );
+        event.ensure_id();
+        let evidence = snapshot.current.source_revision.evidence();
+        let source_evidence = SemanticSourceEvidence {
+            plan: evidence.plan,
+            access: evidence.access,
+            qualified: QualifiedSource::Event {
+                event_id: source.id,
+                created_at: source.created_at,
+            },
+        };
+        let routing = snapshot
+            .operations
+            .iter()
+            .find_map(|operation| {
+                self.intent_receipts
+                    .get(&operation.intent_id)
+                    .and_then(|receipt| self.pending.get(receipt))
+                    .map(|pending| Self::routing_snapshot(&pending.routing))
+            })
+            .unwrap_or_else(|| Self::routing_snapshot(&WriteRouting::Auto));
+        let mut seen = BTreeMap::new();
+        seen.insert(observed.relay, observed.at);
+        let install = SemanticSourceInstall {
+            source: nmp_store::StoredEvent {
+                event: source,
+                provenance: nmp_store::Provenance { seen, local: None },
+            },
+            successor: SemanticRematerialize {
+                coordinate: coordinate.clone(),
+                expected_source_revision: snapshot.current.source_revision.clone(),
+                expected_program_digest: snapshot.current.program_digest,
+                expected_current_materialization: snapshot
+                    .current
+                    .generation
+                    .as_ref()
+                    .map(|generation| generation.materialization.materialization_id),
+                source: source_evidence,
+                evaluated_at: self.clock,
+                materialized: Some(MaterializationCandidate {
+                    event,
+                    routing,
+                    sig_state: PendingMaterializationState::AwaitingSigner,
+                }),
+                contributing_operations: snapshot
+                    .operations
+                    .iter()
+                    .map(|operation| operation.intent_id)
+                    .collect(),
+                resolved_operations: Vec::new(),
+            },
+        };
+        let installed = match self
+            .resolver
+            .install_replaceable_source_materialization(install)
+        {
+            Ok(installed) => installed,
+            Err(error) => {
+                self.degrade_store(error, effects);
+                return true;
+            }
+        };
+        let nmp_resolver::SemanticInstallResult { outcome, committed } = installed;
+        let nmp_store::SemanticInstallOutcome::Installed {
+            current, installed, ..
+        } = outcome
+        else {
+            return !matches!(outcome, nmp_store::SemanticInstallOutcome::Stale);
+        };
+        let Some(generation) = current.generation.as_ref() else {
+            return true;
+        };
+        let target =
+            PendingWriteTarget::ReplaceableOperation(Box::new(ReplaceableMaterializationTarget {
+                coordinate,
+                expected_source_revision: current.source_revision,
+                expected_program_digest: current.program_digest,
+                expected_materialization: generation.materialization.materialization_id,
+                expected_event_id: generation.materialization.event_id,
+            }));
+        for (member, receipt) in member_receipts {
+            debug_assert!(generation.members.contains(&member));
+            let pending = self
+                .pending
+                .get_mut(&receipt)
+                .expect("semantic runtime members were preflighted before commit");
+            let old_event_id = pending.frozen.id;
+            if let Some(receipts) = self.event_to_receipts.get_mut(&old_event_id) {
+                receipts.remove(&receipt);
+                if receipts.is_empty() {
+                    self.event_to_receipts.remove(&old_event_id);
+                }
+            }
+            pending.frozen = installed.event.clone();
+            pending.target = target.clone();
+            pending.already_signed = false;
+            pending.sign_request_in_flight = false;
+            pending.sign_generation = pending.sign_generation.saturating_add(1);
+            pending.event_id = None;
+            self.event_to_receipts
+                .entry(installed.event.id)
+                .or_default()
+                .insert(receipt);
+        }
+        self.apply_committed_mutation(committed, effects);
+        true
+    }
+
     fn on_body_complete_replaceable_operation(
         &mut self,
         operation: nmp_grammar::ReplaceableOperation,
@@ -2412,6 +2662,11 @@ impl<S: EventStore> EngineCore<S> {
                 reason: "replaceable coordinate uses another replay program".to_string(),
             });
         }
+        let replay_source = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.source.as_ref())
+            .map(|stored| UnsignedEvent::from(stored.event.clone()))
+            .unwrap_or_else(|| original_source.clone());
 
         let mut replay_operations = snapshot
             .as_ref()
@@ -2425,8 +2680,7 @@ impl<S: EventStore> EngineCore<S> {
             .unwrap_or_default();
         replay_operations.push(ReplaceableMaterializerOperation::new(&operation_bytes));
         let builder =
-            match materializer.materialize(&original_source, &supplied_current, &replay_operations)
-            {
+            match materializer.materialize(&replay_source, &supplied_current, &replay_operations) {
                 Ok(builder) => builder,
                 Err(refusal) => {
                     return self.refuse_publish(PublishError::ReplaceableOperationRefused {
@@ -2456,20 +2710,6 @@ impl<S: EventStore> EngineCore<S> {
             *blake3::hash(&[b"nmp-public-source-v1".as_slice(), &registration.format].concat())
                 .as_bytes(),
         );
-        let starting_source = snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.operations.first())
-            .map(|operation| match &operation.source_requirement {
-                nmp_store::OperationSourceRequirement::Awaiting(requirement)
-                | nmp_store::OperationSourceRequirement::Qualified(requirement) => {
-                    requirement.clone()
-                }
-            })
-            .unwrap_or(StartingSourceRequirement {
-                plan: source_plan,
-                access: source_access,
-                source: StartingSource::Event(source_event_id),
-            });
         let source = snapshot
             .as_ref()
             .map(|snapshot| snapshot.current.source_revision.evidence().clone())
@@ -2481,16 +2721,63 @@ impl<S: EventStore> EngineCore<S> {
                     created_at: original_source.created_at,
                 },
             });
-        if !matches!(
-            source.qualified,
-            QualifiedSource::Event { event_id, .. } if event_id == source_event_id
-        ) {
+        let starting_source = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.operations.first())
+            .map(|operation| match &operation.source_requirement {
+                nmp_store::OperationSourceRequirement::Awaiting(requirement)
+                | nmp_store::OperationSourceRequirement::Qualified(requirement) => {
+                    StartingSourceRequirement {
+                        plan: requirement.plan,
+                        access: requirement.access,
+                        source: match source.qualified {
+                            QualifiedSource::Event { event_id, .. } => {
+                                StartingSource::Event(event_id)
+                            }
+                            QualifiedSource::Absent => StartingSource::Absent,
+                            QualifiedSource::Unresolved => requirement.source,
+                        },
+                    }
+                }
+            })
+            .unwrap_or(StartingSourceRequirement {
+                plan: source_plan,
+                access: source_access,
+                source: StartingSource::Event(source_event_id),
+            });
+        if snapshot.is_none()
+            && !matches!(
+                source.qualified,
+                QualifiedSource::Event { event_id, .. } if event_id == source_event_id
+            )
+        {
             return self.refuse_publish(PublishError::ReplaceableOperationRefused {
                 reason: "original source does not match retained source evidence".to_string(),
             });
         }
+        let source_event = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.source.clone())
+            .or_else(|| {
+                self.resolver
+                    .store()
+                    .query(&nostr::Filter::new().id(source_event_id))
+                    .ok()
+                    .and_then(|rows| {
+                        rows.into_iter()
+                            .find(|stored| stored.event.id == source_event_id)
+                    })
+            });
+        let Some(source_event) = source_event else {
+            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                reason: "complete original source is no longer retained".to_string(),
+            });
+        };
 
-        let source_floor = original_source.created_at.as_secs().saturating_add(1);
+        let source_floor = match source.qualified {
+            QualifiedSource::Event { created_at, .. } => created_at.as_secs().saturating_add(1),
+            QualifiedSource::Absent | QualifiedSource::Unresolved => 0,
+        };
         let prior_floor = snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.current.generation.as_ref())
@@ -2542,6 +2829,7 @@ impl<S: EventStore> EngineCore<S> {
                 expected_current_materialization: expected_materialization,
                 starting_source,
                 source,
+                source_event: Some(source_event),
                 plan,
                 materialized: Some(MaterializationCandidate {
                     event,

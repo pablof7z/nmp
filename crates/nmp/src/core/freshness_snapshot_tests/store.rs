@@ -120,6 +120,13 @@ impl EventStore for CountingCoverageStore {
         self.inner
             .install_replaceable_materialization(rematerialize)
     }
+    fn install_replaceable_source_materialization(
+        &mut self,
+        install: nmp_store::SemanticSourceInstall,
+    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
+        self.inner
+            .install_replaceable_source_materialization(install)
+    }
 
     fn promote_signed(
         &mut self,

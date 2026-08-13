@@ -105,8 +105,9 @@ pub use semantic_edit::{
     OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
     RecoveredSemanticResource, ReplayFormatId, ReplayProgramId, ResolvedOperation, SemanticAccept,
     SemanticCurrentState, SemanticGeneration, SemanticInstallOutcome, SemanticOperation,
-    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize, SourceEvidence,
-    SourcePlanId, SourceRevision, StartingSource, StartingSourceRequirement,
+    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize,
+    SemanticSourceInstall, SourceEvidence, SourcePlanId, SourceRevision, StartingSource,
+    StartingSourceRequirement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -2135,6 +2136,14 @@ pub trait EventStore {
     fn install_replaceable_materialization(
         &mut self,
         rematerialize: SemanticRematerialize,
+    ) -> Result<SemanticInstallOutcome, PersistenceError>;
+
+    /// Atomically adopt a newer verified relay source and install the complete
+    /// semantic successor prepared from it. The raw source is never exposed as
+    /// the effective canonical value between commits.
+    fn install_replaceable_source_materialization(
+        &mut self,
+        install: SemanticSourceInstall,
     ) -> Result<SemanticInstallOutcome, PersistenceError>;
 
     /// Swap the sentinel signature on `intent_id`'s frozen body for

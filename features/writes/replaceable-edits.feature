@@ -109,6 +109,36 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And one complete current signature-pending event contains Alice and Bob
     And both receipts name that current event without creating another receipt lifecycle
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-015
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::newer_relay_sources_install_complete_successors_without_new_receipts
+  # nmp:evidence=rust:nmp-store::qualified_source_and_complete_successor_survive_redb_reopen
+  # nmp:falsifier=Install the newer relay source as the visible winner before replaying Alice and Bob; the live query exposes the raw source or loses a local operation instead of moving directly between complete local generations.
+  # nmp:issue=#1433
+  Scenario: A newer relay version is combined with every active local operation
+    Given Alice and Bob were added to my contact list while offline
+    And a relay later supplies a newer contact list containing Carol
+    When NMP applies the configured contact-list capability to that newer version
+    Then one complete current replacement contains Alice, Bob, and Carol
+    And its timestamp is exactly one second after the newer relay version
+    And the live query moves directly from the prior complete replacement to the successor
+    And the raw relay version is never the effective live-query value
+    And the original operation receipts now name the successor as current
+
+  # nmp:id=WRITES-REPLACEABLE-EDIT-016
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::newer_relay_sources_install_complete_successors_without_new_receipts
+  # nmp:evidence=rust:nmp-store::semantic_source_and_effective_successor_are_one_crash_atomic_transition
+  # nmp:falsifier=Commit the qualified relay source, successor row, or receipt updates separately; process death recovers a mixed source/effective generation or a partially advanced receipt set.
+  # nmp:issue=#1433
+  Scenario: Source and successor recover as one durable state
+    Given active contact-list operations have one complete current replacement over B0
+    And a relay supplies newer source B5
+    When NMP crashes while replacing the current event with the successor over B5
+    Then reopen recovers either the complete B0 generation or the complete B5 generation
+    And it never recovers raw B5 as the effective value
+    And every original receipt names the same recovered current generation
+
   # ---- the precondition --------------------------------------------------
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-001
