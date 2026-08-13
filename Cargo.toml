@@ -4,6 +4,10 @@ members = [
     # Pure network-destination admission (#885): host normalization,
     # public/local classification, whole-answer-set DNS admission. No I/O.
     "crates/nmp-network-policy",
+    # Protocol-neutral, closed structural edit plans over raw tag cells and
+    # JSON-object byte spans (#1381). Capability crates compile their own
+    # vocabulary into these values; replay needs no module registry.
+    "crates/nmp-event-edit",
     "crates/nmp-grammar",
     "crates/nmp-store",
     "crates/nmp-resolver",
@@ -93,6 +97,7 @@ futures-channel = "0.3"
 hickory-resolver = "0.26.1"
 httpdate = "1"
 nmp-network-policy = { path = "crates/nmp-network-policy" }
+nmp-event-edit = { path = "crates/nmp-event-edit" }
 nmp-grammar = { path = "crates/nmp-grammar" }
 nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
