@@ -28885,7 +28885,7 @@ reexport nmp::EventStore => nmp_store::EventStore
                 "params": [],
                 "where_predicates": []
               },
-              "has_body": true,
+              "has_body": false,
               "header": {
                 "abi": "Rust",
                 "is_async": false,
@@ -28989,7 +28989,7 @@ reexport nmp::EventStore => nmp_store::EventStore
                 "params": [],
                 "where_predicates": []
               },
-              "has_body": true,
+              "has_body": false,
               "header": {
                 "abi": "Rust",
                 "is_async": false,
