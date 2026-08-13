@@ -106,6 +106,7 @@ pub use store_bench::{
 };
 
 mod schema;
+pub mod testing;
 #[cfg(test)]
 use schema::*;
 pub(crate) mod publish_queue;

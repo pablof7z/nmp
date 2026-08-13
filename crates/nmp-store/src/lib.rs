@@ -87,6 +87,7 @@ pub mod ingest_attribution;
 pub use coverage::{coverage_key, CoverageInterval, CoverageKey, GcReport, GcRetentionSet};
 pub use coverage_claims::coverage_claim_atoms;
 pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
+pub use redb_store::testing;
 pub use redb_store::RedbStore;
 #[cfg(feature = "bench-instrumentation")]
 pub use redb_store::{
