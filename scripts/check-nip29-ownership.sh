@@ -219,9 +219,7 @@ grep -qF 'scope_stamps_exact_hosts_on_every_nested_nip29_demand' \
 # its `pinned_demand` helper the same way -- no alias, no deprecation window
 # (`docs/internals/conventions/no-backwards-compatibility.md`) -- so none of
 # these spellings may return anywhere a caller could reach, including in a
-# test that asserts one stays gone. (`docs/surface-change-log.md` and
-# `docs/surface/*` are append-only surface history and are deliberately not
-# scanned: they record withdrawn spellings as facts of the past.)
+# test that asserts one stays gone.
 # `tools/` is scanned too (#1233): the two NIP-29 consumer probes live there
 # and are the application-boundary proof, so a spelling this repo deleted
 # surviving in one of them is exactly the same defect as it surviving in a
@@ -349,7 +347,7 @@ if [[ -n $retired_c7 ]]; then
 fi
 
 # The superseded monolithic native projection must stay deleted. This source
-# corpus deliberately excludes append-only surface history.
+# corpus deliberately excludes append-only history.
 #
 # `Packages/NMP/Sources/NMPFFI` was already left out here because it is
 # generated, but `Packages/NMPKotlin/src/main` is the same hazard wearing a
@@ -369,7 +367,7 @@ found=$(census "$ROOT" \
   "${NATIVE_CORPUS[@]}")
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
-  fail "superseded NIP-29 native surface reappeared"
+  fail "superseded NIP-29 native API reappeared"
 fi
 
 # A removed wire/journal spelling must not survive ANYWHERE, including in a
@@ -398,7 +396,7 @@ fi
 # `RelayListBootstrap`, `GroupHost`, `AuthorRelayList`, ...) is no longer this
 # gate's business. #972 left a name-only grep here; #1105 replaced it with
 # `scripts/check-routing-vocabulary.sh`, which owns the whole contract for the
-# whole domain: the surviving vocabulary ENUMERATED per surface (Rust, FFI in
+# whole domain: the surviving vocabulary ENUMERATED per projection (Rust, FFI in
 # both conversion directions, Swift, Kotlin) as exactly two words, every
 # retired spelling tombstoned with the replacement it maps to, and the group
 # door proved to take no relay and no routing value. One owner, not two

@@ -66,8 +66,6 @@ done
 
 # 1. Tolerance must be explicit in the name at every layer. The former
 #    `decode*` spelling hid that caller-constructible input was accepted.
-# (`docs/surface-change-log.md` is append-only history and is deliberately
-# not scanned: it records the withdrawn spelling as a fact of the past.)
 found=$(census 'decode_simple_groups_list|decodeSimpleGroupsList')
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
@@ -91,7 +89,7 @@ done
 found=$(census 'ObservedSimpleGroups|QualifiedSimpleGroups|SimpleGroupsProjection|CanonicalSimpleGroups|AuthoritativeSimpleGroups|project_observed_simple_groups|projectObservedSimpleGroups|SimpleGroupsWitness|SimpleGroupsProof')
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
-  fail "derived NIP-51 authority/lifecycle surface appeared"
+  fail "derived NIP-51 authority/lifecycle API appeared"
 fi
 
 # 3. No frame proof or second observation handle may be reachable from the
@@ -100,7 +98,7 @@ fi
 if grep -nE \
   'FrameProof|ObservationHandle|AuthorityToken|FfiObservation|FfiFrame([^A-Za-z0-9_]|$)' \
   "${NIP51_SOURCES[@]}"; then
-  fail "NIP-51 parsing acquired an observation lifecycle/proof surface"
+  fail "NIP-51 parsing acquired an observation lifecycle or proof surface"
 fi
 
 # 4. The tolerant-parser falsifiers must keep proving that fabricated,

@@ -96,6 +96,6 @@ cargo feature; all but NIP-65 reach both wrappers. NIP-65 relay-list bootstrap
 is direct-Rust only. There is no NIP-23 owner at all — no crate, no `Article`
 type, no decode — so an article feature must add that owner from scratch.
 
-When implementing a protocol feature not already projected, do not assemble it from mechanism crates in app code. First determine whether it belongs in an opt-in protocol crate and whether Rust/FFI/native surface governance is required.
+When implementing a protocol feature not already projected, do not assemble it from mechanism crates in app code. First determine whether it belongs in an opt-in protocol crate and whether Rust/FFI/native API projection is required.
 
 Relay connection/worker failure during direct Rust NIP-02 observation is acquisition evidence, not `EngineError::ObservationUnavailable`; that error is reserved for an ordinary or windowed initial canonical-projection refusal after store degradation. The follow action has no worker/task refusal and reports any genuine terminal failure from `FollowAction` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant. Raw UniFFI carries the same terminal action fact, and both wrappers project the matching typed failure.

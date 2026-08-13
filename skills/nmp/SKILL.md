@@ -13,12 +13,12 @@ Verified-Revision: `be56577ba4c728ed545b45ac0b20565d70ea2fa3`
 
 This is the audited revision of the declared product/source authorities, not the skill package's own commit. A newer checkout is not automatically stale when only skill files changed; the bundled validator proves whether any declared source drifted.
 
-1. Find the NMP repo root and read `README.md`, `docs/known-gaps.md`, and `docs/architecture/supported-surface.md` when present.
+1. Find the NMP repo root and read `README.md`, `docs/known-gaps.md`, and `docs/VISION.md`.
 2. Record `git rev-parse HEAD`. If the checkout differs from the verified revision, inspect the current facade files listed in [Source map](references/source-map.md) before naming APIs.
 3. Identify the consumer tier: direct Rust (`nmp`), Swift (`NMP`), Kotlin/JVM (`com.nmp.sdk`), or optional content/UI packages. Never substitute an internal crate or raw generated UniFFI type for its supported wrapper.
-4. Check [Current surface and gaps](references/current-surface.md). Treat `docs/VISION.md` as the north star, not proof that a public method exists.
+4. Check `docs/known-gaps.md`. Treat `docs/VISION.md` as the north star, not proof that a public method exists.
 
-If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue first, use an isolated worktree and PR, update every affected projection, and test the touched surface.
+If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue first, use an isolated worktree and PR, update every affected projection, and test the touched API.
 
 ## Route the task
 
@@ -30,7 +30,7 @@ If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue 
 - Relay proof screens, acquisition state, or debugging: [Diagnostics](references/diagnostics.md)
 - Rust/Swift/Kotlin setup, call maps, and test commands: [Platforms](references/platforms.md)
 - Content parsing, NMPUI, or any projected protocol door (NIP-02, NIP-18, NIP-22, NIP-25, NIP-29, NIP-51, NIP-65, Blossom, NIP-C7): [Content and protocols](references/content-and-protocols.md)
-- Adding or reviewing a protocol module or governed cross-platform surface: [Protocol authoring](references/protocol-authoring.md)
+- Adding or reviewing a protocol module or cross-platform API: [Protocol authoring](references/protocol-authoring.md)
 - Test strategy, falsifiers, restart proof, or live smoke verification: [Verification](references/verification.md)
 - Exact implementation authority: [Source map](references/source-map.md)
 - Maintaining or forward-testing this skill: [Evaluation protocol](references/evaluation.md) and [raw prompts](references/evaluation-prompts.md)

@@ -20,8 +20,7 @@ unstable-mechanism = []
 # facade so direct Rust and `nmp-ffi` share ONE owner for those values. The
 # mechanism crate stays optional -- an app that never composes a comment does
 # not link it -- but an app that does gets it through `nmp`, never as a
-# second direct dependency alongside the facade. Non-default, so the governed
-# default-feature surface snapshot is unchanged.
+# second direct dependency alongside the facade. Non-default.
 nip22 = ["dep:nmp-nip22"]
 
 # #155/#1239: NIP-25 reaction composition, projected through the canonical
@@ -29,8 +28,7 @@ nip22 = ["dep:nmp-nip22"]
 # family through `nmp`, never as a second direct dependency alongside the
 # facade, which is the split #1239 records for four other families. The
 # mechanism crate stays optional: an app that never composes a reaction does
-# not link it. Non-default, so the governed default-feature surface snapshot is
-# unchanged.
+# not link it. Non-default.
 nip25 = ["dep:nmp-nip25"]
 
 # Pure Rust NIP-65 values plus the private automatic coordinator assembly.
@@ -48,8 +46,7 @@ nip29 = ["dep:nmp-nip29"]
 # exact shape `nmp-consumer-check` exists to forbid, in the direction that
 # penalises the tier NMP calls primary. Each follows the `nip22` shape above
 # for the same reason it does: ONE owner of the values, and an app that never
-# uses the family does not link its crate. All non-default, so the governed
-# default-feature surface snapshot is unchanged by any of them.
+# uses the family does not link its crate. All non-default.
 #
 # `nmp-nip02` is NOT here and cannot be: it is a `protocol-service` in
 # `scripts/dependency-direction-policy.json`, meaning it sits ABOVE the facade
@@ -71,8 +68,7 @@ asset = ["dep:nmp-asset"]
 blossom = ["dep:nmp-blossom", "asset"]
 
 # #827: both instrumentation features came in with the folded engine modules
-# (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default, so the
-# governed default-feature surface snapshot is unaffected by either.
+# (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default.
 bench-instrumentation = [
     "dep:libc",
     "nmp-store/bench-instrumentation",
@@ -158,7 +154,7 @@ libc = { version = "0.2", optional = true }
 # real -- discovered from a kind:10002 the engine fetched itself, not
 # configured. That discovery is the optional NIP-65 coordinator, so this
 # crate's own test targets enable it. Test-only: the default feature set a
-# consumer links, and therefore the governed surface snapshot, is unchanged.
+# consumer links is unchanged.
 # `nip51` joins it for #1239: `nip51_headless.rs` proves the kind:10009 demand
 # against a real engine, and it now proves it through `nmp::nip51` -- the same
 # path an app has -- instead of through a second `nmp-nip51` dev edge.

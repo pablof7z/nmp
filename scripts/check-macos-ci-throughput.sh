@@ -166,7 +166,6 @@ require_text "$RELAY_INFORMATION_TEST" "testPublicAsyncCallDeliversTypedAcquisit
 
 forbid_text "$CI_WORKFLOW" "  swift-package:"
 forbid_text "$CI_WORKFLOW" "runs-on: macos-"
-require_text "$CI_WORKFLOW" "  surface-regeneration:"
 require_text "$CI_WORKFLOW" "  test:"
 require_text "$CI_WORKFLOW" "  kotlin-package:"
 require_triggers "$CI_WORKFLOW"

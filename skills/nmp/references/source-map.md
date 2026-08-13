@@ -2,15 +2,13 @@
 
 These are the authorities to inspect when a checkout differs from the verified revision. Paths are relative to the NMP repository root. Each `Source:` entry is checked by `scripts/validate_skill.py` when the repo is available.
 
-## Product truth and governance
+## Product truth
 
 - Source: `README.md`
 - Source: `docs/VISION.md`
 - Source: `docs/known-gaps.md`
 - Source: `docs/bug-class-ledger.md`
 - Source: `docs/design/native-task-executor.md`
-- Source: `docs/architecture/supported-surface.md`
-- Source: `docs/surface-change-log.md`
 - Source: `docs/builder/19-offline-sync.md`
 - Source: `docs/builder/22-diagnostics.md`
 - Source: `docs/builder/23-threading-lifecycle.md`

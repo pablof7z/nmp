@@ -1,6 +1,6 @@
 [toolchain]
-# The governed facade snapshot generator requires nightly rustdoc
-# (`-Z unstable-options`). Keep this equal to SURFACE_RUST_TOOLCHAIN in
-# tools/surface-toolchain.env and to tools/rust-toolchain-versions.env.
+# Pinned nightly used for the reviewable rust-toolchain-versions.env oracle and
+# any workspace builds that rely on that exact toolchain. Keep in sync with
+# tools/rust-toolchain-versions.env.
 channel = "nightly-2026-07-07"
 components = ["rustfmt", "clippy"]
