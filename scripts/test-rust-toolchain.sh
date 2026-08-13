@@ -25,7 +25,6 @@ channel=$(
 )
 
 mkdir -p "$FAKE_PATH"
-ln -s "$(command -v grep)" "$FAKE_PATH/grep"
 ln -s "$(command -v sed)" "$FAKE_PATH/sed"
 
 cat > "$FAKE_PATH/rustup" <<'SH'
@@ -69,7 +68,6 @@ reset_fixture() {
   rm -rf "$FIXTURE_ROOT"
   mkdir -p "$FIXTURE_ROOT/tools"
   cp "$ROOT/rust-toolchain.toml" "$FIXTURE_ROOT/"
-  cp "$ROOT/tools/surface-toolchain.env" "$FIXTURE_ROOT/tools/"
   cp "$ROOT/tools/rust-toolchain-versions.env" "$FIXTURE_ROOT/tools/"
 }
 
@@ -109,8 +107,8 @@ reset_fixture
 sed -i.bak 's/^channel = .*/channel = "nightly-2099-01-01"/' \
   "$FIXTURE_ROOT/rust-toolchain.toml"
 rm "$FIXTURE_ROOT/rust-toolchain.toml.bak"
-expect_failure "root/surface mismatch" \
-  "root pin nightly-2099-01-01 does not match surface pin $channel"
+expect_failure "root/version-oracle mismatch" \
+  "root pin nightly-2099-01-01 does not match version-oracle pin $channel"
 
 reset_fixture
 expect_failure "active-toolchain mismatch" \

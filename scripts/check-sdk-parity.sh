@@ -29,7 +29,7 @@ SCRIPT_DIR=${SCRIPT_PATH%/*}
 [[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
 # shellcheck source=scripts/lib/require-commands.sh
 source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
-require_commands awk cat comm cut find git grep mkdir mktemp mv rm sed sort tr wc || exit 2
+require_commands awk cat comm cut find git grep mkdir mktemp mv python3 rm sed sort tr wc || exit 2
 
 QUIET=0
 case ${1:-} in
@@ -39,37 +39,80 @@ case ${1:-} in
 esac
 
 ROOT=${SDK_PARITY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}
-HEAD_REF=${SDK_PARITY_HEAD_REF:-HEAD}
-CATALOG_TOOL_DIR=${SDK_PARITY_CATALOG_TOOL_DIR:-$ROOT/tools/surface-component-catalog}
 [[ -n "$ROOT" ]] || {
   echo "check-sdk-parity: could not resolve repository root" >&2
-  exit 2
-}
-git -C "$ROOT" cat-file -e "$HEAD_REF^{commit}" 2>/dev/null || {
-  echo "check-sdk-parity: head commit is unavailable: $HEAD_REF" >&2
   exit 2
 }
 
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t nmp-sdk-parity)
 trap 'rm -rf "$tmp"' EXIT
 
-CATALOG_BIN=${SDK_PARITY_CATALOG_BIN:-}
-if [[ -z "$CATALOG_BIN" ]]; then
-  # shellcheck source=tools/surface-toolchain.env
-  source "${SDK_PARITY_TOOLCHAIN_ENV:-$ROOT/tools/surface-toolchain.env}"
-  CATALOG_TARGET=${SDK_PARITY_CATALOG_TARGET_DIR:-$tmp/catalog-target}
-  cargo "+$SURFACE_RUST_TOOLCHAIN" build --quiet --locked \
-    --manifest-path "$CATALOG_TOOL_DIR/Cargo.toml" \
-    --target-dir "$CATALOG_TARGET" || exit 2
-  CATALOG_BIN="$CATALOG_TARGET/debug/nmp-surface-component-catalog"
-fi
-[[ -x "$CATALOG_BIN" ]] || {
-  echo "check-sdk-parity: component catalog tool is unavailable: $CATALOG_BIN" >&2
-  exit 2
-}
+# #1448 deleted the component/snapshot catalog. Cross-SDK parity still has one
+# active component, so this retained gate owns its roots directly instead of
+# rebuilding deleted surface-governance machinery.
+printf '%s\0' \
+  $'nmp-core\tmeta\tnmp_ffi' \
+  $'nmp-core\tffi\tcrates/nmp-ffi/src' \
+  $'nmp-core\tswift\tPackages/NMP/Sources/NMP' \
+  $'nmp-core\tswift\tPackages/NMP/Sources/NMPContent' \
+  $'nmp-core\tkotlin\tPackages/NMPKotlin/src/main/kotlin/com/nmp/sdk' \
+  > "$tmp/parity-rows"
 
-"$CATALOG_BIN" parity-rows "$ROOT" "$HEAD_REF" > "$tmp/parity-rows" || exit 2
-"$CATALOG_BIN" allowlist-rows "$ROOT" "$HEAD_REF" > "$tmp/allowlist-rows" || exit 2
+ALLOWLIST="$ROOT/scripts/check-sdk-parity-allowlist.toml"
+python3 - "$ALLOWLIST" > "$tmp/allowlist-rows" <<'PY' || exit 2
+import pathlib
+import re
+import sys
+import tomllib
+
+path = pathlib.Path(sys.argv[1])
+try:
+    document = tomllib.loads(path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+    print(f"check-sdk-parity: cannot read parity allowlist: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+if set(document) - {"schema", "exception"}:
+    print("check-sdk-parity: parity allowlist has unknown top-level fields", file=sys.stderr)
+    raise SystemExit(1)
+if document.get("schema") != 1:
+    print("check-sdk-parity: parity allowlist schema must be 1", file=sys.stderr)
+    raise SystemExit(1)
+
+previous = None
+seen = set()
+for exception in document.get("exception", []):
+    if set(exception) != {"component", "concept", "platform", "justification"}:
+        print("check-sdk-parity: parity exception fields are incomplete or unknown", file=sys.stderr)
+        raise SystemExit(1)
+    component = exception["component"]
+    concept = exception["concept"]
+    platform = exception["platform"]
+    justification = exception["justification"]
+    if component != "nmp-core":
+        print(f"check-sdk-parity: exception names unknown component: {component}", file=sys.stderr)
+        raise SystemExit(1)
+    if not isinstance(concept, str) or not re.fullmatch(r"[a-z0-9]{3,}", concept):
+        print(f"check-sdk-parity: malformed exception concept: {concept}", file=sys.stderr)
+        raise SystemExit(1)
+    if platform not in {"swift", "kotlin"}:
+        print(f"check-sdk-parity: malformed exception platform: {platform}", file=sys.stderr)
+        raise SystemExit(1)
+    if not isinstance(justification, str) or not justification.strip():
+        print("check-sdk-parity: exception justification must not be empty", file=sys.stderr)
+        raise SystemExit(1)
+    key = (component, concept, platform)
+    if key in seen:
+        print("check-sdk-parity: duplicate component/concept/platform exception", file=sys.stderr)
+        raise SystemExit(1)
+    if previous is not None and previous >= key:
+        print("check-sdk-parity: exceptions must be in canonical order", file=sys.stderr)
+        raise SystemExit(1)
+    seen.add(key)
+    previous = key
+    row = "\t".join((*key, justification)).encode()
+    sys.stdout.buffer.write(row + b"\0")
+PY
 
 STOPWORDS_RE='^(new|get|set|default|project|op|inner|cancel|disconnect|connect|self|id|ids|ref|mut|arc|box|dyn|into|from|with|and|the|is|as|ok|err|some|none|true|false|str|string|u8|u16|u32|u64|i8|i16|i32|i64|f32|f64|bool|vec|option|result|ffi|nmp|fn|pub|impl|struct|enum|trait|type|let|var|func|class|public|private|internal|open|override|companion|data|sealed|typealias|import|package|extension|protocol|static|on|to|of|in|for|by|it|an|com|sdk|kotlin|swift|clone|debug|eq|partialeq|hash|hashable|sendable|codable|copy|not|test|tests|mod)$'
 

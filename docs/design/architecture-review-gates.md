@@ -236,9 +236,11 @@ Two decisions harden the raw scan into an enforceable check:
   malformed concepts/platforms, and empty reasons fail. The file is currently
   empty of entries.
 
-The scan is record-scoped. An exception for one governed record cannot mask
-another. Roots and explicit platform omissions come from the same governed
-`component.toml` records that own snapshot generation.
+The retained scan has one active component, `nmp-core`, and owns its Rust FFI,
+Swift, and Kotlin roots directly in the script. An exception for that
+component cannot mask a different component; adding another component requires
+adding its roots to the gate in the same change. The gate does not depend on
+the deleted surface snapshot/catalog toolchain.
 
 Backtested against real history: at the commit before the #493 Kotlin
 Following port (`920033e^`), the check fails with exactly the five real
@@ -253,4 +255,3 @@ allowlist entry.
 `master`. It lives in its own workflow file because
 Marking the job branch-protection **required** is a repo-admin setting; until
 it is flipped, the job is still red/green on every PR.
-
