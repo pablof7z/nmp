@@ -44,22 +44,18 @@ The composer returns the ordinary `WriteIntent`. It does not live on
 `NMPEngine`, introduce a `CommentIntent` wrapper, or add another publication
 lifecycle.
 
-For a personal app that explicitly prefers autologin over Keychain, NMP also
-ships a deliberately plaintext file provider:
+An engine owns one complete session. Apps may persist the opaque exported
+payload without interpreting account or provider restoration material:
 
 ```swift
-let accountStore = NMPInsecureFileAccountStore(
-    fileURL: applicationSupport.appendingPathComponent("local-account.nsec")
-)
-let nmp = try NMPEngine(config: config, localAccountStore: accountStore)
-let restoredPubkey = try nmp.activeAccount()
+let nmp = try NMPEngine(config: config, sessionPayload: storedPayload)
+let account = try nmp.session.add(privateKey: secretKey, makeCurrent: true)
+let payloadToStore = try nmp.session.export()
 ```
 
-With that provider configured, a successful `addAccount` is checkpointed and
-the next engine construction restores and activates it. Sign-out calls
-`clearPersistedAccount()` before shutting down the credential-owning engine.
-This provider is not encrypted, Keychain-backed, Secure-Enclave-backed, or a
-production-vault claim.
+Public-key-only accounts use the same `NMPSessionAccount` handle shape. An app
+that stores `payloadToStore.bytes` must treat those bytes as sensitive and
+restore them as one atomic value; #1398 adds the asynchronous storage policy.
 
 See `Sources/NMP/Engine.swift` and
 [`docs/builder/34-content.md`](../../docs/builder/34-content.md).

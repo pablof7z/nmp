@@ -31,7 +31,7 @@ pub enum FfiFollowAvailability {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiFollowSnapshot {
-    pub active_pubkey: Option<String>,
+    pub current_pubkey: Option<String>,
     pub target: String,
     pub relationship: FfiFollowRelationship,
     pub availability: FfiFollowAvailability,
@@ -162,7 +162,7 @@ impl Drop for NmpFollowActionStream {
 
 pub(crate) fn snapshot_to_ffi(snapshot: FollowSnapshot) -> FfiFollowSnapshot {
     FfiFollowSnapshot {
-        active_pubkey: snapshot.active_pubkey.map(|pubkey| pubkey.to_hex()),
+        current_pubkey: snapshot.current_pubkey.map(|pubkey| pubkey.to_hex()),
         target: snapshot.target.to_hex(),
         relationship: match snapshot.relationship {
             FollowRelationship::Unknown => FfiFollowRelationship::Unknown,
@@ -224,13 +224,13 @@ mod tests {
         let target = Keys::generate().public_key();
         let base = EventId::all_zeros();
         let projected = snapshot_to_ffi(FollowSnapshot {
-            active_pubkey: Some(active),
+            current_pubkey: Some(active),
             target,
             relationship: FollowRelationship::Following,
             availability: FollowAvailability::Ready,
             base_event_id: Some(base),
         });
-        assert_eq!(projected.active_pubkey, Some(active.to_hex()));
+        assert_eq!(projected.current_pubkey, Some(active.to_hex()));
         assert_eq!(projected.target, target.to_hex());
         assert_eq!(projected.relationship, FfiFollowRelationship::Following);
         assert_eq!(projected.availability, FfiFollowAvailability::Ready);

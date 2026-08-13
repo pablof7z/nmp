@@ -85,8 +85,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/Query.swift`
 - Source: `Packages/NMP/Sources/NMP/Window.swift`
 - Source: `Packages/NMP/Sources/NMP/DiagnosticsQuery.swift`
-- Source: `Packages/NMP/Sources/NMP/InsecureFileAccountStore.swift`
-- Source: `Packages/NMP/Sources/NMP/KeychainAccountStore.swift`
+- Source: `Packages/NMP/Sources/NMP/Session.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPFilter.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPDemand.swift`
 - Source: `Packages/NMP/Sources/NMP/Row.swift`
@@ -106,8 +105,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Query.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Window.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/DiagnosticsQuery.kt`
-- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/InsecureFileAccountStore.kt`
-- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/SecureKeyStoreAccountStore.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Session.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPFilter.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NMPDemand.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Row.kt`

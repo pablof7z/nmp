@@ -127,12 +127,14 @@ final class AsyncObservationHandlesTests: XCTestCase {
     func testCancelWakesAParkedNextImmediatelyWithNoPostCancelFrameAndIsIdempotent() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        // An active account roots identity so the initial current-state frame
+        // A current account roots identity so the initial current-state frame
         // is delivered deterministically (matches nmp-ffi's consumer_isolation
         // oracle). No relays, no further writes -> after that first frame the
         // pull has nothing to deliver and genuinely parks.
-        let registration = try await engine.addAccount(secretKey: Self.testSecretKey)
-        try engine.setActiveAccount(registration.publicKey)
+        _ = try engine.session.add(
+            privateKey: testPrivateKey(Self.testSecretKey),
+            makeCurrent: true
+        )
         let query = try engine.observe(NMPFilter(kinds: [8_811]))
 
         // Signalled once the iterating task has consumed the initial frame and
@@ -200,8 +202,10 @@ final class AsyncObservationHandlesTests: XCTestCase {
     func testNormalLoopBreakWithdrawsDemandAndReleasesIteratorClaim() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        let registration = try await engine.addAccount(secretKey: Self.testSecretKey)
-        try engine.setActiveAccount(registration.publicKey)
+        _ = try engine.session.add(
+            privateKey: testPrivateKey(Self.testSecretKey),
+            makeCurrent: true
+        )
         let query = try engine.observe(NMPFilter(kinds: [8_812]))
 
         let delivered = try await Self.consumeOneThenBreak(query)
@@ -225,8 +229,10 @@ final class AsyncObservationHandlesTests: XCTestCase {
     func testTwoIndependentObservationsBothDeliverConcurrentlyWithNoError() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        let registration = try await engine.addAccount(secretKey: Self.testSecretKey)
-        try engine.setActiveAccount(registration.publicKey)
+        _ = try engine.session.add(
+            privateKey: testPrivateKey(Self.testSecretKey),
+            makeCurrent: true
+        )
 
         let a = try engine.observe(NMPFilter(kinds: [8_821]))
         let b = try engine.observe(NMPFilter(kinds: [8_822]))
@@ -258,8 +264,10 @@ final class AsyncObservationHandlesTests: XCTestCase {
     func testTwoConcurrentIteratorsOverOneNMPQueryAreLoudNeverHung() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        let registration = try await engine.addAccount(secretKey: Self.testSecretKey)
-        try engine.setActiveAccount(registration.publicKey)
+        _ = try engine.session.add(
+            privateKey: testPrivateKey(Self.testSecretKey),
+            makeCurrent: true
+        )
         let query = try engine.observe(NMPFilter(kinds: [8_831]))
         let startBarrier = StartBarrier(participants: 2)
 

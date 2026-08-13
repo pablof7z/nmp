@@ -30,6 +30,7 @@ use nmp_ffi::nip02::{
     FfiFollowActionStatus, FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot,
     NmpFollowActionStream, NmpFollowStream,
 };
+use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
     FfiDiagnosticsSnapshot, FfiFilter, FfiIdentity, FfiNotSentReason, FfiReceiptReattachment,
@@ -73,9 +74,23 @@ fn ffi_outbox_routing_config() -> NmpEngineConfig {
     }
 }
 
+fn new_ffi_engine(config: NmpEngineConfig) -> Result<Arc<NmpEngine>, FfiError> {
+    NmpEngine::new(config, None)
+}
+
+fn ffi_private_key(keys: &Keys) -> Arc<FfiPrivateKey> {
+    FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec())
+        .expect("fixture private key must be decoded")
+}
+
+fn ffi_public_key(public_key: PublicKey) -> Arc<FfiPublicKey> {
+    FfiPublicKey::from_bytes(public_key.to_bytes().to_vec())
+        .expect("fixture public key must be decoded")
+}
+
 #[test]
 fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
-    let root_author = Keys::generate().public_key();
+    let root_author = Keys::generate().public_key;
     let root_event_id = nostr::EventId::from_slice(&[0x11; 32]).unwrap();
     let parent_keys = Keys::generate();
     let content = "closed NIP-22 parity".to_string();
@@ -204,8 +219,8 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
 #[test]
 fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
     let relay = nostr::RelayUrl::parse("wss://receipt-parity.example").unwrap();
-    let pubkey = nostr::Keys::generate().public_key();
-    let awaited = nostr::Keys::generate().public_key();
+    let pubkey = nostr::Keys::generate().public_key;
+    let awaited = nostr::Keys::generate().public_key;
     let expected_id = nostr::EventId::from_slice(&[0x5a; 32]).unwrap();
     let actual_id = nostr::EventId::from_slice(&[0x6b; 32]).unwrap();
     let cases = [
@@ -559,7 +574,7 @@ struct TamperedOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormFollowSnapshot {
-    active_pubkey: Option<String>,
+    current_pubkey: Option<String>,
     target: String,
     relationship: &'static str,
     availability: &'static str,
@@ -1802,7 +1817,7 @@ async fn setup_relay(keys: &Keys, query_event: &nostr::Event) -> ScriptedRelay {
 
 fn normalize_direct_follow_snapshot(snapshot: FollowSnapshot) -> NormFollowSnapshot {
     NormFollowSnapshot {
-        active_pubkey: snapshot.active_pubkey.map(|pubkey| pubkey.to_hex()),
+        current_pubkey: snapshot.current_pubkey.map(|pubkey| pubkey.to_hex()),
         target: snapshot.target.to_hex(),
         relationship: match snapshot.relationship {
             FollowRelationship::Unknown => "unknown",
@@ -1823,7 +1838,7 @@ fn normalize_direct_follow_snapshot(snapshot: FollowSnapshot) -> NormFollowSnaps
 
 fn normalize_ffi_follow_snapshot(snapshot: FfiFollowSnapshot) -> NormFollowSnapshot {
     NormFollowSnapshot {
-        active_pubkey: snapshot.active_pubkey,
+        current_pubkey: snapshot.current_pubkey,
         target: snapshot.target,
         relationship: match snapshot.relationship {
             FfiFollowRelationship::Unknown => "unknown",
@@ -2225,13 +2240,9 @@ async fn run_direct_follow_scenario(
         })
         .expect("direct follow engine must construct"),
     );
-    let active = engine
-        .add_account(&author.secret_key().to_secret_hex())
-        .expect("direct follow account must register")
-        .public_key();
-    engine
-        .set_active_account(Some(active))
-        .expect("direct follow account must activate");
+    let _account = engine
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("direct follow account must register");
 
     let observation = observe_following(engine.clone(), target.public_key())
         .expect("direct following observation must open");
@@ -2285,7 +2296,7 @@ async fn run_ffi_follow_scenario(
     target: &Keys,
 ) -> FollowScenarioOutcome {
     let relay = setup_follow_relay(author, existing).await;
-    let engine = NmpEngine::new(NmpEngineConfig {
+    let engine = new_ffi_engine(NmpEngineConfig {
         store_path: None,
         app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
@@ -2293,12 +2304,9 @@ async fn run_ffi_follow_scenario(
         ..ffi_outbox_routing_config()
     })
     .expect("FFI follow engine must construct");
-    let active = engine
-        .add_account(author.secret_key().to_secret_hex())
+    let _account = engine
+        .add_private_key_account(ffi_private_key(author), true)
         .expect("FFI follow account must register");
-    engine
-        .set_active_account(Some(active.public_key()))
-        .expect("FFI follow account must activate");
 
     let observation = engine
         .observe_following(target.public_key().to_hex())
@@ -2363,13 +2371,9 @@ async fn run_direct_missing_contact_list(
         })
         .expect("direct missing-list engine must construct"),
     );
-    let active = engine
-        .add_account(&author.secret_key().to_secret_hex())
-        .expect("direct missing-list account must register")
-        .public_key();
-    engine
-        .set_active_account(Some(active))
-        .expect("direct missing-list account must activate");
+    let _account = engine
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("direct missing-list account must register");
 
     let observation = observe_following(engine.clone(), target.public_key())
         .expect("direct missing-list observation must open");
@@ -2392,7 +2396,7 @@ async fn run_ffi_missing_contact_list(
     target: &Keys,
 ) -> (NormFollowSnapshot, Vec<NormFollowActionStatus>) {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
-    let engine = NmpEngine::new(NmpEngineConfig {
+    let engine = new_ffi_engine(NmpEngineConfig {
         store_path: None,
         app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
@@ -2400,12 +2404,9 @@ async fn run_ffi_missing_contact_list(
         ..ffi_outbox_routing_config()
     })
     .expect("FFI missing-list engine must construct");
-    let active = engine
-        .add_account(author.secret_key().to_secret_hex())
+    let _account = engine
+        .add_private_key_account(ffi_private_key(author), true)
         .expect("FFI missing-list account must register");
-    engine
-        .set_active_account(Some(active.public_key()))
-        .expect("FFI missing-list account must activate");
 
     let observation = engine
         .observe_following(target.public_key().to_hex())
@@ -2437,12 +2438,9 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     })
     .expect("direct engine must construct");
     let pubkey = engine
-        .add_account(&keys.secret_key().to_secret_hex())
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
         .expect("direct account must register")
-        .public_key();
-    engine
-        .set_active_account(Some(pubkey))
-        .expect("direct account must activate");
+        .public_key;
 
     let diagnostics = engine
         .observe_diagnostics()
@@ -2575,7 +2573,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     let relay = setup_relay(keys, query_event).await;
     let expected_row_id = query_event.id.to_hex();
     let relay_url = relay.url.to_string();
-    let engine = NmpEngine::new(NmpEngineConfig {
+    let engine = new_ffi_engine(NmpEngineConfig {
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
@@ -2584,13 +2582,10 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         ..ffi_outbox_routing_config()
     })
     .expect("FFI engine must construct");
-    let registration = engine
-        .add_account(keys.secret_key().to_secret_hex())
+    let _account = engine
+        .add_private_key_account(ffi_private_key(keys), true)
         .expect("FFI account must register");
-    let pubkey = registration.public_key();
-    engine
-        .set_active_account(Some(pubkey.clone()))
-        .expect("FFI account must activate");
+    let pubkey = keys.public_key().to_hex();
 
     let diagnostics_handle = engine
         .observe_diagnostics()
@@ -2699,12 +2694,9 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     })
     .expect("direct auth-parked engine must construct");
     let pubkey = engine
-        .add_account(&keys.secret_key().to_secret_hex())
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
         .expect("direct auth-parked account must register")
-        .public_key();
-    engine
-        .set_active_account(Some(pubkey))
-        .expect("direct auth-parked account must activate");
+        .public_key;
 
     let anchor_cancel = stage_direct_source_anchor(&engine, &pubkey.to_hex(), &relay);
 
@@ -2753,7 +2745,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
     relay.seed_signed_event(&anchor).await;
     relay.seed_signed_event(query_event).await;
     let relay_url = relay.url.to_string();
-    let engine = NmpEngine::new(NmpEngineConfig {
+    let engine = new_ffi_engine(NmpEngineConfig {
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
@@ -2761,13 +2753,10 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         ..ffi_outbox_routing_config()
     })
     .expect("FFI auth-parked engine must construct");
-    let registration = engine
-        .add_account(keys.secret_key().to_secret_hex())
+    let _account = engine
+        .add_private_key_account(ffi_private_key(keys), true)
         .expect("FFI auth-parked account must register");
-    let pubkey = registration.public_key();
-    engine
-        .set_active_account(Some(pubkey.clone()))
-        .expect("FFI auth-parked account must activate");
+    let pubkey = keys.public_key().to_hex();
 
     let anchor_handle = stage_ffi_source_anchor(&engine, &pubkey, &relay);
 
@@ -2821,17 +2810,13 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
         ..direct_outbox_routing_config()
     })
     .expect("direct override engine must construct");
-    let active_pubkey = engine
-        .add_account(&active.secret_key().to_secret_hex())
-        .expect("direct active account must register")
-        .public_key();
-    engine
-        .set_active_account(Some(active_pubkey))
-        .expect("direct active account must activate");
+    let _active_account = engine
+        .add_private_key_account(&active.secret_key().to_secret_bytes(), true)
+        .expect("direct active account must register");
     let override_pubkey = engine
-        .add_account(&override_keys.secret_key().to_secret_hex())
+        .add_private_key_account(&override_keys.secret_key().to_secret_bytes(), false)
         .expect("direct override account must register as a secondary")
-        .public_key();
+        .public_key;
 
     let anchor_cancel = stage_direct_source_anchor(&engine, &override_pubkey.to_hex(), &relay);
 
@@ -2871,7 +2856,7 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
         .expect("source anchor fixture must sign");
     relay.seed_signed_event(&anchor).await;
     let relay_url = relay.url.to_string();
-    let engine = NmpEngine::new(NmpEngineConfig {
+    let engine = new_ffi_engine(NmpEngineConfig {
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
@@ -2879,17 +2864,13 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
         ..ffi_outbox_routing_config()
     })
     .expect("FFI override engine must construct");
-    let active_pubkey = engine
-        .add_account(active.secret_key().to_secret_hex())
-        .expect("FFI active account must register")
-        .public_key();
-    engine
-        .set_active_account(Some(active_pubkey))
-        .expect("FFI active account must activate");
-    let override_pubkey = engine
-        .add_account(override_keys.secret_key().to_secret_hex())
-        .expect("FFI override account must register as a secondary")
-        .public_key();
+    let _active_account = engine
+        .add_private_key_account(ffi_private_key(active), true)
+        .expect("FFI active account must register");
+    let _override_account = engine
+        .add_private_key_account(ffi_private_key(override_keys), false)
+        .expect("FFI override account must register as a secondary");
+    let override_pubkey = override_keys.public_key().to_hex();
 
     let anchor_handle = stage_ffi_source_anchor(&engine, &override_pubkey, &relay);
 
@@ -2959,7 +2940,7 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
 async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
     let relay_url = relay.url.to_string();
-    let engine = NmpEngine::new(NmpEngineConfig {
+    let engine = new_ffi_engine(NmpEngineConfig {
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
@@ -3064,8 +3045,8 @@ async fn run_direct_reattach_live() -> ReattachProof {
     let keys = fixed_keys();
     let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
     engine
-        .set_active_account(Some(keys.public_key()))
-        .expect("direct account must activate");
+        .add_public_key_account(keys.public_key(), true)
+        .expect("direct public-key-only account must become current");
 
     let unsigned = UnsignedEvent::new(
         keys.public_key(),
@@ -3131,10 +3112,10 @@ async fn run_ffi_reattach_live() -> ReattachProof {
     // there: the reattach `AwaitingSigner` payload is now the frozen
     // author pubkey, and the direct-vs-FFI proof compares it.
     let keys = fixed_keys();
-    let engine = NmpEngine::new(ffi_outbox_routing_config()).expect("FFI engine must construct");
+    let engine = new_ffi_engine(ffi_outbox_routing_config()).expect("FFI engine must construct");
     engine
-        .set_active_account(Some(keys.public_key().to_hex()))
-        .expect("FFI account must activate");
+        .add_public_key_account(ffi_public_key(keys.public_key()), true)
+        .expect("FFI public-key-only account must become current");
 
     let receipt = engine
         .publish(FfiWriteIntent {
@@ -3218,8 +3199,8 @@ fn run_direct_correlation() -> CorrelationProof {
     let keys = fixed_keys();
     let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
     engine
-        .set_active_account(Some(keys.public_key()))
-        .expect("direct account must activate");
+        .add_public_key_account(keys.public_key(), true)
+        .expect("direct public-key-only account must become current");
 
     let token = || {
         Some(
@@ -3280,10 +3261,10 @@ fn run_direct_correlation() -> CorrelationProof {
 
 fn run_ffi_correlation() -> CorrelationProof {
     let keys = fixed_keys();
-    let engine = NmpEngine::new(ffi_outbox_routing_config()).expect("FFI engine must construct");
+    let engine = new_ffi_engine(ffi_outbox_routing_config()).expect("FFI engine must construct");
     engine
-        .set_active_account(Some(keys.public_key().to_hex()))
-        .expect("FFI account must activate");
+        .add_public_key_account(ffi_public_key(keys.public_key()), true)
+        .expect("FFI public-key-only account must become current");
 
     let intent = |content: &str, created_at: u64| FfiWriteIntent {
         payload: FfiWritePayload::Event {
@@ -3362,8 +3343,8 @@ fn run_direct_cancellation() -> CancellationProof {
     let keys = fixed_keys();
     let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
     engine
-        .set_active_account(Some(keys.public_key()))
-        .expect("direct account must activate");
+        .add_public_key_account(keys.public_key(), true)
+        .expect("direct public-key-only account must become current");
     let tracked = engine
         .publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
@@ -3412,10 +3393,10 @@ fn run_direct_cancellation() -> CancellationProof {
 
 async fn run_ffi_cancellation() -> CancellationProof {
     let keys = fixed_keys();
-    let engine = NmpEngine::new(ffi_outbox_routing_config()).expect("FFI engine must construct");
+    let engine = new_ffi_engine(ffi_outbox_routing_config()).expect("FFI engine must construct");
     engine
-        .set_active_account(Some(keys.public_key().to_hex()))
-        .expect("FFI account must activate");
+        .add_public_key_account(ffi_public_key(keys.public_key()), true)
+        .expect("FFI public-key-only account must become current");
     let receipt = engine
         .publish(FfiWriteIntent {
             payload: FfiWritePayload::Event {
@@ -3506,11 +3487,8 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
         })
         .expect("direct engine must construct");
         engine
-            .add_account(&keys.secret_key().to_secret_hex())
+            .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
             .expect("direct account must register");
-        engine
-            .set_active_account(Some(keys.public_key()))
-            .expect("direct account must activate");
         let write = |content: &str, created_at: u64| WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
                 kind: Kind::Custom(REATTACH_TERMINAL_KIND),
@@ -3582,18 +3560,15 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     .await;
     let relay_url = relay.url.to_string();
     let superseded_id = {
-        let engine = NmpEngine::new(NmpEngineConfig {
+        let engine = new_ffi_engine(NmpEngineConfig {
             store_path: Some(path.to_string_lossy().into_owned()),
             allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..NmpEngineConfig::default()
         })
         .expect("FFI engine must construct");
         engine
-            .add_account(keys.secret_key().to_secret_hex())
+            .add_private_key_account(ffi_private_key(&keys), true)
             .expect("FFI account must register");
-        engine
-            .set_active_account(Some(keys.public_key().to_hex()))
-            .expect("FFI account must activate");
         let write = |content: &str, created_at: u64| FfiWriteIntent {
             payload: FfiWritePayload::Event {
                 builder: nmp_ffi::types::FfiEventBuilder {
@@ -3634,7 +3609,7 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     };
     relay.shutdown();
 
-    let engine = NmpEngine::new(NmpEngineConfig {
+    let engine = new_ffi_engine(NmpEngineConfig {
         store_path: Some(path.to_string_lossy().into_owned()),
         ..NmpEngineConfig::default()
     })
@@ -3910,12 +3885,9 @@ async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<No
     })
     .expect("direct engine must construct");
     let pubkey = engine
-        .add_account(&keys.secret_key().to_secret_hex())
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
         .expect("direct account must register")
-        .public_key();
-    engine
-        .set_active_account(Some(pubkey))
-        .expect("direct account must activate");
+        .public_key;
 
     let unsigned = UnsignedEvent::new(
         pubkey,
@@ -3940,7 +3912,7 @@ async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<No
 
 async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormStatus> {
     let relay_url = relay.url.to_string();
-    let engine = NmpEngine::new(NmpEngineConfig {
+    let engine = new_ffi_engine(NmpEngineConfig {
         store_path: None,
         app_relays: vec![],
         fallback_relays: vec![],
@@ -3948,14 +3920,9 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
         ..NmpEngineConfig::default()
     })
     .expect("FFI engine must construct");
-    let registration = engine
-        .add_account(keys.secret_key().to_secret_hex())
+    let _account = engine
+        .add_private_key_account(ffi_private_key(keys), true)
         .expect("FFI account must register");
-    let pubkey = registration.public_key();
-    engine
-        .set_active_account(Some(pubkey.clone()))
-        .expect("FFI account must activate");
-
     let receipt = engine
         .publish(FfiWriteIntent {
             payload: FfiWritePayload::Event {
@@ -4015,13 +3982,9 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
     let keys = fixed_keys();
 
     let engine = Engine::new(EngineConfig::default()).expect("direct engine must construct");
-    let pubkey = engine
-        .add_account(&keys.secret_key().to_secret_hex())
-        .expect("direct account must register")
-        .public_key();
-    engine
-        .set_active_account(Some(pubkey))
-        .expect("direct account must activate");
+    let _account = engine
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
+        .expect("direct account must register");
     let direct = match engine.publish(WriteIntent {
         payload: WritePayload::Event(nmp_grammar::EventBuilder {
             kind: Kind::Custom(WRITE_KIND),
@@ -4043,20 +4006,16 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
         .len();
     engine.shutdown();
 
-    let ffi_engine = NmpEngine::new(NmpEngineConfig {
+    let ffi_engine = new_ffi_engine(NmpEngineConfig {
         store_path: None,
         app_relays: vec![],
         fallback_relays: vec![],
         ..NmpEngineConfig::default()
     })
     .expect("FFI engine must construct");
-    let ffi_registration = ffi_engine
-        .add_account(keys.secret_key().to_secret_hex())
+    let _ffi_account = ffi_engine
+        .add_private_key_account(ffi_private_key(&keys), true)
         .expect("FFI account must register");
-    let ffi_pubkey = ffi_registration.public_key();
-    ffi_engine
-        .set_active_account(Some(ffi_pubkey.clone()))
-        .expect("FFI account must activate");
     let ffi = match ffi_engine.publish(FfiWriteIntent {
         payload: FfiWritePayload::Event {
             builder: nmp_ffi::types::FfiEventBuilder {

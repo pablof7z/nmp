@@ -83,7 +83,7 @@ Pending -> Signed(signature)
 Before promotion, NMP verifies that the signer response matches the frozen body,
 expected pubkey, and id and carries a valid signature.
 
-## Missing signer is a durable state
+## Provider unavailability is a durable state
 
 If the selected signer is unavailable, the row remains visible and the receipt
 reports `awaitingSigner(pubkey)`.
@@ -99,9 +99,9 @@ for await fact in receipt.facts {
 }
 ```
 
-A disconnected remote-signer session is not terminal failure. The obligation survives
-until a matching provider reattaches, the app cancels it, protocol expiry makes
-it invalid, or a terminal signer/protocol response occurs.
+A configured provider being unavailable is not terminal failure. The obligation
+survives until that provider becomes available, the app cancels it, protocol
+expiry makes it invalid, or a terminal signer/protocol response occurs.
 
 NMP persists the obligation and identity reference, never raw secret material.
 

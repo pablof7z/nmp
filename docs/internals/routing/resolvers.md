@@ -103,10 +103,10 @@ And the app never names the strategy:
 
 ## 3. Registration: runtime, on the engine — DESIGNED, with BUILT precedent
 
-Resolvers register on the engine at runtime, mirroring the two capability
+Resolvers register on the engine at runtime, mirroring capability installation
 doors that already exist and ship:
 
-- `Engine::add_signer` (`crates/nmp/src/engine.rs:619`)
+- `Engine::add_private_key_account`
 - `Engine::add_auth_policy` (`crates/nmp/src/engine.rs:647`)
 
 `add_route_resolver` follows the same shape: the protocol crate constructs

@@ -14,9 +14,8 @@ import NMPFFI
 
 final class LiveRelayTests: XCTestCase {
     /// fiatjaf -- a known, always-active npub, used only as a read target.
-    /// No secret key is used anywhere in this test: `setActiveAccount` may
-    /// re-root reads onto an account this process holds no key for (read-
-    /// only browsing is legal; see `NMPEngine.setActiveAccount`'s doc).
+    /// No secret key is used anywhere in this test: a public-key-only current
+    /// account may re-root reads without granting signing authority.
     static let fiatjafHex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
     static let operatorRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
 
@@ -28,7 +27,7 @@ final class LiveRelayTests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig(appRelays: Self.operatorRelays))
         defer { engine.shutdown() }
 
-        try engine.setActiveAccount(Self.fiatjafHex)
+        _ = try engine.session.add(publicKey: testPublicKey(Self.fiatjafHex), makeCurrent: true)
 
         let followFeed = NMPFilter(
             kinds: [1],
@@ -74,7 +73,7 @@ final class LiveRelayTests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig(appRelays: Self.operatorRelays))
         defer { engine.shutdown() }
 
-        try engine.setActiveAccount(Self.fiatjafHex)
+        _ = try engine.session.add(publicKey: testPublicKey(Self.fiatjafHex), makeCurrent: true)
 
         let followFeed = NMPFilter(
             kinds: [1],

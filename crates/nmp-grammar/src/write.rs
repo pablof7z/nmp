@@ -316,7 +316,7 @@ pub struct WriteIntent {
     /// write as `pk` — a registered/secondary identity — WITHOUT changing
     /// the active account. Acceptance pins the RESOLVED key into the frozen
     /// write (`expected_pubkey` / `signing_identity_ref`) either way, so
-    /// later `set_active_account` calls can never retarget an accepted
+    /// later current-account changes can never retarget an accepted
     /// intent; under `Active` that pin matters more, not less, since
     /// acceptance is the only place "whoever is active" becomes somebody.
     /// An `Explicit` identity with no registered signing capability still

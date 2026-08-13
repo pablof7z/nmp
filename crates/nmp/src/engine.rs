@@ -29,13 +29,16 @@ use crate::publish_queue::{
     PublishQueueEntry, PublishQueueReadError, ReceiptResult, ReceiptResultError,
     RemoveQueueEntryError,
 };
+#[cfg(any(test, feature = "test-instrumentation"))]
+use crate::runtime::SignerRegistration;
 use crate::runtime::{
     EngineThread, Handle, HistoryHandle, HistoryReceiver, QueryHandle, ReceiptReattachment,
     ReceiptReplayCursor, ReceiptStream, RowsReceiver, RuntimeConfig, SignEventError,
-    SignEventOperation, SignerRegistration,
+    SignEventOperation,
 };
 use nmp_grammar::LiveQuery;
 use nmp_grammar::WriteIntent;
+use nmp_signer::SigningCapability;
 use nmp_store::{MemoryStore, RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;
@@ -60,7 +63,6 @@ use crate::subscription::{
 struct Inner {
     handle: Handle,
     engine_thread: EngineThread,
-    active_pubkey: Option<PublicKey>,
 }
 
 /// The one supported Rust product surface (canonical-facade-52-plan.md §1).
@@ -146,6 +148,23 @@ fn cancel_write_error_from_engine(
     }
 }
 
+fn session_mutation_from_add_signer(
+    error: crate::runtime::AddSignerError,
+) -> crate::SessionMutationError {
+    match error {
+        crate::runtime::AddSignerError::RegistryFull { limit } => {
+            crate::SessionMutationError::CapabilityRegistryFull { limit }
+        }
+        crate::runtime::AddSignerError::CapabilityInstanceExhausted => {
+            crate::SessionMutationError::CapabilityInstanceExhausted
+        }
+        crate::runtime::AddSignerError::EngineShuttingDown
+        | crate::runtime::AddSignerError::MissingPublicKey => {
+            crate::SessionMutationError::EngineClosed
+        }
+    }
+}
+
 impl std::fmt::Display for CancelWriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -183,37 +202,9 @@ impl std::fmt::Display for CancelWriteError {
 
 impl std::error::Error for CancelWriteError {}
 
-/// Opaque ownership proof for one exact local-account installation (#8's
-/// ratified account model, closing #495). Returned by
-/// [`Engine::add_account`]; the ONLY value that may later detach that exact
-/// installation via [`Engine::remove_account`]. Equality is capability-
-/// INSTANCE identity, not key equality: registering the same key again
-/// mints a NEW registration and invalidates this one, so a stale clone can
-/// never detach its replacement.
-#[derive(Clone, PartialEq, Eq)]
-pub struct AccountRegistration {
-    inner: SignerRegistration,
-}
-
-impl AccountRegistration {
-    /// The registered account's public key.
-    #[must_use]
-    pub fn public_key(&self) -> PublicKey {
-        self.inner.public_key()
-    }
-}
-
-impl std::fmt::Debug for AccountRegistration {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AccountRegistration")
-            .field("public_key", &self.public_key())
-            .finish_non_exhaustive()
-    }
-}
-
 /// Opaque ownership proof for one exact AUTH-policy installation (#8).
-/// Same exact-instance discipline as [`AccountRegistration`]: replacement
-/// invalidates it, and a stale clone cannot detach the replacement.
+/// Replacement invalidates it, and a stale clone cannot detach the
+/// replacement.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthPolicyRegistration {
     inner: crate::runtime::AuthPolicyRegistration,
@@ -235,7 +226,7 @@ impl std::fmt::Debug for AuthPolicyRegistration {
     }
 }
 
-/// One event body to sign with the active account without publishing it.
+/// One event body to sign with the current account without publishing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignEventRequest {
     pub created_at: Timestamp,
@@ -264,11 +255,57 @@ impl std::fmt::Display for RelayInformationRequestError {
 impl std::error::Error for RelayInformationRequestError {}
 
 impl Engine {
+    #[cfg(test)]
+    fn install_test_local_provider(
+        &self,
+        secret_key: &str,
+    ) -> Result<crate::SessionAccount, crate::SessionMutationError> {
+        let signer = nmp_local_signer::LocalKeySigner::parse(secret_key)
+            .map_err(|_| crate::SessionMutationError::InvalidSecretKey)?;
+        self.with_handle(|handle| handle.add_private_key_account(signer, false))
+            .map_err(|_| crate::SessionMutationError::EngineClosed)?
+            .map_err(session_mutation_from_add_signer)
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[doc(hidden)]
+    pub fn install_test_signing_capability<Sig>(
+        &self,
+        signer: Sig,
+    ) -> Result<SignerRegistration, EngineError>
+    where
+        Sig: nmp_signer::SigningCapability + Send + Sync + 'static,
+    {
+        self.with_handle(|handle| handle.add_signer(signer))?
+            .map_err(EngineError::from_add_signer_error)
+    }
+
+    #[cfg(test)]
+    fn select_test_account(&self, public_key: Option<PublicKey>) -> Result<(), EngineError> {
+        match public_key {
+            Some(public_key) => {
+                self.add_public_key_account(public_key, false)
+                    .map_err(|_| EngineError::EngineClosed)?;
+                self.make_current_account(public_key)
+                    .map_err(|_| EngineError::EngineClosed)
+            }
+            None => {
+                self.with_handle(|handle| handle.set_current_account(None))?;
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn test_current_public_key(&self) -> Result<Option<PublicKey>, EngineError> {
+        Ok(self.session()?.current_pubkey)
+    }
     /// Destructively remove one closed persistent engine store.
     ///
     /// This clears NMP's canonical events, pending writes, receipts,
     /// coverage/evidence, and all other state held in that store. It does not
-    /// touch any separately configured platform signer-provider checkpoint.
+    /// touch the app-owned opaque session payload, which is independent from
+    /// the event store.
     /// A live engine in THIS OR ANY OTHER process using the same canonical
     /// path is refused with [`EngineError::StoreStillOpen`] without touching
     /// the file. Call [`Engine::shutdown`] (or drop the engine) first. A
@@ -289,6 +326,13 @@ impl Engine {
     /// router cap, everything `nmp-ffi` and
     /// `nmp-demo`'s hand-rolled assembly used to duplicate independently.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        Self::new_with_initial_session(config, crate::session::RestoredSession::empty())
+    }
+
+    fn new_with_initial_session(
+        config: EngineConfig,
+        initial_session: crate::session::RestoredSession,
+    ) -> Result<Self, EngineError> {
         let routing_facts = build_routing_facts(&config)?;
         let admission = build_admission_policy(&config);
         // #20: one effective ceiling is threaded to both the whole-demand
@@ -352,6 +396,7 @@ impl Engine {
                     pool_config,
                     admission,
                     runtime_config,
+                    initial_session,
                 )
                 .map_err(EngineError::from_start_error)?
             }
@@ -364,6 +409,7 @@ impl Engine {
                     pool_config,
                     admission,
                     runtime_config,
+                    initial_session,
                 )
                 .map_err(EngineError::from_start_error)?
             }
@@ -373,7 +419,6 @@ impl Engine {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
-                active_pubkey: None,
             })),
         })
     }
@@ -407,7 +452,6 @@ impl Engine {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
-                active_pubkey: None,
             })),
         })
     }
@@ -438,7 +482,6 @@ impl Engine {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
-                active_pubkey: None,
             })),
         })
     }
@@ -473,13 +516,13 @@ impl Engine {
             pool_config,
             admission,
             runtime_config,
+            crate::session::RestoredSession::empty(),
         )
         .map_err(EngineError::from_start_error)?;
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
-                active_pubkey: None,
             })),
         })
     }
@@ -688,17 +731,17 @@ impl Engine {
     /// whole receipt (#1314). Pre-acceptance correlation-id exhaustion
     /// returns a typed error without creating a receipt at all.
     ///
-    /// Identity (#47): with [`Identity::Active`] — the default — a builder
-    /// payload signs as the CURRENT active account, and fails closed
-    /// pre-acceptance when nobody is active (nothing is pinned, so nothing
-    /// may park). [`Identity::Explicit`] is explicit per-write consent to
-    /// publish as that key — a registered/secondary identity — without
-    /// touching the active account: it works even while logged out, and
-    /// acceptance pins the key so later [`Self::set_active_account`] calls
-    /// cannot retarget the write. A named key with no registered signing
-    /// capability parks durably as
+    /// Identity (#47): with [`crate::Identity::Active`] — the default — a builder
+    /// payload signs as the current account, and fails closed pre-acceptance
+    /// when there is no current account (nothing is pinned, so nothing may
+    /// park). [`crate::Identity::Explicit`] is explicit per-write consent to
+    /// publish as that key — whether or not it is current — without
+    /// touching the current account: it works even while logged out, and
+    /// acceptance pins the key so later [`Self::make_current_account`] calls
+    /// cannot retarget the write. A named key with no available signing
+    /// provider parks durably as
     /// [`SigningState::AwaitingSigner`](crate::SigningState) until that
-    /// exact key's signer attaches. On a `Signed` payload the author is
+    /// exact key's configured provider becomes available. On a `Signed` payload the author is
     /// already frozen in the bytes, so an explicit identity may only
     /// RESTATE it: naming anybody else cannot resolve, so this call refuses
     /// it and takes nothing into custody.
@@ -811,73 +854,98 @@ impl Engine {
             .map_err(cancel_write_error_from_engine)
     }
 
-    /// Register an account from its secret key (hex or bech32 `nsec`). Does
-    /// NOT make the account active -- call [`Self::set_active_account`] for
-    /// that. Returns the [`AccountRegistration`] -- the only value that may
-    /// later detach this exact installation via [`Self::remove_account`]
-    /// (#8's ratified account model; there is deliberately no pubkey-only
-    /// removal).
-    ///
-    /// Registering the same key again replaces the capability, mints a NEW
-    /// registration, and invalidates the prior one. Registration is bounded
-    /// by [`EngineConfig::max_auth_capabilities`](crate::EngineConfig::max_auth_capabilities)
-    /// (shared with [`Self::add_auth_policy`]); a full registry or an
-    /// exhausted instance namespace fails closed with a typed error and
-    /// registers nothing.
-    ///
-    /// This builds a `LocalKeySigner` internally, whose `public_key()`
-    /// always reports `Some` -- there is no reachable "signer has no
-    /// public key" state on this path (unlike an arbitrary third-party
-    /// `SigningCapability`, which [`Self::add_signer`] covers instead).
-    pub fn add_account(&self, secret_key: &str) -> Result<AccountRegistration, EngineError> {
-        // #765: parse straight into the signer's canonical zeroizing owner --
-        // no intermediate `nostr::Keys`/`SecretKey` lives on this path.
-        let signer = nmp_local_signer::LocalKeySigner::parse(secret_key)
-            .map_err(|_| EngineError::InvalidSecretKey)?;
-        let registration = self.with_handle(|handle| {
-            handle
-                .add_signer(signer)
-                .map_err(EngineError::from_add_signer_error)
-        })??;
-        Ok(AccountRegistration {
-            inner: registration,
+    pub fn new_with_session(
+        config: EngineConfig,
+        payload: crate::SessionPayload,
+    ) -> Result<Self, crate::SessionRestoreError> {
+        let restored = crate::session::decode(&payload)?;
+        let provider_count = restored.provider_count();
+        if provider_count > config.max_auth_capabilities {
+            return Err(crate::SessionRestoreError::CapabilityRegistryFull {
+                limit: config.max_auth_capabilities,
+            });
+        }
+        Self::new_with_initial_session(config, restored).map_err(|error| {
+            crate::SessionRestoreError::EngineStartFailed {
+                reason: error.to_string(),
+            }
         })
     }
 
-    /// Detach one exact local-account installation without changing active
-    /// identity or any accepted write's frozen author. Returns `Ok(false)`
-    /// for a stale registration -- one already removed, or one superseded by
-    /// a newer [`Self::add_account`] for the same key -- which is a no-op
-    /// that can never detach the replacement.
-    pub fn remove_account(&self, registration: &AccountRegistration) -> Result<bool, EngineError> {
-        self.with_handle(|handle| handle.remove_signer(registration.inner.clone()))
+    pub fn session(&self) -> Result<crate::SessionSnapshot, EngineError> {
+        self.with_handle(|handle| handle.session_snapshot())?
+            .ok_or(EngineError::EngineClosed)
     }
 
-    /// Register an arbitrary signing capability (for example a remote
-    /// provider) -- the lower-level verb [`Self::add_account`] sits on
-    /// top of for the common local-key case. Same "does not activate it"
-    /// caveat as `add_account`.
-    ///
-    /// The promotion boundary verifies signature, id, author, timestamp,
-    /// kind, tags, and content against the frozen accepted template before
-    /// any relay publication. Capabilities without a stable public key are
-    /// rejected rather than stored unreachably.
-    pub fn add_signer<Sig>(&self, signer: Sig) -> Result<SignerRegistration, EngineError>
-    where
-        Sig: nmp_signer::SigningCapability + Send + 'static,
-    {
-        self.with_handle(|handle| {
-            handle
-                .add_signer(signer)
-                .map_err(EngineError::from_add_signer_error)
-        })?
+    pub fn export_session(&self) -> Result<crate::SessionPayload, EngineError> {
+        // The reducer returns only cloned provider owners and metadata. Secret
+        // descriptor callbacks then run here, after the reducer command and
+        // after the facade lifecycle lock have both been released.
+        let handle = self.with_handle(Clone::clone)?;
+        let export = handle
+            .session_export_sources()
+            .ok_or(EngineError::EngineClosed)?;
+        let descriptors = export
+            .providers
+            .into_iter()
+            .filter_map(|(public_key, provider)| {
+                provider
+                    .persistence_descriptor()
+                    .map(|descriptor| (public_key, descriptor))
+            })
+            .collect();
+        Ok(crate::session::encode(&export.snapshot, descriptors))
     }
 
-    /// Detach one exact signer installation without changing active identity
-    /// or any accepted write's frozen author. A stale registration cannot
-    /// detach a newer signer installed for the same public key.
-    pub fn remove_signer(&self, registration: SignerRegistration) -> Result<bool, EngineError> {
-        self.with_handle(|handle| handle.remove_signer(registration))
+    pub fn add_private_key_account(
+        &self,
+        secret_key: &[u8; 32],
+        make_current: bool,
+    ) -> Result<crate::SessionAccount, crate::SessionMutationError> {
+        let signer = nmp_local_signer::LocalKeySigner::from_secret_bytes(secret_key)
+            .map_err(|_| crate::SessionMutationError::InvalidSecretKey)?;
+        let result = self
+            .with_handle(|handle| handle.add_private_key_account(signer, make_current))
+            .map_err(|_| crate::SessionMutationError::EngineClosed)?;
+        result.map_err(session_mutation_from_add_signer)
+    }
+
+    pub fn add_public_key_account(
+        &self,
+        public_key: PublicKey,
+        make_current: bool,
+    ) -> Result<crate::SessionAccount, crate::SessionMutationError> {
+        self.with_handle(|handle| handle.add_public_key_account(public_key, make_current))
+            .map_err(|_| crate::SessionMutationError::EngineClosed)?
+            .ok_or(crate::SessionMutationError::EngineClosed)
+    }
+
+    pub fn make_current_account(
+        &self,
+        public_key: PublicKey,
+    ) -> Result<(), crate::SessionMutationError> {
+        let found = self
+            .with_handle(|handle| handle.make_current_account(public_key))
+            .map_err(|_| crate::SessionMutationError::EngineClosed)?
+            .ok_or(crate::SessionMutationError::EngineClosed)?;
+        found
+            .then_some(())
+            .ok_or(crate::SessionMutationError::AccountNotFound { public_key })
+    }
+
+    pub fn remove_account(
+        &self,
+        account: &crate::SessionAccount,
+    ) -> Result<bool, crate::SessionMutationError> {
+        self.with_handle(|handle| handle.remove_session_account(account.public_key))
+            .map_err(|_| crate::SessionMutationError::EngineClosed)?
+            .ok_or(crate::SessionMutationError::EngineClosed)
+    }
+
+    pub fn clear_session(&self) -> Result<(), crate::SessionMutationError> {
+        self.with_handle(|handle| handle.clear_session())
+            .map_err(|_| crate::SessionMutationError::EngineClosed)?
+            .ok_or(crate::SessionMutationError::EngineClosed)
     }
 
     /// Install the NIP-42 authorization policy for one exact account
@@ -919,12 +987,12 @@ impl Engine {
         self.with_handle(|handle| handle.remove_auth_policy(registration.inner.clone()))
     }
 
-    /// Sign one immutable unsigned event through the currently active
-    /// account's registered capability and return the exact signed event.
+    /// Sign one immutable unsigned event through the current session
+    /// account's configured provider and return the exact signed event.
     ///
     /// This is intentionally orthogonal to [`Self::publish`]: it creates no
     /// write intent, pending row, receipt, delivery lane, relay plan, or
-    /// publication. The active author is frozen while the same lifecycle /
+    /// publication. The current author is frozen while the same lifecycle /
     /// identity lock is held, and the runtime validates the returned body,
     /// author, id, and signature before completion.
     pub fn sign_event(
@@ -937,7 +1005,11 @@ impl Engine {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             let inner = guard.as_ref().ok_or(SignEventError::EngineClosed)?;
-            let pubkey = inner.active_pubkey.ok_or(SignEventError::NoActiveSigner)?;
+            let pubkey = inner
+                .handle
+                .current_session_pubkey()
+                .flatten()
+                .ok_or(SignEventError::NoCurrentSigningProvider)?;
             (inner.handle.clone(), pubkey)
         };
         let unsigned = UnsignedEvent::new(
@@ -966,7 +1038,11 @@ impl Engine {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             let inner = guard.as_ref().ok_or(SignEventError::EngineClosed)?;
-            let pubkey = inner.active_pubkey.ok_or(SignEventError::NoActiveSigner)?;
+            let pubkey = inner
+                .handle
+                .current_session_pubkey()
+                .flatten()
+                .ok_or(SignEventError::NoCurrentSigningProvider)?;
             (inner.handle.clone(), pubkey)
         };
         let unsigned = UnsignedEvent::new(
@@ -977,46 +1053,6 @@ impl Engine {
             request.content,
         );
         handle.sign_event_with_completion(unsigned, completion)
-    }
-
-    /// Re-root every reactive query AND the active signing capability
-    /// together onto `pubkey` (`None` -> logged-out / read-only). `pubkey`
-    /// need not have been registered via [`Self::add_account`] -- read-only
-    /// browsing of an account this app holds no key for is legal. Publishes
-    /// attempted in that keyless-active state resolve truthfully, never a
-    /// panic: a builder payload published as [`Identity::Active`] is
-    /// accepted and parks durably as
-    /// [`SigningState::AwaitingSigner`](crate::SigningState) until a
-    /// matching signing capability attaches (#47).
-    pub fn set_active_account(&self, pubkey: Option<PublicKey>) -> Result<(), EngineError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        match &mut *guard {
-            Some(inner) => {
-                inner.handle.set_active_account(pubkey);
-                inner.active_pubkey = pubkey;
-                Ok(())
-            }
-            None => Err(EngineError::EngineClosed),
-        }
-    }
-
-    /// The account currently rooting reactive identity and unsigned writes.
-    /// This is facade-owned identity state, not a cache projection. It is
-    /// updated under the same lifecycle mutex as [`Self::set_active_account`]
-    /// so protocol actions can pin the author they are editing and detect an
-    /// account switch before acceptance.
-    pub fn active_account(&self) -> Result<Option<PublicKey>, EngineError> {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        match &*guard {
-            Some(inner) => Ok(inner.active_pubkey),
-            None => Err(EngineError::EngineClosed),
-        }
     }
 
     /// Open a live diagnostics stream. Same `Drop` discipline as
@@ -1098,7 +1134,6 @@ impl Engine {
         if let Some(Inner {
             handle,
             engine_thread,
-            active_pubkey: _,
         }) = inner
         {
             handle.shutdown();
@@ -1119,6 +1154,7 @@ impl Drop for Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::future::Future;
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -1129,6 +1165,308 @@ mod tests {
     use crate::{Row, RowDelta, RowSignature};
     use nostr::Keys;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn private_key_bytes(keys: &Keys) -> [u8; 32] {
+        keys.secret_key().to_secret_bytes()
+    }
+
+    fn receive_added_row(subscription: &Subscription, event_id: EventId) -> crate::Row {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "canonical row {event_id} did not arrive before the deadline"
+            );
+            let frame = subscription
+                .recv_timeout(remaining)
+                .expect("the canonical-row observation stays open");
+            if let Some(row) = frame.deltas.into_iter().find_map(|delta| match delta {
+                crate::RowDelta::Added(row) if row.id() == event_id => Some(row),
+                _ => None,
+            }) {
+                return row;
+            }
+        }
+    }
+
+    #[test]
+    fn whole_session_round_trip_is_canonical_and_restores_public_only_accounts() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine builds");
+        let local = Keys::generate();
+        let public_only = Keys::generate().public_key();
+        engine
+            .add_private_key_account(&private_key_bytes(&local), false)
+            .expect("local account");
+        engine
+            .add_public_key_account(public_only, true)
+            .expect("public-only account");
+        let first = engine.export_session().expect("export");
+        let first_bytes = first.as_bytes().to_vec();
+        engine.shutdown();
+
+        let restored = Engine::new_with_session(EngineConfig::default(), first)
+            .expect("whole session restores");
+        let snapshot = restored.session().expect("snapshot");
+        assert_eq!(snapshot.current_pubkey, Some(public_only));
+        assert_eq!(snapshot.accounts.len(), 2);
+        assert!(snapshot.accounts.iter().any(|account| {
+            account.public_key == public_only
+                && account.provider.is_none()
+                && account.signing == crate::SigningAvailability::Unsupported
+        }));
+        assert!(snapshot.accounts.iter().any(|account| {
+            account.public_key == local.public_key()
+                && account.provider == Some(crate::SessionProvider::LocalKey)
+                && account.signing == crate::SigningAvailability::Available
+        }));
+        assert_eq!(
+            restored.export_session().unwrap().as_bytes(),
+            first_bytes.as_slice(),
+            "canonical export is deterministic across restart"
+        );
+        restored.shutdown();
+    }
+
+    #[test]
+    fn malformed_restore_creates_no_partially_visible_engine() {
+        let malformed = crate::SessionPayload::from_bytes(b"not-a-session".to_vec());
+        assert!(matches!(
+            Engine::new_with_session(EngineConfig::default(), malformed),
+            Err(crate::SessionRestoreError::MalformedPayload)
+        ));
+    }
+
+    #[test]
+    fn restored_session_is_installed_before_parked_write_recovery() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("session-before-recovery.redb");
+        let keys = Keys::generate();
+        let public_key = keys.public_key();
+        let config = || EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        };
+
+        let receipt_id = {
+            let engine = Engine::new(config()).expect("persistent engine");
+            engine
+                .add_public_key_account(public_key, true)
+                .expect("public-only current account");
+            let receipt = engine
+                .publish(WriteIntent {
+                    payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
+                        kind: Kind::TextNote,
+                        tags: Vec::new().into_iter().collect(),
+                        content: "parked before restart".to_string(),
+                        created_at: Some(Timestamp::from(55)),
+                    }),
+                    routing: nmp_grammar::WriteRouting::Explicit(vec![RelayUrl::parse(
+                        "wss://session-recovery.example",
+                    )
+                    .unwrap()]),
+                    identity: Identity::Active,
+                    correlation: None,
+                })
+                .expect("accepted parked write");
+            let parked = engine
+                .publish_queue_for_event(receipt.event_id, None, 1)
+                .unwrap();
+            assert!(
+                matches!(
+                    parked[0].signing,
+                    SigningState::AwaitingSigner { pubkey } if pubkey == public_key
+                ),
+                "expected parked obligation, got {:?}",
+                parked[0].signing
+            );
+            engine.shutdown();
+            receipt.id
+        };
+
+        let payload = {
+            let engine = Engine::new(EngineConfig::default()).expect("payload engine");
+            engine
+                .add_private_key_account(&private_key_bytes(&keys), true)
+                .expect("persistable local provider");
+            let payload = engine.export_session().expect("session payload");
+            engine.shutdown();
+            payload
+        };
+
+        let restarted = Engine::new_with_session(config(), payload).expect("restored engine");
+        let session = restarted.session().expect("restored metadata");
+        assert_eq!(session.current_pubkey, Some(public_key));
+        assert_eq!(session.accounts.len(), 1);
+        assert_eq!(
+            session.accounts[0].signing,
+            crate::SigningAvailability::Available
+        );
+        let entry = restarted
+            .publish_queue(None, 10)
+            .expect("recovered queue")
+            .into_iter()
+            .find(|entry| entry.receipt_id == receipt_id)
+            .expect("same accepted obligation");
+        assert!(
+            matches!(entry.signing, SigningState::Signed { .. }),
+            "boot recovery must see the restored provider on its first turn: {:?}",
+            entry.signing
+        );
+        restarted.shutdown();
+    }
+
+    #[test]
+    fn remove_current_account_clears_current_in_same_runtime_turn() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine builds");
+        let key = Keys::generate().public_key();
+        let account = engine
+            .add_public_key_account(key, true)
+            .expect("account added and selected");
+        assert!(engine.remove_account(&account).expect("remove"));
+        let snapshot = engine.session().expect("snapshot");
+        assert!(snapshot.accounts.is_empty());
+        assert_eq!(snapshot.current_pubkey, None);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn session_mutations_update_one_account_and_clear_the_whole_value() {
+        let engine = Engine::new(EngineConfig::default()).expect("engine builds");
+        let keys = Keys::generate();
+        let public_key = keys.public_key();
+        let public_only = engine
+            .add_public_key_account(public_key, false)
+            .expect("public-only account");
+        assert_eq!(public_only.provider, None);
+        assert_eq!(public_only.signing, crate::SigningAvailability::Unsupported);
+
+        let enriched = engine
+            .add_private_key_account(&private_key_bytes(&keys), true)
+            .expect("same account gains local provider");
+        assert_eq!(enriched.public_key, public_key);
+        assert_eq!(enriched.provider, Some(crate::SessionProvider::LocalKey));
+        let snapshot = engine.session().unwrap();
+        assert_eq!(snapshot.accounts, vec![enriched]);
+        assert_eq!(snapshot.current_pubkey, Some(public_key));
+
+        engine.clear_session().expect("clear whole session");
+        assert_eq!(
+            engine.session().unwrap(),
+            crate::SessionSnapshot {
+                accounts: vec![],
+                current_pubkey: None
+            }
+        );
+        assert_eq!(
+            engine.make_current_account(public_key),
+            Err(crate::SessionMutationError::AccountNotFound { public_key })
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn removing_or_clearing_session_never_retargets_or_discards_accepted_writes() {
+        for clear in [false, true] {
+            let engine = Engine::new(EngineConfig::default()).expect("engine builds");
+            let public_key = Keys::generate().public_key();
+            let account = engine
+                .add_public_key_account(public_key, true)
+                .expect("public-only current account");
+            let query = || {
+                LiveQuery::from_filter(nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+                    authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([
+                        public_key.to_hex()
+                    ]))),
+                    ..nmp_grammar::Filter::default()
+                })
+            };
+            let before_observation = engine
+                .observe(query(), None)
+                .expect("author-and-kind-scoped observation opens");
+            let receipt = engine
+                .publish(WriteIntent {
+                    payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
+                        kind: Kind::TextNote,
+                        tags: Vec::new().into_iter().collect(),
+                        content: "accepted before session mutation".to_string(),
+                        created_at: Some(Timestamp::from(44)),
+                    }),
+                    routing: nmp_grammar::WriteRouting::Explicit(vec![RelayUrl::parse(
+                        "wss://accepted.example",
+                    )
+                    .unwrap()]),
+                    identity: Identity::Active,
+                    correlation: None,
+                })
+                .expect("write accepted while signer is absent");
+            let receipt_id = receipt.id;
+            let frozen_event_id = receipt.event_id;
+            drop(receipt.statuses);
+            let row_before = receive_added_row(&before_observation, frozen_event_id);
+            assert_eq!(row_before.id(), frozen_event_id);
+            assert_eq!(row_before.pubkey(), public_key);
+            assert_eq!(row_before.kind(), Kind::TextNote);
+            assert_eq!(row_before.content(), "accepted before session mutation");
+            assert_eq!(row_before.signature(), RowSignature::Pending);
+            assert_eq!(row_before.signed_event(), None);
+            drop(before_observation);
+            let before = engine
+                .publish_queue_for_event(frozen_event_id, None, 1)
+                .unwrap();
+            assert_eq!(before.len(), 1);
+            assert_eq!(before[0].pubkey, public_key);
+            assert_eq!(
+                before[0].signing,
+                SigningState::AwaitingSigner { pubkey: public_key }
+            );
+
+            if clear {
+                engine.clear_session().expect("clear session");
+            } else {
+                assert!(engine.remove_account(&account).expect("remove account"));
+            }
+
+            assert!(engine.session().unwrap().accounts.is_empty());
+            assert_eq!(engine.session().unwrap().current_pubkey, None);
+            let after_observation = engine
+                .observe(query(), None)
+                .expect("fresh author-and-kind-scoped observation opens");
+            let row_after = receive_added_row(&after_observation, frozen_event_id);
+            assert_eq!(row_after.id(), frozen_event_id);
+            assert_eq!(row_after.pubkey(), public_key);
+            assert_eq!(row_after.kind(), Kind::TextNote);
+            assert_eq!(row_after.content(), "accepted before session mutation");
+            assert_eq!(row_after.signature(), RowSignature::Pending);
+            assert_eq!(row_after.signed_event(), None);
+            assert_eq!(
+                row_after, row_before,
+                "session mutation must preserve the exact canonical row"
+            );
+            drop(after_observation);
+            let ReceiptReattachment::Attached { id, .. } = engine
+                .reattach_receipt(receipt_id)
+                .expect("reattach receipt")
+            else {
+                panic!("accepted receipt must remain reattachable after session mutation")
+            };
+            assert_eq!(id, receipt_id, "reattachment must retain receipt identity");
+            let after = engine
+                .publish_queue_for_event(frozen_event_id, None, 1)
+                .unwrap();
+            assert_eq!(after.len(), 1, "accepted receipt remains retained");
+            assert_eq!(after[0].receipt_id, receipt_id);
+            assert_eq!(after[0].event_id, frozen_event_id);
+            assert_eq!(after[0].pubkey, public_key, "frozen author is unchanged");
+            assert_eq!(
+                after[0].signing,
+                SigningState::AwaitingSigner { pubkey: public_key },
+                "accepted write remains parked on its frozen author"
+            );
+            engine.shutdown();
+        }
+    }
 
     fn engine_with_store_and_lane_faults<S>(
         store: S,
@@ -1149,7 +1487,6 @@ mod tests {
             inner: Mutex::new(Some(Inner {
                 handle,
                 engine_thread,
-                active_pubkey: None,
             })),
         }
     }
@@ -1176,7 +1513,7 @@ mod tests {
 
         let author = Keys::generate();
         engine
-            .set_active_account(Some(author.public_key()))
+            .select_test_account(Some(author.public_key()))
             .expect("set facade-owned identity");
         let subscription = engine
             .observe(
@@ -1242,7 +1579,7 @@ mod tests {
         );
 
         assert_eq!(
-            engine.active_account().unwrap(),
+            engine.test_current_public_key().unwrap(),
             Some(author.public_key()),
             "facade identity survives the internal store generation change"
         );
@@ -1372,7 +1709,7 @@ mod tests {
         let engine = engine_with_lane_faults(faults.clone());
         let author = Keys::generate();
         engine
-            .set_active_account(Some(author.public_key()))
+            .select_test_account(Some(author.public_key()))
             .expect("set facade-owned identity");
         let relay = RelayUrl::parse("wss://invariant.example").unwrap();
         let intent = |content: &str| WriteIntent {
@@ -1867,7 +2204,7 @@ mod tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         engine
-            .set_active_account(Some(keys.public_key()))
+            .select_test_account(Some(keys.public_key()))
             .expect("engine open");
         let receipt = engine
             .publish(WriteIntent {
@@ -1926,7 +2263,7 @@ mod tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         engine
-            .set_active_account(Some(keys.public_key()))
+            .select_test_account(Some(keys.public_key()))
             .expect("engine open");
         let receipt = engine
             .publish(WriteIntent {
@@ -2003,11 +2340,11 @@ mod tests {
         .expect("engine must build");
         let secret = format!("{:064x}", 7u8);
         let author = engine
-            .add_account(&secret)
+            .install_test_local_provider(&secret)
             .expect("account must register")
             .public_key();
         engine
-            .set_active_account(Some(author))
+            .select_test_account(Some(author))
             .expect("account must activate");
         let request = SignEventRequest {
             created_at: nostr::Timestamp::from(1_723_456_789),
@@ -2020,7 +2357,7 @@ mod tests {
             .sign_event(request.clone())
             .expect("sign-only operation must start")
             .recv()
-            .expect("active local signer must complete");
+            .expect("current account's local signing provider must complete");
         assert_eq!(signed.pubkey, author);
         assert_eq!(signed.created_at, request.created_at);
         assert_eq!(signed.kind, request.kind);
@@ -2050,7 +2387,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_event_rejects_missing_active_account_or_signer_before_invocation() {
+    fn sign_event_rejects_missing_current_account_or_provider_before_invocation() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let active = nostr::Keys::generate().public_key();
         let request = SignEventRequest {
@@ -2060,13 +2397,13 @@ mod tests {
             content: "body".to_string(),
         };
         match engine.sign_event(request.clone()) {
-            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
-            Ok(_) => panic!("a missing active account must refuse before acceptance"),
+            Err(error) => assert_eq!(error, SignEventError::NoCurrentSigningProvider),
+            Ok(_) => panic!("a missing current account must refuse before acceptance"),
         }
-        engine.set_active_account(Some(active)).unwrap();
+        engine.select_test_account(Some(active)).unwrap();
         match engine.sign_event(request) {
-            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
-            Ok(_) => panic!("a missing signer must refuse before acceptance"),
+            Err(error) => assert_eq!(error, SignEventError::NoCurrentSigningProvider),
+            Ok(_) => panic!("an unavailable signing provider must refuse before acceptance"),
         }
         engine.shutdown();
     }
@@ -2107,14 +2444,14 @@ mod tests {
         let reported = nostr::Keys::generate();
         let calls = Arc::new(AtomicUsize::new(0));
         engine
-            .add_signer(MismatchedSigner {
+            .install_test_signing_capability(MismatchedSigner {
                 reported: reported.public_key(),
                 actual: nostr::Keys::generate(),
                 calls: Arc::clone(&calls),
             })
             .expect("signer must register");
         engine
-            .set_active_account(Some(reported.public_key()))
+            .select_test_account(Some(reported.public_key()))
             .unwrap();
         let request = SignEventRequest {
             created_at: nostr::Timestamp::from(2),
@@ -2228,12 +2565,12 @@ mod tests {
         let keys = Keys::generate();
         let calls = Arc::new(AtomicUsize::new(0));
         engine
-            .add_signer(CountingSigner {
+            .install_test_signing_capability(CountingSigner {
                 keys: keys.clone(),
                 calls: Arc::clone(&calls),
             })
             .unwrap();
-        engine.set_active_account(Some(keys.public_key())).unwrap();
+        engine.select_test_account(Some(keys.public_key())).unwrap();
 
         let signed = engine
             .sign_event(SignEventRequest {
@@ -2283,12 +2620,12 @@ mod tests {
         let keys = Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
-            .add_signer(PendingSigner {
+            .install_test_signing_capability(PendingSigner {
                 public_key: keys.public_key(),
                 cancellations: Arc::clone(&cancellations),
             })
             .unwrap();
-        engine.set_active_account(Some(keys.public_key())).unwrap();
+        engine.select_test_account(Some(keys.public_key())).unwrap();
 
         let publish = |content: &str| {
             engine
@@ -2340,12 +2677,12 @@ mod tests {
         let keys = Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
-            .add_signer(PendingSigner {
+            .install_test_signing_capability(PendingSigner {
                 public_key: keys.public_key(),
                 cancellations: Arc::clone(&cancellations),
             })
             .unwrap();
-        engine.set_active_account(Some(keys.public_key())).unwrap();
+        engine.select_test_account(Some(keys.public_key())).unwrap();
 
         let publish = |created_at| {
             engine
@@ -2394,12 +2731,12 @@ mod tests {
         let keys = nostr::Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
-            .add_signer(PendingSigner {
+            .install_test_signing_capability(PendingSigner {
                 public_key: keys.public_key(),
                 cancellations: Arc::clone(&cancellations),
             })
             .unwrap();
-        engine.set_active_account(Some(keys.public_key())).unwrap();
+        engine.select_test_account(Some(keys.public_key())).unwrap();
         let request = SignEventRequest {
             created_at: nostr::Timestamp::from(3),
             kind: nostr::Kind::TextNote,
@@ -2423,12 +2760,12 @@ mod tests {
         let keys = Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
-            .add_signer(PendingSigner {
+            .install_test_signing_capability(PendingSigner {
                 public_key: keys.public_key(),
                 cancellations: Arc::clone(&cancellations),
             })
             .unwrap();
-        engine.set_active_account(Some(keys.public_key())).unwrap();
+        engine.select_test_account(Some(keys.public_key())).unwrap();
         let operation = engine
             .sign_event(SignEventRequest {
                 created_at: Timestamp::from(6),
@@ -2449,12 +2786,12 @@ mod tests {
         let keys = Keys::generate();
         let (producer, operation) = nmp_signer::SignerOp::pending_channel();
         engine
-            .add_signer(NoHookPendingSigner {
+            .install_test_signing_capability(NoHookPendingSigner {
                 public_key: keys.public_key(),
                 operation: Mutex::new(Some(operation)),
             })
             .unwrap();
-        engine.set_active_account(Some(keys.public_key())).unwrap();
+        engine.select_test_account(Some(keys.public_key())).unwrap();
         let operation = engine
             .sign_event(SignEventRequest {
                 created_at: Timestamp::from(7),
@@ -2486,12 +2823,12 @@ mod tests {
         let keys = Keys::generate();
         let (producer, operation) = nmp_signer::SignerOp::pending_channel();
         engine
-            .add_signer(NoHookPendingSigner {
+            .install_test_signing_capability(NoHookPendingSigner {
                 public_key: keys.public_key(),
                 operation: Mutex::new(Some(operation)),
             })
             .unwrap();
-        engine.set_active_account(Some(keys.public_key())).unwrap();
+        engine.select_test_account(Some(keys.public_key())).unwrap();
         let operation = engine
             .sign_event(SignEventRequest {
                 created_at: Timestamp::from(8),
@@ -2518,12 +2855,12 @@ mod tests {
         let keys = Keys::generate();
         let cancellations = Arc::new(AtomicUsize::new(0));
         engine
-            .add_signer(HookCompletesSigner {
+            .install_test_signing_capability(HookCompletesSigner {
                 keys: keys.clone(),
                 cancellations: Arc::clone(&cancellations),
             })
             .unwrap();
-        engine.set_active_account(Some(keys.public_key())).unwrap();
+        engine.select_test_account(Some(keys.public_key())).unwrap();
         let operation = engine
             .sign_event(SignEventRequest {
                 created_at: Timestamp::from(9),
@@ -2593,20 +2930,20 @@ mod tests {
         }
     }
 
-    /// `add_account` must accept both hex and bech32 `nsec` secret keys and
+    /// The test provider seam must accept both hex and bech32 `nsec` secret keys and
     /// return the same public key either way.
     #[test]
-    fn add_account_accepts_hex_and_nsec_secret_keys() {
+    fn test_provider_seam_accepts_legacy_fixture_encodings() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
 
         let via_hex = engine
-            .add_account(&keys.secret_key().to_secret_hex())
+            .install_test_local_provider(&keys.secret_key().to_secret_hex())
             .expect("hex secret key must parse");
         assert_eq!(via_hex.public_key(), keys.public_key());
 
         let via_nsec = engine
-            .add_account(
+            .install_test_local_provider(
                 &keys
                     .secret_key()
                     .to_bech32()
@@ -2620,21 +2957,19 @@ mod tests {
 
     /// A malformed secret key is a typed error, not a panic.
     #[test]
-    fn add_account_rejects_malformed_secret_key() {
+    fn test_provider_seam_rejects_malformed_fixture_key() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         assert_eq!(
-            engine.add_account("not-a-key"),
-            Err(EngineError::InvalidSecretKey)
+            engine.install_test_local_provider("not-a-key"),
+            Err(crate::SessionMutationError::InvalidSecretKey)
         );
         engine.shutdown();
     }
 
-    /// #8's ratified account model plus the #529 falsifier folded here: a
-    /// same-key replacement invalidates the prior exact instance, a stale
-    /// registration's removal is a `false` no-op that can never detach the
-    /// replacement, and removal is idempotent per exact instance.
+    /// One public key is one stable session account. Reinstalling its provider
+    /// updates that account rather than minting a second identity category.
     #[test]
-    fn account_registration_is_exact_instance_repeatable_and_stale_safe() {
+    fn same_key_provider_reinstall_updates_one_session_account() {
         let engine = Engine::new(EngineConfig {
             max_auth_capabilities: 1,
             ..EngineConfig::default()
@@ -2642,30 +2977,19 @@ mod tests {
         .expect("engine must build");
         let keys = Keys::generate();
         let first = engine
-            .add_account(&keys.secret_key().to_secret_hex())
+            .install_test_local_provider(&keys.secret_key().to_secret_hex())
             .expect("first account must register");
         let replacement = engine
-            .add_account(&keys.secret_key().to_secret_hex())
+            .install_test_local_provider(&keys.secret_key().to_secret_hex())
             .expect("same-key replacement must not consume another slot");
 
         assert_eq!(first.public_key(), replacement.public_key());
-        assert_ne!(
-            first, replacement,
-            "a replacement must be a NEW exact instance, never equal to the stale one"
-        );
-        assert_eq!(
-            first.clone(),
-            first,
-            "clones of one registration share its exact instance identity"
-        );
-        assert!(
-            !engine.remove_account(&first).unwrap(),
-            "a stale registration must no-op instead of detaching its replacement"
-        );
-        assert!(engine.remove_account(&replacement).unwrap());
+        assert_eq!(first, replacement, "identity is the decoded public key");
+        assert_eq!(engine.session().unwrap().accounts.len(), 1);
+        assert!(engine.remove_account(&first).unwrap());
         assert!(
             !engine.remove_account(&replacement).unwrap(),
-            "removal is exact-instance idempotent"
+            "whole-account removal is identity-idempotent"
         );
         engine.shutdown();
     }
@@ -2715,9 +3039,9 @@ mod tests {
         .expect("zero-capability engine must still build");
         assert_eq!(
             engine
-                .add_account(&Keys::generate().secret_key().to_secret_hex())
+                .install_test_local_provider(&Keys::generate().secret_key().to_secret_hex())
                 .err(),
-            Some(EngineError::AuthCapabilityRegistryFull { limit: 0 })
+            Some(crate::SessionMutationError::CapabilityRegistryFull { limit: 0 })
         );
         assert_eq!(
             engine
@@ -2739,7 +3063,7 @@ mod tests {
         .expect("engine must build");
         let keys = Keys::generate();
         let account = engine
-            .add_account(&keys.secret_key().to_secret_hex())
+            .install_test_local_provider(&keys.secret_key().to_secret_hex())
             .expect("account consumes the one shared slot");
         assert_eq!(
             engine
@@ -2761,7 +3085,7 @@ mod tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let account = engine
-            .add_account(&keys.secret_key().to_secret_hex())
+            .install_test_local_provider(&keys.secret_key().to_secret_hex())
             .expect("account must register");
         let policy = engine
             .add_auth_policy(keys.public_key(), AllowAuthPolicy)
@@ -2770,7 +3094,7 @@ mod tests {
 
         assert_eq!(
             engine.remove_account(&account).err(),
-            Some(EngineError::EngineClosed)
+            Some(crate::SessionMutationError::EngineClosed)
         );
         assert_eq!(
             engine
@@ -2785,15 +3109,15 @@ mod tests {
     }
 
     #[test]
-    fn sign_event_uses_the_active_account_without_publishing() {
+    fn sign_event_uses_the_current_account_without_publishing() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys = Keys::generate();
         let pubkey = engine
-            .add_account(&keys.secret_key().to_secret_hex())
+            .install_test_local_provider(&keys.secret_key().to_secret_hex())
             .expect("account must register")
             .public_key();
         engine
-            .set_active_account(Some(pubkey))
+            .select_test_account(Some(pubkey))
             .expect("account must activate");
 
         let signed = engine
@@ -2803,9 +3127,9 @@ mod tests {
                 tags: vec![Tag::parse(["client", "nip07-test"]).expect("valid tag")],
                 content: "sign without publish".to_string(),
             })
-            .expect("active local signer must start")
+            .expect("current account's local signing provider must start")
             .recv()
-            .expect("active local signer must sign");
+            .expect("current account's local signing provider must sign");
 
         assert_eq!(signed.pubkey, pubkey);
         assert_eq!(signed.created_at, Timestamp::from(1_750_000_000));
@@ -2816,7 +3140,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_event_without_an_active_account_fails_closed() {
+    fn sign_event_without_a_current_account_fails_closed() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let result = engine.sign_event(SignEventRequest {
             created_at: Timestamp::from(1_750_000_000),
@@ -2825,8 +3149,8 @@ mod tests {
             content: "unsigned".to_string(),
         });
         match result {
-            Err(error) => assert_eq!(error, SignEventError::NoActiveSigner),
-            Ok(_) => panic!("a missing active account must fail closed"),
+            Err(error) => assert_eq!(error, SignEventError::NoCurrentSigningProvider),
+            Ok(_) => panic!("a missing current account must fail closed"),
         }
         engine.shutdown();
     }
@@ -2871,28 +3195,28 @@ mod tests {
         engine.shutdown();
     }
 
-    /// #47 falsifier (a) through the facade: with account A active and B
-    /// merely registered ([`Engine::add_account`], never activated), a
+    /// #47 falsifier (a) through the facade: with account A current and B
+    /// merely registered, never activated, a
     /// builder carrying `Identity::Explicit(B)` reaches
     /// `WriteFact::Signed` bearing the exact id of the frozen B-authored
     /// body -- which commits cryptographically to author and content --
-    /// and [`Engine::active_account`] still answers A afterward: naming B
+    /// and the session still answers A afterward: naming B
     /// consented to ONE write, it never re-rooted the engine.
     #[test]
-    fn an_explicit_identity_publishes_as_a_secondary_without_moving_the_active_account() {
+    fn an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_account() {
         let engine = Engine::new(EngineConfig::default()).expect("engine must build");
         let keys_a = Keys::generate();
         let keys_b = Keys::generate();
         let pk_a = engine
-            .add_account(&keys_a.secret_key().to_secret_hex())
+            .install_test_local_provider(&keys_a.secret_key().to_secret_hex())
             .expect("account A must register")
             .public_key();
         let pk_b = engine
-            .add_account(&keys_b.secret_key().to_secret_hex())
+            .install_test_local_provider(&keys_b.secret_key().to_secret_hex())
             .expect("account B must register")
             .public_key();
         engine
-            .set_active_account(Some(pk_a))
+            .select_test_account(Some(pk_a))
             .expect("account A must activate");
 
         let draft = nostr::UnsignedEvent::new(
@@ -2949,9 +3273,9 @@ mod tests {
         }
         assert!(signed_as_b, "override publish must reach Signed as B");
         assert_eq!(
-            engine.active_account().expect("engine is open"),
+            engine.test_current_public_key().expect("engine is open"),
             Some(pk_a),
-            "the per-write override must never move the active account"
+            "the per-write override must never move the current account"
         );
 
         engine.shutdown();
@@ -2991,12 +3315,12 @@ mod tests {
             Some(EngineError::EngineClosed)
         );
         assert_eq!(
-            engine.set_active_account(None).err(),
+            engine.select_test_account(None).err(),
             Some(EngineError::EngineClosed)
         );
         assert_eq!(
-            engine.add_account(&Keys::generate().secret_key().to_secret_hex()),
-            Err(EngineError::EngineClosed)
+            engine.install_test_local_provider(&Keys::generate().secret_key().to_secret_hex()),
+            Err(crate::SessionMutationError::EngineClosed)
         );
         let publish_result = engine.publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
@@ -3025,7 +3349,7 @@ mod tests {
         joined.join().expect("concurrent shutdown must not panic");
 
         assert_eq!(
-            engine.set_active_account(None).err(),
+            engine.select_test_account(None).err(),
             Some(EngineError::EngineClosed)
         );
     }

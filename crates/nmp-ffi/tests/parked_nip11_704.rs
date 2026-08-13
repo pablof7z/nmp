@@ -51,10 +51,13 @@ async fn parked_nip11_waits_hold_no_os_thread_and_cancel_immediately() {
         listeners.push(listener);
     }
 
-    let engine = NmpEngine::new(NmpEngineConfig {
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..NmpEngineConfig::default()
-    })
+    let engine = NmpEngine::new(
+        NmpEngineConfig {
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+            ..NmpEngineConfig::default()
+        },
+        None,
+    )
     .expect("in-memory engine must build");
 
     let baseline = nmp::nmp_threads_spawned();

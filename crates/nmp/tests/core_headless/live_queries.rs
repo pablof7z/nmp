@@ -1376,7 +1376,7 @@ fn per_source_evidence_reflects_each_relays_own_proof_independently() {
 /// #12's own falsifier, reshaped for the deleted-collapse model: a
 /// `Derived` query ($myFollows shape) whose OUTER atom (kind:1 by the
 /// followed author) has a proven coverage row, while the INNER atom (kind:3
-/// -- the follow list itself, by the active identity) has none. The old
+/// -- the follow list itself, by the current identity) has none. The old
 /// `query_coverage` consulted `root_atoms` ONLY, so the inner atom was
 /// invisible to it and the query could report itself `CompleteUpTo` while
 /// the follow-list expansion was entirely unproven. Under

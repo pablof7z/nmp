@@ -149,7 +149,7 @@ public enum StalledWriteStage: Sendable, Hashable {
     /// No destination could be computed.
     case unroutable
     /// No signer answers for the author this write was FROZEN to -- never
-    /// the mutable active account.
+    /// the mutable current account.
     case unsignable
     /// Destinations exist and none of them is working.
     case undeliverable

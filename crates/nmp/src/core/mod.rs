@@ -516,7 +516,7 @@ impl ReceiptReplayCursor {
 /// **Rule 2 — the instruction cannot resolve.** Nothing in this class is a
 /// fact about the world; each is "you asked for something unanswerable," so
 /// nothing is pinned and nothing may park:
-/// [`Self::NoActiveAccount`], [`Self::SignatureInvalid`],
+/// [`Self::NoCurrentAccount`], [`Self::SignatureInvalid`],
 /// [`Self::IdentityContradictsSignedAuthor`], [`Self::ReservedKind`],
 /// [`Self::EmptyExplicitRoute`], [`Self::AlreadyExpired`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,10 +528,10 @@ pub enum PublishError {
     /// need the disk that just refused, so there is no queue entry to fail
     /// into.
     PersistenceFailed { reason: String },
-    /// [`Identity::Active`](nmp_grammar::Identity::Active) with no account
-    /// active. Nothing is pinned, so nothing may park — and a later login
+    /// [`Identity::Active`](nmp_grammar::Identity::Active) with no current
+    /// account. Nothing is pinned, so nothing may park — and a later login
     /// could sign as the wrong person.
-    NoActiveAccount,
+    NoCurrentAccount,
     /// A caller-supplied [`WritePayload::Signed`](nmp_grammar::WritePayload)
     /// whose signature does not verify. Rare by construction: NMP applies
     /// the signature itself for a builder payload.
@@ -562,9 +562,9 @@ impl std::fmt::Display for PublishError {
             Self::PersistenceFailed { reason } => {
                 write!(f, "the write could not be recorded: {reason}")
             }
-            Self::NoActiveAccount => write!(
+            Self::NoCurrentAccount => write!(
                 f,
-                "publishing as the active account requires an active account"
+                "publishing with the current-account identity requires a current account"
             ),
             Self::SignatureInvalid { reason } => {
                 write!(f, "the supplied signature does not verify: {reason}")
@@ -1033,7 +1033,7 @@ pub struct AuthEpoch {
 
 /// One asynchronous operation inside an [`AuthEpoch`]. Tokens are minted in
 /// monotonic order per exact session and are never inferred from challenge
-/// text, event ids, the active account, or callback arrival order.
+/// text, event ids, the current account, or callback arrival order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuthOpToken {
     pub epoch: AuthEpoch,
@@ -1948,7 +1948,7 @@ struct PendingWrite {
     /// into a snapshot goes stale the moment the snapshot stops being
     /// re-emitted while the instant never does.
     accepted_at: Timestamp,
-    /// Signer identity selected and frozen at acceptance. Later active-
+    /// Signer identity selected and frozen at acceptance. Later current-
     /// account changes cannot redirect this obligation.
     signing_pubkey: PublicKey,
     /// Exact frozen body accepted by the store (sentinel signature). Kept
@@ -2448,11 +2448,11 @@ pub struct EngineCore<S: EventStore> {
     /// loopback/onion host); production threads the operator's opt-in local
     /// allowlist via [`Self::with_relay_admission`].
     admission: RelayAdmissionPolicy,
-    /// Every public key this engine can currently act as: the active account
+    /// Every public key this engine can currently act as: the current account
     /// plus every attached signing capability. This is what "own" means in
     /// provenance-aware admission (#1251), and it is deliberately a SET rather
-    /// than the single active account, because `Identity::Explicit` publishes
-    /// as a held key without making it active.
+    /// than the single current account, because `Identity::Explicit` publishes
+    /// as a held key without making it current.
     ///
     /// The grant it produces is always keyed to the exact author whose list is
     /// being read, so heeding one held key's own relay list can never widen
@@ -3880,7 +3880,7 @@ impl<S: EventStore> EngineCore<S> {
         for id in ids {
             self.reconcile_observation_resolution(
                 id,
-                ResolutionCause::ActiveAccountChanged,
+                ResolutionCause::CurrentAccountChanged,
                 &mut effects,
             );
         }
@@ -3888,7 +3888,7 @@ impl<S: EventStore> EngineCore<S> {
         self.refresh_all_observations(&mut effects);
         self.refresh_all_histories(&mut effects);
         if let Some(pk) = pk {
-            // The runtime moves its active signer pointer before delivering
+            // The runtime moves its current signing provider pointer before delivering
             // this message. Re-arm matching accepted work here as well as
             // on SignerAttached so both ordering cases (activate→attach and
             // attach→activate) converge without polling.

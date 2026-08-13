@@ -8,7 +8,7 @@
 // one is reintroduced.
 //
 // Reading kind:10009 stays the ordinary demand/observation noun
-// (`activeAccountDemand()`, below). Browsing a NIP-29 group still takes an
+// (`currentAccountDemand()`, below). Browsing a NIP-29 group still takes an
 // explicit, caller-supplied relay set -- see `NMPRelayScope.on(_:)`.
 //
 // `SimpleGroupsList` is also the ONE native shape a decoded kind:10009 list
@@ -59,14 +59,14 @@ public struct SimpleGroupsList: Sendable, Hashable {
 }
 
 /// The signed-in account's Simple-groups-list demand (#108): `kinds:
-/// [10009]`, `AuthorOutboxes + Public`. Signed-out (no active account)
+/// [10009]`, `AuthorOutboxes + Public`. Signed-out (no current account)
 /// resolves to zero rows through the ordinary reactive-binding empty-
 /// resolution path -- no special case needed on the caller's side.
 ///
 /// #858 moved this out of NIP29.swift: kind:10009 is NIP-51's kind, so its
 /// demand constructor lives with the rest of NIP-51.
-public func activeAccountDemand() -> NMPDemand {
-    NMPDemand(NMPFFI.activeAccountDemand())
+public func currentAccountDemand() -> NMPDemand {
+    NMPDemand(NMPFFI.currentAccountDemand())
 }
 
 /// Tolerantly parse Simple-groups-shaped public items from an untrusted

@@ -8,7 +8,7 @@
 // SIGNING FLOW: nothing here signs. Build a draft, get it signed, validate:
 //
 //   val draft = blossomUploadAuthorizationDraft(
-//       authorPubkeyHex = activeAccount, blobSha256Hex = hash,
+//       authorPubkeyHex = currentAccount, blobSha256Hex = hash,
 //       createdAt = now, expiration = now + 300u, description = "upload")
 //   // Engine sign-only path (the author is frozen from the ACTIVE
 //   // ACCOUNT, so `authorPubkeyHex` must be that account's pubkey):
@@ -582,7 +582,7 @@ data class BlossomAuthorizationDraft(
     val content: String,
 ) {
     /** The engine sign-only request for this exact draft.
-     * `NMPEngine.signEvent` freezes the author from the ACTIVE ACCOUNT, so
+     * `NMPEngine.signEvent` freezes the author from the CURRENT ACCOUNT, so
      * the draft's `authorPubkeyHex` must be that account's pubkey. */
     val signRequest: NMPUnsignedEvent
         get() = NMPUnsignedEvent(createdAt, kind, tags, content)

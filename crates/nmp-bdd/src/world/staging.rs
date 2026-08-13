@@ -130,7 +130,7 @@ impl NmpWorld {
         self.relay_config_mut(relay).auth_required_writes = true;
     }
 
-    /// Stage the active account's app-owned denial for one named relay.
+    /// Stage the current account's app-owned denial for one named relay.
     ///
     /// The name cannot become a policy request URL until the relay binds, so
     /// registration happens in `spawn_engine` on every fresh construction.
@@ -457,7 +457,7 @@ impl NmpWorld {
                     .add_signer(signer)
                     .expect("local signer has a public key");
             }
-            self.handle().set_active_account(Some(keys.public_key()));
+            self.handle().set_current_account(Some(keys.public_key()));
 
             self.auth_policy_registrations.clear();
             if !self.auth_policy_denials.is_empty() {

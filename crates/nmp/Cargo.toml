@@ -142,6 +142,7 @@ negentropy = { version = "0.5", default-features = false, features = ["std"] }
 hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
+zeroize = "1"
 reqwest.workspace = true
 # #704: the engine owns ONE multi-thread tokio runtime (2 workers) that hosts
 # every adapter task (NIP-11 fetches, signer/AUTH completion awaits, optional
@@ -163,7 +164,7 @@ libc = { version = "0.2", optional = true }
 # `nip51` joins it for #1239: `nip51_headless.rs` proves the kind:10009 demand
 # against a real engine, and it now proves it through `nmp::nip51` -- the same
 # path an app has -- instead of through a second `nmp-nip51` dev edge.
-nmp = { path = ".", features = ["nip29", "nip51", "nip65"] }
+nmp = { path = ".", features = ["nip29", "nip51", "nip65", "test-instrumentation"] }
 nmp-test-support.workspace = true
 cucumber = "0.21"
 # In-process test relay for the runtime (C) integration tests: reconnection

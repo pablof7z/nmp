@@ -20,9 +20,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::auth::{
-    FfiAccountRegistration, FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration,
-};
+use crate::auth::{FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration};
 use crate::convert::{
     cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, diagnostics_snapshot_to_ffi,
     filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_event_id, parse_pubkey,
@@ -34,6 +32,9 @@ use crate::convert::{
 };
 #[cfg(feature = "nip02")]
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
+use crate::session::{
+    FfiPrivateKey, FfiPublicKey, FfiSessionAccount, FfiSessionPayload, FfiSessionSnapshot,
+};
 use crate::types::{
     FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
     FfiFilter, FfiFrame, FfiLiveQuery, FfiPublishQueueEntry, FfiPublishQueueError,
@@ -168,8 +169,7 @@ impl Default for NmpEngineConfig {
 }
 
 /// Destructively reset a closed persistent NMP store. This removes all
-/// canonical engine state at `store_path`, while leaving any separately
-/// configured native account checkpoint untouched. A live engine in this OR
+/// canonical engine state at `store_path`. A live engine in this OR
 /// ANY OTHER process using the same canonical path is refused with
 /// `FfiError::StoreStillOpen` without touching the file. Shut down or drop
 /// that engine first. The operation is idempotent when the store does not
@@ -178,18 +178,6 @@ impl Default for NmpEngineConfig {
 pub fn reset_persistent_store(store_path: String) -> Result<(), FfiError> {
     nmp::Engine::reset_persistent_store(store_path)?;
     Ok(())
-}
-
-/// Generate a fresh local-account secret key via OS RNG (hex-encoded,
-/// `NmpEngine::add_account`-compatible) -- the one keygen-only FFI door #588
-/// asks for. This function touches no engine state, installs no signer, and
-/// persists nothing: a native wrapper composes it with the existing
-/// `add_account` to give a clean-start client its first identity, inheriting
-/// that method's save-with-rollback choreography and checkpoint tracking
-/// wholesale instead of a second, parallel registration pipeline.
-#[uniffi::export]
-pub fn generate_account_secret_key() -> String {
-    nostr::Keys::generate().secret_key().to_secret_hex()
 }
 
 // Keep the native-facing literal pinned to the canonical finite default.
@@ -312,10 +300,17 @@ impl NmpEngine {
     }
 
     #[uniffi::constructor]
-    pub fn new(config: NmpEngineConfig) -> Result<Arc<Self>, FfiError> {
+    pub fn new(
+        config: NmpEngineConfig,
+        session_payload: Option<Arc<FfiSessionPayload>>,
+    ) -> Result<Arc<Self>, FfiError> {
         #[cfg(feature = "nip65")]
         let automatic_routing = AutomaticRoutingAssembly::from_config(&config)?;
-        let engine = Arc::new(nmp::Engine::new(config.into())?);
+        let engine = Arc::new(match session_payload {
+            Some(payload) => nmp::Engine::new_with_session(config.into(), payload.payload())
+                .map_err(FfiError::from)?,
+            None => nmp::Engine::new(config.into())?,
+        });
         Ok(Arc::new(Self {
             engine,
             #[cfg(feature = "nip65")]
@@ -323,26 +318,55 @@ impl NmpEngine {
         }))
     }
 
-    /// Register an account from its secret key (hex or bech32 `nsec`). The
-    /// key crosses this boundary exactly once, as a value, and lives in the
-    /// engine from this point on (VISION ledger #12; M4 plan §5) -- this
-    /// method does NOT make the account active, call
-    /// [`Self::set_active_account`] for that. Returns the opaque exact
-    /// registration required for stale-safe explicit removal.
-    pub fn add_account(&self, secret_key: String) -> Result<Arc<FfiAccountRegistration>, FfiError> {
-        let registration = self.engine.add_account(&secret_key)?;
-        Ok(Arc::new(FfiAccountRegistration {
-            inner: registration,
-        }))
+    pub fn session(&self) -> Result<FfiSessionSnapshot, FfiError> {
+        Ok(FfiSessionSnapshot::from(self.engine.session()?))
     }
 
-    /// Remove only the account installation proven by `registration`.
-    /// Repeated or stale cleanup returns `false`.
-    pub fn remove_account(
+    pub fn export_session(&self) -> Result<Arc<FfiSessionPayload>, FfiError> {
+        Ok(FfiSessionPayload::from_payload(
+            self.engine.export_session()?,
+        ))
+    }
+
+    pub fn add_private_key_account(
         &self,
-        registration: Arc<FfiAccountRegistration>,
-    ) -> Result<bool, FfiError> {
-        Ok(self.engine.remove_account(&registration.inner)?)
+        private_key: Arc<FfiPrivateKey>,
+        make_current: bool,
+    ) -> Result<Arc<FfiSessionAccount>, FfiError> {
+        // The FFI key and the engine's local provider are each canonical
+        // zeroizing owners. The unavoidable duplicate lasts only until the
+        // caller releases this transport key; neither owner exposes bytes.
+        self.engine
+            .add_private_key_account(private_key.secret_bytes(), make_current)
+            .map(FfiSessionAccount::from_account)
+            .map_err(FfiError::from)
+    }
+
+    pub fn add_public_key_account(
+        &self,
+        public_key: Arc<FfiPublicKey>,
+        make_current: bool,
+    ) -> Result<Arc<FfiSessionAccount>, FfiError> {
+        self.engine
+            .add_public_key_account(public_key.inner, make_current)
+            .map(FfiSessionAccount::from_account)
+            .map_err(FfiError::from)
+    }
+
+    pub fn make_current_account(&self, account: Arc<FfiSessionAccount>) -> Result<(), FfiError> {
+        self.engine
+            .make_current_account(account.inner.public_key)
+            .map_err(FfiError::from)
+    }
+
+    pub fn remove_account(&self, account: Arc<FfiSessionAccount>) -> Result<bool, FfiError> {
+        self.engine
+            .remove_account(&account.inner)
+            .map_err(FfiError::from)
+    }
+
+    pub fn clear_session(&self) -> Result<(), FfiError> {
+        self.engine.clear_session().map_err(FfiError::from)
     }
 
     /// Install a native-owned authorization policy for one exact account.
@@ -369,27 +393,7 @@ impl NmpEngine {
         Ok(self.engine.remove_auth_policy(&registration.inner)?)
     }
 
-    /// Re-root every reactive query AND the active signing capability
-    /// together onto `pubkey` (`None` -> logged-out / read-only). `pubkey`
-    /// need not have been added via [`Self::add_account`] -- read-only
-    /// browsing of an account this app holds no key for is legal; a write
-    /// published while active in that state parks on
-    /// `FfiSigningState::AwaitingSigner` until a signer for THAT key
-    /// attaches, never a panic (M4 plan §5).
-    pub fn set_active_account(&self, pubkey: Option<String>) -> Result<(), FfiError> {
-        let pk = pubkey.as_deref().map(parse_pubkey).transpose()?;
-        self.engine.set_active_account(pk)?;
-        Ok(())
-    }
-
-    /// Return the account currently rooting reactive identity and unsigned
-    /// writes. The secret and signer capability remain engine-owned; native
-    /// callers receive only the public key needed for presentation.
-    pub fn active_account(&self) -> Result<Option<String>, FfiError> {
-        Ok(self.engine.active_account()?.map(|pubkey| pubkey.to_hex()))
-    }
-
-    /// Sign one exact event through the active account without accepting a
+    /// Sign one exact event through the current account without accepting a
     /// write, persisting a row/receipt, planning relays, or publishing. The
     /// returned [`NmpSignEventHandle`] delivers the outcome once through its
     /// `async fn signed()`; [`NmpSignEventHandle::cancel`] cancels only this
@@ -649,7 +653,7 @@ impl NmpEngine {
 #[cfg(feature = "nip02")]
 #[uniffi::export]
 impl NmpEngine {
-    /// Observe the active account's relationship to `target` through the
+    /// Observe the current account's relationship to `target` through the
     /// NMP-owned NIP-02 resource (#680). Awaiting [`NmpFollowStream::next`]
     /// costs no NMP-owned OS thread: the relationship snapshot is folded inline
     /// over the engine's waker-driven async row mailbox. Contact-list
@@ -1472,18 +1476,27 @@ mod tests {
     use super::*;
     use crate::types::{
         FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiIdentity,
-        FfiLiveQuery, FfiNotSentReason, FfiRowDelta, FfiSignEventFailure, FfiSignEventRequest,
-        FfiSigningState, FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWriteFact,
-        FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
+        FfiLiveQuery, FfiNotSentReason, FfiRowDelta, FfiSignEventRequest, FfiSigningState,
+        FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWriteFact, FfiWriteOutcome,
+        FfiWritePayload, FfiWriteRouting,
     };
     use redb::ReadableTable;
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
     use std::time::Duration;
 
-    fn signer_public_key(public_key: nostr::PublicKey) -> nmp::SignerPublicKey {
-        nmp::SignerPublicKey::new(public_key.to_bytes())
+    #[cfg(any(feature = "nip02", feature = "nip65"))]
+    fn ffi_private_key(keys: &nostr::Keys) -> Arc<FfiPrivateKey> {
+        FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec()).unwrap()
+    }
+
+    fn ffi_private_key_byte(byte: u8) -> Arc<FfiPrivateKey> {
+        let mut bytes = vec![0; 32];
+        bytes[31] = byte;
+        FfiPrivateKey::from_bytes(bytes).unwrap()
+    }
+
+    fn ffi_public_key(public_key: nostr::PublicKey) -> Arc<FfiPublicKey> {
+        FfiPublicKey::from_bytes(public_key.to_bytes().to_vec()).unwrap()
     }
 
     #[tokio::test]
@@ -1524,37 +1537,6 @@ mod tests {
         );
         assert!(result.relays.is_empty());
         engine.shutdown();
-    }
-
-    fn signer_unsigned_to_nostr(unsigned: nmp::SignerUnsignedEvent) -> nostr::UnsignedEvent {
-        let (public_key, created_at, kind, tags, content) = unsigned.into_parts();
-        nostr::UnsignedEvent::new(
-            nostr::PublicKey::from_slice(public_key.as_bytes()).unwrap(),
-            nostr::Timestamp::from(created_at),
-            nostr::Kind::from(kind),
-            tags.into_iter()
-                .map(nostr::Tag::parse)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap(),
-            content,
-        )
-    }
-
-    fn nostr_signed_to_signer(event: nostr::Event) -> nmp::SignerSignedEvent {
-        nmp::SignerSignedEvent::new(
-            event.id.to_bytes(),
-            signer_public_key(event.pubkey),
-            event.created_at.as_secs(),
-            event.kind.as_u16(),
-            event
-                .tags
-                .to_vec()
-                .into_iter()
-                .map(nostr::Tag::to_vec)
-                .collect(),
-            event.content,
-            event.sig.serialize(),
-        )
     }
 
     // #680 replaced push/callback observers with pull-based async stream handles:
@@ -1635,12 +1617,15 @@ mod tests {
     #[test]
     #[cfg(feature = "nip65")]
     fn selected_outbox_routing_refuses_an_empty_runtime_indexer_set() {
-        let result = NmpEngine::new(NmpEngineConfig {
-            outbox_routing: Some(FfiOutboxRoutingConfig {
-                indexers: Vec::new(),
-            }),
-            ..NmpEngineConfig::default()
-        });
+        let result = NmpEngine::new(
+            NmpEngineConfig {
+                outbox_routing: Some(FfiOutboxRoutingConfig {
+                    indexers: Vec::new(),
+                }),
+                ..NmpEngineConfig::default()
+            },
+            None,
+        );
         assert!(matches!(result, Err(FfiError::OutboxRoutingIndexersEmpty)));
     }
 
@@ -1656,14 +1641,15 @@ mod tests {
         let projected = nmp::EngineConfig::from(config.clone());
         assert_eq!(projected.indexer_relays, ["wss://indexer.example"]);
 
-        let engine = NmpEngine::new(config).expect("a nonempty app-owned indexer set is valid");
+        let engine =
+            NmpEngine::new(config, None).expect("a nonempty app-owned indexer set is valid");
         engine.shutdown();
     }
 
     #[test]
     #[cfg(feature = "nip65")]
     fn providerless_auto_refuses_before_acceptance_and_leaves_no_residue() {
-        let engine = NmpEngine::new(NmpEngineConfig::default())
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None)
             .expect("an explicit-routing-only engine is valid");
         let result = engine.publish(FfiWriteIntent {
             payload: FfiWritePayload::Event {
@@ -1687,14 +1673,11 @@ mod tests {
     #[cfg(feature = "nip02")]
     fn providerless_follow_refuses_before_the_action_starts_or_leaves_residue() {
         let author = nostr::Keys::generate();
-        let engine = NmpEngine::new(NmpEngineConfig::default())
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None)
             .expect("an explicit-routing-only engine is valid");
-        let registration = engine
-            .add_account(author.secret_key().to_secret_hex())
+        let _account = engine
+            .add_private_key_account(ffi_private_key(&author), true)
             .expect("the native account registers");
-        engine
-            .set_active_account(Some(registration.public_key()))
-            .expect("the native account activates");
         let result = engine.follow(nostr::Keys::generate().public_key().to_hex());
         assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
         assert!(engine.publish_queue(None, u8::MAX).unwrap().is_empty());
@@ -1713,20 +1696,20 @@ mod tests {
             .seed_relay_list(&author, &[outbox.url.to_string()], &[], 1_700_000_000)
             .await;
 
-        let engine = NmpEngine::new(NmpEngineConfig {
-            outbox_routing: Some(FfiOutboxRoutingConfig {
-                indexers: vec![indexer.url.to_string()],
-            }),
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
-            ..NmpEngineConfig::default()
-        })
+        let engine = NmpEngine::new(
+            NmpEngineConfig {
+                outbox_routing: Some(FfiOutboxRoutingConfig {
+                    indexers: vec![indexer.url.to_string()],
+                }),
+                allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
         .expect("the selected native NIP-65 assembly constructs");
-        let registration = engine
-            .add_account(author.secret_key().to_secret_hex())
+        let _account = engine
+            .add_private_key_account(ffi_private_key(&author), true)
             .expect("the native account registers");
-        engine
-            .set_active_account(Some(registration.public_key()))
-            .expect("the native account activates");
 
         let receipt = engine
             .publish(FfiWriteIntent {
@@ -1773,28 +1756,37 @@ mod tests {
     }
 
     #[test]
-    fn ffi_account_registration_is_explicit_repeatable_and_stale_safe() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_auth_capabilities: 1,
-            ..NmpEngineConfig::default()
-        })
+    fn ffi_account_identity_is_its_public_key() {
+        let engine = NmpEngine::new(
+            NmpEngineConfig {
+                max_auth_capabilities: 1,
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
         .unwrap();
-        let secret = format!("{:064x}", 41u8);
-        let first = engine.add_account(secret.clone()).unwrap();
-        let replacement = engine.add_account(secret).unwrap();
+        let first = engine
+            .add_private_key_account(ffi_private_key_byte(41), false)
+            .unwrap();
+        let replacement = engine
+            .add_private_key_account(ffi_private_key_byte(41), false)
+            .unwrap();
 
-        assert_eq!(first.public_key(), replacement.public_key());
-        assert!(!engine.remove_account(Arc::clone(&first)).unwrap());
-        assert!(engine.remove_account(Arc::clone(&replacement)).unwrap());
+        assert_eq!(first.public_key().bytes(), replacement.public_key().bytes());
+        assert!(engine.remove_account(Arc::clone(&first)).unwrap());
+        assert!(!engine.remove_account(Arc::clone(&replacement)).unwrap());
         assert!(!engine.remove_account(replacement).unwrap());
     }
 
     #[test]
     fn ffi_auth_policy_registration_is_explicit_repeatable_and_stale_safe() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_auth_capabilities: 1,
-            ..NmpEngineConfig::default()
-        })
+        let engine = NmpEngine::new(
+            NmpEngineConfig {
+                max_auth_capabilities: 1,
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
         .unwrap();
         let public_key = nostr::Keys::generate().public_key().to_hex();
         let first = engine
@@ -1812,13 +1804,18 @@ mod tests {
 
     #[test]
     fn ffi_zero_auth_capacity_returns_typed_registry_refusal() {
-        let engine = NmpEngine::new(NmpEngineConfig {
-            max_auth_capabilities: 0,
-            ..NmpEngineConfig::default()
-        })
+        let engine = NmpEngine::new(
+            NmpEngineConfig {
+                max_auth_capabilities: 0,
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
         .unwrap();
         assert_eq!(
-            engine.add_account(format!("{:064x}", 42u8)).unwrap_err(),
+            engine
+                .add_private_key_account(ffi_private_key_byte(42), false)
+                .unwrap_err(),
             FfiError::AuthCapabilityRegistryFull { limit: 0 }
         );
     }
@@ -1899,10 +1896,13 @@ mod tests {
             }
         }
 
-        let engine = NmpEngine::new(NmpEngineConfig {
-            store_path: Some(path.to_string_lossy().into_owned()),
-            ..NmpEngineConfig::default()
-        })
+        let engine = NmpEngine::new(
+            NmpEngineConfig {
+                store_path: Some(path.to_string_lossy().into_owned()),
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
         .unwrap();
         let handle = engine
             .observe_query(
@@ -1952,7 +1952,7 @@ mod tests {
     /// BEFORE any observation is opened.
     #[test]
     fn ffi_window_validation_is_typed() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
 
         let zero = engine
             .observe(
@@ -2000,7 +2000,7 @@ mod tests {
     /// `None`), and a post-shutdown growth request fails closed, typed.
     #[tokio::test]
     async fn ffi_shutdown_closes_windowed_observer_and_fails_request_rows_closed() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         let handle = engine
             .observe(
                 FfiFilter {
@@ -2046,7 +2046,7 @@ mod tests {
             store_path: Some(path.to_string_lossy().into_owned()),
             ..NmpEngineConfig::default()
         };
-        let engine = NmpEngine::new(config.clone()).expect("persistent engine must build");
+        let engine = NmpEngine::new(config.clone(), None).expect("persistent engine must build");
         let before = std::fs::read(&path).expect("live FFI store must be readable");
         let refusal = reset_persistent_store(path.to_string_lossy().into_owned())
             .expect_err("live FFI store must refuse reset");
@@ -2065,7 +2065,7 @@ mod tests {
             before,
             "refused FFI reset must not touch the store file"
         );
-        let second_open = NmpEngine::new(config.clone())
+        let second_open = NmpEngine::new(config.clone(), None)
             .err()
             .expect("a second FFI engine owner must be refused");
         assert_eq!(
@@ -2087,7 +2087,7 @@ mod tests {
         reset_persistent_store(path.to_string_lossy().into_owned())
             .expect("missing FFI store is already reset");
 
-        let reopened = NmpEngine::new(config).expect("reset store must reopen fresh");
+        let reopened = NmpEngine::new(config, None).expect("reset store must reopen fresh");
         reopened.shutdown();
     }
 
@@ -2115,10 +2115,13 @@ mod tests {
             }
             write.commit().expect("epoch fixture must commit");
         }
-        let refusal = NmpEngine::new(NmpEngineConfig {
-            store_path: Some(superseded.to_string_lossy().into_owned()),
-            ..NmpEngineConfig::default()
-        })
+        let refusal = NmpEngine::new(
+            NmpEngineConfig {
+                store_path: Some(superseded.to_string_lossy().into_owned()),
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
         .err()
         .expect("a superseded-epoch store must refuse FFI construction");
         match &refusal {
@@ -2151,10 +2154,13 @@ mod tests {
 
         let damaged = fixture.path().join("damaged.redb");
         std::fs::write(&damaged, b"not a redb database").expect("damaged fixture must write");
-        let generic = NmpEngine::new(NmpEngineConfig {
-            store_path: Some(damaged.to_string_lossy().into_owned()),
-            ..NmpEngineConfig::default()
-        })
+        let generic = NmpEngine::new(
+            NmpEngineConfig {
+                store_path: Some(damaged.to_string_lossy().into_owned()),
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
         .err()
         .expect("damaged bytes must refuse FFI construction");
         assert!(
@@ -2203,80 +2209,6 @@ mod tests {
     // the async `NmpSignEventHandle::signed()` surface is exercised by the
     // sign-event handle tests instead.
 
-    struct MismatchedFfiSigner {
-        reported: nostr::PublicKey,
-        actual: nostr::Keys,
-    }
-
-    impl nmp::SigningCapability for MismatchedFfiSigner {
-        fn public_key(&self) -> Option<nmp::SignerPublicKey> {
-            Some(signer_public_key(self.reported))
-        }
-
-        fn sign(
-            &self,
-            unsigned: nmp::SignerUnsignedEvent,
-        ) -> nmp::SignerOp<nmp::SignerSignedEvent> {
-            let unsigned = signer_unsigned_to_nostr(unsigned);
-            let substituted = nostr::UnsignedEvent::new(
-                self.actual.public_key(),
-                unsigned.created_at,
-                unsigned.kind,
-                unsigned.tags,
-                unsigned.content,
-            );
-            nmp::SignerOp::ok(nostr_signed_to_signer(
-                substituted.sign_with_keys(&self.actual).unwrap(),
-            ))
-        }
-    }
-
-    struct PendingFfiSigner {
-        public_key: nostr::PublicKey,
-        cancellations: Arc<AtomicUsize>,
-        completion: Mutex<Option<nmp::PendingSignerSender<nmp::SignerSignedEvent>>>,
-    }
-
-    impl nmp::SigningCapability for PendingFfiSigner {
-        fn public_key(&self) -> Option<nmp::SignerPublicKey> {
-            Some(signer_public_key(self.public_key))
-        }
-
-        fn sign(
-            &self,
-            _unsigned: nmp::SignerUnsignedEvent,
-        ) -> nmp::SignerOp<nmp::SignerSignedEvent> {
-            let cancellations = Arc::clone(&self.cancellations);
-            let (sender, operation) = nmp::SignerOp::pending_channel_with_cancel(move || {
-                cancellations.fetch_add(1, Ordering::SeqCst);
-            });
-            *self
-                .completion
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = Some(sender);
-            operation
-        }
-    }
-
-    fn pending_ffi_sign_engine() -> (Arc<NmpEngine>, Arc<AtomicUsize>) {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let keys = nostr::Keys::generate();
-        let cancellations = Arc::new(AtomicUsize::new(0));
-        engine
-            .engine
-            .add_signer(PendingFfiSigner {
-                public_key: keys.public_key(),
-                cancellations: Arc::clone(&cancellations),
-                completion: Mutex::new(None),
-            })
-            .unwrap();
-        engine
-            .engine
-            .set_active_account(Some(keys.public_key()))
-            .unwrap();
-        (engine, cancellations)
-    }
-
     fn pending_ffi_request() -> FfiSignEventRequest {
         FfiSignEventRequest {
             created_at: 7,
@@ -2288,13 +2220,10 @@ mod tests {
 
     #[tokio::test]
     async fn ffi_sign_event_returns_the_exact_verified_event_without_publish_api_use() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         let author = engine
-            .add_account(format!("{:064x}", 17u8))
+            .add_private_key_account(ffi_private_key_byte(17), true)
             .expect("account must register");
-        engine
-            .set_active_account(Some(author.public_key()))
-            .expect("account must activate");
         let request = FfiSignEventRequest {
             created_at: 1_723_456_789,
             kind: 27_272,
@@ -2306,7 +2235,7 @@ mod tests {
             .expect("sign operation must start");
 
         let signed = handle.signed().await.expect("sign operation must succeed");
-        assert_eq!(signed.pubkey, author.public_key());
+        assert_eq!(signed.pubkey, author.inner.public_key.to_hex());
         assert_eq!(signed.created_at, request.created_at);
         assert_eq!(signed.kind, request.kind);
         assert_eq!(signed.tags, request.tags);
@@ -2317,11 +2246,11 @@ mod tests {
     }
 
     #[test]
-    fn ffi_sign_event_missing_active_signer_is_typed() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+    fn ffi_sign_event_missing_current_signing_provider_is_typed() {
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         let keys = nostr::Keys::generate();
         engine
-            .set_active_account(Some(keys.public_key().to_hex()))
+            .add_public_key_account(ffi_public_key(keys.public_key()), true)
             .unwrap();
         let result = engine.sign_event(FfiSignEventRequest {
             created_at: 1,
@@ -2331,18 +2260,17 @@ mod tests {
         });
         assert_eq!(
             result.map(|_| ()).unwrap_err(),
-            FfiError::NoActiveSigner,
-            "missing signer must refuse synchronously"
+            FfiError::NoCurrentSigningProvider,
+            "missing current signing provider must refuse synchronously"
         );
         engine.shutdown();
     }
 
     #[test]
     fn ffi_sign_event_refuses_malformed_tags_before_admission() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let author = engine.add_account(format!("{:064x}", 31u8)).unwrap();
-        engine
-            .set_active_account(Some(author.public_key()))
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
+        let _author = engine
+            .add_private_key_account(ffi_private_key_byte(31), true)
             .unwrap();
 
         let result = engine.sign_event(FfiSignEventRequest {
@@ -2365,7 +2293,7 @@ mod tests {
 
     #[test]
     fn ffi_sign_event_after_engine_close_is_typed() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         engine.shutdown();
         let result = engine.sign_event(pending_ffi_request());
         assert_eq!(
@@ -2375,97 +2303,30 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn ffi_sign_event_reports_malicious_output_without_fabricating_success() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let reported = nostr::Keys::generate().public_key();
-        engine
-            .engine
-            .add_signer(MismatchedFfiSigner {
-                reported,
-                actual: nostr::Keys::generate(),
-            })
-            .unwrap();
-        engine.engine.set_active_account(Some(reported)).unwrap();
-        let handle = engine
-            .sign_event(pending_ffi_request())
-            .expect("operation must start");
-        assert!(matches!(
-            handle.signed().await.unwrap_err(),
-            FfiSignEventFailure::InvalidSignerOutput { .. }
-        ));
-        // One-shot: the single result was already delivered to the first await.
-        assert!(matches!(
-            handle.signed().await.unwrap_err(),
-            FfiSignEventFailure::AlreadyConsumed
-        ));
-        engine.shutdown();
-    }
-
     /// The pull-based replacement for the old callback-reentrancy proof: the
     /// task that awaits `signed()` runs on its own executor (never the engine
     /// reducer thread), so it can freely re-enter engine verbs and drive
     /// `shutdown()` to completion without deadlock.
     #[tokio::test]
     async fn ffi_sign_event_completion_consumer_can_reenter_verbs_and_shutdown() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let author = engine.add_account(format!("{:064x}", 32u8)).unwrap();
-        engine
-            .set_active_account(Some(author.public_key()))
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
+        let author = engine
+            .add_private_key_account(ffi_private_key_byte(32), true)
             .unwrap();
         let handle = engine
             .sign_event(pending_ffi_request())
             .expect("operation must start");
 
         let signed = handle.signed().await.expect("local signer must complete");
-        assert_eq!(signed.pubkey, author.public_key());
+        assert_eq!(signed.pubkey, author.inner.public_key.to_hex());
         // Re-enter engine verbs from the awaiting consumer.
-        let active = engine
-            .active_account()
-            .expect("callback consumer can call an engine verb")
-            .expect("fixture has an active account");
-        assert_eq!(active, author.public_key());
+        let active = engine.session().expect("consumer can call an engine verb");
+        assert_eq!(
+            active.current_public_key.unwrap().bytes(),
+            author.public_key().bytes()
+        );
         engine.shutdown();
-        assert!(matches!(
-            engine.active_account(),
-            Err(FfiError::EngineClosed)
-        ));
-    }
-
-    #[tokio::test]
-    async fn ffi_sign_event_caller_cancel_completes_once() {
-        let (engine, cancellations) = pending_ffi_sign_engine();
-        let handle = engine
-            .sign_event(pending_ffi_request())
-            .expect("operation must start");
-        handle.cancel();
-        assert!(matches!(
-            handle.signed().await.unwrap_err(),
-            FfiSignEventFailure::Cancelled
-        ));
-        // One-shot: a second await sees the drained result.
-        assert!(matches!(
-            handle.signed().await.unwrap_err(),
-            FfiSignEventFailure::AlreadyConsumed
-        ));
-        // The cancel hook runs inside `recv_or_cancel` before the completion
-        // resolves, so it has fired exactly once by the time `signed()` returns.
-        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
-        engine.shutdown();
-    }
-
-    #[tokio::test]
-    async fn ffi_sign_event_shutdown_completes_once() {
-        let (engine, cancellations) = pending_ffi_sign_engine();
-        let handle = engine
-            .sign_event(pending_ffi_request())
-            .expect("operation must start");
-        engine.shutdown();
-        assert!(matches!(
-            handle.signed().await.unwrap_err(),
-            FfiSignEventFailure::Cancelled
-        ));
-        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert!(matches!(engine.session(), Err(FfiError::EngineClosed)));
     }
 
     /// #52's headline falsifier through the FFI boundary, re-expressed for
@@ -2475,7 +2336,7 @@ mod tests {
     /// was never taken into custody, which is what "fails closed" now means.
     #[tokio::test]
     async fn ffi_tampered_signed_publish_is_refused_by_publish_itself() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
 
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9999), "original")
@@ -2528,12 +2389,12 @@ mod tests {
     /// `AwaitingSigner` the stream stays open (a timeout, never `None`).
     #[tokio::test]
     async fn ffi_explicit_identity_for_unregistered_pubkey_parks_awaiting_capability() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         let active = nostr::Keys::generate();
         let overridden = nostr::Keys::generate();
         engine
-            .set_active_account(Some(active.public_key().to_hex()))
-            .expect("active account must activate");
+            .add_public_key_account(ffi_public_key(active.public_key()), true)
+            .expect("current account must activate");
 
         let intent = FfiWriteIntent {
             payload: FfiWritePayload::Event {
@@ -2570,7 +2431,7 @@ mod tests {
                     pubkey: overridden.public_key().to_hex()
                 }
             }),
-            "the parked pubkey must be the frozen override, never the active account"
+            "the parked pubkey must be the frozen override, never the current account"
         );
         assert!(
             tokio::time::timeout(Duration::from_secs(1), receipt.next())
@@ -2585,10 +2446,10 @@ mod tests {
 
     #[tokio::test]
     async fn ffi_cancel_returns_and_observes_the_same_typed_durable_fact() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         let keys = nostr::Keys::generate();
         engine
-            .set_active_account(Some(keys.public_key().to_hex()))
+            .add_public_key_account(ffi_public_key(keys.public_key()), true)
             .unwrap();
         let intent = FfiWriteIntent {
             payload: FfiWritePayload::Event {
@@ -2644,40 +2505,45 @@ mod tests {
     }
 
     #[test]
-    fn active_account_projects_the_rust_authority_and_closed_state() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
-        let pubkey = nostr::Keys::generate().public_key().to_hex();
+    fn session_projects_the_rust_current_account_and_closed_state() {
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
+        let pubkey = nostr::Keys::generate().public_key();
 
-        assert_eq!(
-            engine.active_account().expect("engine is open"),
-            None,
+        assert!(
+            engine
+                .session()
+                .expect("engine is open")
+                .current_public_key
+                .is_none(),
             "a new engine must remain read-only"
         );
         engine
-            .set_active_account(Some(pubkey.clone()))
+            .add_public_key_account(ffi_public_key(pubkey), true)
             .expect("account must activate");
         assert_eq!(
-            engine.active_account().expect("engine is open"),
-            Some(pubkey)
+            engine
+                .session()
+                .expect("engine is open")
+                .current_public_key
+                .unwrap()
+                .bytes(),
+            pubkey.to_bytes()
         );
 
         engine.shutdown();
-        assert!(matches!(
-            engine.active_account(),
-            Err(FfiError::EngineClosed)
-        ));
+        assert!(matches!(engine.session(), Err(FfiError::EngineClosed)));
     }
 
-    /// #99 end-to-end reattach: a real durable intent (no signer ever attaches,
+    /// #99 end-to-end reattach: a real durable intent (no signing provider is configured,
     /// so it parks in a retained `Signing { AwaitingSigner }` steady state) is
     /// reattached through a SECOND, independent stream that replays the
     /// identical durable `WriteFact` prefix.
     #[tokio::test]
     async fn ffi_reattach_replays_real_receipt_facts_through_a_fresh_stream() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         let keys = nostr::Keys::generate();
         engine
-            .set_active_account(Some(keys.public_key().to_hex()))
+            .add_public_key_account(ffi_public_key(keys.public_key()), true)
             .expect("account must activate");
 
         let intent = FfiWriteIntent {
@@ -2735,7 +2601,7 @@ mod tests {
     /// #99: an unknown receipt id reattaches to `NotFound` (no stream, no facts).
     #[test]
     fn ffi_reattach_of_unknown_id_is_not_found() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         let outcome = engine
             .reattach_receipt(999_999)
             .expect("reattach call must succeed while the engine is open");
@@ -2752,14 +2618,17 @@ mod tests {
         let path = tmp.path().join("corrupt-receipt.redb");
 
         let receipt_id = {
-            let engine = NmpEngine::new(NmpEngineConfig {
-                store_path: Some(path.to_string_lossy().into_owned()),
-                ..NmpEngineConfig::default()
-            })
+            let engine = NmpEngine::new(
+                NmpEngineConfig {
+                    store_path: Some(path.to_string_lossy().into_owned()),
+                    ..NmpEngineConfig::default()
+                },
+                None,
+            )
             .expect("engine must build");
             let keys = nostr::Keys::generate();
             engine
-                .set_active_account(Some(keys.public_key().to_hex()))
+                .add_public_key_account(ffi_public_key(keys.public_key()), true)
                 .expect("account must activate");
             let intent = FfiWriteIntent {
                 payload: FfiWritePayload::Event {
@@ -2817,10 +2686,13 @@ mod tests {
         tx.commit().expect("redb: commit corruption");
         drop(db);
 
-        let engine = NmpEngine::new(NmpEngineConfig {
-            store_path: Some(path.to_string_lossy().into_owned()),
-            ..NmpEngineConfig::default()
-        })
+        let engine = NmpEngine::new(
+            NmpEngineConfig {
+                store_path: Some(path.to_string_lossy().into_owned()),
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
         .expect("engine must reopen over the corrupted store");
         let outcome = engine
             .reattach_receipt(receipt_id)
@@ -2839,7 +2711,7 @@ mod tests {
     /// a hang, never a post-cancel frame.
     #[tokio::test]
     async fn ffi_repeated_cancel_across_arc_owners_and_drop_yields_terminal_none() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
 
         let handle = engine
             .observe(
@@ -2880,11 +2752,10 @@ mod tests {
     /// intermediates), then cancellation closes it once.
     #[tokio::test]
     async fn ffi_slow_consumer_receives_one_exact_rebased_frame_then_closes() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
         let keys = nostr::Keys::generate();
         engine
-            .engine
-            .set_active_account(Some(keys.public_key()))
+            .add_public_key_account(ffi_public_key(keys.public_key()), true)
             .expect("engine must accept a read-only active identity");
 
         let kind = nostr::Kind::Custom(44_646);
@@ -2986,11 +2857,11 @@ mod tests {
     /// real whole-write terminal: an explicit cancellation.
     #[tokio::test]
     async fn ffi_receipt_stream_ends_with_none_when_sender_dropped() {
-        let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine must build");
+        let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
 
         let keys = nostr::Keys::generate();
         engine
-            .set_active_account(Some(keys.public_key().to_hex()))
+            .add_public_key_account(ffi_public_key(keys.public_key()), true)
             .expect("account must activate");
         let intent = FfiWriteIntent {
             payload: FfiWritePayload::Event {

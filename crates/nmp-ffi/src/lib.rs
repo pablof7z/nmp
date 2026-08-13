@@ -76,6 +76,7 @@ pub mod nip22;
 pub mod nip29;
 #[cfg(feature = "nip51")]
 pub mod nip51;
+pub mod session;
 // #1243: the one tagging door at the native boundary -- reply, chat reply and
 // repost, each returning the `FfiEventBuilder` the publish door already takes.
 pub mod tagging;

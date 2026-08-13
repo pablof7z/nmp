@@ -47,8 +47,7 @@ class DiagnosticsConcurrencyTest {
         runBlocking<Unit> {
             val engine = NMPEngine(NMPConfig())
             try {
-                val registration = engine.addAccount(TEST_SECRET_KEY)
-                engine.setActiveAccount(registration.publicKey)
+                engine.session.add(TEST_SECRET_KEY.testPrivateKey(), makeCurrent = true)
                 val demand =
                     NMPDemand(
                         selection = NMPFilter(kinds = listOf(8_811u)),
@@ -113,8 +112,7 @@ class DiagnosticsConcurrencyTest {
         runBlocking<Unit> {
             val engine = NMPEngine(NMPConfig())
             try {
-                val registration = engine.addAccount(TEST_SECRET_KEY)
-                engine.setActiveAccount(registration.publicKey)
+                engine.session.add(TEST_SECRET_KEY.testPrivateKey(), makeCurrent = true)
 
                 val frameCount = AtomicInteger(0)
                 val firstBatch = CompletableDeferred<Unit>()
@@ -169,8 +167,7 @@ class DiagnosticsConcurrencyTest {
         runBlocking<Unit> {
             val engine = NMPEngine(NMPConfig())
             try {
-                val registration = engine.addAccount(TEST_SECRET_KEY)
-                engine.setActiveAccount(registration.publicKey)
+                engine.session.add(TEST_SECRET_KEY.testPrivateKey(), makeCurrent = true)
 
                 // ONE Flow value, collected twice concurrently.
                 val flow = engine.observe(NMPFilter(kinds = listOf(8_821u)))

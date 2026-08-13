@@ -65,6 +65,8 @@ nostr.workspace = true
 # values -- exactly what #851 closed for `nmp-nip22`.
 nmp = { workspace = true }
 uniffi = { workspace = true, features = ["cli"] }
+zeroize = "1"
+k256 = { version = "0.13.4", default-features = false }
 # The ONE family that cannot come through the facade: `nmp-nip02` depends on
 # `nmp` (a `protocol-service` in `scripts/dependency-direction-policy.json`,
 # above the facade rather than below it), so `nmp -> nmp-nip02` is a cyclic

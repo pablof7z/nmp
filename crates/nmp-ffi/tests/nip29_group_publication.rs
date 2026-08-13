@@ -32,7 +32,7 @@ fn host(n: u16) -> String {
 }
 
 fn engine() -> Arc<NmpEngine> {
-    NmpEngine::new(NmpEngineConfig::default()).expect("an in-memory engine builds")
+    NmpEngine::new(NmpEngineConfig::default(), None).expect("an in-memory engine builds")
 }
 
 /// #1033's own multi-host falsifier, verified through the FFI objects: a

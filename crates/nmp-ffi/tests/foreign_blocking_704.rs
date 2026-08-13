@@ -230,12 +230,10 @@ async fn blocking_foreign_completion_never_stalls_unrelated_engine_work() {
         .expect("in-memory engine must build"),
     );
 
-    let account = engine
-        .add_account(TEST_SECRET_KEY_HEX)
-        .expect("test key parses");
-    let author = account.public_key();
+    let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();
+    let author = keys.public_key();
     engine
-        .set_active_account(Some(author))
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
         .expect("account activates");
 
     // Baseline AFTER construction: the engine's fixed runtime/transport threads
@@ -349,7 +347,7 @@ async fn blocking_foreign_completion_never_stalls_unrelated_engine_work() {
     let signed = outcome.expect("unrelated local sign succeeds under blocked foreign completions");
     assert_eq!(
         signed.pubkey, author,
-        "the unrelated local sign is attributed to the active account"
+        "the unrelated local sign is attributed to the current account"
     );
 
     // The blocked completions are still parked (none has been released yet): they

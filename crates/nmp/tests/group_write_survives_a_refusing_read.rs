@@ -61,7 +61,6 @@ use nmp::{
     nip29, AccessContext, AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey,
     RelayState, Row, RowDelta, SourceStatus, Subscription, WriteFact,
 };
-use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
@@ -83,20 +82,13 @@ fn bare_engine() -> Engine {
 /// A bare engine, plus one registered signing capability for `keys` -- what
 /// `Identity::Explicit(keys.public_key())` (every `Group::publish` call,
 /// `join_request` included) needs to actually produce a signature. No
-/// indexer and no active account: an `Explicit`-routed group write consults
+/// indexer and no current account: an `Explicit`-routed group write consults
 /// neither.
 fn engine_with_signer_for(keys: &Keys) -> Engine {
     let engine = bare_engine();
-    let registration = engine
-        .add_account(&keys.secret_key().to_secret_hex())
-        .expect("the account registers");
     engine
-        .add_signer(
-            LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
-                .expect("fixture keys are valid secp256k1 scalars"),
-        )
-        .expect("a local signer registers");
-    let _ = registration;
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), false)
+        .expect("the account and local provider register");
     engine
 }
 

@@ -41,7 +41,7 @@ public indirect enum NMPBinding: Sendable, Hashable {
     /// A fixed, literal set of hex values (pubkeys/ids/tag values).
     case literal(Set<String>)
     /// Re-resolves reactively whenever the named identity field changes
-    /// (e.g. the active account).
+    /// (e.g. the current account).
     case reactive(NMPIdentityField)
     /// Projects `inner`'s matching rows through `project` (e.g. "authors of
     /// my kind:3 contact list, projected through their `p` tags" = follows).

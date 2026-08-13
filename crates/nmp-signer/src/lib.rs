@@ -17,7 +17,9 @@ mod capability;
 mod op;
 mod value;
 
-pub use capability::{CryptoCapability, SigningCapability};
+pub use capability::{
+    CryptoCapability, SigningCapability, SigningProviderDescriptor, SigningProviderId,
+};
 pub use op::{
     Canceller, PendingSignerOp, PendingSignerResolveError, PendingSignerSender, SignerError,
     SignerOp,

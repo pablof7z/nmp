@@ -8,7 +8,7 @@
 // SIGNING FLOW: nothing here signs. Build a draft, get it signed, validate:
 //
 //   let draft = try blossomUploadAuthorizationDraft(
-//       authorPubkeyHex: activeAccount, blobSha256Hex: hash,
+//       authorPubkeyHex: currentAccount, blobSha256Hex: hash,
 //       createdAt: now, expiration: now + 300, description: "upload")
 //   // Engine sign-only path (the author is frozen from the ACTIVE
 //   // ACCOUNT, so `authorPubkeyHex` must be that account's pubkey):
@@ -417,7 +417,7 @@ public struct BlossomAuthorizationDraft: Sendable, Hashable {
     }
 
     /// The engine sign-only request for this exact draft. `NMPEngine.
-    /// signEvent` freezes the author from the ACTIVE ACCOUNT, so the
+    /// signEvent` freezes the author from the CURRENT ACCOUNT, so the
     /// draft's `authorPubkeyHex` must be that account's pubkey.
     public var signRequest: NMPUnsignedEvent {
         NMPUnsignedEvent(createdAt: createdAt, kind: kind, tags: tags, content: content)

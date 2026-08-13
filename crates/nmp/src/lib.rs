@@ -16,12 +16,12 @@
 //!   [`WriteFact`] out (drained by blocking `recv` or, over the FFI/SDK, an
 //!   awaited pull handle).
 //!
-//! Plus identity, signer, and NIP-42 AUTH-policy lifecycle
-//! ([`Engine::add_account`], [`Engine::remove_account`],
-//! [`Engine::add_auth_policy`], [`Engine::remove_auth_policy`],
-//! [`Engine::add_signer`], [`Engine::remove_signer`], and
-//! [`Engine::set_active_account`]), [`Engine::observe_diagnostics`], and
-//! [`Engine::shutdown`]. Every verb fails closed with
+//! Plus whole-session account and NIP-42 AUTH-policy lifecycle
+//! ([`Engine::session`], [`Engine::add_private_key_account`],
+//! [`Engine::add_public_key_account`], [`Engine::make_current_account`],
+//! [`Engine::remove_account`], [`Engine::clear_session`],
+//! [`Engine::add_auth_policy`], and [`Engine::remove_auth_policy`]),
+//! [`Engine::observe_diagnostics`], and [`Engine::shutdown`]. Every verb fails closed with
 //! `EngineError::EngineClosed` once `shutdown` has run -- see [`Engine`]'s
 //! own doc for the serialized lifecycle gate that makes this true even under
 //! concurrent use, and its `Drop` impl for the case where a caller never
@@ -40,10 +40,6 @@
 //! - `Engine::from_parts`, an in-workspace/test hatch for `nmp-bdd`'s
 //!   scripted-relay harness (may freely need mechanism-crate types; it is
 //!   not expected to be usable from an `nmp`-only dependency).
-//!
-//! External [`SigningCapability`] implementations are supported: the engine's
-//! promotion boundary independently verifies every returned event against the
-//! frozen accepted template before it can reach the wire.
 //!
 //! This crate re-exports every value type an app needs to drive the two
 //! nouns, and to name every `DiagnosticsSnapshot` field, without reaching
@@ -99,6 +95,7 @@ mod negentropy;
 mod publish_queue;
 mod relay_information_service;
 mod runtime;
+mod session;
 
 /// The doc-hidden mechanism door, for IN-WORKSPACE harnesses only.
 ///
@@ -209,11 +206,14 @@ pub use diagnostics::{
 };
 pub use engine::RelayInformationRequestError;
 pub use engine::{
-    AccountRegistration, AuthPolicyRegistration, CancelWriteError, CancelWriteOutcome, Engine,
-    SignEventRequest,
+    AuthPolicyRegistration, CancelWriteError, CancelWriteOutcome, Engine, SignEventRequest,
 };
 pub use error::EngineError;
 pub use observation::ObservationEvidence;
+pub use session::{
+    SessionAccount, SessionMutationError, SessionPayload, SessionProvider, SessionRestoreError,
+    SessionSnapshot, SigningAvailability,
+};
 
 /// Monotonic count of real NMP-owned OS threads spawned this process (#680
 /// falsifier instrumentation). The thread-scaling falsifier asserts opening
@@ -293,7 +293,6 @@ pub use crate::publish_queue::{
 };
 pub use crate::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
-    SignerRegistration,
 };
 // The receipt/status receiver is delivery mechanism — it was previously an
 // external `std::sync::mpsc::Receiver` (never a documented nmp noun); it is now

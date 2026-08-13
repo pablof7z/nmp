@@ -1261,7 +1261,7 @@ fn a_refused_publish_mints_no_receipt_and_no_fact() {
         assert!(
             matches!(
                 effects.as_slice(),
-                [Effect::PublishFailed(PublishError::NoActiveAccount)]
+                [Effect::PublishFailed(PublishError::NoCurrentAccount)]
             ),
             "the refusal is the whole answer: {effects:?}"
         );

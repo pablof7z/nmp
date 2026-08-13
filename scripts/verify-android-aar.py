@@ -159,12 +159,21 @@ def verify(
         for required in (
             "com/nmp/sdk/NMPEngine.class",
             "com/nmp/sdk/NMPConfig.class",
+            "com/nmp/sdk/NMPSession.class",
+            "com/nmp/sdk/NMPSessionPayload.class",
             "uniffi/nmp_ffi/NmpEngine.class",
         ):
             if required not in class_entries:
                 raise VerificationError(f"AAR classes.jar is missing {required}")
-        if "com/nmp/sdk/NMPSecureKeyStoreAccountStore.class" in class_entries:
-            raise VerificationError("desktop JCEKS checkpoint provider leaked into Android")
+        forbidden_checkpoints = {
+            "com/nmp/sdk/NMPInsecureFileAccountStore.class",
+            "com/nmp/sdk/NMPSecureKeyStoreAccountStore.class",
+        } & class_entries
+        if forbidden_checkpoints:
+            raise VerificationError(
+                "deleted checkpoint providers leaked into Android: "
+                f"{sorted(forbidden_checkpoints)}"
+            )
 
         binding_path = binding_override or (
             android

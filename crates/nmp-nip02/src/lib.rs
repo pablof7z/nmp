@@ -7,7 +7,7 @@ mod demand;
 mod edit;
 mod service;
 
-pub use demand::active_account_demand;
+pub use demand::current_account_demand;
 pub use edit::{
     compose_follow_change, expected_base, follows, ComposeFollowError, ComposeFollowResult,
     FollowChange,

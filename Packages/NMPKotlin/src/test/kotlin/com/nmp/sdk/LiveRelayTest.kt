@@ -29,7 +29,7 @@ class LiveRelayTest {
     companion object {
         /** fiatjaf -- a known, always-active npub, used only as a read
          * target. No secret key is used anywhere in this test:
-         * `setActiveAccount` may re-root reads onto an account this
+         * selecting a current account may re-root reads onto an account this
          * process holds no key for (read-only browsing is legal). */
         const val FIATJAF_HEX = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
         val OPERATOR_RELAYS = listOf("wss://purplepag.es", "wss://relay.primal.net")
@@ -69,14 +69,14 @@ class LiveRelayTest {
     }
 
     /** Construct the core native engine with two operator app relays, add a
-     * read-only account for fiatjaf, and observe the reactive follow-feed.
+     * public-key-only account for fiatjaf, and observe the reactive follow-feed.
      * Both the inner and projected demands use only this explicit neutral
      * operator policy; no author-route provider is assembled. */
     @Test
     fun followFeedUsesOperatorAppRelays() =
         runBlocking {
             NMPEngine(NMPConfig(appRelays = OPERATOR_RELAYS)).use { engine ->
-                engine.setActiveAccount(FIATJAF_HEX)
+                engine.session.add(FIATJAF_HEX.testPublicKey(), makeCurrent = true)
 
                 val rows = firstNonEmptyBatch(engine.observe(followFeed()), timeoutMs = 30_000)
                 assumeTrue(
@@ -103,7 +103,7 @@ class LiveRelayTest {
     fun diagnosticsSnapshotShowsRealEventsByKindForTheFollowFeed() =
         runBlocking {
             NMPEngine(NMPConfig(appRelays = OPERATOR_RELAYS)).use { engine ->
-                engine.setActiveAccount(FIATJAF_HEX)
+                engine.session.add(FIATJAF_HEX.testPublicKey(), makeCurrent = true)
 
                 val queryFlow = engine.observe(followFeed())
                 val rowsReady = CompletableDeferred<List<Row>>()

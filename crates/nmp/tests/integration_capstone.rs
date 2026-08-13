@@ -1135,7 +1135,7 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
     handle
         .add_signer(local_signer(&a))
         .expect("local signer has a public key");
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
 
     let (_qh, rows_rx) = handle
         .subscribe(literal_kind1(&a.public_key().to_hex()))
@@ -1219,7 +1219,7 @@ fn write_ack_per_relay_over_real_relays() {
     let policy_registration = handle
         .add_auth_policy(a.public_key(), AllowAuth)
         .expect("install exact-account permissive AUTH policy");
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
 
     let unsigned = UnsignedEvent::new(
         a.public_key(),
@@ -1427,7 +1427,7 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
     let policy_registration = handle
         .add_auth_policy(a.public_key(), AllowAuth)
         .expect("install exact-account permissive AUTH policy");
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
 
     let receipt = handle
         .publish(WriteIntent {
@@ -1587,7 +1587,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
         .add_auth_policy(a.public_key(), AllowAuth)
         .expect("install exact-account permissive AUTH policy");
 
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
     let (_qh, rows_rx) = handle
         .subscribe(LiveQuery::single(follows_minus_mutes_demand(
             a.public_key(),

@@ -203,7 +203,7 @@ impl Group {
     /// `author` is an exact decoded [`PublicKey`], never a reactive selector:
     /// a semantic group write freezes who is writing at composition time
     /// rather than resolving it later against whoever happens to be active
-    /// (#878). Reactive identity remains entirely valid on the READ side.
+    /// (#878). Recurrent identity remains entirely valid on the READ side.
     ///
     /// The returned [`ReceiptStream`] is the ordinary one every other write
     /// returns, store-issued [`ReceiptId`](crate::ReceiptId) included

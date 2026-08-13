@@ -1,7 +1,7 @@
 //! The bounded, read-only stalled-write projection (#756/#968).
 //!
 //! These are the properties the wire tier cannot reach: a signer that never
-//! answers, an active account that changes under a frozen obligation, more
+//! answers, an current account that changes under a frozen obligation, more
 //! stalled writes than any snapshot may carry, and a crash whose reopen must
 //! reproduce the same descriptors from durable facts alone.
 //!
@@ -112,7 +112,7 @@ fn an_unroutable_write_parks_on_an_open_empty_destination_set_and_is_listed() {
 }
 
 /// The identity half of the contract: a missing signer stays pinned to the
-/// pubkey FROZEN at acceptance, and switching the active account underneath
+/// pubkey FROZEN at acceptance, and switching the current account underneath
 /// it changes nothing about what the list says it is waiting for.
 #[test]
 fn an_unsignable_write_names_the_frozen_author_across_an_account_switch() {
@@ -144,13 +144,13 @@ fn an_unsignable_write_names_the_frozen_author_across_an_account_switch() {
     let after = stalled(&core);
     assert_eq!(
         before, after,
-        "the mutable active account is never what a frozen obligation is waiting for"
+        "the mutable current account is never what a frozen obligation is waiting for"
     );
     assert!(
         !after[0]
             .detail
             .contains(&someone_else.public_key().to_hex()),
-        "diagnostics must never report whoever is active now: {:?}",
+        "diagnostics must never report whoever is current now: {:?}",
         after[0].detail
     );
 }

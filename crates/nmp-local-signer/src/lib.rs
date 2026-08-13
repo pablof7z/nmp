@@ -7,4 +7,4 @@
 mod local;
 mod local_crypto;
 
-pub use local::{LocalKeySigner, LocalKeySignerError};
+pub use local::{LocalKeySigner, LocalKeySignerError, LOCAL_KEY_PROVIDER_ID};

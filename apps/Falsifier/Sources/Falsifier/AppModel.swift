@@ -8,21 +8,18 @@ import Foundation
 import Observation
 import NMP
 
-/// The app's own account record. NMP holds the KEY (once added via
-/// `addAccount`); this app tracks only the label + pubkey it wants to
-/// display and switch between. A "read-only" account never calls
-/// `addAccount` at all -- `setActiveAccount` accepts any pubkey, keyed or
-/// not (see `NMPEngine.setActiveAccount`'s doc: read-only browsing is
-/// legal).
-struct Account: Identifiable, Hashable {
-    enum Kind: Hashable {
+/// The app's own presentation record. NMP's session account is the operation
+/// handle; this app owns only the label and display grouping around it.
+struct Account: Identifiable {
+    enum Kind {
         case keyed
-        case readOnly
+        case publicKeyOnly
     }
 
-    let id: String
+    let id: Data
     var label: String
     var kind: Kind
+    let sessionAccount: NMPSessionAccount
 }
 
 @Observable
@@ -36,7 +33,7 @@ final class AppModel {
     static let appRelays = ["wss://purplepag.es", "wss://relay.primal.net"]
 
     private(set) var accounts: [Account] = []
-    private(set) var activePubkey: String?
+    private(set) var currentPubkey: Data?
     var kinds: [UInt16] = [1]
     var lastError: String?
 
@@ -48,32 +45,48 @@ final class AppModel {
         )
     }
 
-    /// Add an account this process holds the secret key for (nsec/hex), then
-    /// make it active. The key crosses into the engine exactly once here;
-    /// this model never touches it again.
-    func addKeyedAccount(secretKey: String, label: String) async {
+    /// Generate a local-key account inside NMP and select it atomically.
+    func addKeyedAccount(label: String) {
         do {
-            let registration = try await engine.addAccount(secretKey: secretKey)
-            let pubkey = registration.publicKey
-            upsert(Account(id: pubkey, label: label, kind: .keyed))
-            setActive(pubkey)
+            let account = try engine.session.add(
+                privateKey: NMPPrivateKey.generate(),
+                makeCurrent: true
+            )
+            upsert(Account(
+                id: account.publicKey.bytes,
+                label: label,
+                kind: .keyed,
+                sessionAccount: account
+            ))
+            currentPubkey = account.publicKey.bytes
         } catch {
             lastError = "\(error)"
         }
     }
 
-    /// Add a read-only account by pubkey alone -- no secret key involved.
-    /// Legal per `setActiveAccount`'s contract; used here for the
-    /// well-known read-only demo target.
-    func addReadOnlyAccount(pubkeyHex: String, label: String) {
-        upsert(Account(id: pubkeyHex, label: label, kind: .readOnly))
-        setActive(pubkeyHex)
+    /// Add the fixed public-key-only demo account and select it atomically.
+    func addPublicKeyOnlyAccount(label: String) {
+        do {
+            let account = try engine.session.add(
+                publicKey: NMPPublicKey(bytes: Data(Self.readOnlyDemoPublicKey)),
+                makeCurrent: true
+            )
+            upsert(Account(
+                id: account.publicKey.bytes,
+                label: label,
+                kind: .publicKeyOnly,
+                sessionAccount: account
+            ))
+            currentPubkey = account.publicKey.bytes
+        } catch {
+            lastError = "\(error)"
+        }
     }
 
-    func setActive(_ pubkey: String?) {
+    func makeCurrent(_ account: Account) {
         do {
-            try engine.setActiveAccount(pubkey)
-            activePubkey = pubkey
+            try engine.session.makeCurrent(account.sessionAccount)
+            currentPubkey = account.id
         } catch {
             lastError = "\(error)"
         }
@@ -86,4 +99,11 @@ final class AppModel {
             accounts.append(account)
         }
     }
+
+    private static let readOnlyDemoPublicKey: [UInt8] = [
+        0x3b, 0xf0, 0xc6, 0x3f, 0xcb, 0x93, 0x46, 0x34,
+        0x07, 0xaf, 0x97, 0xa5, 0xe5, 0xee, 0x64, 0xfa,
+        0x88, 0x3d, 0x10, 0x7e, 0x9e, 0x55, 0x84, 0x72,
+        0xc4, 0xeb, 0x9a, 0xaa, 0xef, 0xa4, 0x59, 0x0d,
+    ]
 }

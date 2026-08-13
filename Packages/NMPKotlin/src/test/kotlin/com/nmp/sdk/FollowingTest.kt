@@ -31,7 +31,7 @@ class FollowingTest {
                     }
                 assertNotNull(snapshot, "NMP must project the signed-out state without relay I/O")
 
-                assertNull(snapshot!!.activePubkey)
+                assertNull(snapshot!!.currentPubkey)
                 assertEquals(TARGET, snapshot.target)
                 assertEquals(FollowRelationship.Unknown, snapshot.relationship)
                 assertEquals(FollowAvailability.SignedOut, snapshot.availability)

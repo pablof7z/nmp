@@ -35,6 +35,7 @@ use std::thread;
 use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
+use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
     FfiFilter, FfiIdentity, FfiRelayInformationCachePolicy, FfiSignEventRequest, FfiWriteIntent,
     FfiWritePayload, FfiWriteRouting,
@@ -92,18 +93,22 @@ fn spawn_nip11_ok_server() -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
     let relay_url = spawn_nip11_ok_server();
-    let engine = NmpEngine::new(NmpEngineConfig {
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..NmpEngineConfig::default()
-    })
+    let engine = NmpEngine::new(
+        NmpEngineConfig {
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+            ..NmpEngineConfig::default()
+        },
+        None,
+    )
     .expect("in-memory engine must build");
 
-    let account = engine
-        .add_account(TEST_SECRET_KEY_HEX.to_string())
-        .expect("test key parses");
-    let author = account.public_key();
+    let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();
+    let author = keys.public_key().to_hex();
     engine
-        .set_active_account(Some(author.clone()))
+        .add_private_key_account(
+            FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec()).unwrap(),
+            true,
+        )
         .expect("account activates");
 
     // Baseline AFTER engine construction: the engine's fixed runtime/transport
@@ -124,7 +129,7 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
         streams.push(stream);
     }
 
-    // (b) A follow observation over the active account.
+    // (b) A follow observation over the current account.
     let follow_obs = engine
         .observe_following(author.clone())
         .expect("follow observation opens without capacity refusal");
@@ -183,7 +188,7 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
         .expect("local sign succeeds under mixed load");
     assert_eq!(
         signed.pubkey, author,
-        "sign is attributed to the active account"
+        "sign is attributed to the current account"
     );
 
     // The NIP-11 fetch resolves to a real document (progress), not a capacity

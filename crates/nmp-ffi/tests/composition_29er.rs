@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use nmp_ffi::facade::{NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::nip02::NmpFollowStream;
+use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
     FfiBinding, FfiFilter, FfiIdentity, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
@@ -162,13 +163,14 @@ impl Composition {
 async fn the_29er_observer_composition_never_saturates_across_room_switching_and_restart() {
     let base = nmp::nmp_threads_spawned();
 
-    let mut engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine builds");
-    let account = engine
-        .add_account(TEST_SECRET_KEY_HEX.to_string())
-        .expect("key parses");
-    let author = account.public_key();
+    let mut engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine builds");
+    let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();
+    let author = keys.public_key().to_hex();
     engine
-        .set_active_account(Some(author.clone()))
+        .add_private_key_account(
+            FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec()).unwrap(),
+            true,
+        )
         .expect("activate account");
 
     // 1) Open the full composition. Old design: refused at the 13th.
@@ -240,13 +242,15 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
     // 3) Full app RESTART: shut the engine down and rebuild the whole composition
     // on a fresh engine.
     engine.shutdown();
-    engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine rebuilds after restart");
-    let account = engine
-        .add_account(TEST_SECRET_KEY_HEX.to_string())
-        .expect("key parses");
-    let author = account.public_key();
+    engine =
+        NmpEngine::new(NmpEngineConfig::default(), None).expect("engine rebuilds after restart");
+    let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();
+    let author = keys.public_key().to_hex();
     engine
-        .set_active_account(Some(author.clone()))
+        .add_private_key_account(
+            FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec()).unwrap(),
+            true,
+        )
         .expect("activate account");
     let restarted = open_composition(&engine, &author);
     assert!(

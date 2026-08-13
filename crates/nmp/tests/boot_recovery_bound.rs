@@ -187,8 +187,9 @@ fn measure_add_account_behind_boot_recovery() {
     })
     .expect("open engine over the populated store");
     let started = std::time::Instant::now();
+    let keys = Keys::generate();
     engine
-        .add_account(&Keys::generate().secret_key().to_secret_hex())
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), false)
         .expect("register an account");
     let add_account = started.elapsed();
 

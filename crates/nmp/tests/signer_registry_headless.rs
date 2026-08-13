@@ -1,5 +1,5 @@
 //! M4 §5 — `SignerRegistry` headless falsifier: two accounts registered via
-//! [`nmp::mechanism::runtime::Handle::add_signer`]. `set_active_account` re-roots
+//! [`nmp::mechanism::runtime::Handle::add_signer`]. `set_current_account` re-roots
 //! reactive reads and authorizes default unsigned acceptance. Once accepted,
 //! a write resolves the exact signer frozen at that boundary; later read-root
 //! changes cannot redirect it. Deliberately
@@ -145,14 +145,14 @@ fn reactive_kind1() -> LiveQuery {
 }
 
 #[test]
-fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
+fn current_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     let a = Keys::generate();
     let b = Keys::generate();
     let seed_relay = RelayUrl::parse("wss://seed.invalid").expect("parse seed relay url");
 
     // Pre-seed the store directly (no live relay in this test): one kind:1
     // post per account, so the reactive-authors subscription's very first
-    // batch already distinguishes "a active" from "b active" with zero
+    // batch already distinguishes "a current" from "b current" with zero
     // network round trips.
     let mut store = MemoryStore::new();
     let a_post = UnsignedEvent::new(
@@ -212,8 +212,8 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     assert_eq!(pk_a, a.public_key());
     assert_eq!(pk_b, b.public_key());
 
-    // ---- read root: active = a -> only a's post visible ------------------
-    handle.set_active_account(Some(pk_a));
+    // ---- read root: current = a -> only a's post visible ------------------
+    handle.set_current_account(Some(pk_a));
     let (_qh, rows_rx) = handle
         .subscribe(reactive_kind1())
         .expect("test subscription construction");
@@ -221,26 +221,26 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
         wait_for_rows(&rows_rx, Duration::from_secs(5), |rows| rows
             .contains(&a_post.id)
             && !rows.contains(&b_post.id)),
-        "active=a must resolve $currentPubkey to a, surfacing only a's seeded post"
+        "current=a must resolve $currentPubkey to a, surfacing only a's seeded post"
     );
 
-    // ---- switch: active = b -> read root re-roots to b's post ------------
-    handle.set_active_account(Some(pk_b));
+    // ---- switch: current = b -> read root re-roots to b's post ------------
+    handle.set_current_account(Some(pk_b));
     assert!(
         wait_for_rows(&rows_rx, Duration::from_secs(5), |rows| rows
             .contains(&b_post.id)
             && !rows.contains(&a_post.id)),
-        "set_active_account(b) must re-root the SAME live subscription onto b's post, \
+        "set_current_account(b) must re-root the SAME live subscription onto b's post, \
          dropping a's -- the read half of the coupled switch"
     );
 
-    // ---- write: still active = b -> publishing AS b must sign ------------
+    // ---- write: still current = b -> publishing AS b must sign ------------
     let unsigned_as_b = UnsignedEvent::new(
         b.public_key(),
         Timestamp::now(),
         Kind::TextNote,
         vec![],
-        "published while b is the active account",
+        "published while b is the current account",
     );
     let receipt_as_b = handle
         .publish(WriteIntent {
@@ -256,21 +256,21 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             s,
             WriteFact::Signing(SigningState::Signed { event_id: _ })
         )),
-        "publish after switching active to b must sign successfully with b's OWN key -- \
+        "publish after switching current to b must sign successfully with b's OWN key -- \
          the write half of the coupled switch"
     );
 
-    // ---- write: still active = b, a body composed "for a" -> still B -----
+    // ---- write: still current = b, a body composed "for a" -> still B -----
     // A builder structurally cannot carry an author (#1005), so a body
-    // composed while A was active is not "A's draft" -- there is no field in
-    // it that says A. Publishing it while B is active is a write AS B, and
+    // composed while A was current is not "A's draft" -- there is no field in
+    // it that says A. Publishing it while B is current is a write AS B, and
     // the only signer that ever sees it is B's.
     let unsigned_as_a_while_b_active = UnsignedEvent::new(
         a.public_key(),
         Timestamp::now(),
         Kind::TextNote,
         vec![],
-        "composed for a while b is active",
+        "composed for a while b is current",
     );
     let receipt_wrong = handle
         .publish(WriteIntent {
@@ -286,12 +286,12 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             s,
             WriteFact::Signing(SigningState::Signed { event_id: _ })
         )),
-        "an author-free body published while B is active signs as B, whatever it was \
+        "an author-free body published while B is current signs as B, whatever it was \
          composed alongside"
     );
 
     // ---- switch back: read identity changes; author-pinned signing stays --
-    handle.set_active_account(Some(pk_a));
+    handle.set_current_account(Some(pk_a));
     let unsigned_as_a = UnsignedEvent::new(
         a.public_key(),
         Timestamp::now(),
@@ -321,9 +321,9 @@ fn active_account_reroots_reads_but_each_write_uses_its_frozen_author() {
 }
 
 /// A registered signer is not authority to publish when no account is
-/// active. Default unsigned publish fails before acceptance.
+/// current. Default unsigned publish fails before acceptance.
 #[test]
-fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
+fn no_current_account_cannot_select_an_arbitrary_registered_signer() {
     let a = Keys::generate();
     let store = MemoryStore::new();
     let dir = FixtureRoutingFacts::new();
@@ -346,7 +346,7 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
         Timestamp::now(),
         Kind::TextNote,
         vec![],
-        "nobody is active",
+        "nobody is current",
     );
     // Nothing is pinned, so nothing may park: the CALL refuses and no
     // receipt stream is ever created.
@@ -357,8 +357,8 @@ fn no_active_account_cannot_select_an_arbitrary_registered_signer() {
         correlation: None,
     });
     assert!(
-        matches!(refused.err(), Some(PublishError::NoActiveAccount)),
-        "publishing as the active account with no active account is a refusal"
+        matches!(refused.err(), Some(PublishError::NoCurrentAccount)),
+        "publishing as the current account with no current account is a refusal"
     );
 
     handle.shutdown();
@@ -392,7 +392,7 @@ fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
     handle
         .add_signer(local_signer(&b))
         .expect("local signer has a public key");
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
 
     let receipt = handle
         .publish(WriteIntent {
@@ -435,7 +435,7 @@ fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
 }
 
 /// #156's account-switch falsifier at the capability seam, restated for a
-/// payload that carries no author. A builder composed while A was active is
+/// payload that carries no author. A builder composed while A was current is
 /// not "A's draft" -- there is no field in it that says A -- so publishing
 /// it after switching to B is not a stale write, it is a write as B. The
 /// resolution happens at acceptance, and exactly one signer sees it: B's.
@@ -468,11 +468,11 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
         })
         .expect("B signer must register");
 
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
     let composed_while_a_was_active = EventBuilder::new(Kind::Custom(9))
-        .content("composed while A is active")
+        .content("composed while A is current")
         .created_at(Timestamp::now());
-    handle.set_active_account(Some(b.public_key()));
+    handle.set_current_account(Some(b.public_key()));
 
     let receipt = handle
         .publish(WriteIntent {
@@ -491,12 +491,12 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
     assert_eq!(
         b_calls.load(Ordering::SeqCst),
         1,
-        "the account active AT ACCEPTANCE is the one asked to sign"
+        "the account current AT ACCEPTANCE is the one asked to sign"
     );
     assert_eq!(
         a_calls.load(Ordering::SeqCst),
         0,
-        "the account that merely happened to be active at compose time signs nothing"
+        "the account that merely happened to be current at compose time signs nothing"
     );
 
     handle.shutdown();
@@ -514,8 +514,8 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
     )
     .expect("test engine thread construction");
 
-    // Pin the active identity before its capability exists.
-    handle.set_active_account(Some(a.public_key()));
+    // Pin the current identity before its capability exists.
+    handle.set_current_account(Some(a.public_key()));
     let receipt = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(EventBuilder {
@@ -572,7 +572,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
     handle
         .add_signer(local_signer(&a))
         .expect("local signer has a public key");
-    handle.set_active_account(Some(b.public_key()));
+    handle.set_current_account(Some(b.public_key()));
 
     let receipt = handle
         .publish(WriteIntent {
@@ -599,7 +599,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
         }
     ));
 
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
     handle
         .add_signer(local_signer(&b))
         .expect("local signer has a public key");
@@ -610,7 +610,7 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
                 WriteFact::Signing(SigningState::Signed { event_id: _ })
             )
         }),
-        "the intent accepted while B was active must stay pinned to B after switching to A"
+        "the intent accepted while B was current must stay pinned to B after switching to A"
     );
 
     handle.shutdown();
@@ -642,7 +642,7 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
         "stale registration A must not detach replacement B"
     );
 
-    handle.set_active_account(Some(keys.public_key()));
+    handle.set_current_account(Some(keys.public_key()));
     let receipt = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(EventBuilder {
@@ -704,7 +704,7 @@ fn assert_no_status_within(
     }
 }
 
-/// #47 falsifier (a) at the registry seam: with A active and B merely
+/// #47 falsifier (a) at the registry seam: with A current and B merely
 /// REGISTERED, a builder carrying `Identity::Explicit(B)`
 /// signs with B's own key -- `Signed` carries the exact id of the frozen
 /// B-authored body, which commits to both author and content -- and the
@@ -728,14 +728,14 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
     handle
         .add_signer(local_signer(&b))
         .expect("local signer has a public key");
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
 
     let draft = UnsignedEvent::new(
         b.public_key(),
         Timestamp::now(),
         Kind::TextNote,
         vec![],
-        "published as b while a stays active",
+        "published as b while a stays current",
     );
     // The frozen body's id commits to author+content; deriving it locally
     // with B's key is the cryptographic pin the Signed status must match.
@@ -791,7 +791,7 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
         "the promoted row must be B's cryptographically valid event"
     );
 
-    // Active identity never moved: the default (no-override) path still
+    // Current identity never moved: the default (no-override) path still
     // roots on A and signs with A's key.
     let a_draft = UnsignedEvent::new(
         a.public_key(),
@@ -824,7 +824,7 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
 
 /// #47 falsifier (d): an override naming a pubkey with NO registered
 /// capability is a durable park (`Accepted` then `AwaitingCapability`),
-/// never a silent failure. A later `set_active_account` to a DIFFERENT
+/// never a silent failure. A later `set_current_account` to a DIFFERENT
 /// registered identity must not retarget the parked intent -- only
 /// registering the override key itself resumes it, and it signs as the
 /// ORIGINAL override pubkey with the exact frozen body.
@@ -843,7 +843,7 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     handle
         .add_signer(local_signer(&a))
         .expect("local signer has a public key");
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
 
     let draft = UnsignedEvent::new(
         b.public_key(),
@@ -870,13 +870,13 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
             )
         }),
         "an override with no registered capability must park, not fail, and the parked pubkey \
-         must be the frozen override B -- never the active account A"
+         must be the frozen override B -- never the current account A"
     );
 
-    // Re-rooting the ACTIVE account onto A (whose signer is attached and
+    // Re-rooting the CURRENT account onto A (whose signer is attached and
     // eager) must not retarget the parked B-pinned intent: no Signed, no
     // Failed -- silence.
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
     assert_no_status_within(&receipt, Duration::from_millis(500), |status| {
         matches!(
             status,
@@ -900,10 +900,10 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     engine_thread.join();
 }
 
-/// #47 falsifier (e): an explicit identity needs NO active account at all --
+/// #47 falsifier (e): an explicit identity needs NO current account at all --
 /// logged fully out, a builder with `Identity::Explicit(B)`
 /// and B's registered capability still signs. (Contrast with
-/// [`no_active_account_cannot_select_an_arbitrary_registered_signer`]: the
+/// [`no_current_account_cannot_select_an_arbitrary_registered_signer`]: the
 /// DEFAULT path in the same state fails closed.)
 #[test]
 fn an_explicit_identity_signs_while_logged_out() {
@@ -918,7 +918,7 @@ fn an_explicit_identity_signs_while_logged_out() {
     handle
         .add_signer(local_signer(&b))
         .expect("local signer has a public key");
-    handle.set_active_account(None);
+    handle.set_current_account(None);
 
     let draft = UnsignedEvent::new(
         b.public_key(),
@@ -941,7 +941,7 @@ fn an_explicit_identity_signs_while_logged_out() {
         wait_for_status(&receipt, Duration::from_secs(5), |status| {
             matches!(status, WriteFact::Signing(SigningState::Signed { event_id: id }) if *id == expected.id)
         }),
-        "an explicit override must not require an active account"
+        "an explicit override must not require an current account"
     );
 
     handle.shutdown();

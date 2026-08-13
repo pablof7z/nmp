@@ -49,7 +49,7 @@ Some app features span two protocols. They compose across module boundaries;
 they do not relabel one module's value inside another (#858):
 
 ```swift
-for await snapshot in try engine.observe(activeAccountDemand()) {
+for await snapshot in try engine.observe(currentAccountDemand()) {
     // NIP-51 decodes its own kind:10009 list, as itself.
     guard let list = snapshot.rows.first.map(parseSimpleGroupsListTolerant)
     else { continue }

@@ -11,7 +11,7 @@
 //! `scripts/check-nip51-no-derived-authority.sh`: any observation-qualified
 //! `Observed*` wrapper, projection-error family, frame-proof projector, or
 //! other protocol-specific witness. NIP-51 reading stays the ordinary
-//! `LiveQuery`/`FfiDemand` noun ([`active_account_demand`]), and a future
+//! `LiveQuery`/`FfiDemand` noun ([`current_account_demand`]), and a future
 //! destructive NIP-51 mutation must bind its exact observed base privately
 //! inside that semantic operation while building the ordinary opaque write
 //! intent -- never by exporting a reusable authority noun here.
@@ -48,16 +48,16 @@ fn simple_groups_list_to_ffi(list: &nmp::nip51::SimpleGroupsList) -> FfiSimpleGr
 }
 
 /// The signed-in account's Simple-groups-list demand (#108,
-/// `nmp::nip51::active_account_demand` mirror): `kinds:[10009]`,
-/// `AuthorOutboxes + Public`. Signed-out (no active account) resolves to
+/// `nmp::nip51::current_account_demand` mirror): `kinds:[10009]`,
+/// `AuthorOutboxes + Public`. Signed-out (no current account) resolves to
 /// zero atoms through the ordinary reactive-binding empty-resolution path
 /// -- no special case needed on either side of this boundary.
 ///
 /// #858 moved this out of `crate::nip29`: kind:10009 is NIP-51's kind, so
 /// its demand constructor lives with the rest of NIP-51.
 #[uniffi::export]
-pub fn active_account_demand() -> FfiDemand {
-    demand_to_ffi(nmp::nip51::active_account_demand())
+pub fn current_account_demand() -> FfiDemand {
+    demand_to_ffi(nmp::nip51::current_account_demand())
 }
 
 /// Tolerantly parse Simple-groups-shaped public items out of a raw native
@@ -131,8 +131,8 @@ mod tests {
     }
 
     #[test]
-    fn active_account_demand_projects_the_reactive_authors_binding() {
-        let demand = active_account_demand();
+    fn current_account_demand_projects_the_reactive_authors_binding() {
+        let demand = current_account_demand();
         assert_eq!(demand.selection.kinds, Some(vec![10009]));
     }
 
@@ -145,6 +145,7 @@ mod tests {
     /// host-pinned constructors directly, field for field, with no
     /// intermediate NIP-29-owned copy of the NIP-51 value in between.
     #[test]
+    #[cfg(feature = "nip29")]
     fn nip29_browsing_still_demands_an_explicitly_supplied_host() {
         use crate::types::{FfiFilter, FfiSourceAuthority};
 

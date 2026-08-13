@@ -2049,6 +2049,7 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite 0.29.0",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -2156,6 +2157,7 @@ version = "0.1.0"
 name = "nmp-ffi"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "nmp",
  "nmp-grammar",
  "nmp-nip02",
@@ -2169,6 +2171,7 @@ dependencies = [
  "tungstenite 0.29.0",
  "uniffi",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -2346,6 +2349,9 @@ dependencies = [
 [[package]]
 name = "nmp-signer"
 version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "nmp-store"

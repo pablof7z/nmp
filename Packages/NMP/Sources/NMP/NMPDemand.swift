@@ -22,7 +22,7 @@ public enum NMPSourceAuthority: Sendable, Hashable {
 /// `nmp_grammar::AccessContext` mirror. Closed vocabulary: an unauthenticated
 /// `public` connection, or NIP-42 authentication against one stable expected
 /// public key (hex). The `nip42` identity is frozen in the demand; changing
-/// the active account never redirects it (#8).
+/// the current account never redirects it (#8).
 public enum NMPAccessContext: Sendable, Hashable {
     case `public`
     case nip42(publicKey: String)

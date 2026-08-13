@@ -1,16 +1,15 @@
-Feature: A named identity with no signer waits; it does not fail
+Feature: A named identity with no available signing provider waits; it does not fail
   Naming a key NMP cannot currently sign for is not an error. It is a
   complete, self-sufficient statement of intent with exactly one piece
   missing, and the missing piece is the one piece that can arrive later. The
   author is known, so the body can be frozen and written down. Only the
   capability is absent.
 
-  Two workflows exist entirely inside that gap. An app can queue writes as an
-  identity before that identity's signer is connected -- a remote signer that
-  finishes pairing a minute after the user hit send, a hardware signer that
-  is plugged in when the user gets to it. And an app can publish as a key it
-  holds while logged out of everything, which is only useful if "logged out"
-  does not also mean "no signer attached yet". Failing the write would delete
+  Two workflows exist entirely inside that gap. An app can queue writes while
+  that identity's provider is unavailable -- a remote provider whose relay is
+  unreachable, or a hardware provider whose device is disconnected. And an app
+  can publish as a key it holds while no account is current, which is only useful
+  if "no current account" does not also mean "no provider may become available". Failing the write would delete
   both, and would do it in the least recoverable way: the app finds out at
   the moment it can do nothing about it.
 
@@ -22,21 +21,25 @@ Feature: A named identity with no signer waits; it does not fail
   on its behalf.
 
   The contrast that makes this coherent is in write-identity.feature: a write
-  with no active account and no named identity FAILS, and fails before
+  with no current account and no named identity FAILS, and fails before
   acceptance. The difference is not severity, it is whether there is anything
-  to wait for. A named key is something concrete; "whoever is active" with
-  nobody active is nothing at all, so there is nothing to park and nothing to
-  attach later.
+  to wait for. A named key is something concrete; "whoever is current" with
+  nobody current is nothing at all, so there is nothing to park.
 
   Background:
-    Given the account with pubkey "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is registered with a working signer
-    And "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is the active account
-    And no signer is registered for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
+    Given the account with pubkey "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" has an available signing provider
+    And "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is the current account
+    And the account with pubkey "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd" has no signing provider
     And my relay list names "wss://hub.example" as my write relay
 
   # ---- parking -----------------------------------------------------------
 
-  Scenario: Naming an identity with no registered signer parks the write
+  # nmp:id=IDENTITY-AWAITING-PROVIDER-001
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-ffi::ffi_explicit_identity_for_unregistered_pubkey_parks_awaiting_capability
+  # nmp:evidence=rust:nmp::parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries
+  # nmp:falsifier=Refuse an explicit public key merely because it has no available provider, or ask the current account to sign it; the facade or runtime proof no longer observes an accepted write pinned to the named key.
+  Scenario: Naming an identity with no signing provider parks the write
     # The headline. The write is accepted -- a real, durable acceptance with
     # a frozen body -- and then waits. It is not refused, and it is not
     # quietly rerouted to the account that does have a signer.
@@ -47,6 +50,11 @@ Feature: A named identity with no signer waits; it does not fail
     And "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is never asked to sign it
     And "wss://hub.example" received nothing yet
 
+  # nmp:id=IDENTITY-AWAITING-PROVIDER-002
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-ffi::ffi_explicit_identity_for_unregistered_pubkey_parks_awaiting_capability
+  # nmp:evidence=rust:nmp::parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries
+  # nmp:falsifier=Omit the frozen public key from the awaiting-signature fact or make its receipt unreattachable; the facade projection or runtime replay proof loses observable custody.
   Scenario: The park is visible, not inferred from silence
     # The failure this rules out is a write that looks live and is actually
     # stuck. The app must be able to render "waiting for your podcast signer"
@@ -58,6 +66,11 @@ Feature: A named identity with no signer waits; it does not fail
 
   # ---- durability --------------------------------------------------------
 
+  # nmp:id=IDENTITY-AWAITING-PROVIDER-003
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
+  # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
+  # nmp:falsifier=Re-resolve a recovered accepted write against the restored current account or discard its frozen body; recovery no longer preserves the one accepted obligation and exact public key.
   Scenario: A parked write survives restart still waiting for the same key
     When I compose an event of kind 1 saying "episode 19 is up" and publish it naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And the write reports accepted and the process stops immediately
@@ -65,58 +78,34 @@ Feature: A named identity with no signer waits; it does not fail
     Then the write is still awaiting a signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And its frozen body is byte-for-byte what it was before the restart
 
-  # ---- completion --------------------------------------------------------
-
-  Scenario: The write completes when that key's signer attaches later
-    # The workflow the park exists for. A remote signer finishes pairing well
-    # after the app queued the write, and the write picks up exactly where it
-    # was -- same frozen body, same author, no recompose.
-    When I compose an event of kind 1 saying "episode 20 is up" and publish it naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
-    And the receipt reports it awaiting a signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
-    And a NIP-46 signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd" attaches 30 seconds later
-    Then the write is signed by that signer
-    And the published event is authored by "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
-    And "wss://hub.example" received it
-
-  Scenario: A parked write survives restart and completes on the far side of it
-    # Both halves in one run, because the two properties are only worth
-    # having together: surviving a restart is pointless if the reattach no
-    # longer re-arms the write, and re-arming is pointless if the write did
-    # not survive.
-    When I compose an event of kind 1 saying "episode 21 is up" and publish it naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
-    And the write reports accepted and the process stops immediately
-    And I reconstruct the engine from the same durable store
-    And a NIP-46 signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd" attaches
-    Then the published event is authored by "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
-    And "wss://hub.example" received it
-
-  Scenario: A signer for a different key does not unpark it
-    # The park names one key. Any other signer arriving is not the one it is
-    # waiting for, however convenient it would be, and the frozen author is
-    # not up for renegotiation because something showed up.
-    When I compose an event of kind 1 saying "episode 22 is up" and publish it naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
-    And a NIP-46 signer for "81b637d8fcd2c6da6359e6963113a1170de795e4b725b84d1e0b4cfd9ec58ce9" attaches
-    Then the write is still awaiting a signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
-    And "wss://hub.example" received nothing
-
+  # nmp:id=IDENTITY-AWAITING-PROVIDER-004
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
+  # nmp:evidence=rust:nmp::an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_account
+  # nmp:falsifier=Let session selection rewrite the public key frozen into an accepted write; removing, clearing, or selecting another account makes either the preserved obligation or secondary-identity proof fail.
   Scenario: Logging out and back in as somebody else leaves the park alone
     # A parked write is not a property of the session. The account switch is
     # exactly the event that would retarget it if the identity were not
     # already pinned.
     When I compose an event of kind 1 saying "episode 23 is up" and publish it naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
-    And I switch the active account to "81b637d8fcd2c6da6359e6963113a1170de795e4b725b84d1e0b4cfd9ec58ce9"
+    And I make "81b637d8fcd2c6da6359e6963113a1170de795e4b725b84d1e0b4cfd9ec58ce9" the current account
     Then the write is still awaiting a signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
 
   # ---- revoking it -------------------------------------------------------
 
+  # nmp:id=IDENTITY-AWAITING-PROVIDER-005
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries
+  # nmp:evidence=rust:nmp::facade_cancellation_is_typed_idempotent_and_reattachable
+  # nmp:falsifier=Let cancellation leave the signing request live or erase the terminal receipt; a later provider can sign, or the cancelled outcome cannot be reattached.
   Scenario: A parked write can be cancelled
     # What makes waiting indefinitely acceptable: the app is never stuck with
     # it. Cancelling is the app's own decision arriving later, the same way
-    # the signer would have.
+    # the provider recovery would have.
     When I compose an event of kind 1 saying "episode 24 is up" and publish it naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And the receipt reports it awaiting a signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And I cancel that write
     Then the write is reported cancelled
-    When a NIP-46 signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd" attaches
+    When the NIP-46 signing provider for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd" becomes available
     Then nothing is signed
     And "wss://hub.example" received nothing

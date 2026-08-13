@@ -49,7 +49,7 @@ final class CorrelationTests: XCTestCase {
             )
         )
         defer { engine.shutdown() }
-        try engine.setActiveAccount(author)
+        _ = try engine.session.add(publicKey: testPublicKey(author), makeCurrent: true)
 
         let token = "swift-sdk-correlation-token"
         let first = try await engine.publish(
@@ -66,7 +66,7 @@ final class CorrelationTests: XCTestCase {
         )
         // `publish` returning `first` IS the acceptance; the stream carries
         // only what happened AFTER it, and with no signer registered for the
-        // active account that is the parked signing obligation.
+        // current account that is the parked signing obligation.
         let firstStatuses = try await Self.withTimeout {
             await Self.collect(first.status, count: 1)
         }
@@ -107,7 +107,7 @@ final class CorrelationTests: XCTestCase {
             )
         )
         defer { engine.shutdown() }
-        try engine.setActiveAccount(author)
+        _ = try engine.session.add(publicKey: testPublicKey(author), makeCurrent: true)
 
         let token = "swift-sdk-reattach-by-correlation"
         let receipt = try await engine.publish(
@@ -148,7 +148,7 @@ final class CorrelationTests: XCTestCase {
     func testMalformedCorrelationTokenOnPublishThrowsSynchronously() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        try engine.setActiveAccount(author)
+        _ = try engine.session.add(publicKey: testPublicKey(author), makeCurrent: true)
 
         do {
             _ = try await engine.publish(

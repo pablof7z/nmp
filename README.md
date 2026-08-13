@@ -79,10 +79,10 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Signing & identity**
 - ✅ Local key signer — one fixed-allocation, non-`Clone` canonical zeroizing secret owner (moving the signer relocates only its pointer), with operation-scoped BIP-340/NIP-44 secret, key, hash-state, cipher-state, and plaintext owners that wipe on success, refusal, and unwind; no operational `nostr::Keys`/`SecretKey`/`Keypair` is retained, and `Debug` is redacted to the public key only ([#546](https://github.com/pablof7z/nmp/pull/546) began this; [#765](https://github.com/pablof7z/nmp/issues/765) replaced its unused duplicate with the real operational owner)
-- ✅ Per-write identity override — publish a single write under a registered secondary identity without changing the active account, across Rust/FFI/Swift/Kotlin. Retarget-immunity is proven: once accepted under the override, a later `set_active_account` can never redirect it to a different signer, even across a store close/reopen ([#47](https://github.com/pablof7z/nmp/issues/47) Unit A, [#550](https://github.com/pablof7z/nmp/pull/550))
-- ✅ Platform secure-vault account stores — Keychain-backed (Swift, iOS/macOS) and JVM `KeyStore`-backed (Kotlin/desktop) checkpoint providers for automatic secure session restore ([#47](https://github.com/pablof7z/nmp/issues/47) vault providers, [#554](https://github.com/pablof7z/nmp/pull/554))
+- ✅ Per-write identity override — publish a single write under a secondary session account without changing the current account, across Rust/FFI/Swift/Kotlin. Retarget-immunity is proven: once accepted under the override, a later account switch can never redirect it to a different signer, even across a store close/reopen ([#47](https://github.com/pablof7z/nmp/issues/47) Unit A, [#550](https://github.com/pablof7z/nmp/pull/550))
+- ✅ Whole-session account model — signer-backed and public-key-only accounts, optional current selection, and provider reconstruction material export and restore as one opaque value. Provider reachability is runtime state, never a reason to drop the account from the restored session ([#1397](https://github.com/pablof7z/nmp/issues/1397))
 - ✅ Frozen identity on a parked write (`AwaitingCapability{pubkey}`) — a stranded reattached write now carries the exact pubkey it's still waiting on, not just "still parked." The PR's own cross-surface parity test caught direct-Rust and FFI reporting two *different* frozen pubkeys for the same receipt pre-merge, was fixed, and re-verified clean ([#47](https://github.com/pablof7z/nmp/issues/47) Unit B, [#556](https://github.com/pablof7z/nmp/pull/556))
-- ✅ **#47 signer-lifecycle epic is fully closed** — all four units (zeroization, per-write override, reattachment, platform vaults) merged across Rust/FFI/Swift/Kotlin
+- ✅ Frozen write identity and local-key zeroization are projected across Rust/FFI/Swift/Kotlin; app-owned transactional session storage remains tracked separately in [#1398](https://github.com/pablof7z/nmp/issues/1398)
 - ⛔ No NIP-55 (Android intent-based signing)
 
 **Publishing**
@@ -273,7 +273,7 @@ Diagnostics are a **permanent, read-only proof surface** — source plan, wire f
 
 - NMP runs **in the host app** and owns local cache + write-obligation state.
 - The app owns identity import, backup, removal, and user-facing trust policy.
-- An **explicitly insecure** plaintext file checkpoint exists for personal/dev autologin — opt-in, separate from the canonical store, and **not** a substitute for secure providers.
+- NMP exports one opaque, sensitive whole-session value; the app owns storing it. NMP does not ship a plaintext credential checkpoint.
 - Key-handling and secure-signer production readiness is tracked openly in [known gaps](docs/known-gaps.md).
 
 ## Contributing
