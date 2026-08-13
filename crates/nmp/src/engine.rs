@@ -41,6 +41,7 @@ use nmp_grammar::WriteIntent;
 use nmp_signer::SigningCapability;
 use nmp_store::{MemoryStore, RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
+use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
 use nostr::RelayUrl;
 use nostr::{EventId, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
@@ -255,6 +256,30 @@ impl std::fmt::Display for RelayInformationRequestError {
 impl std::error::Error for RelayInformationRequestError {}
 
 impl Engine {
+    /// Configure one synchronous capability implementation and return the
+    /// only supported constructor for operations bound to that installation.
+    pub fn add_replaceable_materializer<M>(
+        &self,
+        program: [u8; 16],
+        format: [u8; 16],
+        materializer: M,
+    ) -> Result<crate::RegisteredReplaceableMaterializer, EngineError>
+    where
+        M: crate::ReplaceableMaterializer,
+    {
+        let mut instance = [0u8; 16];
+        OsRng.fill_bytes(&mut instance);
+        let registration = crate::replaceable_materializer::ReplaceableMaterializerRegistration {
+            instance,
+            program,
+            format,
+            materializer: std::sync::Arc::new(materializer),
+        };
+        self.with_handle(|handle| handle.add_replaceable_materializer(registration))?
+            .map_err(EngineError::from_start_error)?;
+        Ok(crate::RegisteredReplaceableMaterializer { instance })
+    }
+
     #[cfg(test)]
     fn install_test_local_provider(
         &self,

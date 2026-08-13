@@ -10,7 +10,9 @@
 //! Hard break, no compatibility alias: every caller in the workspace moved
 //! to `nmp_grammar::{WriteIntent, ...}` in the same change.
 
-use nostr::{Event as SignedEvent, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp};
+use nostr::{
+    Event as SignedEvent, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent,
+};
 
 /// Everything an app must say to publish an event, and everything it MAY
 /// say. The kind is the one thing NMP cannot invent, so the kind is the one
@@ -147,8 +149,109 @@ pub enum WritePayload {
         builder: EventBuilder,
         expected_base: Option<EventId>,
     },
+    /// One capability-owned, replayable operation whose complete optimistic
+    /// event is derived synchronously at acceptance. The opaque value is
+    /// minted by the supported NMP facade; applications do not supply replay
+    /// authority, source timestamps, or an author through this arm.
+    ReplaceableOperation(ReplaceableOperation),
     Signed(SignedEvent),
 }
+
+const MAX_REPLACEABLE_OPERATION_BYTES: usize = 64 * 1024;
+
+/// Opaque mechanism payload for one registered, body-complete replaceable
+/// operation.
+///
+/// This type is public only because it is carried by the closed
+/// [`WritePayload`] enum. Its fields have no public accessors and the NMP
+/// facade does not re-export it. A supported caller receives an unforgeable
+/// registration handle from the engine and asks that handle to mint the
+/// payload; `publish()` rejects an unknown registration instance before
+/// custody. Capability helpers therefore cannot state replay-program ids,
+/// source authority, contributor membership, or a candidate body themselves.
+pub struct ReplaceableOperation {
+    registration_instance: [u8; 16],
+    original_source: UnsignedEvent,
+    current: UnsignedEvent,
+    operation: Vec<u8>,
+}
+
+impl ReplaceableOperation {
+    /// Mechanism-only constructor used by the facade's registered handle.
+    ///
+    /// It is intentionally hidden from documentation rather than offered as
+    /// a supported construction door. Knowing this function still grants no
+    /// authority: the random registration instance must be live in the exact
+    /// engine receiving the intent, and `publish()` validates that fact before
+    /// invoking capability code or writing anything.
+    #[doc(hidden)]
+    pub fn from_registered_parts(
+        registration_instance: [u8; 16],
+        original_source: UnsignedEvent,
+        current: UnsignedEvent,
+        operation: Vec<u8>,
+    ) -> Result<Self, ReplaceableOperationError> {
+        original_source
+            .verify_id()
+            .map_err(|_| ReplaceableOperationError::OriginalSourceInvalid)?;
+        current
+            .verify_id()
+            .map_err(|_| ReplaceableOperationError::CurrentInvalid)?;
+        if original_source.pubkey != current.pubkey
+            || original_source.kind != current.kind
+            || original_source.tags.identifier() != current.tags.identifier()
+        {
+            return Err(ReplaceableOperationError::CoordinateChanged);
+        }
+        if operation.is_empty() {
+            return Err(ReplaceableOperationError::OperationEmpty);
+        }
+        if operation.len() > MAX_REPLACEABLE_OPERATION_BYTES {
+            return Err(ReplaceableOperationError::OperationTooLarge);
+        }
+        Ok(Self {
+            registration_instance,
+            original_source,
+            current,
+            operation,
+        })
+    }
+
+    /// Mechanism-only decomposition at the generic engine boundary. No
+    /// supported facade or protocol helper exposes this method.
+    #[doc(hidden)]
+    pub fn into_registered_parts(self) -> ([u8; 16], UnsignedEvent, UnsignedEvent, Vec<u8>) {
+        (
+            self.registration_instance,
+            self.original_source,
+            self.current,
+            self.operation,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceableOperationError {
+    OriginalSourceInvalid,
+    CurrentInvalid,
+    CoordinateChanged,
+    OperationEmpty,
+    OperationTooLarge,
+}
+
+impl std::fmt::Display for ReplaceableOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OriginalSourceInvalid => "replaceable operation original source is invalid",
+            Self::CurrentInvalid => "replaceable operation current event is invalid",
+            Self::CoordinateChanged => "replaceable operation source coordinate changed",
+            Self::OperationEmpty => "replaceable operation must not be empty",
+            Self::OperationTooLarge => "replaceable operation exceeds the 65536-byte bound",
+        })
+    }
+}
+
+impl std::error::Error for ReplaceableOperationError {}
 
 /// A caller-generated, crash-safe correlation/idempotency token (#591).
 ///

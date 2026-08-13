@@ -945,6 +945,8 @@ pub enum AcceptOutcome {
         intent_id: IntentId,
         receipt_id: u64,
         current: SemanticCurrentState,
+        installed: Option<Box<StoredEvent>>,
+        predecessor: Option<Box<StoredEvent>>,
     },
     /// Brand-new pending row, no address competition. `intent_id`/
     /// `receipt_id` are the store-allocated ids (see [`IntentId`]'s doc) —
@@ -1377,7 +1379,9 @@ impl PublishQueueReceipt {
     pub fn event_id(&self) -> Option<EventId> {
         match &self.payload {
             PublishQueueReceiptPayload::Event { event_id, .. } => Some(*event_id),
-            PublishQueueReceiptPayload::ReplaceableOperation { .. } => None,
+            PublishQueueReceiptPayload::ReplaceableOperation { acceptance, .. } => {
+                acceptance.event_id()
+            }
         }
     }
 }
@@ -1390,8 +1394,30 @@ pub enum PublishQueueReceiptPayload {
     },
     ReplaceableOperation {
         coordinate: nostr::nips::nip01::Coordinate,
+        acceptance: ReplaceableOperationAcceptance,
         state: ReplaceableOperationReceiptState,
     },
+}
+
+/// Stable acceptance identity for a replaceable-operation receipt.
+///
+/// The closed bodyless arm preserves the lower store mechanism without
+/// inventing an event id. A body-complete accepted receipt owns one immutable
+/// event id even while its progressive `current` materialization later moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplaceableOperationAcceptance {
+    Bodyless,
+    BodyComplete(EventId),
+}
+
+impl ReplaceableOperationAcceptance {
+    #[must_use]
+    pub fn event_id(self) -> Option<EventId> {
+        match self {
+            Self::Bodyless => None,
+            Self::BodyComplete(event_id) => Some(event_id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

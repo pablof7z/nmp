@@ -25,7 +25,7 @@ use super::publish_queue::{
 
 pub(crate) type PublishQueueRelayId = u32;
 
-pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 4;
+pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 5;
 pub(super) const PUBLISH_QUEUE_CODEC_VERSION_KEY: &[u8] = b"codec_version";
 pub(super) const NEXT_INTENT_ID_KEY: &[u8] = b"next_intent_id";
 pub(super) const NEXT_RECEIPT_ID_KEY: &[u8] = b"next_receipt_id";
@@ -817,10 +817,21 @@ pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
             encoder.fixed(event_id.as_bytes());
             encode_receipt_state(&mut encoder, *state);
         }
-        crate::PublishQueueReceiptPayload::ReplaceableOperation { coordinate, state } => {
+        crate::PublishQueueReceiptPayload::ReplaceableOperation {
+            coordinate,
+            acceptance,
+            state,
+        } => {
             encoder.u8(1);
             encode_coordinate(&mut encoder, coordinate)
                 .expect("validated operation receipt coordinate");
+            match acceptance {
+                crate::ReplaceableOperationAcceptance::Bodyless => encoder.u8(0),
+                crate::ReplaceableOperationAcceptance::BodyComplete(event_id) => {
+                    encoder.u8(1);
+                    encoder.fixed(event_id.as_bytes());
+                }
+            }
             match state {
                 crate::ReplaceableOperationReceiptState::Contributing { current } => {
                     encoder.u8(0);
@@ -896,6 +907,16 @@ pub(crate) fn decode_receipt(
         },
         1 => {
             let coordinate = decode_coordinate(&mut decoder)?;
+            let acceptance = match decoder.u8()? {
+                0 => crate::ReplaceableOperationAcceptance::Bodyless,
+                1 => crate::ReplaceableOperationAcceptance::BodyComplete(decoder.event_id()?),
+                other => {
+                    return Err(PublishQueueCodecError::InvalidTag(
+                        "operation acceptance",
+                        other,
+                    ))
+                }
+            };
             let state = match decoder.u8()? {
                 0 => {
                     let current = match decoder.u8()? {
@@ -928,7 +949,11 @@ pub(crate) fn decode_receipt(
                     ))
                 }
             };
-            crate::PublishQueueReceiptPayload::ReplaceableOperation { coordinate, state }
+            crate::PublishQueueReceiptPayload::ReplaceableOperation {
+                coordinate,
+                acceptance,
+                state,
+            }
         }
         other => return Err(PublishQueueCodecError::InvalidTag("receipt payload", other)),
     };

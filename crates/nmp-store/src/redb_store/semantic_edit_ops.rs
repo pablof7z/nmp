@@ -11,7 +11,8 @@ use crate::semantic_edit::{
 };
 use crate::{
     AcceptOutcome, IntentId, LocalOrigin, PersistenceError, PromoteOutcome, Provenance,
-    PublishQueueReceiptPayload, ReplaceableOperationReceiptState, SigState, VerifiedSignature,
+    PublishQueueReceiptPayload, ReplaceableOperationReceiptState, SigState, StoredEvent,
+    VerifiedSignature,
 };
 
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
@@ -219,7 +220,7 @@ fn apply_plan(
         {
             return Ok(SemanticInstallOutcome::Stale);
         }
-        Some(old.materialization.event_id)
+        Some(Box::new(row.clone()))
     } else if plan.candidate.is_some()
         && plan
             .previous
@@ -242,7 +243,9 @@ fn apply_plan(
                     created_at,
                 },
                 Some((_key, row)),
-            ) if event_id == row.event.id && created_at == row.event.created_at => Some(event_id),
+            ) if event_id == row.event.id && created_at == row.event.created_at => {
+                Some(Box::new(row.clone()))
+            }
             _ => return Ok(SemanticInstallOutcome::Stale),
         }
     } else {
@@ -288,13 +291,14 @@ fn apply_plan(
         }
     }
 
-    if let Some(event_id) = predecessor {
+    if let Some(predecessor) = &predecessor {
+        let event_id = predecessor.event.id;
         if plan.removed_generation.is_some() || plan.candidate.is_some() {
             remove_row_in_txn(ingest, event_id, |_| true)?;
         }
     }
 
-    if let (Some(event), Some(generation)) = (
+    let installed_row = if let (Some(event), Some(generation)) = (
         candidate_event.as_ref(),
         plan.next.as_ref().and_then(|next| next.generation.as_ref()),
     ) {
@@ -308,7 +312,13 @@ fn apply_plan(
         if let Some(expires_at) = event.tags.expiration().copied() {
             ingest.expiration_put(&expiration_key(expires_at, &event.id), event_key)?;
         }
-    }
+        Some(Box::new(StoredEvent {
+            event: event.clone(),
+            provenance,
+        }))
+    } else {
+        None
+    };
 
     let (lower, upper) = operation_range(&coordinate)?;
     let old_keys = operations
@@ -366,8 +376,17 @@ fn apply_plan(
             .or_else(|| {
                 prior_materialization.filter(|record| update.current == Some(record.current))
             });
+        let acceptance = match receipt.payload {
+            PublishQueueReceiptPayload::ReplaceableOperation { acceptance, .. } => acceptance,
+            PublishQueueReceiptPayload::Event { .. } => {
+                return Err(PersistenceError::invariant(
+                    "semantic member has ordinary event receipt",
+                ));
+            }
+        };
         receipt.payload = PublishQueueReceiptPayload::ReplaceableOperation {
             coordinate: coordinate.clone(),
+            acceptance,
             state: receipt_state(update, chosen.as_ref()),
         };
         let encoded_receipt = encode_receipt(&receipt);
@@ -433,6 +452,12 @@ fn apply_plan(
             accepted_at: Some(accepted_at),
             payload: PublishQueueReceiptPayload::ReplaceableOperation {
                 coordinate: coordinate.clone(),
+                acceptance: materialization
+                    .as_ref()
+                    .map(|work| {
+                        crate::ReplaceableOperationAcceptance::BodyComplete(work.current.event_id)
+                    })
+                    .unwrap_or(crate::ReplaceableOperationAcceptance::Bodyless),
                 state: receipt_state(update, materialization.as_ref()),
             },
             correlation: correlation.as_ref().map(|token| token.as_ref().to_owned()),
@@ -459,6 +484,8 @@ fn apply_plan(
             if plan.candidate.is_some() {
                 SemanticInstallOutcome::Installed {
                     current,
+                    installed: installed_row
+                        .expect("a semantic candidate installs one canonical row"),
                     predecessor,
                 }
             } else {
@@ -533,7 +560,7 @@ pub(super) fn accept(
             )),
             plan,
         )?;
-        match installed {
+        let (installed, predecessor) = match installed {
             SemanticInstallOutcome::Stale => {
                 return Ok(AcceptOutcome::ReplaceableOperationRefused(
                     crate::SemanticRefusal::InvalidSourceRevision,
@@ -542,17 +569,24 @@ pub(super) fn accept(
             SemanticInstallOutcome::Refused(refusal) => {
                 return Ok(AcceptOutcome::ReplaceableOperationRefused(refusal));
             }
-            SemanticInstallOutcome::Installed { .. } | SemanticInstallOutcome::Waiting(_) => {}
+            SemanticInstallOutcome::Installed {
+                installed,
+                predecessor,
+                ..
+            } => (Some(installed), predecessor),
+            SemanticInstallOutcome::Waiting(_) => (None, None),
             SemanticInstallOutcome::Resolved => {
                 return Err(PersistenceError::invariant(
                     "newly accepted replaceable operation cannot already be resolved",
                 ));
             }
-        }
+        };
         Ok(AcceptOutcome::ReplaceableOperation {
             intent_id,
             receipt_id,
             current,
+            installed,
+            predecessor,
         })
     })?;
     if matches!(outcome, AcceptOutcome::ReplaceableOperationRefused(_)) {
@@ -745,6 +779,7 @@ pub(super) fn promote(
                         state: ReplaceableOperationReceiptState::Contributing {
                             current: Some(current),
                         },
+                        ..
                     } if receipt_coordinate == &coordinate
                         && current.materialization.materialization_id == expected_materialization
                         && current.materialization.event_id == expected_event_id
@@ -778,8 +813,15 @@ pub(super) fn promote(
                 .publish_queue_intents
                 .insert(&intent_key(member), encoded.as_slice())
                 .map_err(persist_err)?;
+            let acceptance = match receipt.payload {
+                PublishQueueReceiptPayload::ReplaceableOperation { acceptance, .. } => acceptance,
+                PublishQueueReceiptPayload::Event { .. } => {
+                    unreachable!("materialization receipt preflight guarantees semantic payload")
+                }
+            };
             receipt.payload = PublishQueueReceiptPayload::ReplaceableOperation {
                 coordinate: coordinate.clone(),
+                acceptance,
                 state: ReplaceableOperationReceiptState::Contributing {
                     current: Some(crate::MaterializationReceipt {
                         materialization: work.current,

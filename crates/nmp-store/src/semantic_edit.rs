@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventId, Timestamp, UnsignedEvent};
 
-use crate::{IntentId, IntentSigState, MaterializationRef, PersistenceError};
+use crate::{IntentId, IntentSigState, MaterializationRef, PersistenceError, StoredEvent};
 
 pub(crate) const MAX_PROGRAM_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_COORDINATE_IDENTIFIER_BYTES: usize = 65_536;
@@ -282,7 +282,8 @@ pub struct SemanticRematerialize {
 pub enum SemanticInstallOutcome {
     Installed {
         current: SemanticCurrentState,
-        predecessor: Option<EventId>,
+        installed: Box<StoredEvent>,
+        predecessor: Option<Box<StoredEvent>>,
     },
     Waiting(SemanticCurrentState),
     Resolved,
