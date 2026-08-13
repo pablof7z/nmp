@@ -1929,6 +1929,35 @@ mod tests {
     }
 
     #[test]
+    fn nip11_hostname_uses_platform_resolution_without_policy() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_headers(&mut stream);
+            let body = r#"{"name":"Platform DNS","supported_nips":[11]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let relay = RelayUrl::parse(&format!("ws://localhost:{port}")).unwrap();
+        let rt = test_runtime();
+        let service = local_relay_information_service(rt.handle().clone());
+
+        let value = service
+            .get(relay, RelayInformationCachePolicy::Refresh)
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(value.document().name.as_deref(), Some("Platform DNS"));
+        assert_eq!(value.document().supported_nips, Some(vec![11]));
+        service.close();
+        drop(rt);
+    }
+
+    #[test]
     fn expires_header_sets_and_preserves_the_freshness_deadline() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
