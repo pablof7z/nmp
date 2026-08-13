@@ -3947,11 +3947,17 @@ impl<S: EventStore> EngineCore<S> {
                 ReceiptState::Refused(reason) => Some(WriteOutcome::Refused(reason)),
                 ReceiptState::NoDestination => Some(WriteOutcome::NoDestination),
                 ReceiptState::Accepted | ReceiptState::Signed => match pending {
-                    // Routing finished and named nobody. Terminal, and the
-                    // one terminal that leaves its open-work row behind (see
-                    // `apply_route_answer`).
+                    // A completed answer that truly named nobody is
+                    // terminal even when its close transaction failed and
+                    // left the open-work row available here. A route-revision
+                    // persistence failure also leaves the durable set empty,
+                    // but its named URLs stay owned in
+                    // `route_blocked_relays` and the obligation remains open
+                    // for recovery.
                     Some(pending)
-                        if pending.route_complete && pending.durable_routes.is_empty() =>
+                        if pending.route_complete
+                            && pending.durable_routes.is_empty()
+                            && pending.route_blocked_relays.is_empty() =>
                     {
                         Some(WriteOutcome::NoDestination)
                     }
@@ -5209,9 +5215,13 @@ impl<S: EventStore> EngineCore<S> {
             //   undeliverable. It ends when knowledge is exhausted (becoming
             //   the case below), when a route appears, or when the app
             //   removes the entry.
-            // - `complete` — knowledge IS exhausted and named zero relays.
-            //   There is nowhere to publish, and saying so is a fact rather
-            //   than a guess.
+            // - `complete` with no blocked URL — knowledge IS exhausted and
+            //   named zero relays. There is nowhere to publish, and saying so
+            //   is a fact rather than a guess.
+            // - a blocked URL — resolution DID name a relay, but its route
+            //   revision did not commit. The durable union is still empty,
+            //   but the write remains open and reports the persistence stall
+            //   below rather than inventing `NoDestination`.
             // `picture_changed` is the ONE authority on whether this is news:
             // it was computed against the pending state BEFORE that state was
             // updated, so re-deriving it here would compare the new value
@@ -5228,7 +5238,7 @@ impl<S: EventStore> EngineCore<S> {
                     },
                     effects,
                 );
-                if answer.complete {
+                if answer.complete && blocked.is_empty() {
                     // Knowledge is exhausted and it named nobody. Terminal.
                     //
                     // The open-work row goes with it. This write owns no
