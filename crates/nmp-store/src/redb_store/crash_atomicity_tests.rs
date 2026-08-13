@@ -167,6 +167,7 @@ fn semantic_accept_write() -> AcceptWrite {
                 source: crate::StartingSource::Absent,
             },
             source: semantic_source(),
+            source_policy: crate::SemanticSourcePolicy::Continuing,
             source_event: None,
             plan: crate::SemanticPlan::new(1, vec![42]).unwrap(),
             materialized: None,
@@ -253,6 +254,7 @@ fn seed_qualified_semantic_generation(store: &mut RedbStore) -> (u64, EventId, E
                         source: crate::StartingSource::Event(source.id),
                     },
                     source: evidence,
+                    source_policy: crate::SemanticSourcePolicy::Continuing,
                     source_event: Some(stored),
                     plan: crate::SemanticPlan::new(1, vec![42]).unwrap(),
                     materialized: Some(crate::MaterializationCandidate {
@@ -1121,6 +1123,213 @@ fn semantic_shared_promotion_is_crash_atomic() {
             }
         ));
     }
+}
+
+#[test]
+fn finite_source_round_closes_every_semantic_receipt_and_compacts_the_program() {
+    let (_dir, path) = fixture();
+    let relay_one = RelayUrl::parse(RELAY).unwrap();
+    let relay_two = RelayUrl::parse(RELAY_TWO).unwrap();
+    let source_one =
+        crate::SemanticSource::new(relay_one.clone(), nmp_grammar::AccessContext::Public);
+    let source_two = crate::SemanticSource::new(relay_two, nmp_grammar::AccessContext::Public);
+    let round_id = crate::SourceRoundId([11; 32]);
+    let round = crate::FiniteSemanticSourceRound::new(
+        round_id,
+        BTreeSet::from([source_one.clone(), source_two.clone()]),
+    )
+    .unwrap();
+
+    let (receipt_a, receipt_b, intent_a, intent_b, close, stale_install) = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let mut first_write = semantic_accept_write();
+        let crate::AcceptWritePayload::ReplaceableOperation(first) = &mut first_write.payload
+        else {
+            unreachable!()
+        };
+        first.source_policy = crate::SemanticSourcePolicy::Finite(round);
+        let first = store.accept_write(first_write).unwrap();
+        let intent_a = first.journaled_intent_id().unwrap();
+        let receipt_a = first.journaled_receipt_id().unwrap();
+
+        let snapshot = store
+            .replaceable_operation_snapshot(&semantic_coordinate())
+            .unwrap()
+            .unwrap();
+        let mut second_write = semantic_accept_write();
+        let crate::AcceptWritePayload::ReplaceableOperation(second) = &mut second_write.payload
+        else {
+            unreachable!()
+        };
+        second.expected_source_revision = Some(snapshot.current.source_revision.clone());
+        second.expected_program_digest = Some(snapshot.current.program_digest);
+        second.contributing_operations = vec![intent_a];
+        second.source_policy = snapshot.source_policy.clone();
+        second.plan = crate::SemanticPlan::new(1, vec![43]).unwrap();
+        second_write.accepted_at = Timestamp::from(1_001);
+        let second = store.accept_write(second_write).unwrap();
+        let intent_b = second.journaled_intent_id().unwrap();
+        let receipt_b = second.journaled_receipt_id().unwrap();
+
+        let snapshot = store
+            .replaceable_operation_snapshot(&semantic_coordinate())
+            .unwrap()
+            .unwrap();
+        let installed = store
+            .install_replaceable_materialization(crate::SemanticRematerialize {
+                coordinate: semantic_coordinate(),
+                expected_source_revision: snapshot.current.source_revision.clone(),
+                expected_program_digest: snapshot.current.program_digest,
+                expected_current_materialization: None,
+                source: semantic_source(),
+                evaluated_at: Timestamp::from(1_001),
+                materialized: Some(crate::MaterializationCandidate {
+                    event: UnsignedEvent::new(
+                        keys().public_key(),
+                        Timestamp::from(1_001),
+                        Kind::ContactList,
+                        Vec::new(),
+                        "finite-round",
+                    ),
+                    routing: "finite-round-route".into(),
+                    sig_state: crate::PendingMaterializationState::Pending,
+                }),
+                contributing_operations: vec![intent_a, intent_b],
+                resolved_operations: Vec::new(),
+            })
+            .unwrap();
+        assert!(matches!(
+            installed,
+            SemanticInstallOutcome::Installed { .. }
+        ));
+        let (target, verified) = semantic_promotion_target(&store);
+        store.promote_signed(target, verified).unwrap();
+
+        for (source, generation, revision) in [(source_one, 1, 1), (source_two, 1, 2)] {
+            let request = crate::SemanticSourceRequest {
+                round: round_id,
+                source,
+                transport_generation: generation,
+                request_revision: revision,
+            };
+            store
+                .advance_replaceable_source_round(
+                    &semantic_coordinate(),
+                    crate::SemanticSourceRoundFact::RequestOpened(request.clone()),
+                )
+                .unwrap();
+            store
+                .advance_replaceable_source_round(
+                    &semantic_coordinate(),
+                    crate::SemanticSourceRoundFact::RequestSettled {
+                        request,
+                        terminal: crate::SemanticSourceTerminal::Eose,
+                    },
+                )
+                .unwrap();
+        }
+
+        let snapshot = store
+            .replaceable_operation_snapshot(&semantic_coordinate())
+            .unwrap()
+            .unwrap();
+        let generation = snapshot.current.generation.clone().unwrap();
+        let owner = *generation.members.first().unwrap();
+        store
+            .record_route_revision(owner, BTreeSet::from([relay_one]))
+            .unwrap();
+        let mut lane = store
+            .bootstrap_publish_queue_lanes(owner)
+            .unwrap()
+            .remove(0);
+        lane = store
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_010))
+            .unwrap();
+        let signed = store
+            .query(&Filter::new().id(generation.materialization.event_id))
+            .unwrap()
+            .remove(0)
+            .event;
+        let (_, started) = store
+            .start_lane_attempt(&lane.key, lane.revision, signed, Timestamp::from(1_011))
+            .unwrap();
+        lane = store
+            .record_lane_handoff(
+                &started.key,
+                started.revision,
+                started.last_ordinal,
+                PublishQueueAttemptHandoff {
+                    at: Timestamp::from(1_012),
+                    result: HandoffEvidence::Written,
+                },
+                PublishQueuePostHandoffState::AwaitingAck {
+                    deadline: Timestamp::from(1_020),
+                },
+            )
+            .unwrap();
+        store
+            .finish_lane_attempt(
+                &lane.key,
+                lane.revision,
+                lane.last_ordinal,
+                PublishQueueAttemptOutcome::Acked,
+                Timestamp::from(1_013),
+            )
+            .unwrap();
+
+        let close = crate::SemanticCohortClose {
+            coordinate: semantic_coordinate(),
+            expected_source_revision: snapshot.current.source_revision,
+            expected_program_digest: snapshot.current.program_digest,
+            expected_materialization: generation.materialization,
+            destination: crate::SemanticDestinationPlanClosure::AllCurrentDestinationsTerminal,
+        };
+        let stale_install = semantic_source_install(&store);
+        let outcome = store
+            .close_replaceable_operation_cohort(close.clone())
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::SemanticCohortCloseOutcome::Closed { ref members, .. }
+                if members.len() == 2
+        ));
+        (
+            receipt_a,
+            receipt_b,
+            intent_a,
+            intent_b,
+            close,
+            stale_install,
+        )
+    };
+
+    let mut store = RedbStore::open(&path).unwrap();
+    assert!(store
+        .replaceable_operation_snapshot(&semantic_coordinate())
+        .unwrap()
+        .is_none());
+    assert!(store.recover_publish_queue().unwrap().is_empty());
+    for (receipt_id, intent_id) in [(receipt_a, intent_a), (receipt_b, intent_b)] {
+        let receipt = store.reattach_receipt(receipt_id).unwrap().unwrap();
+        assert_eq!(receipt.intent_id, Some(intent_id));
+        assert!(matches!(
+            receipt.payload,
+            PublishQueueReceiptPayload::ReplaceableOperation {
+                state: ReplaceableOperationReceiptState::Settled,
+                ..
+            }
+        ));
+    }
+    assert_eq!(
+        store.close_replaceable_operation_cohort(close).unwrap(),
+        crate::SemanticCohortCloseOutcome::Stale
+    );
+    assert_eq!(
+        store
+            .install_replaceable_source_materialization(stale_install)
+            .unwrap(),
+        SemanticInstallOutcome::Stale
+    );
 }
 
 fn event_and_request_coverage_state(path: &Path) -> (bool, bool, bool) {
