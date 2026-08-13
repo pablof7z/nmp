@@ -111,7 +111,8 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     let author = Keys::generate();
     let good = RelayUrl::parse("wss://persisted.example").unwrap();
     let blocked = RelayUrl::parse("wss://blocked.example").unwrap();
-    let store = SharedFailStartStore::new([blocked.clone()]);
+    let store = RedbStore::temporary_with_failed_lane_starts([blocked.clone()])
+        .expect("temporary Redb failure fixture");
     let mut core = EngineCore::new(store, 10);
     connect_signer(&mut core, 0, &good, author.public_key());
     connect_signer(&mut core, 1, &blocked, author.public_key());
@@ -312,7 +313,8 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     let author = Keys::generate();
     let a = RelayUrl::parse("wss://blocked-a.example").unwrap();
     let b = RelayUrl::parse("wss://blocked-b.example").unwrap();
-    let store = SharedFailStartStore::new([a.clone(), b.clone()]);
+    let store = RedbStore::temporary_with_failed_lane_starts([a.clone(), b.clone()])
+        .expect("temporary Redb failure fixture");
     let mut core = EngineCore::new(store, 10);
     connect_signer(&mut core, 0, &a, author.public_key());
     connect_signer(&mut core, 1, &b, author.public_key());
@@ -342,7 +344,8 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
     let author = Keys::generate();
     let good = RelayUrl::parse("wss://ack-persisted.example").unwrap();
     let blocked = RelayUrl::parse("wss://still-blocked.example").unwrap();
-    let store = SharedFailStartStore::new([blocked.clone()]);
+    let store = RedbStore::temporary_with_failed_lane_starts([blocked.clone()])
+        .expect("temporary Redb failure fixture");
     let mut core = EngineCore::new(store, 10);
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {

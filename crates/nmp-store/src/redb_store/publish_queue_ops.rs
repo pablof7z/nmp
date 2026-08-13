@@ -1256,6 +1256,12 @@ pub(super) fn start_lane_attempt(
         )?;
         (attempt, advanced)
     };
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if store.failed_lane_start_relays.contains(&key.relay) {
+        return Err(PersistenceError::invariant(
+            "injected attempt start failure",
+        ));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneStartBeforeCommit);
     commit_prepared(write_txn, (attempt, lane))
