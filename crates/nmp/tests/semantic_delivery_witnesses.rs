@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use nmp::{
     AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, Row, RowDelta, SourceAuthority, WriteFact, WriteIntent,
-    WriteOutcome, WriteRouting,
+    ReplaceableMaterializerRefusal, Row, RowDelta, SigningState, SourceAuthority, WriteFact,
+    WriteIntent, WriteOutcome, WriteRouting,
 };
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -254,6 +254,13 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
 
     for statuses in [&first.statuses, &second.statuses] {
         let facts = wait_for_generation_relay_facts(statuses, e2.id(), &expected_relays);
+        assert!(
+            facts.iter().any(|fact| matches!(
+                fact,
+                WriteFact::Signing(SigningState::Signed { event_id }) if *event_id == e2.id()
+            )),
+            "every contributing live receipt must observe E2 signing: {facts:?}"
+        );
         assert_no_settled_fact(&facts);
         assert!(facts.iter().all(|fact| {
             !matches!(fact, WriteFact::Relay { event_id, .. } if *event_id != first_current.id() && *event_id != e2.id())
