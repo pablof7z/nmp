@@ -181,17 +181,31 @@ final class EvidenceMappingTests: XCTestCase {
     }
 
     func testEveryRetryLaneReceiptStateMapsWithoutLosingAttemptTruth() {
+        let eventID = String(repeating: "e", count: 64)
         XCTAssertEqual(
-            WriteFact(.relay(relay: "wss://offline.example", state: .waiting(waiting: .notConnected))),
-            .relay(relay: "wss://offline.example", state: .waiting(.notConnected))
-        )
-        XCTAssertEqual(
-            WriteFact(.relay(relay: "wss://auth.example", state: .waiting(waiting: .needsAuth))),
-            .relay(relay: "wss://auth.example", state: .waiting(.needsAuth))
+            WriteFact(
+                .relay(
+                    eventId: eventID,
+                    relay: "wss://offline.example",
+                    state: .waiting(waiting: .notConnected)
+                )
+            ),
+            .relay(eventId: eventID, relay: "wss://offline.example", state: .waiting(.notConnected))
         )
         XCTAssertEqual(
             WriteFact(
                 .relay(
+                    eventId: eventID,
+                    relay: "wss://auth.example",
+                    state: .waiting(waiting: .needsAuth)
+                )
+            ),
+            .relay(eventId: eventID, relay: "wss://auth.example", state: .waiting(.needsAuth))
+        )
+        XCTAssertEqual(
+            WriteFact(
+                .relay(
+                    eventId: eventID,
                     relay: "wss://auth.example",
                     state: .authFailed(
                         pubkey: String(repeating: "a", count: 64),
@@ -201,6 +215,7 @@ final class EvidenceMappingTests: XCTestCase {
                 )
             ),
             .relay(
+                eventId: eventID,
                 relay: "wss://auth.example",
                 state: .authFailed(
                     pubkey: String(repeating: "a", count: 64),
@@ -212,6 +227,7 @@ final class EvidenceMappingTests: XCTestCase {
         XCTAssertEqual(
             WriteFact(
                 .relay(
+                    eventId: eventID,
                     relay: "wss://retry.example",
                     state: .waiting(
                         waiting: .backingOff(
@@ -224,6 +240,7 @@ final class EvidenceMappingTests: XCTestCase {
                 )
             ),
             .relay(
+                eventId: eventID,
                 relay: "wss://retry.example",
                 state: .waiting(
                     .backingOff(
@@ -237,10 +254,39 @@ final class EvidenceMappingTests: XCTestCase {
         )
         XCTAssertEqual(
             WriteFact(
-                .relay(relay: "wss://written.example", state: .sent(attempt: 4, writtenAt: 125))
+                .relay(
+                    eventId: eventID,
+                    relay: "wss://written.example",
+                    state: .sent(attempt: 4, writtenAt: 125)
+                )
             ),
-            .relay(relay: "wss://written.example", state: .sent(attempt: 4, writtenAt: 125))
+            .relay(
+                eventId: eventID,
+                relay: "wss://written.example",
+                state: .sent(attempt: 4, writtenAt: 125)
+            )
         )
+    }
+
+    func testRelayFactsKeepTheExactEventGeneration() {
+        let firstID = String(repeating: "1", count: 64)
+        let secondID = String(repeating: "2", count: 64)
+        let first = WriteFact(
+            .relay(eventId: firstID, relay: "wss://generation.example", state: .published)
+        )
+        let second = WriteFact(
+            .relay(eventId: secondID, relay: "wss://generation.example", state: .published)
+        )
+
+        XCTAssertEqual(
+            first,
+            .relay(eventId: firstID, relay: "wss://generation.example", state: .published)
+        )
+        XCTAssertEqual(
+            second,
+            .relay(eventId: secondID, relay: "wss://generation.example", state: .published)
+        )
+        XCTAssertNotEqual(first, second)
     }
 
     /// A lane the local disk stalled is a lane that is still ours: it is

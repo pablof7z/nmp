@@ -434,7 +434,8 @@ public enum WriteOutcome: Sendable, Hashable {
 /// relays. Never block a UI on this.
 public enum WriteFact: Sendable, Hashable {
     case signing(SigningState)
-    case relay(relay: String, state: RelayState)
+    /// Evidence from one relay about one exact event generation.
+    case relay(eventId: String, relay: String, state: RelayState)
     /// The relays this write is INTENDED for, and whether resolution can
     /// still change its mind. `complete` flips on settled RESOLUTION, never
     /// on delivery, so `complete == true` with nothing published yet is
@@ -461,8 +462,8 @@ public enum WriteFact: Sendable, Hashable {
     init(_ ffi: FfiWriteFact) {
         switch ffi {
         case .signing(let state): self = .signing(SigningState(state))
-        case .relay(let relay, let state):
-            self = .relay(relay: relay, state: RelayState(state))
+        case .relay(let eventId, let relay, let state):
+            self = .relay(eventId: eventId, relay: relay, state: RelayState(state))
         case .destinations(let relays, let complete, let awaitingAuthorRoutes):
             self = .destinations(
                 relays: relays,

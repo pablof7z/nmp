@@ -199,6 +199,7 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
             .remove(0);
         let key = PublishQueueLaneKey {
             intent_id,
+            event_id: signed.id,
             relay: relay.clone(),
         };
         lane = store
