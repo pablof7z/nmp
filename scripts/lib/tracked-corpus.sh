@@ -18,11 +18,6 @@
 # LEVEL: inside `$(...)` a failed enumeration would exit nothing but the
 # subshell and would read to the caller as "no violations found".
 #
-# `scripts/test-check-nip29-ownership.sh` falsifies every clause below against
-# a purpose-built repository: paths holding spaces and newlines, tracked
-# symlinks, submodule gitlinks, a tracked file deleted from the working tree,
-# a single-file batch, and invocation from a subdirectory.
-
 # Tracked regular files under each pathspec, collected into TRACKED_PATHS.
 #
 #   -s -z        NUL-terminated and carrying the index mode, so a path holding
