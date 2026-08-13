@@ -854,13 +854,43 @@ mod semantic_successor_tests {
         assert_eq!(core.pending.len(), 3);
         assert_eq!(core.intent_receipts.len(), 3);
         assert_eq!(
-            receipts.into_iter().collect::<BTreeSet<_>>(),
+            receipts.iter().copied().collect::<BTreeSet<_>>(),
             core.pending.keys().copied().collect()
         );
         assert!(core
             .pending
             .values()
             .all(|pending| pending.frozen.id == second_successor.event.id));
+        let sign_requests = later_effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sign_requests.len(),
+            1,
+            "one semantic generation has one physical signer request"
+        );
+        let (owner, generation, unsigned) = sign_requests.into_iter().next().unwrap();
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let signed_effects = core.handle(EngineMsg::SignerCompleted(
+            owner,
+            generation,
+            Ok(signed.clone()),
+        ));
+        for receipt in &receipts {
+            assert!(signed_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::EmitReceipt(
+                    candidate,
+                    WriteFact::Signing(SigningState::Signed { event_id })
+                ) if candidate == receipt && *event_id == signed.id
+            )));
+        }
     }
 }
 
