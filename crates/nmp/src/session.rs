@@ -391,14 +391,14 @@ mod tests {
     use super::*;
     use nostr::Keys;
 
+    type RawProvider<'a> = Option<(&'a str, u16, Vec<u8>)>;
+    type RawAccount<'a> = (PublicKey, RawProvider<'a>);
+
     fn secret_bytes(keys: &Keys) -> [u8; 32] {
         keys.secret_key().to_secret_bytes()
     }
 
-    fn raw_payload(
-        accounts: &[(PublicKey, Option<(&str, u16, Vec<u8>)>)],
-        current: Option<PublicKey>,
-    ) -> SessionPayload {
+    fn raw_payload(accounts: &[RawAccount<'_>], current: Option<PublicKey>) -> SessionPayload {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&SESSION_VERSION.to_be_bytes());
         bytes.extend_from_slice(&(accounts.len() as u32).to_be_bytes());

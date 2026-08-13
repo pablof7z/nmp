@@ -114,7 +114,9 @@ fn decode_hex_secret(encoded: &[u8]) -> Result<[u8; 32], String> {
     }
 
     let mut secret = [0_u8; 32];
-    for (index, pair) in encoded.chunks_exact(2).enumerate() {
+    let (pairs, remainder) = encoded.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for (index, pair) in pairs.iter().enumerate() {
         let (high, low) = match (hex_nibble(pair[0]), hex_nibble(pair[1])) {
             (Ok(high), Ok(low)) => (high, low),
             _ => {
@@ -133,33 +135,6 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err("not a hex digit".to_string()),
-    }
-}
-
-#[cfg(test)]
-mod secret_key_tests {
-    use super::decode_hex_secret;
-
-    #[test]
-    fn decodes_exact_secret_bytes_at_the_application_boundary() {
-        let encoded = b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n";
-        assert_eq!(
-            decode_hex_secret(encoded).unwrap(),
-            [
-                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
-                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
-                0x1c, 0x1d, 0x1e, 0x1f,
-            ]
-        );
-    }
-
-    #[test]
-    fn refuses_encoded_or_malformed_secret_values_below_the_boundary() {
-        assert!(decode_hex_secret(b"nsec1not-a-decoded-key").is_err());
-        assert!(decode_hex_secret(
-            b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1g"
-        )
-        .is_err());
     }
 }
 
@@ -961,4 +936,31 @@ fn ensure(condition: bool, error: impl Into<String>) -> Result<(), String> {
 
 fn display(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod secret_key_tests {
+    use super::decode_hex_secret;
+
+    #[test]
+    fn decodes_exact_secret_bytes_at_the_application_boundary() {
+        let encoded = b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n";
+        assert_eq!(
+            decode_hex_secret(encoded).unwrap(),
+            [
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+                0x1c, 0x1d, 0x1e, 0x1f,
+            ]
+        );
+    }
+
+    #[test]
+    fn refuses_encoded_or_malformed_secret_values_below_the_boundary() {
+        assert!(decode_hex_secret(b"nsec1not-a-decoded-key").is_err());
+        assert!(decode_hex_secret(
+            b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1g"
+        )
+        .is_err());
+    }
 }

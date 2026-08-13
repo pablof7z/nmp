@@ -14,8 +14,10 @@ struct OutboxRoutingSwiftConsumer {
             )
         )
         defer { engine.shutdown() }
-        let account = try await engine.addAccount(secretKey: manifest["secret_key"]!)
-        try engine.setActiveAccount(account.publicKey)
+        let privateKey = try NMPPrivateKey(
+            bytes: decodedHex(manifest["secret_key"]!)
+        )
+        _ = try engine.session.add(privateKey: privateKey, makeCurrent: true)
         let receipt = try await engine.publish(
             WriteIntent(
                 payload: .event(kind: 1, content: "swift prepared cold discovery"),
@@ -31,4 +33,26 @@ struct OutboxRoutingSwiftConsumer {
         }
         print("PASS swift prepared outbox routing cold discovery")
     }
+}
+
+private enum FixtureInputError: Error {
+    case invalidHex
+}
+
+private func decodedHex(_ hex: String) throws -> Data {
+    guard hex.count.isMultiple(of: 2) else {
+        throw FixtureInputError.invalidHex
+    }
+    var bytes = Data()
+    bytes.reserveCapacity(hex.count / 2)
+    var index = hex.startIndex
+    while index < hex.endIndex {
+        let next = hex.index(index, offsetBy: 2)
+        guard let byte = UInt8(hex[index..<next], radix: 16) else {
+            throw FixtureInputError.invalidHex
+        }
+        bytes.append(byte)
+        index = next
+    }
+    return bytes
 }
