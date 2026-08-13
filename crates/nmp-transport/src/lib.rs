@@ -34,6 +34,10 @@ mod handle;
 mod health;
 mod keepalive;
 mod pool;
+/// Process-wide NMP thread census. Hosted here because transport is the
+/// lowest crate both the pool and the engine can share. Not an executor.
+#[doc(hidden)]
+pub mod thread_census;
 
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};

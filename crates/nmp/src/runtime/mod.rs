@@ -1326,7 +1326,7 @@ fn spawn_sign_event_completion(
     let spawned = thread::Builder::new()
         .name("nmp-sign-event-completion".to_string())
         .spawn(move || {
-            nmp_executor::run_counted_thread(move || {
+            nmp_transport::thread_census::run_counted_thread(move || {
                 SIGN_EVENT_COMPLETION_OP.with(|op| op.set(Some(operation_id)));
                 let _finished = SignEventFinishedGuard {
                     inbox: thread_inbox,
@@ -1938,8 +1938,8 @@ impl EngineThread {
             .worker_threads(ADAPTER_RUNTIME_WORKERS)
             .enable_all()
             .thread_name("nmp-adapter")
-            .on_thread_start(nmp_executor::note_thread_spawn)
-            .on_thread_stop(nmp_executor::note_thread_exit)
+            .on_thread_start(nmp_transport::thread_census::note_thread_spawn)
+            .on_thread_stop(nmp_transport::thread_census::note_thread_exit)
             .build()
             .map(Arc::new)
             .map_err(|error| EngineThreadError::ThreadUnavailable {
@@ -1990,7 +1990,7 @@ impl EngineThread {
         let bridge_join = match thread::Builder::new()
             .name("nmp-engine-pool-bridge".to_string())
             .spawn(move || {
-                nmp_executor::run_counted_thread(move || {
+                nmp_transport::thread_census::run_counted_thread(move || {
                     #[cfg(test)]
                     let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
                     pool_bridge_loop(
@@ -2027,7 +2027,7 @@ impl EngineThread {
             match thread::Builder::new()
                 .name("nmp-engine".to_string())
                 .spawn(move || {
-                    nmp_executor::run_counted_thread(move || {
+                    nmp_transport::thread_census::run_counted_thread(move || {
                         #[cfg(test)]
                         let _thread_count = RuntimeThreadCountGuard::enter(engine_runtime_threads);
                         engine_loop(

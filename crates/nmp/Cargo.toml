@@ -116,7 +116,6 @@ nmp-store.workspace = true
 nmp-router.workspace = true
 nmp-resolver.workspace = true
 nmp-transport.workspace = true
-nmp-executor.workspace = true
 # The one pure destination-admission owner (#885): discovery admission and
 # the NIP-11 fetcher decide from it instead of re-deriving host rules.
 blake3.workspace = true

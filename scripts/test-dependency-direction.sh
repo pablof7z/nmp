@@ -277,19 +277,19 @@ expect_failure \
   "shortest path: nmp-router -> nmp-nip99"
 
 # The focused NIP-29 fixture remains family-classified and is rejected through
-# the role policy when it reaches the executor. Reclassifying that target to a
-# newly invented future role in a policy copy is rejected without adding a
-# second forbidden-role list.
-nip29_forbidden="$TEMP_ROOT/nip29-to-executor"
-write_workspace "$nip29_forbidden" nmp-nip29 nmp-executor
-write_crate "$nip29_forbidden" nmp-executor
+# the role policy when it reaches a remaining generic mechanism. Reclassifying
+# that target to a newly invented future role in a policy copy is rejected
+# without adding a second forbidden-role list.
+nip29_forbidden="$TEMP_ROOT/nip29-to-store"
+write_workspace "$nip29_forbidden" nmp-nip29 nmp-store
+write_crate "$nip29_forbidden" nmp-store
 write_crate "$nip29_forbidden" nmp-nip29 \
-  $'[dependencies]\nnmp-executor = { path = "../nmp-executor" }'
+  $'[dependencies]\nnmp-store = { path = "../nmp-store" }'
 expect_failure \
   "NIP-29 family-preserving forbidden edge" \
   "$nip29_forbidden" \
   "focused classification: nmp-nip29 [pure-protocol] via family rule 'nmp-nip'" \
-  "shortest path: nmp-nip29 -> nmp-executor"
+  "shortest path: nmp-nip29 -> nmp-store"
 
 nip29_forbidden_metadata="$TEMP_ROOT/nip29-forbidden-metadata.json"
 cargo metadata \
@@ -308,7 +308,7 @@ policy["roles"]["future-runtime"] = {
     "description": "Synthetic future role used only by the falsifier.",
     "may_reach": ["generic-value"],
 }
-policy["role_rules"]["exact"]["nmp-executor"] = "future-runtime"
+policy["role_rules"]["exact"]["nmp-store"] = "future-runtime"
 with open(sys.argv[2], "w", encoding="utf-8") as target:
     json.dump(policy, target)
 PY
@@ -316,7 +316,7 @@ expect_validator_failure \
   "NIP-29 future-role derivation" \
   "$future_role_policy" \
   "$nip29_forbidden_metadata" \
-  "forbidden target: nmp-executor [future-runtime; exact rule 'nmp-executor']"
+  "forbidden target: nmp-store [future-runtime; exact rule 'nmp-store']"
 
 test_optional_edge
 
