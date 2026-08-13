@@ -153,11 +153,14 @@ async fn cold_public_engine_observes_alices_notes(world: &mut AcceptanceWorld) {
     while Instant::now() < deadline && !world.content_row_arrived {
         if let Ok(frame) = subscription.recv_timeout(Duration::from_millis(250)) {
             world.content_row_arrived = frame.deltas.iter().any(|delta| {
-                delta.event().is_some_and(|event| event.id == expected_note)
+                delta
+                    .row()
+                    .and_then(|row| row.signed_event())
+                    .is_some_and(|event| event.id == expected_note)
                     && matches!(
                         delta,
                         nmp::RowDelta::Added(row)
-                            if row.sources.contains(&world.content().url)
+                            if row.sources().contains(&world.content().url)
                     )
             });
         }

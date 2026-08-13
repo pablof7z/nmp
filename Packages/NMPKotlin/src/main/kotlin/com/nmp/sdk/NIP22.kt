@@ -220,8 +220,7 @@ fun decodeComment(row: Row): DecodedComment {
             kind = row.kind,
             tags = row.tags,
             content = row.content,
-            sig = row.sig,
-            signatureState = row.signatureState.toFfi(),
+            signature = row.signature.toFfi(),
             sources = row.sources,
         )
     try {

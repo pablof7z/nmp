@@ -285,7 +285,7 @@ fn fresh_cached_profile_uses_coverage_and_zero_wire() {
     assert_eq!(reqs(&effects), 0);
     assert!(rows
         .iter()
-        .any(|row| matches!(row, RowDelta::Added(row) if row.event.id == profile.id)));
+        .any(|row| matches!(row, RowDelta::Added(row) if row.id() == profile.id)));
     assert_eq!(evidence[0].sources.len(), 1);
     assert_eq!(evidence[0].sources[0].relay, relay);
     assert_eq!(
@@ -383,7 +383,7 @@ fn cache_only_never_opens_wire_with_populated_cache_and_coverage() {
     assert_eq!(reqs(&effects), 0);
     assert!(rows
         .iter()
-        .any(|row| matches!(row, RowDelta::Added(row) if row.event.id == cached.id)));
+        .any(|row| matches!(row, RowDelta::Added(row) if row.id() == cached.id)));
     assert!(
         evidence[0].sources.is_empty(),
         "CacheOnly claims no acquisition"
@@ -496,7 +496,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
 
     assert!(
         rows.iter().any(
-            |delta| matches!(delta, RowDelta::Added(row) if row.event.id == root_row.id)
+            |delta| matches!(delta, RowDelta::Added(row) if row.id() == root_row.id)
         ),
         "Public root Strict is a no-op and must keep the B-observed row; the nested A pin belongs only to the inner projection"
     );

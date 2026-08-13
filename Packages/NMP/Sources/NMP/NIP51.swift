@@ -71,14 +71,13 @@ public func activeAccountDemand() -> NMPDemand {
 
 /// Tolerantly parse Simple-groups-shaped public items from an untrusted
 /// `Row` (#863). Infallible and kind-agnostic: malformed individual items
-/// are counted, never fatal, and the row's `kind`/`sig` are not consulted.
+/// are counted, never fatal, and the row's `kind`/signature are not consulted.
 ///
 /// The result is observational data only.
 public func parseSimpleGroupsListTolerant(_ row: Row) -> SimpleGroupsList {
     let ffiRow = FfiRow(
         id: row.id, pubkey: row.pubkey, createdAt: row.createdAt, kind: row.kind,
-        tags: row.tags, content: row.content, sig: row.sig,
-        signatureState: row.signatureState.ffi, sources: row.sources
+        tags: row.tags, content: row.content, signature: row.signature.ffi, sources: row.sources
     )
     return SimpleGroupsList(NMPFFI.parseSimpleGroupsListTolerant(row: ffiRow))
 }

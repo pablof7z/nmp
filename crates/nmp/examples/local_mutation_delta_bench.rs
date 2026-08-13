@@ -220,7 +220,7 @@ fn assert_single_added(effects: &[Effect], expected: &Event) {
     let rows = projected_rows(effects);
     assert!(matches!(
         rows.as_slice(),
-        [RowDelta::Added(row)] if row.event.id == expected.id
+        [RowDelta::Added(row)] if row.id() == expected.id
     ));
 }
 

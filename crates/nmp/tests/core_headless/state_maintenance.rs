@@ -37,7 +37,7 @@ fn root_query_emits_removed_on_delete() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::EmitRows(_, rows, _)
-            if rows.iter().any(|r| matches!(r, RowDelta::Added(row) if row.event.id == note_id)))),
+            if rows.iter().any(|r| matches!(r, RowDelta::Added(row) if row.id() == note_id)))),
         "the note must arrive as Added first"
     );
 
@@ -97,7 +97,7 @@ fn expiry_emits_removed_via_manual_tick() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::EmitRows(_, rows, _)
-            if rows.iter().any(|r| matches!(r, RowDelta::Added(row) if row.event.id == expiring_id)))),
+            if rows.iter().any(|r| matches!(r, RowDelta::Added(row) if row.id() == expiring_id)))),
         "the expiring note must arrive as Added first"
     );
 

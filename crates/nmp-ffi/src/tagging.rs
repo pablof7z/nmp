@@ -21,13 +21,6 @@
 //! holding, sources included — and never a relationship, a marker, a relay
 //! hint or an author. Those are what the door fills.
 
-#[cfg(any(
-    feature = "nip18",
-    feature = "nip22",
-    feature = "nip25",
-    feature = "nipc7"
-))]
-use crate::convert::signed_event_from_ffi;
 use crate::convert::{event_builder_from_ffi, parse_pubkey, parse_relay_url, FfiError};
 #[cfg(feature = "nip25")]
 use crate::types::FfiReaction;
@@ -52,29 +45,33 @@ use nmp::{At, InterpolatedContent, Mention};
     feature = "nipc7"
 ))]
 pub(crate) fn row_from_ffi(row: FfiRow) -> Result<nmp::Row, FfiError> {
-    let signature_state = match row.signature_state {
-        crate::types::FfiRowSignatureState::Pending => nmp::RowSignatureState::Pending,
-        crate::types::FfiRowSignatureState::Signed => nmp::RowSignatureState::Signed,
+    let signature = match row.signature {
+        crate::types::FfiRowSignature::Pending => nmp::RowSignature::Pending,
+        crate::types::FfiRowSignature::Signed { signature } => nmp::RowSignature::Signed(
+            signature
+                .parse()
+                .map_err(|_| FfiError::InvalidSignature { got: signature })?,
+        ),
     };
-    let event = signed_event_from_ffi(
-        row.id,
-        row.pubkey,
-        row.created_at,
-        row.kind,
-        row.tags,
-        row.content,
-        row.sig,
-    )?;
+    let id =
+        nostr::EventId::from_hex(&row.id).map_err(|_| FfiError::InvalidEventId { got: row.id })?;
+    let pubkey = parse_pubkey(&row.pubkey)?;
+    let tags = crate::convert::tags_from_ffi(row.tags)?;
     let sources = row
         .sources
         .iter()
         .map(|url| crate::convert::parse_relay_url(url))
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-    Ok(nmp::Row {
-        event,
-        signature_state,
+    Ok(nmp::Row::from_parts(
+        id,
+        pubkey,
+        nostr::Timestamp::from(row.created_at),
+        nostr::Kind::from(row.kind),
+        nostr::Tags::from_list(tags),
+        row.content,
+        signature,
         sources,
-    })
+    ))
 }
 
 fn builder_to_ffi(builder: nmp::EventBuilder) -> FfiEventBuilder {
@@ -147,9 +144,14 @@ pub fn with_content(
             #[cfg(feature = "nip18")]
             FfiContentPart::Quote { target } => {
                 let row = row_from_ffi(target)?;
-                match row.sources.iter().next() {
-                    Some(relay) => interpolate(&At(&row.event, relay.clone()), &mut interpolated),
-                    None => interpolate(&row.event, &mut interpolated),
+                let event = row
+                    .signed_event()
+                    .ok_or_else(|| FfiError::InvalidSignature {
+                        got: "pending row has no signature".to_owned(),
+                    })?;
+                match row.sources().iter().next() {
+                    Some(relay) => interpolate(&At(&event, relay.clone()), &mut interpolated),
+                    None => interpolate(&event, &mut interpolated),
                 }
             }
         }
@@ -191,8 +193,13 @@ pub fn chat_reply(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 #[cfg(feature = "nip18")]
 pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
     let row = row_from_ffi(target)?;
-    let hint = row.sources.iter().next().cloned();
-    Ok(builder_to_ffi(nmp::nip18::repost(&row.event, hint)))
+    let hint = row.sources().iter().next().cloned();
+    let event = row
+        .signed_event()
+        .ok_or_else(|| FfiError::InvalidSignature {
+            got: "pending row has no signature".to_owned(),
+        })?;
+    Ok(builder_to_ffi(nmp::nip18::repost(&event, hint)))
 }
 
 /// Compose a NIP-25 reaction to `target`.
@@ -220,10 +227,13 @@ pub fn react_to(target: FfiRow, reaction: FfiReaction) -> Result<FfiEventBuilder
         }
     };
     let row = row_from_ffi(target)?;
-    let hint = row.sources.iter().next().cloned();
-    Ok(builder_to_ffi(nmp::nip25::react(
-        &row.event, hint, reaction,
-    )))
+    let hint = row.sources().iter().next().cloned();
+    let event = row
+        .signed_event()
+        .ok_or_else(|| FfiError::InvalidSignature {
+            got: "pending row has no signature".to_owned(),
+        })?;
+    Ok(builder_to_ffi(nmp::nip25::react(&event, hint, reaction)))
 }
 
 #[cfg(all(
@@ -247,14 +257,20 @@ mod tests {
             )
             .sign_with_keys(&keys)
             .expect("test event signs");
-        row_to_ffi_row(&nmp::Row {
-            event,
-            signature_state: nmp::RowSignatureState::Signed,
-            sources: sources
+        let signature = event.sig;
+        row_to_ffi_row(&nmp::Row::from_parts(
+            event.id,
+            event.pubkey,
+            event.created_at,
+            event.kind,
+            event.tags,
+            event.content,
+            nmp::RowSignature::Signed(signature),
+            sources
                 .iter()
                 .map(|url| nostr::RelayUrl::parse(url).expect("test relay parses"))
                 .collect(),
-        })
+        ))
     }
 
     /// #1243's own report, closed at the boundary it named: a native chat app

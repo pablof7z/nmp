@@ -92,10 +92,10 @@ fn wait_for_rows(
                 for delta in deltas {
                     match delta {
                         RowDelta::Added(row) => {
-                            current.insert(row.event.id);
+                            current.insert(row.id());
                         }
                         RowDelta::Updated(row) => {
-                            current.insert(row.event.id);
+                            current.insert(row.id());
                         }
                         RowDelta::SourcesGrew { .. } => {}
                         RowDelta::Removed(id) => {
@@ -775,9 +775,9 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
                 if deltas.iter().any(|delta| {
                     matches!(
                         delta,
-                        RowDelta::Added(row) if row.event.id == expected.id
-                            && row.event.pubkey == b.public_key()
-                            && row.event.verify().is_ok()
+                        RowDelta::Added(row) if row.id() == expected.id
+                            && row.pubkey() == b.public_key()
+                            && row.signed_event().is_some_and(|event| event.verify().is_ok())
                     )
                 }) {
                     break true;

@@ -1,8 +1,8 @@
-use nmp::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp::{EventBuilder, Identity, Row, WriteIntent, WritePayload, WriteRouting};
 use nmp_event_edit::{
     EventEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
 };
-use nostr::{Event, EventId, Kind, PublicKey, Tag};
+use nostr::{EventId, Kind, PublicKey, Tag};
 
 /// The requested relationship after a NIP-02 edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,8 +38,8 @@ fn follow_selector(target: PublicKey) -> TagItemSelector {
 /// True when `event` contains any NIP-02 `p` tag for `target`. Relay hints,
 /// petnames, extra tag fields, malformed unrelated tags, and ordering are
 /// deliberately irrelevant to membership and remain untouched by edits.
-pub fn follows(event: &Event, target: PublicKey) -> bool {
-    let source = event.tags.iter().map(Tag::as_slice).collect::<Vec<_>>();
+pub fn follows(event: &Row, target: PublicKey) -> bool {
+    let source = event.tags().iter().map(Tag::as_slice).collect::<Vec<_>>();
     follow_selector(target).matches_any(&source)
 }
 
@@ -63,11 +63,11 @@ pub fn follows(event: &Event, target: PublicKey) -> bool {
 /// which is the only place monotonicity can actually be guaranteed, so
 /// there is no arithmetic here left to exhaust.
 pub fn compose_follow_change(
-    base: &Event,
+    base: &Row,
     target: PublicKey,
     change: FollowChange,
 ) -> Result<ComposeFollowResult, ComposeFollowError> {
-    if base.kind != Kind::ContactList {
+    if base.kind() != Kind::ContactList {
         return Err(ComposeFollowError::BaseHasWrongKind);
     }
 
@@ -86,7 +86,7 @@ pub fn compose_follow_change(
     let plan = EventEditPlan::tags(edit);
     // Borrow raw cells for matching; only the final changed document is
     // reconstructed. There is no input-wide string clone before the edit.
-    let source = base.tags.iter().map(Tag::as_slice).collect::<Vec<_>>();
+    let source = base.tags().iter().map(Tag::as_slice).collect::<Vec<_>>();
     let applied = plan
         .apply_tags(&source)
         .map_err(|_| ComposeFollowError::InvalidGeneratedTag)?;
@@ -107,10 +107,10 @@ pub fn compose_follow_change(
             builder: EventBuilder {
                 kind: Kind::ContactList,
                 tags,
-                content: base.content.clone(),
+                content: base.content().to_owned(),
                 created_at: None,
             },
-            expected_base: Some(base.id),
+            expected_base: Some(base.id()),
         },
         routing: WriteRouting::Auto,
         identity: Identity::Active,
@@ -132,14 +132,14 @@ mod tests {
     use super::*;
     use nostr::Keys;
 
-    fn event(author: &Keys, at: u64, raw_tags: Vec<Vec<&str>>, content: &str) -> Event {
+    fn event(author: &Keys, at: u64, raw_tags: Vec<Vec<&str>>, content: &str) -> Row {
         let tags = raw_tags
             .into_iter()
             .map(|values| {
                 Tag::parse(values.into_iter().map(str::to_string).collect::<Vec<_>>()).unwrap()
             })
             .collect::<Vec<_>>();
-        nostr::UnsignedEvent::new(
+        let event = nostr::UnsignedEvent::new(
             author.public_key(),
             nostr::Timestamp::from_secs(at),
             Kind::ContactList,
@@ -147,7 +147,17 @@ mod tests {
             content,
         )
         .sign_with_keys(author)
-        .unwrap()
+        .unwrap();
+        Row::from_parts(
+            event.id,
+            event.pubkey,
+            event.created_at,
+            event.kind,
+            event.tags,
+            event.content,
+            nmp::RowSignature::Signed(event.sig),
+            Default::default(),
+        )
     }
 
     fn composed(intent: &WriteIntent) -> &EventBuilder {
@@ -189,13 +199,13 @@ mod tests {
         // `max(clock, winner + 1)` against the row it is CAS-ing, which is
         // the only place the winner is actually known.
         assert_eq!(draft.created_at, None);
-        assert_eq!(draft.content, base.content);
+        assert_eq!(draft.content, base.content());
         let actual: Vec<Vec<String>> = draft.tags.iter().map(|t| t.as_slice().to_vec()).collect();
         let mut expected: Vec<Vec<String>> =
-            base.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+            base.tags().iter().map(|t| t.as_slice().to_vec()).collect();
         expected.push(vec!["p".into(), target.public_key().to_hex()]);
         assert_eq!(actual, expected);
-        assert_eq!(expected_base(&intent), Some(Some(base.id)));
+        assert_eq!(expected_base(&intent), Some(Some(base.id())));
     }
 
     #[test]
@@ -268,15 +278,24 @@ mod tests {
         else {
             panic!("must publish")
         };
-        assert_eq!(expected_base(&intent), Some(Some(wrong_author.id)));
+        assert_eq!(expected_base(&intent), Some(Some(wrong_author.id())));
     }
 
     #[test]
     fn base_validation_fails_closed() {
         let author = Keys::generate();
         let target = Keys::generate();
-        let mut wrong_kind = event(&author, 1, vec![], "");
-        wrong_kind.kind = Kind::TextNote;
+        let contact_list = event(&author, 1, vec![], "");
+        let wrong_kind = Row::from_parts(
+            contact_list.id(),
+            contact_list.pubkey(),
+            contact_list.created_at(),
+            Kind::TextNote,
+            contact_list.tags().clone(),
+            contact_list.content().to_owned(),
+            contact_list.signature(),
+            contact_list.sources.clone(),
+        );
         assert_eq!(
             compose_follow_change(&wrong_kind, target.public_key(), FollowChange::Follow,).err(),
             Some(ComposeFollowError::BaseHasWrongKind)

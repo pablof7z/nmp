@@ -5,22 +5,24 @@
 
 import NMPFFI
 
-/// Whether this canonical row already carries a verified Nostr signature.
-public enum RowSignatureState: Sendable, Hashable {
+/// The one owner of a row's signature property. NMP-emitted signed rows have
+/// passed verification; values made with the public raw initializer make no
+/// validity claim merely by carrying bytes.
+public enum RowSignature: Sendable, Hashable {
     case pending
-    case signed
+    case signed(signature: String)
 
-    init(_ ffi: FfiRowSignatureState) {
+    init(_ ffi: FfiRowSignature) {
         switch ffi {
         case .pending: self = .pending
-        case .signed: self = .signed
+        case .signed(let signature): self = .signed(signature: signature)
         }
     }
 
-    var ffi: FfiRowSignatureState {
+    var ffi: FfiRowSignature {
         switch self {
         case .pending: return .pending
-        case .signed: return .signed
+        case .signed(let signature): return .signed(signature: signature)
         }
     }
 }
@@ -35,10 +37,9 @@ public struct Row: Sendable, Identifiable, Hashable {
     /// Each inner array is one raw tag (`["p", "<hex>", ...]`), verbatim.
     public let tags: [[String]]
     public let content: String
-    public let sig: String
-    /// `pending` means `sig` is NMP's placeholder and must not be treated as
-    /// a valid Nostr signature.
-    public let signatureState: RowSignatureState
+    /// The one owner of the signature property. Pending carries no signature;
+    /// signed necessarily carries one.
+    public let signature: RowSignature
     /// Sorted, deduplicated relay URLs that have delivered this event id
     /// (#105) -- raw tokens, not a formatted/display field either.
     public let sources: [String]
@@ -50,8 +51,7 @@ public struct Row: Sendable, Identifiable, Hashable {
         kind = ffi.kind
         tags = ffi.tags
         content = ffi.content
-        sig = ffi.sig
-        signatureState = RowSignatureState(ffi.signatureState)
+        signature = RowSignature(ffi.signature)
         sources = ffi.sources
     }
 
@@ -60,7 +60,7 @@ public struct Row: Sendable, Identifiable, Hashable {
     /// claim about signature validity, provenance, or canonical-store status.
     public init(
         id: String, pubkey: String, createdAt: UInt64, kind: UInt16, tags: [[String]],
-        content: String, sig: String, signatureState: RowSignatureState, sources: [String]
+        content: String, signature: RowSignature, sources: [String]
     ) {
         self.id = id
         self.pubkey = pubkey
@@ -68,8 +68,7 @@ public struct Row: Sendable, Identifiable, Hashable {
         self.kind = kind
         self.tags = tags
         self.content = content
-        self.sig = sig
-        self.signatureState = signatureState
+        self.signature = signature
         self.sources = sources
     }
 
@@ -79,7 +78,7 @@ public struct Row: Sendable, Identifiable, Hashable {
     func withSources(_ sources: [String]) -> Row {
         Row(
             id: id, pubkey: pubkey, createdAt: createdAt, kind: kind, tags: tags,
-            content: content, sig: sig, signatureState: signatureState, sources: sources
+            content: content, signature: signature, sources: sources
         )
     }
 }

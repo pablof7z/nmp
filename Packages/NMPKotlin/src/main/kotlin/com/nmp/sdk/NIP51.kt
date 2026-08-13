@@ -78,7 +78,7 @@ fun activeAccountDemand(): NMPDemand = NMPDemand.from(ffiActiveAccountDemand())
 
 /** Tolerantly parse Simple-groups-shaped public items from an untrusted
  * [row] (#863). Infallible and kind-agnostic: malformed individual items are
- * counted, never fatal, and the row's `kind`/`sig` are not consulted.
+ * counted, never fatal, and the row's `kind`/signature are not consulted.
  *
  * The result is observational data only. */
 fun parseSimpleGroupsListTolerant(row: Row): SimpleGroupsList {
@@ -90,8 +90,7 @@ fun parseSimpleGroupsListTolerant(row: Row): SimpleGroupsList {
             kind = row.kind,
             tags = row.tags,
             content = row.content,
-            sig = row.sig,
-            signatureState = row.signatureState.toFfi(),
+            signature = row.signature.toFfi(),
             sources = row.sources,
         )
     return SimpleGroupsList.from(ffiParseSimpleGroupsListTolerant(ffiRow))

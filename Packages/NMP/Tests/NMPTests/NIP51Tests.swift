@@ -12,8 +12,8 @@ final class NIP51Tests: XCTestCase {
                 ["group", "missing-relay"],
                 ["r", "wss://relay-in-use.example.com"],
             ],
-            content: "encrypted-private-items", sig: "caller-chosen-signature",
-            signatureState: .signed, sources: []
+            content: "encrypted-private-items",
+            signature: .signed(signature: "caller-chosen-signature"), sources: []
         )
     }
 

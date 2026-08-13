@@ -405,19 +405,19 @@ pub struct FfiRow {
     /// verbatim -- never parsed into a display-facing shape here.
     pub tags: Vec<Vec<String>>,
     pub content: String,
-    pub sig: String,
-    /// Explicit canonical signature state. `Pending` means `sig` is NMP's
-    /// structurally parseable placeholder, never a verified Nostr signature.
-    pub signature_state: FfiRowSignatureState,
+    /// The one owner of this row's signature state. Pending carries no
+    /// signature bytes; Signed necessarily carries them.
+    pub signature: FfiRowSignature,
     /// Sorted, deduplicated relay URLs that have delivered this event id.
     pub sources: Vec<String>,
 }
 
-/// `nmp::RowSignatureState` mirror.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub enum FfiRowSignatureState {
+/// `nmp::RowSignature` mirror. This data enum structurally excludes both an
+/// unsigned `Signed` value and a signature-bearing `Pending` value.
+#[derive(Debug, Clone, PartialEq, Eq, Enum)]
+pub enum FfiRowSignature {
     Pending,
-    Signed,
+    Signed { signature: String },
 }
 
 /// Immutable NIP-01 event body accepted by the governed sign-only operation.

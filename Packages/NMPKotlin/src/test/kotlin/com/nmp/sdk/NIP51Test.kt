@@ -19,8 +19,7 @@ class NIP51Test {
                     listOf("r", "wss://relay-in-use.example.com"),
                 ),
             content = "encrypted-private-items",
-            sig = "caller-chosen-signature",
-            signatureState = RowSignatureState.Signed,
+            signature = RowSignature.Signed("caller-chosen-signature"),
             sources = emptyList(),
         )
 

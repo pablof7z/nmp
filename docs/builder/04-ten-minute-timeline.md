@@ -146,11 +146,11 @@ After durable `accepted(intentId)`, any matching query sees the canonical local
 row through the store's normal invalidation path:
 
 ```swift
-switch row.signatureState {
-case .pending(let intentId):
-    renderPending(intentId)
-case .signed:
-    renderPublished()
+switch row.signature {
+case .pending:
+    renderPending()
+case .signed(let signature):
+    renderPublished(signature: signature)
 }
 ```
 

@@ -1176,7 +1176,7 @@ mod tests {
         let opening = subscription
             .recv_timeout(Duration::from_secs(5))
             .expect("a new observation receives its opening frame");
-        assert!(opening.deltas.iter().all(|delta| delta.event().is_none()));
+        assert!(opening.deltas.iter().all(|delta| delta.row().is_none()));
         let relay = RelayUrl::parse("wss://recovery.example").unwrap();
         let event = EventBuilder::text_note("ambiguous acceptance")
             .sign_with_keys(&author)
@@ -1219,7 +1219,7 @@ mod tests {
             recovered_frame
                 .deltas
                 .iter()
-                .filter_map(|delta| delta.event())
+                .filter_map(|delta| delta.row().and_then(|row| row.signed_event()))
                 .any(|recovered| recovered.id == event.id),
             "the existing query handle did not receive the committed boundary event"
         );
@@ -1500,7 +1500,7 @@ mod tests {
                 found = frame
                     .deltas
                     .iter()
-                    .filter_map(|delta| delta.event())
+                    .filter_map(|delta| delta.row().and_then(|row| row.signed_event()))
                     .any(|received| received.id == expected_id)
                     || found;
                 execution.extend(frame.execution);

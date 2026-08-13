@@ -90,7 +90,7 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
         .iter()
         .find_map(|effect| match effect {
             Effect::EmitRows(_, rows, _) => rows.iter().find_map(|r| match r {
-                RowDelta::Added(row) if row.event.id == event.id => Some(row.sources.clone()),
+                RowDelta::Added(row) if row.id() == event.id => Some(row.sources.clone()),
                 _ => None,
             }),
             _ => None,
@@ -100,7 +100,7 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     assert_eq!(
         delivered
             .iter()
-            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id))
+            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event.id))
             .count(),
         1,
         "exactly one Added for this id so far"
@@ -126,7 +126,7 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     assert_eq!(
         delivered
             .iter()
-            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id))
+            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event.id))
             .count(),
         1,
         "still exactly one Added"
@@ -158,7 +158,7 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     assert_eq!(
         delivered
             .iter()
-            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id))
+            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event.id))
             .count(),
         1,
         "still exactly one Added ever -- growth is never a second Added"
@@ -230,7 +230,7 @@ fn unrelated_handle_lifecycle_never_spuriously_emits_sources_grew() {
     assert_eq!(
         delivered
             .iter()
-            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id))
+            .filter(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event.id))
             .count(),
         1,
         "still exactly one Added"
@@ -297,7 +297,7 @@ fn projected_sources_survive_a_real_redb_reopen() {
         .iter()
         .find_map(|effect| match effect {
             Effect::EmitRows(_, rows, _) => rows.iter().find_map(|r| match r {
-                RowDelta::Added(row) if row.event.id == event.id => Some(row.sources.clone()),
+                RowDelta::Added(row) if row.id() == event.id => Some(row.sources.clone()),
                 _ => None,
             }),
             _ => None,
