@@ -85,10 +85,9 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
             .pending_request_claim_transfer_claims,
         1
     );
-    assert!(!failed.iter().any(|effect| matches!(
-        effect,
-        Effect::RecordCoverage(..) | Effect::EmitObservationEvidence(..)
-    )));
+    assert!(!failed
+        .iter()
+        .any(|effect| matches!(effect, Effect::EmitObservationEvidence(..))));
     assert_eq!(
         core.resolver
             .store()
@@ -114,11 +113,6 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     assert_eq!(core.request_claim_transfer_claims_attempted.get(), 2);
     assert_eq!(core.request_claim_transfer_failures.get(), 1);
     assert_eq!(core.request_claim_transfer_commits.get(), 1);
-    assert!(retried.iter().any(|effect| matches!(
-        effect,
-        Effect::RecordCoverage(key, recorded_relay, interval)
-            if *key == added_claim && recorded_relay == &relay && *interval == generation
-    )));
     assert!(!retried
         .iter()
         .any(|effect| matches!(effect, Effect::EmitObservationEvidence(..))));
@@ -259,7 +253,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         transport,
     );
     core.clock = Timestamp::from(250u64);
-    let eose = core.on_relay_frame(
+    let _ = core.on_relay_frame(
         transport,
         session.clone(),
         RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
@@ -267,13 +261,6 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         ))),
     );
 
-    assert!(eose.iter().any(|effect| matches!(
-        effect,
-        Effect::RecordCoverage(key, recorded_relay, interval)
-            if *key == added_claim
-                && recorded_relay == &relay
-                && *interval == CoverageInterval::new(Timestamp::from(100), Timestamp::from(250))
-    )));
     assert!(core.pending_request_claim_transfers.is_empty());
     assert_eq!(core.request_claim_transfer_attempts.get(), 1);
     let census = core.bench_ownership_census();

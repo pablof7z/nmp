@@ -1529,14 +1529,6 @@ pub enum Effect {
     /// was abandoned (liveness deadline / `NEG-ERR`), or is being converted
     /// back to a plain REQ.
     NegClose(RelayUrl, SubId),
-    /// One per attributed atom per EOSE/NEG-DONE (ruling §7): the narrow
-    /// atom's `CoverageKey`, the relay that proved it, and the proven
-    /// interval.
-    RecordCoverage(
-        nmp_store::CoverageKey,
-        RelayUrl,
-        nmp_store::CoverageInterval,
-    ),
     /// One observation's merged row transition plus its per-BRANCH
     /// acquisition evidence, indexed by canonical branch order (#1108). A
     /// single-branch live query carries exactly one entry; nothing here is

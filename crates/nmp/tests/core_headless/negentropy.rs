@@ -879,10 +879,10 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         !has_request_terminal(&effects, RequestTerminal::Eose),
         "the limit:0 barrier opens NEG but does not settle the request"
     );
-    assert!(
-        !effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
+    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
+    assert_eq!(
+        core.get_coverage(&atom_b, &relay0).expect("coverage peek"),
+        None,
         "a limit:0 EOSE must never mint coverage even when the relay overdelivered"
     );
     assert_ne!(
@@ -1173,7 +1173,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         attempt_id: backfill_attempt,
         cause: LocalSendRefusal::SessionUnavailable,
     });
-    let stray = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -1181,12 +1181,6 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         public_session(&relay),
         eose_frame(&wire_sub_string(&backfill)),
     ));
-    assert!(
-        !stray
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "a refused ids-only request has no wire eligibility: {stray:?}"
-    );
     let due = core
         .next_deadline()
         .unwrap()
@@ -1229,12 +1223,6 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         eose_frame(&backfill_wire),
     ));
     assert!(
-        !completed
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the backfill EOSE must retire the poisoned NEG owner without coverage: {completed:?}"
-    );
-    assert!(
         !has_request_terminal(&completed, RequestTerminal::Nip77),
         "a failed backfill commit must not become NIP-77 absence evidence"
     );
@@ -1261,7 +1249,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         public_session(&healthy_relay),
         event_frame(&wire_sub_string(&healthy_request), healthy_event),
     ));
-    let healthy_completed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 1,
             generation: 1,
@@ -1269,12 +1257,6 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         public_session(&healthy_relay),
         eose_frame(&wire_sub_string(&healthy_request)),
     ));
-    assert!(
-        healthy_completed
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the missing-id failure must not poison a concurrent healthy request"
-    );
     let healthy_atom = ctx_atom(cf(&[2], &[&healthy.public_key().to_hex()]));
     assert!(core
         .get_coverage(&healthy_atom, &healthy_relay)
@@ -1841,7 +1823,7 @@ fn live_eose_timeout_fallback_then_full_withdrawal_closes_orphaned_candidate() {
     // A late EOSE arriving on the orphaned candidate's wire id AFTER
     // withdrawal must never mint coverage for demand that no longer
     // exists. The connection is on generation 2 after the reconnect above.
-    let late = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 2,
@@ -1849,12 +1831,11 @@ fn live_eose_timeout_fallback_then_full_withdrawal_closes_orphaned_candidate() {
         public_session(&relay),
         eose_frame(&wire_sub_string(&live_sub_id)),
     ));
-    assert!(
-        !late
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "a late EOSE on a withdrawn, orphaned candidate must never mint \
-         phantom coverage: {late:?}"
+    let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
+    assert_eq!(
+        core.get_coverage(&atom_a, &relay).expect("coverage peek"),
+        None,
+        "a late EOSE on a withdrawn, orphaned candidate must never mint phantom coverage"
     );
 }
 
@@ -1920,7 +1901,7 @@ fn live_eose_timeout_withdrawal_closes_only_its_orphaned_candidate() {
 
     // A late EOSE on the orphaned candidate's wire id must never mint
     // coverage after it has been superseded away.
-    let late = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -1928,12 +1909,11 @@ fn live_eose_timeout_withdrawal_closes_only_its_orphaned_candidate() {
         public_session(&relay),
         eose_frame(&wire_sub_string(&live_sub_id)),
     ));
-    assert!(
-        !late
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "a late EOSE on a withdrawn, orphaned candidate must never mint \
-         phantom coverage: {late:?}"
+    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
+    assert_eq!(
+        core.get_coverage(&atom_b, &relay).expect("coverage peek"),
+        None,
+        "a late EOSE on a withdrawn, orphaned candidate must never mint phantom coverage"
     );
 
     let _ = core.handle(EngineMsg::Unsubscribe(a_handle));
@@ -2027,7 +2007,7 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
 
     // The straggler: the EOSE the relay finally sends for the request that
     // was closed at the narrowing step.
-    let stale = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -2035,13 +2015,6 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         public_session(&relay),
         eose_frame(&wire_sub_string(&first_backlog)),
     ));
-    assert!(
-        !stale
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "a straggler EOSE for a closed request must credit no coverage at \
-         all -- the reopened request has not been served yet: {stale:?}"
-    );
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     assert_eq!(
@@ -2055,7 +2028,7 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
 
     // The positive leg: the reopened request's OWN EOSE still earns exactly
     // the coverage it proved.
-    let served = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -2063,13 +2036,6 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         public_session(&relay),
         eose_frame(&wire_sub_string(&reopened_backlog)),
     ));
-    assert!(
-        served
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the reopened request's own EOSE must still record coverage -- \
-         exact attribution, not dead attribution: {served:?}"
-    );
     assert_eq!(
         core.get_coverage(&atom_a, &relay).expect("coverage peek"),
         None,
