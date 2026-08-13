@@ -1,6 +1,7 @@
 # One macOS runner owns native Apple qualification for a pull-request head.
-# Pull requests build only the host slice needed by SwiftPM/XCTest. The
-# less-frequent master run packages the full device + simulator + macOS set.
+# Pull requests build the simulator and host slices needed by SwiftPM/XCTest
+# plus the public-hostname NIP-11 simulator falsifier. The less-frequent master
+# run packages the full device + simulator + macOS set.
 name: macOS qualification
 
 on:
@@ -38,13 +39,20 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
 
-      - name: Select thin PR or full master Apple scope
+      - name: Select the newest installed Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          latest=${latest:-/Applications/Xcode.app}
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+
+      - name: Select simulator PR or full master Apple scope
         id: apple_scope
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [[ "$EVENT_NAME" == pull_request ]]; then
-            echo "mode=--macos-only" >> "$GITHUB_OUTPUT"
+            echo "mode=--sim-only" >> "$GITHUB_OUTPUT"
           else
             echo "mode=" >> "$GITHUB_OUTPUT"
           fi
@@ -104,6 +112,35 @@ jobs:
       - name: Test the Swift package
         if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
         run: swift test --package-path Packages/NMP
+
+      - name: Install xcodegen
+        if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      - name: Generate the iOS falsifier project
+        if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
+        run: xcodegen generate
+        working-directory: apps/Falsifier
+
+      - name: Resolve an iOS Simulator destination
+        if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
+        id: ios_sim
+        run: |
+          udid=$(xcrun simctl list devices available --json | python3 scripts/pick-ios-simulator-destination.py)
+          xcrun simctl bootstatus "$udid" -b
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Test public-hostname NIP-11 on iOS Simulator
+        if: ${{ !cancelled() && steps.swift_package.outcome == 'success' }}
+        run: |
+          xcodebuild test \
+            -project Falsifier.xcodeproj \
+            -scheme Falsifier \
+            -destination "id=${{ steps.ios_sim.outputs.udid }}" \
+            -only-testing:FalsifierTests/NMPSimulatorQualificationTests/testPublicHostnameUsesPlatformDNSOnIOSSimulator \
+            -retry-tests-on-failure \
+            -test-iterations 3
+        working-directory: apps/Falsifier
 
       - uses: actions/setup-java@v4
         with:

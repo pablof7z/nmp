@@ -352,13 +352,9 @@ impl EventStore for ControlledFailureStore {
 fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
     let control = StoreFailureControl::default();
     let store = ControlledFailureStore::new(MemoryStore::new(), control.clone());
-    let (engine, handle) = crate::runtime::EngineThread::spawn(
-        store,
-        4,
-        nmp_transport::PoolConfig::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("runtime starts before injected canonical-store read failures");
+    let (engine, handle) =
+        crate::runtime::EngineThread::spawn(store, 4, nmp_transport::PoolConfig::default())
+            .expect("runtime starts before injected canonical-store read failures");
     assert_eq!(
         handle.observation_ownership_census(),
         crate::runtime::ObservationOwnershipCensus::default()
@@ -752,7 +748,6 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
             ControlledFailureStore::new(MemoryStore::new(), control),
             4,
             nmp_transport::PoolConfig::default(),
-            RelayAdmissionPolicy::default(),
         )
         .unwrap();
         let caller_handle = handle.clone();
@@ -780,7 +775,6 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
             ControlledFailureStore::new(MemoryStore::new(), control),
             4,
             nmp_transport::PoolConfig::default(),
-            RelayAdmissionPolicy::default(),
         )
         .unwrap();
         let caller_handle = handle.clone();

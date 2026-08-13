@@ -14,7 +14,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use nmp_network_policy::{Declarer, OnionReachability};
 use nmp_test_support::ConnectionOwner;
 use nmp_transport::{AttemptCorrelation, HandoffResult, Pool, PoolConfig, PoolEvent, WireFrame};
 use nostr::{JsonUtil, RelayMessage};
@@ -84,10 +83,6 @@ fn loopback(port: u16) -> SocketAddr {
 /// from this instead.
 fn test_pool_config() -> PoolConfig {
     PoolConfig {
-        destination_policy: std::sync::Arc::new(nmp_network_policy::DestinationPolicy::new(
-            ["127.0.0.1".to_string()],
-            OnionReachability::Unreachable,
-        )),
         ..PoolConfig::default()
     }
 }
@@ -174,9 +169,7 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
     // under CI load can alone eat close to that whole budget before this
     // bound would even be exercised -- 15s is the smallest round number
     // that still comfortably clears one full stalled attempt plus margin.
-    let h1 = pool
-        .ensure_open(&url, Declarer::Ourselves)
-        .expect("relay admitted");
+    let h1 = pool.ensure_open(&url).expect("relay admitted");
     let connected1 = recv_matching(&rx, Duration::from_secs(15), is_connected);
     let PoolEvent::Connected {
         handle: observed1, ..
@@ -337,9 +330,7 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
 
     // 15s, not 5s -- see test 7's identical `connected1` wait above for why
     // (CONNECT_TIMEOUT-bounded first-dial exposure).
-    let h1 = pool
-        .ensure_open(&url, Declarer::Ourselves)
-        .expect("relay admitted");
+    let h1 = pool.ensure_open(&url).expect("relay admitted");
     let connected1 = recv_matching(&rx, Duration::from_secs(15), is_connected);
     let PoolEvent::Connected {
         handle: observed1, ..
@@ -490,9 +481,7 @@ async fn durable_event_resolves_written_exactly_once() {
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
     let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
-    let h = pool
-        .ensure_open(&url, Declarer::Ourselves)
-        .expect("relay admitted");
+    let h = pool.ensure_open(&url).expect("relay admitted");
     // 15s, not 5s -- see test 7's identical `connected1` wait for why
     // (CONNECT_TIMEOUT-bounded first-dial exposure).
     recv_matching(&rx, Duration::from_secs(15), is_connected);
@@ -601,9 +590,7 @@ async fn close_under_saturated_data_lanes_never_deadlocks_the_pool() {
     )
     .expect("test pool construction");
 
-    let h1 = pool
-        .ensure_open(&url, Declarer::Ourselves)
-        .expect("relay admitted");
+    let h1 = pool.ensure_open(&url).expect("relay admitted");
     // 15s — see test 7's identical first-connect wait for the CONNECT_TIMEOUT
     // rationale.
     recv_matching(&rx, Duration::from_secs(15), is_connected);

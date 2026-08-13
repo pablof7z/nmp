@@ -27,7 +27,6 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                 appRelays: [relay.relayURL],
                 fallbackRelays: [],
                 outboxRouting: OutboxRoutingConfig(indexers: [relay.relayURL]),
-                allowedLocalRelayHosts: ["localhost"],
                 maxRelays: 1,
                 maxAuthCapabilities: 2
             )

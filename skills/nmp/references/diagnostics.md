@@ -9,7 +9,7 @@ Current cross-platform relay diagnostics expose relay URL, `access` context, wir
 
 Each relay summary also carries the latest NIP-11 `supported_nips` advertisement, cited document revision, freshness, last refresh error, the NIP-77 handoff state, and an independently sourced behavioral NIP-77 state. Advertisement may influence whether a probe starts, but only a real NEG response creates behavioral proof; a document cannot mint that authority.
 
-Rust additionally exposes `discovered_private_relays_rejected`, `sessions_rejected_over_cap`, `sessions_refused_by_subscription_budget`, `store_degraded`, and the relay-level `subscription_budget`, `subscriptions_refused`, `subid_length_limit`, and `subid_length_rejects_our_ids`. The two rejection counters reach raw UniFFI but not the ergonomic wrappers; `store_degraded` reaches neither and is direct-Rust only. Do not design a native recovery screen around fields it cannot observe.
+Rust additionally exposes `sessions_rejected_over_cap`, `sessions_refused_by_subscription_budget`, `store_degraded`, and the relay-level `subscription_budget`, `subscriptions_refused`, `subid_length_limit`, and `subid_length_rejects_our_ids`. The session rejection counters reach raw UniFFI but not the ergonomic wrappers; `store_degraded` reaches neither and is direct-Rust only. Do not design a native recovery screen around fields it cannot observe.
 
 Do not claim that diagnostics currently provide:
 

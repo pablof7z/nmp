@@ -520,13 +520,6 @@ impl NmpWorld {
                 reconnect_delay_initial: Some(Duration::from_millis(20)),
                 ..PoolConfig::default()
             },
-            // Static fixture facts do not pass through the network-discovery
-            // gate. Opt local hosts in because feature-on NIP-65 scenarios do
-            // discover routes from scripted local relay-list events.
-            nmp::mechanism::core::RelayAdmissionPolicy::new(
-                ["127.0.0.1", "localhost", "[::1]", "::1"].map(str::to_string),
-                nmp::mechanism::core::OnionReachability::Unreachable,
-            ),
         )
         .expect("BDD engine construction");
         let handle = engine

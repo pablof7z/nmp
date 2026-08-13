@@ -47,7 +47,6 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use nmp::mechanism::core::RelayAdmissionPolicy;
 use nmp::mechanism::runtime::EngineThread;
 use nmp_grammar::{AccessContext, Demand, Filter, Freshness, LiveQuery, SourceAuthority};
 use nmp_router::FixtureRoutingFacts;
@@ -91,10 +90,6 @@ fn every_opening_frame_reports_one_evidence_entry_per_branch() {
                 reconnect_delay_initial: Some(Duration::from_secs(3600)),
                 ..PoolConfig::default()
             },
-            RelayAdmissionPolicy::new(
-                ["127.0.0.1".to_string()],
-                nmp_network_policy::OnionReachability::Unreachable,
-            ),
         )
         .expect("spawn runtime");
 

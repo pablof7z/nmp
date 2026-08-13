@@ -36,27 +36,6 @@ public struct NMPConfig: Sendable {
     /// indexer or construction throws.
     public var outboxRouting: OutboxRoutingConfig?
     // nmp-native:endif
-    /// Local/private relay HOSTS to re-admit from OTHER PEOPLE's data. A
-    /// loopback / RFC-1918 / link-local relay named by someone else's relay
-    /// list or event is refused by default; listing its host here
-    /// (`"127.0.0.1"`, `"localhost"`) re-admits that exact host from any
-    /// source. Host-only match (port- and path-insensitive).
-    ///
-    /// NOT how an app reaches its own local relay: relays this app declared
-    /// (`appRelays`, `fallbackRelays`, an explicit write route, a pinned read
-    /// scope) and relays a signed-in identity declared in its own relay list
-    /// are heeded on their provenance alone. Default empty.
-    public var allowedLocalRelayHosts: [String]
-    /// Whether this process can reach a Tor hidden service.
-    ///
-    /// `.onion` is a reachability question, not a "my network" address, so
-    /// `allowedLocalRelayHosts` grants it nothing. Declaring reachability
-    /// makes OTHER people's `.onion` relays usable, not only ones this app or
-    /// its own identities declared. NMP installs no Tor transport and never
-    /// probes for one: this states that reachability exists, and a hidden
-    /// service that turns out unreachable simply fails to connect.
-    /// Default `false`.
-    public var torReachable: Bool
     /// The one whole-engine relay ceiling. It bounds the complete compiled
     /// demand and simultaneous physical transport workers with the same
     /// effective value. Access contexts never share a socket; competing read
@@ -76,8 +55,6 @@ public struct NMPConfig: Sendable {
         // nmp-native:if nip65
         outboxRouting: OutboxRoutingConfig? = nil,
         // nmp-native:endif
-        allowedLocalRelayHosts: [String] = [],
-        torReachable: Bool = false,
         maxRelays: UInt32 = 10,
         maxAuthCapabilities: UInt32 = 64
     ) {
@@ -87,8 +64,6 @@ public struct NMPConfig: Sendable {
         // nmp-native:if nip65
         self.outboxRouting = outboxRouting
         // nmp-native:endif
-        self.allowedLocalRelayHosts = allowedLocalRelayHosts
-        self.torReachable = torReachable
         self.maxRelays = maxRelays
         self.maxAuthCapabilities = maxAuthCapabilities
     }
@@ -101,8 +76,6 @@ public struct NMPConfig: Sendable {
             // nmp-native:if nip65
             outboxRouting: outboxRouting.map { FfiOutboxRoutingConfig(indexers: $0.indexers) },
             // nmp-native:endif
-            allowedLocalRelayHosts: allowedLocalRelayHosts,
-            torReachable: torReachable,
             maxRelays: maxRelays,
             maxAuthCapabilities: maxAuthCapabilities
         )

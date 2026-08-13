@@ -1751,26 +1751,8 @@ mod tests {
         let keys = Keys::generate();
         let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(keys.public_key()));
         let (pool_tx, pool_rx) = std::sync::mpsc::channel();
-        // Issue #519/#524 resolved-IP admission refuses a 127.0.0.1 dial
-        // unless the operator opts that host in — the same opt-in the
-        // transport's own real-socket tests use (`test_pool_config`). This
-        // postdates the mega base this reducer was ported from.
-        let pool = Pool::new(
-            PoolConfig {
-                destination_policy: std::sync::Arc::new(
-                    nmp_network_policy::DestinationPolicy::new(
-                        ["127.0.0.1".to_string()],
-                        nmp_network_policy::OnionReachability::Unreachable,
-                    ),
-                ),
-                ..PoolConfig::default()
-            },
-            pool_tx,
-        )
-        .unwrap();
-        let opened = pool
-            .ensure_session(&session, nmp_network_policy::Declarer::Ourselves)
-            .unwrap();
+        let pool = Pool::new(PoolConfig::default(), pool_tx).unwrap();
+        let opened = pool.ensure_session(&session).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let connected = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());

@@ -29,40 +29,6 @@ pub struct EngineConfig {
     pub app_relays: Vec<String>,
     /// Operator fallback relay set (`Lane::OperatorFallback`). Default empty.
     pub fallback_relays: Vec<String>,
-    /// Local/private relay HOSTS to re-admit from OTHER PEOPLE's data
-    /// (issues #121, #1251).
-    ///
-    /// A loopback / RFC-1918 / link-local relay named by someone else — a
-    /// stranger's kind:10002, a relay hint in their event — is refused by
-    /// default, because such an address means nothing outside its own network
-    /// and naming one is the cheapest SSRF pivot there is. Listing a host here
-    /// (`"127.0.0.1"`, `"localhost"`) re-admits that exact host from any
-    /// source. Matched host-only (port- and path-insensitive).
-    ///
-    /// This knob is NOT how an app reaches its own local relay. Relays THIS
-    /// app declared (`app_relays`, `fallback_relays`, `WriteRouting::Explicit`,
-    /// `RelayScope::on`) and relays a signed-in identity declared in its own
-    /// relay list are heeded on their provenance alone, dial included: they
-    /// are describing their own network. Default empty (fail closed).
-    ///
-    /// One deliberate exception, recorded in `docs/known-gaps.md`: NIP-11
-    /// document acquisition is provenance-blind, so fetching a LOCAL relay's
-    /// NIP-11 document still requires its host here.
-    pub allowed_local_relay_hosts: Vec<String>,
-    /// Whether this process can reach a Tor hidden service (#1251).
-    ///
-    /// `.onion` is not a "my network" address, it is a reachability question,
-    /// so it is not on the provenance axis and
-    /// [`Self::allowed_local_relay_hosts`] grants it nothing. Declaring
-    /// reachability makes OTHER people's `.onion` relays usable — a relay list
-    /// belonging to someone you follow, a hint in their event — not only ones
-    /// this app or its own identities declared, which are heeded regardless.
-    ///
-    /// NMP installs no Tor transport and never probes for one. This is the app
-    /// stating that reachability exists; heeding is permission to try, so a
-    /// hidden service that turns out to be unreachable simply fails to
-    /// connect. Default `false`.
-    pub tor_reachable: bool,
     /// The one whole-engine relay ceiling. The same effective value bounds
     /// the router's complete current demand and simultaneous physical
     /// transport workers. Access contexts never share a socket; when read and
@@ -108,8 +74,6 @@ impl Default for EngineConfig {
             indexer_relays: Vec::new(),
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
-            allowed_local_relay_hosts: Vec::new(),
-            tor_reachable: false,
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
             max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
             max_publish_attempts: DEFAULT_MAX_PUBLISH_ATTEMPTS,
@@ -121,23 +85,6 @@ fn parse_relay_url(url: &str) -> Result<RelayUrl, EngineError> {
     RelayUrl::parse(url).map_err(|_| EngineError::InvalidRelayUrl {
         url: url.to_string(),
     })
-}
-
-/// Build the engine's relay admission policy (issues #121, #1251) from the
-/// two operator declarations that widen it. Both only ever affect relays
-/// SOMEONE ELSE named; what this app and its own identities declared is
-/// heeded without either. The runtime threads the same policy into the
-/// transport dial and the NIP-11 resolved-IP guard, so one owner answers the
-/// address question everywhere.
-pub(crate) fn build_admission_policy(config: &EngineConfig) -> crate::core::RelayAdmissionPolicy {
-    crate::core::RelayAdmissionPolicy::new(
-        config.allowed_local_relay_hosts.iter().cloned(),
-        if config.tor_reachable {
-            nmp_network_policy::OnionReachability::Reachable
-        } else {
-            nmp_network_policy::OnionReachability::Unreachable
-        },
-    )
 }
 
 pub(crate) fn build_routing_facts(

@@ -38,26 +38,6 @@ data class NMPConfig(
      * indexer or construction throws. */
     val outboxRouting: OutboxRoutingConfig? = null,
     // nmp-native:endif
-    /** Local/private relay HOSTS to re-admit from OTHER PEOPLE's data. A
-     * loopback / RFC-1918 / link-local relay named by someone else's relay
-     * list or event is refused by default; listing its host here
-     * (`"127.0.0.1"`, `"localhost"`) re-admits that exact host from any
-     * source. Host-only match (port- and path-insensitive).
-     *
-     * NOT how an app reaches its own local relay: relays this app declared
-     * (`appRelays`, `fallbackRelays`, an explicit write route, a pinned read
-     * scope) and relays a signed-in identity declared in its own relay list
-     * are heeded on their provenance alone. Default empty. */
-    val allowedLocalRelayHosts: List<String> = emptyList(),
-    /** Whether this process can reach a Tor hidden service.
-     *
-     * `.onion` is a reachability question, not a "my network" address, so
-     * `allowedLocalRelayHosts` grants it nothing. Declaring reachability makes
-     * OTHER people's `.onion` relays usable, not only ones this app or its own
-     * identities declared. NMP installs no Tor transport and never probes for
-     * one: this states that reachability exists, and a hidden service that
-     * turns out unreachable simply fails to connect. Default `false`. */
-    val torReachable: Boolean = false,
     /** The one whole-engine relay ceiling. It bounds the complete compiled
      * demand and simultaneous physical transport workers with the same
      * effective value. Access contexts never share a socket; competing read
@@ -77,8 +57,6 @@ data class NMPConfig(
             // nmp-native:if nip65
             outboxRouting = outboxRouting?.let { FfiOutboxRoutingConfig(it.indexers) },
             // nmp-native:endif
-            allowedLocalRelayHosts = allowedLocalRelayHosts,
-            torReachable = torReachable,
             maxRelays = maxRelays,
             maxAuthCapabilities = maxAuthCapabilities,
         )

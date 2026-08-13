@@ -75,7 +75,6 @@ const SETTLE: Duration = Duration::from_secs(20);
 fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
     let engine = Engine::new(EngineConfig {
         indexer_relays: vec![indexer.url.to_string()],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
         ..EngineConfig::default()
     })
     .expect("an in-memory engine builds");
@@ -90,7 +89,6 @@ fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
 /// directory.
 fn bare_engine() -> Engine {
     Engine::new(EngineConfig {
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
         ..EngineConfig::default()
     })
     .expect("an in-memory engine builds")
@@ -101,7 +99,6 @@ fn bare_engine() -> Engine {
 /// explicit route, never about `Auto`/outbox behavior.
 fn engine_with_signer(keys: &Keys) -> Engine {
     let engine = Engine::new(EngineConfig {
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
         ..EngineConfig::default()
     })
     .expect("an in-memory engine builds");
@@ -133,7 +130,6 @@ impl SigningCapability for FailingSigner {
 /// A live engine whose one registered signer always refuses.
 fn engine_with_failing_signer(keys: &Keys) -> Engine {
     let engine = Engine::new(EngineConfig {
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
         ..EngineConfig::default()
     })
     .expect("an in-memory engine builds");

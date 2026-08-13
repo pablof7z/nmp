@@ -257,15 +257,6 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
-        // A pinned source is the app naming the exact relays this read must
-        // ask -- `RelayScope::on`, a NIP-29 host, an operator indexer query
-        // (#1251). The app named them, so the socket heeds them; nothing here
-        // widens what an unpinned read may reach.
-        for branch in query.branches() {
-            if let nmp_grammar::SourceAuthority::Pinned(relays) = &branch.source {
-                self.heed_relays(relays.iter().cloned());
-            }
-        }
         match self.open_observation(query, self.clock) {
             ObservationOpen::Opened {
                 id,
@@ -346,10 +337,9 @@ impl<S: EventStore> EngineCore<S> {
         // function, against the same kind of "current authoritative set"
         // (`planned`/`demand`) recompile just established.
         self.attribution.prune_shapes(demand.iter());
-        let admitted_demand = self.admit_projected_routing_evidence(&demand);
-        let outcome =
-            self.router
-                .compile(&admitted_demand, &self.routing_facts, self.compile_budget());
+        let outcome = self
+            .router
+            .compile(&demand, &self.routing_facts, self.compile_budget());
         let transferred_claims =
             self.apply_request_metadata_updates(&outcome.request_metadata_updates, effects);
         let mut plan_effects = Vec::new();
@@ -394,9 +384,8 @@ impl<S: EventStore> EngineCore<S> {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
-        let admitted = self.admit_pending_projected_routing_evidence(&pending);
         let budget = self.compile_budget();
-        let outcome = self.router.admit(&admitted, &self.routing_facts, budget);
+        let outcome = self.router.admit(&pending, &self.routing_facts, budget);
         let mut effects = Vec::new();
         let transferred_claims =
             self.apply_request_metadata_updates(&outcome.request_metadata_updates, &mut effects);
@@ -1239,9 +1228,7 @@ impl<S: EventStore> EngineCore<S> {
         {
             self.pending_wire_atoms.insert(key, effective_atom.clone());
         }
-        let rejected_before = self.discovered_private_relays_rejected;
-        self.admit_pending_projected_routing_evidence(&BTreeSet::from([effective_atom]));
-        metadata_diagnostics_changed || self.discovered_private_relays_rejected != rejected_before
+        metadata_diagnostics_changed
     }
 
     /// Release one exact owner's contribution. Returns the final effective
@@ -1282,7 +1269,6 @@ impl<S: EventStore> EngineCore<S> {
         self.release_author_outbox_wire_owner(atom);
         if became_ownerless {
             self.attribution.release_atom(&final_atom);
-            self.release_rejected_projected_evidence(key);
             self.wire_owner_counts.remove(&key);
             self.wire_routing_evidence_owner_counts.remove(&key);
             self.pending_wire_atoms.remove(&key);
@@ -1302,7 +1288,6 @@ impl<S: EventStore> EngineCore<S> {
         if self.pending_wire_atoms.contains_key(&key) {
             self.pending_wire_atoms.insert(key, effective_atom.clone());
         }
-        self.admit_pending_projected_routing_evidence(&BTreeSet::from([effective_atom]));
         None
     }
 
@@ -1616,20 +1601,9 @@ impl<S: EventStore> EngineCore<S> {
     /// and residual-capacity reducer as live admission. The preview reads
     /// exact incumbent indexes but never mutates live wire or ownership.
     pub(super) fn shadow_plan_for(&self, demand: BTreeSet<ContextualAtom>) -> RelayPlan {
-        let admitted = demand
-            .into_iter()
-            .map(|mut atom| {
-                atom.routing_evidence.retain(|evidence| {
-                    self.admission
-                        .admits(&evidence.relay, super::Declarer::SomeoneElse)
-                        .is_ok()
-                });
-                atom
-            })
-            .collect();
         let preview =
             self.router
-                .preview_admission(&admitted, &self.routing_facts, self.compile_budget());
+                .preview_admission(&demand, &self.routing_facts, self.compile_budget());
         #[cfg(any(test, feature = "bench-instrumentation"))]
         {
             self.freshness_candidate_atoms.set(
@@ -1808,105 +1782,6 @@ impl<S: EventStore> EngineCore<S> {
                     .reconciled_through
                     .is_some_and(|through| through >= cutoff)
             })
-    }
-
-    /// Gate every network-sourced selector hint/provenance URL before it can
-    /// become a router candidate.
-    ///
-    /// A relay hint in an `e`/`p`/`a` tag is the cheapest thing in Nostr to
-    /// forge, and a row's observed-source provenance is arrival rather than
-    /// authorship, so both are always [`Declarer::SomeoneElse`] however
-    /// familiar the relay they name looks. Operator-configured lanes never
-    /// travel this path; they are a trusted declaration made elsewhere.
-    pub(super) fn admit_projected_routing_evidence(
-        &mut self,
-        demand: &BTreeSet<ContextualAtom>,
-    ) -> BTreeSet<ContextualAtom> {
-        let active: BTreeSet<_> = demand.iter().map(nmp_router::DemandKey::for_atom).collect();
-        let stale: Vec<_> = self
-            .rejected_projected_evidence_by_demand
-            .keys()
-            .filter(|key| !active.contains(key))
-            .copied()
-            .collect();
-        for key in stale {
-            self.release_rejected_projected_evidence(key);
-        }
-        self.admit_pending_projected_routing_evidence(demand)
-    }
-
-    pub(super) fn admit_pending_projected_routing_evidence(
-        &mut self,
-        demand: &BTreeSet<ContextualAtom>,
-    ) -> BTreeSet<ContextualAtom> {
-        let mut admitted = BTreeSet::new();
-        for atom in demand {
-            let key = nmp_router::DemandKey::for_atom(atom);
-            let atom_selection = atom.filter.hash();
-            let mut projected = atom.clone();
-            let mut rejected = BTreeSet::new();
-            projected.routing_evidence.retain(|evidence| {
-                let accepted = self
-                    .admission
-                    .admits(&evidence.relay, super::Declarer::SomeoneElse)
-                    .is_ok();
-                if !accepted {
-                    rejected.insert((atom_selection, evidence.clone()));
-                }
-                accepted
-            });
-            self.replace_rejected_projected_evidence(key, rejected);
-            admitted.insert(projected);
-        }
-        admitted
-    }
-
-    fn replace_rejected_projected_evidence(
-        &mut self,
-        demand: nmp_router::DemandKey,
-        rejected: BTreeSet<(DescriptorHash, RoutingEvidence)>,
-    ) {
-        let previous = self
-            .rejected_projected_evidence_by_demand
-            .remove(&demand)
-            .unwrap_or_default();
-        for fact in previous.difference(&rejected) {
-            if let Some(count) = self.rejected_projected_evidence_owner_counts.get_mut(fact) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.rejected_projected_evidence_owner_counts.remove(fact);
-                }
-            }
-        }
-        for fact in rejected.difference(&previous) {
-            let count = self
-                .rejected_projected_evidence_owner_counts
-                .entry(fact.clone())
-                .or_insert(0);
-            if *count == 0 {
-                self.discovered_private_relays_rejected =
-                    self.discovered_private_relays_rejected.saturating_add(1);
-            }
-            *count = count.saturating_add(1);
-        }
-        if !rejected.is_empty() {
-            self.rejected_projected_evidence_by_demand
-                .insert(demand, rejected);
-        }
-    }
-
-    pub(super) fn release_rejected_projected_evidence(&mut self, demand: nmp_router::DemandKey) {
-        let Some(rejected) = self.rejected_projected_evidence_by_demand.remove(&demand) else {
-            return;
-        };
-        for fact in rejected {
-            if let Some(count) = self.rejected_projected_evidence_owner_counts.get_mut(&fact) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.rejected_projected_evidence_owner_counts.remove(&fact);
-                }
-            }
-        }
     }
 
     /// One exact request is abandoned. It may no longer earn coverage or

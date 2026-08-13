@@ -34,7 +34,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
-use nmp_network_policy::{Declarer, DestinationPolicy};
 use nostr::RelayUrl;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message;
@@ -684,8 +683,6 @@ pub(super) fn spawn(
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
     command_queue_capacity: usize,
-    destination_policy: Arc<DestinationPolicy>,
-    declarer: Declarer,
     committed_observations: Arc<super::committed_observations::CommittedObservationCache>,
     spawner: &dyn ThreadSpawner,
 ) -> Result<WorkerHandle, ThreadSpawnError> {
@@ -731,8 +728,6 @@ pub(super) fn spawn(
                     keepalive_pong_timeout,
                     reconnect_delay_initial,
                     reconnect_jitter_max,
-                    &destination_policy,
-                    declarer,
                     &committed_observations,
                 );
             }),
@@ -784,8 +779,6 @@ fn run_worker(
     keepalive_pong_timeout: Duration,
     reconnect_delay_initial: Duration,
     reconnect_jitter_max: Duration,
-    destination_policy: &DestinationPolicy,
-    declarer: Declarer,
     committed_observations: &super::committed_observations::CommittedObservationCache,
 ) {
     let relay_scope = super::committed_observations::RelayScope::new(&url);
@@ -823,7 +816,7 @@ fn run_worker(
             return;
         }
         let generation = pack_generation(worker_id, attempt);
-        match open_relay_socket(url.as_str(), destination_policy, declarer) {
+        match open_relay_socket(url.as_str()) {
             Ok(mut socket) => {
                 let connected_at = Instant::now();
                 let Ok(current_preamble) = reconnect_preamble.state.lock() else {

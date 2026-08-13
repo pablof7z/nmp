@@ -327,7 +327,6 @@ class NMPRuntimeQualificationTest {
     private fun config(store: File? = null): NMPConfig =
         NMPConfig(
             storePath = store?.absolutePath,
-            allowedLocalRelayHosts = listOf("10.0.2.2"),
             maxRelays = 2u,
         )
 

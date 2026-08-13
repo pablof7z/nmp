@@ -78,7 +78,6 @@ use std::time::{Duration, Instant};
 use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
 use nmp_grammar::LiveQuery;
-use nmp_network_policy::{Declarer, DestinationPolicy};
 use nmp_router::{SubId, WireOp};
 use nmp_signer::{
     PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
@@ -103,7 +102,7 @@ use crate::core::{
     self, AcquisitionEvidence, AuthSendCompletion, DiagnosticsSnapshot, Effect, EngineCore,
     EngineMsg, HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, LocalSendRefusal,
     Nip77Frame, ObservationEvidence, ObservationId, ObservationOpen, PublishError, ReattachOutcome,
-    ReceiptId, RelayAdmissionPolicy, RequestAttemptId, RequestHandoffOutcome, Row, RowDelta,
+    ReceiptId, RequestAttemptId, RequestHandoffOutcome, Row, RowDelta,
 };
 use crate::publish_queue::{
     CancelWriteError, CancelWriteOutcome, PublishQueueEntry, PublishQueueReadError, ReceiptResult,
@@ -527,13 +526,7 @@ mod history_mailbox_tests {
             1,
             3,
         );
-        let (engine_thread, handle) = EngineThread::spawn(
-            store,
-            4,
-            PoolConfig::default(),
-            RelayAdmissionPolicy::default(),
-        )
-        .unwrap();
+        let (engine_thread, handle) = EngineThread::spawn(store, 4, PoolConfig::default()).unwrap();
 
         let (history_handle, receiver) = handle.subscribe_history(query.clone()).unwrap();
         receiver.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -1873,18 +1866,11 @@ impl EngineThread {
         store: S,
         cap: usize,
         pool_config: PoolConfig,
-        admission: RelayAdmissionPolicy,
     ) -> Result<(Self, Handle), EngineThreadError>
     where
         S: EventStore + Send + 'static,
     {
-        Self::spawn_with_runtime_config(
-            store,
-            cap,
-            pool_config,
-            admission,
-            RuntimeConfig::default(),
-        )
+        Self::spawn_with_runtime_config(store, cap, pool_config, RuntimeConfig::default())
     }
 
     /// Spawn a headless runtime over a static fact snapshot.
@@ -1897,7 +1883,6 @@ impl EngineThread {
         facts: nmp_router::FixtureRoutingFacts,
         cap: usize,
         pool_config: PoolConfig,
-        admission: RelayAdmissionPolicy,
     ) -> Result<(Self, Handle), EngineThreadError>
     where
         S: EventStore + Send + 'static,
@@ -1907,7 +1892,6 @@ impl EngineThread {
             crate::core::RoutingFactStore::from_fixture(facts),
             cap,
             pool_config,
-            admission,
             RuntimeConfig::default(),
             RestoredSession::empty(),
         )
@@ -1917,7 +1901,6 @@ impl EngineThread {
         store: S,
         cap: usize,
         pool_config: PoolConfig,
-        admission: RelayAdmissionPolicy,
         runtime_config: RuntimeConfig,
     ) -> Result<(Self, Handle), EngineThreadError>
     where
@@ -1928,7 +1911,6 @@ impl EngineThread {
             crate::core::RoutingFactStore::default(),
             cap,
             pool_config,
-            admission,
             runtime_config,
             RestoredSession::empty(),
         )
@@ -1939,7 +1921,6 @@ impl EngineThread {
         routing_facts: crate::core::RoutingFactStore,
         cap: usize,
         mut pool_config: PoolConfig,
-        admission: RelayAdmissionPolicy,
         runtime_config: RuntimeConfig,
         initial_session: RestoredSession,
     ) -> Result<(Self, Handle), EngineThreadError>
@@ -1972,22 +1953,8 @@ impl EngineThread {
             (router, pool) => router.min(pool),
         };
         pool_config.max_relays = cap;
-        // Issue #519/#885: thread the SAME pure destination policy this
-        // `admission` policy enforces at discovery-time into both places
-        // that actually open a socket/DNS-resolve a relay, so an operator's
-        // intentional local relay keeps working after resolved-address
-        // admission (`pool::connect`'s dial, `HttpFetcher`'s NIP-11
-        // resolver) is enforced there too — see those modules' docs for why
-        // the URL string alone is never sufficient.
-        let destination_policy: Arc<DestinationPolicy> =
-            Arc::new(admission.destination_policy().clone());
-        pool_config.destination_policy = Arc::clone(&destination_policy);
-
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
-        let relay_information = RelayInformationService::new_with_admission(
-            runtime.handle().clone(),
-            Arc::clone(&destination_policy),
-        );
+        let relay_information = RelayInformationService::new(runtime.handle().clone());
         #[cfg(test)]
         let runtime_threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max_engine_batch = pool_config.max_engine_batch.max(1);
@@ -2064,7 +2031,6 @@ impl EngineThread {
                             store,
                             routing_facts,
                             cap,
-                            admission,
                             initial_session,
                             EnginePoolRuntime {
                                 pool: engine_pool,
@@ -2219,16 +2185,8 @@ mod receipt_delivery_lifecycle_tests {
     /// without relying on a later `notify` call to prune a closed mailbox.
     #[test]
     fn parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries() {
-        let (thread, handle) = EngineThread::spawn(
-            MemoryStore::new(),
-            10,
-            PoolConfig::default(),
-            RelayAdmissionPolicy::new(
-                ["127.0.0.1".to_string()],
-                nmp_network_policy::OnionReachability::Unreachable,
-            ),
-        )
-        .expect("test engine thread construction");
+        let (thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default())
+            .expect("test engine thread construction");
         let tracked = parked_write(&handle, &Keys::generate());
         let id = tracked.id;
         assert_eq!(handle.receipt_delivery_count(id), 1);
@@ -2294,13 +2252,8 @@ mod reentrant_shutdown_tests {
     fn runtime() -> (EngineThread, Handle) {
         // #680 removed the configurable native-task limit; the blocking-adapter
         // pool is a fixed internal capacity, so spawn takes no limit argument.
-        EngineThread::spawn(
-            MemoryStore::new(),
-            1,
-            PoolConfig::default(),
-            RelayAdmissionPolicy::default(),
-        )
-        .expect("engine construction")
+        EngineThread::spawn(MemoryStore::new(), 1, PoolConfig::default())
+            .expect("engine construction")
     }
 
     fn unsigned(keys: &Keys, content: &str) -> UnsignedEvent {
@@ -3274,13 +3227,12 @@ mod relay_worker_reconciliation_tests {
         config.max_relays = 1;
         let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let public_handle = pool
-            .ensure_session(&public, Declarer::Ourselves)
+            .ensure_session(&public)
             .expect("Public read owns the cap-sized pool");
         let (self_inbox, inbox_rx) = mpsc::channel();
 
-        let protected_handle =
-            ensure_write_effect_session(&protected, Declarer::Ourselves, &pool, &self_inbox)
-                .expect("write displaces Public");
+        let protected_handle = ensure_write_effect_session(&protected, &pool, &self_inbox)
+            .expect("write displaces Public");
 
         assert_eq!(pool.live_session_handle(&public), None);
         assert_eq!(pool.live_session_handle(&protected), Some(protected_handle));
@@ -3317,10 +3269,10 @@ mod relay_worker_reconciliation_tests {
         config.max_relays = 1;
         let pool = Pool::new(config, pool_tx).expect("test pool construction");
         let public_handle = pool
-            .ensure_session(&public, Declarer::Ourselves)
+            .ensure_session(&public)
             .expect("Public read owns the cap-sized pool");
         assert!(matches!(
-            pool.ensure_session(&protected_read, Declarer::Ourselves),
+            pool.ensure_session(&protected_read),
             Err(nmp_transport::RelayOpenError::AtCapacity { max_relays: 1 })
         ));
         assert_eq!(pool.live_session_handle(&public), Some(public_handle));
@@ -3621,13 +3573,9 @@ mod relay_worker_reconciliation_tests {
     fn repeated_engine_shutdown_returns_runtime_threads_to_exact_baseline() {
         let _serial = RUNTIME_LIFECYCLE_TEST_LOCK.lock().unwrap();
         for _ in 0..16 {
-            let (engine, handle) = EngineThread::spawn(
-                MemoryStore::new(),
-                1,
-                PoolConfig::default(),
-                RelayAdmissionPolicy::default(),
-            )
-            .expect("engine construction");
+            let (engine, handle) =
+                EngineThread::spawn(MemoryStore::new(), 1, PoolConfig::default())
+                    .expect("engine construction");
             let runtime_threads = Arc::clone(&engine.runtime_threads);
             let deadline = Instant::now() + Duration::from_secs(5);
             // #704: the auth-release bridge is gone (the adapter executor was
@@ -3964,7 +3912,6 @@ mod auth_registry_admission_tests {
             MemoryStore::new(),
             1,
             PoolConfig::default(),
-            RelayAdmissionPolicy::default(),
             RuntimeConfig {
                 max_auth_capabilities: limit,
                 max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
@@ -4570,7 +4517,6 @@ fn engine_loop<S>(
     store: S,
     routing_facts: crate::core::RoutingFactStore,
     cap: usize,
-    admission: RelayAdmissionPolicy,
     initial_session: RestoredSession,
     pool_runtime: EnginePoolRuntime,
     wiring: EngineWiring<'_>,
@@ -4596,15 +4542,7 @@ fn engine_loop<S>(
     let runtime_handle = runtime.handle().clone();
     let runtime_handle = &runtime_handle;
     let mut core = EngineCore::new_with_routing_facts(store, routing_facts, cap)
-        .with_relay_admission(admission)
         .with_max_publish_attempts(max_publish_attempts);
-    // The operator's exact NIP-65 discovery sources are a trusted declaration
-    // like every other configured lane (#1251), so an indexer on `localhost`
-    // is dialable on that declaration alone. Done here rather than in
-    // `EngineCore::new_with_routing_facts` because indexer relays are the
-    // optional coordinator's configuration, not a neutral routing fact.
-    #[cfg(feature = "nip65")]
-    core.heed_relays(nip65_sources.iter().cloned());
     let mut row_channels: HashMap<ObservationId, RowsSender> = HashMap::new();
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
@@ -6477,25 +6415,24 @@ fn dispatch_relay_open_failure(
 /// access contexts onto one socket, and never evicts a different relay.
 fn ensure_write_effect_session(
     session: &RelaySessionKey,
-    declarer: Declarer,
     pool: &Pool,
     self_inbox: &Sender<Cmd>,
 ) -> Result<nmp_transport::RelayHandle, nmp_transport::RelayOpenError> {
-    match pool.ensure_session(session, declarer) {
+    match pool.ensure_session(session) {
         Ok(handle) => Ok(handle),
         Err(nmp_transport::RelayOpenError::AtCapacity { .. })
             if session.access != nmp_grammar::AccessContext::Public =>
         {
             let public = RelaySessionKey::public(session.relay.clone());
             let Some(public_handle) = pool.live_session_handle(&public) else {
-                return pool.ensure_session(session, declarer);
+                return pool.ensure_session(session);
             };
             if let Some(event) = pool.close(public_handle) {
                 if let Some(message) = translate_pool_event(event) {
                     let _ = self_inbox.send(Cmd::Engine(message));
                 }
             }
-            pool.ensure_session(session, declarer)
+            pool.ensure_session(session)
         }
         Err(error) => Err(error),
     }
@@ -6526,7 +6463,7 @@ fn retry_required_relay_workers<S: EventStore>(core: &EngineCore<S>, pool: &Pool
         if pool.live_session_handle(&session).is_some() {
             continue;
         }
-        let Ok(handle) = pool.ensure_session(&session, core.dial_declarer(&session.relay)) else {
+        let Ok(handle) = pool.ensure_session(&session) else {
             continue;
         };
         pool.set_reconnect_preamble(handle, Vec::new());
@@ -6608,7 +6545,7 @@ fn dispatch_effect(
             crate::ingest_attribution::committed_observation_effect(phase_started.elapsed());
         }
         Effect::Wire(delta) => {
-            let outcomes = apply_wire_delta(core, &delta, pool);
+            let outcomes = apply_wire_delta(&delta, pool);
             for outcome in outcomes {
                 let evidence = core.on_wire_request_handoff(outcome);
                 dispatch_effects(
@@ -6624,7 +6561,7 @@ fn dispatch_effect(
             }
         }
         Effect::Replay(session, reqs) => {
-            let outcomes = apply_replay(core, &session, &reqs, pool);
+            let outcomes = apply_replay(&session, &reqs, pool);
             for outcome in outcomes {
                 let evidence = core.on_wire_request_handoff(outcome);
                 dispatch_effects(
@@ -6671,8 +6608,7 @@ fn dispatch_effect(
             }
         }
         Effect::PublishEvent(session, event, correlation) => {
-            let declarer = core.dial_declarer(&session.relay);
-            let Ok(handle) = pool.ensure_session(&session, declarer) else {
+            let Ok(handle) = pool.ensure_session(&session) else {
                 let _ = runtime.self_inbox.send(Cmd::Engine(EngineMsg::EventHandoff(
                     correlation,
                     HandoffResult::NotHandedOff,
@@ -6692,7 +6628,7 @@ fn dispatch_effect(
             // Read ownership cannot displace an already-live physical
             // session. A typed cap refusal remains observable in pool
             // diagnostics and is reconciled after a real worker retirement.
-            if let Err(error) = pool.ensure_session(&session, core.dial_declarer(&session.relay)) {
+            if let Err(error) = pool.ensure_session(&session) {
                 dispatch_relay_open_failure(
                     core,
                     session,
@@ -6712,10 +6648,7 @@ fn dispatch_effect(
             // must not be converted back into an invalid handle or a busy
             // retry loop here. A protected write may, however, time-share
             // this relay's already-live Public slot (#598).
-            let declarer = core.dial_declarer(&session.relay);
-            if let Err(error) =
-                ensure_write_effect_session(&session, declarer, pool, runtime.self_inbox)
-            {
+            if let Err(error) = ensure_write_effect_session(&session, pool, runtime.self_inbox) {
                 dispatch_relay_open_failure(
                     core,
                     session,
@@ -6941,7 +6874,7 @@ fn dispatch_effect(
         }
         Effect::StartProbe(attempt_id, url, sub_id, filter, initial_hex) => {
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
-            let outcome = nip77_send(core, pool, attempt_id, &url, text);
+            let outcome = nip77_send(pool, attempt_id, &url, text);
             let followups = core.on_nip77_handoff(Nip77Frame::Probe, outcome);
             dispatch_effects(
                 core,
@@ -6957,7 +6890,7 @@ fn dispatch_effect(
         Effect::NegOpen(attempt_id, probed, sub_id, filter, initial_hex) => {
             let relay = probed.url().clone();
             let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
-            let outcome = nip77_send(core, pool, attempt_id, &relay, text);
+            let outcome = nip77_send(pool, attempt_id, &relay, text);
             let followups = core.on_nip77_handoff(Nip77Frame::Open, outcome);
             dispatch_effects(
                 core,
@@ -6972,7 +6905,7 @@ fn dispatch_effect(
         }
         Effect::NegMsg(attempt_id, relay, sub_id, message_hex) => {
             let text = neg_msg_frame_text(&sub_id, message_hex);
-            let outcome = nip77_send(core, pool, attempt_id, &relay, text);
+            let outcome = nip77_send(pool, attempt_id, &relay, text);
             let followups = core.on_nip77_handoff(Nip77Frame::Continue, outcome);
             dispatch_effects(
                 core,
@@ -6986,7 +6919,7 @@ fn dispatch_effect(
             );
         }
         Effect::NegClose(relay, sub_id) => {
-            let Ok(handle) = pool.ensure_open(&relay, core.dial_declarer(&relay)) else {
+            let Ok(handle) = pool.ensure_open(&relay) else {
                 return;
             };
             let text = neg_close_frame_text(&sub_id);
@@ -7007,14 +6940,13 @@ fn dispatch_effect(
 /// about this process: no session could be opened at all, versus a worker that
 /// exists and refused the frame at admission because its finite outbound
 /// envelope is full (#506/#1331). Neither is ever a statement about the relay.
-fn nip77_send<S: EventStore>(
-    core: &EngineCore<S>,
+fn nip77_send(
     pool: &Pool,
     attempt_id: RequestAttemptId,
     relay: &RelayUrl,
     text: String,
 ) -> RequestHandoffOutcome {
-    let Ok(handle) = pool.ensure_open(relay, core.dial_declarer(relay)) else {
+    let Ok(handle) = pool.ensure_open(relay) else {
         return RequestHandoffOutcome::Refused {
             attempt_id,
             cause: LocalSendRefusal::SessionUnavailable,
@@ -7079,17 +7011,12 @@ fn neg_close_frame_text(sub_id: &SubId) -> String {
 /// PROTECTED sessions. Public replay belongs to `EngineCore`; protected REQs
 /// additionally cannot replay before the fresh generation reaches AUTH
 /// Ready (#8).
-fn apply_wire_delta<S: EventStore>(
-    core: &EngineCore<S>,
-    delta: &core::AttemptedWireDelta,
-    pool: &Pool,
-) -> Vec<RequestHandoffOutcome> {
+fn apply_wire_delta(delta: &core::AttemptedWireDelta, pool: &Pool) -> Vec<RequestHandoffOutcome> {
     let mut outcomes = Vec::new();
     for (session, ops) in &delta.ops {
         let has_req = ops.iter().any(|op| matches!(op, WireOp::Req(..)));
         let handle = if has_req {
-            pool.ensure_session(session, core.dial_declarer(&session.relay))
-                .ok()
+            pool.ensure_session(session).ok()
         } else {
             // A close-only delta must never reopen a worker already released
             // by exact session-demand reconciliation. Socket teardown already
@@ -7137,13 +7064,12 @@ fn apply_wire_delta<S: EventStore>(
 /// is the sole replay owner. No transport preamble is installed, so the same
 /// generation cannot receive an automatic copy; protected sessions retain the
 /// same empty-preamble rule (#8).
-fn apply_replay<S: EventStore>(
-    core: &EngineCore<S>,
+fn apply_replay(
     session: &RelaySessionKey,
     reqs: &core::AttemptedReplay,
     pool: &Pool,
 ) -> Vec<RequestHandoffOutcome> {
-    let Ok(handle) = pool.ensure_session(session, core.dial_declarer(&session.relay)) else {
+    let Ok(handle) = pool.ensure_session(session) else {
         return reqs
             .attempts()
             .iter()

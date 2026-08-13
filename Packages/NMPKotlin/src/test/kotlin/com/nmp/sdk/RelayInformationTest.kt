@@ -96,7 +96,7 @@ class RelayInformationTest {
                 body = """{"name":"Local","supported_nips":[11,77],"limitation":{"max_limit":500,"auth_required":true}}""",
                 responseDelayMillis = 500,
             ).use { server ->
-                NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("localhost"))).use { engine ->
+                NMPEngine(NMPConfig()).use { engine ->
                     val request =
                         async(start = CoroutineStart.UNDISPATCHED) {
                             engine.relayInformation(
@@ -126,7 +126,7 @@ class RelayInformationTest {
     fun publicSuspendCallDeliversTypedAcquisitionError() =
         runBlocking {
             LocalNIP11Server(body = "not-json").use { server ->
-                NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("localhost"))).use { engine ->
+                NMPEngine(NMPConfig()).use { engine ->
                     try {
                         engine.relayInformation(
                             server.relayUrl,
@@ -156,7 +156,7 @@ class RelayInformationTest {
     fun concurrentRelayInformationFetchesAreNeverCapacityRefused() =
         runBlocking {
             LocalNIP11Server(body = """{"name":"Shared"}""", gated = true).use { server ->
-                NMPEngine(NMPConfig(allowedLocalRelayHosts = listOf("localhost"))).use { engine ->
+                NMPEngine(NMPConfig()).use { engine ->
                     val requests =
                         List(65) {
                             async(start = CoroutineStart.UNDISPATCHED) {

@@ -9,8 +9,7 @@ struct OutboxRoutingSwiftConsumer {
         ) as! [String: String]
         let engine = try NMPEngine(
             config: NMPConfig(
-                outboxRouting: OutboxRoutingConfig(indexers: [manifest["indexer"]!]),
-                allowedLocalRelayHosts: ["localhost", "127.0.0.1"]
+                outboxRouting: OutboxRoutingConfig(indexers: [manifest["indexer"]!])
             )
         )
         defer { engine.shutdown() }

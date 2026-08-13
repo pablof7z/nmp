@@ -1,17 +1,6 @@
-//! The provenance grant has to survive the whole way down (#1251).
-//!
-//! Two other suites prove the halves in isolation: `nmp::nip65::provenance`
-//! proves the engine decides admission with the author's identity, and
-//! `nmp_transport::pool::connect`'s
-//! `our_own_declaration_reaches_a_local_relay_with_no_allowlist` proves the
-//! socket honours a declaration with an empty allowlist. Neither proves they
-//! are actually wired to each other.
-//!
-//! This one does, against a real loopback relay over a real websocket, with
-//! `allowed_local_relay_hosts` left EMPTY. Before #1251 the same configuration
-//! reached the dial guard and was refused there, so the app was told its own
-//! configured relay was a destination and then could never reach it — routing
-//! and the socket answering one provenance question two different ways.
+//! Loopback relay destinations are ordinary Nostr destinations (#1429).
+//! This suite reaches one through the supported engine facade over a real
+//! websocket, with no destination-policy configuration surface.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -57,20 +46,15 @@ fn acked_relays(receipts: &FifoReceiver<WriteFact>, budget: Duration) -> BTreeSe
     acked
 }
 
-/// `ROUTING-ADMISSION-004`, end to end: the app declares a loopback relay and
-/// nothing else. No local host is on the admission allowlist, so every
-/// address-only gate in the stack would refuse this dial.
+/// End to end: the app declares a loopback relay and nothing else, then the
+/// real transport reaches it and receives a publish acknowledgement.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_app_declared_loopback_relay_is_reached_with_an_empty_allowlist() {
+async fn an_app_declared_loopback_relay_is_reached_without_opt_in() {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
     let url = relay.url.clone();
 
     let engine = Engine::new(EngineConfig {
         app_relays: vec![url.to_string()],
-        // Deliberately empty. The app naming the relay IS the declaration;
-        // needing to name it a second time here was the incoherence.
-        allowed_local_relay_hosts: Vec::new(),
-        tor_reachable: false,
         ..EngineConfig::default()
     })
     .expect("an engine with one app relay builds");
@@ -92,7 +76,6 @@ async fn an_app_declared_loopback_relay_is_reached_with_an_empty_allowlist() {
     let acked = acked_relays(&tracked.statuses, SETTLE);
     assert!(
         acked.contains(&url.to_string()),
-        "an app relay on loopback must be REACHED, not merely routed to, on the \
-         app's own declaration alone; acked: {acked:?}"
+        "an app relay on loopback must be reached like any other target; acked: {acked:?}"
     );
 }

@@ -3,10 +3,8 @@
 //! both forms of mirror hash failure, the 502-vs-5xx origin distinction,
 //! strict bounded list parsing, and the three separated per-operation
 //! failure taxonomies. Each test doc-comment names the invariant it would
-//! falsify. (The post-DNS resolver falsifiers live as unit tests in
-//! `src/client.rs`, where the private resolver hook is reachable.)
+//! falsify.
 
-use std::collections::BTreeSet;
 use std::net::TcpListener;
 
 use nostr::{Alphabet, EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
@@ -26,16 +24,8 @@ mod support;
 
 use support::{MockServer, ScriptedResponse};
 
-fn loopback_allowlist() -> BTreeSet<String> {
-    BTreeSet::from(["127.0.0.1".to_string()])
-}
-
 fn loopback_client() -> BlossomClient {
-    BlossomClient::new(BlossomClientConfig {
-        allowed_local_hosts: loopback_allowlist(),
-        ..BlossomClientConfig::default()
-    })
-    .expect("client construction")
+    BlossomClient::new(BlossomClientConfig::default()).expect("client construction")
 }
 
 /// Draft -> sign -> validate an `upload` grant for `blob` (BUD-04: this
@@ -141,7 +131,6 @@ fn reason_response(status_line: &'static str, reason: &str) -> ScriptedResponse 
 fn mirror_taxonomy_slot(error: &MirrorError) -> &'static str {
     match error {
         MirrorError::AuthorizationBlobMismatch { .. } => "authorization-blob-mismatch",
-        MirrorError::LocalHostNotAdmitted { .. } => "local-host-not-admitted",
         MirrorError::Network { .. } => "network",
         MirrorError::RedirectRefused { .. } => "redirect-refused",
         MirrorError::AuthRejected { .. } => "auth-rejected",
@@ -159,7 +148,6 @@ fn mirror_taxonomy_slot(error: &MirrorError) -> &'static str {
 fn delete_taxonomy_slot(error: &DeleteError) -> &'static str {
     match error {
         DeleteError::AuthorizationBlobMismatch { .. } => "authorization-blob-mismatch",
-        DeleteError::LocalHostNotAdmitted { .. } => "local-host-not-admitted",
         DeleteError::Network { .. } => "network",
         DeleteError::RedirectRefused { .. } => "redirect-refused",
         DeleteError::AuthRejected { .. } => "auth-rejected",
@@ -173,7 +161,6 @@ fn delete_taxonomy_slot(error: &DeleteError) -> &'static str {
 fn list_taxonomy_slot(error: &ListError) -> &'static str {
     match error {
         ListError::WrongVerb { .. } => "wrong-verb",
-        ListError::LocalHostNotAdmitted { .. } => "local-host-not-admitted",
         ListError::Network { .. } => "network",
         ListError::RedirectRefused { .. } => "redirect-refused",
         ListError::AuthRejected { .. } => "auth-rejected",
@@ -524,7 +511,6 @@ async fn list_parsing_is_bounded_and_strict() {
 
     // Oversized body -> ResponseTooLarge under the LIST cap.
     let capped_client = BlossomClient::new(BlossomClientConfig {
-        allowed_local_hosts: loopback_allowlist(),
         max_list_response_bytes: 256,
         ..BlossomClientConfig::default()
     })
@@ -638,8 +624,7 @@ async fn list_parsing_is_bounded_and_strict() {
 /// Falsifier g1 (#551): every remaining [`MirrorError`] outcome maps to
 /// its OWN taxonomy slot -- 307 is `RedirectRefused` (never followed),
 /// 401+X-Reason is `AuthRejected` carrying that exact reason, 415 is
-/// `ServerRejected`, a dead port is `Network`, an unadmitted literal
-/// private host is refused pre-socket, an oversized 200 body is bounded,
+/// `ServerRejected`, a dead port is `Network`, an oversized 200 body is bounded,
 /// and a non-descriptor 200 body is `DescriptorInvalid` -- while the
 /// wildcard-free `mirror_taxonomy_slot` match proves exhaustiveness at
 /// compile time (409/502/500/mismatch slots are pinned by falsifiers
@@ -722,24 +707,8 @@ async fn mirror_failure_taxonomy_is_separated_and_exhaustive() {
     assert!(matches!(err, MirrorError::Network { .. }));
     assert_eq!(mirror_taxonomy_slot(&err), "network");
 
-    // An unadmitted literal private host -> refused pre-socket.
-    let default_deny = BlossomClient::new(BlossomClientConfig::default()).expect("client");
-    let server = BlossomServerUrl::parse("http://192.168.1.9").expect("private-host url");
-    let err = default_deny
-        .mirror(&server, source_url, expected, &auth)
-        .await
-        .expect_err("an unadmitted private host must be refused");
-    assert_eq!(
-        err,
-        MirrorError::LocalHostNotAdmitted {
-            host: "192.168.1.9".to_string(),
-        }
-    );
-    assert_eq!(mirror_taxonomy_slot(&err), "local-host-not-admitted");
-
     // An oversized 200 body is bounded while streaming.
     let capped_client = BlossomClient::new(BlossomClientConfig {
-        allowed_local_hosts: loopback_allowlist(),
         max_response_bytes: 256,
         ..BlossomClientConfig::default()
     })
@@ -773,8 +742,7 @@ async fn mirror_failure_taxonomy_is_separated_and_exhaustive() {
 /// maps to its OWN taxonomy slot -- 402 is `AuthRejected` (BUD-12 counts
 /// payment-required as authorization-indicting for DELETE), 404 is the
 /// distinct `NotFound`, 429 is `ServerRejected`, 503 is `ServerError`,
-/// 307 is `RedirectRefused`, a dead port is `Network`, and an unadmitted
-/// literal private host is refused pre-socket -- while the wildcard-free
+/// 307 is `RedirectRefused`, and a dead port is `Network` -- while the wildcard-free
 /// `delete_taxonomy_slot` match proves exhaustiveness at compile time
 /// (blob/verb mismatch slots are pinned by falsifiers a/b).
 #[tokio::test]
@@ -883,29 +851,13 @@ async fn delete_failure_taxonomy_is_separated_and_exhaustive() {
         .expect_err("a dead port must be Network");
     assert!(matches!(err, DeleteError::Network { .. }));
     assert_eq!(delete_taxonomy_slot(&err), "network");
-
-    // An unadmitted literal private host -> refused pre-socket.
-    let default_deny = BlossomClient::new(BlossomClientConfig::default()).expect("client");
-    let server = BlossomServerUrl::parse("http://10.0.0.7").expect("private-host url");
-    let err = default_deny
-        .delete(&server, blob, &auth)
-        .await
-        .expect_err("an unadmitted private host must be refused");
-    assert_eq!(
-        err,
-        DeleteError::LocalHostNotAdmitted {
-            host: "10.0.0.7".to_string(),
-        }
-    );
-    assert_eq!(delete_taxonomy_slot(&err), "local-host-not-admitted");
 }
 
 /// Falsifier g3 (#551, BUD-12): every remaining [`ListError`] outcome
 /// maps to its OWN taxonomy slot -- a 401 on an AUTH-LESS call is
 /// `AuthRejected` (the server may require a `list` grant), 404 is
 /// `ServerRejected`, 500 is `ServerError`, 307 is `RedirectRefused`, a
-/// dead port is `Network`, and an unadmitted `.localhost` name is refused
-/// pre-socket -- while the wildcard-free `list_taxonomy_slot` match
+/// dead port is `Network` -- while the wildcard-free `list_taxonomy_slot` match
 /// proves exhaustiveness at compile time (wrong-verb by falsifier b;
 /// bounded/strict parse slots by falsifier e).
 #[tokio::test]
@@ -996,20 +948,4 @@ async fn list_failure_taxonomy_is_separated_and_exhaustive() {
         .expect_err("a dead port must be Network");
     assert!(matches!(err, ListError::Network { .. }));
     assert_eq!(list_taxonomy_slot(&err), "network");
-
-    // An unadmitted `.localhost` NAME (not an IP literal) -> refused
-    // pre-socket by the same hostname rules as `nmp-transport`.
-    let default_deny = BlossomClient::new(BlossomClientConfig::default()).expect("client");
-    let server = BlossomServerUrl::parse("http://blossom.localhost").expect("localhost url");
-    let err = default_deny
-        .list(&server, owner, &ListPage::default(), None)
-        .await
-        .expect_err("an unadmitted .localhost name must be refused");
-    assert_eq!(
-        err,
-        ListError::LocalHostNotAdmitted {
-            host: "blossom.localhost".to_string(),
-        }
-    );
-    assert_eq!(list_taxonomy_slot(&err), "local-host-not-admitted");
 }

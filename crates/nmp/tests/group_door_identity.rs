@@ -33,7 +33,6 @@ const SETTLE: Duration = Duration::from_secs(20);
 
 fn bare_engine() -> Engine {
     Engine::new(EngineConfig {
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
         ..EngineConfig::default()
     })
     .expect("an in-memory engine builds")
