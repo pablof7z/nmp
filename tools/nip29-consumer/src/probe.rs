@@ -681,13 +681,13 @@ fn provenance_growth(args: Args) -> Result<(), String> {
             && state
                 .rows
                 .values()
-                .any(|row| row.event.content == "relay A chat")
+                .any(|row| row.content() == "relay A chat")
     })?;
     ensure(
         !observed
             .rows
             .values()
-            .any(|row| row.event.content == RELAY_B_CHAT),
+            .any(|row| row.content() == RELAY_B_CHAT),
         "relay B-only content arrived while relay B was staged down",
     )?;
     signal_ready(&args)?;
@@ -695,23 +695,20 @@ fn provenance_growth(args: Args) -> Result<(), String> {
 
     wait_until(&subscription, context.settle, &mut observed, |state| {
         state.has_source_count(SHARED_CHAT, 2)
-            && state
-                .rows
-                .values()
-                .any(|row| row.event.content == RELAY_B_CHAT)
+            && state.rows.values().any(|row| row.content() == RELAY_B_CHAT)
     })?;
     let shared = observed
         .rows
         .values()
-        .find(|row| row.event.content == SHARED_CHAT)
+        .find(|row| row.content() == SHARED_CHAT)
         .expect("shared row exists after predicate");
     ensure(
-        observed.source_growth.contains(&shared.event.id),
+        observed.source_growth.contains(&shared.id()),
         "the existing shared row reached two sources without SourcesGrew",
     )?;
     println!(
         "PROOF provenance_after shared_sources=2 relay_b_content=true sources_grew_event={}",
-        shared.event.id
+        shared.id()
     );
     println!("PASS provenance-growth");
     drop(subscription);
