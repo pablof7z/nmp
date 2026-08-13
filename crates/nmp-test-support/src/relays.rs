@@ -1151,6 +1151,50 @@ impl ScriptedRelay {
         self.wire.snapshot()
     }
 
+    /// Bounded independent socket witness for one exact outbound `EVENT` id.
+    ///
+    /// This waits on the wire recorder's notification rather than guessing a
+    /// network delay. It counts literal client frames, including attempts a
+    /// relay rejects before admission.
+    pub async fn wait_wire_event_id_count(
+        &self,
+        event_id: &str,
+        at_least: usize,
+        timeout: Duration,
+    ) -> bool {
+        let wait = async {
+            loop {
+                if self
+                    .wire
+                    .snapshot()
+                    .event_ids
+                    .iter()
+                    .filter(|candidate| candidate.as_str() == event_id)
+                    .count()
+                    >= at_least
+                {
+                    return true;
+                }
+                let notified = self.wire.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self
+                    .wire
+                    .snapshot()
+                    .event_ids
+                    .iter()
+                    .filter(|candidate| candidate.as_str() == event_id)
+                    .count()
+                    >= at_least
+                {
+                    return true;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(timeout, wait).await.is_ok()
+    }
+
     /// Bounded wait for an exact raw REQ witness.
     ///
     /// The predicate reads the decoded client-to-relay frame, not the relay's
