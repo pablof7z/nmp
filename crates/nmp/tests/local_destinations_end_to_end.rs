@@ -36,6 +36,7 @@ fn acked_relays(receipts: &FifoReceiver<WriteFact>, budget: Duration) -> BTreeSe
             Ok(WriteFact::Relay {
                 relay,
                 state: RelayState::Published,
+                ..
             }) => {
                 acked.insert(relay.to_string());
             }

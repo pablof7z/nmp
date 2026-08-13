@@ -69,11 +69,13 @@ fn wait_for_published_relays(
                 });
             }
             Ok(WriteFact::Relay {
+                event_id,
                 relay,
                 state: RelayState::Published,
             }) => {
                 published.insert(relay.clone());
                 seen.push(WriteFact::Relay {
+                    event_id,
                     relay,
                     state: RelayState::Published,
                 });
