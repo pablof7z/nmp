@@ -18,8 +18,8 @@ use nmp_grammar::{
 };
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, EventStore, IntentSigState, PublishQueueAttemptOutcome,
-    PublishQueueTerminalOutcome, RedbStore, SigState,
+    sentinel_signature, AcceptWrite, AcceptWritePayload, EventStore, IntentSigState,
+    PublishQueueAttemptOutcome, PublishQueueTerminalOutcome, RedbStore, SigState,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{
@@ -674,13 +674,15 @@ fn assert_persisted_routing_fails_closed_without_dropping(
         let mut store = RedbStore::open(&path).unwrap();
         let outcome = store
             .accept_write(AcceptWrite {
-                frozen,
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: AcceptWritePayload::Event {
+                    frozen: Box::new(frozen),
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing,
+                    sig_state: IntentSigState::Pending,
+                },
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
-                routing,
-                sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(104u64),
                 correlation: None,
             })
@@ -784,13 +786,15 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
         let mut store = RedbStore::open(&path).unwrap();
         let outcome = store
             .accept_write(AcceptWrite {
-                frozen,
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: AcceptWritePayload::Event {
+                    frozen: Box::new(frozen),
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "auto".to_string(),
+                    sig_state: IntentSigState::Pending,
+                },
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
-                routing: "auto".to_string(),
-                sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(777),
                 correlation: None,
             })
@@ -1105,9 +1109,10 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         .into_iter()
         .find(|intent| intent.intent_id == intent_id)
         .expect("failed cancellation must retain open work");
+    let (recovered_event, _, _, _) = recovered.event_work().expect("ordinary event work");
     assert_eq!(
         store
-            .query(&nostr::Filter::new().id(recovered.frozen.id))
+            .query(&nostr::Filter::new().id(recovered_event.id))
             .unwrap()
             .len(),
         1,
@@ -1251,21 +1256,23 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
         let mut store = RedbStore::open(&path).unwrap();
         store
             .accept_write(AcceptWrite {
-                frozen: nostr::Event::new(
-                    event.id,
-                    event.pubkey,
-                    event.created_at,
-                    event.kind,
-                    event.tags.clone(),
-                    event.content.clone(),
-                    sentinel_signature(),
-                ),
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: AcceptWritePayload::Event {
+                    frozen: Box::new(nostr::Event::new(
+                        event.id,
+                        event.pubkey,
+                        event.created_at,
+                        event.kind,
+                        event.tags.clone(),
+                        event.content.clone(),
+                        sentinel_signature(),
+                    )),
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "auto".to_string(),
+                    sig_state: IntentSigState::Pending,
+                },
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "local".to_string(),
-                routing: "auto".to_string(),
-                sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(991),
                 correlation: None,
             })

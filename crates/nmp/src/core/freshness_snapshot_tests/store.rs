@@ -107,14 +107,26 @@ impl EventStore for CountingCoverageStore {
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         self.inner.accept_write(accept)
     }
+    fn replaceable_operation_snapshot(
+        &self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+    ) -> Result<Option<nmp_store::RecoveredSemanticResource>, PersistenceError> {
+        self.inner.replaceable_operation_snapshot(coordinate)
+    }
+    fn install_replaceable_materialization(
+        &mut self,
+        rematerialize: nmp_store::SemanticRematerialize,
+    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
+        self.inner
+            .install_replaceable_materialization(rematerialize)
+    }
 
     fn promote_signed(
         &mut self,
-        intent_id: nmp_store::IntentId,
+        target: nmp_store::PromotionTarget,
         verified: nmp_store::VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError> {
-        self.inner
-            .promote_signed(crate::PromotionTarget::Event(intent_id), verified)
+        self.inner.promote_signed(target, verified)
     }
 
     fn compensate_write(
