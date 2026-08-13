@@ -1681,23 +1681,29 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         for (id, intent_id, already_signed) in recovered_semantic_owners {
-            if already_signed {
-                let revisions = match self.resolver.store().recover_route_revisions(intent_id) {
-                    Ok(revisions) => revisions,
-                    Err(error) => {
-                        self.record_store_failure(&error);
-                        self.schedule_lane_bootstrap_retry(intent_id, None);
-                        continue;
-                    }
-                };
-                let durable_relays = revisions
-                    .iter()
-                    .flat_map(|revision| revision.relays.iter().cloned())
-                    .collect::<BTreeSet<_>>();
-                let signing_pubkey = self.pending[&id].signing_pubkey;
-                if let Some(pending) = self.pending.get_mut(&id) {
-                    pending.durable_routes = durable_relays.clone();
+            // A semantic successor installs its current-generation lanes and
+            // route union atomically before its signature exists. Restore
+            // that union for both recovery states: otherwise an unsigned
+            // successor reaches `on_signed` with an empty durable route set,
+            // mistakes every persisted route for a new addition, and tries
+            // to bootstrap current lanes against predecessor attempt history.
+            let revisions = match self.resolver.store().recover_route_revisions(intent_id) {
+                Ok(revisions) => revisions,
+                Err(error) => {
+                    self.record_store_failure(&error);
+                    self.schedule_lane_bootstrap_retry(intent_id, None);
+                    continue;
                 }
+            };
+            let durable_relays = revisions
+                .iter()
+                .flat_map(|revision| revision.relays.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            if let Some(pending) = self.pending.get_mut(&id) {
+                pending.durable_routes = durable_relays;
+            }
+            if already_signed {
+                let signing_pubkey = self.pending[&id].signing_pubkey;
                 let event_id = self.pending[&id].frozen.id;
                 match self.recover_semantic_generation_lanes(intent_id, event_id) {
                     Ok(lanes) => {
