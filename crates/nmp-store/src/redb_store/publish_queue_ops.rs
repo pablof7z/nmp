@@ -1,7 +1,7 @@
 use super::commit::commit_prepared;
 use super::publish_queue::{
-    alloc_counter_in_txn, alloc_receipt_id_in_txn, lane_deadline, replace_lane_in_txn,
-    update_publish_queue_receipt, PublishQueueReceiptRecord,
+    alloc_counter_in_txn, alloc_receipt_id_in_txn, lane_deadline, remove_superseded_receipt_index,
+    replace_lane_in_txn, update_publish_queue_receipt, PublishQueueReceiptRecord,
 };
 use super::publish_queue_codec::{
     attempt_key, attempt_range, canonical_route_ids, codec_error, deadline_by_intent_key,
@@ -10,8 +10,9 @@ use super::publish_queue_codec::{
     decode_receipt, decode_relay, decode_route, encode_attempt, encode_attempt_details,
     encode_lane, encode_receipt, encode_relay, encode_route, intent_key, lane_key, lane_range,
     parse_attempt_key, parse_deadline_by_intent_key, parse_deadline_key, parse_intent_key,
-    parse_lane_key, parse_route_revision_key, receipt_key, relay_key, route_revision_key,
-    route_revision_range, PublishQueueRelayId, NEXT_RELAY_ID_KEY,
+    parse_lane_key, parse_route_revision_key, parse_superseded_receipt_key, receipt_key, relay_key,
+    route_revision_key, route_revision_range, superseded_receipt_range, PublishQueueRelayId,
+    NEXT_RELAY_ID_KEY, SUPERSEDED_RECEIPT_COUNT_KEY,
 };
 use super::schema::{
     persist_err, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS, PUBLISH_QUEUE_CORRELATIONS,
@@ -1607,8 +1608,12 @@ fn close_intent(
                 let mut receipts = write_txn
                     .open_table(PUBLISH_QUEUE_RECEIPTS)
                     .map_err(persist_err)?;
+                let mut meta = write_txn
+                    .open_table(PUBLISH_QUEUE_META)
+                    .map_err(persist_err)?;
                 update_publish_queue_receipt(
                     &mut receipts,
+                    &mut meta,
                     record.receipt_id,
                     ReceiptState::NoDestination,
                 )?;
@@ -1780,6 +1785,105 @@ pub(super) fn publish_queue_receipts_after(
     Ok(out)
 }
 
+pub(super) fn next_superseded_receipt_deadline(
+    store: &RedbStore,
+) -> Result<Option<Timestamp>, PersistenceError> {
+    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let meta = read_txn
+        .open_table(PUBLISH_QUEUE_META)
+        .map_err(persist_err)?;
+    let count = meta
+        .get(SUPERSEDED_RECEIPT_COUNT_KEY)
+        .map_err(persist_err)?
+        .map(|guard| {
+            super::publish_queue_codec::decode_meta_u64(guard.value(), "superseded receipt count")
+        })
+        .transpose()
+        .map_err(|error| codec_error("superseded receipt count", error))?
+        .unwrap_or(0);
+    let (lower, upper) = superseded_receipt_range();
+    let first = meta
+        .range::<&[u8]>(lower.as_slice()..=upper.as_slice())
+        .map_err(persist_err)?
+        .next()
+        .transpose()
+        .map_err(persist_err)?
+        .map(|(key, _)| parse_superseded_receipt_key(key.value()))
+        .transpose()
+        .map_err(|error| codec_error("superseded receipt index key", error))?;
+    if (count == 0) != first.is_none() {
+        return Err(PersistenceError::invariant(
+            "superseded receipt count disagrees with its ordered index",
+        ));
+    }
+    if count > crate::SUPERSEDED_RECEIPT_MAX_COUNT as u64 {
+        return Ok(Some(Timestamp::from(0)));
+    }
+    Ok(first.map(|(accepted_at, _)| accepted_at + crate::SUPERSEDED_RECEIPT_MAX_AGE_SECS))
+}
+
+pub(super) fn prune_superseded_receipts(
+    store: &mut RedbStore,
+    now: Timestamp,
+) -> Result<Vec<u64>, PersistenceError> {
+    let candidates = {
+        let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+        let meta = read_txn
+            .open_table(PUBLISH_QUEUE_META)
+            .map_err(persist_err)?;
+        let count = meta
+            .get(SUPERSEDED_RECEIPT_COUNT_KEY)
+            .map_err(persist_err)?
+            .map(|guard| {
+                super::publish_queue_codec::decode_meta_u64(
+                    guard.value(),
+                    "superseded receipt count",
+                )
+            })
+            .transpose()
+            .map_err(|error| codec_error("superseded receipt count", error))?
+            .unwrap_or(0);
+        let count = usize::try_from(count).map_err(|_| {
+            PersistenceError::invariant("superseded receipt count exceeds platform size")
+        })?;
+        let excess = count.saturating_sub(crate::SUPERSEDED_RECEIPT_MAX_COUNT);
+        let (lower, upper) = superseded_receipt_range();
+        let mut candidates = Vec::new();
+        for row in meta
+            .range::<&[u8]>(lower.as_slice()..=upper.as_slice())
+            .map_err(persist_err)?
+        {
+            let (key, _) = row.map_err(persist_err)?;
+            let (accepted_at, receipt_id) = parse_superseded_receipt_key(key.value())
+                .map_err(|error| codec_error("superseded receipt index key", error))?;
+            if candidates.len() >= excess
+                && now < accepted_at + crate::SUPERSEDED_RECEIPT_MAX_AGE_SECS
+            {
+                break;
+            }
+            candidates.push(receipt_id);
+        }
+        if candidates.len() < excess {
+            return Err(PersistenceError::invariant(
+                "superseded receipt count exceeds its ordered index",
+            ));
+        }
+        candidates
+    };
+    for receipt_id in &candidates {
+        match remove_publish_queue_entry(store, *receipt_id)? {
+            crate::RemoveQueueEntryOutcome::Removed => {}
+            crate::RemoveQueueEntryOutcome::NotFound
+            | crate::RemoveQueueEntryOutcome::StillOpen => {
+                return Err(PersistenceError::invariant(
+                    "superseded receipt index disagrees with retained receipt",
+                ));
+            }
+        }
+    }
+    Ok(candidates)
+}
+
 /// Forget one retained receipt and every piece of evidence keyed to it
 /// (#1039). Refuses while the receipt still owns an open intent row.
 pub(super) fn remove_publish_queue_entry(
@@ -1809,6 +1913,10 @@ pub(super) fn remove_publish_queue_entry(
                 return Ok(crate::RemoveQueueEntryOutcome::StillOpen);
             }
         }
+        let mut meta = write_txn
+            .open_table(PUBLISH_QUEUE_META)
+            .map_err(persist_err)?;
+        remove_superseded_receipt_index(&mut meta, receipt_id, &record)?;
         receipts.remove(&key).map_err(persist_err)?;
         // #591 tokens name this receipt id and nothing else; leaving one
         // behind would reattach a caller to a receipt that no longer exists.

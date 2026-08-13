@@ -2107,55 +2107,11 @@ pub trait EventStore {
     /// Permanently remove superseded receipt evidence once it is one hour old
     /// or outside the newest 500 entries. Open obligations and every other
     /// receipt state are outside this disposal class.
-    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError> {
-        let mut retained = self
-            .enumerate_publish_queue_receipts()?
-            .into_iter()
-            .filter_map(|receipt| {
-                (receipt.state == ReceiptState::Superseded)
-                    .then_some((receipt.receipt_id, receipt.accepted_at))
-            })
-            .collect::<Vec<_>>();
-        retained.sort_by_key(|(receipt_id, accepted_at)| (*accepted_at, *receipt_id));
-        let excess = retained.len().saturating_sub(SUPERSEDED_RECEIPT_MAX_COUNT);
-        let mut removed = Vec::new();
-        for (index, (receipt_id, accepted_at)) in retained.into_iter().enumerate() {
-            let age_due = accepted_at
-                .is_none_or(|accepted_at| now >= accepted_at + SUPERSEDED_RECEIPT_MAX_AGE_SECS);
-            if index >= excess && !age_due {
-                continue;
-            }
-            match self.remove_publish_queue_entry(receipt_id)? {
-                RemoveQueueEntryOutcome::Removed | RemoveQueueEntryOutcome::NotFound => {
-                    removed.push(receipt_id);
-                }
-                RemoveQueueEntryOutcome::StillOpen => {
-                    return Err(PersistenceError::invariant(
-                        "superseded receipt still owns open publish work",
-                    ));
-                }
-            }
-        }
-        Ok(removed)
-    }
+    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError>;
 
     /// Earliest age deadline for disposable supersession evidence. A count
     /// overflow returns the epoch so the reducer schedules immediate pruning.
-    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        let retained = self
-            .enumerate_publish_queue_receipts()?
-            .into_iter()
-            .filter(|receipt| receipt.state == ReceiptState::Superseded)
-            .collect::<Vec<_>>();
-        if retained.len() > SUPERSEDED_RECEIPT_MAX_COUNT {
-            return Ok(Some(Timestamp::from(0)));
-        }
-        Ok(retained
-            .into_iter()
-            .filter_map(|receipt| receipt.accepted_at)
-            .map(|accepted_at| accepted_at + SUPERSEDED_RECEIPT_MAX_AGE_SECS)
-            .min())
-    }
+    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError>;
 
     /// Forget one retained receipt and every piece of evidence keyed to it
     /// (#1039). The removal half of the app's outbox door, and a real

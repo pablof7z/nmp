@@ -68,9 +68,10 @@ Feature: Replaceable writes keep only useful delivery work
     # nmp:evidence=rust:nmp-store::a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safety_evidence
     # nmp:evidence=rust:nmp-store::superseded_safety_receipts_are_bounded_by_age_and_count
     # nmp:evidence=rust:nmp-store::superseded_safety_receipt_deadline_survives_redb_reopen
+    # nmp:evidence=rust:nmp-store::deadline_peek_and_prune_are_independent_of_unrelated_receipt_history
     # nmp:evidence=rust:nmp::superseded_safety_receipt_is_pruned_by_the_engine_deadline
     # nmp:evidence=rust:nmp-parity::direct_and_ffi_reattach_are_semantically_identical_for_a_terminal_retained_receipt
-    # nmp:falsifier=removing either the age deadline or count eviction leaves more than 500 superseded receipts or preserves one past an hour
+    # nmp:falsifier=removing the ordered superseded-receipt index makes every deadline peek materialize unrelated retained history; removing age or count eviction leaves more than 500 receipts or one past an hour
     Scenario: Safety evidence for replaced writes is strictly bounded
       Given replaceable writes whose older values may have crossed a handoff
       Then their old event bodies and delivery machinery are permanently removed
@@ -79,6 +80,7 @@ Feature: Replaceable writes keep only useful delivery work
       When their retained safety evidence becomes one hour old
       Then NMP permanently removes that obsolete evidence
       And if more than 500 replaced entries accumulate sooner, NMP keeps only the newest 500
+      And checking that cleanup deadline does not enumerate unrelated receipt history
       But current obligations are never classified as disposable
       And possible-handoff ambiguity is retained only as that bounded safety evidence
 

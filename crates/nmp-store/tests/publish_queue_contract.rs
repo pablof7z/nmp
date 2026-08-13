@@ -1056,6 +1056,7 @@ fn superseded_safety_receipts_are_bounded_by_age_and_count() {
             "only the current write obligation remains"
         );
         assert_ne!(retained[0].state, ReceiptState::Superseded);
+        assert_eq!(store.next_superseded_receipt_deadline().unwrap(), None);
     });
 }
 
@@ -1114,6 +1115,7 @@ fn superseded_safety_receipt_deadline_survives_redb_reopen() {
     );
     assert!(store.reattach_receipt(older_receipt).unwrap().is_none());
     assert!(store.reattach_receipt(newer_receipt).unwrap().is_some());
+    assert_eq!(store.next_superseded_receipt_deadline().unwrap(), None);
 }
 
 #[test]

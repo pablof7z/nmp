@@ -23,7 +23,7 @@ use super::query::expiration_key;
 use super::schema::{
     persist_err, EventKey, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
-    PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -212,6 +212,7 @@ fn retire_superseded_owners_in_txn(
         if *retain_safety_receipt {
             update_publish_queue_receipt(
                 &mut ingest.publish_queue_receipts,
+                &mut ingest.publish_queue_meta,
                 *receipt_id,
                 ReceiptState::Superseded,
             )?;
@@ -288,9 +289,6 @@ pub(super) fn accept_write(
 
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, write_txn| {
-        let mut publish_queue_meta = write_txn
-            .open_table(PUBLISH_QUEUE_META)
-            .map_err(persist_err)?;
         let mut publish_queue_correlations = write_txn
             .open_table(PUBLISH_QUEUE_CORRELATIONS)
             .map_err(persist_err)?;
@@ -373,8 +371,8 @@ pub(super) fn accept_write(
         let (result, displaced): (AcceptOutcome, Option<StoredEvent>) = if let Some(dup_loc) =
             dup_loc
         {
-            let intent_id = alloc_intent_id_in_txn(&mut publish_queue_meta)?;
-            let receipt_id = alloc_receipt_id_in_txn(&mut publish_queue_meta)?;
+            let intent_id = alloc_intent_id_in_txn(&mut ingest.publish_queue_meta)?;
+            let receipt_id = alloc_receipt_id_in_txn(&mut ingest.publish_queue_meta)?;
             let mut existing_record = match &dup_loc {
                 DupLoc::Live(_event_key, stored) => stored_event_to_record(stored),
                 DupLoc::Stash(key) => stored_event_to_record(
@@ -489,8 +487,8 @@ pub(super) fn accept_write(
         } else if tombstone_refuses(ingest, &frozen)? {
             (AcceptOutcome::Refused(RefuseReason::Tombstoned), None)
         } else {
-            let intent_id = alloc_intent_id_in_txn(&mut publish_queue_meta)?;
-            let receipt_id = alloc_receipt_id_in_txn(&mut publish_queue_meta)?;
+            let intent_id = alloc_intent_id_in_txn(&mut ingest.publish_queue_meta)?;
+            let receipt_id = alloc_receipt_id_in_txn(&mut ingest.publish_queue_meta)?;
             let local = LocalOrigin {
                 owners: BTreeSet::from([intent_id]),
                 sig_state: SigState::Pending,
@@ -1244,6 +1242,7 @@ pub(super) fn compensate_write_with_state(
 
                     update_publish_queue_receipt(
                         &mut ingest.publish_queue_receipts,
+                        &mut ingest.publish_queue_meta,
                         intent_record.receipt_id,
                         terminal_state,
                     )?;
