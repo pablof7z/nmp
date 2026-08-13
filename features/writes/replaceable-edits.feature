@@ -139,6 +139,41 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And it never recovers raw B5 as the effective value
     And every original receipt names the same recovered current generation
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-017
+  # nmp:status=specified
+  # nmp:gap=evidence
+  # nmp:issue=#1434
+  Scenario: A successor retires predecessor work and republishes to every destination
+    Given relay 1 received current generation E1
+    And relay 2 later supplies a newer source version
+    When NMP creates successor generation E2
+    Then E1 signer, handoff, acknowledgement, timeout, authentication, and retry completions cannot advance E2 or put E1 back on the wire
+    And E2 has fresh delivery work for relay 1 and relay 2
+    And after restart only E2 resumes active delivery
+    And E1 delivery evidence remains historical evidence naming E1
+
+  # nmp:id=WRITES-REPLACEABLE-EDIT-018
+  # nmp:status=specified
+  # nmp:gap=evidence
+  # nmp:issue=#1434
+  Scenario: Shared operation receipts observe one physical generation delivery
+    Given Alice and Bob have distinct operation receipts sharing current generation E2
+    And their destination plans overlap
+    When E2 is signed and delivered
+    Then exactly one signer request and one physical publication per relay occur for E2
+    And both receipts expose signing and relay evidence naming E2
+
+  # nmp:id=WRITES-REPLACEABLE-EDIT-019
+  # nmp:status=specified
+  # nmp:gap=evidence
+  # nmp:issue=#1434
+  Scenario: Destination completion does not close a continuing semantic operation
+    Given every destination for the current semantic generation is terminal
+    When its deliberately continuing source policy remains active
+    Then each operation receipt remains open with event-qualified terminal relay evidence
+    And a later qualified source may still create one successor generation
+    And no terminal receipt is resurrected
+
   # ---- the precondition --------------------------------------------------
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-001
