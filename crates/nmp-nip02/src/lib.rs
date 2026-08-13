@@ -9,8 +9,8 @@ mod service;
 
 pub use demand::current_account_demand;
 pub use edit::{
-    compose_follow_change, expected_base, follows, ComposeFollowError, ComposeFollowResult,
-    FollowChange,
+    compose_follow_change, expected_base, follows, register_follow_writes, ComposeFollowError,
+    ComposeFollowResult, FollowChange, FollowWrites,
 };
 pub use service::{
     observe_following, observe_following_async, prepare_set_following, set_following,

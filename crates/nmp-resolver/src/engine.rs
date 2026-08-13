@@ -1118,11 +1118,18 @@ impl<S: EventStore> Engine<S> {
             // already reflected in the store (relay echo / co-owner join),
             // a `Stale` intent produced no pending row (lost its address
             // race), and a `Refused` intent never entered the store at all.
+            AcceptOutcome::ReplaceableOperation {
+                installed,
+                predecessor,
+                ..
+            } => {
+                inserted_rows.extend(installed.iter().map(|row| (**row).clone()));
+                removed_rows.extend(predecessor.iter().map(|row| row.event.clone()));
+            }
             AcceptOutcome::Duplicate { .. }
             | AcceptOutcome::Stale { .. }
             | AcceptOutcome::Refused(_)
-            | AcceptOutcome::ReplaceableOperationRefused(_)
-            | AcceptOutcome::ReplaceableOperation { .. } => {}
+            | AcceptOutcome::ReplaceableOperationRefused(_) => {}
         }
         let inserted_events: Vec<_> = inserted_rows.iter().map(|row| row.event.clone()).collect();
         let changed_events: Vec<_> = inserted_events

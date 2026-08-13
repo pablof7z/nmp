@@ -636,7 +636,9 @@ fn terminal_retention_whole_closure_eviction_is_atomic_across_process_death() {
                 "unexpected state for event {event_id}"
             );
         }
-        PublishQueueReceiptPayload::ReplaceableOperation { coordinate, state } => {
+        PublishQueueReceiptPayload::ReplaceableOperation {
+            coordinate, state, ..
+        } => {
             panic!(
                 "expected an event receipt, got replaceable operation {coordinate:?} in state {state:?}"
             );

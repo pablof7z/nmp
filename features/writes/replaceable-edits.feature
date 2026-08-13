@@ -35,6 +35,84 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And my relay list names "wss://hub.example" as my write relay
     And my contact list "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe" created at "2026-07-29T12:00:00Z" is the stored winner
 
+  # ---- complete before custody ------------------------------------------
+
+  # A capability operation is accepted only after that capability has
+  # produced the whole unsigned replacement. NMP does not accept a promise to
+  # fill in content, tags, or an event id later. Failure to produce the whole
+  # event is therefore a refusal before custody, not a parked write.
+
+  # nmp:id=WRITES-REPLACEABLE-EDIT-010
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip02::alice_then_bob_keep_two_receipts_and_one_complete_pending_event
+  # nmp:falsifier=Accept the operation without committing its complete pending row; the public Engine capstone cannot observe the acceptance event id as the current Pending live-query value before returning custody.
+  # nmp:issue=#1432
+  Scenario: An accepted capability operation already has one complete replacement event
+    Given I am disconnected from every relay
+    When a configured capability adds Alice to my contact list
+    Then the write is accepted through the ordinary write-intent lifecycle
+    And its ordinary receipt names the complete replacement event
+    And the complete signature-pending replacement is the current live-query value
+    And no accepted state is waiting for content, tags, or an event id
+
+  # nmp:id=WRITES-REPLACEABLE-EDIT-011
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip02::invalidated_registration_and_materializer_refusal_leave_no_custody
+  # nmp:falsifier=Accept an operation from a replaced registration or retain anything after synchronous materializer refusal; the queue is no longer empty and the signed source is no longer the sole canonical row.
+  # nmp:issue=#1432
+  Scenario: An unavailable capability refuses the operation before custody
+    Given the capability required by the operation is not configured
+    When I try to add Alice to my contact list through that capability
+    Then publishing is refused with a typed configuration error
+    And NMP retains no receipt, write intent, optimistic row, signing work, route, delivery work, or correlation
+
+  # The encrypted content is opaque to an operation that owns only a public
+  # tag. Its presence does not turn that operation into a crypto operation.
+
+  # nmp:id=WRITES-REPLACEABLE-EDIT-012
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip02::alice_then_bob_keep_two_receipts_and_one_complete_pending_event
+  # nmp:evidence=rust:nmp-nip02::semantic_operations_compose_in_order_and_preserve_unowned_fields
+  # nmp:falsifier=Rewrite or decrypt content while applying the public follow operation; the exact opaque source content no longer survives both materialization and durable restart.
+  # nmp:issue=#1432
+  Scenario: A public tag-only edit preserves opaque encrypted content without crypto
+    Given my stored contact list contains opaque encrypted content
+    And no decryption capability is available
+    When a configured capability adds Alice as a public contact tag
+    Then the write is accepted
+    And the replacement preserves the encrypted content byte for byte
+    And NMP does not request decryption or encryption
+
+  # This is the contrast with the preceding scenario: crypto is required by
+  # what the operation asks to change, not merely by encrypted bytes being
+  # present elsewhere in the event.
+
+  # nmp:id=WRITES-REPLACEABLE-EDIT-013
+  # nmp:status=specified
+  # nmp:gap=implementation
+  # nmp:issue=#1382
+  Scenario: An encrypted-content edit without its required crypto refuses before custody
+    Given my stored contact list contains opaque encrypted content
+    And the requested operation must decrypt and rewrite that content
+    And the required crypto capability is unavailable
+    When I try to publish that operation
+    Then publishing is refused with a typed crypto-capability error
+    And NMP retains no receipt, write intent, optimistic row, signing work, route, delivery work, or correlation
+
+  # nmp:id=WRITES-REPLACEABLE-EDIT-014
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-nip02::alice_then_bob_keep_two_receipts_and_one_complete_pending_event
+  # nmp:evidence=rust:nmp-store::body_complete_receipt_keeps_accepted_id_while_current_advances_across_reopen
+  # nmp:falsifier=Create one receipt per shared event or rewrite Alice's acceptance id when Bob becomes current; the capstone loses two stable receipt identities or the store reopen proof observes the wrong accepted-to-current pair.
+  # nmp:issue=#1432
+  Scenario: Several offline operations keep their receipts while sharing one complete current event
+    Given I am disconnected from every relay
+    When a configured capability adds Alice to my contact list
+    And the configured capability then adds Bob to my contact list
+    Then both operations have distinct ordinary receipts
+    And one complete current signature-pending event contains Alice and Bob
+    And both receipts name that current event without creating another receipt lifecycle
+
   # ---- the precondition --------------------------------------------------
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-001

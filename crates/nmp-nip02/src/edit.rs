@@ -1,4 +1,8 @@
-use nmp::{EventBuilder, Identity, Row, WriteIntent, WritePayload, WriteRouting};
+use nmp::{
+    Engine, EventBuilder, Identity, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
+    ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, Row, WriteIntent,
+    WritePayload, WriteRouting,
+};
 use nmp_event_edit::{
     EventEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
 };
@@ -22,6 +26,159 @@ pub enum ComposeFollowResult {
 pub enum ComposeFollowError {
     BaseHasWrongKind,
     InvalidGeneratedTag,
+    InvalidOperation,
+}
+
+const FOLLOW_PROGRAM: [u8; 16] = *b"nmp-nip02-follow";
+const FOLLOW_FORMAT: [u8; 16] = *b"nip02-follow-v01";
+const FOLLOW_OPERATION_VERSION: u8 = 1;
+const FOLLOW_OPERATION_LEN: usize = 34;
+
+/// Registration-bound NIP-02 write composer.
+///
+/// The value can be obtained only by configuring the matching materializer
+/// on an engine. It exposes typed follow/unfollow composition, not replay ids,
+/// opaque bytes, source authority, or contributor membership.
+pub struct FollowWrites {
+    registration: RegisteredReplaceableMaterializer,
+}
+
+/// Configure NIP-02's synchronous materializer before composing operations.
+/// A missing implementation can therefore never become retained waiting
+/// work: without this returned value there is no supported operation door.
+pub fn register_follow_writes(engine: &Engine) -> Result<FollowWrites, nmp::EngineError> {
+    engine
+        .add_replaceable_materializer(FOLLOW_PROGRAM, FOLLOW_FORMAT, FollowMaterializer)
+        .map(|registration| FollowWrites { registration })
+}
+
+impl FollowWrites {
+    /// Compose one semantic follow change over a complete current event while
+    /// retaining the first signed source as replay evidence.
+    ///
+    /// `current` may be NMP's complete signature-pending optimistic row. The
+    /// registration handle validates `original_source` as signed provenance
+    /// and binds the operation to this engine instance before returning the
+    /// ordinary write noun.
+    pub fn compose(
+        &self,
+        original_source: &Row,
+        current: &Row,
+        target: PublicKey,
+        change: FollowChange,
+    ) -> Result<ComposeFollowResult, ComposeFollowError> {
+        if original_source.kind() != Kind::ContactList || current.kind() != Kind::ContactList {
+            return Err(ComposeFollowError::BaseHasWrongKind);
+        }
+        let wants_follow = change == FollowChange::Follow;
+        if follows(current, target) == wants_follow {
+            return Ok(ComposeFollowResult::NoChange);
+        }
+
+        let payload = self
+            .registration
+            .operation(
+                original_source,
+                current,
+                encode_follow_operation(target, change),
+            )
+            .map_err(|_| ComposeFollowError::InvalidOperation)?;
+        Ok(ComposeFollowResult::Publish(Box::new(WriteIntent {
+            payload,
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        })))
+    }
+}
+
+fn encode_follow_operation(target: PublicKey, change: FollowChange) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(FOLLOW_OPERATION_LEN);
+    bytes.push(FOLLOW_OPERATION_VERSION);
+    bytes.push(match change {
+        FollowChange::Follow => 1,
+        FollowChange::Unfollow => 0,
+    });
+    bytes.extend_from_slice(target.as_bytes());
+    bytes
+}
+
+fn decode_follow_operation(bytes: &[u8]) -> Result<(PublicKey, FollowChange), String> {
+    if bytes.len() != FOLLOW_OPERATION_LEN {
+        return Err("NIP-02 operation has the wrong length".to_string());
+    }
+    if bytes[0] != FOLLOW_OPERATION_VERSION {
+        return Err("NIP-02 operation has an unsupported version".to_string());
+    }
+    let change = match bytes[1] {
+        0 => FollowChange::Unfollow,
+        1 => FollowChange::Follow,
+        _ => return Err("NIP-02 operation has an invalid change".to_string()),
+    };
+    let target = PublicKey::from_slice(&bytes[2..])
+        .map_err(|_| "NIP-02 operation has an invalid public key".to_string())?;
+    Ok((target, change))
+}
+
+struct FollowMaterializer;
+
+fn apply_follow_operations<'a>(
+    current: &nostr::UnsignedEvent,
+    operations: impl IntoIterator<Item = &'a [u8]>,
+) -> Result<EventBuilder, String> {
+    let mut tags = current.tags.clone().to_vec();
+    for operation in operations {
+        let (target, change) = decode_follow_operation(operation)?;
+        let target_hex = target.to_hex();
+        match change {
+            FollowChange::Follow => {
+                if !tags.iter().any(|tag| {
+                    let row = tag.as_slice();
+                    row.first().is_some_and(|cell| cell == "p")
+                        && row.get(1).is_some_and(|cell| cell == &target_hex)
+                }) {
+                    tags.push(Tag::public_key(target));
+                }
+            }
+            FollowChange::Unfollow => tags.retain(|tag| {
+                let row = tag.as_slice();
+                !(row.first().is_some_and(|cell| cell == "p")
+                    && row.get(1).is_some_and(|cell| cell == &target_hex))
+            }),
+        }
+    }
+
+    Ok(EventBuilder {
+        kind: Kind::ContactList,
+        tags,
+        content: current.content.clone(),
+        created_at: None,
+    })
+}
+
+impl ReplaceableMaterializer for FollowMaterializer {
+    fn materialize(
+        &self,
+        source: &nostr::UnsignedEvent,
+        current: &nostr::UnsignedEvent,
+        operations: &[ReplaceableMaterializerOperation<'_>],
+    ) -> Result<EventBuilder, ReplaceableMaterializerRefusal> {
+        if source.kind != Kind::ContactList
+            || current.kind != Kind::ContactList
+            || source.pubkey != current.pubkey
+            || source.tags.identifier() != current.tags.identifier()
+        {
+            return Err(ReplaceableMaterializerRefusal {
+                reason: "NIP-02 materialization source coordinate changed".to_string(),
+            });
+        }
+
+        apply_follow_operations(
+            current,
+            operations.iter().map(|operation| operation.bytes()),
+        )
+        .map_err(|reason| ReplaceableMaterializerRefusal { reason })
+    }
 }
 
 fn follow_selector(target: PublicKey) -> TagItemSelector {
@@ -123,7 +280,9 @@ pub fn compose_follow_change(
 pub fn expected_base(intent: &WriteIntent) -> Option<Option<EventId>> {
     match &intent.payload {
         WritePayload::ReplaceableEdit { expected_base, .. } => Some(*expected_base),
-        WritePayload::Event(_) | WritePayload::Signed(_) => None,
+        WritePayload::Event(_)
+        | WritePayload::ReplaceableOperation(_)
+        | WritePayload::Signed(_) => None,
     }
 }
 
@@ -312,5 +471,73 @@ mod tests {
         ];
         let reconstructed = Tag::parse(raw.clone()).expect("non-empty raw tag");
         assert_eq!(reconstructed.as_slice(), raw.as_slice());
+    }
+
+    #[test]
+    fn semantic_operations_compose_in_order_and_preserve_unowned_fields() {
+        let author = Keys::generate();
+        let alice = Keys::generate().public_key();
+        let bob = Keys::generate().public_key();
+        let remove_alice = encode_follow_operation(alice, FollowChange::Unfollow);
+        let add_alice = encode_follow_operation(alice, FollowChange::Follow);
+        let add_bob = encode_follow_operation(bob, FollowChange::Follow);
+        let base = event(
+            &author,
+            10,
+            vec![vec!["client", "keep"], vec!["x", "opaque", "cells"]],
+            "opaque content survives",
+        );
+        let current = nostr::UnsignedEvent {
+            id: Some(base.id()),
+            pubkey: base.pubkey(),
+            created_at: base.created_at(),
+            kind: base.kind(),
+            tags: base.tags().clone(),
+            content: base.content().to_owned(),
+        };
+
+        let materialized = apply_follow_operations(
+            &current,
+            [
+                add_alice.as_slice(),
+                add_bob.as_slice(),
+                remove_alice.as_slice(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(materialized.content, "opaque content survives");
+        let raw = materialized
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw,
+            vec![
+                vec!["client".to_string(), "keep".to_string()],
+                vec!["x".to_string(), "opaque".to_string(), "cells".to_string()],
+                vec!["p".to_string(), bob.to_hex()],
+            ]
+        );
+    }
+
+    #[test]
+    fn semantic_operation_codec_is_versioned_and_closed() {
+        let target = Keys::generate().public_key();
+        let bytes = encode_follow_operation(target, FollowChange::Follow);
+        assert_eq!(bytes.len(), FOLLOW_OPERATION_LEN);
+        assert_eq!(
+            decode_follow_operation(&bytes),
+            Ok((target, FollowChange::Follow))
+        );
+
+        let mut wrong_version = bytes.clone();
+        wrong_version[0] = 2;
+        assert!(decode_follow_operation(&wrong_version).is_err());
+        let mut wrong_change = bytes.clone();
+        wrong_change[1] = 9;
+        assert!(decode_follow_operation(&wrong_change).is_err());
+        assert!(decode_follow_operation(&bytes[..bytes.len() - 1]).is_err());
     }
 }

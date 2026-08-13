@@ -5,6 +5,7 @@
 
 use super::*;
 use nmp_grammar::ThreadPosition;
+use nostr::nips::nip01::Coordinate;
 
 fn public_retry_cause(cause: PublishQueueTransientCause) -> Option<RetryCause> {
     match cause {
@@ -376,6 +377,9 @@ impl<S: EventStore> EngineCore<S> {
     /// signature has no route to be missing and a write with no route has no
     /// destination to be unreachable.
     fn stalled_write_stage(&self, pending: &PendingWrite) -> Option<(StalledWriteStage, String)> {
+        if !pending.target.accepts_ordinary_signer() {
+            return None;
+        }
         if pending.event_id.is_none() && !pending.already_signed {
             // A signer request still outstanding is work in progress, not a
             // stall. Only the durable `AwaitingCapability` park -- request
@@ -1369,6 +1373,86 @@ impl<S: EventStore> EngineCore<S> {
         self.lane_bootstrap_retries.clear();
 
         for intent in recovered {
+            if let nmp_store::PublishQueueWork::ReplaceableOperation {
+                coordinate,
+                materialization: Some(materialization),
+            } = &intent.work
+            {
+                let snapshot = match self
+                    .resolver
+                    .store()
+                    .replaceable_operation_snapshot(coordinate)
+                {
+                    Ok(Some(snapshot)) => snapshot,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        self.degrade_store(error, &mut effects);
+                        continue;
+                    }
+                };
+                let Some(generation) = snapshot.current.generation.as_ref() else {
+                    continue;
+                };
+                if generation.materialization != materialization.receipt.materialization {
+                    continue;
+                }
+                let row = match self.resolver.store().query(
+                    &nostr::Filter::new().id(materialization.receipt.materialization.event_id),
+                ) {
+                    Ok(rows) => rows.into_iter().next(),
+                    Err(error) => {
+                        self.degrade_store(error, &mut effects);
+                        continue;
+                    }
+                };
+                let Some(row) = row else { continue };
+                let parsed_routing = Self::parse_routing_snapshot(&materialization.routing);
+                let id = ReceiptId(intent.receipt_id);
+                self.pending.insert(
+                    id,
+                    PendingWrite {
+                        target: PendingWriteTarget::ReplaceableOperation(Box::new(
+                            ReplaceableMaterializationTarget {
+                                coordinate: coordinate.clone(),
+                                expected_source_revision: snapshot.current.source_revision.clone(),
+                                expected_program_digest: snapshot.current.program_digest,
+                                expected_materialization: generation
+                                    .materialization
+                                    .materialization_id,
+                                expected_event_id: generation.materialization.event_id,
+                            },
+                        )),
+                        routing: parsed_routing
+                            .clone()
+                            .unwrap_or(WriteRouting::Explicit(Vec::new())),
+                        routing_valid: parsed_routing.is_some(),
+                        intent_id: intent.intent_id,
+                        accepted_at: intent.accepted_at,
+                        signing_pubkey: intent.expected_pubkey,
+                        frozen: row.event.clone(),
+                        already_signed: false,
+                        sign_request_in_flight: false,
+                        sign_generation: 0,
+                        event_id: None,
+                        pending_relays: BTreeSet::new(),
+                        unstarted_relays: BTreeSet::new(),
+                        route_blocked_relays: BTreeSet::new(),
+                        attempt_ordinals: BTreeMap::new(),
+                        lane_projection: LaneWorkerProjection::default(),
+                        durable_routes: BTreeSet::new(),
+                        route_complete: false,
+                        destinations_reported: false,
+                        persistence_fault: None,
+                        route_needs: BTreeSet::new(),
+                    },
+                );
+                self.intent_receipts.insert(intent.intent_id, id);
+                self.event_to_receipts
+                    .entry(generation.materialization.event_id)
+                    .or_default()
+                    .insert(id);
+                continue;
+            }
             let Some((frozen, _, routing_snapshot, sig_state)) = intent.event_work() else {
                 // #841 owns runtime orchestration for durable replaceable
                 // operations. Their reference-only journal arm must never
@@ -1412,6 +1496,7 @@ impl<S: EventStore> EngineCore<S> {
             self.pending.insert(
                 id,
                 PendingWrite {
+                    target: PendingWriteTarget::Event,
                     routing,
                     routing_valid,
                     intent_id: intent.intent_id,
@@ -1775,6 +1860,24 @@ impl<S: EventStore> EngineCore<S> {
                 return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable)
             }
         };
+        if let PublishQueueReceiptPayload::ReplaceableOperation {
+            acceptance: nmp_store::ReplaceableOperationAcceptance::BodyComplete(accepted_event_id),
+            state: nmp_store::ReplaceableOperationReceiptState::Contributing { current: Some(_) },
+            ..
+        } = &receipt.payload
+        {
+            if limit == 0 {
+                return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
+            }
+            return ReceiptReplayPage {
+                outcome: ReattachOutcome::Attached,
+                facts: Vec::new(),
+                next_cursor: None,
+                end_cursor: Some(cursor),
+                frozen_id: Some(*accepted_event_id),
+                isolated_fact_cursors: Vec::new(),
+            };
+        }
         let Some(receipt_state) = receipt.event_state() else {
             // The store can truthfully reattach this ordinary receipt, but
             // #841 has not yet installed the runtime projection for semantic
@@ -2161,6 +2264,23 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(crate) fn receipt_is_live(&self, id: ReceiptId) -> bool {
         self.pending.contains_key(&id)
+            || self
+                .resolver
+                .store()
+                .reattach_receipt(id.0)
+                .ok()
+                .flatten()
+                .is_some_and(|receipt| {
+                    matches!(
+                        receipt.payload,
+                        PublishQueueReceiptPayload::ReplaceableOperation {
+                            state: nmp_store::ReplaceableOperationReceiptState::Contributing {
+                                current: Some(_),
+                            },
+                            ..
+                        }
+                    )
+                })
     }
 
     /// #591: recover a receipt id from a caller-generated correlation token
@@ -2203,6 +2323,341 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     // ---- publish queue (D: intent -> signed -> routed -> sent -> acked) --
+
+    fn on_body_complete_replaceable_operation(
+        &mut self,
+        operation: nmp_grammar::ReplaceableOperation,
+        routing: WriteRouting,
+        identity: Identity,
+        correlation: Option<nmp_grammar::CorrelationToken>,
+    ) -> Vec<Effect> {
+        let (instance, original_source, supplied_current, operation_bytes) =
+            operation.into_registered_parts();
+        let Some(registration) = self.replaceable_materializers.get(&instance) else {
+            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                reason: "replaceable materializer registration is not active".to_string(),
+            });
+        };
+        let program = ReplayProgramId(registration.program);
+        let format = ReplayFormatId(registration.format);
+        let materializer = registration.materializer.clone();
+
+        let signing_pubkey = match identity {
+            Identity::Explicit(pubkey) if pubkey != original_source.pubkey => {
+                return self.refuse_publish(PublishError::IdentityContradictsSignedAuthor {
+                    identity: pubkey,
+                    author: original_source.pubkey,
+                });
+            }
+            Identity::Explicit(pubkey) => pubkey,
+            Identity::Active => match self.active_pubkey {
+                Some(pubkey) if pubkey == original_source.pubkey => pubkey,
+                Some(pubkey) => {
+                    return self.refuse_publish(PublishError::IdentityContradictsSignedAuthor {
+                        identity: pubkey,
+                        author: original_source.pubkey,
+                    });
+                }
+                None => return self.refuse_publish(PublishError::NoCurrentAccount),
+            },
+        };
+        if original_source.kind == nostr::Kind::Authentication {
+            return self.refuse_publish(PublishError::ReservedKind {
+                kind: original_source.kind.as_u16(),
+            });
+        }
+
+        let coordinate = Coordinate {
+            kind: original_source.kind,
+            public_key: original_source.pubkey,
+            identifier: original_source.tags.identifier().unwrap_or("").to_owned(),
+        };
+        let snapshot = match self
+            .resolver
+            .store()
+            .replaceable_operation_snapshot(&coordinate)
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return self.refuse_publish(PublishError::PersistenceFailed {
+                    reason: error.to_string(),
+                });
+            }
+        };
+
+        let supplied_current_id = supplied_current
+            .id
+            .expect("registered operation validation froze a current id");
+        let expected_current_id = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.current.generation.as_ref())
+            .map(|generation| generation.materialization.event_id)
+            .unwrap_or_else(|| {
+                original_source
+                    .id
+                    .expect("registered operation validation froze a source id")
+            });
+        if supplied_current_id != expected_current_id {
+            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                reason: "operation was composed over a stale current materialization".to_string(),
+            });
+        }
+        if snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .operations
+                .iter()
+                .any(|operation| operation.program != program || operation.format != format)
+        }) {
+            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                reason: "replaceable coordinate uses another replay program".to_string(),
+            });
+        }
+
+        let mut replay_operations = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .operations
+                    .iter()
+                    .map(|operation| ReplaceableMaterializerOperation::new(operation.plan.bytes()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        replay_operations.push(ReplaceableMaterializerOperation::new(&operation_bytes));
+        let builder =
+            match materializer.materialize(&original_source, &supplied_current, &replay_operations)
+            {
+                Ok(builder) => builder,
+                Err(refusal) => {
+                    return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                        reason: refusal.reason,
+                    });
+                }
+            };
+        if builder.kind != coordinate.kind
+            || nostr::Tags::from_list(builder.tags.clone())
+                .identifier()
+                .unwrap_or("")
+                != coordinate.identifier
+        {
+            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                reason: "materializer changed the replaceable coordinate".to_string(),
+            });
+        }
+
+        let source_event_id = original_source
+            .id
+            .expect("registered operation validation froze a source id");
+        let source_plan = SourcePlanId(
+            *blake3::hash(&[b"nmp-exact-source-v1".as_slice(), &registration.program].concat())
+                .as_bytes(),
+        );
+        let source_access = AccessContextId(
+            *blake3::hash(&[b"nmp-public-source-v1".as_slice(), &registration.format].concat())
+                .as_bytes(),
+        );
+        let starting_source = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.operations.first())
+            .map(|operation| match &operation.source_requirement {
+                nmp_store::OperationSourceRequirement::Awaiting(requirement)
+                | nmp_store::OperationSourceRequirement::Qualified(requirement) => {
+                    requirement.clone()
+                }
+            })
+            .unwrap_or(StartingSourceRequirement {
+                plan: source_plan,
+                access: source_access,
+                source: StartingSource::Event(source_event_id),
+            });
+        let source = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.current.source_revision.evidence().clone())
+            .unwrap_or(SemanticSourceEvidence {
+                plan: source_plan,
+                access: source_access,
+                qualified: QualifiedSource::Event {
+                    event_id: source_event_id,
+                    created_at: original_source.created_at,
+                },
+            });
+        if !matches!(
+            source.qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == source_event_id
+        ) {
+            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                reason: "original source does not match retained source evidence".to_string(),
+            });
+        }
+
+        let source_floor = original_source.created_at.as_secs().saturating_add(1);
+        let prior_floor = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.current.generation.as_ref())
+            .map(|generation| generation.created_at.as_secs().saturating_add(1))
+            .unwrap_or(0);
+        let created_at = Timestamp::from(self.clock.as_secs().max(source_floor).max(prior_floor));
+        let mut event = UnsignedEvent::new(
+            signing_pubkey,
+            created_at,
+            builder.kind,
+            builder.tags,
+            builder.content,
+        );
+        event.ensure_id();
+        let plan = match SemanticPlan::new(1, operation_bytes) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                    reason: reason.to_string(),
+                });
+            }
+        };
+        let (expected_source_revision, expected_program_digest, expected_materialization) =
+            snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    (
+                        Some(snapshot.current.source_revision.clone()),
+                        Some(snapshot.current.program_digest),
+                        snapshot
+                            .current
+                            .generation
+                            .as_ref()
+                            .map(|generation| generation.materialization.materialization_id),
+                    )
+                })
+                .unwrap_or((None, None, None));
+        let contributing_operations = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.operations.iter().map(|op| op.intent_id).collect())
+            .unwrap_or_default();
+        let accept = AcceptWrite {
+            payload: AcceptWritePayload::ReplaceableOperation(Box::new(SemanticAccept {
+                coordinate: coordinate.clone(),
+                program,
+                format,
+                expected_source_revision,
+                expected_program_digest,
+                expected_current_materialization: expected_materialization,
+                starting_source,
+                source,
+                plan,
+                materialized: Some(MaterializationCandidate {
+                    event,
+                    routing: Self::routing_snapshot(&routing),
+                    sig_state: PendingMaterializationState::AwaitingSigner,
+                }),
+                contributing_operations,
+                resolved_operations: Vec::new(),
+            })),
+            expected_pubkey: signing_pubkey,
+            signing_identity_ref: signing_pubkey.to_hex(),
+            accepted_at: self.clock,
+            correlation,
+        };
+        let LocalAcceptResult { outcome, committed } = match self.resolver.accept_local(accept) {
+            Ok(result) => result,
+            Err(error) => {
+                return self.refuse_publish(PublishError::PersistenceFailed {
+                    reason: error.to_string(),
+                });
+            }
+        };
+        let (intent_id, receipt_id, current, installed) = match outcome {
+            AcceptOutcome::ReplaceableOperation {
+                intent_id,
+                receipt_id,
+                current,
+                installed: Some(installed),
+                ..
+            } => (intent_id, ReceiptId(receipt_id), current, installed),
+            AcceptOutcome::ReplaceableOperationRefused(reason) => {
+                return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                    reason: reason.to_string(),
+                });
+            }
+            AcceptOutcome::ReplaceableOperation {
+                installed: None, ..
+            } => {
+                return self.refuse_publish(PublishError::PersistenceFailed {
+                    reason: "body-complete acceptance produced no canonical row".to_string(),
+                });
+            }
+            _ => unreachable!("semantic acceptance returns a semantic outcome"),
+        };
+        let frozen = installed.event;
+        let mut effects = vec![Effect::WriteAccepted(receipt_id, frozen.id)];
+        let members = current
+            .generation
+            .as_ref()
+            .map(|generation| generation.members.clone())
+            .unwrap_or_default();
+        let parked_target =
+            PendingWriteTarget::ReplaceableOperation(Box::new(ReplaceableMaterializationTarget {
+                coordinate: coordinate.clone(),
+                expected_source_revision: current.source_revision.clone(),
+                expected_program_digest: current.program_digest,
+                expected_materialization: current
+                    .generation
+                    .as_ref()
+                    .expect("body-complete current has a generation")
+                    .materialization
+                    .materialization_id,
+                expected_event_id: frozen.id,
+            }));
+        for member in members {
+            let member_receipt = if member == intent_id {
+                Some(receipt_id)
+            } else {
+                self.intent_receipts.get(&member).copied()
+            };
+            let Some(member_receipt) = member_receipt else {
+                continue;
+            };
+            if let Some(previous) = self.pending.get_mut(&member_receipt) {
+                if let Some(receipts) = self.event_to_receipts.get_mut(&previous.frozen.id) {
+                    receipts.remove(&member_receipt);
+                }
+                previous.frozen = frozen.clone();
+                previous.target = parked_target.clone();
+            } else {
+                self.pending.insert(
+                    member_receipt,
+                    PendingWrite {
+                        target: parked_target.clone(),
+                        routing: routing.clone(),
+                        routing_valid: true,
+                        intent_id: member,
+                        accepted_at: self.clock,
+                        signing_pubkey,
+                        frozen: frozen.clone(),
+                        already_signed: false,
+                        sign_request_in_flight: false,
+                        sign_generation: 0,
+                        event_id: None,
+                        pending_relays: BTreeSet::new(),
+                        unstarted_relays: BTreeSet::new(),
+                        route_blocked_relays: BTreeSet::new(),
+                        attempt_ordinals: BTreeMap::new(),
+                        lane_projection: LaneWorkerProjection::default(),
+                        durable_routes: BTreeSet::new(),
+                        route_complete: false,
+                        destinations_reported: false,
+                        persistence_fault: None,
+                        route_needs: BTreeSet::new(),
+                    },
+                );
+                self.intent_receipts.insert(member, member_receipt);
+            }
+            self.event_to_receipts
+                .entry(frozen.id)
+                .or_default()
+                .insert(member_receipt);
+        }
+        self.apply_committed_mutation(committed, &mut effects);
+        effects
+    }
 
     /// `Publish` (issues #2/#3 U3): enter durable/at-most-once writes through
     /// `resolver.accept_local` exactly once. The store allocates both ids
@@ -2330,9 +2785,22 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
+        let payload = match payload {
+            WritePayload::ReplaceableOperation(operation) => {
+                return self.on_body_complete_replaceable_operation(
+                    operation,
+                    routing,
+                    identity,
+                    correlation,
+                )
+            }
+            payload => payload,
+        };
+
         let replaceable_base = match &payload {
             WritePayload::ReplaceableEdit { expected_base, .. } => Some(*expected_base),
             WritePayload::Event(_) | WritePayload::Signed(_) => None,
+            WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         };
         // The store owns this write's timestamp exactly when the app left
         // it unsaid on an edit that names a base: it is the only component
@@ -2350,6 +2818,7 @@ impl<S: EventStore> EngineCore<S> {
                 builder.kind
             }
             WritePayload::Signed(event) => event.kind,
+            WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         };
         if payload_kind == nostr::Kind::Authentication {
             return self.refuse_publish(PublishError::ReservedKind {
@@ -2389,6 +2858,7 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 Identity::Explicit(_) | Identity::Active => event.pubkey,
             },
+            WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         };
 
         if let WritePayload::Signed(event) = &payload {
@@ -2416,6 +2886,7 @@ impl<S: EventStore> EngineCore<S> {
                             IntentSigState::AwaitingSigner
                         }
                         WritePayload::Signed(_) => IntentSigState::Pending,
+                        WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
                     },
                 },
                 expected_pubkey: signing_pubkey,
@@ -2524,6 +2995,7 @@ impl<S: EventStore> EngineCore<S> {
         self.pending.insert(
             id,
             PendingWrite {
+                target: PendingWriteTarget::Event,
                 routing,
                 routing_valid: true,
                 intent_id: intent_id.expect("a journaled acceptance always has an intent id"),
@@ -2614,6 +3086,7 @@ impl<S: EventStore> EngineCore<S> {
             WritePayload::Signed(event) => {
                 self.on_signed(id, event, &mut effects);
             }
+            WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         }
         effects
     }
@@ -2674,6 +3147,7 @@ impl<S: EventStore> EngineCore<S> {
         let mut effects = Vec::new();
         for (id, pending) in &mut self.pending {
             if pending.signing_pubkey == pk
+                && pending.target.accepts_ordinary_signer()
                 && pending.event_id.is_none()
                 && !pending.already_signed
                 && !pending.sign_request_in_flight
@@ -2822,6 +3296,37 @@ impl<S: EventStore> EngineCore<S> {
         let mut entries = Vec::with_capacity(receipts.len());
         for receipt in receipts {
             let id = ReceiptId(receipt.receipt_id);
+            if let PublishQueueReceiptPayload::ReplaceableOperation {
+                state:
+                    nmp_store::ReplaceableOperationReceiptState::Contributing {
+                        current: Some(current),
+                    },
+                ..
+            } = &receipt.payload
+            {
+                entries.push(PublishQueueEntry {
+                    receipt_id: id,
+                    event_id: current.materialization.event_id,
+                    pubkey: receipt.expected_pubkey,
+                    accepted_at: receipt.accepted_at.unwrap_or_else(|| Timestamp::from(0u64)),
+                    signing: match current.sig_state {
+                        IntentSigState::Signed => SigningState::Signed {
+                            event_id: current.materialization.event_id,
+                        },
+                        IntentSigState::AwaitingSigner | IntentSigState::Pending => {
+                            SigningState::AwaitingSigner {
+                                pubkey: receipt.expected_pubkey,
+                            }
+                        }
+                    },
+                    relays: BTreeSet::new(),
+                    route_complete: false,
+                    relay_states: Vec::new(),
+                    outcome: None,
+                    persistence_fault: None,
+                });
+                continue;
+            }
             let (event_id, state) = match &receipt.payload {
                 PublishQueueReceiptPayload::Event { event_id, state } => (*event_id, *state),
                 PublishQueueReceiptPayload::ReplaceableOperation { .. } => {
@@ -3374,6 +3879,9 @@ impl<S: EventStore> EngineCore<S> {
                 event.content.clone(),
                 sentinel_signature(),
             ),
+            WritePayload::ReplaceableOperation(_) => {
+                unreachable!("body-complete operations use their dedicated acceptance branch")
+            }
         }
     }
 
