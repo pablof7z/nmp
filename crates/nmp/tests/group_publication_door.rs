@@ -205,6 +205,7 @@ fn drain_until_all_acked(
                 if let WriteFact::Relay {
                     relay,
                     state: RelayState::Published,
+                    ..
                 } = &status
                 {
                     acked.insert(relay.clone());
@@ -364,7 +365,8 @@ async fn a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_aut
             status,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         )
     });
@@ -515,13 +517,14 @@ async fn a_caller_supplied_context_is_refused_before_relay_contact_and_differs_f
             status,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Rejected { reason: _ }
+                state: RelayState::Rejected { reason: _ },
+                ..
             }
         )
     });
     assert!(
         statuses.iter().any(
-            |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Rejected { reason: message } }
+            |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Rejected { reason: message }, .. }
                 if relay == &host.url && message.contains("ordinary relay rejection"))
         ),
         "expected the relay's own rejection message on the receipt: {statuses:?}"
@@ -758,7 +761,8 @@ async fn two_groups_on_two_hosts_never_bleed_into_each_other_at_the_wire() {
             status,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         )
     });
@@ -767,7 +771,8 @@ async fn two_groups_on_two_hosts_never_bleed_into_each_other_at_the_wire() {
             status,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         )
     });
@@ -866,10 +871,12 @@ async fn a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_a
             WriteFact::Relay {
                 relay,
                 state: RelayState::Published,
+                ..
             } if *relay == acking_host.url => saw_ack = true,
             WriteFact::Relay {
                 relay,
                 state: RelayState::Rejected { reason: _ },
+                ..
             } if *relay == rejecting_host.url => saw_reject = true,
             _ => {}
         }
@@ -878,13 +885,13 @@ async fn a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_a
 
     assert!(
         seen.iter()
-            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == acking_host.url)),
+            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published, .. } if *relay == acking_host.url)),
         "the acking host's own outcome must be an ordinary Acked fact: {seen:?}"
     );
     assert!(
         seen.iter().any(|status| matches!(
             status,
-            WriteFact::Relay { relay, state: RelayState::Rejected { reason: message } }
+            WriteFact::Relay { relay, state: RelayState::Rejected { reason: message }, .. }
                 if *relay == rejecting_host.url && message.contains("this host refuses")
         )),
         "the rejecting host's own outcome must be an ordinary Rejected fact carrying its own \

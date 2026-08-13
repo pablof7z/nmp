@@ -461,7 +461,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     assert!(
         wait_for_status(&receipt_rx, Duration::from_secs(10), |s| matches!(
             s,
-            WriteFact::Relay { relay: r, state: RelayState::Published } if r == &url
+            WriteFact::Relay { relay: r, state: RelayState::Published, .. } if r == &url
         )),
         "a durable publish to the seeded relay must reach Acked"
     );
