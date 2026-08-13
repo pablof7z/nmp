@@ -142,7 +142,9 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
 
     let direct_builder = match &direct.payload {
         WritePayload::Event(builder) => builder,
-        WritePayload::ReplaceableEdit { .. } | WritePayload::Signed(_) => {
+        WritePayload::ReplaceableEdit { .. }
+        | WritePayload::ReplaceableOperation(_)
+        | WritePayload::Signed(_) => {
             panic!("NIP-22 must compose one ordinary builder payload")
         }
     };
@@ -150,7 +152,9 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
         .expect("the public FFI result must be accepted by generic publish");
     let projected_builder = match &projected.payload {
         WritePayload::Event(builder) => builder,
-        WritePayload::ReplaceableEdit { .. } | WritePayload::Signed(_) => {
+        WritePayload::ReplaceableEdit { .. }
+        | WritePayload::ReplaceableOperation(_)
+        | WritePayload::Signed(_) => {
             panic!("the public FFI result must stay an ordinary builder payload")
         }
     };

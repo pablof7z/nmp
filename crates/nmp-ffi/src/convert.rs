@@ -327,6 +327,8 @@ pub enum FfiError {
     /// as a VALUE instead of panicking on an exported path.
     #[cfg(feature = "nip22")]
     ReplaceableEditHasNoWireForm,
+    #[cfg(feature = "nip22")]
+    ReplaceableOperationHasNoWireForm,
     InvalidCorrelationToken {
         got: String,
         reason: String,
@@ -764,6 +766,11 @@ impl std::fmt::Display for FfiError {
                 f,
                 "a replaceable edit crosses this boundary only inside the semantic method that \
                  owns its precondition, never as a payload"
+            ),
+            #[cfg(feature = "nip22")]
+            Self::ReplaceableOperationHasNoWireForm => write!(
+                f,
+                "a registered replaceable operation has no standalone FFI payload"
             ),
             Self::InvalidSigner { reason } => write!(f, "invalid signer: {reason}"),
             Self::AuthCapabilityRegistryFull { limit } => {
@@ -2690,6 +2697,7 @@ pub(crate) fn write_payload_to_ffi(payload: GWritePayload) -> Result<FfiWritePay
             sig: event.sig.to_string(),
         }),
         GWritePayload::ReplaceableEdit { .. } => Err(FfiError::ReplaceableEditHasNoWireForm),
+        GWritePayload::ReplaceableOperation(_) => Err(FfiError::ReplaceableOperationHasNoWireForm),
     }
 }
 
@@ -3633,6 +3641,9 @@ mod tests {
             GWritePayload::ReplaceableEdit { .. } => {
                 panic!("the raw FFI write surface must not mint guarded replaceable edits")
             }
+            GWritePayload::ReplaceableOperation(_) => {
+                panic!("the raw FFI write surface must not mint registered operations")
+            }
             GWritePayload::Signed(_) => {
                 panic!("an Event FfiWritePayload must build an Event GWritePayload")
             }
@@ -3866,6 +3877,9 @@ mod tests {
             }
             GWritePayload::ReplaceableEdit { .. } => {
                 panic!("the raw FFI write surface must not mint guarded replaceable edits")
+            }
+            GWritePayload::ReplaceableOperation(_) => {
+                panic!("the raw FFI write surface must not mint registered operations")
             }
         }
     }

@@ -3197,6 +3197,12 @@ enum Enum {
             ),
         },
         Variant {
+            name: "ReplaceableOperationHasNoWireForm",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
             name: "InvalidCorrelationToken",
             discr: None,
             fields: [

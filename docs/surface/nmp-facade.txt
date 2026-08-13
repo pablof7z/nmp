@@ -1549,6 +1549,7 @@ impl nmp::Engine
 pub fn nmp::Engine::add_auth_policy<P>(&self, nostr::key::public_key::PublicKey, P) -> core::result::Result<nmp::AuthPolicyRegistration, nmp::EngineError> where P: nmp::AuthPolicy + 'static
 pub fn nmp::Engine::add_private_key_account(&self, &[u8; 32], bool) -> core::result::Result<nmp::SessionAccount, nmp::SessionMutationError>
 pub fn nmp::Engine::add_public_key_account(&self, nostr::key::public_key::PublicKey, bool) -> core::result::Result<nmp::SessionAccount, nmp::SessionMutationError>
+pub fn nmp::Engine::add_replaceable_materializer<M>(&self, [u8; 16], [u8; 16], M) -> core::result::Result<nmp::RegisteredReplaceableMaterializer, nmp::EngineError> where M: nmp::ReplaceableMaterializer
 pub fn nmp::Engine::cancel(&self, nmp::ReceiptId) -> core::result::Result<nmp::CancelWriteOutcome, nmp::CancelWriteError>
 pub fn nmp::Engine::clear_session(&self) -> core::result::Result<(), nmp::SessionMutationError>
 pub fn nmp::Engine::export_session(&self) -> core::result::Result<nmp::SessionPayload, nmp::EngineError>
@@ -1749,6 +1750,18 @@ impl core::marker::Unpin for nmp::ReceiptStream
 impl core::marker::UnsafeUnpin for nmp::ReceiptStream
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::ReceiptStream
 impl core::panic::unwind_safe::UnwindSafe for nmp::ReceiptStream
+pub struct nmp::RegisteredReplaceableMaterializer
+impl nmp::RegisteredReplaceableMaterializer
+pub fn nmp::RegisteredReplaceableMaterializer::operation(&self, &nmp::Row, &nmp::Row, alloc::vec::Vec<u8>) -> core::result::Result<nmp_grammar::write::WritePayload, nmp_grammar::write::ReplaceableOperationError>
+impl core::clone::Clone for nmp::RegisteredReplaceableMaterializer
+pub fn nmp::RegisteredReplaceableMaterializer::clone(&self) -> nmp::RegisteredReplaceableMaterializer
+impl core::marker::Freeze for nmp::RegisteredReplaceableMaterializer
+impl core::marker::Send for nmp::RegisteredReplaceableMaterializer
+impl core::marker::Sync for nmp::RegisteredReplaceableMaterializer
+impl core::marker::Unpin for nmp::RegisteredReplaceableMaterializer
+impl core::marker::UnsafeUnpin for nmp::RegisteredReplaceableMaterializer
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RegisteredReplaceableMaterializer
+impl core::panic::unwind_safe::UnwindSafe for nmp::RegisteredReplaceableMaterializer
 pub struct nmp::RelayDiagnosticsSnapshot
 pub nmp::RelayDiagnosticsSnapshot::access: nmp_grammar::descriptor::AccessContext
 pub nmp::RelayDiagnosticsSnapshot::authors_served: usize
@@ -1867,6 +1880,36 @@ impl core::marker::Unpin for nmp::RelayInformationSnapshot
 impl core::marker::UnsafeUnpin for nmp::RelayInformationSnapshot
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationSnapshot
 impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationSnapshot
+pub struct nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> nmp::ReplaceableMaterializerOperation<'a>
+pub fn nmp::ReplaceableMaterializerOperation<'a>::bytes(&self) -> &'a [u8]
+impl<'a> core::clone::Clone for nmp::ReplaceableMaterializerOperation<'a>
+pub fn nmp::ReplaceableMaterializerOperation<'a>::clone(&self) -> nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> core::marker::Copy for nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> core::marker::Freeze for nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> core::marker::Send for nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> core::marker::Sync for nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> core::marker::Unpin for nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> core::marker::UnsafeUnpin for nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for nmp::ReplaceableMaterializerOperation<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for nmp::ReplaceableMaterializerOperation<'a>
+pub struct nmp::ReplaceableMaterializerRefusal
+pub nmp::ReplaceableMaterializerRefusal::reason: alloc::string::String
+impl core::clone::Clone for nmp::ReplaceableMaterializerRefusal
+pub fn nmp::ReplaceableMaterializerRefusal::clone(&self) -> nmp::ReplaceableMaterializerRefusal
+impl core::cmp::Eq for nmp::ReplaceableMaterializerRefusal
+impl core::cmp::PartialEq for nmp::ReplaceableMaterializerRefusal
+pub fn nmp::ReplaceableMaterializerRefusal::eq(&self, &nmp::ReplaceableMaterializerRefusal) -> bool
+impl core::fmt::Debug for nmp::ReplaceableMaterializerRefusal
+pub fn nmp::ReplaceableMaterializerRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::ReplaceableMaterializerRefusal
+impl core::marker::Freeze for nmp::ReplaceableMaterializerRefusal
+impl core::marker::Send for nmp::ReplaceableMaterializerRefusal
+impl core::marker::Sync for nmp::ReplaceableMaterializerRefusal
+impl core::marker::Unpin for nmp::ReplaceableMaterializerRefusal
+impl core::marker::UnsafeUnpin for nmp::ReplaceableMaterializerRefusal
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::ReplaceableMaterializerRefusal
+impl core::panic::unwind_safe::UnwindSafe for nmp::ReplaceableMaterializerRefusal
 pub struct nmp::Row
 pub nmp::Row::sources: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
 impl nmp::Row
@@ -2114,6 +2157,8 @@ impl !core::panic::unwind_safe::UnwindSafe for nmp::WindowHandle
 pub const nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS: u64
 pub trait nmp::AuthPolicy: core::marker::Send
 pub fn nmp::AuthPolicy::evaluate(&self, nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp
+pub trait nmp::ReplaceableMaterializer: core::marker::Send + core::marker::Sync + 'static
+pub fn nmp::ReplaceableMaterializer::materialize(&self, &nostr::event::unsigned::UnsignedEvent, &nostr::event::unsigned::UnsignedEvent, &[nmp::ReplaceableMaterializerOperation<'_>]) -> core::result::Result<nmp_grammar::write::EventBuilder, nmp::ReplaceableMaterializerRefusal>
 pub type nmp::AuthPolicyResult = core::result::Result<nmp::AuthPolicyDecision, nmp::AuthPolicyError>
 
 # resolved dependency-owned reexports (rustdoc JSON format 60)
@@ -31659,6 +31704,112 @@ reexport nmp::EventStore => nmp_store::EventStore
                                                         },
                                                         "name": "current",
                                                         "visibility": "default"
+                                                      },
+                                                      {
+                                                        "attrs": [],
+                                                        "inner": {
+                                                          "struct_field": {
+                                                            "resolved_path": {
+                                                              "args": {
+                                                                "angle_bracketed": {
+                                                                  "args": [
+                                                                    {
+                                                                      "type": {
+                                                                        "resolved_path": {
+                                                                          "args": {
+                                                                            "angle_bracketed": {
+                                                                              "args": [
+                                                                                {
+                                                                                  "type": {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "StoredEvent",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_store::StoredEvent"
+                                                                                        },
+                                                                                        "path": "nmp_store::StoredEvent"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                              ],
+                                                                              "constraints": []
+                                                                            }
+                                                                          },
+                                                                          "path": "Box",
+                                                                          "resolved_item": {
+                                                                            "path": "alloc::boxed::Box"
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  ],
+                                                                  "constraints": []
+                                                                }
+                                                              },
+                                                              "path": "Option",
+                                                              "resolved_item": {
+                                                                "path": "core::option::Option"
+                                                              }
+                                                            }
+                                                          }
+                                                        },
+                                                        "name": "installed",
+                                                        "visibility": "default"
+                                                      },
+                                                      {
+                                                        "attrs": [],
+                                                        "inner": {
+                                                          "struct_field": {
+                                                            "resolved_path": {
+                                                              "args": {
+                                                                "angle_bracketed": {
+                                                                  "args": [
+                                                                    {
+                                                                      "type": {
+                                                                        "resolved_path": {
+                                                                          "args": {
+                                                                            "angle_bracketed": {
+                                                                              "args": [
+                                                                                {
+                                                                                  "type": {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "StoredEvent",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_store::StoredEvent"
+                                                                                        },
+                                                                                        "path": "nmp_store::StoredEvent"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                              ],
+                                                                              "constraints": []
+                                                                            }
+                                                                          },
+                                                                          "path": "Box",
+                                                                          "resolved_item": {
+                                                                            "path": "alloc::boxed::Box"
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  ],
+                                                                  "constraints": []
+                                                                }
+                                                              },
+                                                              "path": "Option",
+                                                              "resolved_item": {
+                                                                "path": "core::option::Option"
+                                                              }
+                                                            }
+                                                          }
+                                                        },
+                                                        "name": "predecessor",
+                                                        "visibility": "default"
                                                       }
                                                     ],
                                                     "has_stripped_fields": false
@@ -32996,12 +33147,65 @@ reexport nmp::EventStore => nmp_store::EventStore
                                                                       "type": {
                                                                         "resolved_path": {
                                                                           "args": null,
-                                                                          "path": "nostr::EventId",
+                                                                          "path": "crate::StoredEvent",
                                                                           "resolved_item": {
                                                                             "definition": {
-                                                                              "previously_defined": "nostr::event::id::EventId"
+                                                                              "previously_defined": "nmp_store::StoredEvent"
                                                                             },
-                                                                            "path": "nostr::event::id::EventId"
+                                                                            "path": "nmp_store::StoredEvent"
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  ],
+                                                                  "constraints": []
+                                                                }
+                                                              },
+                                                              "path": "Box",
+                                                              "resolved_item": {
+                                                                "path": "alloc::boxed::Box"
+                                                              }
+                                                            }
+                                                          }
+                                                        },
+                                                        "name": "installed",
+                                                        "visibility": "default"
+                                                      },
+                                                      {
+                                                        "attrs": [],
+                                                        "inner": {
+                                                          "struct_field": {
+                                                            "resolved_path": {
+                                                              "args": {
+                                                                "angle_bracketed": {
+                                                                  "args": [
+                                                                    {
+                                                                      "type": {
+                                                                        "resolved_path": {
+                                                                          "args": {
+                                                                            "angle_bracketed": {
+                                                                              "args": [
+                                                                                {
+                                                                                  "type": {
+                                                                                    "resolved_path": {
+                                                                                      "args": null,
+                                                                                      "path": "crate::StoredEvent",
+                                                                                      "resolved_item": {
+                                                                                        "definition": {
+                                                                                          "previously_defined": "nmp_store::StoredEvent"
+                                                                                        },
+                                                                                        "path": "nmp_store::StoredEvent"
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                              ],
+                                                                              "constraints": []
+                                                                            }
+                                                                          },
+                                                                          "path": "Box",
+                                                                          "resolved_item": {
+                                                                            "path": "alloc::boxed::Box"
                                                                           }
                                                                         }
                                                                       }
@@ -34410,6 +34614,82 @@ reexport nmp::EventStore => nmp_store::EventStore
                                                                                             }
                                                                                           },
                                                                                           "name": "coordinate",
+                                                                                          "visibility": "default"
+                                                                                        },
+                                                                                        {
+                                                                                          "attrs": [],
+                                                                                          "inner": {
+                                                                                            "struct_field": {
+                                                                                              "resolved_path": {
+                                                                                                "args": null,
+                                                                                                "path": "ReplaceableOperationAcceptance",
+                                                                                                "resolved_item": {
+                                                                                                  "definition": {
+                                                                                                    "attrs": [],
+                                                                                                    "inner": {
+                                                                                                      "enum": {
+                                                                                                        "generics": {
+                                                                                                          "params": [],
+                                                                                                          "where_predicates": []
+                                                                                                        },
+                                                                                                        "has_stripped_variants": false,
+                                                                                                        "variants": [
+                                                                                                          {
+                                                                                                            "attrs": [],
+                                                                                                            "inner": {
+                                                                                                              "variant": {
+                                                                                                                "discriminant": null,
+                                                                                                                "kind": "plain"
+                                                                                                              }
+                                                                                                            },
+                                                                                                            "name": "Bodyless",
+                                                                                                            "visibility": "default"
+                                                                                                          },
+                                                                                                          {
+                                                                                                            "attrs": [],
+                                                                                                            "inner": {
+                                                                                                              "variant": {
+                                                                                                                "discriminant": null,
+                                                                                                                "kind": {
+                                                                                                                  "tuple": [
+                                                                                                                    {
+                                                                                                                      "attrs": [],
+                                                                                                                      "inner": {
+                                                                                                                        "struct_field": {
+                                                                                                                          "resolved_path": {
+                                                                                                                            "args": null,
+                                                                                                                            "path": "nostr::EventId",
+                                                                                                                            "resolved_item": {
+                                                                                                                              "definition": {
+                                                                                                                                "previously_defined": "nostr::event::id::EventId"
+                                                                                                                              },
+                                                                                                                              "path": "nostr::event::id::EventId"
+                                                                                                                            }
+                                                                                                                          }
+                                                                                                                        }
+                                                                                                                      },
+                                                                                                                      "name": "0",
+                                                                                                                      "visibility": "default"
+                                                                                                                    }
+                                                                                                                  ]
+                                                                                                                }
+                                                                                                              }
+                                                                                                            },
+                                                                                                            "name": "BodyComplete",
+                                                                                                            "visibility": "default"
+                                                                                                          }
+                                                                                                        ]
+                                                                                                      }
+                                                                                                    },
+                                                                                                    "name": "ReplaceableOperationAcceptance",
+                                                                                                    "visibility": "public"
+                                                                                                  },
+                                                                                                  "path": "nmp_store::ReplaceableOperationAcceptance"
+                                                                                                }
+                                                                                              }
+                                                                                            }
+                                                                                          },
+                                                                                          "name": "acceptance",
                                                                                           "visibility": "default"
                                                                                         },
                                                                                         {
@@ -43683,6 +43963,55 @@ reexport nmp::WriteIntent => nmp_grammar::write::WriteIntent
                                   }
                                 },
                                 "name": "ReplaceableEdit",
+                                "visibility": "default"
+                              },
+                              {
+                                "attrs": [],
+                                "inner": {
+                                  "variant": {
+                                    "discriminant": null,
+                                    "kind": {
+                                      "tuple": [
+                                        {
+                                          "attrs": [],
+                                          "inner": {
+                                            "struct_field": {
+                                              "resolved_path": {
+                                                "args": null,
+                                                "path": "ReplaceableOperation",
+                                                "resolved_item": {
+                                                  "definition": {
+                                                    "attrs": [],
+                                                    "inner": {
+                                                      "struct": {
+                                                        "generics": {
+                                                          "params": [],
+                                                          "where_predicates": []
+                                                        },
+                                                        "kind": {
+                                                          "plain": {
+                                                            "fields": [],
+                                                            "has_stripped_fields": true
+                                                          }
+                                                        }
+                                                      }
+                                                    },
+                                                    "name": "ReplaceableOperation",
+                                                    "visibility": "public"
+                                                  },
+                                                  "path": "nmp_grammar::write::ReplaceableOperation"
+                                                }
+                                              }
+                                            }
+                                          },
+                                          "name": "0",
+                                          "visibility": "default"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                },
+                                "name": "ReplaceableOperation",
                                 "visibility": "default"
                               },
                               {

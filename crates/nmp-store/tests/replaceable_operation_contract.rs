@@ -57,6 +57,69 @@ fn bodyless_accept(
     }
 }
 
+fn body_complete_accept(
+    coordinate: Coordinate,
+    snapshot: Option<&nmp_store::SemanticCurrentState>,
+    existing: Vec<nmp_store::IntentId>,
+    byte: u8,
+    created_at: u64,
+) -> SemanticAccept {
+    let mut accept = bodyless_accept(coordinate.clone(), snapshot, existing, byte);
+    accept.materialized = Some(MaterializationCandidate {
+        event: UnsignedEvent::new(
+            coordinate.public_key,
+            Timestamp::from(created_at),
+            coordinate.kind,
+            Vec::new(),
+            format!("materialized-{byte}"),
+        ),
+        routing: "test-route".into(),
+        sig_state: PendingMaterializationState::AwaitingSigner,
+    });
+    accept
+}
+
+fn accept_body_complete(
+    store: &mut dyn EventStore,
+    keys: &Keys,
+    accepted_at: u64,
+    accept: SemanticAccept,
+) -> (nmp_store::IntentId, u64, nostr::EventId) {
+    match store
+        .accept_write(AcceptWrite {
+            payload: AcceptWritePayload::ReplaceableOperation(Box::new(accept)),
+            expected_pubkey: keys.public_key(),
+            signing_identity_ref: "test-key".into(),
+            accepted_at: Timestamp::from(accepted_at),
+            correlation: None,
+        })
+        .unwrap()
+    {
+        AcceptOutcome::ReplaceableOperation {
+            intent_id,
+            receipt_id,
+            installed: Some(installed),
+            ..
+        } => (intent_id, receipt_id, installed.event.id),
+        other => panic!("expected body-complete operation, got {other:?}"),
+    }
+}
+
+fn receipt_ids(store: &dyn EventStore, receipt_id: u64) -> (nostr::EventId, nostr::EventId) {
+    let receipt = store.reattach_receipt(receipt_id).unwrap().unwrap();
+    match receipt.payload {
+        PublishQueueReceiptPayload::ReplaceableOperation {
+            acceptance: nmp_store::ReplaceableOperationAcceptance::BodyComplete(accepted),
+            state:
+                ReplaceableOperationReceiptState::Contributing {
+                    current: Some(current),
+                },
+            ..
+        } => (accepted, current.materialization.event_id),
+        other => panic!("expected body-complete receipt, got {other:?}"),
+    }
+}
+
 fn accept_operation(
     store: &mut dyn EventStore,
     keys: &Keys,
@@ -77,6 +140,7 @@ fn accept_operation(
             intent_id,
             receipt_id,
             current,
+            ..
         } => {
             assert!(current.generation.is_none());
             (intent_id, receipt_id)
@@ -311,4 +375,50 @@ fn redb_reopens_bodyless_operation_and_current_generation_without_body_copies() 
         IntentSigState::Pending,
     );
     assert_eq!(store.recover_publish_queue().unwrap().len(), 1);
+}
+
+#[test]
+fn body_complete_receipt_keeps_accepted_id_while_current_advances_across_reopen() {
+    fn exercise(store: &mut dyn EventStore) -> (u64, u64, nostr::EventId, nostr::EventId) {
+        let keys = Keys::generate();
+        let coordinate = coordinate(&keys);
+        let (first, first_receipt, first_event) = accept_body_complete(
+            store,
+            &keys,
+            10,
+            body_complete_accept(coordinate.clone(), None, Vec::new(), 1, 10),
+        );
+        let snapshot = store
+            .replaceable_operation_snapshot(&coordinate)
+            .unwrap()
+            .unwrap();
+        let (_, second_receipt, second_event) = accept_body_complete(
+            store,
+            &keys,
+            11,
+            body_complete_accept(coordinate, Some(&snapshot.current), vec![first], 2, 11),
+        );
+        assert_eq!(
+            receipt_ids(store, first_receipt),
+            (first_event, second_event)
+        );
+        assert_eq!(
+            receipt_ids(store, second_receipt),
+            (second_event, second_event)
+        );
+        (first_receipt, second_receipt, first_event, second_event)
+    }
+
+    let mut memory = MemoryStore::new();
+    exercise(&mut memory);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("accepted-id.redb");
+    let evidence = {
+        let mut redb = RedbStore::open(&path).unwrap();
+        exercise(&mut redb)
+    };
+    let redb = RedbStore::open(&path).unwrap();
+    assert_eq!(receipt_ids(&redb, evidence.0), (evidence.2, evidence.3));
+    assert_eq!(receipt_ids(&redb, evidence.1), (evidence.3, evidence.3));
 }

@@ -193,6 +193,11 @@ fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
         FollowActionFailure::Compose(error) => match error {
             ComposeFollowError::BaseHasWrongKind => FfiFollowActionFailure::BaseHasWrongKind,
             ComposeFollowError::InvalidGeneratedTag => FfiFollowActionFailure::InvalidGeneratedTag,
+            // The existing FFI action uses `compose_follow_change`, which
+            // cannot construct the registration-bound Rust-only refusal.
+            // Keep this internal projection total without inventing an
+            // unreachable native lifecycle state.
+            ComposeFollowError::InvalidOperation => FfiFollowActionFailure::InvalidGeneratedTag,
         },
         FollowActionFailure::EngineClosed => FfiFollowActionFailure::EngineClosed,
         FollowActionFailure::ReceiptUnavailable => FfiFollowActionFailure::ReceiptUnavailable,

@@ -94,15 +94,19 @@ use nmp_router::{
 };
 use nmp_signer::SignerError;
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId,
     AuthDenial as StoredAuthDenial, AuthDenialSource as StoredAuthDenialSource, CloseIntentOutcome,
     CompensateOutcome, CoverageInterval, CoverageKey, DurabilityOutcome, EventStore,
-    HandoffEvidence, IntentId, IntentSigState, PersistenceError, PersistenceFault, PromoteOutcome,
+    HandoffEvidence, IntentId, IntentSigState, MaterializationCandidate,
+    PendingMaterializationState, PersistenceError, PersistenceFault, PromoteOutcome,
     PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
     PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
     PublishQueueReceiptPayload, PublishQueueTerminalOutcome, PublishQueueTransientCause,
-    ReceiptState, RelayObserved, RemoveQueueEntryOutcome, SigState, VerifiedSignature,
+    QualifiedSource, ReceiptState, RelayObserved, RemoveQueueEntryOutcome,
+    ReplaceableMaterializationTarget, ReplayFormatId, ReplayProgramId, SemanticAccept,
+    SemanticPlan, SigState, SourceEvidence as SemanticSourceEvidence, SourcePlanId, StartingSource,
+    StartingSourceRequirement, VerifiedSignature,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
@@ -117,6 +121,9 @@ use crate::publish_queue::{
     WriteOutcome,
 };
 use crate::relay_information_service::RelayInformationCapabilityEvidence;
+use crate::replaceable_materializer::{
+    ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration,
+};
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
 /// negentropy session with no reply is abandoned in favor of a plain REQ
@@ -551,6 +558,9 @@ pub enum PublishError {
     /// acceptance timestamp. NMP never takes custody of work that is
     /// impossible to publish usefully.
     AlreadyExpired,
+    /// The closed semantic operation or its exact source witness no longer
+    /// matched at the atomic acceptance door. Nothing entered custody.
+    ReplaceableOperationRefused { reason: String },
 }
 
 impl std::fmt::Display for PublishError {
@@ -580,6 +590,9 @@ impl std::fmt::Display for PublishError {
                 "an explicit route naming no relays is refused: it never degrades into Auto"
             ),
             Self::AlreadyExpired => write!(f, "the event was already expired at acceptance"),
+            Self::ReplaceableOperationRefused { reason } => {
+                write!(f, "the replaceable operation was refused: {reason}")
+            }
         }
     }
 }
@@ -1926,7 +1939,29 @@ fn bootstrap_retry_delay_secs(failures: u32) -> u64 {
         .min(RETRY_MAX_SECS)
 }
 
+#[derive(Clone)]
+enum PendingWriteTarget {
+    Event,
+    ReplaceableOperation(Box<ReplaceableMaterializationTarget>),
+}
+
+impl PendingWriteTarget {
+    fn accepts_ordinary_signer(&self) -> bool {
+        match self {
+            Self::Event => true,
+            Self::ReplaceableOperation(target) => {
+                // Reading the exact fence here is deliberate: semantic work
+                // is parked for #1434, and cannot accidentally enter the
+                // ordinary intent-id promotion path.
+                let _exact_generation = target.expected_event_id;
+                false
+            }
+        }
+    }
+}
+
 struct PendingWrite {
+    target: PendingWriteTarget,
     routing: WriteRouting,
     /// False only when a persisted routing snapshot cannot be decoded.
     /// Recovery keeps owning the obligation but fails closed on wire output.
@@ -2143,6 +2178,7 @@ struct PendingRequestClaimTransfer {
 /// The PURE synchronous reducer (§2 position 1). No I/O, no threads.
 pub struct EngineCore<S: EventStore> {
     resolver: ResolverEngine<S>,
+    replaceable_materializers: HashMap<[u8; 16], ReplaceableMaterializerRegistration>,
     router: Router,
     routing_facts: RoutingFactStore,
     cap: usize,
@@ -2557,6 +2593,17 @@ struct AttemptCorrelationTarget {
 struct AttemptCorrelationExhausted;
 
 impl<S: EventStore> EngineCore<S> {
+    pub(crate) fn add_replaceable_materializer(
+        &mut self,
+        registration: ReplaceableMaterializerRegistration,
+    ) {
+        self.replaceable_materializers.retain(|_, current| {
+            current.program != registration.program || current.format != registration.format
+        });
+        self.replaceable_materializers
+            .insert(registration.instance, registration);
+    }
+
     pub fn new(store: S, cap: usize) -> Self {
         Self::new_with_routing_facts(store, RoutingFactStore::default(), cap)
     }
@@ -2581,6 +2628,7 @@ impl<S: EventStore> EngineCore<S> {
     ) -> Self {
         Self {
             resolver: ResolverEngine::new(store),
+            replaceable_materializers: HashMap::new(),
             router: Router::new(RuleRegistry::default_widen_only()),
             routing_facts,
             cap,
