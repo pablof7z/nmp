@@ -1705,6 +1705,7 @@ mod tests {
                     Some(FfiWriteFact::Relay {
                         relay,
                         state: crate::types::FfiRelayState::Published,
+                        ..
                     }) => break relay,
                     Some(_) => {}
                     None => panic!("the receipt ended before a relay published"),

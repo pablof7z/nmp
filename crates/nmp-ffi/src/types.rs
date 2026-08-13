@@ -1064,6 +1064,9 @@ pub enum FfiWriteFact {
         state: FfiSigningState,
     },
     Relay {
+        /// Exact event generation this relay evidence describes, as a
+        /// 64-character lowercase hex event id.
+        event_id: String,
         relay: String,
         state: FfiRelayState,
     },
