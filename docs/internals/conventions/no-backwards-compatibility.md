@@ -5,9 +5,9 @@ slug: no-backwards-compatibility
 status: policy
 date: 2026-07-29
 owns:
-  - the rule that a replaced surface is deleted, never aliased or deprecated
+  - the rule that a replaced public API is deleted, never aliased or deprecated
   - how proposals must be presented under this rule
-  - why breaking callers is cheap here and a second surface is not
+  - why breaking callers is cheap here and a second API is not
 related:
   - docs/internals/conventions/bech32-boundary.md
   - docs/internals/conventions/naming-no-invented-categories.md
@@ -35,14 +35,13 @@ in the same change**. Never:
 
 - an alias kept alongside the new name;
 - a deprecation period, marker, or warning;
-- a wrapper that forwards the old surface to the new one;
+- a wrapper that forwards the old API to the new one;
 - any second way to express the same thing, however temporary it is claimed
   to be.
 
-The workspace, the FFI layer, Swift, Kotlin, the governed surface snapshots,
-and every test move to the new spelling in the same change. "Temporary"
-compatibility surfaces are not temporary; they are a second surface with a
-maintenance bill and no deletion date.
+The workspace, the FFI layer, Swift, Kotlin, and every test move to the new
+spelling in the same change. "Temporary" compatibility paths are not
+temporary; they are a second API with a maintenance bill and no deletion date.
 
 The same rule applies to durable bytes. A `SCHEMA_VERSION` bump makes every
 non-current store unsupported; the consumer discards and recreates it instead
@@ -60,7 +59,7 @@ places it gets violated are analyses and option lists:
   2026-07-28 write-plane session, the question "does `Identity` replace
   `identity_override` outright (breaking) or wrap it?" was retracted as
   invalid the moment this ruling landed — wrapping was never on the table.
-- **Do not weigh breaking Swift/Kotlin/governed snapshots as an argument
+- **Do not weigh breaking Swift/Kotlin snapshots as an argument
   against a better design.** Migration cost of in-workspace callers is not a
   design input. If the design is better, the callers move.
 - **Do not propose migration shims, phased rollouts of a spelling, or
@@ -75,14 +74,14 @@ review.
 ### 3.1 There are no external consumers
 
 The entire cost that backwards compatibility exists to avoid is **absent
-here**. NMP has no external consumers. Every caller of every surface — the
+here**. NMP has no external consumers. Every caller of every public API — the
 facade, the FFI component, the Swift and Kotlin SDKs, the protocol crates, the
 harnesses, the example apps — is inside this workspace or in a sibling
 repository that moves with it. Nobody is pinned to a version we cannot reach
 and update in the same change.
 
 Compatibility policy is a tax paid to strangers. There are no strangers. Paying
-it anyway buys nothing and costs a permanent second surface.
+it anyway buys nothing and costs a permanent second API.
 
 This is a *fact about the current situation*, not a value judgement, and it is
 the load-bearing premise of the whole rule: an argument for compatibility must

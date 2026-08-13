@@ -1928,14 +1928,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nmp-demo"
-version = "0.1.0"
-dependencies = [
- "nmp",
- "nostr 0.44.4",
-]
-
-[[package]]
 name = "nmp-event-edit"
 version = "0.1.0"
 dependencies = [

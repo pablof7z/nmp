@@ -84,6 +84,6 @@ insert-delete collapse, expiry, and multi-owner pending adoption.
 That shape is sound, but it is not a prerequisite for a selected next step:
 the direct packed parser proposal in #615 closed negative, while the current
 packed-postings event plane already indexes borrowed `Event` fields inside its
-governed transaction. Keeping the extra ownership surface would therefore be
+governed transaction. Keeping the extra ownership boundary would therefore be
 speculative machinery, contrary to #613's negative-result rule.
 

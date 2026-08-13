@@ -1,12 +1,11 @@
 # Architecture review gates
 
-- **Status:** active PR-review checklist (gates 1-4) plus two mechanical CI
-  checks: gate 5 (`scripts/check-sdk-parity.sh`, with the documented
+- **Status:** active PR-review checklist (gates 1-4) plus one mechanical CI
+  check: gate 5 (`scripts/check-sdk-parity.sh`, with the documented
   per-component exception catalog
-  `scripts/check-sdk-parity-allowlist.toml`) and gate 6
-  (`scripts/check-falsifier-honesty.sh`). Both run as blocking jobs in
-  `.github/workflows/architecture-gates.yml` on every PR; making them
-  branch-protection *required* checks is a repo-admin setting the workflow
+  `scripts/check-sdk-parity-allowlist.toml`). It runs as a blocking job in
+  `.github/workflows/architecture-gates.yml` on every PR; making it a
+  branch-protection *required* check is a repo-admin setting the workflow
   itself cannot grant.
 - **Origin:** issue #496, written after the #485 architectural sweep. History\*
   (issue #474/#484) was a parallel-noun modeling error caught by a manual
@@ -36,13 +35,10 @@ to:
 Run gates 1-4 by eye against the diff of any PR that adds a public type,
 error variant, destructive verb, or a `bool` living next to a handle/executor.
 They are cheap — each is a single question with a yes/no trained "tell."
-Gates 5 and 6 run mechanically in CI (`.github/workflows/architecture-gates.yml`)
-and locally via `scripts/check-sdk-parity.sh` and
-`scripts/check-falsifier-honesty.sh <base> <head> [pr-body-file]`. The
-mechanical halves are floors, not replacements: gate 5 proves a concept is
-*mentioned*, not correctly projected; gate 6 proves a named mechanism
-*exists*, not that it falsifies anything. The by-eye halves of both gates
-still apply in review.
+Gate 5 runs mechanically in CI (`.github/workflows/architecture-gates.yml`)
+and locally via `scripts/check-sdk-parity.sh`. The mechanical half is a floor,
+not a replacement: gate 5 proves a concept is *mentioned*, not correctly
+projected. The by-eye half still applies in review.
 
 ---
 
@@ -258,52 +254,3 @@ allowlist entry.
 Marking the job branch-protection **required** is a repo-admin setting; until
 it is flipped, the job is still red/green on every PR.
 
----
-
-## Gate 6 — Falsifier-honesty (mechanical CI check)
-
-**Rule.** If a PR's description or "Falsifiers" section names a mechanism it
-claims to add (a typed error variant, a guard, a registry, a lock), that
-mechanism must actually be present in the diff. A named-but-absent mechanism
-is worse than not claiming one — it tells the next reader a bad path is
-excluded when it is not.
-
-**Trained tell.** Read the PR's own claimed falsifier list, then grep the
-diff for each named mechanism by identifier. Anything named but not found in
-the diff (or found only in a doc comment, not in a type/test) fails.
-
-**Doctrine anchor.** `docs/bug-class-ledger.md:3-5` and its closing sentence:
-*"Every status must remain honest. A design document, issue, or passing
-adjacent test is not proof."* Applied to a single PR instead of the ledger as
-a whole: a PR's own prose is not proof of what its diff does either.
-
-**Mechanical check.** `scripts/check-falsifier-honesty.sh BASE HEAD
-[claims-file]`, run as the blocking `falsifier-honesty` job in
-`.github/workflows/architecture-gates.yml` on every PR (the job feeds it the
-PR base SHA, the merged tree, and the PR body as the claims file). Claim
-sources are deliberately narrow: the "Updated falsifiers:" fields of
-change-log entries *added* by the PR to `docs/surface-change-log.md`, plus
-any "falsifier"-headed section or `falsifiers...:` line of the PR body. From
-those regions only backtick code spans that parse cleanly as **one** symbol
-(`snake_case`, `Camel::Case::path`, `.swiftCase`, `fn_name()` — normalized
-to the last path component, prose-shaped words dropped) or **one** source
-path are checked; every checked name must exist in the HEAD tree outside
-markdown (as whole-word file content, or as a test file's exact stem/path).
-Anything that does not parse as a single concrete name is skipped as
-unverifiable prose, never failed — so the check catches fabricated
-mechanisms without punishing ordinary description. A PR that makes no
-falsifier claim passes: making no claim is honest; *naming* an absent one is
-the lie this gate exists to catch. Presence is textual: a bare mention in a
-source-code comment or dead code satisfies the grep, so a deliberately
-dishonest PR can plant the word — but the plant sits in the same diff the
-reviewer reads, and the by-eye half of this gate still owns that case.
-
-Backtested against the eight most recent merged PRs (#535–#544 era; five of
-them appended change-log falsifier claims, 43 named claims total, and the
-other three correctly resolved to "no claims"): zero false failures,
-including crate-relative test-path citations and test-file-stem citations. Simulated dishonesty fails as
-intended: claiming `EngineError::StoreStillOpen` against the tree from
-before #489's fix (where the mechanism did not exist) exits 1; the same
-claim against the #489 tree passes. The check proves presence, not
-sufficiency — whether the named falsifier actually falsifies the invariant
-remains a by-eye review question.

@@ -85,7 +85,7 @@ Close the hypothesis negative if the production-safe three-run replay median mis
 - The event store remains internally atomic; cache publication occurs only after governed commit and the cache is volatile, so restart is a safe miss.
 - The Noun Gate is preserved: all candidate, lease, epoch, and invalidation types remain internal to transport/engine/resolver.
 - The existing bounded queues, session-generation checks, diagnostics, and applied acknowledgement remain in the hit path.
-- No FFI, Swift, Kotlin, supported Rust facade, or surface snapshot changes are planned.
+- No FFI, Swift, Kotlin, or supported Rust facade changes are planned.
 
 ## Possible Rule Or ADR Loosening
 
@@ -99,7 +99,7 @@ Close the hypothesis negative if the production-safe three-run replay median mis
 
 - Store-only duplicate shortcut: rejected because measured parsing, materialization, and bridge work remain far above the replay budget.
 - EventId-only cache: rejected because an unverified ID cannot authorize a preparse bypass and a different relay must still grow provenance.
-- Persist the cache: rejected because volatility makes crash recovery a safe miss and avoids another authority or migration surface.
+- Persist the cache: rejected because volatility makes crash recovery a safe miss and avoids another authority or migration path.
 - Suppress duplicate frames in transport: rejected because engine diagnostics, generation checks, pending-intent adoption, and ordered invalidation must remain exact.
 - Change storage engines first: retained as separate issue #658, but it cannot address the measured duplicate parse/materialization path.
 

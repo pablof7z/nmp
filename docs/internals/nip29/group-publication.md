@@ -5,7 +5,7 @@ slug: group-publication
 status: built
 date: 2026-07-29
 owns:
-  - the app-facing surface for reading from and writing into a NIP-29 group
+  - the app-facing API for reading from and writing into a NIP-29 group
   - who mints the h tag and the host route, and when
   - why there is no pre-signed group publication path (withdrawn, #1292)
   - where NIP-29's own kinds (9000–9022) live
@@ -123,15 +123,9 @@ with no new mechanism.
 
 The `Group` does not decide which kinds live in the group; the app supplies the
 `Filter`. This is not a stylistic choice — it is the corrected form of a
-measured defect. The #838 entry in `docs/surface-change-log.md` (APPEND-ONLY;
-quoted, never edited) records:
-
-> `group_content_demand` declared `[9,30315]` to be the group's fixed content
-> catalog even though NIP-29 permits foreign event kinds
-
-(`docs/surface-change-log.md:912`. That sentence predates the terminology fix
-in `docs/internals/conventions/naming-no-invented-categories.md`; as history it
-stays verbatim.)
+measured defect. PR #838 deleted `group_content_demand` because it declared
+`[9,30315]` to be the group's fixed content catalog even though NIP-29 permits
+foreign event kinds.
 
 The defect was declaring a FIXED content catalog when any kind can carry an
 `h` and live in a group. An app-supplied `Filter` cannot re-acquire that
@@ -172,7 +166,7 @@ PrivateNarrow, RelayListBootstrap}` (`crates/nmp-grammar/src/write.rs:207-228`)
 ## 6. The pre-signed path validates `h` instead of appending — WITHDRAWN (#1292)
 
 **This path is deleted, no alias.** `Group::publish` is the group's only
-write door; there is no `publish_signed`, and no surface accepts bytes an app
+write door; there is no `publish_signed`, and no API accepts bytes an app
 signed itself into a group. The maintainer's ruling: apps must not sign their
 own bytes and keep app-local optimistic mirrors. The legitimate need it was
 built for — a signed event WITHOUT a publication — is served by
@@ -321,7 +315,7 @@ Source anchors as PR #1011 left them — historical, not current (see §11):
   `Packages/NMP/Sources/NMP/NIP29.swift:1-12`, and
   `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt:1-13` expose only
   `groupDiscoveryDemand`. Issue #1015 owns a future native Group publication
-  door; this document claims no Swift, Kotlin, or Android write surface.
+  door; this document claims no Swift, Kotlin, or Android write API.
 
 ---
 
@@ -387,7 +381,7 @@ acceptance.
 
 **Discovery is evidence-scoped, not exact-state.** kind:39002 (members) and
 kind:39001 (admins) are optional, possibly-partial relay-signed lists:
-inclusion is evidence, absence is not evidence of the opposite. The surface is
+inclusion is evidence, absence is not evidence of the opposite. The API is
 therefore `nip29::member_list_includes(subjects)` /
 `nip29::admin_list_includes(subjects)`, returning a composable
 `GroupPredicate` (`union`/`intersect`/`minus`, folding with the grammar's own
@@ -453,7 +447,7 @@ state the underlying kinds cannot establish.
 - `crates/nmp/src/nip29/read.rs` — folds one branch per host into the one
   `LiveQuery` (`LiveQuery::single`/`LiveQuery::union`), consuming #1108.
 - `crates/nmp-ffi/src/nip29.rs` — `FfiRelayScope`, `FfiGroup`,
-  `FfiGroupPredicate` project the full read/write surface, not only
+  `FfiGroupPredicate` project the full read/write API, not only
   discovery; Swift/Kotlin projection is the remaining native work.
 - `scripts/check-nip29-ownership.sh` — retargeted at this shape: requires
   `RelayScope`, the evidence-scoped predicates, both falsifiers by name, and

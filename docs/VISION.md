@@ -32,8 +32,8 @@ The app-facing model has two nouns:
 2. **Write intent.** A durable or explicitly non-durable publication obligation
    observed through a reattachable receipt.
 
-Diagnostics are a permanent proof surface over both nouns, not a third command
-surface or optional debug mode.
+Diagnostics are a permanent proof plane over both nouns, not a third command
+plane or optional debug mode.
 
 ## 2. Live-query contract
 
@@ -306,24 +306,7 @@ engine noun or a source of routing, store, navigation, or product-policy truth.
 See
 `docs/design/ui-components-strategy.md`.
 
-## 8. Public-surface governance
-
-Behavioral invariants above are the frame. Public names, enum cases, FFI records,
-and method signatures are not frozen before v2.
-
-A public-shape change is allowed only when it:
-
-1. records what the current shape cannot express or makes unsafe;
-2. assesses Rust facade, persistence, diagnostics, FFI, Swift, and Kotlin impact;
-3. updates affected projections and falsifiers together;
-4. receives explicit human signoff; and
-5. removes the superseded path instead of maintaining premature parallel APIs.
-
-The project freezes an earned cross-platform contract after falsification; it
-does not freeze a guess. Until then, compatibility is intentionally provisional
-and changes are deliberate rather than casual.
-
-## 9. Validation frame and work order
+## 8. Validation frame and work order
 
 The original milestone gates established the thesis in stages: grammar,
 compiler/router, store/transport/outbox, Swift boundary, an iOS falsifier, then a

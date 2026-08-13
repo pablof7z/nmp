@@ -9,7 +9,7 @@ owns:
   - the never-built GroupHostAuthority / GroupHost, and why it died twice
   - the honest history of #838's PinnedHost removal and its deliberate reversal
   - the check-nip29-ownership.sh ban whose premise is now dead, and what replaces it
-  - check-routing-vocabulary.sh, the cross-surface owner of the two-word rule
+  - check-routing-vocabulary.sh, the cross-API owner of the two-word rule
   - AuthorRelayList(Kind) — proposed, died unbuilt
 related:
   - docs/internals/routing/auto-and-explicit.md
@@ -23,7 +23,7 @@ related:
   - docs/internals/writes/payload-and-replaceable-edits.md
 issues:
   - "#838 removed PinnedHost(HostAuthority); its conclusion is deliberately reversed here"
-  - "#1105 moved the tombstones into a cross-surface gate and proved the group door end to end"
+  - "#1105 moved the tombstones into a cross-API gate and proved the group door end to end"
 ---
 
 # Removed routes — a tombstone record
@@ -120,12 +120,11 @@ Nothing group-shaped exists in the routing grammar. Keep it that way.
 
 ### 3.1 What #838 did and why it was right
 
-The 2026-07-27 entry in `docs/surface-change-log.md` (lines 910-919 —
-APPEND-ONLY history; quote it, never edit it) records that `nmp-nip29` had
-collapsed three owners into itself, and that "The universal write plane then
-retained a `PinnedHost(HostAuthority)` route whose only production
-constructor was that invalid composer." #838 deleted the composer family and
-took `PinnedHost`/`HostAuthority` with it, concluding:
+PR #838 records that `nmp-nip29` had collapsed three owners into itself, and
+that "The universal write plane then retained a `PinnedHost(HostAuthority)`
+route whose only production constructor was that invalid composer." #838
+deleted the composer family and took `PinnedHost`/`HostAuthority` with it,
+concluding:
 
 > With `PinnedHost` removed and supported native routing limited to
 > `AuthorOutbox`, no supported general-purpose or NIP-29 operation can
@@ -172,7 +171,7 @@ design — those names must simply never return (§2), and a grep for names
 nobody proposes is not a tripwire, it is sediment. **What replaces it is
 positive pins on what the reversal must NOT have loosened:**
 
-- group publication crosses the app surface only through the `Group` door —
+- group publication crosses the app API only through the `Group` door —
   the app never spells `Explicit([host])` for a group and never touches `h`
   (`nip29/group-publication.md`);
 - `nmp-nip29` still cannot depend on the engine crates (the ownership half
@@ -181,7 +180,7 @@ positive pins on what the reversal must NOT have loosened:**
   (ledger #6's structure, §1).
 
 The rest of the gate — chat-schema ownership, `previous` minting, the
-removed native surface — is untouched by routing and stays.
+removed native API — is untouched by routing and stays.
 
 ### 3.4 Who owns the tombstones now (#1105)
 
@@ -195,7 +194,7 @@ this document tombstones hardest.
 `scripts/check-routing-vocabulary.sh` (#1105) owns the whole contract, for
 the whole domain, in one place:
 
-- **cardinality by enumeration, per surface** — the `nmp-grammar` enum, the
+- **cardinality by enumeration, per projection** — the `nmp-grammar` enum, the
   `nmp-ffi` mirror, BOTH public FFI conversion directions, the Swift enum and
   the Kotlin sealed class each declare exactly `Auto` and `Explicit`. Because
   the sets are exact, "it names no NIP and no strategy" needs no rule of its
@@ -208,7 +207,7 @@ the whole domain, in one place:
   value, stated as a signature.
 
 The gate has its own falsifier, `scripts/test-check-routing-vocabulary.sh`,
-which restores a retired spelling and adds a third variant to each surface in
+which restores a retired spelling and adds a third variant to each projection in
 turn and requires each mutation to go red. The runtime half — the app
 supplies content only, the host alone receives, the author's discovered
 outbox is never contacted — is

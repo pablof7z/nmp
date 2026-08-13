@@ -4,11 +4,8 @@
 #   gate 5  Cross-SDK parity: the hand-written Swift and Kotlin SDK surfaces
 #           must both cover every concept the Rust FFI exports
 #           (scripts/check-sdk-parity.sh + its documented allowlist).
-#   gate 6  Falsifier honesty: every symbol/path a PR's "Updated falsifiers"
-#           field or "Falsifiers" section concretely names must exist in the
-#           tree the PR produces (scripts/check-falsifier-honesty.sh).
 #
-# Alongside them live narrow, per-boundary structural checks that enforce one
+# Alongside it live narrow, per-boundary structural checks that enforce one
 # specific ownership contract each (currently #863's NIP-51 observational
 # parsing rule and #879's pure content/locator boundary). Same character, same
 # trust properties.
@@ -16,9 +13,9 @@
 # These checks require no secrets and make no pull_request_target trust
 # decisions, so an ordinary reviewable workflow is the right home.
 #
-# Gates 5 and 6 are intended to be branch-protection REQUIRED checks (an
-# owner/admin setting; see the gate doc). Every job here gates on content only
-# and never executes PR-provided code beyond these repo scripts.
+# Gate 5 is intended to be a branch-protection REQUIRED check (an owner/admin
+# setting; see the gate doc). Every job here gates on content only and never
+# executes PR-provided code beyond these repo scripts.
 
 name: Architecture gates
 
@@ -216,25 +213,3 @@ jobs:
       - name: Falsify runner ownership, suite coverage, and cancellation isolation
         run: bash scripts/test-macos-ci-throughput.sh
 
-  falsifier-honesty:
-    name: Falsifier honesty (gate 6)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # The PR body is untrusted text. It reaches the script only as a file
-      # via an env var (never shell-interpolated), and the script only ever
-      # greps it.
-      - name: Capture PR body as claim text
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
-
-      - name: Verify named falsifiers/mechanisms exist in the PR tree
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: bash scripts/check-falsifier-honesty.sh "$BASE_SHA" HEAD "$RUNNER_TEMP/pr-body.md"

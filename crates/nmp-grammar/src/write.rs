@@ -276,8 +276,7 @@ pub struct CorrelationToken(String);
 /// an earlier draft that carried `len`/`max` on `TooLong`): both facts are
 /// already reachable without duplicating them here (the caller's own input
 /// length, and the public [`CorrelationToken::MAX_LEN`] constant), and a
-/// fieldless variant keeps this type's cost in the governed public-surface
-/// snapshot minimal.
+/// fieldless variant keeps this type's cost in the public API minimal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CorrelationTokenError {
     /// The caller supplied the empty string -- structurally not a token.
@@ -307,9 +306,9 @@ impl CorrelationToken {
     /// small enough that a durable `OUTBOX_CORRELATIONS` row stays tiny even
     /// though it is retained forever (the same retention policy as
     /// `OUTBOX_RECEIPTS`). Deliberately module-private, not `pub`: an
-    /// associated const costs real space in the governed public-surface
-    /// snapshot for a fact this doc comment (and `CorrelationTokenError`'s
-    /// `TooLong` variant) already state; nothing needs it programmatically.
+    /// associated const costs real space in the public API for a fact this
+    /// doc comment (and `CorrelationTokenError`'s `TooLong` variant) already
+    /// state; nothing needs it programmatically.
     const MAX_LEN: usize = 64;
 }
 
@@ -318,11 +317,9 @@ impl CorrelationToken {
 /// silent truncation. A `TryFrom<&str>` trait impl rather than an inherent
 /// `new` constructor -- functionally identical call-site ergonomics
 /// (`CorrelationToken::try_from(token)`/`token.try_into()`), but a trait
-/// impl costs nothing in the governed public-surface snapshot (which only
-/// walks inherent impls), unlike an inherent constructor whose signature
-/// forces a full one-time inline resolution of `CorrelationTokenError`
-/// (~90 lines) -- reclaimed here after an unrelated lane's own facade
-/// growth ate this crate's remaining ceiling headroom.
+/// impl costs nothing in the public API (which only walks inherent impls),
+/// unlike an inherent constructor whose signature forces a full one-time
+/// inline resolution of `CorrelationTokenError` (~90 lines).
 impl TryFrom<&str> for CorrelationToken {
     type Error = CorrelationTokenError;
 
@@ -340,8 +337,7 @@ impl TryFrom<&str> for CorrelationToken {
 /// The underlying token string. A trait impl rather than an inherent
 /// `as_str` method: functionally identical call-site ergonomics
 /// (`token.as_ref()`), but a trait impl (unlike an inherent method) costs
-/// nothing in the governed public-surface snapshot, which only walks
-/// inherent impls.
+/// nothing in the public API, which only walks inherent impls.
 impl AsRef<str> for CorrelationToken {
     fn as_ref(&self) -> &str {
         &self.0

@@ -76,7 +76,6 @@ No runtime code changed. Final-tree verification is:
 ```sh
 git diff --check master...HEAD
 scripts/check-sdk-parity.sh
-scripts/check-falsifier-honesty.sh master HEAD
 ```
 
 ## Raw-result aggregate SHA-256

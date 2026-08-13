@@ -11,7 +11,7 @@
 //! Unit A0/#56) so every entry point -- this facade, a direct-Rust app, any
 //! `from_parts`/raw-`EngineThread` caller -- inherits the same guarantees.
 //! `nmp-ffi` is now only config/type mirroring plus native object handles over
-//! `nmp`'s async pull surfaces. Long-lived observations expose `next()` and
+//! `nmp`'s async pull APIs. Long-lived observations expose `next()` and
 //! `cancel()` directly; no drain-thread/callback-observer bridge remains.
 //!
 //! Neutral routing facts are assembled privately by `nmp::Engine`; this
@@ -178,7 +178,7 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
 /// The UniFFI-exported engine object. `new` is the ONE construction call the
 /// M4 kill test (plan §7) requires -- everything past construction is a
 /// method call on this object, never a second container the app must adopt.
-/// Wraps a single [`nmp::Engine`] -- the one supported Rust product surface
+/// Wraps a single [`nmp::Engine`] -- the one supported Rust product API
 /// -- rather than independently assembling `nmp-store`/`nmp-router`/
 /// `nmp-transport`/`nmp-resolver` mechanism types (#52).
 #[derive(uniffi::Object)]
@@ -1514,7 +1514,7 @@ mod tests {
     // whose `async fn next()`/`signed()` drive delivery. `None` from `next()`
     // replaces `on_closed`. The `RowObserver`/`DiagnosticsObserver`/
     // `ReceiptObserver`/`SignEventObserver`/`FollowObserver` traits are deleted,
-    // as is the native-task capacity/census surface. Tests below drive the async
+    // as is the native-task capacity/census vocabulary. Tests below drive the async
     // handles on a real Tokio executor (`#[tokio::test]`, dev-only).
 
     struct AllowPolicyCallback;
@@ -2174,7 +2174,7 @@ mod tests {
     // #680 also deleted the callback-observer sign-event tests
     // (`ffi_sign_event_*` on `SignEventObserver`/`max_native_tasks`/
     // `native_task_census`/`ExecutorSaturated`/`await_native_tasks_idle`);
-    // the async `NmpSignEventHandle::signed()` surface is exercised by the
+    // the async `NmpSignEventHandle::signed()` API is exercised by the
     // sign-event handle tests instead.
 
     fn pending_ffi_request() -> FfiSignEventRequest {

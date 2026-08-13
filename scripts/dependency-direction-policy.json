@@ -88,7 +88,6 @@
       "nmp-consumer-check": "application",
       "nmp-consumer-nip29": "application",
       "nmp-cli": "application",
-      "nmp-demo": "application",
       "nmp-bdd": "verification",
       "nmp-parity": "verification",
       "nmp-test-support": "verification"
