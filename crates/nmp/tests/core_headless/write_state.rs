@@ -696,7 +696,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published }) if *id == id_a && relay == &ack
+        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published, .. }) if *id == id_a && relay == &ack
     )));
     assert!(!acked
         .iter()
@@ -712,7 +712,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     ));
     assert!(nacked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Rejected { reason: _ } }) if *id == id_b && relay == &nack
+        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Rejected { reason: _ }, .. }) if *id == id_b && relay == &nack
     )));
 
     let dropped = core.handle(EngineMsg::RelayDisconnected(
@@ -724,7 +724,7 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
         DisconnectReason::Error,
     ));
     assert!(!dropped.iter().any(
-        |effect| matches!(effect, Effect::EmitReceipt(id, WriteFact::Relay { relay: _, state: RelayState::GaveUp }) if *id == id_a)
+        |effect| matches!(effect, Effect::EmitReceipt(id, WriteFact::Relay { relay: _, state: RelayState::GaveUp, .. }) if *id == id_a)
     ));
     assert!(
         core.next_deadline().expect("deadline peek").is_some(),

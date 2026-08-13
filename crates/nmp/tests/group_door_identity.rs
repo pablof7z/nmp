@@ -167,7 +167,8 @@ async fn a_join_request_is_publishable_with_no_subscription_at_all() {
             status,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         )
     });
@@ -233,7 +234,8 @@ async fn one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_
             s,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         )
     });
@@ -269,7 +271,8 @@ async fn one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_
             s,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         )
     });
@@ -334,6 +337,7 @@ async fn a_moderation_rejection_reports_the_hosts_exact_message_and_is_never_acc
             WriteFact::Relay {
                 relay: host,
                 state: RelayState::Rejected { reason: msg },
+                ..
             } if *host == relay.url => Some(msg.clone()),
             _ => None,
         })
@@ -347,7 +351,8 @@ async fn a_moderation_rejection_reports_the_hosts_exact_message_and_is_never_acc
             s,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         )),
         "the removal must never also be reported accepted: saw {statuses:?}"
@@ -404,6 +409,7 @@ async fn a_moderation_rejection_is_a_host_fact_not_a_routing_failure() {
                     WriteFact::Relay {
                         relay,
                         state: RelayState::Rejected { reason: msg },
+                        ..
                     } if *relay == refusing.url => {
                         assert_eq!(msg, message);
                         rejected = true;
@@ -411,6 +417,7 @@ async fn a_moderation_rejection_is_a_host_fact_not_a_routing_failure() {
                     WriteFact::Relay {
                         relay,
                         state: RelayState::Published,
+                        ..
                     } if *relay == accepting.url => accepted = true,
                     _ => {}
                 }

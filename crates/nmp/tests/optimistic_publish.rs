@@ -405,10 +405,12 @@ async fn an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_
             WriteFact::Relay {
                 relay,
                 state: RelayState::Published,
+                ..
             } if relay == &accepting_url => acked = true,
             WriteFact::Relay {
                 relay,
                 state: RelayState::Rejected { reason: _ },
+                ..
             } if relay == &rejecting_url => rejected = true,
             _ => {}
         }

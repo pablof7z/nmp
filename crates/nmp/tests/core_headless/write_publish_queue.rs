@@ -118,7 +118,8 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     authenticate_signer(&mut core, 0, &good, &author);
     authenticate_signer(&mut core, 1, &blocked, &author);
 
-    let (id, _, effects) = publish_explicit(&mut core, &author, [good.clone(), blocked.clone()]);
+    let (id, signed, effects) =
+        publish_explicit(&mut core, &author, [good.clone(), blocked.clone()]);
     assert!(effects.iter().any(
         |effect| matches!(effect, Effect::PublishEvent(session, event, _)
             if session == &signer_session(&good, event.pubkey))
@@ -129,10 +130,10 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     ));
     assert!(receipt_statuses(&effects)
         .iter()
-        .any(|fact| fact == &attempt_stalled(&blocked)));
+        .any(|fact| fact == &attempt_stalled(signed.id, &blocked)));
     let replay = core.reattach_receipt(id);
     assert!(replay.is_attached());
-    assert!(replay.facts.contains(&attempt_stalled(&blocked)));
+    assert!(replay.facts.contains(&attempt_stalled(signed.id, &blocked)));
 }
 
 // ---- issue #93: durable EVENT handoff -----------------------------------
@@ -197,7 +198,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
             e,
             Effect::EmitReceipt(
                 receipt,
-                WriteFact::Relay { relay: r, state: RelayState::Sent { attempt: 1, written_at } }
+                WriteFact::Relay { relay: r, state: RelayState::Sent { attempt: 1, written_at }, .. }
             ) if *receipt == id && r == &relay && *written_at == Timestamp::from(10)
         )),
         "a Written handoff must emit exactly one Sent, got {handoff_effects:?}"
@@ -206,7 +207,7 @@ fn sent_never_fires_synchronously_and_only_written_handoff_produces_it() {
         .reattach_receipt(id)
         .facts
         .iter()
-        .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. } } if r == &relay)));
+        .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. }, .. } if r == &relay)));
 
     // The SAME correlation resolving a second time (a defensive duplicate
     // delivery, which transport itself never actually produces) must be a
@@ -258,7 +259,7 @@ fn not_handed_off_waits_visibly_and_ambiguous_says_nothing_and_neither_is_sent()
         effect,
         Effect::EmitReceipt(
             receipt,
-            WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NotConnected) }
+            WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NotConnected), .. }
         ) if *receipt == id && relay == &relay_a
     )));
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(10)));
@@ -318,7 +319,7 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     authenticate_signer(&mut core, 0, &a, &author);
     authenticate_signer(&mut core, 1, &b, &author);
 
-    let (id, _, effects) = publish_explicit(&mut core, &author, [a.clone(), b.clone()]);
+    let (id, signed, effects) = publish_explicit(&mut core, &author, [a.clone(), b.clone()]);
     assert_eq!(
         effects
             .iter()
@@ -327,13 +328,13 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
         0
     );
     let statuses = receipt_statuses(&effects);
-    assert!(statuses.contains(&attempt_stalled(&a)));
-    assert!(statuses.contains(&attempt_stalled(&b)));
+    assert!(statuses.contains(&attempt_stalled(signed.id, &a)));
+    assert!(statuses.contains(&attempt_stalled(signed.id, &b)));
     let replay = core.reattach_receipt(id);
     assert!(replay.is_attached());
     let replayed = replay.facts;
-    assert!(replayed.contains(&attempt_stalled(&a)));
-    assert!(replayed.contains(&attempt_stalled(&b)));
+    assert!(replayed.contains(&attempt_stalled(signed.id, &a)));
+    assert!(replayed.contains(&attempt_stalled(signed.id, &b)));
 }
 
 #[test]
@@ -366,12 +367,12 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(receipt, WriteFact::Relay { relay, state: RelayState::Published })
+        Effect::EmitReceipt(receipt, WriteFact::Relay { relay, state: RelayState::Published, .. })
             if *receipt == id && relay == &good
     )));
     let replay = core.reattach_receipt(id);
     assert!(replay.is_attached());
-    assert!(replay.facts.contains(&attempt_stalled(&blocked)));
+    assert!(replay.facts.contains(&attempt_stalled(signed.id, &blocked)));
 }
 
 #[test]
@@ -380,15 +381,15 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     let relay = RelayUrl::parse("wss://recover-blocked.example").unwrap();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("start-failure.redb");
-    let receipt = {
+    let (receipt, event_id) = {
         let mut first = EngineCore::new(RedbFailStartStore::open(&path, [relay.clone()]), 10);
         connect_signer(&mut first, 0, &relay, author.public_key());
         authenticate_signer(&mut first, 0, &relay, &author);
-        let (id, _, effects) = publish_explicit(&mut first, &author, [relay.clone()]);
+        let (id, signed, effects) = publish_explicit(&mut first, &author, [relay.clone()]);
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
-        id
+        (id, signed.id)
     };
 
     let mut still_blocked = EngineCore::new(RedbFailStartStore::open(&path, [relay.clone()]), 10);
@@ -401,7 +402,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     authenticate_signer(&mut still_blocked, 0, &relay, &author);
     let replay = still_blocked.reattach_receipt(receipt);
     assert!(replay.is_attached());
-    assert!(replay.facts.contains(&attempt_stalled(&relay)));
+    assert!(replay.facts.contains(&attempt_stalled(event_id, &relay)));
     drop(still_blocked);
 
     let mut recovered = EngineCore::new(RedbFailStartStore::open(&path, []), 10);
@@ -462,13 +463,14 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
+        let event_id = signed.id;
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
         assert!(receipt_statuses(&effects)
             .iter()
-            .any(|fact| fact == &attempt_stalled(&relay)));
+            .any(|fact| fact == &attempt_stalled(event_id, &relay)));
         id
     };
 
@@ -654,7 +656,7 @@ fn accepted_explicit_route_ignores_later_directory_fact_across_restart() {
         RelayFrame::from(RelayMessage::ok(event.id, true, "")),
     ));
     assert!(acked.iter().any(
-        |effect| matches!(effect, Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published })
+        |effect| matches!(effect, Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published, .. })
             if *id == receipt && relay == &chosen)
     ));
 
@@ -777,7 +779,7 @@ fn an_explicit_route_over_a_live_directory_is_verbatim_and_claims_no_privacy() {
     assert!(
         acked.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published })
+            Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published, .. })
                 if *id == receipt && relay == &chosen
         )),
         "the named relay is where the note actually lands: {acked:?}"
@@ -889,11 +891,11 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
         ));
         assert!(acked.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(_, WriteFact::Relay { relay: r, state: RelayState::Published }) if r == &old
+            Effect::EmitReceipt(_, WriteFact::Relay { relay: r, state: RelayState::Published, .. }) if r == &old
         )));
         let replay = core.reattach_receipt(receipt);
         assert!(replay.is_attached());
-        assert!(replay.facts.contains(&route_stalled(&new)));
+        assert!(replay.facts.contains(&route_stalled(old_event.id, &new)));
     }
 
     {
@@ -962,13 +964,14 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
+        let event_id = signed.id;
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
         assert!(receipt_statuses(&effects)
             .iter()
-            .any(|fact| fact == &route_stalled(&relay)));
+            .any(|fact| fact == &route_stalled(event_id, &relay)));
     }
     let store = RedbStore::open(&path).unwrap();
     let intent = store.recover_publish_queue().expect("recover delivery")[0].intent_id;
@@ -1043,7 +1046,7 @@ fn write_ack_per_relay() {
         ok_frame,
     ));
     assert!(effects.iter().any(
-        |e| matches!(e, Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, state: RelayState::Published }) if *rid == id && r == &relay_ok)
+        |e| matches!(e, Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, state: RelayState::Published, .. }) if *rid == id && r == &relay_ok)
     ));
 
     let nack_frame = RelayFrame::from(RelayMessage::ok(signed.id, false, "blocked: spam"));
@@ -1056,16 +1059,16 @@ fn write_ack_per_relay() {
         nack_frame,
     ));
     assert!(effects.iter().any(
-        |e| matches!(e, Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: msg } }) if *rid == id && r == &relay_bad && msg.contains("blocked"))
+        |e| matches!(e, Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: msg }, .. }) if *rid == id && r == &relay_bad && msg.contains("blocked"))
     ));
 
     let statuses = core.reattach_receipt(id).facts;
     assert!(statuses
         .iter()
-        .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Published } if r == &relay_ok)));
+        .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Published, .. } if r == &relay_ok)));
     assert!(statuses
         .iter()
-        .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: _ } } if r == &relay_bad)));
+        .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: _ }, .. } if r == &relay_bad)));
 }
 
 /// A relay named by two outbox sources is ONE destination, not two.
@@ -1225,7 +1228,8 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
             _,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         )
     )));
@@ -1238,7 +1242,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
         frame(),
     ));
     assert!(retried.iter().any(
-        |effect| matches!(effect, Effect::EmitReceipt(receipt, WriteFact::Relay { relay: r, state: RelayState::Published }) if *receipt == id && r == &relay)
+        |effect| matches!(effect, Effect::EmitReceipt(receipt, WriteFact::Relay { relay: r, state: RelayState::Published, .. }) if *receipt == id && r == &relay)
     ));
 }
 
