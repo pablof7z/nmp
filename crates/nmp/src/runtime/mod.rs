@@ -5859,7 +5859,9 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
 }
 
 /// Release workers no longer owned by the reducer, then execute its effects.
-/// Release MUST happen first: when a cap-sized plan replaces every relay,
+/// Terminal CLOSE frames for an obsolete session travel WITH its retirement
+/// so the connected worker flushes them before socket teardown. Release must
+/// otherwise happen first: when a cap-sized plan replaces every relay,
 /// keeping the old workers through `apply_wire_delta` would make every new
 /// `ensure_open` fail even though the new plan itself is within the cap.
 /// `relay_worker_requirements` includes nonterminal durable/ephemeral write work,
@@ -5878,7 +5880,26 @@ fn dispatch_core_effects<S: EventStore>(
     runtime: DispatchRuntime<'_>,
 ) {
     if let Some(required) = core.relay_worker_requirements() {
-        for event in pool.close_unrequired_sessions(&required.all) {
+        let mut terminal_frames: BTreeMap<RelaySessionKey, Vec<String>> = BTreeMap::new();
+        for effect in &effects {
+            let Effect::Wire(delta) = effect else {
+                continue;
+            };
+            for (session, ops) in &delta.ops {
+                if required.all.contains(session) {
+                    continue;
+                }
+                for op in ops {
+                    if let WireOp::Close(sub_id) = op {
+                        terminal_frames
+                            .entry(session.clone())
+                            .or_default()
+                            .push(close_frame_text(sub_id));
+                    }
+                }
+            }
+        }
+        for event in pool.close_unrequired_sessions(&required.all, terminal_frames) {
             if let Some(msg) = translate_pool_event(event) {
                 let _ = runtime.self_inbox.send(Cmd::Engine(msg));
             }
