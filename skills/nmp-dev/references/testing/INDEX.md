@@ -1,104 +1,53 @@
 # NMP testing
 
-NMP uses two connected but distinct systems:
+Put each kind of information in one place:
 
-- **Feature files preserve behavioral meaning.** They are the durable, English-language memory of how NMP should behave, including contextual distinctions, edge cases, counterexamples, and explicit corrections from the user.
-- **Executable tests provide evidence.** They prove those behavioral claims at the narrowest stable contract that owns the guarantee.
+- Feature files describe behavior.
+- Tests prove that behavior.
+- GitHub issues track unfinished work.
+- Design docs and the bug-class ledger explain why the architecture exists and
+  which classes of bugs it prevents.
 
-Do not collapse these into one system. Not every meaningful scenario belongs in Cucumber, and not every executable invariant needs a feature scenario.
+Do not copy the same rule into several places. Current BDD syntax, status, and
+runner rules live in
+[`docs/bdd/000-bdd-approach.md`](../../../../docs/bdd/000-bdd-approach.md).
 
-## Non-negotiable principles
+## User corrections
 
-1. **A user correction is a specification event.** When the user explains that two apparently similar cases must behave differently, preserve that distinction in the canonical feature corpus.
-2. **Feature placement follows behavioral domains.** Routing behavior belongs with routing behavior even when five Rust crates participate.
-3. **Test placement follows contract ownership.** A router invariant belongs in `nmp-router`; a public cross-component promise belongs in `crates/nmp/tests`; platform projections belong in parity and native suites.
-4. **Meaning and proof are traceable, not duplicated.** A scenario names the behavior. Its metadata points to the executable evidence. The test does not need to repeat the scenario prose verbatim.
-5. **Acceptance tests use the supported facade.** Controlled setup may use test-only seams. Scenario actions and observations must not bypass the contract they claim to prove.
-6. **Distributed claims require appropriate falsifiers.** Restart, failure ordering, independent witnesses, and deterministic fault schedules matter more than another happy-path example.
-7. **A green test is not evidence if the fixture injected the answer.** Stage causes, not derived outcomes.
+When a user correction changes the meaning of a behavior:
 
-## Mandatory response to behavioral nuance
+1. Find the owning feature and `Rule`.
+2. Fix inaccurate text. Add one contrasting example that shows when the result
+   should differ.
+3. Set truthful status.
+4. Put executable proof in the smallest component responsible for the
+   behavior.
+5. Deliberately reintroduce the named bug or remove its protection. Confirm the
+   linked evidence fails.
+6. Link unfinished work to an issue.
 
-Whenever the user says that behavior is wrong, incomplete, context-dependent, or easily misinterpreted:
+Never leave the correction only in chat, a PR, or a test name.
 
-1. Identify the distinction the user introduced.
-2. Find the canonical feature and `Rule` that own it.
-3. Update an existing scenario or add contrastive scenarios that separate the cases.
-4. Mark the scenario status truthfully.
-5. Add or update executable evidence at the correct test layer.
-6. Prove the evidence would fail if the named mechanism or distinction were removed.
-7. Link active implementation work to a GitHub issue without turning the feature corpus into a task list.
-
-Do this as part of the same work. Do not leave the nuance only in chat, a PR description, or a test name.
-
-## Where to start
+## Load only what applies
 
 | Need | Read |
 |---|---|
-| Capture a correction or nuanced behavior | [`behavior-specification.md`](behavior-specification.md) |
-| Record status, evidence, and falsifiers | [`evidence-and-traceability.md`](evidence-and-traceability.md) |
-| Decide which crate or suite owns the proof | [`test-placement.md`](test-placement.md) |
-| Test routing, acquisition, source, account, or evidence context | [`routing-and-context.md`](routing-and-context.md) |
-| Test restart, timing, partial failure, ACK ambiguity, or boundedness | [`distributed-systems.md`](distributed-systems.md) |
-| Follow the expected workflow while implementing | [`agent-development-workflow.md`](agent-development-workflow.md) |
-| Review a test or behavior change | [`review-checklist.md`](review-checklist.md) |
+| Feature meaning, metadata, or corrections | [`behavior-specification.md`](behavior-specification.md) |
+| Status, test links, or deliberate-break checks | [`evidence-and-traceability.md`](evidence-and-traceability.md) |
+| Where a test belongs | [`test-placement.md`](test-placement.md) |
+| Routing, identity, source, or request context | [`routing-and-context.md`](routing-and-context.md) |
+| Restart, faults, timing, ambiguity | [`distributed-systems.md`](distributed-systems.md) |
+| Final review | [`review-checklist.md`](review-checklist.md) |
 
-## Test-layer decision table
+## Done
 
-| Claim | Primary proof |
-|---|---|
-| Pure value, parser, codec, or local state transition | Unit or table-driven test in the owning crate |
-| Invariant over a large input space | Property, model, or differential test in the owning crate |
-| Persistence or reconstruction guarantee | Store/owner integration test with close and reopen |
-| Behavior spanning mechanisms but owned by the Rust product facade | `crates/nmp/tests/` facade integration test |
-| High-value cross-layer public promise worth reading as a capstone | `@acceptance` feature scenario driven through `nmp` |
-| Cross-language semantic or byte equivalence | `nmp-parity` plus native SDK tests |
-| Public-network/provider compatibility | Opt-in live probe |
-| Timing, retry, reordering, partial failure, or crash interleaving | Deterministic fault/schedule or state-machine test |
-
-A behavior can require several proof layers. Prefer one structural proof at the owning mechanism and one public capstone when the product-level consequence is important. Do not reproduce the same integration scenario in every crate it touches.
-
-## Canonical responsibilities
-
-| Surface | Owns |
-|---|---|
-| Feature files | Behavioral meaning and discriminating examples |
-| Executable tests | Evidence that current code satisfies the behavior |
-| GitHub issues | Temporary implementation, repair, or evidence work |
-| Architecture/design docs | Why the system is structured as it is |
-| Bug-class ledger | Class-level closure claim, structural exclusion, and proof summary |
-| PR description | What changed in this change set |
-
-Do not make any one surface impersonate the others.
-
-## Feature-corpus organization
-
-Organize features by stable behavioral domain, not by Rust crate:
-
-```text
-features/
-  acquisition/
-  routing/
-  identity/
-  writes/
-  evidence/
-  limits/
-  protocol-composition/
-  lifecycle/
-  reset/
-  must-never/
-```
-
-Crates may split or merge. The behavioral distinctions should survive those refactors.
-
-## Definition of done for a behavioral change
-
-A behavioral change is not complete until:
-
-- the canonical English-language behavior is accurate;
-- its status is truthful;
-- executable evidence exists at the correct layer or an issue records the missing work;
-- the old or incorrect behavior is falsified;
-- fixtures do not preload the claimed result;
-- relevant restart, context, platform, and failure dimensions have been considered;
-- all evidence locators still resolve and pass.
+- Feature meaning and status are accurate.
+- Executable proof sits with the component responsible for the behavior and
+  fails when the named bug is reintroduced.
+- Test setup provides inputs instead of inserting the expected result.
+- Tests cover every request context, restart, failure, and platform condition
+  needed by the claim.
+- Every evidence locator resolves to a real check in its required CI job.
+- All required checks pass. A live check supplements repeatable evidence; it
+  does not replace it.
+- Remaining work has one issue.
