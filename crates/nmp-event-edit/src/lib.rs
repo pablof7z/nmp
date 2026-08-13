@@ -28,7 +28,10 @@ pub use plan::{
     PartitionedTagEdit, PlanError, TagEdit, TagInsertion, TagItemPattern, TagItemSelector,
     TagRowPattern,
 };
-pub use tags::{PartitionedTagEditOutcome, TagApplyError, TagEditOutcome};
+pub use tags::{
+    ConsumingPartitionedTagEditOutcome, ConsumingTagEditOutcome, PartitionedTagEditOutcome,
+    TagApplyError, TagEditOutcome,
+};
 
 #[cfg(any(test, feature = "bench-instrumentation"))]
 pub use json::JsonApplyMetrics;

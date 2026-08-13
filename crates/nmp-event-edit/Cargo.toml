@@ -16,3 +16,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+static_assertions.workspace = true
