@@ -55,8 +55,12 @@ Android artifact qualification; see [Controlled relay identity UI](36-relay-ui.m
 
 The Android AAR is built from the same app `.nmp.toml` capability declaration as Swift and
 desktop JVM. It packages only the selected `com.nmp.sdk` wrappers and matching
-UniFFI contract, with API 26 and exact `arm64-v8a`/`x86_64` slices. This is a
-packaging/consumption qualification, not yet a running-engine claim.
+UniFFI contract, with API 26 and exact `arm64-v8a`/`x86_64` slices. A clean
+external app resolves that Maven artifact and runs the public facade on a
+pinned API-35 x86_64 emulator. The governed test covers one controlled live
+observation, scoped pre-connect failure and recovery, structured cancellation,
+app-private fresh-process cache reopen, deterministic close, wrong-ABI refusal,
+and the declared 64-collector latency/thread/CPU/native-heap bounds.
 
 The supported Android product must still include a standard Keystore-backed
 provider and prove process-death receipt/signer reattachment. Newest-state
@@ -67,8 +71,8 @@ explicit plaintext sandbox persistence. It provides the same restore/clear
 semantics as Swift and the same warning: it is not Keystore or a secure Android
 production provider.
 
-Android emulator runtime, lifecycle, Compose capstone, Keystore, and NIP-55
-execution remain open work (#832–#836).
+Android configuration lifecycle, Compose capstone, Keystore, NIP-55 execution,
+and physical-arm64 qualification remain open work (#833–#836).
 
 ## Other platforms
 

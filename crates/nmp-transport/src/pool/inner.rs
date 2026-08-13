@@ -15,7 +15,7 @@
 //! worker — the pool already knows the outcome the instant it decides to
 //! tear a slot down, so there is nothing to learn from an async ack.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -303,12 +303,22 @@ impl PoolInner {
     }
 
     fn retire_worker(&mut self, slot: u32, generation: u64, worker: WorkerHandle) {
+        self.retire_worker_with_frames(slot, generation, worker, Vec::new());
+    }
+
+    fn retire_worker_with_frames(
+        &mut self,
+        slot: u32,
+        generation: u64,
+        worker: WorkerHandle,
+        frames: Vec<String>,
+    ) {
         let worker_id = worker_id_of(generation);
         let request = RetireRequest {
             slot,
             generation,
             worker_id,
-            join: worker.retire(),
+            join: worker.retire_with_frames(frames),
         };
         self.retiring_worker_ids.insert(worker_id);
         let Some(retire_tx) = self.retire_tx.as_ref() else {
@@ -526,13 +536,12 @@ impl PoolInner {
         })
     }
 
-    /// Release every live slot not present in the caller-owned exact demand
-    /// set. Handles are snapshotted first so [`Self::close`] remains the one
-    /// generation-safe mutation door and produces the ordinary synchronous
-    /// disconnect fact for every released worker.
+    /// Release obsolete sessions, flushing the caller-supplied terminal text
+    /// frames on the exact still-connected generation before retirement.
     pub(super) fn close_unrequired_sessions(
         &mut self,
         required: &BTreeSet<RelaySessionKey>,
+        mut frames: BTreeMap<RelaySessionKey, Vec<String>>,
     ) -> Vec<PoolEvent> {
         let obsolete: Vec<RelayHandle> = self
             .slots
@@ -546,7 +555,23 @@ impl PoolInner {
             .collect();
         obsolete
             .into_iter()
-            .filter_map(|handle| self.close(handle))
+            .filter_map(|handle| {
+                let state = self.slots.get_mut(handle.slot as usize)?;
+                if state.generation != handle.generation {
+                    return None;
+                }
+                let worker = state.worker.take()?;
+                let generation = state.generation;
+                let session = state.session.clone();
+                state.health.state = ConnState::Disconnected;
+                let terminal = frames.remove(&session).unwrap_or_default();
+                self.retire_worker_with_frames(handle.slot, generation, worker, terminal);
+                Some(PoolEvent::Disconnected {
+                    handle,
+                    session,
+                    reason: DisconnectReason::Closed,
+                })
+            })
             .collect()
     }
 

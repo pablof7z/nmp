@@ -155,7 +155,10 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - 🧪 Swift SDK — apps prepare one Cargo-resolved, feature-selected local package; public-wrapper behavior is qualified by macOS-host XCTest. iOS runtime and physical-device qualification remain separate.
 - 🧪 Kotlin SDK — apps prepare the same feature-selected desktop-JVM module or
   Android AAR. The AAR has exact API-26 `arm64-v8a`/`x86_64` packaging and
-  clean-consumer qualification; emulator/runtime/lifecycle proof remains #832–#833.
+  clean-consumer qualification. Its public facade is exercised by an external
+  app on a pinned API-35 emulator, including controlled live/offline recovery,
+  app-private restart, cancellation, close, wrong-ABI refusal, and bounded
+  64-collector performance. Configuration lifecycle proof remains #833.
 
 ## Status / maturity
 
@@ -208,7 +211,7 @@ Built for **bounded memory and streaming — never first-N truncation.** Measure
 
 ## Platforms in one line
 
-Rust core is the truth · **Swift** behavior qualified on the macOS host (full Apple slices packaged on master; iOS runtime pending) · **Kotlin** desktop-JVM plus a source-reproducible feature-selected Android AAR (runtime qualification pending).
+Rust core is the truth · **Swift** behavior qualified on the macOS host (full Apple slices packaged on master; iOS runtime pending) · **Kotlin** desktop-JVM plus a source-reproducible feature-selected Android AAR qualified on a pinned API-35 emulator.
 
 ## Roadmap / where it's heading
 

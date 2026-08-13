@@ -129,6 +129,8 @@ public enum SourceStatus: Sendable, Hashable {
     case disconnected
     case awaitingAuth(phase: AuthPhase)
     case authDenied
+    /// This exact source cannot currently acquire its planned work: worker
+    /// open, request placement, or AUTH failed. Never a global sync verdict.
     case error
 
     init(_ ffi: FfiSourceStatus) {
