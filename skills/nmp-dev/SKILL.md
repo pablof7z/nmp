@@ -1,60 +1,77 @@
 ---
 name: nmp-dev
-description: Develop, fix, refactor, review, or test the NMP repository itself across Rust crates, the supported facade, FFI, Swift and Kotlin projections, feature/BDD suites, persistence and fault tests, documentation, and repository tooling. Use when work changes this repository or evaluates its internal design and evidence. Do not use for an application that merely consumes NMP; use the separate nmp skill.
+description: Develop, review, test, or refactor NMP itself. Always use this skill when working in the NMP repository. For apps consuming NMP, use the separate nmp skill.
 ---
 
-# NMP repository development
+# NMP development
 
-Treat the root `AGENTS.md` as the canonical contributor guide. Use this skill to route internal work and load detailed testing guidance; do not let it override current repository docs, GitHub issues, or source.
+`AGENTS.md` is canonical. Repository docs, issues, and source outrank this
+router.
 
-## Establish the work boundary
+## Start
 
-1. Find the repository root and read `AGENTS.md` completely.
-2. Follow its cold-start order before proposing architecture or changing behavior.
-3. Find the owning GitHub issue. If no issue captures the consequence and honest rationale, file it before editing.
-4. Work on an issue-linked branch in an isolated worktree. Inspect its status first and preserve unrelated changes.
-5. Read the current owning design document, bug-class ledger row, known gap, feature rule, and tests that govern the change. Treat plans as temporary work artifacts, not architecture authority.
+1. Read `AGENTS.md` and its cold-start sources.
+2. Find or file the issue before editing.
+3. Use an issue-linked branch in an isolated worktree.
+4. Read the owning design, gap, feature rule, and tests.
 
-For read-only explanation or review, inspect the same authorities but do not create repository or GitHub state unless the user also asked for a change.
+For behavior, tests, or user corrections, start with [NMP
+testing](references/testing/INDEX.md).
 
-## Preserve NMP's architecture
+## Communicate plainly
 
-- Keep the app-facing model to a live query and a write intent. Diagnostics are proof over those nouns, not a third command surface.
-- For semantic capability surfaces, extend the ordinary `LiveQuery` and `WriteIntent`. Capability helpers may provide typed delivered values and composable `Binding` fragments, but must preserve reactive identity and each nested demand's source, access, cache, and freshness context. Do not introduce public row-projection boilerplate, capability-specific observation or receipt lifecycles, or app-managed observation waterfalls.
-- Prefer a type or API shape that excludes the bad path plus a falsifier that proves the exclusion. Prose and review memory are not structural mechanisms.
-- Apply the standing conventions before surface work: remove replaced spellings in the same change, keep Bech32 at human boundaries, and do not invent protocol categories or repository jargon.
-- Run the Noun, Reachability, Bool-Lifecycle, and Destructive-API gates by eye. Run cross-SDK parity and falsifier-honesty mechanically when the affected surface requires them.
-- Fix governed behavior end to end across the Rust facade, persistence or diagnostics, FFI, Swift, Kotlin, docs, and falsifiers. Do not preserve a compatibility path.
-- Keep `README.md`, `docs/known-gaps.md`, and `docs/bug-class-ledger.md` truthful. Change a gap or ledger status only when the claimed implementation and proof actually changed.
+- Lead with the concrete behavior and its consequence. Add exact symbols, test
+  names, and repository terms only after the explanation.
+- Use the words the user used when they are accurate. Define a necessary NMP or
+  Nostr term the first time it appears.
+- Do not compress several rules into one list of abstract nouns. Use separate
+  sentences or questions so each rule can be understood and challenged.
+- Do not make a narrow observation sound reusable by giving it a broad name.
+  State where it applies and where it does not.
 
-## Route testing and behavioral work
+## Guardrails
 
-Start with [NMP testing](references/testing/INDEX.md), then load only the references needed for the claim:
+- Keep the public model to a live query and a write intent.
+- Add read capabilities through `LiveQuery` and write capabilities through
+  `WriteIntent`. Helpers may return typed values or help build those requests.
+- When one live request produces another, NMP must remember that relationship
+  and update the produced request when its input changes. Keep the identity,
+  source, access rules, cache rules, cached results, and freshness of each
+  request separate. Do not reuse any of them for a different request.
+- Do not make apps manage internal rows or combine several observations to get
+  one capability. Do not create a separate observation or receipt lifecycle
+  for one capability.
+- Make invalid use impossible through the API. Add a test that fails if that
+  protection is removed.
+- Apply every standing convention in `AGENTS.md`, including [no hidden runtime
+  flags](../../docs/internals/conventions/no-hidden-runtime-feature-flags.md).
+- Run all six architecture gates in proportion to the diff.
+- When behavior shared across layers changes, update every affected layer in
+  the same change: Rust, storage, diagnostics, FFI, Swift, Kotlin, docs, tests,
+  validation scripts, and evidence metadata. Do not keep the old path for
+  compatibility.
+- Keep `README.md`, `docs/known-gaps.md`, and the bug-class ledger truthful.
 
-- Preserve user corrections, contextual distinctions, and negative guarantees in the feature corpus: [Behavioral specification](references/testing/behavior-specification.md).
-- Map truthful status, exact evidence, and a mechanism-disable falsifier: [Evidence and traceability](references/testing/evidence-and-traceability.md).
-- Put executable proof at the narrowest stable contract owner and add a facade capstone only when the public consequence needs it: [Test placement](references/testing/test-placement.md).
-- Make identity, source, relay role, access context, request scope, lifecycle, and write phase explicit for acquisition work: [Routing and context testing](references/testing/routing-and-context.md).
-- Use restart, controlled schedules, fault points, ambiguity, independent witnesses, and reproducible artifacts for distributed claims: [Distributed-systems testing](references/testing/distributed-systems.md).
-- Follow the red-to-green implementation sequence and status-promotion discipline: [Agent development workflow](references/testing/agent-development-workflow.md).
-- Apply the final behavioral, fixture, evidence, distributed, and test-architecture checks: [Testing review checklist](references/testing/review-checklist.md).
+## Execute
 
-The testing references describe how to develop and review the corpus. Before applying their examples or metadata, inspect `docs/bdd/000-bdd-approach.md`, the current `features/` tree, and `crates/nmp-bdd`. If current practice differs, keep status honest and use the owning issue to reconcile it; never infer that a scenario or platform guarantee is already built.
+1. State what behavior is wrong and identify the smallest part of NMP
+   responsible for it.
+2. Before changing code, show a test that fails. If the behavior already works
+   and only proof is missing, temporarily remove its protection and confirm the
+   new test catches the break.
+3. In test setup, provide the inputs that should produce the result. Do not
+   insert the result itself.
+4. Fix the shared source of the problem. Update every affected caller and
+   platform layer in the same change.
+5. Run the test that demonstrates the bug, tests for changed crates, and any
+   public-API, restart, fault, parity, native, or repository checks the claim
+   depends on.
+6. Verify the running path for runtime claims. Compilation is not execution.
 
-## Execute and prove the change
+## Finish
 
-1. Identify the narrowest owner of the guarantee before choosing files or test targets.
-2. Establish red evidence for a defect or new distinction. For already-correct behavior with missing proof, temporarily disable or invert the named mechanism and confirm the proof fails for the intended reason.
-3. Inspect fixtures for answer injection. Stage causes and observe supported behavior or an independent external witness.
-4. Implement the structural mechanism. Update every governed caller and projection in the same change.
-5. Run the focused falsifier, then touched-crate tests, facade/BDD capstones, restart or fault tests, parity/native suites, and repository gates in proportion to the claim.
-6. Verify the running consumer or system path when the change claims runtime behavior. Compilation is not execution evidence.
-
-Do not substitute a workspace-wide green run for proving that the intended falsifier turns red and then green.
-
-## Finish and hand off
-
-- Review the diff against all six architecture gates and the issue scope.
-- Report the exact commands run and distinguish deterministic proof from live or platform evidence not run.
-- Close the issue only when its work is complete. Otherwise leave a GitHub issue or PR handoff note with the exact branch, worktree, blocker, and next step.
-- If a worktree, branch, blocker, or unmerged PR remains, make that external handoff before ending the session.
+- Review the diff against the issue and six gates.
+- Report the commands run, what they proved, and any live or platform checks
+  not run.
+- Close completed issues. Otherwise post branch, worktree, blocker, and next
+  step on the issue or PR.

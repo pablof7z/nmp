@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Canonical contributor guide for the NMP repo. Every rule here applies to agents and humans alike. Terse on purpose — the durable understanding lives in `docs/`, the tactical state lives in GitHub Issues. Execution plans are temporal work artifacts, not architecture authority; move durable decisions into the current owning document and let git preserve the plan's history.
+Canonical contributor guide for the NMP repo. Every rule here applies to agents and humans alike. Keep it concise and plain: durable understanding lives in `docs/`, and temporary work lives in GitHub Issues. Execution plans are temporary work artifacts, not architecture authority; move lasting decisions into the document that owns the subject and let git preserve the plan's history.
 
 ## Cold-start reading order
 
@@ -30,11 +30,12 @@ The point is that six months from now the tracker answers *why did we do this*, 
 
 ## Standing conventions — read before proposing a surface change
 
-Three rules that are not negotiable and are violated most often in *proposals*, not in code. Full reasoning, worked examples, and the incidents behind each live in `docs/internals/conventions/`.
+Four rules that are not negotiable and are violated most often in *proposals*, not in code. Full reasoning, worked examples, and the incidents behind each live in `docs/internals/conventions/`.
 
 1. **No backwards compatibility, ever** (`conventions/no-backwards-compatibility.md`). A replaced spelling is DELETED in the same change — no alias, no deprecation, no wrapper, no "keep both until X". **NMP has no external consumers**: every caller is in this workspace or a sibling that moves with it, so compatibility is a tax paid to strangers who do not exist. Where compatibility and architectural cleanliness conflict, **clean architecture wins absolutely**. Do not offer "replace vs wrap" as an option, and do not weigh breaking Swift/Kotlin/snapshots as an argument against a better design.
 2. **Bech32 only at the user boundary** (`conventions/bech32-boundary.md`). `npub`/`nevent`/`naddr` exist to show something to a human or to accept what a human pasted. Everything internal — parameters, fields, FFI arguments, protocol-crate signatures — uses the decoded type (`PublicKey`, `EventId`). An app decodes at its own boundary and hands NMP a key.
 3. **No invented categories, no repo jargon** (`conventions/naming-no-invented-categories.md`). Do not name a category the protocol does not have, and do not let internal shorthand harden into vocabulary. The worked example: "foreign kinds" described a category that does not exist in Nostr, hardened across 13 sites, and became load-bearing in a CI gate before it was removed (#960).
+4. **No hidden runtime feature flags** (`conventions/no-hidden-runtime-feature-flags.md`). Requested behavior runs on the normal path; if it is not ready, it is not ready to merge. Runtime gates require an explicit staged/optional product decision. Cargo features and real configuration are unaffected.
 
 ## Architecture review gates
 

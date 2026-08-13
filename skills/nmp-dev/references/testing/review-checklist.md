@@ -1,77 +1,70 @@
 # Testing review checklist
 
-Use this checklist for behavioral changes, test additions, scenario edits, and acceptance-harness work.
+Use only relevant sections.
 
-## Behavioral memory
+## Meaning
 
-- [ ] Did the user introduce a correction, contextual distinction, counterexample, forbidden consequence, or durability rule?
-- [ ] Is that nuance preserved in the canonical feature corpus?
-- [ ] Does the feature live under the behavioral domain rather than the edited crate?
-- [ ] Was wrong text corrected in place instead of contradicted by a new appendix or feature?
-- [ ] Do contrastive scenarios show both what changes and what must remain unchanged?
-- [ ] Does each scenario have one clear promise?
-- [ ] Is the prose free of unnecessary private Rust/table/helper vocabulary?
+- [ ] User corrections and contrasts are in the owning feature/`Rule`.
+- [ ] Each scenario states one product promise using app or Nostr terms.
+- [ ] Status and metadata match reality. Unfinished work links one open issue.
+- [ ] Requested behavior runs normally without an unrequested runtime flag.
 
-## Metadata and status
+## Evidence
 
-- [ ] Is `nmp:id` unique and stable?
-- [ ] Is status exactly `built`, `specified`, or `known-violation`?
-- [ ] Does every `built` scenario have evidence and a falsifier?
-- [ ] Does every `specified` scenario name the exact gap and issue?
-- [ ] Does every `known-violation` scenario link the repair issue?
-- [ ] Is every `@acceptance` scenario `built`?
-- [ ] Are evidence locators greppable and current?
+- [ ] Each executable check sits with the smallest stable component responsible
+      for the behavior.
+- [ ] Reintroducing the named bug or removing its protection makes the linked
+      evidence fail.
+- [ ] Rules across many inputs or operation orders use property or model tests.
+- [ ] Public-API and native-platform tests are kept only when they prove an
+      additional result.
+- [ ] Every non-live evidence locator names one enabled test or validation
+      script in required CI.
+- [ ] Every live locator names one enabled supplemental live job.
 
-## Evidence quality
+## Fixtures
 
-- [ ] Is the proof located with the narrowest stable contract that owns the guarantee?
-- [ ] Does the proof distinguish the scenario from its contrasting cases?
-- [ ] Did the test fail before the fix or under the stated mechanism-disable falsifier?
-- [ ] Could the named defect still exist while the test stays green?
-- [ ] Is a broad state space handled by property/model testing rather than manual examples?
-- [ ] Is there a facade capstone where the cross-component public consequence matters?
-- [ ] Are platform/native proofs present when the contract crosses FFI or platform lifecycle?
+- [ ] Setup provides the inputs instead of inserting the expected result.
+- [ ] Public claims use public API output or an independent witness, not private
+      state.
+- [ ] The test controls its build, identities, environment, clock, ports, and
+      processes, then proves cleanup.
 
-## Fixture truthfulness
+## Request context and distributed behavior
 
-- [ ] Does setup stage real inputs rather than the derived result?
-- [ ] For discovery, is the route absent initially and learned from the intended protocol fact?
-- [ ] For durability, is state destroyed and reopened rather than merely read from the database?
-- [ ] For network effects, is there an independent relay/provider witness where practical?
-- [ ] Does the test avoid using a private handle to drive or observe a public facade claim?
-- [ ] Are exact binary/build, identity, environment, and fixture ownership controlled?
+- [ ] The test says whether the request was given directly, follows changing
+      state, or was produced from another request.
+- [ ] The test states whose request it is and where each source came from.
+- [ ] The job of each relay is clear: read, write, index, host, or deliver.
+- [ ] Public or authenticated access, the account, and the session are explicit.
+- [ ] The exact filter and range that produced each observation are clear.
+- [ ] Caller, engine, and route limits remain separate, including the size of
+      each request chunk and any known missing results.
+- [ ] Reconfiguration, reconnection, and restart affect only the requests that
+      depend on them.
+- [ ] Cached data, requested responses, EOSE, unavailable sources, limits, and
+      known missing results belong only to the request that produced them.
+- [ ] Selecting a relay, contacting it, receiving rows, and receiving EOSE are
+      tested as different facts.
+- [ ] One relay finishing does not mark the whole request complete.
+- [ ] For writes, acceptance, signer wait, signature, delivery attempt, relay
+      outcome, and unresolved outcome are tested as different facts.
+- [ ] Lost acknowledgements preserve uncertainty durably when the outcome
+      cannot be known.
+- [ ] The test covers every relevant restart, crash, operation order, duplicate,
+      reconnect, and stale response.
+- [ ] Failure output records a replay command and removes secrets.
 
-## Routing and evidence context
+## Architecture and completion
 
-- [ ] Are literal, reactive, and derived demand distinguished?
-- [ ] Are explicit and default/frozen identities distinguished?
-- [ ] Are source provenance and relay roles explicit?
-- [ ] Are account, AUTH, session/capability epoch, filter/range, and limit scopes considered?
-- [ ] Is one source's EOSE kept separate from global completion?
-- [ ] Are empty rows kept separate from unknown, unavailable, limited, or shortfall states?
-- [ ] Are caller limits kept separate from engine-imposed caps?
-- [ ] Are selected sources kept separate from actual contacts and outcomes?
-
-## Distributed behavior
-
-- [ ] Is the claim classified as safety, liveness, durability, isolation, truthfulness, boundedness, or idempotence?
-- [ ] Are relevant crash points, reordering, duplication, reconnect, and stale-response schedules tested?
-- [ ] Is retry behavior safe under ACK ambiguity?
-- [ ] Are waits bounded by observable conditions rather than arbitrary sleeps?
-- [ ] Are randomized schedules replayable by seed and operation log?
-- [ ] Are failure artifacts retained and secrets scrubbed?
-- [ ] Does teardown prove no process, thread, port, file, or environment leakage?
-
-## Test architecture
-
-- [ ] Is the feature corpus acting as behavioral memory rather than a duplicate project plan?
-- [ ] Is GitHub still the owner of temporary implementation work?
-- [ ] Are mechanism tests kept in their owning crates?
-- [ ] Does the acceptance layer primarily depend on `nmp`, `nmp-test-support`, and external witnesses?
-- [ ] Are direct mechanism dependencies narrowly justified rather than used to bypass the facade?
-- [ ] Has redundant shell/Cucumber/Rust evidence been removed after equivalent coverage is proven?
-- [ ] Does CI expose acceptance, fault/persistence, parity/native, and live-probe roles clearly?
-
-## Final question
-
-- [ ] Would a future agent reading only the feature rule, scenarios, and evidence pointers understand the exact nuance the user established and know how to avoid reintroducing the wrong behavior?
+- [ ] Feature files describe behavior, issues track unfinished work, design docs
+      explain architecture, and tests provide proof. None duplicates another.
+- [ ] Tests use existing targets when possible. Redundant harnesses and duplicate
+      tests or evidence locators are removed.
+- [ ] The focused check, changed-crate tests, and required public-API or fault
+      checks pass.
+- [ ] Required parity and native-platform tests pass.
+- [ ] Required repository checks pass.
+- [ ] Unrun live or platform checks are stated.
+- [ ] A future agent can recover the exact distinction, linked test, and
+      deliberate-break check from feature metadata without reading chat.
