@@ -32,13 +32,13 @@ use super::store_bench::{duration_ns, nearest_rank};
 use super::{binary_event, StoreBenchProcessCounters};
 
 const PACKED_SEGMENTS: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("packed_postings_segments_v2");
+    TableDefinition::new("packed_postings_segments");
 const PACKED_DICTIONARIES: TableDefinition<u64, &[u8]> =
     TableDefinition::new("packed_postings_dictionaries");
 const PACKED_RUN_META: TableDefinition<u64, &[u8]> =
     TableDefinition::new("packed_postings_run_meta");
 const PACKED_DEAD_KEYS: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("packed_postings_dead_keys_v2");
+    TableDefinition::new("packed_postings_dead_keys");
 const FAMILY_COUNT: usize = 4;
 const PACKED_REDB_CACHE_BYTES: usize = 16 * 1_024 * 1_024;
 const FJALL_CACHE_BYTES: u64 = 16 * 1_024 * 1_024;
@@ -456,10 +456,10 @@ impl FjallKeyspaces {
             observations: open("packed_observations")?,
             relays: open("packed_relays")?,
             relay_ids: open("packed_relay_ids")?,
-            segments: open("packed_segments_v2")?,
+            segments: open("packed_segments")?,
             dictionaries: open("packed_dictionaries")?,
             run_meta: open("packed_run_meta")?,
-            dead_keys: open("packed_dead_keys_v2")?,
+            dead_keys: open("packed_dead_keys")?,
         })
     }
 }
