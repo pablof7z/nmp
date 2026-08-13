@@ -165,7 +165,7 @@ async fn receipt_acked_by(w: &mut NmpWorld, relay: String) {
     assert!(
         w.receipt_eventually(|seen| seen
             .iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay, state: RelayState::Published } if *relay == url))),
+            .any(|s| matches!(s, WriteFact::Relay { relay, state: RelayState::Published, .. } if *relay == url))),
         "expected the receipt to report acked by {relay:?}; saw {:?}",
         w.receipt_statuses()
     );
@@ -177,7 +177,7 @@ async fn receipt_rejected_by(w: &mut NmpWorld, relay: String) {
     assert!(
         w.receipt_eventually(|seen| seen
             .iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if *relay == url))),
+            .any(|s| matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. }, .. } if *relay == url))),
         "expected the receipt to report rejected by {relay:?}; saw {:?}",
         w.receipt_statuses()
     );

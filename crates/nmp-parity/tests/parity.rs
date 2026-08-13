@@ -225,15 +225,18 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
     let relay = nostr::RelayUrl::parse("wss://receipt-parity.example").unwrap();
     let pubkey = nostr::Keys::generate().public_key;
     let awaited = nostr::Keys::generate().public_key;
+    let relay_event_id = nostr::EventId::from_slice(&[0x7c; 32]).unwrap();
     let expected_id = nostr::EventId::from_slice(&[0x5a; 32]).unwrap();
     let actual_id = nostr::EventId::from_slice(&[0x6b; 32]).unwrap();
     let cases = [
         (
             WriteFact::Relay {
+                event_id: relay_event_id,
                 relay: relay.clone(),
                 state: RelayState::Waiting(RelayWaiting::NotConnected),
             },
             FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
                 relay: relay.to_string(),
                 state: FfiRelayState::Waiting {
                     waiting: FfiRelayWaiting::NotConnected,
@@ -242,10 +245,12 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
         ),
         (
             WriteFact::Relay {
+                event_id: relay_event_id,
                 relay: relay.clone(),
                 state: RelayState::Waiting(RelayWaiting::NeedsAuth),
             },
             FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
                 relay: relay.to_string(),
                 state: FfiRelayState::Waiting {
                     waiting: FfiRelayWaiting::NeedsAuth,
@@ -254,6 +259,7 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
         ),
         (
             WriteFact::Relay {
+                event_id: relay_event_id,
                 relay: relay.clone(),
                 state: RelayState::AuthFailed {
                     pubkey,
@@ -262,6 +268,7 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
                 },
             },
             FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
                 relay: relay.to_string(),
                 state: FfiRelayState::AuthFailed {
                     pubkey: pubkey.to_hex(),
@@ -272,6 +279,7 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
         ),
         (
             WriteFact::Relay {
+                event_id: relay_event_id,
                 relay: relay.clone(),
                 state: RelayState::Waiting(RelayWaiting::BackingOff {
                     attempt: 7,
@@ -281,6 +289,7 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
                 }),
             },
             FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
                 relay: relay.to_string(),
                 state: FfiRelayState::Waiting {
                     waiting: FfiRelayWaiting::BackingOff {
@@ -294,12 +303,14 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
         ),
         (
             WriteFact::Relay {
+                event_id: relay_event_id,
                 relay: relay.clone(),
                 state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                     detail: "attempt log stalled".into(),
                 }),
             },
             FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
                 relay: relay.to_string(),
                 state: FfiRelayState::Waiting {
                     waiting: FfiRelayWaiting::PersistenceStalled {
@@ -310,6 +321,7 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
         ),
         (
             WriteFact::Relay {
+                event_id: relay_event_id,
                 relay: relay.clone(),
                 state: RelayState::Sent {
                     attempt: 9,
@@ -317,6 +329,7 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
                 },
             },
             FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
                 relay: relay.to_string(),
                 state: FfiRelayState::Sent {
                     attempt: 9,
@@ -326,10 +339,12 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
         ),
         (
             WriteFact::Relay {
+                event_id: relay_event_id,
                 relay: relay.clone(),
                 state: RelayState::GaveUp,
             },
             FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
                 relay: relay.to_string(),
                 state: FfiRelayState::GaveUp,
             },
@@ -956,7 +971,9 @@ fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
                 .map(PublicKey::to_hex)
                 .collect(),
         ),
-        WriteFact::Relay { relay: url, state } => {
+        WriteFact::Relay {
+            relay: url, state, ..
+        } => {
             let url = normalize_url(url.as_str(), relay);
             match state {
                 RelayState::Waiting(RelayWaiting::NotConnected) => {
@@ -1032,7 +1049,9 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
             awaiting_author_routes.sort();
             NormStatus::Destinations(relays, complete, awaiting_author_routes)
         }
-        FfiWriteFact::Relay { relay: url, state } => {
+        FfiWriteFact::Relay {
+            relay: url, state, ..
+        } => {
             let url = normalize_url(&url, relay);
             match state {
                 FfiRelayState::Waiting {

@@ -523,7 +523,7 @@ fn verify_publications(context: &Context, scope: &nip29::RelayScope) -> Result<(
     let mixed_statuses = wait_for_write(&mixed.statuses, context.settle, |statuses| {
         acked(statuses, &context.relay_a)
             && statuses.iter().any(
-                |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if relay == &context.relay_b),
+                |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Rejected { .. }, .. } if relay == &context.relay_b),
             )
     })?;
     println!("PROOF publish mixed_group={MIXED_GROUP} outcomes={mixed_statuses:?}");
@@ -907,7 +907,7 @@ fn wait_for_write(
 fn acked(statuses: &[WriteFact], relay: &RelayUrl) -> bool {
     statuses
         .iter()
-        .any(|status| matches!(status, WriteFact::Relay { relay: candidate, state: RelayState::Published } if candidate == relay))
+        .any(|status| matches!(status, WriteFact::Relay { relay: candidate, state: RelayState::Published, .. } if candidate == relay))
 }
 
 fn signal_ready(args: &Args) -> Result<(), String> {

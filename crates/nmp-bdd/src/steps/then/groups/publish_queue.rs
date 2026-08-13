@@ -44,6 +44,7 @@ pub(super) async fn published_delivered_to(w: &mut NmpWorld, relay: String) {
                 WriteFact::Relay {
                     relay,
                     state: RelayState::Sent { .. } | RelayState::Published,
+                    ..
                 } if *relay == url
             )
         })
