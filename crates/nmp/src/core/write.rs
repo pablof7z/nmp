@@ -713,7 +713,8 @@ impl<S: EventStore> EngineCore<S> {
                 // lane it has is trivially terminal, and closing on that
                 // would delete the exact obligation the queue rewriter is
                 // waiting to complete. Nothing auto-abandons.
-                pending.route_complete
+                !matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
+                    && pending.route_complete
                     && pending.route_blocked_relays.is_empty()
                     && pending.lane_projection.can_close()
             })
