@@ -13,7 +13,8 @@ require_commands cargo cp git mkdir mktemp python3 rm seq sleep swift || exit 2
 
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
-cargo build --locked -q -p nmp-cli -p nmp-test-support --bin outbox-routing-relay-harness
+cargo build --locked -q -p nmp-cli --bin nmp
+cargo build --locked -q -p nmp-test-support --bin outbox-routing-relay-harness
 nmp_cli="${CARGO_TARGET_DIR:-$repo_root/target}/debug/nmp"
 relay_harness="${CARGO_TARGET_DIR:-$repo_root/target}/debug/outbox-routing-relay-harness"
 scratch_parent=${NMP_OUTBOX_ROUTING_SCRATCH_PARENT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}
