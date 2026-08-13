@@ -26,8 +26,8 @@ use super::publish_queue_codec::{
 };
 use super::query::expiration_key;
 use super::schema::{
-    persist_err, PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_META,
-    SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS, SEMANTIC_RESOURCES,
+    persist_err, PUBLISH_QUEUE_CORRELATIONS, SEMANTIC_MATERIALIZATION_HIGH_WATER,
+    SEMANTIC_OPERATIONS, SEMANTIC_RESOURCES,
 };
 use super::semantic_edit_codec::{
     coordinate_key, decode_operation, decode_resource, encode_operation, encode_resource,
@@ -502,12 +502,8 @@ pub(super) fn accept(
         drop(high_water);
         drop(operations);
         drop(resources);
-        let mut meta = write_txn
-            .open_table(PUBLISH_QUEUE_META)
-            .map_err(persist_err)?;
-        let intent_id = alloc_intent_id_in_txn(&mut meta)?;
-        let receipt_id = alloc_receipt_id_in_txn(&mut meta)?;
-        drop(meta);
+        let intent_id = alloc_intent_id_in_txn(&mut ingest.publish_queue_meta)?;
+        let receipt_id = alloc_receipt_id_in_txn(&mut ingest.publish_queue_meta)?;
         let plan = match plan_accept(
             previous,
             materialization_high_water,
