@@ -1,4 +1,4 @@
-//! Store-owned corruption helpers for tests outside this crate.
+//! Store-owned corruption fixtures for tests outside this crate.
 //!
 //! Callers name a receipt, attempt prefix, route key, or intent. They do not
 //! name a Redb table.

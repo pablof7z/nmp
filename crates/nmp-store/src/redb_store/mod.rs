@@ -106,6 +106,8 @@ pub use store_bench::{
 };
 
 mod schema;
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[path = "testing_tests.rs"]
 pub mod testing;
 #[cfg(test)]
 use schema::*;
