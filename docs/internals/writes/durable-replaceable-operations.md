@@ -9,7 +9,7 @@ owns:
   - offline and multi-device replay of operations over source-qualified replaceable state
   - receipt, event-id, signature, routing, and relay-evidence truth across rematerialization
   - capability ownership of encoding, conflict, private-content, and migration policy
-  - the current high-level application-registered materializer candidate
+  - the body-complete custody boundary for configured capability materializers
 related:
   - docs/design/durable-write-signing-and-retry.md
   - docs/internals/writes/payload-and-replaceable-edits.md
@@ -20,8 +20,12 @@ related:
   - docs/known-gaps.md
 issues:
   - "#1380 — offline-safe semantic operations epic"
-  - "#1412 — application-registered materializer experiment"
+  - "#1382 — encrypted candidate preparation before custody"
+  - "#1412 — rejected bodyless materializer experiment"
   - "#1414 — this behavior specification"
+  - "#1432 — body-complete semantic operation acceptance"
+  - "#1433 — complete successor rematerialization"
+  - "#1434 — generation-qualified signing and delivery"
 ---
 
 # Durable operations for replaceable events
@@ -515,7 +519,7 @@ policy. “Always apply the local operation” is one policy; “refuse because 
 base field changed” is another. The generic store and publish scheduler cannot
 decide between them.
 
-### 4.6 A private addressable list: accepted before content is possible
+### 4.6 A private addressable list: required crypto completes before custody
 
 Assume an addressable list stores public items in tags and private items inside
 encrypted content. The app requests:
@@ -524,21 +528,21 @@ encrypted content. The app requests:
 private_list.add(pubkey X)
 ```
 
-NMP may be able to durably accept this operation while the required decryptor
-or encryption key is unavailable. At that point:
+This operation depends on the private entries. Before NMP takes custody, the
+configured capability validates the signed source, decrypts the relevant
+content, applies the operation, preserves public and private data under its
+rules, re-encrypts, and returns a complete unsigned body. NMP derives its event
+id before acceptance. If the required capability or crypto cannot complete
+that candidate, the call refuses typed before custody and leaves no receipt,
+intent, correlation, optimistic row, signer request, route, lane, or durable
+waiting state.
 
-- the receipt exists;
-- the operation bytes exist durably in the user's local store;
-- no complete event body exists;
-- no event id exists;
-- no signature request or relay attempt exists;
-- no malformed placeholder event is inserted into live queries.
-
-When the exact capability becomes available, it validates the signed source,
-decrypts the relevant content, applies the operation, preserves public and
-private data under its rules, re-encrypts, and returns a complete unsigned
-body. Only then does NMP derive an event id, expose a body-complete optimistic
-row, request a signature, and begin delivery.
+That rule does not make opaque encrypted content globally blocking. If the app
+instead performs a public-only edit whose meaning does not depend on private
+entries, the capability may preserve the exact ciphertext byte-for-byte and
+produce a complete candidate without requesting decryption. It must refuse
+before custody only when the requested operation actually requires unavailable
+private-state knowledge.
 
 The local database is already inside the user's device trust boundary. Durable
 plaintext operation data may be stored when restart replay requires it. This
@@ -605,7 +609,7 @@ For a replayable operation, acceptance must atomically record at least:
 - the source requirement or selected source-plan identity needed to determine
   what may be materialized;
 - the operation's logical time contribution;
-- either no current materialization or one complete current materialization;
+- one complete initial current materialization, including its event id;
 - the compact relationship between this receipt and any shared current
   materialization.
 
@@ -613,15 +617,16 @@ If this transaction fails, the write was not accepted. NMP must not emit a
 receipt that claims custody while keeping the only copy of the operation in
 memory.
 
-### 5.3 Bodyless acceptance is intentional
+### 5.3 Body-complete acceptance is mandatory
 
-A replayable operation can be valid even when no complete event can yet be
-constructed. Examples include unavailable private-content decryption, an
-unresolved source required by the capability's policy, or—under an architecture
-that uses separately supplied replay code—that implementation being absent.
+A replayable operation enters custody only after its configured capability has
+produced one complete unsigned event and NMP has derived its event id. Missing
+capability code, unresolved source evidence required for the initial candidate,
+required crypto unavailability, invalid output, or any other inability to
+construct that complete candidate is a typed pre-custody refusal with zero
+acceptance residue.
 
-The target behavior is to accept the durable operation and expose the precise
-reason materialization is waiting. It must not manufacture:
+The refusal must not manufacture:
 
 - a fake event id;
 - an all-zero or empty signature;
@@ -629,8 +634,10 @@ reason materialization is waiting. It must not manufacture:
 - a relay destination for bytes that do not exist;
 - a query row whose body is only a guess.
 
-This differs from an ordinary event waiting for a signer: that write already
-has a complete body and event id, so its optimistic row is valid and visible.
+An accepted semantic operation therefore begins in the same body-complete
+signature-pending condition as an ordinary unsigned event. Later source-driven
+work may replace it with a complete successor, but an accepted receipt never
+transitions to a bodyless state.
 
 ### 5.4 Ambiguous acceptance after a storage failure
 
@@ -650,19 +657,18 @@ NMP's live query is the app's ordinary read subscription. It observes the
 effective local event set, including locally accepted, body-complete writes.
 There is no separate optimistic callback or overlay.
 
-### 6.1 Content-pending is not signature-pending
+### 6.1 Every accepted operation has a complete event row
 
-The states are structurally different:
+Accepted operation state has two body-complete forms:
 
-1. **Content-pending operation** — accepted operation exists, but no complete
-   event body or event id exists yet.
-2. **Signature-pending materialization** — complete body and event id exist;
+1. **Signature-pending materialization** — complete body and event id exist;
    signature does not.
-3. **Signed materialization** — complete validated wire event exists and may
+2. **Signed materialization** — complete validated wire event exists and may
    be delivered.
 
-Only states 2 and 3 can appear as event rows in a live query. State 1 is
-observable through the receipt, not as a fake event.
+Both can appear as event rows in a live query. Candidate preparation before
+custody is not a receipt state and cannot create a row, event id, or placeholder
+signature.
 
 ### 6.2 What a signature-pending query row contains
 
@@ -702,7 +708,7 @@ immediately, but capability replay may succeed, wait, or refuse.
 | Replay result for B2 | Effective event shown by ordinary queries | Receipt/source evidence |
 |---|---|---|
 | Complete successor E2 | One logical transition from E1 to E2; B2 never flashes as the effective value | B2 remains source truth; E2 is the local materialization based on it |
-| Waiting for content, source prerequisite, or conditional replay implementation | Keep E1 as the last body-complete effective value rather than silently erase the accepted operation | State explicitly that E1 is based on a superseded source revision and rematerialization for B2 is waiting |
+| Successor preparation is still in flight or retryable required crypto is temporarily unavailable | Keep E1 as the last body-complete effective value rather than silently erase the accepted operation | State explicitly that E1 is based on a superseded source revision and complete successor preparation for B2 is pending |
 | Terminal capability refusal or operation failure | In one logical transition terminalize the affected operation, remove its contribution, and expose B2, qualified absence, or a successor built from remaining operations | Preserve the refusal and the exact source revision that caused it |
 | Operation already satisfied by B2 and no successor is required | Expose B2 or the byte-equivalent current result without manufacturing an event | Resolve the accepted operation truthfully without relay-publication claims |
 
@@ -1042,8 +1048,11 @@ Encryption changes when a body can exist, not the identity of the write noun.
 ### 10.1 Decrypt, encrypt, and sign are separate capabilities
 
 A device may be able to sign but not decrypt a source, decrypt but not sign,
-or perform a public-only edit without decrypting private content. Each wait or
-failure must name the actual missing capability.
+or perform a public-only edit without decrypting private content. Before initial
+custody, a missing crypto capability required by the operation produces typed
+zero-residue refusal; signer unavailability may park the already body-complete
+accepted event. Later successor preparation may wait or retry under its
+explicit bounded policy while the last complete generation remains current.
 
 The design must never treat “signer available” as proof that content can be
 materialized.
@@ -1071,8 +1080,11 @@ contents, it may preserve the exact opaque ciphertext byte-for-byte. This avoids
 blocking a safe public edit on unavailable decryption.
 
 If the operation's meaning depends on private contents—for example removing a
-private item—it remains content-pending or fails with a typed refusal. It must
-not guess that the item is absent.
+private item—and the required crypto is unavailable during the initial call,
+it fails with a typed pre-custody refusal. During later successor preparation,
+NMP retains the last complete generation until a complete successor can commit
+or the operation follows its typed terminal policy. It must never guess that
+the item is absent.
 
 ### 10.4 Scheme policy remains capability-specific
 
@@ -1163,15 +1175,16 @@ Matching only on coordinate is insufficient. A destination union is not
 automatically lossless when one operation's policy intentionally limits where
 its resulting state may be disclosed.
 
-### 11.3 Why `publish()` cannot permanently return one event id
+### 11.3 The acceptance event id is initial, not permanently current
 
-At acceptance time, a content-pending operation can have no event id. Later,
-one operation may move through E1 and E2. Conversely, two receipts may share
-E3. A mandatory `receipt.event_id` therefore encodes a false one-to-one
+Every accepted operation has an initial event id. Later, one operation may move
+through E1 and E2, while two receipts may share E3. A mandatory initial
+`receipt.event_id` is therefore truthful, but interpreting that field as the
+receipt's one permanent current event id would encode a false one-to-one
 relationship.
 
-The target receipt must instead expose event identity progressively, for
-example as facts equivalent to:
+The target receipt must retain its initial accepted event id and expose later
+event identity as generation-qualified facts equivalent to:
 
 ```text
 materialized E1
@@ -1225,21 +1238,24 @@ reported as stale; it cannot mutate current state.
 The same rule applies to decryption, encryption, route calculation, transport
 handoff, and relay responses.
 
-### 12.3 Missing signer is not content-pending
+### 12.3 Missing signer follows body-complete acceptance
 
 If E1 already exists but its signer does not, the receipt says it is waiting
 for the signer tied to E1's author. Matching live queries may see E1 as
 signature-pending.
 
-If no complete body exists, the receipt instead says why content materialization
-is waiting. Mixing these states would let an app believe it has a valid event
-id when it does not.
+If no complete initial body can be produced, NMP refuses before custody and
+there is no receipt to park. Mixing pre-custody candidate preparation with
+signer waiting would let an app believe NMP had accepted a valid event when it
+had not.
 
 ### 12.4 Signer and crypto outcomes
 
 | Outcome | Receipt behavior | Effective query behavior |
 |---|---|---|
-| Signer or required crypto capability temporarily absent | Remain open and name the exact missing capability | Keep the body-complete optimistic value when one exists; content-pending has no event row |
+| Signer temporarily absent after acceptance | Remain open and name the signer tied to the complete current event | Keep the body-complete signature-pending value |
+| Required crypto unavailable during initial candidate preparation | Typed pre-custody refusal; no receipt or other acceptance residue | No optimistic row |
+| Required crypto temporarily unavailable while preparing a source-driven successor | Keep the receipt open under the explicit bounded successor policy | Keep the last complete generation, marked against its retired source revision; never install a bodyless replacement |
 | Signer explicitly refuses this current materialization | Terminalize every operation whose only current publication depends on that refusal, unless capability policy supplies another valid path | Remove the refused materialization's local contribution in one logical transition and reveal qualified source state or a value rebuilt from remaining operations |
 | Returned signature or crypto result is invalid | Treat as typed capability failure, never as relay failure or success | Do not promote or mutate the current row; terminal compensation follows the same rule as explicit refusal if no retryable provider path remains |
 | Result is valid but names a retired materialization | Record or discard as stale according to diagnostics policy; do not terminalize the current operation | No query change |
@@ -1490,9 +1506,9 @@ cancellable only before signing. A signed write returns a typed refusal because
 the event may already have escaped the device.
 
 Replayable operations make the boundary more subtle. One materialization may
-serve several receipts, and an operation may be content-pending before signing
-exists. The target must define cancellation in terms of operation contribution,
-not merely “delete this event id.”
+serve several receipts, and later complete successors may retire an earlier
+event id. The target must define cancellation in terms of operation
+contribution, not merely “delete this event id.”
 
 When cancellation is still safe:
 
@@ -1550,7 +1566,7 @@ YAGNI applies: no state is added merely because it can be imagined.
 
 ---
 
-## 16. Restart and unavailable replay machinery
+## 16. Restart and replay configuration
 
 Durability matters most when the process disappears between phases.
 
@@ -1560,10 +1576,9 @@ For every active coordinate, recovery must reconstruct:
 
 - independent open receipt identities and correlation values;
 - the compact still-contributing operation program;
-- the exact versioned replay format and, only for an architecture using
-  separately supplied code, its exact implementation identity;
+- the exact versioned replay format and configured implementation identity;
 - selected source revision and source evidence needed by the plan;
-- either no current materialization or exactly one current materialization;
+- exactly one complete current materialization;
 - monotonically non-reused materialization identity;
 - exact signature, route, attempt, and relay facts for the current event;
 - bounded historical facts required for retired event ids.
@@ -1571,24 +1586,26 @@ For every active coordinate, recovery must reconstruct:
 Recovery of unchanged state must not rewrite it merely to rebuild in-memory
 ownership.
 
-### 16.2 Missing replay capability is a wait, not data loss
+### 16.2 Replay capability is required engine configuration
 
-If the chosen architecture depends on separately supplied capability code and
-that code is unavailable after restart, the receipt reports the exact missing
-capability and format. NMP retains the bytes. Restoring the matching
-implementation later wakes only matching work.
+When separately packaged capability code owns replay, the exact implementation
+and format needed by durable operations must be configured before the engine
+opens and resumes them. Missing or mismatched code is a typed startup or
+configuration failure; it is not a receipt state, does not create a bodyless
+accepted operation, and is not repaired by late registration wakeup. The store
+remains intact so the correctly configured engine can open it later.
 
 A different version must not guess that it can decode the bytes. Exact format
-mismatch is distinct from no implementation being registered.
+mismatch remains distinct from an implementation that is not configured, but
+neither becomes durable waiting work inside the ordinary receipt lifecycle.
 
-### 16.3 Replay refusal and unavailability remain distinguishable
+### 16.3 Replay outcomes remain exact
 
-Whatever representation is selected, the receipt distinguishes a temporary
-missing prerequisite from a permanent capability refusal, an unsupported
-operation format, internal execution failure, and a stale result discarded
-because the source or operation changed. The registered-code candidate adds
-further panic, bounded executor, non-return, and shutdown concerns described in
-the volatile architecture section.
+After configuration succeeds, the receipt can distinguish a permanent
+capability refusal, retryable successor preparation failure, internal execution
+failure, and a stale result discarded because the source or operation changed.
+None of those outcomes may erase the last complete generation and replace it
+with a bodyless state.
 
 ### 16.4 Materialization identities never reuse
 
@@ -1608,7 +1625,8 @@ When a newer source event B2 arrives, two truths must become durable together:
 
 - B2 is now the selected source-qualified event; and
 - applying the still-contributing local operations to B2 yields effective
-  materialization E2, or yields an explicit content-pending/refused state.
+  complete materialization E2, or follows the explicit successor
+  retry/refusal policy while E1 remains the last complete effective value.
 
 Ordinary app queries must never briefly expose raw B2 as the effective value
 and then switch to E2 in a second transaction. That flash would momentarily
@@ -1618,12 +1636,15 @@ At the same time, diagnostics or source-qualified observation must still be
 able to say that B2 came from relay A and that E2 is a local materialization.
 “Atomic effective update” must not destroy provenance.
 
-The same crash-consistent logical transition that installs E2 must retire E1
-as current, move receipt membership, and fence stale completions. A crash
-leaves either the complete old state or the complete successor state, never a
-mixture. This requirement does not dictate whether a backend implements that
-authority boundary as one physical database transaction or another equally
-strong atomic protocol.
+Source evidence may advance while successor preparation runs outside store
+locks, but that immediately makes E1 ineligible for new handoff and retry. The
+crash-consistent logical transition that installs complete E2 must retire E1 as
+current, move receipt membership, and fence stale completions. A crash leaves
+either complete E1 with the newer source evidence and explicit successor state,
+or the complete successor E2, never a bodyless or mixed generation. This
+requirement does not dictate whether a backend implements that authority
+boundary as one physical database transaction or another equally strong atomic
+protocol.
 
 ---
 
@@ -1756,8 +1777,9 @@ true through the ordinary public write and query APIs:
    source or semantic replay work.
 2. An exact whole replacement either accepts against its exact base or leaves
    only a terminal typed refusal receipt.
-3. A replayable operation may be accepted with no event id when no body can yet
-   exist.
+3. A replayable operation is accepted only with one complete initial unsigned
+   event and event id; inability to construct it refuses before custody with
+   zero acceptance residue.
 4. A body-complete optimistic event appears through ordinary matching live
    queries before signing, with one typed pending-or-signed signature property.
 5. No empty or sentinel signature crosses the public event-row boundary.
@@ -1780,9 +1802,9 @@ true through the ordinary public write and query APIs:
 13. Relay acceptance remains qualified by exact relay and exact event id.
 14. The source plan and destination plan are independently visible and never
     described as global completeness.
-15. Replay representation survives restart: a registered-code design waits
-    durably for the exact implementation and format, while a closed-plan design
-    makes missing replay code unrepresentable for every accepted format.
+15. Replay representation survives restart, and the exact implementation and
+    format are required engine configuration rather than a missing-code receipt
+    state or late-registration wakeup path.
 16. Capabilities own logical identity, preservation, normalization, conflict,
     deletion/reset/migration, and encryption policy.
 17. Private operations never guess when required plaintext is unavailable; the
@@ -1824,14 +1846,14 @@ rewritten when the target becomes built; it is not a compatibility promise.
 
 | Question | Current NMP | Target in this document |
 |---|---|---|
-| What can one accepted write contain? | One complete body and one permanent event id | A complete fixed body, an exact replacement, or a durable operation that may initially have no body |
-| What does a receipt identify? | In practice one fixed event publication | One accepted app operation across zero, one, or several materializations |
+| What can one accepted write contain? | One complete body and one permanent event id | A complete fixed body, an exact replacement, or a durable operation with one complete initial materialization and possible complete successors |
+| What does a receipt identify? | In practice one fixed event publication | One accepted app operation across one or several complete materializations |
 | Can several receipts share one event? | Only limited identical-byte co-ownership; no semantic program | Yes, while keeping independent operation outcomes |
 | Can a newer source automatically rebase an accepted write? | No | Yes, while the declared obligation remains active |
-| What does a live query see before signing? | Complete pending body with separate signature string and state fields | Complete body only, with one public `Pending | Signed(signature)` property; content-pending has no row |
+| What does a live query see before signing? | Complete pending body with separate signature string and state fields | Complete body only, with one public `Pending | Signed(signature)` property |
 | What happens on an exact replacement conflict? | Terminal refusal receipt; no pending row, signing, route, or delivery work | Same exact fallback behavior |
 | When is `created_at` chosen? | Ordinary/exact builder acceptance may use current clock and current local winner | Replay successor uses operation/source/prior-generation maximum; reconnect alone does not restamp |
-| What if replay code is unavailable? | No semantic-operation payload exists | Registered-code design waits durably for exact capability/format; closed-plan design admits only formats whose interpreter exists |
+| What if replay code is unavailable? | No semantic-operation payload exists | Initial use refuses before custody; restart/open reports typed configuration failure and retains the store intact, with no missing-code receipt state or late wakeup |
 | Can relay evidence outlive a predecessor? | One receipt assumes one event id | Yes, but every fact remains scoped to its predecessor event id |
 | Does relay `OK true` prove convergence? | No | No; no mandatory readback state is added |
 
@@ -1855,12 +1877,14 @@ event-id-specific.
 
 ---
 
-## 22. Candidate high-level architecture — volatile
+## 22. Production direction and historical experiment evidence
 
 Everything before this section is the behavior an implementation must serve.
-This section describes the leading NMP-specific implementation candidate as of
-2026-08-13. It is deliberately more volatile and does not make the target
-built.
+The dependency direction in this section was settled on 2026-08-13: NMP owns a
+small materializer contract and independently packaged capabilities supply the
+semantics. The exact production surface remains volatile and does not make the
+target built. The bodyless #1412 prototype described later is historical
+evidence only and is explicitly rejected as production architecture.
 
 ### 22.1 Keep one public write noun
 
@@ -1908,17 +1932,17 @@ establishes source and preservation policy. It is not a raw app-constructible
 payload. The final surface must also resolve §3.1's open question about deleting
 unsigned blind replaceable builders.
 
-The operation payload does not carry author, `created_at`, event id, or
-signature. Author comes from the write's identity selection. Timestamp and
-event id belong to materialization. Signature follows only after a complete
-body exists.
+The replay representation does not itself mint author, `created_at`, event id,
+or signature. Author comes from the write's identity selection. The configured
+materializer and NMP derive the complete candidate timestamp and event id before
+custody; signature follows after acceptance.
 
-### 22.2 Application-registered materializers
+### 22.2 Configured capability materializers
 
-The leading experiment lets the application assemble independently packaged
-capability modules and register exact materializer implementations with NMP.
-NMP depends only on a small contract; it does not depend on every profile,
-follow, article, list, or third-party capability crate.
+The application assembles independently packaged capability modules and
+configures exact materializer implementations with NMP before use. NMP depends
+only on a small contract; it does not depend on every profile, follow, article,
+list, or third-party capability crate.
 
 Conceptually:
 
@@ -1928,13 +1952,18 @@ application startup
     ├── register follow materializer, format 1
     └── register long-form materializer, format 2
 
-durable operation
-    └── names exactly one materializer key + format
+capability operation factory
+    └── is bound to exactly one configured materializer key + format
 ```
 
 The registration key identifies semantic ownership. The format identifies the
 exact durable byte contract. A materializer registered under another format
 must not receive unknown bytes.
+
+Configuration is a prerequisite, not a receipt lifecycle. A supported app must
+not mint or transplant raw replay authority. Missing implementation or format
+causes typed refusal before custody for an initial call, and typed engine-open
+failure for already durable work. There is no late-registration wakeup queue.
 
 This dependency inversion avoids a static `nmp -> every capability crate`
 graph, which is rejected: it would make core NMP the catalog owner for every
@@ -1959,10 +1988,15 @@ output:
   explicit per-operation resolution/normalization facts
 
 or:
-  waiting for a named content/source prerequisite
   already satisfied, with per-operation resolution facts and no new event
   typed refusal
 ```
+
+For initial custody, `already satisfied` must still resolve the call without
+inventing an accepted bodyless obligation; if the operation requires
+publication, only a complete candidate can be accepted. Unresolved source or
+required crypto is handled before this acceptance decision and produces typed
+zero-residue refusal when it prevents a complete initial candidate.
 
 “Deterministic” here means semantically stable for the same source, operation
 program, format, and target time. A capability whose correct wire encoding uses
@@ -1987,13 +2021,15 @@ a different interpretation is forbidden. If physical encoding legitimately
 uses randomness, NMP persists the first committed complete body and never
 reruns the encoder merely because the process restarted.
 
-### 22.4 Execute arbitrary code outside store locks
+### 22.4 Execute capability code outside store locks
 
 Application-selected capability code may be slow, fail, or panic. It must not
 run while the durable database transaction or engine's serialized state owner
 is held.
 
-The candidate flow is:
+Initial candidate preparation runs before the acceptance transaction. Later
+source-driven successor preparation uses the same off-lock discipline. The
+successor flow is:
 
 ```text
 1. Point-read the target's exact source revision, current generation,
@@ -2010,12 +2046,17 @@ The candidate flow is:
 A receipt id alone is never a sufficient fence because the same receipt may
 survive several generations.
 
-Registered materializers are trusted application code, not a sandbox boundary.
+Configured materializers are trusted application code, not a sandbox boundary.
 Catching a Rust panic cannot contain process abort, unsafe memory corruption,
 unbounded allocation, or an infinite loop. Executor capacity, cooperative
 cancellation, deadlines, shutdown, and native callback lifetime therefore need
 explicit policy and falsifiers before this mechanism can be production
 architecture.
+
+For the initial call, panic, invalid output, refusal, or required-capability
+unavailability leaves zero acceptance residue. Bounded execution machinery may
+be needed for successors, but it must not add missing-handler or bodyless
+receipt states.
 
 ### 22.5 Durable state shape
 
@@ -2025,24 +2066,25 @@ coordinate containing:
 - current source revision;
 - compact opaque operation program;
 - independent receipt membership and outcomes;
-- optional current materialization;
+- exactly one complete current materialization while operations are active;
 - monotonic materialization high-water identity;
 - current-generation signature fence;
 - indexes that let one source change point-read only its coordinate.
 
-Content-pending state has active operations and no current materialization.
-Body-complete state has exactly one current unsigned-or-signed materialization,
-not separate fields that can disagree. Resolved heavy operation bodies can be
-deleted while small receipt evidence survives.
+Active accepted state has exactly one current unsigned-or-signed
+materialization, not separate fields that can disagree. Successor preparation
+may be in flight while the last complete generation remains current. Resolved
+heavy operation bodies can be deleted while small receipt evidence survives.
 
 ### 22.6 Receipt and delivery projection
 
-The current direct-Rust `ReceiptStream` has a mandatory `event_id`, and the
-current publish queue assumes one permanent event id. The candidate must hard
-cut those assumptions:
+The current direct-Rust `ReceiptStream` has a mandatory `event_id`, which is
+truthful for body-complete acceptance, while the current publish queue assumes
+that id remains permanently current. Production must hard-cut only the latter
+assumption:
 
-- acceptance can return a receipt before any event id exists;
-- materialization facts introduce exact event ids progressively;
+- acceptance returns a receipt with its exact initial event id;
+- successor materialization facts introduce later exact event ids;
 - signature facts name the exact event id/materialization;
 - relay facts name exact event id, relay, and attempt;
 - the aggregate result reduces the current-generation terminal facts without
@@ -2060,20 +2102,23 @@ acceptance into a closed, capability-neutral structural edit format.
 |---|---|---|
 | Who owns conflict meaning at replay time? | Capability implementation | Whatever can be expressed in the closed edit language |
 | NMP dependency on capability crates | None; app assembles registrations | None after capability compiles the edit |
-| Restart requirement | Exact implementation and format must register again | Generic interpreter is always present |
-| Missing-code state | Required and durable | Not required for supported plan versions |
+| Restart requirement | Exact implementation and format are required engine configuration | Generic interpreter is always present |
+| Missing-code state | Typed configuration/open failure; never an accepted receipt state | Not required for supported plan versions |
 | Expressiveness | Arbitrary deterministic capability policy | Bounded by structural instruction set |
 | Operational risk | Callback scheduling, panic, slowness, native packaging | More generic machinery and risk of semantic leakage into the IR |
 | Versioning | Capability-specific opaque format | Central structural plan version |
 | Native SDK integration | Unproven for arbitrary callbacks | Easier if native apps call fused typed helpers only |
 
-The choice does not change the stable behavior required above. It changes where
-replay semantics execute and which failure states exist.
+The dependency-inverted materializer direction is selected because it keeps
+capability semantics out of generic NMP without adding a static dependency on
+every capability crate. The closed structural `EventEdit` remains useful
+comparison evidence, not the selected universal semantic language.
 
-### 22.8 What the #1412 experiments proved
+### 22.8 What the rejected #1412 prototype proved
 
-The #1412 experiment now has two evidence layers. Its first, isolated registry
-prototype proved that:
+The #1412 experiment has two evidence layers. Its bodyless lifecycle and
+parallel persistence were rejected, but its first isolated registry prototype
+still proved that:
 
 - two independently packaged capability implementations can register through
   one NMP-owned contract;
@@ -2099,9 +2144,10 @@ These captured numbers show a small dispatch tax for the prototype. Nanosecond
 microbenchmarks remain host- and load-sensitive; they are evidence for
 feasibility, not a performance contract.
 
-The second layer routes a genuinely bodyless semantic payload through the real
-public Rust `Engine::publish(WriteIntent)` door. At measured head
-`283132d2617dc5dff2be538e5385385554420140`, it proved that:
+The second layer routed a genuinely bodyless semantic payload through the real
+public Rust `Engine::publish(WriteIntent)` door. That behavior is not the
+production target. At measured head
+`283132d2617dc5dff2be538e5385385554420140`, it demonstrated historically that:
 
 - semantic acceptance uses the ordinary receipt and intent-id allocators,
   caller-correlation index, and redb database; there is no second public
@@ -2151,7 +2197,12 @@ The ordinary and bodyless acceptance rows perform different work and end in
 different states. They describe the prototype workloads; they are not a claim
 that the difference is an architecture tax or regression.
 
-### 22.9 What the #1412 experiments did not prove
+The bodyless acceptance, missing-handler persistence, late registration, and
+nullable initial event id in those bullets are retained here only so the
+experiment's measurements remain interpretable. The #1412 decision gate
+explicitly rejected all four for production.
+
+### 22.9 What the rejected #1412 prototype did not prove
 
 Using the real acceptance door proves the front half of one public lifecycle;
 it does not yet prove the ordinary lifecycle after a body is installed. The
@@ -2202,17 +2253,19 @@ contain process abort, unsafe memory corruption, hostile CPU use, or hostile
 allocation. Native trust/isolation and callback lifetime therefore remain open
 architecture decisions.
 
-### 22.10 Likely implementation sequence if the candidate survives
+### 22.10 Production implementation sequence
 
 This is a dependency order, not a promise that each item is already designed:
 
 1. Hard-cut public row signature projection to one `Pending | Signed` owner.
-2. Land the compact store state for bodyless operations, optional current
+2. Land compact store state for body-complete operations, one current
    materialization, independent receipts, and non-reused generation fences.
 3. Define the exact opaque operation and registration contract in a lower
    mechanism crate with no capability dependency.
-4. Extend `WriteIntent` and the real acceptance transaction; delete the
-   one-permanent-event-id receipt assumption.
+4. Extend `WriteIntent` and the real acceptance transaction so a configured
+   capability produces a complete initial candidate before custody; preserve
+   its initial event id while deleting the one-permanently-current-event-id
+   assumption.
 5. Integrate off-lock materialization and atomic source/effective replacement.
 6. Key crypto, signer, route, delivery, and relay facts by exact generation.
 7. Add one ordinary replaceable and one addressable capability consumer; keep
@@ -2240,20 +2293,20 @@ These questions are material and must remain visible:
    wire event exists?
 4. What cancellation is safe when one signed materialization serves several
    receipts?
-5. Can arbitrary application-registered materializers cross Swift and Kotlin
-   boundaries without introducing unbounded callbacks or shutdown hazards, or
-   should native apps reach only statically packaged fused capability methods?
-6. How are handler non-return, cancellation, and application shutdown bounded?
-7. Which real capability requires replay logic that cannot be expressed cleanly
-   by a closed structural `EventEdit`?
-8. Which exact receipt surface replaces the current mandatory permanent
-   `event_id` without adding redundant owners or lifecycle booleans?
-9. What clock owns an operation's logical time, and how are equal or
+5. Should Swift and Kotlin reach configured materializers only through
+   statically packaged fused capability methods, avoiding arbitrary native
+   callback and shutdown hazards?
+6. How are successor materializer non-return, cancellation, and application
+   shutdown bounded without adding a missing-handler receipt lifecycle?
+7. Which exact receipt facts distinguish the stable initial accepted event id
+   from later current and retired generations without redundant state owners or
+   lifecycle booleans?
+8. What clock owns an operation's logical time, and how are equal or
    future-skewed local operation times handled without trusting an app-supplied
    event timestamp?
-10. How does a source policy distinguish first-resource creation from
-    unresolved absence for each capability?
-11. Does the final unsigned payload structurally refuse blind replaceable and
+9. How does a source policy distinguish first-resource creation from
+   unresolved absence for each capability?
+10. Does the final unsigned payload structurally refuse blind replaceable and
     addressable builders, requiring a capability-owned exact or replayable
     operation, while preserving verbatim externally pre-signed publication?
 
@@ -2270,13 +2323,17 @@ implementation and final promotion must remain traceable to:
 
 - #1380 for the complete semantic-operation contract;
 - #1381 for loss-preserving structural transforms;
-- #1382 for encrypted content and content-pending state;
+- #1382 for encrypted candidate preparation before custody and exact crypto
+  fences;
 - #1408 for compact durable operation/materialization state;
-- #841 for full source/effective orchestration;
+- #1432 for body-complete acceptance and optimistic query projection;
+- #1433 for complete source-driven successor rematerialization;
+- #1434 for generation-qualified signing, routing, and relay evidence;
 - #1406 for long-sequence and recovery bounds;
 - #1386 for restart, query, rebase, and generation-qualified delivery proof;
 - #1387 for final feature, architecture, status, and SDK promotion;
-- #1412 for the registered-materializer experiments; and
+- #1412 for historical registered-materializer evidence and the explicit
+  rejection of its bodyless lifecycle; and
 - #1414 for this document's completeness and handoff.
 
 No issue closing, README claim, known-gap removal, ledger closure, or supported
