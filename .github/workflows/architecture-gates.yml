@@ -165,6 +165,17 @@ jobs:
   # NMP keeps no backwards compatibility: a replaced spelling is deleted in the
   # same change. There are no external consumers, so compatibility is a tax
   # paid to strangers who do not exist.
+  store-table-names:
+    name: Current table names stay inside nmp-store
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse production table-name literals outside nmp-store
+        run: bash scripts/check-store-table-names.sh
+
   no-compatibility-surface:
     name: No compatibility surface
     runs-on: ubuntu-latest

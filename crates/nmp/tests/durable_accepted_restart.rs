@@ -18,57 +18,13 @@ use nmp_grammar::{
 };
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, AcceptWritePayload, EventStore, IntentSigState,
+    sentinel_signature, testing, AcceptWrite, AcceptWritePayload, EventStore, IntentSigState,
     PublishQueueAttemptOutcome, PublishQueueTerminalOutcome, RedbStore, SigState,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
 use nostr::{
     EventBuilder, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
-use redb::{Database, ReadableTable, TableDefinition};
-
-fn corrupt_first_publish_queue_row<const N: usize>(
-    path: &std::path::Path,
-    table_name: &'static str,
-    prefix: &[u8],
-) {
-    let definition: TableDefinition<&[u8; N], &[u8]> = TableDefinition::new(table_name);
-    let db = Database::open(path).unwrap();
-    let tx = db.begin_write().unwrap();
-    {
-        let mut table = tx.open_table(definition).unwrap();
-        let (key, mut value) = table
-            .iter()
-            .unwrap()
-            .map(|row| {
-                let (key, value) = row.unwrap();
-                (*key.value(), value.value().to_vec())
-            })
-            .find(|(key, _)| key.as_slice().starts_with(prefix))
-            .expect("matching publish-queue row");
-        assert!(value.len() >= 5, "versioned delivery envelope");
-        value[4] = 200;
-        table.insert(&key, value.as_slice()).unwrap();
-    }
-    tx.commit().unwrap();
-}
-
-fn insert_corrupt_publish_queue_row<const N: usize>(
-    path: &std::path::Path,
-    table_name: &'static str,
-    key: &[u8; N],
-    magic: &[u8; 4],
-) {
-    let definition: TableDefinition<&[u8; N], &[u8]> = TableDefinition::new(table_name);
-    let db = Database::open(path).unwrap();
-    let tx = db.begin_write().unwrap();
-    {
-        let mut table = tx.open_table(definition).unwrap();
-        let value = [magic.as_slice(), &[200, 0, 0, 0]].concat();
-        table.insert(key, value.as_slice()).unwrap();
-    }
-    tx.commit().unwrap();
-}
 
 fn receipt_id(effects: &[Effect]) -> ReceiptId {
     effects
@@ -985,11 +941,8 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             receipt_id,
         )
     };
-    corrupt_first_publish_queue_row::<20>(
-        &path,
-        "publish_queue_attempts",
-        &intent_id.0.to_be_bytes(),
-    );
+    testing::corrupt_first_publish_queue_attempt(&path, &intent_id.0.to_be_bytes())
+        .expect("store-owned attempt corruption");
 
     let store = RedbStore::open(&path).unwrap();
     let mut core =
@@ -1076,11 +1029,8 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
         (intent_id, receipt_id)
     };
 
-    corrupt_first_publish_queue_row::<8>(
-        &path,
-        "publish_queue_receipts",
-        &receipt_id.0.to_be_bytes(),
-    );
+    testing::corrupt_publish_queue_receipt(&path, receipt_id.0)
+        .expect("store-owned receipt corruption");
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, 10);
@@ -1213,12 +1163,8 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
     let mut route_key = [0_u8; 16];
     route_key[..8].copy_from_slice(&intent_id.0.to_be_bytes());
     route_key[8..].copy_from_slice(&1u64.to_be_bytes());
-    insert_corrupt_publish_queue_row::<16>(
-        &path,
-        "publish_queue_route_revisions",
-        &route_key,
-        b"NMDV",
-    );
+    testing::insert_corrupt_publish_queue_route_revision(&path, &route_key)
+        .expect("store-owned route-revision corruption");
 
     let store = RedbStore::open(&path).unwrap();
     let mut core = EngineCore::new(store, 10);
@@ -1282,7 +1228,7 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
 
     // Corrupt the one journal row through a raw handle; no store door can
     // write these bytes, which is exactly why this class needs a falsifier.
-    corrupt_first_publish_queue_row::<8>(&path, "publish_queue_intents", &[]);
+    testing::corrupt_first_publish_queue_intent(&path).expect("store-owned intent corruption");
 
     let store = RedbStore::open(&path).unwrap();
     assert!(

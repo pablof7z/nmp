@@ -1453,7 +1453,6 @@ mod tests {
         FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWriteFact, FfiWriteOutcome,
         FfiWritePayload, FfiWriteRouting,
     };
-    use redb::ReadableTable;
     use std::collections::BTreeSet;
     use std::time::Duration;
 
@@ -2635,29 +2634,8 @@ mod tests {
             receipt_id
         };
 
-        // Overwrite the receipt's own durable row with undecodable bytes.
-        const RECEIPTS: redb::TableDefinition<&[u8; 8], &[u8]> =
-            redb::TableDefinition::new("publish_queue_receipts");
-        let db = redb::Database::open(&path).expect("redb: reopen for corruption");
-        let tx = db.begin_write().expect("redb: begin_write");
-        {
-            let mut table = tx
-                .open_table(RECEIPTS)
-                .expect("redb: open publish_queue_receipts");
-            let key = receipt_id.to_be_bytes();
-            let mut value = table
-                .get(&key)
-                .expect("redb: read retained receipt")
-                .expect("retained receipt row")
-                .value()
-                .to_vec();
-            value[4] = 200;
-            table
-                .insert(&key, value.as_slice())
-                .expect("redb: write corrupt receipt bytes");
-        }
-        tx.commit().expect("redb: commit corruption");
-        drop(db);
+        nmp_store::testing::corrupt_publish_queue_receipt(&path, receipt_id)
+            .expect("store-owned receipt corruption");
 
         let engine = NmpEngine::new(
             NmpEngineConfig {
