@@ -70,7 +70,7 @@ async fn receipt_acked_by(w: &mut NmpWorld, relay_name: String) {
     let relay_url = w.relay_url(&relay_name);
     let acked = w.receipt_eventually(|seen| {
         seen.iter().any(|s| {
-            matches!(s, WriteFact::Relay { relay, state: RelayState::Published } if *relay == relay_url)
+            matches!(s, WriteFact::Relay { relay, state: RelayState::Published, .. } if *relay == relay_url)
         })
     });
     assert!(
@@ -84,7 +84,7 @@ async fn receipt_rejected_by(w: &mut NmpWorld, relay_name: String) {
     let relay_url = w.relay_url(&relay_name);
     let rejected = w.receipt_eventually(|seen| {
         seen.iter().any(|s| {
-            matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if *relay == relay_url)
+            matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. }, .. } if *relay == relay_url)
         })
     });
     assert!(
@@ -101,7 +101,7 @@ async fn receipt_reports_relay_rejected(w: &mut NmpWorld, relay_name: String) {
     let relay_url = w.relay_url(&relay_name);
     let rejected = w.receipt_eventually(|seen| {
         seen.iter().any(|s| {
-            matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. } } if *relay == relay_url)
+            matches!(s, WriteFact::Relay { relay, state: RelayState::Rejected { .. }, .. } if *relay == relay_url)
         })
     });
     assert!(
@@ -205,6 +205,7 @@ async fn numbered_receipt_waiting(w: &mut NmpWorld, ordinal: String, relay_name:
                 WriteFact::Relay {
                     relay,
                     state: RelayState::Waiting(RelayWaiting::NotConnected),
+                    ..
                 } if *relay == relay_url
             )
         })
@@ -236,7 +237,7 @@ async fn numbered_receipt_acked(w: &mut NmpWorld, ordinal: String, relay_name: S
     let relay_url = w.relay_url(&relay_name);
     let acked = w.receipt_eventually_at(receipt_ordinal(&ordinal), |seen| {
         seen.iter().any(|status| {
-            matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == relay_url)
+            matches!(status, WriteFact::Relay { relay, state: RelayState::Published, .. } if *relay == relay_url)
         })
     });
     assert!(
@@ -274,7 +275,7 @@ async fn delivered_to(w: &mut NmpWorld, targets: String) {
         let url = w.relay_url(&name);
         let acked = w.receipt_eventually(|seen| {
             seen.iter().any(|s| {
-                matches!(s, WriteFact::Relay { relay, state: RelayState::Published } if *relay == url)
+                matches!(s, WriteFact::Relay { relay, state: RelayState::Published, .. } if *relay == url)
             })
         });
         assert!(
@@ -426,7 +427,7 @@ async fn received_with_signature_untouched(w: &mut NmpWorld, name: String, perso
     let url = w.relay_url(&name);
     let acked = w.receipt_eventually(|seen| {
         seen.iter().any(|s| {
-            matches!(s, WriteFact::Relay { relay, state: RelayState::Published } if *relay == url)
+            matches!(s, WriteFact::Relay { relay, state: RelayState::Published, .. } if *relay == url)
         })
     });
     assert!(acked, "expected {name:?} to accept the republished event");

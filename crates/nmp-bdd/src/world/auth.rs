@@ -49,6 +49,7 @@ impl NmpWorld {
                             source: AuthDenialSource::Policy,
                             ..
                         },
+                        ..
                     } if *denied_relay == relay
                 )
             })
@@ -77,6 +78,7 @@ impl NmpWorld {
                             source,
                             reason,
                         },
+                    ..
                 } if *denied_relay == relay && *source == AuthDenialSource::Policy => {
                     Some((*pubkey, *source, reason.clone()))
                 }
