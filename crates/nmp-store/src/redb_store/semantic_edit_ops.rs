@@ -22,19 +22,169 @@ use super::publish_queue::{
     PublishQueueIntentRecordWork, PublishQueueMaterializationRecord, PublishQueueReceiptRecord,
 };
 use super::publish_queue_codec::{
-    codec_error, decode_intent, decode_receipt, encode_intent, encode_receipt, intent_key,
-    receipt_key,
+    codec_error, deadline_by_intent_key, deadline_intent_range, deadline_key, decode_deadline,
+    decode_intent, decode_lane, decode_receipt, decode_route, encode_intent, encode_lane,
+    encode_receipt, encode_route, intent_key, lane_key, lane_range, parse_deadline_by_intent_key,
+    parse_lane_key, parse_route_revision_key, receipt_key, route_revision_key,
+    route_revision_range,
 };
 use super::query::expiration_key;
 use super::schema::{
-    persist_err, PUBLISH_QUEUE_CORRELATIONS, SEMANTIC_MATERIALIZATION_HIGH_WATER,
-    SEMANTIC_OPERATIONS, SEMANTIC_RESOURCES,
+    persist_err, PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES,
+    PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS, SEMANTIC_RESOURCES,
 };
 use super::semantic_edit_codec::{
     coordinate_key, decode_operation, decode_resource, encode_operation, encode_resource,
     operation_key, operation_range,
 };
 use super::store::RedbStore;
+
+/// Replace every predecessor delivery cursor with one fresh current-generation
+/// lane per relay, owned by the generation's deterministic lowest intent.
+/// Attempts/details remain immutable history; only active lanes and deadlines
+/// move. Running inside the semantic install transaction makes the store
+/// recover as wholly E1 or wholly E2 after a crash.
+fn install_successor_delivery_lanes(
+    write_txn: &redb::WriteTransaction,
+    previous: &crate::SemanticGeneration,
+    next: &crate::SemanticGeneration,
+) -> Result<(), PersistenceError> {
+    let owner =
+        next.members.first().copied().ok_or_else(|| {
+            PersistenceError::invariant("semantic generation has no delivery owner")
+        })?;
+    let mut route_revisions = write_txn
+        .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
+        .map_err(persist_err)?;
+    let mut lanes = write_txn
+        .open_table(PUBLISH_QUEUE_LANES)
+        .map_err(persist_err)?;
+    let mut deadlines = write_txn
+        .open_table(PUBLISH_QUEUE_DEADLINES)
+        .map_err(persist_err)?;
+    let mut deadlines_by_intent = write_txn
+        .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
+        .map_err(persist_err)?;
+
+    let mut relay_ids = std::collections::BTreeSet::new();
+    let mut owner_last_ordinals = BTreeMap::new();
+    for member in &next.members {
+        let (route_lower, route_upper) = route_revision_range(*member);
+        for row in route_revisions
+            .range::<&[u8; 16]>(&route_lower..=&route_upper)
+            .map_err(persist_err)?
+        {
+            let (key, value) = row.map_err(persist_err)?;
+            let (key_intent, _) = parse_route_revision_key(key.value())
+                .map_err(|error| codec_error("route revision key", error))?;
+            if key_intent != *member {
+                return Err(PersistenceError::invariant(
+                    "successor route range escaped semantic member",
+                ));
+            }
+            relay_ids.extend(
+                decode_route(value.value())
+                    .map_err(|error| codec_error("route revision", error))?,
+            );
+        }
+    }
+
+    for member in &previous.members {
+        let (deadline_lower, deadline_upper) = deadline_intent_range(*member);
+        let deadline_rows = deadlines_by_intent
+            .range::<&[u8; 20]>(&deadline_lower..=&deadline_upper)
+            .map_err(persist_err)?
+            .map(|row| {
+                row.map(|(key, value)| (*key.value(), value.value().to_vec()))
+                    .map_err(persist_err)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for (by_intent, encoded) in deadline_rows {
+            let (key_intent, at, relay_id) = parse_deadline_by_intent_key(&by_intent)
+                .map_err(|error| codec_error("deadline index key", error))?;
+            if key_intent != *member {
+                return Err(PersistenceError::invariant(
+                    "successor deadline range escaped semantic member",
+                ));
+            }
+            decode_deadline(&encoded).map_err(|error| codec_error("deadline index", error))?;
+            deadlines
+                .remove(&deadline_key(at, *member, relay_id))
+                .map_err(persist_err)?;
+            deadlines_by_intent
+                .remove(&deadline_by_intent_key(*member, at, relay_id))
+                .map_err(persist_err)?;
+        }
+
+        let (lane_lower, lane_upper) = lane_range(*member);
+        let lane_rows = lanes
+            .range::<&[u8; 12]>(&lane_lower..=&lane_upper)
+            .map_err(persist_err)?
+            .map(|row| {
+                row.map(|(key, value)| (*key.value(), value.value().to_vec()))
+                    .map_err(persist_err)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for (storage_key, encoded) in lane_rows {
+            let (key_intent, relay_id) =
+                parse_lane_key(&storage_key).map_err(|error| codec_error("lane key", error))?;
+            let (event_id, revision, last_ordinal, _) =
+                decode_lane(&encoded).map_err(|error| codec_error("lane", error))?;
+            if key_intent != *member || event_id != previous.materialization.event_id {
+                return Err(PersistenceError::invariant(
+                    "successor predecessor lane does not name the prior generation",
+                ));
+            }
+            if *member == owner {
+                owner_last_ordinals.insert(relay_id, (revision, last_ordinal));
+            }
+            lanes.remove(&storage_key).map_err(persist_err)?;
+        }
+    }
+
+    if !relay_ids.is_empty() {
+        let (lower, upper) = route_revision_range(owner);
+        let mut last = 0;
+        for row in route_revisions
+            .range::<&[u8; 16]>(&lower..=&upper)
+            .map_err(persist_err)?
+        {
+            let (key, _) = row.map_err(persist_err)?;
+            let (_, ordinal) = parse_route_revision_key(key.value())
+                .map_err(|error| codec_error("route revision key", error))?;
+            last = last.max(ordinal);
+        }
+        let ordinal = last
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError::invariant("route revision ordinal exhausted"))?;
+        let encoded = encode_route(&relay_ids.iter().copied().collect::<Vec<_>>())
+            .map_err(|error| codec_error("route revision", error))?;
+        route_revisions
+            .insert(&route_revision_key(owner, ordinal), encoded.as_slice())
+            .map_err(persist_err)?;
+    }
+    for relay_id in relay_ids {
+        let (old_revision, last_ordinal) = owner_last_ordinals
+            .get(&relay_id)
+            .copied()
+            .unwrap_or((0, 0));
+        let revision = old_revision
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError::invariant("delivery lane revision exhausted"))?;
+        let encoded = encode_lane(
+            next.materialization.event_id,
+            revision,
+            last_ordinal,
+            &crate::PublishQueueLaneState::WaitingConnection,
+        )
+        .map_err(|error| codec_error("lane", error))?;
+        lanes
+            .insert(&lane_key(owner, relay_id), encoded.as_slice())
+            .map_err(persist_err)?;
+    }
+    Ok(())
+}
 
 fn load_operations(
     table: &impl ReadableTable<&'static [u8], &'static [u8]>,
@@ -553,6 +703,10 @@ pub(super) fn accept(
             .as_ref()
             .expect("accepted operation remains active")
             .current();
+        let delivery_transition = plan
+            .removed_generation
+            .clone()
+            .zip(plan.next.as_ref().and_then(|next| next.generation.clone()));
         let installed = apply_plan(
             ingest,
             write_txn,
@@ -567,6 +721,9 @@ pub(super) fn accept(
             )),
             plan,
         )?;
+        if let Some((previous, next)) = delivery_transition {
+            install_successor_delivery_lanes(write_txn, &previous, &next)?;
+        }
         let (installed, predecessor) = match installed {
             SemanticInstallOutcome::Stale => {
                 return Ok(AcceptOutcome::ReplaceableOperationRefused(
@@ -658,7 +815,15 @@ pub(super) fn install(
             }
             Err(refusal) => return Ok(SemanticInstallOutcome::Refused(refusal)),
         };
-        apply_plan(ingest, write_txn, coordinate.clone(), None, plan)
+        let delivery_transition = plan
+            .removed_generation
+            .clone()
+            .zip(plan.next.as_ref().and_then(|next| next.generation.clone()));
+        let outcome = apply_plan(ingest, write_txn, coordinate.clone(), None, plan)?;
+        if let Some((previous, next)) = delivery_transition {
+            install_successor_delivery_lanes(write_txn, &previous, &next)?;
+        }
+        Ok(outcome)
     })?;
     if matches!(
         outcome,
@@ -711,7 +876,15 @@ pub(super) fn install_source(
             }
             Err(refusal) => return Ok(SemanticInstallOutcome::Refused(refusal)),
         };
-        apply_plan(ingest, write_txn, coordinate.clone(), None, plan)
+        let delivery_transition = plan
+            .removed_generation
+            .clone()
+            .zip(plan.next.as_ref().and_then(|next| next.generation.clone()));
+        let outcome = apply_plan(ingest, write_txn, coordinate.clone(), None, plan)?;
+        if let Some((previous, next)) = delivery_transition {
+            install_successor_delivery_lanes(write_txn, &previous, &next)?;
+        }
+        Ok(outcome)
     })?;
     if matches!(
         outcome,

@@ -110,8 +110,9 @@ fn retire_superseded_owners_in_txn(
             let (lane_key, lane_bytes) = row.map_err(persist_err)?;
             let (key_intent, _) =
                 parse_lane_key(lane_key.value()).map_err(|error| codec_error("lane key", error))?;
-            let (_, last_ordinal, _) = super::publish_queue_codec::decode_lane(lane_bytes.value())
-                .map_err(|error| codec_error("lane", error))?;
+            let (_, _, last_ordinal, _) =
+                super::publish_queue_codec::decode_lane(lane_bytes.value())
+                    .map_err(|error| codec_error("lane", error))?;
             if key_intent != owner {
                 return Err(PersistenceError::invariant(
                     "lane retirement range escaped intent prefix",

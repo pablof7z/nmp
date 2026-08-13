@@ -236,13 +236,13 @@ fn an_event_every_host_refused_stays_visible_reporting_zero_relays() {
     assert!(
         statuses
             .iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: m } } if r == &host_a && m.contains("a"))),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: m }, .. } if r == &host_a && m.contains("a"))),
         "host A's refusal is an ordinary per-relay receipt fact: {statuses:?}"
     );
     assert!(
         statuses
             .iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: m } } if r == &host_b && m.contains("b"))),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: m }, .. } if r == &host_b && m.contains("b"))),
         "host B's refusal is an ordinary per-relay receipt fact: {statuses:?}"
     );
 
@@ -555,13 +555,13 @@ fn the_users_own_row_survives_a_carrier_outside_the_pin_and_reports_it_honestly(
     assert!(
         receipt_statuses(&acked)
             .iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Published } if r == &carrier)),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Published, .. } if r == &carrier)),
         "the unwatched host took it"
     );
     assert!(
         receipt_statuses(&refused)
             .iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: _ } } if r == &watched)),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Rejected { reason: _ }, .. } if r == &watched)),
         "the watched host refused it"
     );
 

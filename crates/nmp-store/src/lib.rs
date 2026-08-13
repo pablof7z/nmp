@@ -1465,6 +1465,10 @@ pub struct PublishQueueAttempt {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PublishQueueLaneKey {
     pub intent_id: IntentId,
+    /// Exact immutable bytes this lane publishes. A successor generation for
+    /// the same semantic operation owner and relay is a different lane; its
+    /// ACK, retry, and deadline can never alias the predecessor.
+    pub event_id: EventId,
     pub relay: RelayUrl,
 }
 

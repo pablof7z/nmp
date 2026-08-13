@@ -487,7 +487,7 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
         ));
         assert!(acked.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(_, WriteFact::Relay { relay: acked_relay, state: RelayState::Published }) if acked_relay == &relay
+            Effect::EmitReceipt(_, WriteFact::Relay { relay: acked_relay, state: RelayState::Published, .. }) if acked_relay == &relay
         )));
         // The process dies right here, before persisting the receipt id.
     }
@@ -506,7 +506,7 @@ fn partial_relay_ack_survives_restart_and_replays_by_token() {
     assert!(
         statuses
             .iter()
-            .any(|status| matches!(status, WriteFact::Relay { relay: acked_relay, state: RelayState::Published } if acked_relay == &relay)),
+            .any(|status| matches!(status, WriteFact::Relay { relay: acked_relay, state: RelayState::Published, .. } if acked_relay == &relay)),
         "the token must replay the SAME partial per-relay ACK evidence after restart, got {statuses:?}"
     );
 }
@@ -570,7 +570,7 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
         ));
         assert!(rejected.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(_, WriteFact::Relay { relay: rejected_relay, state: RelayState::Rejected { reason } })
+            Effect::EmitReceipt(_, WriteFact::Relay { relay: rejected_relay, state: RelayState::Rejected { reason }, .. })
                 if rejected_relay == &relay && reason == "rate-limited"
         )));
         // The process dies right here, before persisting the receipt id.
@@ -590,7 +590,7 @@ fn partial_relay_reject_survives_restart_and_replays_by_token() {
     assert!(
         statuses.iter().any(|status| matches!(
             status,
-            WriteFact::Relay { relay: rejected_relay, state: RelayState::Rejected { reason } }
+            WriteFact::Relay { relay: rejected_relay, state: RelayState::Rejected { reason }, .. }
                 if rejected_relay == &relay && reason == "rate-limited"
         )),
         "the token must replay the SAME partial per-relay REJECT evidence after restart, got {statuses:?}"

@@ -1195,6 +1195,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         .unwrap();
     let unknown_key = PublishQueueLaneKey {
         intent_id: edge_intent,
+        event_id: fixture.edge_signed.id,
         relay: unknown_relay,
     };
     let unknown_lane = edge_lanes
@@ -1241,6 +1242,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
 
     let gave_up_key = PublishQueueLaneKey {
         intent_id: edge_intent,
+        event_id: fixture.edge_signed.id,
         relay: gave_up_relay,
     };
     let gave_up_lane = edge_lanes
@@ -1281,6 +1283,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
 
     let interrupted_key = PublishQueueLaneKey {
         intent_id: edge_intent,
+        event_id: fixture.edge_signed.id,
         relay: interrupted_relay,
     };
     let interrupted_lane = edge_lanes
@@ -1396,6 +1399,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
 
     let lane_key = PublishQueueLaneKey {
         intent_id: publish_intent,
+        event_id: fixture.publish_signed.id,
         relay: publish,
     };
     let lane = harness

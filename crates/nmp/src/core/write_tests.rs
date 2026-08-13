@@ -564,6 +564,8 @@ mod semantic_successor_tests {
         let carol = Keys::generate().public_key();
         let dave = Keys::generate().public_key();
         let relay = RelayUrl::parse("wss://semantic-source.example").unwrap();
+        let destination_a = RelayUrl::parse("wss://semantic-a.example").unwrap();
+        let destination_b = RelayUrl::parse("wss://semantic-b.example").unwrap();
         let base = source(&author, 1, "base", &[]);
         let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
@@ -594,7 +596,8 @@ mod semantic_successor_tests {
         let original = UnsignedEvent::from(base.clone());
         let mut current = original.clone();
         let mut receipts = Vec::new();
-        for person in [alice, bob] {
+        for (person, destination) in [(alice, destination_a.clone()), (bob, destination_b.clone())]
+        {
             let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
                 instance,
                 original.clone(),
@@ -604,7 +607,7 @@ mod semantic_successor_tests {
             .unwrap();
             let effects = core.handle(EngineMsg::Publish(WriteIntent {
                 payload: WritePayload::ReplaceableOperation(payload),
-                routing: WriteRouting::Auto,
+                routing: WriteRouting::Explicit(vec![destination]),
                 identity: Identity::Active,
                 correlation: None,
             }));
@@ -794,7 +797,7 @@ mod semantic_successor_tests {
         .unwrap();
         let accepted_later = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::ReplaceableOperation(later_operation),
-            routing: WriteRouting::Auto,
+            routing: WriteRouting::Explicit(vec![destination_a.clone()]),
             identity: Identity::Active,
             correlation: None,
         }));
@@ -854,13 +857,66 @@ mod semantic_successor_tests {
         assert_eq!(core.pending.len(), 3);
         assert_eq!(core.intent_receipts.len(), 3);
         assert_eq!(
-            receipts.into_iter().collect::<BTreeSet<_>>(),
+            receipts.iter().copied().collect::<BTreeSet<_>>(),
             core.pending.keys().copied().collect()
         );
         assert!(core
             .pending
             .values()
             .all(|pending| pending.frozen.id == second_successor.event.id));
+        let sign_requests = later_effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sign_requests.len(),
+            1,
+            "one semantic generation has one physical signer request"
+        );
+        let (owner, generation, unsigned) = sign_requests.into_iter().next().unwrap();
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        let signed_effects = core.handle(EngineMsg::SignerCompleted(
+            owner,
+            generation,
+            Ok(signed.clone()),
+        ));
+        for receipt in &receipts {
+            assert!(signed_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::EmitReceipt(
+                    candidate,
+                    WriteFact::Signing(SigningState::Signed { event_id })
+                ) if candidate == receipt && *event_id == signed.id
+            )));
+        }
+        let owner_intent = core.pending[&owner].intent_id;
+        let lanes = core
+            .resolver
+            .store()
+            .recover_publish_queue_lanes(owner_intent)
+            .unwrap();
+        assert_eq!(
+            lanes
+                .iter()
+                .map(|lane| lane.key.relay.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([destination_a, destination_b]),
+            "all contributing routes union into the one physical owner"
+        );
+        assert!(core.pending.iter().all(|(receipt, pending)| {
+            *receipt == owner
+                || core
+                    .resolver
+                    .store()
+                    .recover_publish_queue_lanes(pending.intent_id)
+                    .unwrap()
+                    .is_empty()
+        }));
     }
 }
 
@@ -909,7 +965,6 @@ mod persistence_stall_replay_tests {
                 _ => None,
             })
             .expect("publish takes custody and answers with the receipt id");
-
         // The same relay failed to commit BOTH durable facts.
         let pending = core.pending.get_mut(&id).expect("the write is pending");
         pending.unstarted_relays.insert(relay.clone());
@@ -982,11 +1037,13 @@ mod persistence_stall_replay_tests {
                 _ => None,
             })
             .expect("publish takes custody and answers with the receipt id");
+        let event_id = core.pending[&id].frozen.id;
 
         let mut effects = Vec::new();
         core.emit_write_fact(
             id,
             WriteFact::Relay {
+                event_id,
                 relay: relay.clone(),
                 state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                     detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -1007,6 +1064,7 @@ mod persistence_stall_replay_tests {
         core.emit_write_fact(
             id,
             WriteFact::Relay {
+                event_id,
                 relay,
                 state: RelayState::Published,
             },

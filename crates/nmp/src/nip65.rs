@@ -458,7 +458,7 @@ mod tests {
             assert!(
                 replay.facts.iter().any(|fact| matches!(
                     fact,
-                    WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NotConnected) } if relay == &outbox
+                    WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NotConnected), .. } if relay == &outbox
                 )),
                 "receipt {receipt:?} must own exactly the newly learned lane: {:?}",
                 replay.facts
@@ -510,10 +510,14 @@ mod tests {
             BTreeSet::from([recovered_event, fresh_event]),
             "one later author route must release both exact obligations on its one lane"
         );
-        for receipt in [recovered_receipt, fresh_receipt] {
+        for (receipt, event_id) in [
+            (recovered_receipt, recovered_event),
+            (fresh_receipt, fresh_event),
+        ] {
             let replay = core.reattach_receipt(receipt);
             assert!(
                 replay.facts.contains(&WriteFact::Relay {
+                    event_id,
                     relay: outbox.clone(),
                     state: RelayState::Published
                 }),

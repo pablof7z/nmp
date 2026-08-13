@@ -1236,10 +1236,12 @@ fn write_ack_per_relay_over_real_relays() {
                     WriteFact::Relay {
                         relay: r,
                         state: RelayState::Published,
+                        ..
                     } if r == &url_ok => acked_ok = true,
                     WriteFact::Relay {
                         relay: r,
                         state: RelayState::Rejected { reason: _ },
+                        ..
                     } if r == &url_bad => rejected_bad = true,
                     _ => {}
                 }
@@ -1256,12 +1258,12 @@ fn write_ack_per_relay_over_real_relays() {
     );
     assert!(
         seen.iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. } } if r == &url_ok)),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. }, .. } if r == &url_ok)),
         "must observe Sent(relay_ok) (got: {seen:?})"
     );
     assert!(
         seen.iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. } } if r == &url_bad)),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. }, .. } if r == &url_bad)),
         "must observe Sent(relay_bad) (got: {seen:?})"
     );
     assert!(acked_ok, "relay_ok must reach Acked (got stream: {seen:?})");
@@ -1420,7 +1422,7 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
         .statuses;
     assert!(
         wait_for_status(&receipt, Duration::from_secs(20), |status| {
-            matches!(status, WriteFact::Relay { relay: acked, state: RelayState::Published } if acked == &url)
+            matches!(status, WriteFact::Relay { relay: acked, state: RelayState::Published, .. } if acked == &url)
         }),
         "durable write must converge after a fresh second-generation AUTH"
     );
@@ -1588,7 +1590,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     assert!(
         wait_for_status(&contact_receipt_rx, Duration::from_secs(10), |s| matches!(
             s,
-            WriteFact::Relay { relay: r, state: RelayState::Published } if r == &url
+            WriteFact::Relay { relay: r, state: RelayState::Published, .. } if r == &url
         )),
         "a's contact list (naming b, c) must reach Acked"
     );
@@ -1613,7 +1615,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
     assert!(
         wait_for_status(&mute_receipt_rx, Duration::from_secs(10), |s| matches!(
             s,
-            WriteFact::Relay { relay: r, state: RelayState::Published } if r == &url
+            WriteFact::Relay { relay: r, state: RelayState::Published, .. } if r == &url
         )),
         "a's mute list (naming c) must reach Acked"
     );

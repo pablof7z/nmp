@@ -228,22 +228,26 @@ class EvidenceMappingTest {
 
     @Test
     fun everyRetryLaneRelayStateMapsWithoutLosingAttemptTruth() {
+        val eventId = "e".repeat(64)
         assertEquals(
             WriteFact.Relay(
+                eventId,
                 "wss://offline.example",
                 RelayState.Waiting(RelayWaiting.NotConnected),
             ),
             WriteFact.from(
                 FfiWriteFact.Relay(
+                    eventId,
                     "wss://offline.example",
                     FfiRelayState.Waiting(FfiRelayWaiting.NotConnected),
                 ),
             ),
         )
         assertEquals(
-            WriteFact.Relay("wss://auth.example", RelayState.Waiting(RelayWaiting.NeedsAuth)),
+            WriteFact.Relay(eventId, "wss://auth.example", RelayState.Waiting(RelayWaiting.NeedsAuth)),
             WriteFact.from(
                 FfiWriteFact.Relay(
+                    eventId,
                     "wss://auth.example",
                     FfiRelayState.Waiting(FfiRelayWaiting.NeedsAuth),
                 ),
@@ -251,6 +255,7 @@ class EvidenceMappingTest {
         )
         assertEquals(
             WriteFact.Relay(
+                eventId,
                 "wss://auth.example",
                 RelayState.AuthFailed(
                     "a".repeat(64),
@@ -260,6 +265,7 @@ class EvidenceMappingTest {
             ),
             WriteFact.from(
                 FfiWriteFact.Relay(
+                    eventId,
                     "wss://auth.example",
                     FfiRelayState.AuthFailed(
                         "a".repeat(64),
@@ -271,6 +277,7 @@ class EvidenceMappingTest {
         )
         assertEquals(
             WriteFact.Relay(
+                eventId,
                 "wss://retry.example",
                 RelayState.Waiting(
                     RelayWaiting.BackingOff(
@@ -283,6 +290,7 @@ class EvidenceMappingTest {
             ),
             WriteFact.from(
                 FfiWriteFact.Relay(
+                    eventId,
                     "wss://retry.example",
                     FfiRelayState.Waiting(
                         FfiRelayWaiting.BackingOff(
@@ -296,26 +304,65 @@ class EvidenceMappingTest {
             ),
         )
         assertEquals(
-            WriteFact.Relay("wss://written.example", RelayState.Sent(4uL, 125uL)),
+            WriteFact.Relay(eventId, "wss://written.example", RelayState.Sent(4uL, 125uL)),
             WriteFact.from(
-                FfiWriteFact.Relay("wss://written.example", FfiRelayState.Sent(4uL, 125uL)),
+                FfiWriteFact.Relay(
+                    eventId,
+                    "wss://written.example",
+                    FfiRelayState.Sent(4uL, 125uL),
+                ),
             ),
         )
+    }
+
+    @Test
+    fun relayFactsKeepTheExactEventGeneration() {
+        val firstId = "1".repeat(64)
+        val secondId = "2".repeat(64)
+        val first =
+            WriteFact.from(
+                FfiWriteFact.Relay(
+                    firstId,
+                    "wss://generation.example",
+                    FfiRelayState.Published,
+                ),
+            )
+        val second =
+            WriteFact.from(
+                FfiWriteFact.Relay(
+                    secondId,
+                    "wss://generation.example",
+                    FfiRelayState.Published,
+                ),
+            )
+
+        assertEquals(
+            WriteFact.Relay(firstId, "wss://generation.example", RelayState.Published),
+            first,
+        )
+        assertEquals(
+            WriteFact.Relay(secondId, "wss://generation.example", RelayState.Published),
+            second,
+        )
+        assertTrue(first != second)
     }
 
     /** A stalled local disk owns the lane but has emitted nothing on the
      * wire: it must never be read as the lane being finished with. */
     @Test
     fun persistenceStalledRelayStateMappingRemainsNonterminal() {
+        val eventId = "e".repeat(64)
         val stalled =
             WriteFact.from(
                 FfiWriteFact.Relay(
+                    eventId,
                     "wss://blocked.example",
                     FfiRelayState.Waiting(FfiRelayWaiting.PersistenceStalled("disk full")),
                 ),
             )
         assertEquals(
             WriteFact.Relay(
+                eventId,
                 "wss://blocked.example",
                 RelayState.Waiting(RelayWaiting.PersistenceStalled("disk full")),
             ),

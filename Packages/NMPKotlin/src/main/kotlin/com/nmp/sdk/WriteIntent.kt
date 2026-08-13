@@ -484,7 +484,8 @@ sealed class WriteOutcome {
 sealed class WriteFact {
     data class Signing(val state: SigningState) : WriteFact()
 
-    data class Relay(val relay: String, val state: RelayState) : WriteFact()
+    /** Evidence from one relay about one exact event generation. */
+    data class Relay(val eventId: String, val relay: String, val state: RelayState) : WriteFact()
 
     /** The relays this write is INTENDED for, and whether resolution can
      * still change its mind. [complete] flips on settled RESOLUTION, never on
@@ -518,7 +519,7 @@ sealed class WriteFact {
         fun from(ffi: FfiWriteFact): WriteFact =
             when (ffi) {
                 is FfiWriteFact.Signing -> Signing(SigningState.from(ffi.state))
-                is FfiWriteFact.Relay -> Relay(ffi.relay, RelayState.from(ffi.state))
+                is FfiWriteFact.Relay -> Relay(ffi.eventId, ffi.relay, RelayState.from(ffi.state))
                 is FfiWriteFact.Destinations ->
                     Destinations(ffi.relays, ffi.complete, ffi.awaitingAuthorRoutes)
                 is FfiWriteFact.Outcome -> Outcome(WriteOutcome.from(ffi.outcome))

@@ -45,7 +45,7 @@ impl ReceiptResult {
         let mut relays = BTreeMap::new();
         for fact in facts {
             match fact {
-                WriteFact::Relay { relay, state } => {
+                WriteFact::Relay { relay, state, .. } => {
                     relays.insert(relay, state);
                 }
                 WriteFact::Outcome(outcome) => return Ok(Self { outcome, relays }),
@@ -58,7 +58,7 @@ impl ReceiptResult {
 
 #[cfg(test)]
 mod tests {
-    use nostr::{RelayUrl, Timestamp};
+    use nostr::{EventId, RelayUrl, Timestamp};
 
     use super::*;
 
@@ -68,10 +68,12 @@ mod tests {
         let rejected = RelayUrl::parse("wss://rejected.example").unwrap();
         let result = ReceiptResult::from_facts([
             WriteFact::Relay {
+                event_id: EventId::from_byte_array([1; 32]),
                 relay: published.clone(),
                 state: RelayState::Published,
             },
             WriteFact::Relay {
+                event_id: EventId::from_byte_array([1; 32]),
                 relay: rejected.clone(),
                 state: RelayState::Rejected {
                     reason: "blocked".to_string(),
@@ -96,6 +98,7 @@ mod tests {
         let relay = RelayUrl::parse("wss://pending.example").unwrap();
         assert_eq!(
             ReceiptResult::from_facts([WriteFact::Relay {
+                event_id: EventId::from_byte_array([1; 32]),
                 relay,
                 state: RelayState::Sent {
                     attempt: 1,

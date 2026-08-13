@@ -62,6 +62,7 @@ mod request_attempt_tests;
 mod request_effects;
 #[cfg(test)]
 mod request_replacement_transition_tests;
+mod semantic_delivery;
 #[cfg(test)]
 mod transport_tests;
 mod write;
@@ -2587,7 +2588,7 @@ struct AttemptCorrelationTarget {
     session: RelaySessionKey,
     /// Durable/AtMostOnce correlations identify the exact persisted lane
     /// ordinal. Ephemeral correlations have no delivery row.
-    lane: Option<(IntentId, u64)>,
+    lane: Option<(PublishQueueLaneKey, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
