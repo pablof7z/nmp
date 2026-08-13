@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use nmp::{
     AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, ReplaceableSourcePolicy, Row, RowDelta, SigningState,
-    SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
+    ReplaceableMaterializerRefusal, ReplaceableSourcePolicy, Row, RowDelta, RowSignature,
+    SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
 };
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -338,4 +338,151 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
     restarted.shutdown();
     relay_one.shutdown();
     relay_two.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destination() {
+    let relay_a = ScriptedRelay::start(&RelayConfig::default()).await;
+    let relay_b = ScriptedRelay::start(&RelayConfig::default()).await;
+    let source = ScriptedRelay::start(&RelayConfig::default()).await;
+    // Hold the author-route query open long enough for E2 to sign and reach
+    // the already-known app relay. The exact raw REQ below proves that Bob's
+    // route is genuinely pending before the route-only addition is seeded.
+    let indexer = ScriptedRelay::start(&RelayConfig {
+        query_delay: Some(Duration::from_secs(10)),
+        ..RelayConfig::default()
+    })
+    .await;
+    let author = Keys::generate();
+    let alice = Keys::generate().public_key();
+    let bob = Keys::generate();
+    let initial_time = Timestamp::now().as_secs().saturating_sub(10);
+    let base = contact_list(&author, initial_time, "base", &[]);
+    source.seed_signed_event(&base).await;
+
+    let engine = Engine::new(EngineConfig {
+        indexer_relays: vec![indexer.url.to_string()],
+        app_relays: vec![relay_a.url.to_string()],
+        ..EngineConfig::default()
+    })
+    .expect("engine opens with an app relay and one NIP-65 indexer");
+    engine
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("local author account registers");
+    let materializer = engine
+        .add_replaceable_materializer([16; 16], [17; 16], AddPeople)
+        .expect("semantic capability registers");
+    let subscription = engine
+        .observe(pinned_contact_lists(&source, author.public_key()), None)
+        .expect("contact list observation opens");
+    let mut rows = BTreeMap::new();
+    let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
+
+    let first = engine
+        .publish(WriteIntent {
+            payload: materializer
+                .operation(
+                    &base_row,
+                    &base_row,
+                    ReplaceableSourcePolicy::Continuing,
+                    alice.to_bytes().to_vec(),
+                )
+                .expect("first operation is complete"),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        })
+        .expect("first operation enters custody");
+    let first_current = wait_for_row(&subscription, &mut rows, |row| row.id() == first.event_id);
+    let second = engine
+        .publish(WriteIntent {
+            payload: materializer
+                .operation(
+                    &base_row,
+                    &first_current,
+                    ReplaceableSourcePolicy::Continuing,
+                    bob.public_key().to_bytes().to_vec(),
+                )
+                .expect("second operation composes over current"),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        })
+        .expect("second operation enters custody");
+    let e2 = wait_for_row(&subscription, &mut rows, |row| {
+        row.id() == second.event_id && matches!(row.signature(), RowSignature::Signed(_))
+    });
+    let RowSignature::Signed(e2_signature) = e2.signature() else {
+        unreachable!("the predicate selected only a signed E2 row")
+    };
+
+    let bob_hex = bob.public_key().to_hex();
+    indexer
+        .wait_wire_req(SETTLE, |request| {
+            request.kinds().contains(&10_002) && request.authors().contains(&bob_hex)
+        })
+        .await
+        .expect("the live NIP-65 request waits for Bob's exact route");
+    assert!(
+        relay_a
+            .wait_wire_event_id_count(&e2.id().to_hex(), 1, SETTLE)
+            .await,
+        "the already-known app relay receives E2"
+    );
+    let facts = wait_for_generation_relay_facts(
+        &second.statuses,
+        e2.id(),
+        &BTreeSet::from([relay_a.url.clone()]),
+    );
+    assert!(facts.iter().any(|fact| matches!(
+        fact,
+        WriteFact::Signing(SigningState::Signed { event_id }) if *event_id == e2.id()
+    )));
+
+    // Only routing knowledge changes here. Bob's newer relay-list fact says
+    // his inbox is relay B; no semantic operation or source event is added.
+    indexer
+        .seed_relay_list(
+            &bob,
+            &[],
+            &[relay_b.url.to_string()],
+            initial_time.saturating_add(1),
+        )
+        .await;
+    assert!(
+        relay_b
+            .wait_wire_event_id_count(&e2.id().to_hex(), 1, SETTLE)
+            .await,
+        "the newly learned destination receives the already-signed E2"
+    );
+    relay_a
+        .wait_wire_quiet(Duration::from_millis(250), SETTLE)
+        .await;
+    relay_b
+        .wait_wire_quiet(Duration::from_millis(250), SETTLE)
+        .await;
+
+    let count_e2 = |relay: &ScriptedRelay| {
+        relay
+            .wire_record()
+            .event_ids
+            .iter()
+            .filter(|candidate| candidate.as_str() == e2.id().to_hex())
+            .count()
+    };
+    assert_eq!(count_e2(&relay_a), 1, "terminal relay A is never resent E2");
+    assert_eq!(count_e2(&relay_b), 1, "relay B receives exactly one E2");
+    let delivered_b = relay_b
+        .admitted_events()
+        .into_iter()
+        .find(|event| event.id == e2.id())
+        .expect("relay B admits the exact E2 frame");
+    assert_eq!(delivered_b.sig, e2_signature);
+    assert_eq!(delivered_b.id, second.event_id);
+
+    engine.shutdown();
+    relay_a.shutdown();
+    relay_b.shutdown();
+    source.shutdown();
+    indexer.shutdown();
 }
