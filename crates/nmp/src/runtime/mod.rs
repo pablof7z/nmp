@@ -108,10 +108,10 @@ use crate::publish_queue::{
     CancelWriteError, CancelWriteOutcome, PublishQueueEntry, PublishQueueReadError, ReceiptResult,
     ReceiptResultError, RemoveQueueEntryError, SigningState, WriteFact, WriteOutcome,
 };
-use crate::relay_information_service::{
-    RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
-    RelayInformationSnapshot,
+use crate::relay_information::{
+    RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
 };
+use crate::relay_information_service::RelayInformationService;
 use crate::session::{
     RestoredSession, SessionAccount, SessionProvider, SessionSnapshot, SigningAvailability,
 };
