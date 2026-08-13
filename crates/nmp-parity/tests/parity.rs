@@ -1609,13 +1609,25 @@ fn wait_for_ffi_handoff_quiescence(
     }
 }
 
+/// The evidence a limit-bounded request settles on: the relay has sent
+/// everything it had for the question it was asked and, because the router
+/// bounded the request with a NIP-01 `limit`, earned no watermark doing so.
+///
+/// `finished_stored_events`, not `requesting`, is what every wait below reads.
+/// `requesting` is the beat WHILE stored events are still streaming (#1235):
+/// a source passes through it and leaves it, so an observer that samples the
+/// stream can legitimately never see it — the engine publishes `connecting`
+/// and then `finished_stored_events` whenever EOSE lands before the observing
+/// thread is scheduled, which is what a loaded machine does. Waiting for a
+/// beat is waiting for a race. `finished_stored_events` is reached and kept,
+/// so a wait on it terminates on the delivery fact these scenarios are about.
 fn expected_limited_evidence() -> Vec<NormEvidence> {
     // One branch, so exactly one evidence entry (#1108).
     vec![NormEvidence {
         sources: vec![NormSource {
             relay: "<loopback-relay>".to_string(),
             reconciled_through: None,
-            status: "requesting".to_string(),
+            status: "finished_stored_events".to_string(),
         }],
         shortfall: vec![],
     }]
@@ -1789,19 +1801,25 @@ fn stage_direct_source_anchor(
         .expect("direct source-anchor query must open");
 
     let deadline = Instant::now() + WAIT;
+    let mut observed = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let frame = subscription
             .recv_timeout(remaining)
             .unwrap_or_else(|error| {
                 panic!(
-                    "direct source-anchor query did not settle within the total {WAIT:?} bound: {error}"
+                    "direct source-anchor query did not settle within the total {WAIT:?} bound: \
+                     {error}; evidence observed: {observed:?}; relay query counts: anchor={}, \
+                     content={}",
+                    relay.query_count_for_kind(SOURCE_ANCHOR_KIND),
+                    relay.query_count_for_kind(QUERY_KIND),
                 )
             });
         let evidence = normalize_direct_evidence(frame.evidence, relay.url.as_str());
         if evidence == expected_limited_evidence() {
             break;
         }
+        observed.push(evidence);
     }
     subscription
 }
@@ -2492,13 +2510,25 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     });
     let mut rows = BTreeMap::new();
     let rows_deadline = Instant::now() + WAIT;
+    let mut last_evidence = None;
     let evidence = loop {
-        let frame = recv_before(&rows_rx, rows_deadline, "direct query");
+        let remaining = rows_deadline.saturating_duration_since(Instant::now());
+        let frame = rows_rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "direct query did not settle within the total {WAIT:?} bound: {error}; rows: \
+                 {:?}; last evidence: {last_evidence:?}; relay query counts: anchor={}, \
+                 content={}",
+                rows.keys().collect::<Vec<_>>(),
+                relay.query_count_for_kind(SOURCE_ANCHOR_KIND),
+                relay.query_count_for_kind(QUERY_KIND),
+            )
+        });
         apply_direct_deltas(&mut rows, frame.deltas, &relay_url);
         let normalized = normalize_direct_evidence(frame.evidence, &relay_url);
         if rows.contains_key(&expected_row_id) && normalized == expected_limited_evidence() {
             break normalized;
         }
+        last_evidence = Some(normalized);
     };
     // Exact worker ownership (#235) may legitimately close this relay when
     // demand reaches zero. Keep both observations live until actual relay
@@ -2615,13 +2645,24 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     let rows_rx = bridge_rows(&query_handle);
     let mut rows = BTreeMap::new();
     let rows_deadline = Instant::now() + WAIT;
+    let mut last_evidence = None;
     let evidence = loop {
-        let (deltas, evidence) = recv_before(&rows_rx, rows_deadline, "FFI query");
+        let remaining = rows_deadline.saturating_duration_since(Instant::now());
+        let (deltas, evidence) = rows_rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "FFI query did not settle within the total {WAIT:?} bound: {error}; rows: {:?}; \
+                 last evidence: {last_evidence:?}; relay query counts: anchor={}, content={}",
+                rows.keys().collect::<Vec<_>>(),
+                relay.query_count_for_kind(SOURCE_ANCHOR_KIND),
+                relay.query_count_for_kind(QUERY_KIND),
+            )
+        });
         apply_ffi_deltas(&mut rows, deltas, &relay_url);
         let normalized = normalize_ffi_evidence(evidence, &relay_url);
         if rows.contains_key(&expected_row_id) && normalized == expected_limited_evidence() {
             break normalized;
         }
+        last_evidence = Some(normalized);
     };
     // Same durable, continuously-owned handoff proof as the direct facade.
     let handoff_baseline = wait_for_ffi_handoff_quiescence(&diag_rx, &relay);
