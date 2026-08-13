@@ -120,7 +120,7 @@ retired layout would still keep that layout alive.
 The app-facing half is proved separately, because a refusal that is typed at
 the store and collapsed at the facade is not reachable by the consumer this
 policy addresses. `crates/nmp/src/engine.rs` and
-`crates/nmp-ffi/src/facade.rs` each drive one nonempty store whose marker this
+`crates/nmp-ffi/src/facade/tests.rs` each drive one nonempty store whose marker this
 build cannot read and one file of damaged bytes, and assert the two arrive as
 different variants and that only the epoch one renders "discard and recreate";
 Swift and Kotlin assert the same branch without reading any message.
