@@ -504,6 +504,366 @@ mod receipt_allocator_tests {
     }
 }
 
+#[cfg(test)]
+mod semantic_successor_tests {
+    use super::*;
+    use crate::replaceable_materializer::{
+        ReplaceableMaterializer, ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal,
+        ReplaceableMaterializerRegistration,
+    };
+    use nmp_store::{EventStore, RedbStore, RelayObserved};
+    use nostr::nips::nip01::Coordinate;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use std::sync::Arc;
+
+    struct AddPeople;
+
+    impl ReplaceableMaterializer for AddPeople {
+        fn materialize(
+            &self,
+            _source: &UnsignedEvent,
+            current: &UnsignedEvent,
+            operations: &[ReplaceableMaterializerOperation<'_>],
+        ) -> Result<nmp_grammar::EventBuilder, ReplaceableMaterializerRefusal> {
+            let mut tags = current.tags.clone().to_vec();
+            for operation in operations {
+                let key = PublicKey::from_slice(operation.bytes()).map_err(|error| {
+                    ReplaceableMaterializerRefusal {
+                        reason: error.to_string(),
+                    }
+                })?;
+                if !tags
+                    .iter()
+                    .any(|tag| tag.as_slice() == ["p", &key.to_hex()])
+                {
+                    tags.push(Tag::public_key(key));
+                }
+            }
+            Ok(nmp_grammar::EventBuilder {
+                kind: current.kind,
+                tags,
+                content: current.content.clone(),
+                created_at: None,
+            })
+        }
+    }
+
+    fn source(keys: &Keys, at: u64, content: &str, people: &[PublicKey]) -> SignedEvent {
+        EventBuilder::new(Kind::ContactList, content)
+            .tags(people.iter().copied().map(Tag::public_key))
+            .custom_created_at(Timestamp::from(at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn newer_relay_sources_install_complete_successors_without_new_receipts() {
+        let author = Keys::generate();
+        let alice = Keys::generate().public_key();
+        let bob = Keys::generate().public_key();
+        let carol = Keys::generate().public_key();
+        let dave = Keys::generate().public_key();
+        let relay = RelayUrl::parse("wss://semantic-source.example").unwrap();
+        let base = source(&author, 1, "base", &[]);
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        store
+            .insert(
+                base.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(1)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
+            nmp_grammar::Filter {
+                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
+                    .public_key()
+                    .to_hex()]))),
+                ..nmp_grammar::Filter::default()
+            },
+        )));
+        let instance = [5; 16];
+        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
+            instance,
+            program: [6; 16],
+            format: [7; 16],
+            materializer: Arc::new(AddPeople),
+        });
+
+        let original = UnsignedEvent::from(base.clone());
+        let mut current = original.clone();
+        let mut receipts = Vec::new();
+        for person in [alice, bob] {
+            let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
+                instance,
+                original.clone(),
+                current.clone(),
+                person.to_bytes().to_vec(),
+            )
+            .unwrap();
+            let effects = core.handle(EngineMsg::Publish(WriteIntent {
+                payload: WritePayload::ReplaceableOperation(payload),
+                routing: WriteRouting::Auto,
+                identity: Identity::Active,
+                correlation: None,
+            }));
+            let (receipt, event_id) = effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::WriteAccepted(receipt, event_id) => Some((*receipt, *event_id)),
+                    _ => None,
+                })
+                .unwrap();
+            receipts.push(receipt);
+            current = UnsignedEvent::from(
+                core.resolver
+                    .store()
+                    .query(&nostr::Filter::new().id(event_id))
+                    .unwrap()
+                    .pop()
+                    .unwrap()
+                    .event,
+            );
+        }
+
+        let first_local_id = current.id.unwrap();
+        let stale_generation = 9;
+        let stale_unsigned = current.clone();
+        let stale_signed = stale_unsigned.sign_with_keys(&author).unwrap();
+        let stale_receipt = receipts[0];
+        {
+            let pending = core.pending.get_mut(&stale_receipt).unwrap();
+            pending.sign_request_in_flight = true;
+            pending.sign_generation = stale_generation;
+        }
+        let current_echo = current.clone().sign_with_keys(&author).unwrap();
+        let mut echo_effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                current_echo,
+                RelayObserved::new(relay.clone(), Timestamp::from(2)),
+            )],
+            &mut echo_effects,
+        );
+        assert_eq!(
+            core.resolver
+                .store()
+                .replaceable_operation_snapshot(&Coordinate {
+                    kind: Kind::ContactList,
+                    public_key: author.public_key(),
+                    identifier: String::new(),
+                })
+                .unwrap()
+                .unwrap()
+                .current
+                .generation
+                .unwrap()
+                .materialization
+                .event_id,
+            first_local_id,
+            "a relay echo of E1 is signature evidence, not a newer semantic base"
+        );
+        core.replaceable_materializers.clear();
+        let unavailable = source(&author, 3, "unavailable", &[carol]);
+        let mut unavailable_effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                unavailable,
+                RelayObserved::new(relay.clone(), Timestamp::from(3)),
+            )],
+            &mut unavailable_effects,
+        );
+        assert!(unavailable_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))));
+        let unavailable_snapshot = core
+            .resolver
+            .store()
+            .replaceable_operation_snapshot(&Coordinate {
+                kind: Kind::ContactList,
+                public_key: author.public_key(),
+                identifier: String::new(),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(unavailable_snapshot.source.unwrap().event.id, base.id);
+        assert_eq!(
+            unavailable_snapshot
+                .current
+                .generation
+                .unwrap()
+                .materialization
+                .event_id,
+            first_local_id
+        );
+        assert_eq!(
+            core.resolver
+                .store()
+                .query(
+                    &nostr::Filter::new()
+                        .kind(Kind::ContactList)
+                        .author(author.public_key())
+                )
+                .unwrap()[0]
+                .event
+                .id,
+            first_local_id
+        );
+        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
+            instance,
+            program: [6; 16],
+            format: [7; 16],
+            materializer: Arc::new(AddPeople),
+        });
+
+        let newer = source(&author, 5, "remote-five", &[carol]);
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                newer.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(5)),
+            )],
+            &mut effects,
+        );
+
+        let first_successor = core
+            .resolver
+            .store()
+            .query(
+                &nostr::Filter::new()
+                    .kind(Kind::ContactList)
+                    .author(author.public_key()),
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(first_successor.event.created_at, Timestamp::from(6));
+        assert_eq!(first_successor.event.content, "remote-five");
+        for person in [alice, bob, carol] {
+            assert!(first_successor
+                .event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["p", &person.to_hex()]));
+        }
+        assert_ne!(first_successor.event.id, first_local_id);
+        assert!(effects.iter().any(|effect| match effect {
+            Effect::EmitRows(_, deltas, _) => {
+                deltas.len() == 2
+                    && deltas.iter().any(
+                        |delta| matches!(delta, RowDelta::Removed(id) if *id == first_local_id),
+                    )
+                    && deltas.iter().any(|delta| {
+                        matches!(delta, RowDelta::Added(row) if row.id() == first_successor.event.id)
+                    })
+                    && deltas.iter().all(|delta| {
+                        !matches!(delta, RowDelta::Added(row) if row.id() == newer.id)
+                    })
+            }
+            _ => false,
+        }), "successor effects: {effects:#?}");
+        let stale_effects = core.handle(EngineMsg::SignerCompleted(
+            stale_receipt,
+            stale_generation,
+            Ok(stale_signed),
+        ));
+        assert!(stale_effects.is_empty());
+        assert_eq!(
+            core.resolver
+                .store()
+                .query(
+                    &nostr::Filter::new()
+                        .kind(Kind::ContactList)
+                        .author(author.public_key())
+                )
+                .unwrap()[0]
+                .event
+                .id,
+            first_successor.event.id,
+            "a delayed E1 signature cannot promote or replace E2"
+        );
+
+        let erin = Keys::generate().public_key();
+        let later_operation = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            instance,
+            original,
+            UnsignedEvent::from(first_successor.event.clone()),
+            erin.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let accepted_later = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(later_operation),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        receipts.push(
+            accepted_later
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::WriteAccepted(receipt, _) => Some(*receipt),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("operation after B5 was refused: {accepted_later:#?}")),
+        );
+        assert_eq!(
+            core.resolver
+                .store()
+                .replaceable_operation_snapshot(&Coordinate {
+                    kind: Kind::ContactList,
+                    public_key: author.public_key(),
+                    identifier: String::new(),
+                })
+                .unwrap()
+                .unwrap()
+                .source
+                .unwrap()
+                .event
+                .id,
+            newer.id,
+            "accepting another operation must not regress retained B5 to the payload's old B0"
+        );
+
+        let later = source(&author, 7, "remote-seven", &[carol, dave]);
+        let mut later_effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(later, RelayObserved::new(relay, Timestamp::from(7)))],
+            &mut later_effects,
+        );
+        let second_successor = core
+            .resolver
+            .store()
+            .query(
+                &nostr::Filter::new()
+                    .kind(Kind::ContactList)
+                    .author(author.public_key()),
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(second_successor.event.created_at, Timestamp::from(8));
+        assert_eq!(second_successor.event.content, "remote-seven");
+        for person in [alice, bob, carol, dave, erin] {
+            assert!(second_successor
+                .event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["p", &person.to_hex()]));
+        }
+        assert_eq!(core.pending.len(), 3);
+        assert_eq!(core.intent_receipts.len(), 3);
+        assert_eq!(
+            receipts.into_iter().collect::<BTreeSet<_>>(),
+            core.pending.keys().copied().collect()
+        );
+        assert!(core
+            .pending
+            .values()
+            .all(|pending| pending.frozen.id == second_successor.event.id));
+    }
+}
+
 /// The receipt-replay cursor must keep the two persistence stalls apart.
 ///
 /// One relay can stall on BOTH its append-only route revision and its attempt

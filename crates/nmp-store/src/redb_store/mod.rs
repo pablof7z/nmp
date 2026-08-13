@@ -274,6 +274,13 @@ impl EventStore for RedbStore {
         semantic_edit_ops::install(self, rematerialize)
     }
 
+    fn install_replaceable_source_materialization(
+        &mut self,
+        install: crate::SemanticSourceInstall,
+    ) -> Result<crate::SemanticInstallOutcome, PersistenceError> {
+        semantic_edit_ops::install_source(self, install)
+    }
+
     fn promote_signed(
         &mut self,
         target: crate::PromotionTarget,

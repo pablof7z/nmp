@@ -16,7 +16,7 @@ use crate::{IntentId, MaterializationRef, PersistenceError};
 
 const RESOURCE_MAGIC: &[u8; 4] = b"NMSR";
 const OPERATION_MAGIC: &[u8; 4] = b"NMSO";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const HEADER: usize = 8;
 
 struct Encoder(Vec<u8>);
@@ -295,6 +295,15 @@ pub(super) fn decode_operation(bytes: &[u8]) -> Result<SemanticOperation, Persis
 pub(super) fn encode_resource(state: &SemanticResourceState) -> Result<Vec<u8>, PersistenceError> {
     let mut encoder = Encoder::new(RESOURCE_MAGIC);
     encode_revision(&mut encoder, &state.source_revision);
+    match &state.source {
+        None => encoder.u8(0),
+        Some(source) => {
+            encoder.u8(1);
+            let encoded = crate::binary_event::encode(source)
+                .map_err(|error| invariant(format!("encode semantic source: {error:?}")))?;
+            encoder.bytes(&encoded, usize::MAX)?;
+        }
+    }
     match state.last_materialization_id {
         None => encoder.u8(0),
         Some(id) => {
@@ -326,6 +335,14 @@ pub(super) fn decode_resource(
 ) -> Result<SemanticResourceState, PersistenceError> {
     let mut decoder = Decoder::new(bytes, RESOURCE_MAGIC)?;
     let source_revision = decode_revision(&mut decoder)?;
+    let source = match decoder.u8()? {
+        0 => None,
+        1 => Some(
+            crate::binary_event::decode(&decoder.bytes(usize::MAX)?)
+                .map_err(|error| invariant(format!("decode semantic source: {error:?}")))?,
+        ),
+        _ => return Err(invariant("invalid optional semantic source tag")),
+    };
     let last_materialization_id = match decoder.u8()? {
         0 => None,
         1 => Some(MaterializationId(decoder.u64()?)),
@@ -368,6 +385,7 @@ pub(super) fn decode_resource(
         coordinate,
         source_revision,
         operations: Vec::new(),
+        source,
         last_materialization_id,
         generation,
     })

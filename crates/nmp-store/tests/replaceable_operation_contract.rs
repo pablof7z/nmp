@@ -1,13 +1,14 @@
+use nmp_store::RelayObserved;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, EventStore, IntentSigState,
     MaterializationCandidate, MaterializationId, PendingMaterializationState, PromoteOutcome,
     PromotionTarget, PublishQueueReceiptPayload, QualifiedSource, RedbStore,
     ReplaceableOperationReceiptState, ReplayFormatId, ReplayProgramId, SemanticAccept,
-    SemanticInstallOutcome, SemanticPlan, SemanticRematerialize, SourceEvidence, SourcePlanId,
-    StartingSource, StartingSourceRequirement, VerifiedSignature,
+    SemanticInstallOutcome, SemanticPlan, SemanticRematerialize, SemanticSourceInstall,
+    SourceEvidence, SourcePlanId, StartingSource, StartingSourceRequirement, VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
-use nostr::{Filter, Keys, Kind, Timestamp, UnsignedEvent};
+use nostr::{EventBuilder, Filter, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
 fn coordinate(keys: &Keys) -> Coordinate {
     Coordinate {
@@ -50,6 +51,7 @@ fn bodyless_accept(
             .map(|generation| generation.materialization.materialization_id),
         starting_source: starting_source(),
         source: source(),
+        source_event: None,
         plan: SemanticPlan::new(1, vec![byte]).unwrap(),
         materialized: None,
         contributing_operations: existing,
@@ -371,6 +373,122 @@ fn redb_reopens_bodyless_operation_and_current_generation_without_body_copies() 
         IntentSigState::Pending,
     );
     assert_eq!(store.recover_publish_queue().unwrap().len(), 1);
+}
+
+fn exercise_source_successor(store: &mut dyn EventStore) {
+    let keys = Keys::generate();
+    let coordinate = coordinate(&keys);
+    let relay = RelayUrl::parse("wss://source-contract.example").unwrap();
+    let base = EventBuilder::new(Kind::ContactList, "B0")
+        .custom_created_at(Timestamp::from(1))
+        .sign_with_keys(&keys)
+        .unwrap();
+    store
+        .insert(
+            base.clone(),
+            RelayObserved::new(relay.clone(), Timestamp::from(1)),
+        )
+        .unwrap();
+    let stored_base = store
+        .query(&Filter::new().id(base.id))
+        .unwrap()
+        .pop()
+        .unwrap();
+    let evidence = SourceEvidence {
+        plan: SourcePlanId([3; 32]),
+        access: AccessContextId([4; 32]),
+        qualified: QualifiedSource::Event {
+            event_id: base.id,
+            created_at: base.created_at,
+        },
+    };
+    let mut accept = body_complete_accept(coordinate.clone(), None, Vec::new(), 1, 2);
+    accept.starting_source.source = StartingSource::Event(base.id);
+    accept.source = evidence;
+    accept.source_event = Some(stored_base);
+    let (intent, receipt, first_id) = accept_body_complete(store, &keys, 0, accept);
+    assert_eq!(
+        store
+            .replaceable_operation_snapshot(&coordinate)
+            .unwrap()
+            .unwrap()
+            .source
+            .unwrap()
+            .event,
+        base
+    );
+
+    let newer = EventBuilder::new(Kind::ContactList, "B5")
+        .custom_created_at(Timestamp::from(5))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let mut seen = std::collections::BTreeMap::new();
+    seen.insert(relay, Timestamp::from(5));
+    let stored_newer = nmp_store::StoredEvent {
+        event: newer.clone(),
+        provenance: nmp_store::Provenance { seen, local: None },
+    };
+    let snapshot = store
+        .replaceable_operation_snapshot(&coordinate)
+        .unwrap()
+        .unwrap();
+    let outcome = store
+        .install_replaceable_source_materialization(SemanticSourceInstall {
+            source: stored_newer,
+            successor: SemanticRematerialize {
+                coordinate: coordinate.clone(),
+                expected_source_revision: snapshot.current.source_revision.clone(),
+                expected_program_digest: snapshot.current.program_digest,
+                expected_current_materialization: snapshot
+                    .current
+                    .generation
+                    .as_ref()
+                    .map(|generation| generation.materialization.materialization_id),
+                source: SourceEvidence {
+                    plan: SourcePlanId([3; 32]),
+                    access: AccessContextId([4; 32]),
+                    qualified: QualifiedSource::Event {
+                        event_id: newer.id,
+                        created_at: newer.created_at,
+                    },
+                },
+                evaluated_at: Timestamp::from(5),
+                materialized: Some(MaterializationCandidate {
+                    event: UnsignedEvent::new(
+                        keys.public_key(),
+                        Timestamp::from(6),
+                        Kind::ContactList,
+                        Vec::new(),
+                        "E2",
+                    ),
+                    routing: "successor-route".into(),
+                    sig_state: PendingMaterializationState::AwaitingSigner,
+                }),
+                contributing_operations: vec![intent],
+                resolved_operations: Vec::new(),
+            },
+        })
+        .unwrap();
+    let SemanticInstallOutcome::Installed { installed, .. } = outcome else {
+        panic!("expected successor install, got {outcome:?}");
+    };
+    let reopened = store
+        .replaceable_operation_snapshot(&coordinate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.source.unwrap().event, newer);
+    assert_ne!(installed.event.id, first_id);
+    assert_eq!(receipt_ids(store, receipt), (first_id, installed.event.id));
+}
+
+#[test]
+fn qualified_source_and_complete_successor_survive_redb_reopen() {
+    let mut temporary = RedbStore::temporary().expect("temporary Redb store");
+    exercise_source_successor(&mut temporary);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut redb = RedbStore::open(dir.path().join("source-successor.redb")).unwrap();
+    exercise_source_successor(&mut redb);
 }
 
 #[test]

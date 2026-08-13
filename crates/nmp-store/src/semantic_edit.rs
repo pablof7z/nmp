@@ -219,6 +219,7 @@ pub struct SemanticCurrentState {
 pub struct RecoveredSemanticResource {
     pub coordinate: Coordinate,
     pub operations: Vec<SemanticOperation>,
+    pub source: Option<StoredEvent>,
     pub current: SemanticCurrentState,
 }
 
@@ -258,6 +259,10 @@ pub struct SemanticAccept {
     pub expected_current_materialization: Option<MaterializationId>,
     pub starting_source: StartingSourceRequirement,
     pub source: SourceEvidence,
+    /// The complete verified source named by `source`, including its relay
+    /// provenance. Event-qualified acceptance must carry it; absent and
+    /// unresolved acceptance must not.
+    pub source_event: Option<StoredEvent>,
     pub plan: SemanticPlan,
     pub materialized: Option<MaterializationCandidate>,
     pub contributing_operations: Vec<IntentId>,
@@ -276,6 +281,15 @@ pub struct SemanticRematerialize {
     pub materialized: Option<MaterializationCandidate>,
     pub contributing_operations: Vec<IntentId>,
     pub resolved_operations: Vec<ResolvedOperation>,
+}
+
+/// One verified relay source and the complete successor prepared from it.
+/// The store adopts both under the same CAS transaction; the source can never
+/// become an intermediate effective canonical value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticSourceInstall {
+    pub source: StoredEvent,
+    pub successor: SemanticRematerialize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,6 +342,7 @@ pub(crate) struct SemanticResourceState {
     pub(crate) coordinate: Coordinate,
     pub(crate) source_revision: SourceRevision,
     pub(crate) operations: Vec<SemanticOperation>,
+    pub(crate) source: Option<StoredEvent>,
     pub(crate) last_materialization_id: Option<MaterializationId>,
     pub(crate) generation: Option<SemanticGeneration>,
 }
@@ -372,6 +387,7 @@ pub(crate) fn plan_accept(
     {
         return Err(SemanticRefusal::IncompatibleReplayProgram);
     }
+    validate_source_event(&accept.source, accept.source_event.as_ref())?;
     if let Some(previous) = &previous {
         validate_resource_state(previous).map_err(|_| SemanticRefusal::InvalidSourceRevision)?;
     }
@@ -536,12 +552,19 @@ pub(crate) fn plan_accept(
         .as_ref()
         .and_then(|state| state.generation.clone())
         .filter(|old| generation.as_ref() != Some(old));
+    let retained_source = previous
+        .as_ref()
+        .and_then(|state| state.source.clone())
+        .into_iter()
+        .chain(accept.source_event)
+        .find(|source| validate_source_event(source_revision.evidence(), Some(source)).is_ok());
     Ok(SemanticTransitionPlan {
         previous,
         next: Some(SemanticResourceState {
             coordinate: accept.coordinate,
             source_revision,
             operations,
+            source: retained_source,
             last_materialization_id,
             generation,
         }),
@@ -685,12 +708,14 @@ pub(crate) fn plan_rematerialize(
         .as_ref()
         .map(|generation| generation.materialization.materialization_id)
         .or(previous.last_materialization_id);
+    let retained_source = previous.source.clone();
     Ok(SemanticTransitionPlan {
         previous: Some(previous),
         next: (!operations.is_empty()).then_some(SemanticResourceState {
             coordinate: rematerialize.coordinate,
             source_revision,
             operations,
+            source: retained_source,
             last_materialization_id,
             generation,
         }),
@@ -699,6 +724,68 @@ pub(crate) fn plan_rematerialize(
         candidate,
         removed_generation,
     })
+}
+
+pub(crate) fn plan_source_install(
+    previous: SemanticResourceState,
+    install: SemanticSourceInstall,
+) -> Result<SemanticTransitionPlan, SemanticRefusal> {
+    validate_source_event(&install.successor.source, Some(&install.source))?;
+    let coordinate = &install.successor.coordinate;
+    let source_matches_coordinate = install.source.event.pubkey == coordinate.public_key
+        && install.source.event.kind == coordinate.kind
+        && (!(30_000..=39_999).contains(&coordinate.kind.as_u16())
+            || install.source.event.tags.identifier().unwrap_or("") == coordinate.identifier);
+    let source_matches_evidence = matches!(
+        install.successor.source.qualified,
+        QualifiedSource::Event { event_id, created_at }
+            if event_id == install.source.event.id && created_at == install.source.event.created_at
+    );
+    if !source_matches_coordinate || !source_matches_evidence {
+        return Err(SemanticRefusal::InvalidSourceRevision);
+    }
+    let advances = match previous.source_revision.evidence().qualified {
+        QualifiedSource::Event {
+            event_id,
+            created_at,
+        } => {
+            install.source.event.created_at > created_at
+                || (install.source.event.created_at == created_at
+                    && install.source.event.id < event_id)
+        }
+        QualifiedSource::Absent | QualifiedSource::Unresolved => true,
+    };
+    if !advances {
+        return Err(SemanticRefusal::InvalidSourceRevision);
+    }
+    let source = install.source;
+    let mut plan = plan_rematerialize(previous, install.successor)?;
+    if let Some(next) = &mut plan.next {
+        next.source = Some(source);
+    }
+    Ok(plan)
+}
+
+fn validate_source_event(
+    evidence: &SourceEvidence,
+    source: Option<&StoredEvent>,
+) -> Result<(), SemanticRefusal> {
+    match (evidence.qualified, source) {
+        (
+            QualifiedSource::Event {
+                event_id,
+                created_at,
+            },
+            Some(source),
+        ) if source.event.id == event_id
+            && source.event.created_at == created_at
+            && source.event.verify().is_ok() =>
+        {
+            Ok(())
+        }
+        (QualifiedSource::Absent | QualifiedSource::Unresolved, None) => Ok(()),
+        _ => Err(SemanticRefusal::InvalidSourceRevision),
+    }
 }
 
 fn source_requirement(operation: &SemanticOperation) -> &StartingSourceRequirement {
@@ -944,7 +1031,8 @@ pub(crate) fn validate_resource_state(
                 .all(|member| operation_ids.contains(member))
                 && state.last_materialization_id
                     == Some(generation.materialization.materialization_id)
-        });
+        })
+        && validate_source_event(state.source_revision.evidence(), state.source.as_ref()).is_ok();
     valid
         .then_some(())
         .ok_or_else(|| PersistenceError::invariant("invalid active semantic resource state"))
@@ -955,6 +1043,7 @@ pub(crate) fn recovered(state: SemanticResourceState) -> RecoveredSemanticResour
     RecoveredSemanticResource {
         coordinate: state.coordinate,
         operations: state.operations,
+        source: state.source,
         current: SemanticCurrentState {
             source_revision: state.source_revision,
             program_digest,
