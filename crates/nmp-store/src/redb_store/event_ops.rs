@@ -22,7 +22,11 @@ use super::{
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(any(
+    test,
+    feature = "bench-instrumentation",
+    feature = "test-instrumentation"
+))]
 use std::sync::atomic::Ordering;
 
 /// The `coverage` table's JSON value: the window-erased shape the row was
@@ -565,7 +569,11 @@ pub(super) fn get_coverage(
     key: CoverageKey,
     relay: &RelayUrl,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(
+        test,
+        feature = "bench-instrumentation",
+        feature = "test-instrumentation"
+    ))]
     store.coverage_reads.fetch_add(1, Ordering::Relaxed);
     let row_key = RedbStore::coverage_row_key(key, relay);
     let read_txn = store.database()?.begin_read().map_err(persist_err)?;

@@ -21,11 +21,19 @@ use super::schema::{
     SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
     SEMANTIC_RESOURCES, STORE_META, TOMBSTONES,
 };
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(any(
+    test,
+    feature = "bench-instrumentation",
+    feature = "test-instrumentation"
+))]
 use super::AtomicU64;
 #[cfg(test)]
 use super::AtomicU8;
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(any(
+    test,
+    feature = "bench-instrumentation",
+    feature = "test-instrumentation"
+))]
 use super::Ordering;
 use super::{
     acquire_for_open, binary_event, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
@@ -108,7 +116,11 @@ pub struct RedbStore {
     pub(super) query_event_values: AtomicU64,
     /// Coverage-table point reads, kept separate from event projection work
     /// so lifecycle benchmarks can attribute diagnostics cost exactly.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(
+        test,
+        feature = "bench-instrumentation",
+        feature = "test-instrumentation"
+    ))]
     pub(super) coverage_reads: AtomicU64,
     /// Benchmark-only ceiling: governed commits skip persistence barriers.
     /// Ordinary builds cannot construct a store with this set.
@@ -668,7 +680,11 @@ impl RedbStore {
             query_index_rows: AtomicU64::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             query_event_values: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(any(
+                test,
+                feature = "bench-instrumentation",
+                feature = "test-instrumentation"
+            ))]
             coverage_reads: AtomicU64::new(0),
             #[cfg(feature = "bench-instrumentation")]
             benchmark_durability: _benchmark_durability,
@@ -770,12 +786,20 @@ impl RedbStore {
         )
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(
+        test,
+        feature = "bench-instrumentation",
+        feature = "test-instrumentation"
+    ))]
     pub fn reset_coverage_reads(&self) {
         self.coverage_reads.store(0, Ordering::Relaxed);
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(
+        test,
+        feature = "bench-instrumentation",
+        feature = "test-instrumentation"
+    ))]
     pub fn coverage_reads(&self) -> u64 {
         self.coverage_reads.load(Ordering::Relaxed)
     }
