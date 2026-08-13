@@ -2969,6 +2969,7 @@ impl<S: EventStore> EngineCore<S> {
                 expected_current_materialization: expected_materialization,
                 starting_source,
                 source,
+                source_policy: nmp_store::SemanticSourcePolicy::Continuing,
                 source_event: Some(source_event),
                 plan,
                 materialized: Some(MaterializationCandidate {
