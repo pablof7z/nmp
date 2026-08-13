@@ -149,67 +149,67 @@ const EXPECTED_SEMANTIC_TRACE: &[(&str, &str)] = &[
     ),
     (
         "correlated multi-relay lanes durable",
-        "b92c08443288e4400d433a48cd29ad4ce8e4a996dbfcf9357db7c73cbdb4cd27",
+        "41e0ba90e928654d5a1daaf8e4d3d0184125e88d72e3a53db07b4dd90afc4ffb",
     ),
     (
         "ambiguous handoff became outcome unknown",
-        "17125a230ec9f7a835e21ac2efbee9d79cd2bd17e872cb2aaee9c88621abe588",
+        "40a5e5e6e7b04bd68af5e03fba8a42aa64ca8f71a28d1de21aac2c723f6a0c81",
     ),
     (
         "delivery attempt gave up",
-        "cbbbdf1399a4c88064fe144c1113c9f8b0ba5757d87be481173347c5f3c9b685",
+        "a791b7ccab0ad9393b2386b0db37aeff71b015077b243c4136ed2821fe52f4fb",
     ),
     (
         "in-flight delivery interrupted",
-        "24c677c32389426223907c19e3c60b22e880113889db84987e3a91d49d38c505",
+        "50796991c8187ebf3a9eb4c773bcda6dcb790ddda4d32eb8c5d3d9b4ee8a9e59",
     ),
     (
         "retry ended in relay rejection",
-        "ad3da84dba425e027bf8efcf9cc0f85f1f564067f25c8c99de8dcb83e70637fb",
+        "be19911b9bab0dafef409364625b11f2388e96018b6b5d9636262e3d392ad336",
     ),
     (
         "multi-relay terminal obligation closed",
-        "ad3da84dba425e027bf8efcf9cc0f85f1f564067f25c8c99de8dcb83e70637fb",
+        "be19911b9bab0dafef409364625b11f2388e96018b6b5d9636262e3d392ad336",
     ),
     (
         "publication route durable",
-        "489c326e0ec1d771c63333f12518ffa9e85b58dc9b3f4fdde223a0472b52f7d8",
+        "3fcc15ce7650f4bbe8393a4ce5320e0ab801b4cfeb8e39b7330e6fa990541736",
     ),
     (
         "publication lanes bootstrapped",
-        "fccb7686f4956649c75a8fec913048d07402ac349b6c5edfffd8df03275094bb",
+        "4134eab65d527bbd96373fc4a8e473be4991a8c2286ff656ba6cc04f8cbf2b74",
     ),
     (
         "publication lane eligible",
-        "df882359ad6351a3b948465e3be68068926c689c47ce4485cb2810fa14515052",
+        "3f090fe947aeb0de7aae879371058dc85129a6bd1afd7746bdfe32a79ba89fb7",
     ),
     (
         "publication attempt started",
-        "d6e152aad831f2ecd1a843e4d16468dc91434773f423ca192930f6465e6a3a29",
+        "075ea5a19a888aa2bccc18c402a0520e7d202299cb9ed9d8e17945282e2a7d2a",
     ),
     (
         "publication retry scheduled",
-        "2e9feb051c0845a1718d8dd7d473404ff5c940bed448ed6528d80ddf38d8c11e",
+        "843e6e73ebe9f4f6d5cc9ff1e43eb8a1a7dc5c588f30b87d6dd2e5a5d8a2b4f5",
     ),
     (
         "publication retry eligible",
-        "b423a4642f6d185f69b3e0b896eb84ec165413a600297a0104ed3838a0c2c732",
+        "3c37a00e3224263d7927ea34313b635c4e049289e9ab400bb993ae783b4aceab",
     ),
     (
         "publication retry started",
-        "6d234a1774d13ae57db5788dcdef31d8942abc514d68f71eaf873583b0bbb850",
+        "29db6ae8fa8230968b15d58c6c046f0de5a33c7f3b438c929c64a86643aaa988",
     ),
     (
         "publication handed off",
-        "cd3b5e6d5f0be9c2d0184aef2a508432c7c2e45d28e05c6340972d32a6b25c91",
+        "2232df354b8ea71ab7f3eac3cdcae68c8807e0583e15d611abb0e0cd4a36d7d7",
     ),
     (
         "publication receipt acked",
-        "238b4f60f00d021e25a2f94faa2431656e812d2d4549adeade9d63d56a29acd6",
+        "3b4d7e8baf33d629b17887b2629d3e1dbd6902771b852d4d0cf631a0a0055223",
     ),
     (
         "publication obligation closed",
-        "238b4f60f00d021e25a2f94faa2431656e812d2d4549adeade9d63d56a29acd6",
+        "3b4d7e8baf33d629b17887b2629d3e1dbd6902771b852d4d0cf631a0a0055223",
     ),
 ];
 
