@@ -5,11 +5,12 @@
 
 use std::path::Path;
 
+use nostr::EventId;
 use redb::{Database, ReadableTable, TableDefinition};
 
 use super::schema::{
-    persist_err, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_RECEIPTS,
-    PUBLISH_QUEUE_ROUTE_REVISIONS,
+    event_row_key, persist_err, EVENTS, EVENT_IDS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_INTENTS,
+    PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 use crate::PersistenceError;
 
@@ -74,6 +75,32 @@ pub fn insert_corrupt_publish_queue_route_revision(
             .map_err(persist_err)?;
         let value = [b"NMDV".as_slice(), &[200, 0, 0, 0]].concat();
         opened.insert(key, value.as_slice()).map_err(persist_err)?;
+    }
+    tx.commit().map_err(persist_err)?;
+    Ok(())
+}
+
+/// Overwrite the canonical row named by `event_id` with undecodable bytes.
+pub fn corrupt_canonical_event(path: &Path, event_id: EventId) -> Result<(), PersistenceError> {
+    let db = Database::open(path).map_err(persist_err)?;
+    let tx = db.begin_write().map_err(persist_err)?;
+    let event_key = {
+        let event_ids = tx.open_table(EVENT_IDS).map_err(persist_err)?;
+        let event_key = event_ids
+            .get(event_id.as_bytes())
+            .map_err(persist_err)?
+            .map(|value| value.value())
+            .ok_or_else(|| PersistenceError::invariant("canonical event id fixture"))?;
+        event_key
+    };
+    {
+        let mut events = tx.open_table(EVENTS).map_err(persist_err)?;
+        events
+            .insert(
+                event_row_key(event_key).as_slice(),
+                b"NMPE-truncated".as_slice(),
+            )
+            .map_err(persist_err)?;
     }
     tx.commit().map_err(persist_err)?;
     Ok(())

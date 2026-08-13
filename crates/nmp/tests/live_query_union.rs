@@ -29,9 +29,7 @@
 //! its handle is registered leaves residue only in the resolver graph, which
 //! `active_demand` (computed from the handle table) reports as absent.
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
 
 use nmp::mechanism::core::{
     AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, ObservationEvidence,
@@ -42,14 +40,8 @@ use nmp_grammar::{
     LiveQuery, LiveQueryError, SourceAuthority,
 };
 use nmp_router::{FixtureRoutingFacts, WireOp};
-use nmp_store::{
-    AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
-    CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId,
-    PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent, PublishQueueReceipt,
-    PublishQueueRouteRevision, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome,
-    RetractReason, StoredEvent,
-};
-use nostr::{Event, EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
+use nmp_store::{testing, CoverageInterval, EventStore, RedbStore, RelayObserved};
+use nostr::{EventId, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
 const KIND: u16 = 39_000;
 /// The second branch's selection. Distinct from [`KIND`] so a fault can be
@@ -838,217 +830,6 @@ fn only_the_branch_tells_two_identical_resolver_facts_apart() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Fault injection for the three proofs below.
-//
-// The existing single-branch rollback proof
-// (`observation_open_failures_are_typed_leak_free_and_leave_runtime_usable`)
-// arms a fault that fails the NEXT canonical read, so on a union it can only
-// ever fail branch 0 and nothing is rolled back. This store instead fails the
-// read that asks for ONE named kind, and delegates every other door to a
-// healthy `RedbStore`. Because canonical branch order sorts on the
-// selection first, aiming the fault at `OTHER_KIND` fails a LATER branch with
-// the earlier one already opened -- the case a per-branch subscribe-and-merge
-// implementation gets wrong.
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Default)]
-struct BranchReadFault(Rc<Cell<Option<u16>>>);
-
-impl BranchReadFault {
-    fn aim_at(&self, kind: u16) {
-        self.0.set(Some(kind));
-    }
-
-    fn disarm(&self) {
-        self.0.set(None);
-    }
-
-    fn strikes(&self, filter: &nostr::Filter) -> bool {
-        let Some(armed) = self.0.get() else {
-            return false;
-        };
-        filter
-            .kinds
-            .as_ref()
-            .is_some_and(|kinds| kinds.contains(&Kind::from_u16(armed)))
-    }
-}
-
-struct BranchReadFailureStore {
-    inner: RedbStore,
-    fault: BranchReadFault,
-}
-
-impl BranchReadFailureStore {
-    fn new(inner: RedbStore, fault: BranchReadFault) -> Self {
-        Self { inner, fault }
-    }
-}
-
-impl EventStore for BranchReadFailureStore {
-    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
-        if self.fault.strikes(filter) {
-            return Err(PersistenceError::invariant(
-                "injected branch canonical read failure",
-            ));
-        }
-        self.inner.query(filter)
-    }
-
-    fn query_newest_before(
-        &self,
-        filter: &nostr::Filter,
-        before: EventCursor,
-        limit: usize,
-    ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        if self.fault.strikes(filter) {
-            return Err(PersistenceError::invariant(
-                "injected branch canonical read failure",
-            ));
-        }
-        self.inner.query_newest_before(filter, before, limit)
-    }
-
-    fn insert(
-        &mut self,
-        event: Event,
-        from: RelayObserved,
-    ) -> Result<InsertOutcome, PersistenceError> {
-        self.inner.insert(event, from)
-    }
-    fn remove(
-        &mut self,
-        id: EventId,
-        reason: RetractReason,
-    ) -> Result<Option<StoredEvent>, PersistenceError> {
-        self.inner.remove(id, reason)
-    }
-    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.expire_due(now)
-    }
-    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_expiration()
-    }
-    fn record_coverage(
-        &mut self,
-        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
-    ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(claims)
-    }
-    fn get_coverage(
-        &self,
-        key: CoverageKey,
-        relay: &RelayUrl,
-    ) -> Result<Option<CoverageInterval>, PersistenceError> {
-        self.inner.get_coverage(key, relay)
-    }
-    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
-        self.inner.gc(claims)
-    }
-    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
-        self.inner.accept_write(accept)
-    }
-    fn replaceable_operation_snapshot(
-        &self,
-        coordinate: &nostr::nips::nip01::Coordinate,
-    ) -> Result<Option<nmp_store::RecoveredSemanticResource>, PersistenceError> {
-        self.inner.replaceable_operation_snapshot(coordinate)
-    }
-    fn install_replaceable_materialization(
-        &mut self,
-        rematerialize: nmp_store::SemanticRematerialize,
-    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
-        self.inner
-            .install_replaceable_materialization(rematerialize)
-    }
-    fn install_replaceable_source_materialization(
-        &mut self,
-        install: nmp_store::SemanticSourceInstall,
-    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
-        self.inner
-            .install_replaceable_source_materialization(install)
-    }
-    fn enumerate_publish_queue_receipts(
-        &self,
-    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
-        self.inner.enumerate_publish_queue_receipts()
-    }
-    fn publish_queue_receipts_after(
-        &self,
-        after: Option<u64>,
-        limit: u8,
-    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
-        self.inner.publish_queue_receipts_after(after, limit)
-    }
-    fn remove_publish_queue_entry(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<RemoveQueueEntryOutcome, PersistenceError> {
-        self.inner.remove_publish_queue_entry(receipt_id)
-    }
-    fn accept_refused(
-        &mut self,
-        frozen_id: EventId,
-        expected_pubkey: PublicKey,
-        reason: RefuseReason,
-    ) -> Result<u64, PersistenceError> {
-        self.inner
-            .accept_refused(frozen_id, expected_pubkey, reason)
-    }
-    fn promote_signed(
-        &mut self,
-        target: nmp_store::PromotionTarget,
-        verified: nmp_store::VerifiedSignature,
-    ) -> Result<PromoteOutcome, PersistenceError> {
-        self.inner.promote_signed(target, verified)
-    }
-    fn compensate_write(
-        &mut self,
-        intent_id: IntentId,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.compensate_write(intent_id)
-    }
-    fn compensate_write_with_state(
-        &mut self,
-        intent_id: IntentId,
-        reason: CompensationReason,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.compensate_write_with_state(intent_id, reason)
-    }
-    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
-        self.inner.recover_publish_queue()
-    }
-    fn reattach_receipt(
-        &self,
-        receipt_id: u64,
-    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
-        self.inner.reattach_receipt(receipt_id)
-    }
-    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
-        self.inner.lookup_correlation(token)
-    }
-    fn record_route_revision(
-        &mut self,
-        intent_id: IntentId,
-        relays: BTreeSet<RelayUrl>,
-    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
-        self.inner.record_route_revision(intent_id, relays)
-    }
-    fn recover_route_revisions(
-        &self,
-        intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
-        self.inner.recover_route_revisions(intent_id)
-    }
-    fn recover_attempts(
-        &self,
-        intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
-        self.inner.recover_attempts(intent_id)
-    }
-}
-
 fn degraded(effects: &[Effect]) -> Option<String> {
     effects.iter().find_map(|effect| match effect {
         Effect::EmitDiagnostics(snapshot) => snapshot.store_degraded.clone(),
@@ -1063,12 +844,23 @@ fn degraded(effects: &[Effect]) -> Option<String> {
 #[test]
 fn a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed() {
     let (a, b, c) = (relay("a"), relay("b"), relay("c"));
-    let fault = BranchReadFault::default();
+    let directory = tempfile::tempdir().expect("temporary Redb directory");
+    let path = directory.path().join("union-open-corruption.redb");
+    let corrupt_id = {
+        let mut store = RedbStore::open(&path).expect("create temporary Redb store");
+        store_event_of_kind(
+            &mut store,
+            &Keys::generate(),
+            OTHER_KIND,
+            200,
+            "corrupt-later-branch",
+            &[&b],
+        )
+    };
+    testing::corrupt_canonical_event(&path, corrupt_id)
+        .expect("store-owned canonical-event corruption");
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        BranchReadFailureStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            fault.clone(),
-        ),
+        RedbStore::open(&path).expect("reopen temporary Redb store"),
         FixtureRoutingFacts::new(),
         10,
     );
@@ -1086,15 +878,13 @@ fn a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed() {
          nothing to roll back and proves nothing about a union"
     );
 
-    fault.aim_at(OTHER_KIND);
     let refused = core.handle(EngineMsg::Subscribe(query));
-    fault.disarm();
 
-    assert_eq!(
-        degraded(&refused).as_deref(),
-        Some("durable-store persistence failure: injected branch canonical read failure"),
-        "the injected read must actually have fired; without this the rest of \
-         this test would pass over a perfectly healthy open"
+    let refusal = degraded(&refused).expect("the corrupt branch reports degraded storage");
+    assert!(
+        refusal.starts_with("durable-store persistence failure: decode canonical event view "),
+        "the store-owned corruption must actually be dereferenced; without this the rest of \
+         this test would pass over a perfectly healthy open: {refusal}"
     );
     assert!(
         !refused
@@ -1146,23 +936,45 @@ fn a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed() {
 fn one_branchs_refresh_failure_retracts_no_sibling_row() {
     let (a, b) = (relay("a"), relay("b"));
     let keys = Keys::generate();
-    let fault = BranchReadFault::default();
-    let mut store = BranchReadFailureStore::new(
-        RedbStore::temporary().expect("temporary Redb store"),
-        fault.clone(),
-    );
-    let from_a = store_event_of_kind(&mut store, &keys, KIND, 200, "a", &[&a]);
-    let from_b = store_event_of_kind(&mut store, &keys, OTHER_KIND, 201, "b", &[&b]);
+    let corrupt_keys = Keys::generate();
+    let directory = tempfile::tempdir().expect("temporary Redb directory");
+    let path = directory.path().join("union-refresh-corruption.redb");
+    let (from_a, from_b, corrupt_id) = {
+        let mut store = RedbStore::open(&path).expect("create temporary Redb store");
+        let from_a = store_event_of_kind(&mut store, &keys, KIND, 200, "a", &[&a]);
+        let from_b = store_event_of_kind(&mut store, &keys, OTHER_KIND, 201, "b", &[&b]);
+        let corrupt_id = store_event_of_kind(
+            &mut store,
+            &corrupt_keys,
+            OTHER_KIND,
+            202,
+            "corrupt-after-reroot",
+            &[&b],
+        );
+        (from_a, from_b, corrupt_id)
+    };
+    testing::corrupt_canonical_event(&path, corrupt_id)
+        .expect("store-owned canonical-event corruption");
+    let store = RedbStore::open(&path).expect("reopen temporary Redb store");
     let mut core =
         EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
+    core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+
+    let reactive_other_kind = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([OTHER_KIND])),
+            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([b.clone()])),
+        AccessContext::Public,
+    )
+    .expect("a reactive pinned demand is constructible");
 
     let opened = handle_and_flush(
         &mut core,
         EngineMsg::Subscribe(union_of(
-            [
-                host_branch_of_kind(&a, KIND),
-                host_branch_of_kind(&b, OTHER_KIND),
-            ],
+            [host_branch_of_kind(&a, KIND), reactive_other_kind],
             None,
         )),
     );
@@ -1178,12 +990,9 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
     let prior_evidence = projection.evidence.clone();
     assert_eq!(prior_evidence.len(), 2);
 
-    // One branch's local read fails while the whole query refreshes.
-    fault.aim_at(OTHER_KIND);
-    let refreshed = core.handle(EngineMsg::SetActivePubkey(Some(
-        Keys::generate().public_key(),
-    )));
-    fault.disarm();
+    // The corrupt row is first selected and dereferenced by this reactive
+    // identity change, after both branches have delivered healthy rows.
+    let refreshed = core.handle(EngineMsg::SetActivePubkey(Some(corrupt_keys.public_key())));
 
     let retracted: Vec<EventId> = frames(&refreshed, id)
         .iter()
@@ -1210,10 +1019,10 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
         "and both branches' evidence, byte-identical -- including the failing \
          branch's own prior entry, which is not replaced by an empty one"
     );
-    assert_eq!(
-        degraded(&refreshed).as_deref(),
-        Some("durable-store persistence failure: injected branch canonical read failure"),
-        "the failure is reported as an ordinary degraded diagnostic instead"
+    let refusal = degraded(&refreshed).expect("the corrupt branch reports degraded storage");
+    assert!(
+        refusal.starts_with("durable-store persistence failure: decode canonical event view "),
+        "the failure is reported as an ordinary degraded diagnostic instead: {refusal}"
     );
 }
 
