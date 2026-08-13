@@ -1651,7 +1651,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Superseded path removed:** the full-receipt-enumeration defaults for deadline peek and pruning are deleted. No streaming scan, shadow cache, retention TTL/LRU, or Mosaico workaround remains.
 - **Human signoff:** issue #1415 records the bug and scope. [Draft PR #1417](https://github.com/pablof7z/nmp/pull/1417), exact-head CI, and review are the approval trail; this entry is not merge authorization.
 
-## 2026-08-13 — Give each query row exactly one signature owner ([issue #1383](https://github.com/pablof7z/nmp/issues/1383))
+## 2026-08-13 — Give each query row exactly one signature owner ([issue #1383](https://github.com/pablof7z/nmp/issues/1383), [PR #1424](https://github.com/pablof7z/nmp/pull/1424))
 
 - **Failure evidence:** Rust, UniFFI, Swift, and Kotlin exposed signature bytes beside a separate pending/signed state. A pending row therefore carried NMP's 128-zero store sentinel across the app boundary, and raw row construction could pair either state with contradictory bytes. Apps had to remember which field overruled the other instead of receiving a value that excluded both invalid combinations.
 - **Changed projections:** ffi,kotlin,rust,swift
@@ -1660,4 +1660,4 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Diagnostics impact:** none. Signature lifecycle remains ordinary row content in the existing live-query graph; receipt, relay, and queue diagnostics are unchanged.
 - **Updated falsifiers:** `pending_has_no_signature_or_event_projection` and `signed_always_projects_the_exact_supplied_signature` prove the Rust value cannot expose a pending signature and always carries the exact supplied bytes in `Signed`; `pending_ffi_row_contains_no_signature_sentinel` proves the FFI projection contains no 128-zero signature field; `delayed_signer_promotes_the_same_visible_row_from_pending_to_signed` and `an_unsigned_write_is_still_explicitly_pending_after_a_restart` prove live promotion and restart reconstruction. Swift `testRowAccumulatorSignaturePromotionReplacesTheSameRow`, Kotlin `signaturePromotionReplacesTheSameRow`, cross-SDK parity, and `WRITES-RECEIPTS-002`, `003`, and `010` cover the native mappings and durable behavioral meaning.
 - **Superseded path removed:** `Row.sig`, `Row.signatureState` / `signature_state`, `RowSignatureState`, `FfiRowSignatureState`, and the Rust row's public event-shaped sentinel door are deleted outright. There is no alias, nullable signature beside a state flag, empty-string convention, or magic-text replacement.
-- **Human signoff:** issue #1383 records the required hard cut. Exact-head CI and independent protected-surface review remain required before merge.
+- **Human signoff:** issue #1383 records the required hard cut. PR #1424, exact-head CI, and independent protected-surface review are the approval trail before merge.
