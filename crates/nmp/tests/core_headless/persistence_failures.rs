@@ -1568,6 +1568,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
     }));
     let (id, generation, unsigned_event) = find_sign_request(&accepted);
     let signed = unsigned_event.sign_with_keys(&author).unwrap();
+    let event_id = signed.id;
     let signed_effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
 
     // Non-vacuity: the injected bootstrap failure really is the path taken,
@@ -1583,7 +1584,7 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
         assert!(
             statuses
                 .iter()
-                .any(|status| status == &attempt_stalled(relay)),
+                .any(|status| status == &attempt_stalled(event_id, relay)),
             "the fixture must actually take the failed-creation path for {relay}: {statuses:?}"
         );
     }
@@ -1700,12 +1701,13 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     }));
     let (id1, gen1, u1) = find_sign_request(&accepted1);
     let signed1 = u1.sign_with_keys(&author).unwrap();
+    let event_id1 = signed1.id;
     let signed_effects1 = core.handle(EngineMsg::SignerCompleted(id1, gen1, Ok(signed1)));
     assert!(
         signed_effects1
             .iter()
             .any(|e| matches!(e, Effect::EmitReceipt(rid, fact)
-                if *rid == id1 && fact == &attempt_stalled(&relay))),
+                if *rid == id1 && fact == &attempt_stalled(event_id1, &relay))),
         "the injected bootstrap failure must surface as a persistence stall, got \
          {signed_effects1:?}"
     );
@@ -1725,7 +1727,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     assert!(
         signed_effects2.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, state: RelayState::Waiting(RelayWaiting::NotConnected) })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, state: RelayState::Waiting(RelayWaiting::NotConnected), .. })
                 if *rid == id2 && r == &relay
         )),
         "the second write must bootstrap normally and land in WaitingConnection, \
@@ -1838,7 +1840,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         effects_a.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }), .. })
                 if *rid == receipt_a && relay == &relay_a
         )),
         "receipt_for_intent must resolve intent_a's due AckTimeout back to \
@@ -1848,7 +1850,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         !effects_a.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { .. }) })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { .. }), .. })
                 if relay == &relay_b || *rid == receipt_b
         )),
         "relay_b's deadline is not yet due -- it must not fire early, got {effects_a:?}"
@@ -1858,7 +1860,7 @@ fn receipt_for_intent_resolves_correctly_after_boot_recovery() {
     assert!(
         effects_b.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }), .. })
                 if *rid == receipt_b && relay == &relay_b
         )),
         "receipt_for_intent must resolve intent_b's due AckTimeout back to \
@@ -1925,7 +1927,7 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }) })
+            Effect::EmitReceipt(rid, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: 1, .. }), .. })
                 if *rid == receipt2 && relay == &relay2
         )),
         "an earlier, unrelated pending removal (write #1's close) must not \
