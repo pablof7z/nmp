@@ -151,9 +151,9 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And E1 delivery evidence remains historical evidence naming E1
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-018
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1473
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::shared_second_generation_is_once_per_relay_and_replays_without_settling
+  # nmp:falsifier=Suppress the physical owner's E2 Signing(Signed) receipt fact while leaving E2 delivery intact; the original contributing receipt no longer observes the shared generation signature.
   Scenario: Shared operation receipts observe one physical generation delivery
     Given Alice and Bob have distinct operation receipts sharing current generation E2
     And their destination plans overlap
