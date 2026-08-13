@@ -77,14 +77,18 @@ fn receipt_state(
     match &update.resolution {
         crate::OperationResolution::Contributing => {
             ReplaceableOperationReceiptState::Contributing {
-                current: update.current.and_then(|current| {
-                    materialization
-                        .filter(|record| record.current == current)
-                        .map(|record| crate::MaterializationReceipt {
-                            materialization: record.current,
-                            sig_state: record.sig_state,
-                        })
-                }),
+                progress: crate::ReplaceableOperationReceiptProgress::from_parts(
+                    update.current.and_then(|current| {
+                        materialization
+                            .filter(|record| record.current == current)
+                            .map(|record| crate::MaterializationReceipt {
+                                materialization: record.current,
+                                sig_state: record.sig_state,
+                            })
+                    }),
+                    update.waiting,
+                )
+                .expect("contributing operation must be waiting or current"),
             }
         }
         crate::OperationResolution::Resolved => ReplaceableOperationReceiptState::Resolved,
@@ -743,7 +747,7 @@ pub(super) fn promote(
                     PublishQueueReceiptPayload::ReplaceableOperation {
                         coordinate: receipt_coordinate,
                         state: ReplaceableOperationReceiptState::Contributing {
-                            current: Some(current),
+                            progress: crate::ReplaceableOperationReceiptProgress::Current(current),
                         },
                     } if receipt_coordinate == &coordinate
                         && current.materialization.materialization_id == expected_materialization
@@ -781,10 +785,12 @@ pub(super) fn promote(
             receipt.payload = PublishQueueReceiptPayload::ReplaceableOperation {
                 coordinate: coordinate.clone(),
                 state: ReplaceableOperationReceiptState::Contributing {
-                    current: Some(crate::MaterializationReceipt {
-                        materialization: work.current,
-                        sig_state: crate::IntentSigState::Signed,
-                    }),
+                    progress: crate::ReplaceableOperationReceiptProgress::Current(
+                        crate::MaterializationReceipt {
+                            materialization: work.current,
+                            sig_state: crate::IntentSigState::Signed,
+                        },
+                    ),
                 },
             };
             let encoded = encode_receipt(&receipt);

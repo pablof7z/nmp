@@ -626,11 +626,15 @@ impl MemoryStore {
         match &update.resolution {
             crate::OperationResolution::Contributing => {
                 crate::ReplaceableOperationReceiptState::Contributing {
-                    current: update.current.and_then(|current| {
-                        materialization
-                            .filter(|work| work.receipt.materialization == current)
-                            .map(|work| work.receipt)
-                    }),
+                    progress: crate::ReplaceableOperationReceiptProgress::from_parts(
+                        update.current.and_then(|current| {
+                            materialization
+                                .filter(|work| work.receipt.materialization == current)
+                                .map(|work| work.receipt)
+                        }),
+                        update.waiting,
+                    )
+                    .expect("contributing operation must be waiting or current"),
                 }
             }
             crate::OperationResolution::Resolved => {
@@ -1107,7 +1111,7 @@ impl MemoryStore {
                     crate::PublishQueueReceiptPayload::ReplaceableOperation {
                         coordinate: receipt_coordinate,
                         state: crate::ReplaceableOperationReceiptState::Contributing {
-                            current: Some(current),
+                            progress: crate::ReplaceableOperationReceiptProgress::Current(current),
                         },
                     } if receipt_coordinate == &coordinate
                         && current.materialization.materialization_id == expected_materialization
@@ -1146,7 +1150,7 @@ impl MemoryStore {
                 .payload = crate::PublishQueueReceiptPayload::ReplaceableOperation {
                 coordinate: coordinate.clone(),
                 state: crate::ReplaceableOperationReceiptState::Contributing {
-                    current: Some(work.receipt),
+                    progress: crate::ReplaceableOperationReceiptProgress::Current(work.receipt),
                 },
             };
         }

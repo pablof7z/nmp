@@ -21,6 +21,16 @@ pub(crate) const MAX_RESOLUTION_REASON_BYTES: usize = 4_096;
 )]
 pub struct MaterializationId(pub u64);
 
+/// Durable revision of the target materialization attempt.
+///
+/// Unlike [`MaterializationId`], this advances even while no complete event
+/// body exists. Crypto callbacks fence against it so an answer for an older
+/// source/program attempt cannot complete its successor.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct MaterializationRevision(pub u64);
+
 /// Exact owner/implementation identity of an opaque replay program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReplayProgramId(pub [u8; 16]);
@@ -212,7 +222,35 @@ pub struct SemanticGeneration {
 pub struct SemanticCurrentState {
     pub source_revision: SourceRevision,
     pub program_digest: SemanticProgramDigest,
-    pub generation: Option<SemanticGeneration>,
+    pub materialization_revision: MaterializationRevision,
+    pub progress: SemanticMaterializationProgress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticMaterializationProgress {
+    Waiting {
+        reason: MaterializationWait,
+        current: Option<SemanticGeneration>,
+    },
+    Current(SemanticGeneration),
+}
+
+impl SemanticCurrentState {
+    #[must_use]
+    pub fn waiting(&self) -> Option<MaterializationWait> {
+        match self.progress {
+            SemanticMaterializationProgress::Waiting { reason, .. } => Some(reason),
+            SemanticMaterializationProgress::Current(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> Option<&SemanticGeneration> {
+        match &self.progress {
+            SemanticMaterializationProgress::Waiting { current, .. } => current.as_ref(),
+            SemanticMaterializationProgress::Current(generation) => Some(generation),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +268,24 @@ pub struct MaterializationCandidate {
     pub event: UnsignedEvent,
     pub routing: String,
     pub sig_state: PendingMaterializationState,
+}
+
+/// Why an accepted operation has no new complete body yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MaterializationWait {
+    Source,
+    Content,
+}
+
+/// Result of evaluating the current durable operation program.
+///
+/// The closed shape prevents `None` from ambiguously meaning missing source,
+/// missing decrypt/encrypt capability, or a fully resolved operation set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializationAttempt {
+    Waiting(MaterializationWait),
+    Complete(MaterializationCandidate),
+    Resolved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,10 +312,11 @@ pub struct SemanticAccept {
     pub expected_source_revision: Option<SourceRevision>,
     pub expected_program_digest: Option<SemanticProgramDigest>,
     pub expected_current_materialization: Option<MaterializationId>,
+    pub expected_materialization_revision: Option<MaterializationRevision>,
     pub starting_source: StartingSourceRequirement,
     pub source: SourceEvidence,
     pub plan: SemanticPlan,
-    pub materialized: Option<MaterializationCandidate>,
+    pub materialization: MaterializationAttempt,
     pub contributing_operations: Vec<IntentId>,
     pub resolved_operations: Vec<ResolvedOperation>,
 }
@@ -271,9 +328,10 @@ pub struct SemanticRematerialize {
     pub expected_source_revision: SourceRevision,
     pub expected_program_digest: SemanticProgramDigest,
     pub expected_current_materialization: Option<MaterializationId>,
+    pub expected_materialization_revision: MaterializationRevision,
     pub source: SourceEvidence,
     pub evaluated_at: Timestamp,
-    pub materialized: Option<MaterializationCandidate>,
+    pub materialization: MaterializationAttempt,
     pub contributing_operations: Vec<IntentId>,
     pub resolved_operations: Vec<ResolvedOperation>,
 }
@@ -298,6 +356,7 @@ pub enum SemanticRefusal {
     IncompatibleReplayProgram,
     SourceUnresolved,
     InvalidSourceRevision,
+    InvalidMaterializationRevision,
     SourceRevisionExhausted,
     NonCanonicalOperationOrder,
     DuplicateOperation(IntentId),
@@ -310,6 +369,8 @@ pub enum SemanticRefusal {
     MaterializationTimestampOverflow,
     MaterializationExpired,
     MaterializationIdExhausted,
+    MaterializationRevisionExhausted,
+    MaterializationWaitMismatch,
     MaterializationEventIdCollision,
     MaterializationTombstoned,
 }
@@ -327,6 +388,8 @@ pub(crate) struct SemanticResourceState {
     pub(crate) coordinate: Coordinate,
     pub(crate) source_revision: SourceRevision,
     pub(crate) operations: Vec<SemanticOperation>,
+    pub(crate) materialization_revision: MaterializationRevision,
+    pub(crate) waiting: Option<MaterializationWait>,
     pub(crate) last_materialization_id: Option<MaterializationId>,
     pub(crate) generation: Option<SemanticGeneration>,
 }
@@ -336,8 +399,20 @@ impl SemanticResourceState {
         SemanticCurrentState {
             source_revision: self.source_revision.clone(),
             program_digest: semantic_program_digest(&self.operations),
-            generation: self.generation.clone(),
+            materialization_revision: self.materialization_revision,
+            progress: materialization_progress(self.waiting, self.generation.clone()),
         }
+    }
+}
+
+fn materialization_progress(
+    waiting: Option<MaterializationWait>,
+    generation: Option<SemanticGeneration>,
+) -> SemanticMaterializationProgress {
+    match (waiting, generation) {
+        (Some(reason), current) => SemanticMaterializationProgress::Waiting { reason, current },
+        (None, Some(generation)) => SemanticMaterializationProgress::Current(generation),
+        (None, None) => unreachable!("active semantic resource must be waiting or current"),
     }
 }
 
@@ -346,6 +421,7 @@ pub(crate) struct SemanticReceiptUpdate {
     pub(crate) intent_id: IntentId,
     pub(crate) resolution: OperationResolution,
     pub(crate) current: Option<MaterializationRef>,
+    pub(crate) waiting: Option<MaterializationWait>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +463,13 @@ pub(crate) fn plan_accept(
                 .map(|generation| generation.materialization.materialization_id)
     {
         return Err(SemanticRefusal::InvalidSourceRevision);
+    }
+    if accept.expected_materialization_revision
+        != previous
+            .as_ref()
+            .map(|state| state.materialization_revision)
+    {
+        return Err(SemanticRefusal::InvalidMaterializationRevision);
     }
     if previous
         .as_ref()
@@ -452,8 +535,13 @@ pub(crate) fn plan_accept(
         .collect::<BTreeSet<_>>();
     let previous_generation = previous.as_ref().and_then(|state| state.generation.clone());
     let current_digest = semantic_program_digest(&operations);
-    let (generation, candidate) = match accept.materialized {
-        Some(mut candidate) => {
+    let materialization_revision = next_materialization_revision(
+        previous
+            .as_ref()
+            .map(|state| state.materialization_revision),
+    )?;
+    let (generation, candidate, waiting) = match accept.materialization {
+        MaterializationAttempt::Complete(mut candidate) => {
             if candidate
                 .event
                 .tags
@@ -490,16 +578,21 @@ pub(crate) fn plan_accept(
                     program_digest: current_digest,
                 }),
                 Some(candidate),
+                None,
             )
         }
-        None => {
+        MaterializationAttempt::Waiting(waiting) => {
+            validate_materialization_wait(&operations, waiting)?;
             let retained = previous_generation.filter(|generation| {
                 generation
                     .members
                     .iter()
                     .all(|member| all_members.contains(member))
             });
-            (retained, None)
+            (retained, None, Some(waiting))
+        }
+        MaterializationAttempt::Resolved => {
+            return Err(SemanticRefusal::MaterializationMembershipMismatch)
         }
     };
 
@@ -517,6 +610,7 @@ pub(crate) fn plan_accept(
                     .contains(&operation.intent_id)
                     .then_some(generation.materialization)
             }),
+            waiting,
         })
         .chain(
             resolved
@@ -525,6 +619,7 @@ pub(crate) fn plan_accept(
                     intent_id,
                     resolution,
                     current: None,
+                    waiting: None,
                 }),
         )
         .collect();
@@ -541,6 +636,8 @@ pub(crate) fn plan_accept(
             coordinate: accept.coordinate,
             source_revision,
             operations,
+            materialization_revision,
+            waiting,
             last_materialization_id,
             generation,
         }),
@@ -566,6 +663,9 @@ pub(crate) fn plan_rematerialize(
             != rematerialize.expected_current_materialization
     {
         return Err(SemanticRefusal::InvalidSourceRevision);
+    }
+    if previous.materialization_revision != rematerialize.expected_materialization_revision {
+        return Err(SemanticRefusal::InvalidMaterializationRevision);
     }
     if previous.operations.first().is_some_and(|operation| {
         let requirement = source_requirement(operation);
@@ -602,58 +702,66 @@ pub(crate) fn plan_rematerialize(
         return Err(SemanticRefusal::MaterializationMembershipMismatch);
     }
     let current_digest = semantic_program_digest(&operations);
-    let (generation, candidate) = match (operations.is_empty(), rematerialize.materialized) {
-        (true, None) => (None, None),
-        (false, None) => {
-            let retained = previous.generation.clone().filter(|generation| {
-                generation
-                    .members
-                    .iter()
-                    .all(|member| all_members.contains(member))
-            });
-            (retained, None)
-        }
-        (false, Some(mut candidate)) => {
-            if candidate
-                .event
-                .tags
-                .expiration()
-                .is_some_and(|expires_at| expires_at <= &rematerialize.evaluated_at)
-            {
-                return Err(SemanticRefusal::MaterializationExpired);
+    let materialization_revision =
+        next_materialization_revision(Some(previous.materialization_revision))?;
+    let (generation, candidate, waiting) =
+        match (operations.is_empty(), rematerialize.materialization) {
+            (true, MaterializationAttempt::Resolved) => (None, None, None),
+            (false, MaterializationAttempt::Waiting(waiting)) => {
+                validate_materialization_wait(&operations, waiting)?;
+                let retained = previous.generation.clone().filter(|generation| {
+                    generation
+                        .members
+                        .iter()
+                        .all(|member| all_members.contains(member))
+                });
+                (retained, None, Some(waiting))
             }
-            if matches!(rematerialize.source.qualified, QualifiedSource::Unresolved) {
-                return Err(SemanticRefusal::SourceUnresolved);
-            }
-            ensure_all_qualified(&operations)?;
-            validate_materialized(&rematerialize.coordinate, &mut candidate.event)?;
-            validate_exact_timestamp(
-                candidate.event.created_at,
-                &source_revision,
-                previous.generation.as_ref(),
-                &operations,
-            )?;
-            let materialization_id = next_materialization_id(previous.last_materialization_id)?;
-            let materialization = MaterializationRef {
-                materialization_id,
-                event_id: candidate
+            (false, MaterializationAttempt::Complete(mut candidate)) => {
+                if candidate
                     .event
-                    .id
-                    .expect("validate_materialized ensures id"),
-            };
-            (
-                Some(SemanticGeneration {
-                    materialization,
-                    created_at: candidate.event.created_at,
-                    members: all_members.clone(),
-                    source_revision: source_revision.clone(),
-                    program_digest: current_digest,
-                }),
-                Some(candidate),
-            )
-        }
-        (true, Some(_)) => return Err(SemanticRefusal::MaterializationMembershipMismatch),
-    };
+                    .tags
+                    .expiration()
+                    .is_some_and(|expires_at| expires_at <= &rematerialize.evaluated_at)
+                {
+                    return Err(SemanticRefusal::MaterializationExpired);
+                }
+                if matches!(rematerialize.source.qualified, QualifiedSource::Unresolved) {
+                    return Err(SemanticRefusal::SourceUnresolved);
+                }
+                ensure_all_qualified(&operations)?;
+                validate_materialized(&rematerialize.coordinate, &mut candidate.event)?;
+                validate_exact_timestamp(
+                    candidate.event.created_at,
+                    &source_revision,
+                    previous.generation.as_ref(),
+                    &operations,
+                )?;
+                let materialization_id = next_materialization_id(previous.last_materialization_id)?;
+                let materialization = MaterializationRef {
+                    materialization_id,
+                    event_id: candidate
+                        .event
+                        .id
+                        .expect("validate_materialized ensures id"),
+                };
+                (
+                    Some(SemanticGeneration {
+                        materialization,
+                        created_at: candidate.event.created_at,
+                        members: all_members.clone(),
+                        source_revision: source_revision.clone(),
+                        program_digest: current_digest,
+                    }),
+                    Some(candidate),
+                    None,
+                )
+            }
+            (true, MaterializationAttempt::Waiting(_) | MaterializationAttempt::Complete(_))
+            | (false, MaterializationAttempt::Resolved) => {
+                return Err(SemanticRefusal::MaterializationMembershipMismatch)
+            }
+        };
     let receipt_updates = operations
         .iter()
         .map(|operation| SemanticReceiptUpdate {
@@ -665,6 +773,7 @@ pub(crate) fn plan_rematerialize(
                     .contains(&operation.intent_id)
                     .then_some(generation.materialization)
             }),
+            waiting,
         })
         .chain(
             resolved
@@ -673,6 +782,7 @@ pub(crate) fn plan_rematerialize(
                     intent_id,
                     resolution,
                     current: None,
+                    waiting: None,
                 }),
         )
         .collect();
@@ -690,6 +800,8 @@ pub(crate) fn plan_rematerialize(
             coordinate: rematerialize.coordinate,
             source_revision,
             operations,
+            materialization_revision,
+            waiting,
             last_materialization_id,
             generation,
         }),
@@ -741,6 +853,22 @@ fn ensure_all_qualified(operations: &[SemanticOperation]) -> Result<(), Semantic
         Err(SemanticRefusal::SourceUnresolved)
     } else {
         Ok(())
+    }
+}
+
+fn validate_materialization_wait(
+    operations: &[SemanticOperation],
+    waiting: MaterializationWait,
+) -> Result<(), SemanticRefusal> {
+    let source_pending = operations.iter().any(|operation| {
+        matches!(
+            operation.source_requirement,
+            OperationSourceRequirement::Awaiting(_)
+        )
+    });
+    match (waiting, source_pending) {
+        (MaterializationWait::Source, true) | (MaterializationWait::Content, false) => Ok(()),
+        _ => Err(SemanticRefusal::MaterializationWaitMismatch),
     }
 }
 
@@ -890,6 +1018,18 @@ fn next_materialization_id(
     ))
 }
 
+fn next_materialization_revision(
+    previous: Option<MaterializationRevision>,
+) -> Result<MaterializationRevision, SemanticRefusal> {
+    Ok(MaterializationRevision(
+        previous
+            .map(|revision| revision.0)
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(SemanticRefusal::MaterializationRevisionExhausted)?,
+    ))
+}
+
 pub(crate) fn semantic_program_digest(operations: &[SemanticOperation]) -> SemanticProgramDigest {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"nmp-semantic-program-v2\0");
@@ -931,11 +1071,27 @@ pub(crate) fn validate_resource_state(
         .map(|operation| operation.intent_id)
         .collect::<BTreeSet<_>>();
     let valid = !state.operations.is_empty()
+        && state.materialization_revision.0 != 0
         && operation_ids.len() == state.operations.len()
         && state
             .operations
             .windows(2)
             .all(|pair| pair[0].intent_id < pair[1].intent_id)
+        && match state.waiting {
+            Some(MaterializationWait::Source) => state.operations.iter().any(|operation| {
+                matches!(
+                    operation.source_requirement,
+                    OperationSourceRequirement::Awaiting(_)
+                )
+            }),
+            Some(MaterializationWait::Content) | None => state.operations.iter().all(|operation| {
+                matches!(
+                    operation.source_requirement,
+                    OperationSourceRequirement::Qualified(_)
+                )
+            }),
+        }
+        && (state.waiting.is_some() || state.generation.is_some())
         && state.generation.as_ref().is_none_or(|generation| {
             generation
                 .members
@@ -957,7 +1113,8 @@ pub(crate) fn recovered(state: SemanticResourceState) -> RecoveredSemanticResour
         current: SemanticCurrentState {
             source_revision: state.source_revision,
             program_digest,
-            generation: state.generation,
+            materialization_revision: state.materialization_revision,
+            progress: materialization_progress(state.waiting, state.generation),
         },
     }
 }

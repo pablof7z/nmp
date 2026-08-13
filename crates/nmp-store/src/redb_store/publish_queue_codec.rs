@@ -25,7 +25,7 @@ use super::publish_queue::{
 
 pub(crate) type PublishQueueRelayId = u32;
 
-pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 4;
+pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 5;
 pub(super) const PUBLISH_QUEUE_CODEC_VERSION_KEY: &[u8] = b"codec_version";
 pub(super) const NEXT_INTENT_ID_KEY: &[u8] = b"next_intent_id";
 pub(super) const NEXT_RECEIPT_ID_KEY: &[u8] = b"next_receipt_id";
@@ -822,8 +822,16 @@ pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
             encode_coordinate(&mut encoder, coordinate)
                 .expect("validated operation receipt coordinate");
             match state {
-                crate::ReplaceableOperationReceiptState::Contributing { current } => {
+                crate::ReplaceableOperationReceiptState::Contributing { progress } => {
                     encoder.u8(0);
+                    let (current, waiting) = match progress {
+                        crate::ReplaceableOperationReceiptProgress::Waiting { reason, current } => {
+                            (current.as_ref(), Some(*reason))
+                        }
+                        crate::ReplaceableOperationReceiptProgress::Current(current) => {
+                            (Some(current), None)
+                        }
+                    };
                     match current {
                         None => encoder.u8(0),
                         Some(current) => {
@@ -832,6 +840,11 @@ pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
                             encoder.fixed(current.materialization.event_id.as_bytes());
                             encode_sig_state(&mut encoder, current.sig_state);
                         }
+                    }
+                    match waiting {
+                        None => encoder.u8(0),
+                        Some(crate::MaterializationWait::Source) => encoder.u8(1),
+                        Some(crate::MaterializationWait::Content) => encoder.u8(2),
                     }
                 }
                 crate::ReplaceableOperationReceiptState::Resolved => encoder.u8(1),
@@ -914,7 +927,24 @@ pub(crate) fn decode_receipt(
                             ))
                         }
                     };
-                    crate::ReplaceableOperationReceiptState::Contributing { current }
+                    let waiting = match decoder.u8()? {
+                        0 => None,
+                        1 => Some(crate::MaterializationWait::Source),
+                        2 => Some(crate::MaterializationWait::Content),
+                        other => {
+                            return Err(PublishQueueCodecError::InvalidTag(
+                                "operation materialization wait",
+                                other,
+                            ))
+                        }
+                    };
+                    let progress =
+                        crate::ReplaceableOperationReceiptProgress::from_parts(current, waiting)
+                            .ok_or(PublishQueueCodecError::InvalidTag(
+                                "operation materialization progress",
+                                0,
+                            ))?;
+                    crate::ReplaceableOperationReceiptState::Contributing { progress }
                 }
                 1 => crate::ReplaceableOperationReceiptState::Resolved,
                 2 => crate::ReplaceableOperationReceiptState::Cancelled,

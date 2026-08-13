@@ -1,7 +1,8 @@
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, EventStore, IntentSigState,
-    MaterializationCandidate, MaterializationId, MemoryStore, PendingMaterializationState,
-    PromoteOutcome, PromotionTarget, PublishQueueReceiptPayload, QualifiedSource, RedbStore,
+    MaterializationAttempt, MaterializationCandidate, MaterializationId, MaterializationWait,
+    MemoryStore, PendingMaterializationState, PromoteOutcome, PromotionTarget,
+    PublishQueueReceiptPayload, QualifiedSource, RedbStore, ReplaceableOperationReceiptProgress,
     ReplaceableOperationReceiptState, ReplayFormatId, ReplayProgramId, SemanticAccept,
     SemanticInstallOutcome, SemanticPlan, SemanticRematerialize, SourceEvidence, SourcePlanId,
     StartingSource, StartingSourceRequirement, VerifiedSignature,
@@ -22,6 +23,17 @@ fn source() -> SourceEvidence {
         plan: SourcePlanId([3; 32]),
         access: AccessContextId([4; 32]),
         qualified: QualifiedSource::Absent,
+    }
+}
+
+fn event_source(byte: u8, created_at: u64) -> SourceEvidence {
+    SourceEvidence {
+        plan: SourcePlanId([3; 32]),
+        access: AccessContextId([4; 32]),
+        qualified: QualifiedSource::Event {
+            event_id: nostr::EventId::from_byte_array([byte; 32]),
+            created_at: Timestamp::from(created_at),
+        },
     }
 }
 
@@ -46,12 +58,13 @@ fn bodyless_accept(
         expected_source_revision: snapshot.map(|state| state.source_revision.clone()),
         expected_program_digest: snapshot.map(|state| state.program_digest),
         expected_current_materialization: snapshot
-            .and_then(|state| state.generation.as_ref())
+            .and_then(|state| state.generation())
             .map(|generation| generation.materialization.materialization_id),
+        expected_materialization_revision: snapshot.map(|state| state.materialization_revision),
         starting_source: starting_source(),
         source: source(),
         plan: SemanticPlan::new(1, vec![byte]).unwrap(),
-        materialized: None,
+        materialization: MaterializationAttempt::Waiting(MaterializationWait::Content),
         contributing_operations: existing,
         resolved_operations: Vec::new(),
     }
@@ -78,7 +91,7 @@ fn accept_operation(
             receipt_id,
             current,
         } => {
-            assert!(current.generation.is_none());
+            assert!(current.generation().is_none());
             (intent_id, receipt_id)
         }
         other => panic!("expected bodyless replaceable operation, got {other:?}"),
@@ -96,7 +109,7 @@ fn assert_receipt_current(
         PublishQueueReceiptPayload::ReplaceableOperation {
             state:
                 ReplaceableOperationReceiptState::Contributing {
-                    current: Some(current),
+                    progress: ReplaceableOperationReceiptProgress::Current(current),
                 },
             ..
         } => {
@@ -108,6 +121,22 @@ fn assert_receipt_current(
         }
         other => panic!("expected contributing materialization receipt, got {other:?}"),
     }
+}
+
+fn assert_receipt_waiting(store: &dyn EventStore, receipt_id: u64, expected: MaterializationWait) {
+    let receipt = store.reattach_receipt(receipt_id).unwrap().unwrap();
+    assert!(matches!(
+        receipt.payload,
+        PublishQueueReceiptPayload::ReplaceableOperation {
+            state: ReplaceableOperationReceiptState::Contributing {
+                progress: ReplaceableOperationReceiptProgress::Waiting {
+                    reason: waiting,
+                    current: None,
+                },
+            },
+            ..
+        } if waiting == expected
+    ));
 }
 
 fn install_shared_materialization(
@@ -139,9 +168,10 @@ fn install_shared_materialization(
             expected_source_revision: snapshot.current.source_revision.clone(),
             expected_program_digest: snapshot.current.program_digest,
             expected_current_materialization: None,
+            expected_materialization_revision: snapshot.current.materialization_revision,
             source: source(),
             evaluated_at: Timestamp::from(created_at),
-            materialized: Some(MaterializationCandidate {
+            materialization: MaterializationAttempt::Complete(MaterializationCandidate {
                 event,
                 routing: "test-route".into(),
                 sig_state: PendingMaterializationState::Pending,
@@ -181,7 +211,7 @@ fn exercise_bodyless_shared_lifecycle(store: &mut dyn EventStore) {
         ),
     );
     let current = install_shared_materialization(store, &keys, &coordinate, vec![first, second]);
-    let generation = current.generation.clone().unwrap();
+    let generation = current.generation().cloned().unwrap();
     assert_eq!(
         generation.materialization.materialization_id,
         MaterializationId(1)
@@ -278,7 +308,7 @@ fn redb_reopens_bodyless_operation_and_current_generation_without_body_copies() 
             install_shared_materialization(&mut store, &keys, &coordinate, vec![accepted.0]);
         assert_eq!(
             current
-                .generation
+                .generation()
                 .unwrap()
                 .materialization
                 .materialization_id,
@@ -298,7 +328,7 @@ fn redb_reopens_bodyless_operation_and_current_generation_without_body_copies() 
     assert_eq!(
         snapshot
             .current
-            .generation
+            .generation()
             .unwrap()
             .materialization
             .materialization_id,
@@ -311,4 +341,208 @@ fn redb_reopens_bodyless_operation_and_current_generation_without_body_copies() 
         IntentSigState::Pending,
     );
     assert_eq!(store.recover_publish_queue().unwrap().len(), 1);
+}
+
+#[test]
+fn content_pending_reconstructs_and_an_old_target_revision_is_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("content-pending.redb");
+    let keys = Keys::generate();
+    let coordinate = coordinate(&keys);
+    let (first, first_receipt, stale_attempt) = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let (first, receipt) = accept_operation(
+            &mut store,
+            &keys,
+            10,
+            bodyless_accept(coordinate.clone(), None, Vec::new(), 42),
+        );
+        let snapshot = store
+            .replaceable_operation_snapshot(&coordinate)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.current.materialization_revision.0, 1);
+        assert_eq!(
+            snapshot.current.waiting(),
+            Some(MaterializationWait::Content)
+        );
+        assert_receipt_waiting(&store, receipt, MaterializationWait::Content);
+        let stale_attempt = SemanticRematerialize {
+            coordinate: coordinate.clone(),
+            expected_source_revision: snapshot.current.source_revision.clone(),
+            expected_program_digest: snapshot.current.program_digest,
+            expected_current_materialization: None,
+            expected_materialization_revision: snapshot.current.materialization_revision,
+            source: source(),
+            evaluated_at: Timestamp::from(10),
+            materialization: MaterializationAttempt::Complete(MaterializationCandidate {
+                event: UnsignedEvent::new(
+                    keys.public_key(),
+                    Timestamp::from(10),
+                    Kind::ContactList,
+                    Vec::new(),
+                    "stale plaintext result",
+                ),
+                routing: "test-route".into(),
+                sig_state: PendingMaterializationState::Pending,
+            }),
+            contributing_operations: vec![first],
+            resolved_operations: Vec::new(),
+        };
+        (first, receipt, stale_attempt)
+    };
+
+    let mut store = RedbStore::open(&path).unwrap();
+    let reopened = store
+        .replaceable_operation_snapshot(&coordinate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.operations[0].plan.bytes(), &[42]);
+    assert_eq!(reopened.current.materialization_revision.0, 1);
+    assert_eq!(
+        reopened.current.waiting(),
+        Some(MaterializationWait::Content)
+    );
+    assert_receipt_waiting(&store, first_receipt, MaterializationWait::Content);
+
+    let (second, second_receipt) = accept_operation(
+        &mut store,
+        &keys,
+        11,
+        bodyless_accept(coordinate.clone(), Some(&reopened.current), vec![first], 43),
+    );
+    assert!(matches!(
+        store
+            .install_replaceable_materialization(stale_attempt)
+            .unwrap(),
+        SemanticInstallOutcome::Stale
+    ));
+    let current = store
+        .replaceable_operation_snapshot(&coordinate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.operations.len(), 2);
+    assert_eq!(current.operations[1].intent_id, second);
+    assert_eq!(current.current.materialization_revision.0, 2);
+    assert_eq!(
+        current.current.waiting(),
+        Some(MaterializationWait::Content)
+    );
+    assert_receipt_waiting(&store, first_receipt, MaterializationWait::Content);
+    assert_receipt_waiting(&store, second_receipt, MaterializationWait::Content);
+}
+
+#[test]
+fn source_supersession_invalidates_an_inflight_materialization() {
+    let keys = Keys::generate();
+    let coordinate = coordinate(&keys);
+    let mut store = MemoryStore::new();
+    let (intent, _) = accept_operation(
+        &mut store,
+        &keys,
+        10,
+        bodyless_accept(coordinate.clone(), None, Vec::new(), 42),
+    );
+    let before = store
+        .replaceable_operation_snapshot(&coordinate)
+        .unwrap()
+        .unwrap();
+    let stale = SemanticRematerialize {
+        coordinate: coordinate.clone(),
+        expected_source_revision: before.current.source_revision.clone(),
+        expected_program_digest: before.current.program_digest,
+        expected_current_materialization: None,
+        expected_materialization_revision: before.current.materialization_revision,
+        source: source(),
+        evaluated_at: Timestamp::from(10),
+        materialization: MaterializationAttempt::Complete(MaterializationCandidate {
+            event: UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from(10),
+                Kind::ContactList,
+                Vec::new(),
+                "stale source result",
+            ),
+            routing: "test-route".into(),
+            sig_state: PendingMaterializationState::Pending,
+        }),
+        contributing_operations: vec![intent],
+        resolved_operations: Vec::new(),
+    };
+
+    let advanced = store
+        .install_replaceable_materialization(SemanticRematerialize {
+            coordinate: coordinate.clone(),
+            expected_source_revision: before.current.source_revision,
+            expected_program_digest: before.current.program_digest,
+            expected_current_materialization: None,
+            expected_materialization_revision: before.current.materialization_revision,
+            source: event_source(8, 11),
+            evaluated_at: Timestamp::from(11),
+            materialization: MaterializationAttempt::Waiting(MaterializationWait::Content),
+            contributing_operations: vec![intent],
+            resolved_operations: Vec::new(),
+        })
+        .unwrap();
+    assert!(matches!(advanced, SemanticInstallOutcome::Waiting(_)));
+    assert!(matches!(
+        store.install_replaceable_materialization(stale).unwrap(),
+        SemanticInstallOutcome::Stale
+    ));
+}
+
+#[test]
+fn source_wait_and_content_wait_are_distinct_and_cannot_be_misreported() {
+    let keys = Keys::generate();
+    let coordinate = coordinate(&keys);
+    let mut unresolved = source();
+    unresolved.qualified = QualifiedSource::Unresolved;
+    let source_pending = SemanticAccept {
+        coordinate: coordinate.clone(),
+        program: ReplayProgramId([7; 16]),
+        format: ReplayFormatId([9; 16]),
+        expected_source_revision: None,
+        expected_program_digest: None,
+        expected_current_materialization: None,
+        expected_materialization_revision: None,
+        starting_source: starting_source(),
+        source: unresolved.clone(),
+        plan: SemanticPlan::new(1, vec![1]).unwrap(),
+        materialization: MaterializationAttempt::Waiting(MaterializationWait::Source),
+        contributing_operations: Vec::new(),
+        resolved_operations: Vec::new(),
+    };
+
+    let mut store = MemoryStore::new();
+    let (_, receipt) = accept_operation(&mut store, &keys, 10, source_pending);
+    assert_receipt_waiting(&store, receipt, MaterializationWait::Source);
+
+    let wrongly_content_pending = SemanticAccept {
+        coordinate,
+        program: ReplayProgramId([7; 16]),
+        format: ReplayFormatId([9; 16]),
+        expected_source_revision: None,
+        expected_program_digest: None,
+        expected_current_materialization: None,
+        expected_materialization_revision: None,
+        starting_source: starting_source(),
+        source: unresolved,
+        plan: SemanticPlan::new(1, vec![2]).unwrap(),
+        materialization: MaterializationAttempt::Waiting(MaterializationWait::Content),
+        contributing_operations: Vec::new(),
+        resolved_operations: Vec::new(),
+    };
+    let mut second_store = MemoryStore::new();
+    assert!(matches!(
+        second_store.accept_write(AcceptWrite {
+            payload: AcceptWritePayload::ReplaceableOperation(Box::new(wrongly_content_pending)),
+            expected_pubkey: keys.public_key(),
+            signing_identity_ref: "test-key".into(),
+            accepted_at: Timestamp::from(11),
+            correlation: None,
+        }),
+        Ok(AcceptOutcome::ReplaceableOperationRefused(
+            nmp_store::SemanticRefusal::MaterializationWaitMismatch
+        ))
+    ));
 }

@@ -16,8 +16,9 @@ use wait_timeout::ChildExt;
 use super::*;
 use crate::{
     sentinel_signature, HandoffEvidence, MaterializationId, MaterializationReceipt,
-    MaterializationRef, PublishQueueReceiptPayload, ReplaceableOperationReceiptState,
-    SemanticCurrentState, SemanticGeneration, SemanticInstallOutcome,
+    MaterializationRef, PublishQueueReceiptPayload, ReplaceableOperationReceiptProgress,
+    ReplaceableOperationReceiptState, SemanticCurrentState, SemanticGeneration,
+    SemanticInstallOutcome, SemanticMaterializationProgress,
 };
 
 /// The verified, intent-bound evidence `promote_signed` takes (#768). Every
@@ -161,6 +162,7 @@ fn semantic_accept_write() -> AcceptWrite {
             expected_source_revision: None,
             expected_program_digest: None,
             expected_current_materialization: None,
+            expected_materialization_revision: None,
             starting_source: crate::StartingSourceRequirement {
                 plan: crate::SourcePlanId([3; 32]),
                 access: crate::AccessContextId([4; 32]),
@@ -168,7 +170,9 @@ fn semantic_accept_write() -> AcceptWrite {
             },
             source: semantic_source(),
             plan: crate::SemanticPlan::new(1, vec![42]).unwrap(),
-            materialized: None,
+            materialization: crate::MaterializationAttempt::Waiting(
+                crate::MaterializationWait::Content,
+            ),
             contributing_operations: Vec::new(),
             resolved_operations: Vec::new(),
         })),
@@ -189,9 +193,10 @@ fn semantic_rematerialize(store: &RedbStore) -> crate::SemanticRematerialize {
         expected_source_revision: snapshot.current.source_revision.clone(),
         expected_program_digest: snapshot.current.program_digest,
         expected_current_materialization: None,
+        expected_materialization_revision: snapshot.current.materialization_revision,
         source: semantic_source(),
         evaluated_at: Timestamp::from(1_000),
-        materialized: Some(crate::MaterializationCandidate {
+        materialization: crate::MaterializationAttempt::Complete(crate::MaterializationCandidate {
             event: UnsignedEvent::new(
                 keys().public_key(),
                 Timestamp::from(1_000),
@@ -214,7 +219,7 @@ fn semantic_promotion_target(
         .replaceable_operation_snapshot(&semantic_coordinate())
         .unwrap()
         .unwrap();
-    let generation = snapshot.current.generation.as_ref().unwrap();
+    let generation = snapshot.current.generation().cloned().unwrap();
     let row = store
         .query(
             &Filter::new()
@@ -721,7 +726,7 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
             .replaceable_operation_snapshot(&semantic_coordinate())
             .unwrap()
             .unwrap();
-        assert!(snapshot.current.generation.is_none());
+        assert!(snapshot.current.generation().is_none());
         assert!(store
             .query(
                 &Filter::new()
@@ -734,7 +739,12 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
         assert!(matches!(
             receipt.payload,
             PublishQueueReceiptPayload::ReplaceableOperation {
-                state: ReplaceableOperationReceiptState::Contributing { current: None },
+                state: ReplaceableOperationReceiptState::Contributing {
+                    progress: ReplaceableOperationReceiptProgress::Waiting {
+                        reason: crate::MaterializationWait::Content,
+                        current: None,
+                    },
+                },
                 ..
             }
         ));
@@ -747,7 +757,7 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
             installed,
             SemanticInstallOutcome::Installed {
                 current: SemanticCurrentState {
-                    generation: Some(SemanticGeneration {
+                    progress: SemanticMaterializationProgress::Current(SemanticGeneration {
                         materialization: MaterializationRef {
                             materialization_id: MaterializationId(1),
                             ..
@@ -767,7 +777,7 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
             .unwrap()
             .unwrap()
             .current
-            .generation
+            .generation()
             .unwrap()
             .materialization
             .materialization_id,
@@ -796,6 +806,7 @@ fn semantic_shared_promotion_is_crash_atomic() {
         };
         second.expected_source_revision = Some(snapshot.current.source_revision.clone());
         second.expected_program_digest = Some(snapshot.current.program_digest);
+        second.expected_materialization_revision = Some(snapshot.current.materialization_revision);
         second.contributing_operations = vec![first_intent];
         second.plan = crate::SemanticPlan::new(1, vec![43]).unwrap();
         second_write.accepted_at = Timestamp::from(1_001);
@@ -811,19 +822,22 @@ fn semantic_shared_promotion_is_crash_atomic() {
             expected_source_revision: snapshot.current.source_revision.clone(),
             expected_program_digest: snapshot.current.program_digest,
             expected_current_materialization: None,
+            expected_materialization_revision: snapshot.current.materialization_revision,
             source: semantic_source(),
             evaluated_at: Timestamp::from(1_001),
-            materialized: Some(crate::MaterializationCandidate {
-                event: UnsignedEvent::new(
-                    keys().public_key(),
-                    Timestamp::from(1_001),
-                    Kind::ContactList,
-                    Vec::new(),
-                    "semantic-u5-shared",
-                ),
-                routing: "semantic-u5-route".into(),
-                sig_state: crate::PendingMaterializationState::Pending,
-            }),
+            materialization: crate::MaterializationAttempt::Complete(
+                crate::MaterializationCandidate {
+                    event: UnsignedEvent::new(
+                        keys().public_key(),
+                        Timestamp::from(1_001),
+                        Kind::ContactList,
+                        Vec::new(),
+                        "semantic-u5-shared",
+                    ),
+                    routing: "semantic-u5-route".into(),
+                    sig_state: crate::PendingMaterializationState::Pending,
+                },
+            ),
             contributing_operations: vec![first_intent, second_intent],
             resolved_operations: Vec::new(),
         };
@@ -856,10 +870,12 @@ fn semantic_shared_promotion_is_crash_atomic() {
                 receipt.payload,
                 PublishQueueReceiptPayload::ReplaceableOperation {
                     state: ReplaceableOperationReceiptState::Contributing {
-                        current: Some(MaterializationReceipt {
-                            sig_state: IntentSigState::Pending,
-                            ..
-                        }),
+                        progress: ReplaceableOperationReceiptProgress::Current(
+                            MaterializationReceipt {
+                                sig_state: IntentSigState::Pending,
+                                ..
+                            }
+                        ),
                     },
                     ..
                 }
@@ -878,10 +894,12 @@ fn semantic_shared_promotion_is_crash_atomic() {
             receipt.payload,
             PublishQueueReceiptPayload::ReplaceableOperation {
                 state: ReplaceableOperationReceiptState::Contributing {
-                    current: Some(MaterializationReceipt {
-                        sig_state: IntentSigState::Signed,
-                        ..
-                    }),
+                    progress: ReplaceableOperationReceiptProgress::Current(
+                        MaterializationReceipt {
+                            sig_state: IntentSigState::Signed,
+                            ..
+                        }
+                    ),
                 },
                 ..
             }

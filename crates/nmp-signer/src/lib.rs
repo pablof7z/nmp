@@ -28,8 +28,8 @@ pub use op::{
 };
 pub use payload::{
     DecryptOperation, DecryptPayloadRequest, EncryptOperation, EncryptPayloadRequest,
-    EncryptedPayload, EncryptedPayloadService, FencedCiphertext, FencedPlaintext,
-    PayloadEncryption, PayloadError, PayloadFence, PayloadLimits, StalePayloadResult,
-    TransientPlaintext,
+    EncryptedPayload, EncryptedPayloadService, FencedCiphertext, FencedPlaintext, PayloadCodecId,
+    PayloadEncryption, PayloadError, PayloadFence, PayloadLimits, PayloadPolicy, PayloadSource,
+    StalePayloadResult, TransientPlaintext,
 };
 pub use value::{SignerPublicKey, SignerSignedEvent, SignerSignedEventParts, SignerUnsignedEvent};

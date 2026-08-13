@@ -102,12 +102,13 @@ pub use redb_store::{
     StoreBenchProcessCounters, StoreBenchVariant,
 };
 pub use semantic_edit::{
-    AccessContextId, MaterializationCandidate, MaterializationId, OperationResolution,
-    OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
-    RecoveredSemanticResource, ReplayFormatId, ReplayProgramId, ResolvedOperation, SemanticAccept,
-    SemanticCurrentState, SemanticGeneration, SemanticInstallOutcome, SemanticOperation,
-    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize, SourceEvidence,
-    SourcePlanId, SourceRevision, StartingSource, StartingSourceRequirement,
+    AccessContextId, MaterializationAttempt, MaterializationCandidate, MaterializationId,
+    MaterializationRevision, MaterializationWait, OperationResolution, OperationSourceRequirement,
+    PendingMaterializationState, QualifiedSource, RecoveredSemanticResource, ReplayFormatId,
+    ReplayProgramId, ResolvedOperation, SemanticAccept, SemanticCurrentState, SemanticGeneration,
+    SemanticInstallOutcome, SemanticMaterializationProgress, SemanticOperation, SemanticPlan,
+    SemanticProgramDigest, SemanticRefusal, SemanticRematerialize, SourceEvidence, SourcePlanId,
+    SourceRevision, StartingSource, StartingSourceRequirement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1397,11 +1398,33 @@ pub enum PublishQueueReceiptPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplaceableOperationReceiptState {
     Contributing {
-        current: Option<MaterializationReceipt>,
+        progress: ReplaceableOperationReceiptProgress,
     },
     Resolved,
     Cancelled,
     Refused(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplaceableOperationReceiptProgress {
+    Waiting {
+        reason: MaterializationWait,
+        current: Option<MaterializationReceipt>,
+    },
+    Current(MaterializationReceipt),
+}
+
+impl ReplaceableOperationReceiptProgress {
+    pub(crate) fn from_parts(
+        current: Option<MaterializationReceipt>,
+        waiting: Option<MaterializationWait>,
+    ) -> Option<Self> {
+        match (waiting, current) {
+            (Some(reason), current) => Some(Self::Waiting { reason, current }),
+            (None, Some(current)) => Some(Self::Current(current)),
+            (None, None) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,9 +3,9 @@
 
 use nmp::{
     DecryptCapability, DecryptPayloadRequest, EncryptCapability, EncryptPayloadRequest,
-    EncryptedPayload, EncryptedPayloadService, PayloadEncryption, PayloadFence, PayloadLimits,
-    SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
-    TransientPlaintext,
+    EncryptedPayload, EncryptedPayloadService, PayloadCodecId, PayloadEncryption, PayloadFence,
+    PayloadLimits, PayloadPolicy, PayloadSource, SignerOp, SignerPublicKey, SignerSignedEvent,
+    SignerUnsignedEvent, SigningCapability, TransientPlaintext,
 };
 
 struct ConsumerSigner;
@@ -58,34 +58,37 @@ fn nmp_only_signer_surface_is_implementable() {
     assert_eq!(signed.public_key(), public_key);
     assert_eq!(signed.content(), "hello");
 
-    let fence = PayloadFence::new([1; 32], [2; 32], 3, [4; 32]);
     let limits = PayloadLimits::new(64, 64);
+    let fence = PayloadFence::new(
+        PayloadSource::Event([1; 32]),
+        [2; 32],
+        3,
+        [4; 32],
+        PayloadPolicy::new(
+            [5; 16],
+            1,
+            PayloadCodecId::new([6; 16]),
+            PayloadEncryption::Nip44V2,
+            public_key,
+        ),
+        limits,
+    );
     let encrypted = EncryptedPayloadService::encrypt(
         &signer,
         fence,
-        PayloadEncryption::Nip44V2,
-        public_key,
         TransientPlaintext::new(b"secret".to_vec()),
-        limits,
     )
     .unwrap()
     .wait(std::time::Duration::ZERO)
     .unwrap()
     .accept(fence)
     .unwrap();
-    let decrypted = EncryptedPayloadService::decrypt(
-        &signer,
-        fence,
-        PayloadEncryption::Nip44V2,
-        public_key,
-        encrypted.into_string(),
-        limits,
-    )
-    .unwrap()
-    .wait(std::time::Duration::ZERO)
-    .unwrap()
-    .accept(fence)
-    .unwrap();
+    let decrypted = EncryptedPayloadService::decrypt(&signer, fence, encrypted.into_string())
+        .unwrap()
+        .wait(std::time::Duration::ZERO)
+        .unwrap()
+        .accept(fence)
+        .unwrap();
     assert_eq!(
         decrypted
             .as_str()

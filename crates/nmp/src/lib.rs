@@ -378,10 +378,10 @@ pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, Unsig
 pub use nmp_signer::{
     DecryptCapability, DecryptOperation, DecryptPayloadRequest, EncryptCapability,
     EncryptOperation, EncryptPayloadRequest, EncryptedPayload, EncryptedPayloadService,
-    FencedCiphertext, FencedPlaintext, PayloadEncryption, PayloadError, PayloadFence,
-    PayloadLimits, PendingSignerResolveError, PendingSignerSender, SignerError, SignerOp,
-    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, StalePayloadResult,
-    TransientPlaintext,
+    FencedCiphertext, FencedPlaintext, PayloadCodecId, PayloadEncryption, PayloadError,
+    PayloadFence, PayloadLimits, PayloadPolicy, PayloadSource, PendingSignerResolveError,
+    PendingSignerSender, SignerError, SignerOp, SignerPublicKey, SignerSignedEvent,
+    SignerUnsignedEvent, SigningCapability, StalePayloadResult, TransientPlaintext,
 };
 
 // The concrete mechanism types are internal by default (#52's "internal or
