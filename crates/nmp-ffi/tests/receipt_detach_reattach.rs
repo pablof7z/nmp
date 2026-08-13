@@ -22,9 +22,9 @@ use nmp_ffi::types::{
     FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 use nmp_store::{
-    AcceptWrite, EventStore, HandoffEvidence, IntentSigState, PublishQueueAttemptHandoff,
-    PublishQueueAttemptOutcome, PublishQueueLaneKey, PublishQueuePostHandoffState,
-    PublishQueueTransientCause, VerifiedSignature,
+    AcceptWrite, AcceptWritePayload, EventStore, HandoffEvidence, IntentSigState, PromotionTarget,
+    PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueLaneKey,
+    PublishQueuePostHandoffState, PublishQueueTransientCause, VerifiedSignature,
 };
 use nostr::Event;
 
@@ -172,13 +172,15 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
         );
         let accepted = store
             .accept_write(AcceptWrite {
-                frozen,
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: AcceptWritePayload::Event {
+                    frozen: Box::new(frozen),
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "auto".into(),
+                    sig_state: IntentSigState::Pending,
+                },
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "ffi-paged-replay".into(),
-                routing: "auto".into(),
-                sig_state: IntentSigState::Pending,
                 accepted_at: nostr::Timestamp::from(1_000u64),
                 correlation: None,
             })
@@ -186,7 +188,7 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
         let intent_id = accepted.journaled_intent_id().expect("intent id");
         let receipt_id = accepted.journaled_receipt_id().expect("receipt id");
         store
-            .promote_signed(intent_id, evidence(&signed))
+            .promote_signed(PromotionTarget::Event(intent_id), evidence(&signed))
             .expect("promote fixture");
         store
             .record_route_revision(intent_id, [relay.clone()].into_iter().collect())

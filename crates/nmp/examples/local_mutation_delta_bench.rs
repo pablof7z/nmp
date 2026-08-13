@@ -20,7 +20,9 @@ use nmp::mechanism::core::ObservationId;
 use nmp::mechanism::core::{Effect, EngineCore, EngineMsg, RowDelta};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IndexedTagName};
-use nmp_store::{sentinel_signature, AcceptWrite, IntentSigState, RedbStore, RelayObserved};
+use nmp_store::{
+    sentinel_signature, AcceptWrite, AcceptWritePayload, IntentSigState, RedbStore, RelayObserved,
+};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 struct CountingAllocator;
@@ -183,13 +185,15 @@ fn frozen_from_signed(signed: &Event) -> Event {
 
 fn accept_write(signed: &Event, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
-        frozen: frozen_from_signed(signed),
-        replaceable_base: None,
-        monotonic_stamp: false,
+        payload: AcceptWritePayload::Event {
+            frozen: Box::new(frozen_from_signed(signed)),
+            replaceable_base: None,
+            monotonic_stamp: false,
+            routing: "local-mutation-benchmark".to_owned(),
+            sig_state: IntentSigState::Pending,
+        },
         expected_pubkey: signed.pubkey,
         signing_identity_ref: "local-mutation-benchmark".to_owned(),
-        routing: "local-mutation-benchmark".to_owned(),
-        sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
         correlation: None,
     }

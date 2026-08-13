@@ -110,6 +110,7 @@ mod schema;
 use schema::*;
 pub(crate) mod publish_queue;
 pub(crate) mod publish_queue_codec;
+mod semantic_edit_codec;
 #[cfg(test)]
 use publish_queue::*;
 mod canonical;
@@ -130,6 +131,7 @@ pub use store::RedbStore;
 mod event_ops;
 mod ingest;
 pub(crate) mod publish_queue_ops;
+mod semantic_edit_ops;
 mod write_ops;
 
 impl EventStore for RedbStore {
@@ -258,12 +260,48 @@ impl EventStore for RedbStore {
         write_ops::accept_write(self, accept)
     }
 
+    fn replaceable_operation_snapshot(
+        &self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+    ) -> Result<Option<crate::RecoveredSemanticResource>, PersistenceError> {
+        semantic_edit_ops::snapshot(self, coordinate)
+    }
+
+    fn install_replaceable_materialization(
+        &mut self,
+        rematerialize: crate::SemanticRematerialize,
+    ) -> Result<crate::SemanticInstallOutcome, PersistenceError> {
+        semantic_edit_ops::install(self, rematerialize)
+    }
+
     fn promote_signed(
         &mut self,
-        intent_id: IntentId,
+        target: crate::PromotionTarget,
         verified: VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError> {
-        write_ops::promote_signed(self, intent_id, verified)
+        match target {
+            crate::PromotionTarget::Event(intent_id) => {
+                write_ops::promote_signed(self, intent_id, verified)
+            }
+            crate::PromotionTarget::ReplaceableMaterialization(target) => {
+                let crate::ReplaceableMaterializationTarget {
+                    coordinate,
+                    expected_source_revision,
+                    expected_program_digest,
+                    expected_materialization,
+                    expected_event_id,
+                } = *target;
+                semantic_edit_ops::promote(
+                    self,
+                    coordinate,
+                    expected_source_revision,
+                    expected_program_digest,
+                    expected_materialization,
+                    expected_event_id,
+                    verified,
+                )
+            }
+        }
     }
 
     fn compensate_write_with_state(

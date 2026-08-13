@@ -74,6 +74,7 @@ mod coverage_claims;
 mod memory_store;
 mod persistent_store_lifetime;
 mod redb_store;
+mod semantic_edit;
 #[cfg(test)]
 mod semantic_oracle;
 mod terminal_retention;
@@ -99,6 +100,14 @@ pub use redb_store::{
     StoreBenchMetrics, StoreBenchPreparedBatch, StoreBenchPreparedCorpus,
     StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
     StoreBenchProcessCounters, StoreBenchVariant,
+};
+pub use semantic_edit::{
+    AccessContextId, MaterializationCandidate, MaterializationId, OperationResolution,
+    OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
+    RecoveredSemanticResource, ReplayFormatId, ReplayProgramId, ResolvedOperation, SemanticAccept,
+    SemanticCurrentState, SemanticGeneration, SemanticInstallOutcome, SemanticOperation,
+    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize, SourceEvidence,
+    SourcePlanId, SourceRevision, StartingSource, StartingSourceRequirement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -864,33 +873,15 @@ pub enum IntentSigState {
 /// id colliding with a retained `PUBLISH_QUEUE_RECEIPTS` row, making
 /// `reattach_receipt` ambiguous.
 pub struct AcceptWrite {
+    /// The one accepted write payload. Replaceable operations deliberately
+    /// carry no event body: the body becomes authoritative only when a
+    /// materialization transition installs it into the canonical event table.
+    pub payload: AcceptWritePayload,
     /// The frozen, unsigned NIP-01 body: pubkey/created_at/kind/tags/
     /// content are final and `event.id` is already `EventId::new(..)` over
     /// exactly those fields (the signature is not an id input — Q1).
     /// `event.sig` must be [`sentinel_signature`] until
     /// [`EventStore::promote_signed`] swaps in the real one.
-    pub frozen: Event,
-    /// Optional compare-and-swap guard for a whole-value replacement. The
-    /// store derives the coordinate from `frozen` and compares its current
-    /// canonical winner inside the same transaction that would accept the
-    /// new row. `Some(None)` means the caller observed no local base;
-    /// `None` means this is an ordinary, unconditional write.
-    pub replaceable_base: Option<Option<EventId>>,
-    /// The app stated no `created_at`, so this write's timestamp is NMP's
-    /// to decide and `frozen.created_at` currently holds nothing but the
-    /// caller's clock. Inside the same transaction that compares
-    /// `replaceable_base` — and against the very row it compares — the
-    /// store moves the stamp forward to `winner.created_at + 1` whenever
-    /// the clock is not already ahead (the `max(clock, winner + 1)` rule)
-    /// and re-derives `frozen.id` over the stamped body.
-    ///
-    /// This is why the rule lives here rather than in the engine: a
-    /// timestamp computed outside the transaction is computed against a row
-    /// that may already have moved, which is exactly the seam the
-    /// precondition exists to close. `false` when the app stated its own
-    /// `created_at` — present-then-changed is the one thing a stated field
-    /// may never be, even when the value it stated loses the race.
-    pub monotonic_stamp: bool,
     /// The pinned signing identity (#43 "pins the chosen identity at
     /// acceptance"). Ordinarily equal to `frozen.pubkey`; kept as an
     /// explicit field because it is a distinct journal fact (#2's "expected
@@ -900,20 +891,24 @@ pub struct AcceptWrite {
     /// gives it real meaning; this frame only pins the persistence hook
     /// (Fable checkpoint Q5).
     pub signing_identity_ref: String,
-    /// Opaque, engine-owned routing snapshot at acceptance — persisted and
-    /// returned verbatim by `recover_publish_queue`. The store never interprets
-    /// routing semantics; §5's append-only-revision ownership stays in
-    /// `nmp-engine`.
-    pub routing: String,
-    /// The intent's sig state AT ACCEPTANCE — always `AwaitingSigner` or
-    /// `Pending`, never `Signed` (a row only reaches `Signed` through
-    /// `promote_signed`).
-    pub sig_state: IntentSigState,
     pub accepted_at: Timestamp,
     /// #591 crash-safe correlation token. When `Some`, checked (and, on a
     /// first sighting, journaled) inside this SAME acceptance transaction
     /// -- see [`EventStore::accept_write`]'s doc for the exact protocol.
     pub correlation: Option<nmp_grammar::CorrelationToken>,
+}
+
+/// The closed work shape accepted through [`EventStore::accept_write`].
+/// There is no optional semantic sidecar beside an authoritative event body.
+pub enum AcceptWritePayload {
+    Event {
+        frozen: Box<Event>,
+        replaceable_base: Option<Option<EventId>>,
+        monotonic_stamp: bool,
+        routing: String,
+        sig_state: IntentSigState,
+    },
+    ReplaceableOperation(Box<SemanticAccept>),
 }
 
 /// The result of an [`EventStore::accept_write`] call — mirrors
@@ -941,6 +936,16 @@ pub struct AcceptWrite {
 /// (retraction-and-negative-deltas.md §7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptOutcome {
+    /// A replaceable operation failed a typed store precondition before
+    /// custody. No intent, receipt, operation row, or counter is allocated.
+    ReplaceableOperationRefused(SemanticRefusal),
+    /// A bodyless replaceable operation entered the ordinary intent/receipt
+    /// journal. `current` is progressive and may contain no materialization.
+    ReplaceableOperation {
+        intent_id: IntentId,
+        receipt_id: u64,
+        current: SemanticCurrentState,
+    },
     /// Brand-new pending row, no address competition. `intent_id`/
     /// `receipt_id` are the store-allocated ids (see [`IntentId`]'s doc) —
     /// the ONLY place a caller learns either.
@@ -1040,8 +1045,9 @@ impl AcceptOutcome {
             | AcceptOutcome::Duplicate { intent_id, .. }
             | AcceptOutcome::Superseded { intent_id, .. }
             | AcceptOutcome::Stale { intent_id, .. }
-            | AcceptOutcome::Kind5Processed { intent_id, .. } => Some(*intent_id),
-            AcceptOutcome::Refused(_) => None,
+            | AcceptOutcome::Kind5Processed { intent_id, .. }
+            | AcceptOutcome::ReplaceableOperation { intent_id, .. } => Some(*intent_id),
+            AcceptOutcome::ReplaceableOperationRefused(_) | AcceptOutcome::Refused(_) => None,
         }
     }
 
@@ -1055,8 +1061,9 @@ impl AcceptOutcome {
             | AcceptOutcome::Duplicate { receipt_id, .. }
             | AcceptOutcome::Superseded { receipt_id, .. }
             | AcceptOutcome::Stale { receipt_id, .. }
-            | AcceptOutcome::Kind5Processed { receipt_id, .. } => Some(*receipt_id),
-            AcceptOutcome::Refused(_) => None,
+            | AcceptOutcome::Kind5Processed { receipt_id, .. }
+            | AcceptOutcome::ReplaceableOperation { receipt_id, .. } => Some(*receipt_id),
+            AcceptOutcome::ReplaceableOperationRefused(_) | AcceptOutcome::Refused(_) => None,
         }
     }
 
@@ -1080,7 +1087,10 @@ impl AcceptOutcome {
             | AcceptOutcome::Duplicate { row, .. }
             | AcceptOutcome::Superseded { row, .. }
             | AcceptOutcome::Kind5Processed { row, .. } => Some(row),
-            AcceptOutcome::Stale { .. } | AcceptOutcome::Refused(_) => None,
+            AcceptOutcome::ReplaceableOperation { .. }
+            | AcceptOutcome::Stale { .. }
+            | AcceptOutcome::ReplaceableOperationRefused(_)
+            | AcceptOutcome::Refused(_) => None,
         }
     }
 }
@@ -1135,6 +1145,13 @@ pub enum PromoteOutcome {
         /// row's only owner, which is the common case.
         co_signed: Vec<IntentId>,
     },
+    MaterializationPromoted {
+        row: Box<StoredEvent>,
+        members: Vec<IntentId>,
+    },
+    /// Exact replaceable-operation CAS witness no longer names current state.
+    /// No row, journal, or receipt changed.
+    Stale,
     /// This `IntentId` names no still-open intent, OR its OWN journal is
     /// ALREADY `Signed` — either because it promoted before (codex-nova's
     /// original repeat-promotion finding), or because some OTHER co-owner
@@ -1213,17 +1230,50 @@ pub enum RemoveQueueEntryOutcome {
 pub struct PublishQueueIntent {
     pub intent_id: IntentId,
     pub receipt_id: u64,
-    pub frozen: Event,
+    pub work: PublishQueueWork,
     pub expected_pubkey: PublicKey,
     pub signing_identity_ref: String,
-    pub routing: String,
-    pub sig_state: IntentSigState,
     /// The predecessor this intent displaced, if any — still durable
     /// (`PUBLISH_QUEUE_DISPLACED` is deleted only by `promote_signed` or
     /// `compensate_write`, never by `recover_publish_queue`), so a post-restart
     /// cancellation can still restore it.
-    pub displaced: Option<StoredEvent>,
     pub accepted_at: Timestamp,
+}
+
+impl PublishQueueIntent {
+    /// Project ordinary event work without weakening the closed event-vs-operation shape.
+    pub fn event_work(&self) -> Option<(&Event, Option<&StoredEvent>, &str, IntentSigState)> {
+        match &self.work {
+            PublishQueueWork::Event {
+                frozen,
+                displaced,
+                routing,
+                sig_state,
+            } => Some((frozen, displaced.as_deref(), routing, *sig_state)),
+            PublishQueueWork::ReplaceableOperation { .. } => None,
+        }
+    }
+}
+
+/// Durable open work reconstructed through the one publish queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishQueueWork {
+    Event {
+        frozen: Event,
+        displaced: Option<Box<StoredEvent>>,
+        routing: String,
+        sig_state: IntentSigState,
+    },
+    ReplaceableOperation {
+        coordinate: nostr::nips::nip01::Coordinate,
+        materialization: Option<MaterializationWork>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializationWork {
+    pub receipt: MaterializationReceipt,
+    pub routing: String,
 }
 
 /// A durably-retained receipt's coarse status — the STORE-OBSERVABLE
@@ -1304,13 +1354,81 @@ pub struct PublishQueueReceipt {
     /// without ever gaining a journal row, a pending event row, a signer
     /// request or a relay write.
     pub intent_id: Option<IntentId>,
-    pub frozen_id: EventId,
     pub expected_pubkey: PublicKey,
     /// Acceptance time for receipts backed by a real write intent. Receipt-
     /// only semantic refusals enter receipt custody but have no accepted
     /// intent, so their private terminal-retention clock is stored separately.
     pub accepted_at: Option<Timestamp>,
-    pub state: ReceiptState,
+    pub payload: PublishQueueReceiptPayload,
+}
+
+impl PublishQueueReceipt {
+    /// Project the event arm's durable state. Replaceable-operation receipts
+    /// have their own closed state vocabulary and therefore return `None`.
+    pub fn event_state(&self) -> Option<ReceiptState> {
+        match &self.payload {
+            PublishQueueReceiptPayload::Event { state, .. } => Some(*state),
+            PublishQueueReceiptPayload::ReplaceableOperation { .. } => None,
+        }
+    }
+
+    /// Project the event arm's exact event id without inventing one for a
+    /// bodyless replaceable operation.
+    pub fn event_id(&self) -> Option<EventId> {
+        match &self.payload {
+            PublishQueueReceiptPayload::Event { event_id, .. } => Some(*event_id),
+            PublishQueueReceiptPayload::ReplaceableOperation { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublishQueueReceiptPayload {
+    Event {
+        event_id: EventId,
+        state: ReceiptState,
+    },
+    ReplaceableOperation {
+        coordinate: nostr::nips::nip01::Coordinate,
+        state: ReplaceableOperationReceiptState,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplaceableOperationReceiptState {
+    Contributing {
+        current: Option<MaterializationReceipt>,
+    },
+    Resolved,
+    Cancelled,
+    Refused(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializationReceipt {
+    pub materialization: MaterializationRef,
+    pub sig_state: IntentSigState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializationRef {
+    pub materialization_id: MaterializationId,
+    pub event_id: EventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceableMaterializationTarget {
+    pub coordinate: nostr::nips::nip01::Coordinate,
+    pub expected_source_revision: SourceRevision,
+    pub expected_program_digest: SemanticProgramDigest,
+    pub expected_materialization: MaterializationId,
+    pub expected_event_id: EventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionTarget {
+    Event(IntentId),
+    ReplaceableMaterialization(Box<ReplaceableMaterializationTarget>),
 }
 
 /// Versioned, durable evidence for one publication attempt. The key is the
@@ -1993,6 +2111,20 @@ pub trait EventStore {
     /// `MemoryStore` never actually returns `Err` (no I/O).
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError>;
 
+    /// Point-load one active replaceable-operation resource. Opaque replay
+    /// bytes and exact CAS witnesses are returned without interpreting them.
+    fn replaceable_operation_snapshot(
+        &self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+    ) -> Result<Option<RecoveredSemanticResource>, PersistenceError>;
+
+    /// Atomically install a materializer result computed outside store locks,
+    /// or report a typed stale/refusal outcome without mutation.
+    fn install_replaceable_materialization(
+        &mut self,
+        rematerialize: SemanticRematerialize,
+    ) -> Result<SemanticInstallOutcome, PersistenceError>;
+
     /// Swap the sentinel signature on `intent_id`'s frozen body for
     /// `verified`'s real one and flip the canonical
     /// `SigState`/`IntentSigState` to
@@ -2032,7 +2164,7 @@ pub trait EventStore {
     /// the same reason `accept_write` is.
     fn promote_signed(
         &mut self,
-        intent_id: IntentId,
+        target: PromotionTarget,
         verified: VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError>;
 

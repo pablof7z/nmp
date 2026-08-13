@@ -9,7 +9,9 @@
 use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom, DemandDelta};
-use nmp_store::{sentinel_signature, AcceptOutcome, AcceptWrite, IntentSigState, MemoryStore};
+use nmp_store::{
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, IntentSigState, MemoryStore,
+};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
 use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle, SubscribeOutcome};
@@ -262,13 +264,15 @@ pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {
         sentinel_signature(),
     );
     AcceptWrite {
+        payload: AcceptWritePayload::Event {
+            frozen: Box::new(frozen),
+            replaceable_base: None,
+            monotonic_stamp: false,
+            routing: "auto".to_string(),
+            sig_state: IntentSigState::Pending,
+        },
         expected_pubkey: signed.pubkey,
-        frozen,
-        replaceable_base: None,
-        monotonic_stamp: false,
         signing_identity_ref: "local".to_string(),
-        routing: "auto".to_string(),
-        sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
         correlation: None,
     }

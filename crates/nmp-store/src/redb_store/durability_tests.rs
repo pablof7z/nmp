@@ -199,13 +199,15 @@ fn attempt_durable_write(store: &mut RedbStore, created_at: u64) -> Result<(), P
     let frozen = frozen_event(created_at);
     store
         .accept_write(AcceptWrite {
-            frozen,
-            replaceable_base: None,
-            monotonic_stamp: false,
+            payload: crate::AcceptWritePayload::Event {
+                frozen: Box::new(frozen),
+                replaceable_base: None,
+                monotonic_stamp: false,
+                routing: "durability-proof".into(),
+                sig_state: IntentSigState::Pending,
+            },
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "durability-proof".into(),
-            routing: "durability-proof".into(),
-            sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(created_at),
             correlation: None,
         })
@@ -221,13 +223,15 @@ fn reopen_replaces_only_the_database_generation_and_preserves_durable_identity()
     let frozen = frozen_event(900);
     let outcome = store
         .accept_write(AcceptWrite {
-            frozen: frozen.clone(),
-            replaceable_base: None,
-            monotonic_stamp: false,
+            payload: crate::AcceptWritePayload::Event {
+                frozen: Box::new(frozen.clone()),
+                replaceable_base: None,
+                monotonic_stamp: false,
+                routing: "reopen-proof".into(),
+                sig_state: IntentSigState::Pending,
+            },
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "reopen-proof".into(),
-            routing: "reopen-proof".into(),
-            sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(900),
             correlation: Some(
                 nmp_grammar::CorrelationToken::try_from("stable-reopen-correlation").unwrap(),
@@ -254,8 +258,8 @@ fn reopen_replaces_only_the_database_generation_and_preserves_durable_identity()
         Some(receipt)
     );
     assert_eq!(
-        store.reattach_receipt(receipt).unwrap().unwrap().frozen_id,
-        frozen.id
+        store.reattach_receipt(receipt).unwrap().unwrap().event_id(),
+        Some(frozen.id)
     );
 }
 

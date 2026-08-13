@@ -112,15 +112,53 @@ pub(super) fn replace_lane_in_txn(
 /// payload (Fable checkpoint R7), everything issue #3's "one crash-atomic
 /// commit" enumerates besides the pending row itself (which lives in
 /// `EVENTS`, not duplicated here).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PublishQueueIntentRecord {
     pub(super) receipt_id: u64,
-    pub(super) frozen: Event,
+    pub(super) work: PublishQueueIntentRecordWork,
     pub(super) expected_pubkey: PublicKey,
     pub(super) signing_identity_ref: String,
+    pub(super) accepted_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) enum PublishQueueIntentRecordWork {
+    Event {
+        frozen: Event,
+        routing: String,
+        sig_state: IntentSigState,
+    },
+    ReplaceableOperation {
+        coordinate: nostr::nips::nip01::Coordinate,
+        materialization: Option<PublishQueueMaterializationRecord>,
+    },
+}
+
+impl PublishQueueIntentRecord {
+    pub(super) fn event(&self) -> Option<(&Event, IntentSigState)> {
+        match &self.work {
+            PublishQueueIntentRecordWork::Event {
+                frozen, sig_state, ..
+            } => Some((frozen, *sig_state)),
+            PublishQueueIntentRecordWork::ReplaceableOperation { .. } => None,
+        }
+    }
+
+    pub(super) fn event_mut(&mut self) -> Option<(&mut Event, &mut IntentSigState)> {
+        match &mut self.work {
+            PublishQueueIntentRecordWork::Event {
+                frozen, sig_state, ..
+            } => Some((frozen, sig_state)),
+            PublishQueueIntentRecordWork::ReplaceableOperation { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct PublishQueueMaterializationRecord {
+    pub(super) current: crate::MaterializationRef,
     pub(super) routing: String,
     pub(super) sig_state: IntentSigState,
-    pub(super) accepted_at: Timestamp,
 }
 
 /// Allocate the next [`IntentId`] from [`PUBLISH_QUEUE_META`]'s durable high-water
@@ -180,15 +218,14 @@ pub(super) fn alloc_counter_in_txn(
 /// see [`crate::ReceiptState`]'s doc). `EventId`/`PublicKey`/`IntentId`/
 /// `ReceiptState` all already derive `Serialize`/`Deserialize`, so this
 /// mirrors `crate::PublishQueueReceipt` field-for-field with no re-encoding.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PublishQueueReceiptRecord {
     /// `None` for a refused-at-acceptance receipt-only record — see
     /// `crate::PublishQueueReceipt::intent_id`'s doc.
     pub(crate) intent_id: Option<IntentId>,
-    pub(crate) frozen_id: EventId,
     pub(crate) expected_pubkey: PublicKey,
     pub(crate) accepted_at: Option<Timestamp>,
-    pub(crate) state: ReceiptState,
+    pub(crate) payload: crate::PublishQueueReceiptPayload,
     pub(crate) correlation: Option<String>,
     pub(crate) terminal_sequence: Option<u64>,
     pub(crate) terminal_at: Option<Timestamp>,
@@ -214,7 +251,13 @@ pub(super) fn update_publish_queue_receipt(
         })?;
     let mut record = decode_receipt(&encoded)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
-    record.state = state;
+    let crate::PublishQueueReceiptPayload::Event { state: current, .. } = &mut record.payload
+    else {
+        return Err(PersistenceError::invariant(
+            "operation receipt cannot take an ordinary delivery state",
+        ));
+    };
+    *current = state;
     let encoded = encode_receipt(&record);
     publish_queue_receipts
         .insert(&key, encoded.as_slice())

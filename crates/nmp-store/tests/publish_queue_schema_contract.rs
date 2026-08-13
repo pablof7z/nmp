@@ -3,7 +3,7 @@
 //! Two claims live here, and both are falsifiable by a one-line edit to
 //! `schema.rs`:
 //!
-//! 1. A fresh store creates EXACTLY the 27 production tables, named exactly
+//! 1. A fresh store creates EXACTLY the 30 production tables, named exactly
 //!    as listed below. The old spelling of the publish queue (`outbox_*`,
 //!    then `delivery_*`) is gone, not aliased, and so is every tree #1248
 //!    folded into a neighbour's key space.
@@ -36,7 +36,7 @@ const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
 /// What is left is: does this need a DIFFERENT LEADING SORT DIMENSION than its
 /// neighbour, or is it a GENUINELY DISTINCT KEY SPACE? If neither, it is a
 /// column, and it belongs in its neighbour's key space.
-const PRODUCTION_TABLES: [&str; 27] = [
+const PRODUCTION_TABLES: [&str; 30] = [
     "addr_index",
     "coverage",
     "event_ids",
@@ -62,6 +62,9 @@ const PRODUCTION_TABLES: [&str; 27] = [
     "publish_queue_suppress_by_id",
     "relay_ids",
     "relays",
+    "semantic_materialization_high_water",
+    "semantic_operations",
+    "semantic_resources",
     "store_meta",
     "tombstones",
 ];
@@ -132,7 +135,7 @@ fn a_fresh_store_creates_exactly_the_named_publish_queue_inventory() {
         meta.get(b"codec_version".as_slice())
             .unwrap()
             .map(|value| value.value().to_vec()),
-        Some(3u64.to_be_bytes().to_vec())
+        Some(4u64.to_be_bytes().to_vec())
     );
 }
 
