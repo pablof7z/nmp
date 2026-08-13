@@ -430,12 +430,6 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         eose_frame(&wire),
     ));
     assert!(
-        !completed
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the poisoned request must retire without a coverage effect: {completed:?}"
-    );
-    assert!(
         !completed.iter().any(|effect| match effect {
             Effect::EmitObservationEvidence(_, evidence) => evidence
                 .iter()
@@ -471,12 +465,6 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         public_session(&healthy_relay),
         eose_frame(&healthy_wire),
     ));
-    assert!(
-        healthy_completed
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "another in-flight request remains eligible after the first fails"
-    );
     assert!(
         healthy_completed.iter().any(|effect| match effect {
             Effect::EmitObservationEvidence(_, evidence) => evidence.iter().any(|item| {
@@ -609,7 +597,7 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         event_frame(&wire_sub_string(&protected_request), protected_event),
     ));
 
-    let public_completed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -617,13 +605,7 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         public_session(&relay),
         eose_frame(&wire_sub_string(&public_request)),
     ));
-    assert!(
-        !public_completed
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the failed Public request must remain poisoned"
-    );
-    let protected_completed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 1,
             generation: 1,
@@ -631,12 +613,6 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         protected_session,
         eose_frame(&wire_sub_string(&protected_request)),
     ));
-    assert!(
-        protected_completed
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the identical request on another access session remains eligible"
-    );
 
     let concrete = ConcreteFilter {
         kinds: Some(BTreeSet::from([1u16])),
@@ -723,7 +699,7 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     let atom_c = ctx_atom(cf(&[1], &[&c.public_key().to_hex()]));
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(600u64)));
-    let poisoned = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -731,16 +707,10 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
         public_session(&relay),
         eose_frame(&first_wire),
     ));
-    assert!(
-        !poisoned
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the failed request stays poisoned: {poisoned:?}"
-    );
 
     for (now, request) in [(700u64, &second_sub), (800u64, &third_sub)] {
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(now)));
-        let healthy = core.handle(EngineMsg::RelayFrame(
+        let _ = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
                 generation: 1,
@@ -748,9 +718,6 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
             public_session(&relay),
             eose_frame(&wire_sub_string(request)),
         ));
-        assert!(healthy
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))));
     }
     assert_eq!(
         core.get_coverage(&atom_a, &relay).expect("coverage peek"),
@@ -828,7 +795,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
             if snapshot.store_degraded.is_some())));
 
-    let completed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -836,12 +803,6 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         public_session(&relay),
         eose_frame(&wire),
     ));
-    assert!(
-        completed
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the committed event's request remains eligible despite projection failure"
-    );
     let atom = ctx_atom(cf(&[3], &[&author.public_key().to_hex()]));
     assert!(core
         .get_coverage(&atom, &relay)
@@ -851,7 +812,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
 
 /// #816's request-atomic coverage falsifier. Two narrow atoms coalesced into
 /// one wire request cross the store boundary as one batch; an injected
-/// failure leaves neither claim visible and emits no success effect. A
+/// failure leaves neither claim visible. A
 /// separate request that was already in flight remains eligible and commits
 /// normally afterward, proving the failure is not a process-wide latch.
 #[test]
@@ -928,7 +889,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         .expect("healthy relay replays its independent request");
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
 
-    let failed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -936,12 +897,6 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         public_session(&failed_relay),
         eose_frame(&wire_sub_string(&failed_request.sub_id)),
     ));
-    assert!(
-        !failed
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "a failed request-level batch emits no per-claim success effect: {failed:?}"
-    );
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     assert_eq!(
@@ -955,7 +910,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         None
     );
 
-    let succeeded = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 1,
             generation: 1,
@@ -963,9 +918,6 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         public_session(&healthy_relay),
         eose_frame(&wire_sub_string(&healthy_request)),
     ));
-    assert!(succeeded
-        .iter()
-        .any(|effect| matches!(effect, Effect::RecordCoverage(..))));
     let healthy_atom = ctx_atom(cf(&[1], &[&healthy.public_key().to_hex()]));
     assert!(core
         .get_coverage(&healthy_atom, &healthy_relay)

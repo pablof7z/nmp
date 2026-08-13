@@ -227,14 +227,16 @@ fn departing_shape_remains_owned_through_atomic_eose_persistence() {
             .is_some(),
         "completion must carry both shapes through the atomic store door"
     );
-    assert_eq!(
-        effects
-            .iter()
-            .filter(|effect| matches!(effect, Effect::RecordCoverage(..)))
-            .count(),
-        2,
-        "both coalesced claims commit even though one active owner departed"
-    );
+    for claim in &request.coverage_claims {
+        assert!(
+            core.resolver
+                .store()
+                .get_coverage(*claim, &relay)
+                .unwrap()
+                .is_some(),
+            "both coalesced claims commit even though one active owner departed"
+        );
+    }
     core.retire_request_evidence(send_id);
 
     assert_eq!(

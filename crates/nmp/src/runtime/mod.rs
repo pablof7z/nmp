@@ -6783,13 +6783,6 @@ fn dispatch_effect(
             // what frame parsing needs); left as an explicit no-op, the same
             // as E's `StartProbe`/`NegOpen` stubs below.
         }
-        Effect::RecordCoverage(..) => {
-            // `EngineCore::on_relay_frame`'s EOSE arm already calls
-            // `EventStore::record_coverage` itself before ever returning
-            // this effect (see `core/mod.rs`) -- this is a notification for
-            // an observer, not a command this runtime must additionally act
-            // on.
-        }
         Effect::EmitRows(id, rows, evidence) => {
             #[cfg(feature = "nip65")]
             let nip65_followups = { runtime.nip65.borrow_mut().consume_rows(core, id, &rows) };
