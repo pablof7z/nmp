@@ -257,8 +257,7 @@ final class WindowTests: XCTestCase {
             kind: 7_779,
             tags: [],
             content: id,
-            sig: "sig",
-            signatureState: .signed,
+            signature: .signed(signature: "sig"),
             sources: ["wss://window.example"]
         )
     }

@@ -25,10 +25,10 @@ impl Observed {
         for delta in frame.deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    self.rows.insert(row.event.id, row);
+                    self.rows.insert(row.id(), row);
                 }
                 RowDelta::Updated(row) => {
-                    self.rows.insert(row.event.id, row);
+                    self.rows.insert(row.id(), row);
                 }
                 RowDelta::SourcesGrew { id, sources } => {
                     self.source_growth.insert(id);
@@ -46,14 +46,14 @@ impl Observed {
     pub fn rows_of_kind(&self, kind: u16) -> Vec<&Row> {
         self.rows
             .values()
-            .filter(|row| row.event.kind.as_u16() == kind)
+            .filter(|row| row.kind().as_u16() == kind)
             .collect()
     }
 
     pub fn has_source_count(&self, content: &str, count: usize) -> bool {
         self.rows
             .values()
-            .any(|row| row.event.content == content && row.sources.len() == count)
+            .any(|row| row.content() == content && row.sources().len() == count)
     }
 
     pub fn relays_in_evidence(&self) -> BTreeSet<RelayUrl> {

@@ -39,12 +39,11 @@ use crate::types::{
     FfiLaneCount, FfiLiveQuery, FfiNotSentReason, FfiPublishQueueEntry, FfiPublishQueueError,
     FfiQueueRelayState, FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason,
     FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRelayState, FfiRelayWaiting,
-    FfiRemoveQueueEntryError, FfiRetryCause, FfiRow, FfiRowDelta, FfiRowSignatureState,
-    FfiSelector, FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure,
-    FfiSignEventRequest, FfiSignedEvent, FfiSigningState, FfiSourceAuthority, FfiSourceEvidence,
-    FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow,
-    FfiWindowContents, FfiWindowLoad, FfiWriteFact, FfiWriteIntent, FfiWriteOutcome,
-    FfiWritePayload, FfiWriteRouting,
+    FfiRemoveQueueEntryError, FfiRetryCause, FfiRow, FfiRowDelta, FfiRowSignature, FfiSelector,
+    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest,
+    FfiSignedEvent, FfiSigningState, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
+    FfiStalledWrite, FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow, FfiWindowContents,
+    FfiWindowLoad, FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -1154,11 +1153,16 @@ mod window_conversion_tests {
             .sign_with_keys(&keys)
             .expect("test fixture must sign cleanly");
         let relay = RelayUrl::parse("wss://window.example").unwrap();
-        let row = Row {
-            event: event.clone(),
-            signature_state: nmp::RowSignatureState::Signed,
-            sources: std::collections::BTreeSet::from([relay]),
-        };
+        let row = Row::from_parts(
+            event.id,
+            event.pubkey,
+            event.created_at,
+            event.kind,
+            event.tags.clone(),
+            event.content.clone(),
+            nmp::RowSignature::Signed(event.sig),
+            std::collections::BTreeSet::from([relay]),
+        );
         let frame = Frame {
             // Receiver-derived deltas exist Rust-side for windowed frames --
             // the wire must drop them (never carry rows twice).
@@ -1192,11 +1196,16 @@ mod window_conversion_tests {
             .sign_with_keys(&keys)
             .expect("test fixture must sign cleanly");
         let relay = RelayUrl::parse("wss://unbounded.example").unwrap();
-        let row = Row {
-            event: event.clone(),
-            signature_state: nmp::RowSignatureState::Signed,
-            sources: std::collections::BTreeSet::from([relay]),
-        };
+        let row = Row::from_parts(
+            event.id,
+            event.pubkey,
+            event.created_at,
+            event.kind,
+            event.tags.clone(),
+            event.content.clone(),
+            nmp::RowSignature::Signed(event.sig),
+            std::collections::BTreeSet::from([relay]),
+        );
         let frame = Frame {
             deltas: vec![RowDelta::Added(row)],
             window: None,
@@ -1214,6 +1223,30 @@ mod window_conversion_tests {
             FfiRowDelta::Added { row } => assert_eq!(row.id, event.id.to_hex()),
             other => panic!("expected FfiRowDelta::Added, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pending_ffi_row_contains_no_signature_sentinel() {
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9_999), "pending")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("test fixture must sign cleanly");
+        let row = Row::from_parts(
+            event.id,
+            event.pubkey,
+            event.created_at,
+            event.kind,
+            event.tags,
+            event.content,
+            nmp::RowSignature::Pending,
+            std::collections::BTreeSet::new(),
+        );
+
+        let ffi = row_to_ffi_row(&row);
+        assert_eq!(ffi.signature, FfiRowSignature::Pending);
+        assert!(
+            !format!("{ffi:?}").contains(&"0".repeat(128)),
+            "the app-facing FFI record must not serialize the store sentinel"
+        );
     }
 }
 
@@ -1535,20 +1568,21 @@ pub fn demand_to_ffi(d: GDemand) -> FfiDemand {
 /// `sources` (#105) is likewise raw: the row's relay-observation set,
 /// verbatim URLs, sorted (the caller's `BTreeSet<RelayUrl>` iteration order).
 pub fn row_to_ffi_row(row: &Row) -> FfiRow {
-    let e = &row.event;
-    FfiRow {
-        id: e.id.to_hex(),
-        pubkey: e.pubkey.to_hex(),
-        created_at: e.created_at.as_secs(),
-        kind: e.kind.as_u16(),
-        tags: e.tags.iter().map(|t| t.clone().to_vec()).collect(),
-        content: e.content.clone(),
-        sig: e.sig.to_string(),
-        signature_state: match row.signature_state {
-            nmp::RowSignatureState::Pending => FfiRowSignatureState::Pending,
-            nmp::RowSignatureState::Signed => FfiRowSignatureState::Signed,
+    let signature = match row.signature() {
+        nmp::RowSignature::Pending => FfiRowSignature::Pending,
+        nmp::RowSignature::Signed(signature) => FfiRowSignature::Signed {
+            signature: signature.to_string(),
         },
-        sources: row.sources.iter().map(RelayUrl::to_string).collect(),
+    };
+    FfiRow {
+        id: row.id().to_hex(),
+        pubkey: row.pubkey().to_hex(),
+        created_at: row.created_at().as_secs(),
+        kind: row.kind().as_u16(),
+        tags: row.tags().iter().map(|t| t.clone().to_vec()).collect(),
+        content: row.content().to_owned(),
+        signature,
+        sources: row.sources().iter().map(RelayUrl::to_string).collect(),
     }
 }
 
@@ -2581,7 +2615,7 @@ pub(crate) fn event_builder_to_ffi(builder: GEventBuilder) -> FfiEventBuilder {
 /// tag-integrity hole `filter_map(...).ok()` used to open. Every tag either
 /// parses or the whole `write_intent_from_ffi` call fails closed with a
 /// typed [`FfiError::InvalidTag`] naming the offending raw tag.
-fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
+pub(crate) fn tags_from_ffi(tags: Vec<Vec<String>>) -> Result<Vec<Tag>, FfiError> {
     tags.into_iter()
         .map(|t| Tag::parse(t.clone()).map_err(|_| FfiError::InvalidTag { got: t }))
         .collect()

@@ -1040,8 +1040,8 @@ pub nmp::RowDelta::SourcesGrew::id: nostr::event::id::EventId
 pub nmp::RowDelta::SourcesGrew::sources: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
 pub nmp::RowDelta::Updated(nmp::Row)
 impl nmp::RowDelta
-pub fn nmp::RowDelta::event(&self) -> core::option::Option<&nostr::event::Event>
 pub fn nmp::RowDelta::id(&self) -> nostr::event::id::EventId
+pub fn nmp::RowDelta::row(&self) -> core::option::Option<&nmp::Row>
 impl core::clone::Clone for nmp::RowDelta
 pub fn nmp::RowDelta::clone(&self) -> nmp::RowDelta
 impl core::fmt::Debug for nmp::RowDelta
@@ -1053,27 +1053,27 @@ impl core::marker::Unpin for nmp::RowDelta
 impl core::marker::UnsafeUnpin for nmp::RowDelta
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RowDelta
 impl core::panic::unwind_safe::UnwindSafe for nmp::RowDelta
-pub enum nmp::RowSignatureState
-pub nmp::RowSignatureState::Pending
-pub nmp::RowSignatureState::Signed
-impl core::clone::Clone for nmp::RowSignatureState
-pub fn nmp::RowSignatureState::clone(&self) -> nmp::RowSignatureState
-impl core::cmp::Eq for nmp::RowSignatureState
-impl core::cmp::PartialEq for nmp::RowSignatureState
-pub fn nmp::RowSignatureState::eq(&self, &nmp::RowSignatureState) -> bool
-impl core::fmt::Debug for nmp::RowSignatureState
-pub fn nmp::RowSignatureState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for nmp::RowSignatureState
-pub fn nmp::RowSignatureState::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for nmp::RowSignatureState
-impl core::marker::StructuralPartialEq for nmp::RowSignatureState
-impl core::marker::Freeze for nmp::RowSignatureState
-impl core::marker::Send for nmp::RowSignatureState
-impl core::marker::Sync for nmp::RowSignatureState
-impl core::marker::Unpin for nmp::RowSignatureState
-impl core::marker::UnsafeUnpin for nmp::RowSignatureState
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::RowSignatureState
-impl core::panic::unwind_safe::UnwindSafe for nmp::RowSignatureState
+pub enum nmp::RowSignature
+pub nmp::RowSignature::Pending
+pub nmp::RowSignature::Signed(secp256k1::schnorr::Signature)
+impl core::clone::Clone for nmp::RowSignature
+pub fn nmp::RowSignature::clone(&self) -> nmp::RowSignature
+impl core::cmp::Eq for nmp::RowSignature
+impl core::cmp::PartialEq for nmp::RowSignature
+pub fn nmp::RowSignature::eq(&self, &nmp::RowSignature) -> bool
+impl core::fmt::Debug for nmp::RowSignature
+pub fn nmp::RowSignature::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nmp::RowSignature
+pub fn nmp::RowSignature::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nmp::RowSignature
+impl core::marker::StructuralPartialEq for nmp::RowSignature
+impl core::marker::Freeze for nmp::RowSignature
+impl core::marker::Send for nmp::RowSignature
+impl core::marker::Sync for nmp::RowSignature
+impl core::marker::Unpin for nmp::RowSignature
+impl core::marker::UnsafeUnpin for nmp::RowSignature
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::RowSignature
+impl core::panic::unwind_safe::UnwindSafe for nmp::RowSignature
 pub enum nmp::ShortfallFact
 pub nmp::ShortfallFact::LocalLimit
 pub nmp::ShortfallFact::LocalLimit::atom: nmp_grammar::concrete::ConcreteFilter
@@ -1784,9 +1784,18 @@ impl core::marker::UnsafeUnpin for nmp::RelayInformationSnapshot
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RelayInformationSnapshot
 impl core::panic::unwind_safe::UnwindSafe for nmp::RelayInformationSnapshot
 pub struct nmp::Row
-pub nmp::Row::event: nostr::event::Event
-pub nmp::Row::signature_state: nmp::RowSignatureState
 pub nmp::Row::sources: alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
+impl nmp::Row
+pub fn nmp::Row::content(&self) -> &str
+pub fn nmp::Row::created_at(&self) -> nostr::types::time::Timestamp
+pub fn nmp::Row::from_parts(nostr::event::id::EventId, nostr::key::public_key::PublicKey, nostr::types::time::Timestamp, nostr::event::kind::Kind, nostr::event::tag::list::Tags, alloc::string::String, nmp::RowSignature, alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>) -> Self
+pub fn nmp::Row::id(&self) -> nostr::event::id::EventId
+pub fn nmp::Row::kind(&self) -> nostr::event::kind::Kind
+pub fn nmp::Row::pubkey(&self) -> nostr::key::public_key::PublicKey
+pub fn nmp::Row::signature(&self) -> nmp::RowSignature
+pub fn nmp::Row::signed_event(&self) -> core::option::Option<nostr::event::Event>
+pub fn nmp::Row::sources(&self) -> &alloc::collections::btree::set::BTreeSet<nostr::types::url::RelayUrl>
+pub fn nmp::Row::tags(&self) -> &nostr::event::tag::list::Tags
 impl core::clone::Clone for nmp::Row
 pub fn nmp::Row::clone(&self) -> nmp::Row
 impl core::cmp::Eq for nmp::Row

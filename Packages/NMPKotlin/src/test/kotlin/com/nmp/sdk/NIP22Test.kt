@@ -43,8 +43,7 @@ class NIP22Test {
                         listOf("k", "podcast:item:guid"),
                     ),
                 content = "nice episode",
-                sig = "0".repeat(128),
-                signatureState = RowSignatureState.Signed,
+                signature = RowSignature.Signed("0".repeat(128)),
                 sources = emptyList(),
             )
         val decoded = decodeComment(row)
@@ -74,8 +73,7 @@ class NIP22Test {
                         listOf("k", "podcast:item:guid"),
                     ),
                 content = "",
-                sig = "0".repeat(128),
-                signatureState = RowSignatureState.Signed,
+                signature = RowSignature.Signed("0".repeat(128)),
                 sources = emptyList(),
             )
         val error =
@@ -95,8 +93,7 @@ class NIP22Test {
                 kind = 1111u.toUShort(),
                 tags = tags,
                 content = "",
-                sig = "0".repeat(128),
-                signatureState = RowSignatureState.Signed,
+                signature = RowSignature.Signed("0".repeat(128)),
                 sources = emptyList(),
             )
 

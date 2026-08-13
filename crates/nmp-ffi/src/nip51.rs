@@ -100,8 +100,9 @@ mod tests {
                 vec!["r".to_owned(), "wss://relay-in-use.example.com".to_owned()],
             ],
             content: "encrypted-private-items".to_owned(),
-            sig: "caller-chosen-signature".to_owned(),
-            signature_state: crate::types::FfiRowSignatureState::Signed,
+            signature: crate::types::FfiRowSignature::Signed {
+                signature: "caller-chosen-signature".to_owned(),
+            },
             sources: vec![],
         }
     }

@@ -101,11 +101,11 @@ impl Projected {
             for delta in deltas {
                 match delta {
                     RowDelta::Added(row) => {
-                        *self.added.entry(row.event.id).or_default() += 1;
-                        self.rows.insert(row.event.id, row.clone());
+                        *self.added.entry(row.id()).or_default() += 1;
+                        self.rows.insert(row.id(), row.clone());
                     }
                     RowDelta::Updated(row) => {
-                        self.rows.insert(row.event.id, row.clone());
+                        self.rows.insert(row.id(), row.clone());
                     }
                     RowDelta::SourcesGrew { id, sources } => {
                         if let Some(row) = self.rows.get_mut(id) {
@@ -131,7 +131,7 @@ impl Projected {
     fn shown(&self) -> Vec<(nostr::EventId, BTreeSet<RelayUrl>)> {
         self.rows
             .values()
-            .map(|row| (row.event.id, row.sources.clone()))
+            .map(|row| (row.id(), row.sources.clone()))
             .collect()
     }
 }
@@ -456,10 +456,10 @@ fn an_unsigned_write_is_still_explicitly_pending_after_a_restart() {
         let row = projected
             .row(&expected_id)
             .expect("acceptance inserts the pending canonical row");
-        assert_eq!(row.signature_state, nmp::RowSignatureState::Pending);
+        assert_eq!(row.signature(), nmp::RowSignature::Pending);
         assert!(
-            row.event.verify().is_err(),
-            "the pending sentinel must not pass cryptographic verification"
+            row.signed_event().is_none(),
+            "the pending app row must not expose the storage sentinel"
         );
     }
 
@@ -472,10 +472,10 @@ fn an_unsigned_write_is_still_explicitly_pending_after_a_restart() {
     let row = recovered
         .row(&expected_id)
         .expect("the cold snapshot returns the accepted canonical row");
-    assert_eq!(row.signature_state, nmp::RowSignatureState::Pending);
+    assert_eq!(row.signature(), nmp::RowSignature::Pending);
     assert!(
-        row.event.verify().is_err(),
-        "restart must preserve the explicit pending state, not bless the sentinel"
+        row.signed_event().is_none(),
+        "restart must preserve pending without exposing the storage sentinel"
     );
 }
 

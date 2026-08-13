@@ -163,7 +163,7 @@ NIP-01 event identity does not include the signature, so the pending row has a
 stable id. Its signature state is typed:
 
 ```text
-Pending(intentId) | Signed(signature)
+Pending | Signed(signature)
 ```
 
 The write path never pushes rows to observers. Acceptance, signature promotion,

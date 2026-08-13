@@ -160,7 +160,7 @@ impl NmpWorld {
         feed.drain_available();
         feed.rows
             .values()
-            .map(|row| (row.event.content.clone(), row.sources.clone()))
+            .map(|row| (row.content().to_string(), row.sources().clone()))
             .collect()
     }
 
@@ -176,7 +176,7 @@ impl NmpWorld {
             let rows: Vec<(String, BTreeSet<RelayUrl>)> = f
                 .rows
                 .values()
-                .map(|row| (row.event.content.clone(), row.sources.clone()))
+                .map(|row| (row.content().to_string(), row.sources().clone()))
                 .collect();
             pred(&rows)
         })

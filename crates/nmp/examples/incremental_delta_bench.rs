@@ -175,7 +175,7 @@ fn assert_single_added(effects: &[Effect], expected: &Event) {
         .collect();
     assert!(matches!(
         rows.as_slice(),
-        [RowDelta::Added(row)] if row.event.id == expected.id
+        [RowDelta::Added(row)] if row.id() == expected.id
     ));
 }
 

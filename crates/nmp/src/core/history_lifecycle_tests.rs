@@ -141,7 +141,7 @@ mod history_mutation_tests {
         assert!(batch
             .deltas
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == inserted.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == inserted.id)));
         assert!(batch
             .deltas
             .iter()
@@ -275,8 +275,7 @@ mod history_mutation_tests {
                 .iter()
                 .map(|event_id| {
                     core.histories[&id].last_rows[event_id]
-                        .event
-                        .created_at
+                        .created_at()
                         .as_secs()
                 })
                 .collect::<Vec<_>>(),
@@ -290,8 +289,7 @@ mod history_mutation_tests {
                 .iter()
                 .map(|event_id| {
                     core.histories[&id].last_rows[event_id]
-                        .event
-                        .created_at
+                        .created_at()
                         .as_secs()
                 })
                 .collect::<Vec<_>>(),
@@ -456,7 +454,7 @@ mod history_mutation_tests {
         assert!(batch
             .deltas
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == replacement.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == replacement.id)));
 
         let expiring = EventBuilder::new(Kind::from(9u16), "expires")
             .tag(room_tag(47))
@@ -569,11 +567,11 @@ mod history_mutation_tests {
         assert!(batch
             .deltas
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == z.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == z.id)));
         assert!(!batch
             .deltas
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == predecessor.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == predecessor.id)));
     }
 
     #[test]
@@ -710,7 +708,7 @@ mod history_mutation_tests {
         assert!(batch
             .deltas
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == replacement.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == replacement.id)));
         let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
         assert_eq!(core.histories[&id].last_rows, oracle);
     }
@@ -743,7 +741,7 @@ mod history_mutation_tests {
         assert!(batch
             .deltas
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == late.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == late.id)));
         assert!(batch.deltas.iter().any(
             |delta| matches!(delta, RowDelta::Removed(event_id) if *event_id == old_boundary.id)
         ));

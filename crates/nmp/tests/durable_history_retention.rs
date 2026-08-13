@@ -39,10 +39,10 @@ fn receive_current_ids(rx: &RowsReceiver) -> BTreeSet<EventId> {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    current.insert(row.event.id);
+                    current.insert(row.id());
                 }
                 RowDelta::Updated(row) => {
-                    current.insert(row.event.id);
+                    current.insert(row.id());
                 }
                 RowDelta::Removed(id) => {
                     current.remove(&id);

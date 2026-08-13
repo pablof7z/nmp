@@ -134,7 +134,7 @@ validates the immutable composition and signs once.
 **Excludes:** an optimistic overlay or direct write-to-observer lane diverging
 from the store.
 
-The canonical row carries `Pending(intentId) | Signed(signature)` and
+The canonical row carries `Pending | Signed(signature)` and
 participates in normal filters, derived bindings, replacement, delete, expiry,
 persistence, and invalidation.
 

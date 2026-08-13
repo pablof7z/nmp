@@ -3330,21 +3330,21 @@ impl<S: EventStore> EngineCore<S> {
                     row.event.id,
                     RememberedRow {
                         created_at: row.event.created_at.as_secs(),
-                        signature_state: RowSignatureState::from_store(row.signature_state),
+                        signature_state: RowSignature::from_store(&row.event, row.signature_state),
                         sources: sources.clone(),
                     },
                 );
                 added.insert(
                     row.event.id,
-                    Row {
-                        event: {
+                    Row::from_stored_event(
+                        {
                             #[cfg(feature = "bench-instrumentation")]
                             crate::ingest_attribution::projection_event_clone();
                             row.event.clone()
                         },
-                        signature_state: RowSignatureState::from_store(row.signature_state),
+                        row.signature_state,
                         sources,
-                    },
+                    ),
                 );
             }
             for row in &changes.provenance_grew {
@@ -3352,7 +3352,7 @@ impl<S: EventStore> EngineCore<S> {
                     continue;
                 }
                 if let Some(remembered) = state.last_rows.get_mut(&row.event.id) {
-                    let signature_state = RowSignatureState::from_store(row.signature_state);
+                    let signature_state = RowSignature::from_store(&row.event, row.signature_state);
                     let signature_changed = remembered.signature_state != signature_state;
                     let prior_len = remembered.sources.len();
                     remembered
@@ -3362,11 +3362,11 @@ impl<S: EventStore> EngineCore<S> {
                     if signature_changed {
                         updated.insert(
                             row.event.id,
-                            Row {
-                                event: row.event.clone(),
-                                signature_state,
-                                sources: remembered.sources.clone(),
-                            },
+                            Row::from_stored_event(
+                                row.event.clone(),
+                                row.signature_state,
+                                remembered.sources.clone(),
+                            ),
                         );
                         sources_grew.remove(&row.event.id);
                     } else if remembered.sources.len() != prior_len {
@@ -3379,21 +3379,23 @@ impl<S: EventStore> EngineCore<S> {
                     continue;
                 }
                 if let Some(remembered) = state.last_rows.get_mut(&row.event.id) {
-                    let signature_state = RowSignatureState::from_store(row.signature_state);
+                    let signature_state = RowSignature::from_store(&row.event, row.signature_state);
                     remembered.signature_state = signature_state;
                     remembered.sources = row.observed_relays.clone();
                     if let Some(added_row) = added.get_mut(&row.event.id) {
-                        added_row.event = row.event.clone();
-                        added_row.signature_state = signature_state;
-                        added_row.sources = remembered.sources.clone();
+                        *added_row = Row::from_stored_event(
+                            row.event.clone(),
+                            row.signature_state,
+                            remembered.sources.clone(),
+                        );
                     } else {
                         updated.insert(
                             row.event.id,
-                            Row {
-                                event: row.event.clone(),
-                                signature_state,
-                                sources: remembered.sources.clone(),
-                            },
+                            Row::from_stored_event(
+                                row.event.clone(),
+                                row.signature_state,
+                                remembered.sources.clone(),
+                            ),
                         );
                     }
                     sources_grew.remove(&row.event.id);
@@ -3448,21 +3450,21 @@ impl<S: EventStore> EngineCore<S> {
                 row.event.id,
                 RememberedRow {
                     created_at: row.event.created_at.as_secs(),
-                    signature_state: RowSignatureState::from_store(row.signature_state),
+                    signature_state: RowSignature::from_store(&row.event, row.signature_state),
                     sources: sources.clone(),
                 },
             );
             complete_rows.insert(
                 row.event.id,
-                Row {
-                    event: {
+                Row::from_stored_event(
+                    {
                         #[cfg(feature = "bench-instrumentation")]
                         crate::ingest_attribution::projection_event_clone();
                         row.event.clone()
                     },
-                    signature_state: RowSignatureState::from_store(row.signature_state),
+                    row.signature_state,
                     sources,
-                },
+                ),
             );
         }
         for row in &changes.provenance_grew {
@@ -3473,14 +3475,15 @@ impl<S: EventStore> EngineCore<S> {
                 remembered
                     .sources
                     .extend(row.observed_relays.iter().cloned());
-                remembered.signature_state = RowSignatureState::from_store(row.signature_state);
+                remembered.signature_state =
+                    RowSignature::from_store(&row.event, row.signature_state);
                 complete_rows.insert(
                     row.event.id,
-                    Row {
-                        event: row.event.clone(),
-                        signature_state: remembered.signature_state,
-                        sources: remembered.sources.clone(),
-                    },
+                    Row::from_stored_event(
+                        row.event.clone(),
+                        row.signature_state,
+                        remembered.sources.clone(),
+                    ),
                 );
             }
         }
@@ -3489,15 +3492,16 @@ impl<S: EventStore> EngineCore<S> {
                 continue;
             }
             if let Some(remembered) = current.get_mut(&row.event.id) {
-                remembered.signature_state = RowSignatureState::from_store(row.signature_state);
+                remembered.signature_state =
+                    RowSignature::from_store(&row.event, row.signature_state);
                 remembered.sources = row.observed_relays.clone();
                 complete_rows.insert(
                     row.event.id,
-                    Row {
-                        event: row.event.clone(),
-                        signature_state: remembered.signature_state,
-                        sources: remembered.sources.clone(),
-                    },
+                    Row::from_stored_event(
+                        row.event.clone(),
+                        row.signature_state,
+                        remembered.sources.clone(),
+                    ),
                 );
             }
         }
@@ -3616,8 +3620,8 @@ impl<S: EventStore> EngineCore<S> {
                 (
                     *id,
                     RememberedRow {
-                        created_at: row.event.created_at.as_secs(),
-                        signature_state: row.signature_state,
+                        created_at: row.created_at().as_secs(),
+                        signature_state: row.signature,
                         sources: row.sources.clone(),
                     },
                 )
@@ -3631,7 +3635,7 @@ impl<S: EventStore> EngineCore<S> {
         for (event_id, row) in current {
             match state.last_rows.get(&event_id) {
                 None => delta.push(RowDelta::Added(row)),
-                Some(last) if last.signature_state != row.signature_state => {
+                Some(last) if last.signature_state != row.signature => {
                     delta.push(RowDelta::Updated(row));
                 }
                 Some(last) if last.sources != row.sources => {
@@ -3769,7 +3773,7 @@ impl<S: EventStore> EngineCore<S> {
             if union.len() > limit {
                 let mut ordered: Vec<(u64, EventId)> = union
                     .iter()
-                    .map(|(event_id, row)| (row.event.created_at.as_secs(), *event_id))
+                    .map(|(event_id, row)| (row.created_at().as_secs(), *event_id))
                     .collect();
                 ordered.sort_by(|a, b| nip01_newest_first((a.0, &a.1), (b.0, &b.1)));
                 let keep: BTreeSet<EventId> =
@@ -3878,12 +3882,16 @@ impl<S: EventStore> EngineCore<S> {
                     }
                 }
                 by_id.entry(se.event.id).or_insert_with(|| {
-                    let signature_state = row_signature_state(&se.provenance);
-                    Row {
-                        event: se.event,
+                    let signature_state = se
+                        .provenance
+                        .local
+                        .as_ref()
+                        .map_or(SigState::Signed, |local| local.sig_state);
+                    Row::from_stored_event(
+                        se.event,
                         signature_state,
-                        sources: se.provenance.seen.into_keys().collect(),
-                    }
+                        se.provenance.seen.into_keys().collect(),
+                    )
                 });
             }
         }
@@ -3897,7 +3905,7 @@ impl<S: EventStore> EngineCore<S> {
             if by_id.len() > limit {
                 let mut ordered: Vec<(u64, EventId)> = by_id
                     .iter()
-                    .map(|(event_id, row)| (row.event.created_at.as_secs(), *event_id))
+                    .map(|(event_id, row)| (row.created_at().as_secs(), *event_id))
                     .collect();
                 ordered.sort_by(|a, b| nip01_newest_first((a.0, &a.1), (b.0, &b.1)));
                 let keep: BTreeSet<EventId> =

@@ -62,7 +62,7 @@ StoredRow {
   eventId: final id,
   body: frozen body,
   provenance.local: intentId,
-  signatureState: Pending(intentId)
+  signature: Pending
 }
 ```
 
@@ -77,7 +77,7 @@ Because the signature is not part of a NIP-01 event id, signer success promotes
 the same row:
 
 ```text
-Pending(intentId) -> Signed(signature)
+Pending -> Signed(signature)
 ```
 
 Before promotion, NMP verifies that the signer response matches the frozen body,

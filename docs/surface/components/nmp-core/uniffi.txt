@@ -5079,7 +5079,7 @@ enum Enum {
 }
 
 enum Enum {
-    name: "FfiRowSignatureState",
+    name: "FfiRowSignature",
     module_path: "nmp_ffi",
     remote: false,
     discr_type: None,
@@ -5093,14 +5093,21 @@ enum Enum {
         Variant {
             name: "Signed",
             discr: None,
-            fields: [],
+            fields: [
+                Field {
+                    name: "signature",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
             docstring: None,
         },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "`nmp::RowSignatureState` mirror.",
+        "`nmp::RowSignature` mirror. This data enum structurally excludes both an\nunsigned `Signed` value and a signature-bearing `Pending` value.",
     ),
 }
 
@@ -8069,20 +8076,14 @@ record Record {
             docstring: None,
         },
         Field {
-            name: "sig",
-            type_: String,
-            default: None,
-            docstring: None,
-        },
-        Field {
-            name: "signature_state",
+            name: "signature",
             type_: Enum {
                 module_path: "nmp_ffi",
-                name: "FfiRowSignatureState",
+                name: "FfiRowSignature",
             },
             default: None,
             docstring: Some(
-                "Explicit canonical signature state. `Pending` means `sig` is NMP's\nstructurally parseable placeholder, never a verified Nostr signature.",
+                "The one owner of this row's signature state. Pending carries no\nsignature bytes; Signed necessarily carries them.",
             ),
         },
         Field {

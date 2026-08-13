@@ -13,7 +13,7 @@ use crate::world::NmpWorld;
 #[then(regex = r#"^my feed shows (\S+)'s notes$"#)]
 async fn feed_shows_persons_notes(w: &mut NmpWorld, person: String) {
     let pk = w.pubkey_hex(&person);
-    let shown = w.feed_eventually(|rows, _| rows.iter().any(|e| e.pubkey.to_hex() == pk));
+    let shown = w.feed_eventually(|rows, _| rows.iter().any(|row| row.pubkey().to_hex() == pk));
     assert!(
         shown,
         "expected my feed to eventually show {person}'s notes"
@@ -22,7 +22,7 @@ async fn feed_shows_persons_notes(w: &mut NmpWorld, person: String) {
 
 #[then(regex = r#"^my feed shows the note saying "([^"]+)"$"#)]
 async fn feed_shows_note_text(w: &mut NmpWorld, text: String) {
-    let shown = w.feed_eventually(|rows, _| rows.iter().any(|e| e.content == text));
+    let shown = w.feed_eventually(|rows, _| rows.iter().any(|row| row.content() == text));
     assert!(
         shown,
         "expected my feed to eventually show a note saying {text:?}"
@@ -37,12 +37,13 @@ async fn notes_no_longer_arrive(w: &mut NmpWorld, person: String) {
     );
     let pk = w.pubkey_hex(&person);
     let pk_for_gone = pk.clone();
-    let gone = w.feed_eventually(|rows, _| !rows.iter().any(|e| e.pubkey.to_hex() == pk_for_gone));
+    let gone =
+        w.feed_eventually(|rows, _| !rows.iter().any(|row| row.pubkey().to_hex() == pk_for_gone));
     assert!(
         gone,
         "expected {person}'s notes to eventually disappear from my feed"
     );
-    let stays_gone = w.feed_never(|rows| rows.iter().any(|e| e.pubkey.to_hex() == pk));
+    let stays_gone = w.feed_never(|rows| rows.iter().any(|row| row.pubkey().to_hex() == pk));
     assert!(
         stays_gone,
         "expected {person}'s notes to never reappear in my feed"
