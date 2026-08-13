@@ -37,7 +37,7 @@ Feature: Valid relay URLs are ordinary destinations
 
   # nmp:id=ROUTING-DESTINATIONS-004
   # nmp:status=built
-  # nmp:evidence=swift:NMPTests.RelayInformationTests.testPublicHostnameUsesPlatformDNSOnIOSSimulator
+  # nmp:evidence=rust:nmp::nip11_hostname_uses_platform_resolution_without_policy
   # nmp:falsifier=Install a custom DNS resolver in the NIP-11 HTTP client; the iOS Simulator request bypasses platform DNS and the public relay document is unavailable through the supported Swift facade.
   Scenario: NIP-11 uses platform DNS on iOS
     Given a public relay hostname has a NIP-11 document
