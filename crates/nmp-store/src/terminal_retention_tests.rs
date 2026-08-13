@@ -83,7 +83,9 @@ fn assert_event_receipt_state(receipt: PublishQueueReceipt, expected: ReceiptSta
         PublishQueueReceiptPayload::Event { event_id, state } => {
             assert_eq!(state, expected, "unexpected state for event {event_id}");
         }
-        PublishQueueReceiptPayload::ReplaceableOperation { coordinate, state } => {
+        PublishQueueReceiptPayload::ReplaceableOperation {
+            coordinate, state, ..
+        } => {
             panic!(
                 "expected an event receipt, got replaceable operation {coordinate:?} in state {state:?}"
             );

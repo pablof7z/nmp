@@ -2009,6 +2009,7 @@ dependencies = [
  "nmp",
  "nmp-event-edit",
  "nmp-grammar",
+ "nmp-store",
  "nostr 0.44.4",
  "tempfile",
  "tokio",

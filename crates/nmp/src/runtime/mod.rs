@@ -914,6 +914,10 @@ mod publish_result_tests {
 /// down its own `Pool` clone on the way out (see `spawn`).
 enum Cmd {
     Engine(EngineMsg),
+    AddReplaceableMaterializer {
+        registration: crate::replaceable_materializer::ReplaceableMaterializerRegistration,
+        reply: Sender<()>,
+    },
     RelayInformationFetched {
         url: RelayUrl,
         generation: u64,
@@ -4901,6 +4905,9 @@ fn engine_loop<S>(
                 Cmd::AddSigner { reply, .. } => {
                     let _ = reply.send(Err(AddSignerError::EngineShuttingDown));
                 }
+                Cmd::AddReplaceableMaterializer { reply, .. } => {
+                    let _ = reply.send(());
+                }
                 Cmd::AddPrivateKeyAccount { reply, .. } => {
                     let _ = reply.send(Err(AddSignerError::EngineShuttingDown));
                 }
@@ -5256,6 +5263,13 @@ fn engine_loop<S>(
                         let _ = reply.send(Err(error));
                     }
                 }
+            }
+            Cmd::AddReplaceableMaterializer {
+                registration,
+                reply,
+            } => {
+                core.add_replaceable_materializer(registration);
+                let _ = reply.send(());
             }
             Cmd::SessionSnapshot { reply } => {
                 let _ = reply.send(registry.snapshot());
@@ -7315,6 +7329,22 @@ pub fn relay_information_retention_census(
 }
 
 impl Handle {
+    pub(crate) fn add_replaceable_materializer(
+        &self,
+        registration: crate::replaceable_materializer::ReplaceableMaterializerRegistration,
+    ) -> Result<(), EngineThreadError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::AddReplaceableMaterializer {
+                registration,
+                reply: reply_tx,
+            })
+            .map_err(|_| EngineThreadError::EngineShuttingDown)?;
+        reply_rx
+            .recv()
+            .map_err(|_| EngineThreadError::EngineShuttingDown)
+    }
+
     pub(crate) fn session_snapshot(&self) -> Option<SessionSnapshot> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox

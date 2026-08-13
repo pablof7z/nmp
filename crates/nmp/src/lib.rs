@@ -94,6 +94,7 @@ mod lane_fault_store;
 mod negentropy;
 mod publish_queue;
 mod relay_information_service;
+mod replaceable_materializer;
 mod runtime;
 mod session;
 
@@ -210,6 +211,10 @@ pub use engine::{
 };
 pub use error::EngineError;
 pub use observation::ObservationEvidence;
+pub use replaceable_materializer::{
+    RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,
+    ReplaceableMaterializerRefusal,
+};
 pub use session::{
     SessionAccount, SessionMutationError, SessionPayload, SessionProvider, SessionRestoreError,
     SessionSnapshot, SigningAvailability,

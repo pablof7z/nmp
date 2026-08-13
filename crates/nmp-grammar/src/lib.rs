@@ -45,6 +45,6 @@ pub use tagging::{
 };
 pub use text::{At, InterpolatedContent, Mention};
 pub use write::{
-    CorrelationToken, CorrelationTokenError, EventBuilder, Identity, WriteIntent, WritePayload,
-    WriteRouting,
+    CorrelationToken, CorrelationTokenError, EventBuilder, Identity, ReplaceableOperation,
+    ReplaceableOperationError, WriteIntent, WritePayload, WriteRouting,
 };
