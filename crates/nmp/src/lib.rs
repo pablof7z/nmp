@@ -73,10 +73,8 @@ mod subscription;
 // - [`mod@negentropy`] -- the prober FSM + `ProbedRelay` capability token +
 //   `Reconciler` (a MODULE, not a crate -- plan §1: reducer-coupled).
 // - [`mod@relay_information_service`] -- engine-owned one-shot NIP-11
-//   acquisition. Distinct from the facade-OWNED NIP-11 values in
-//   [`mod@relay_information`], which this crate converts to and re-exports;
-//   the two files kept their own contents and only the second one needed a
-//   name, since a crate cannot have two `relay_information` modules.
+//   acquisition. Public NIP-11 values live in [`mod@relay_information`];
+//   this module owns cache, flight, and fetch coordination only.
 //
 // They are PRIVATE, exactly like every other module of this facade, which is
 // what keeps ~242 mechanism items out of the public API: the
