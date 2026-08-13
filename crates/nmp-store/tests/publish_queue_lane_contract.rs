@@ -9,7 +9,7 @@ use nmp_store::{
     PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
     PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
-    PublishQueueTransientCause, RedbStore, VerifiedSignature,
+    PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -96,7 +96,7 @@ fn for_each_backend(mut body: impl FnMut(&mut dyn EventStore)) {
 }
 
 #[test]
-fn lane_lifecycle_is_exact_and_backend_identical() {
+fn retained_terminal_receipt_keeps_full_history_until_whole_eviction() {
     for_each_backend(|store| {
         let relay = RelayUrl::parse("wss://lane-lifecycle.example").unwrap();
         let (intent, receipt, signed, key, seeded) = seed(store, "lane lifecycle", 100, relay);
@@ -273,6 +273,20 @@ fn lane_lifecycle_is_exact_and_backend_identical() {
         );
         assert_eq!(store.recover_attempts(intent).unwrap().len(), 2);
         assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 2);
+        assert_eq!(store.recover_route_revisions(intent).unwrap().len(), 1);
+
+        assert_eq!(
+            store.remove_publish_queue_entry(receipt).unwrap(),
+            RemoveQueueEntryOutcome::Removed
+        );
+        assert!(store.reattach_receipt(receipt).unwrap().is_none());
+        assert!(store
+            .recover_publish_queue_lanes(intent)
+            .unwrap()
+            .is_empty());
+        assert!(store.recover_attempts(intent).unwrap().is_empty());
+        assert!(store.recover_attempt_details(intent).unwrap().is_empty());
+        assert!(store.recover_route_revisions(intent).unwrap().is_empty());
     });
 }
 

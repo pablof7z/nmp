@@ -1,24 +1,26 @@
 use super::commit::commit_prepared;
 use super::publish_queue::{
-    alloc_counter_in_txn, alloc_receipt_id_in_txn, lane_deadline, remove_superseded_receipt_index,
-    replace_lane_in_txn, update_publish_queue_receipt, PublishQueueReceiptRecord,
+    alloc_counter_in_txn, alloc_receipt_id_in_txn, lane_deadline, mark_terminal_receipt,
+    read_meta_u64, remove_terminal_receipt_index, replace_lane_in_txn,
+    update_publish_queue_receipt, PublishQueueReceiptRecord,
 };
 use super::publish_queue_codec::{
     attempt_key, attempt_range, canonical_route_ids, codec_error, deadline_by_intent_key,
     deadline_due_range, deadline_intent_range, deadline_key, decode_attempt,
     decode_attempt_details, decode_deadline, decode_displaced, decode_intent, decode_lane,
-    decode_receipt, decode_relay, decode_route, encode_attempt, encode_attempt_details,
-    encode_lane, encode_receipt, encode_relay, encode_route, intent_key, lane_key, lane_range,
-    parse_attempt_key, parse_deadline_by_intent_key, parse_deadline_key, parse_intent_key,
-    parse_lane_key, parse_route_revision_key, parse_superseded_receipt_key, receipt_key, relay_key,
-    route_revision_key, route_revision_range, superseded_receipt_range, PublishQueueRelayId,
-    NEXT_RELAY_ID_KEY, SUPERSEDED_RECEIPT_COUNT_KEY,
+    decode_meta_u64, decode_receipt, decode_relay, decode_route, encode_attempt,
+    encode_attempt_details, encode_lane, encode_receipt, encode_relay, encode_route, intent_key,
+    lane_key, lane_range, parse_attempt_key, parse_deadline_by_intent_key, parse_deadline_key,
+    parse_intent_key, parse_lane_key, parse_route_revision_key, parse_terminal_receipt_key,
+    receipt_key, relay_key, route_revision_key, route_revision_range, terminal_receipt_range,
+    PublishQueueRelayId, NEXT_RELAY_ID_KEY, TERMINAL_RECEIPT_BYTES_KEY, TERMINAL_RECEIPT_COUNT_KEY,
 };
 use super::schema::{
     persist_err, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS, PUBLISH_QUEUE_CORRELATIONS,
     PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_DISPLACED,
-    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS,
-    PUBLISH_QUEUE_RELAYS, PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META,
+    PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS, PUBLISH_QUEUE_RELAY_IDS,
+    PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -34,6 +36,7 @@ use super::{
     PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RelayUrl, Timestamp,
 };
+use crate::terminal_retention::{wall_clock_now, TerminalRetentionLimits};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 /// Replay every still-open intent (#3 §2.3), fallible end to end (#790).
@@ -1543,6 +1546,65 @@ pub(super) enum LaneShape {
     AllTerminal,
 }
 
+fn terminal_intent_evidence_bytes(
+    write_txn: &redb::WriteTransaction,
+    intent_id: IntentId,
+) -> Result<u64, PersistenceError> {
+    let mut total = 0u64;
+    let (attempt_lower, attempt_upper) = attempt_range(intent_id);
+    let attempts = write_txn
+        .open_table(PUBLISH_QUEUE_ATTEMPTS)
+        .map_err(persist_err)?;
+    for row in attempts
+        .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
+        .map_err(persist_err)?
+    {
+        let (key, value) = row.map_err(persist_err)?;
+        total = total
+            .checked_add((key.value().len() + value.value().len()) as u64)
+            .ok_or_else(|| PersistenceError::invariant("terminal evidence bytes overflow"))?;
+    }
+    let details = write_txn
+        .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
+        .map_err(persist_err)?;
+    for row in details
+        .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
+        .map_err(persist_err)?
+    {
+        let (key, value) = row.map_err(persist_err)?;
+        total = total
+            .checked_add((key.value().len() + value.value().len()) as u64)
+            .ok_or_else(|| PersistenceError::invariant("terminal evidence bytes overflow"))?;
+    }
+    let (lane_lower, lane_upper) = lane_range(intent_id);
+    let lanes = write_txn
+        .open_table(PUBLISH_QUEUE_LANES)
+        .map_err(persist_err)?;
+    for row in lanes
+        .range::<&[u8; 12]>(&lane_lower..=&lane_upper)
+        .map_err(persist_err)?
+    {
+        let (key, value) = row.map_err(persist_err)?;
+        total = total
+            .checked_add((key.value().len() + value.value().len()) as u64)
+            .ok_or_else(|| PersistenceError::invariant("terminal evidence bytes overflow"))?;
+    }
+    let (route_lower, route_upper) = route_revision_range(intent_id);
+    let routes = write_txn
+        .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
+        .map_err(persist_err)?;
+    for row in routes
+        .range::<&[u8; 16]>(&route_lower..=&route_upper)
+        .map_err(persist_err)?
+    {
+        let (key, value) = row.map_err(persist_err)?;
+        total = total
+            .checked_add((key.value().len() + value.value().len()) as u64)
+            .ok_or_else(|| PersistenceError::invariant("terminal evidence bytes overflow"))?;
+    }
+    Ok(total)
+}
+
 fn close_intent(
     store: &mut RedbStore,
     intent_id: IntentId,
@@ -1559,6 +1621,12 @@ fn close_intent(
         if encoded_intent.is_none() {
             CloseIntentOutcome::AlreadyClosed
         } else {
+            let intent_record = decode_intent(
+                encoded_intent
+                    .as_deref()
+                    .expect("close path already proved the intent row exists"),
+            )
+            .map_err(|error| codec_error("intent", error))?;
             let lanes_table = write_txn
                 .open_table(PUBLISH_QUEUE_LANES)
                 .map_err(persist_err)?;
@@ -1595,26 +1663,18 @@ fn close_intent(
                     LaneShape::AllTerminal => "intent lanes are not non-empty and terminal",
                 }));
             }
+            drop(lanes_table);
+            let evidence_bytes = terminal_intent_evidence_bytes(&write_txn, intent_id)?;
             if shape == LaneShape::None {
                 // One transaction: the receipt records WHY the write ended,
                 // so a reattaching app is told "nowhere to publish" rather
                 // than merely finding its open work gone.
-                let record = decode_intent(
-                    encoded_intent
-                        .as_deref()
-                        .expect("close path already proved the intent row exists"),
-                )
-                .map_err(|error| codec_error("intent", error))?;
                 let mut receipts = write_txn
                     .open_table(PUBLISH_QUEUE_RECEIPTS)
                     .map_err(persist_err)?;
-                let mut meta = write_txn
-                    .open_table(PUBLISH_QUEUE_META)
-                    .map_err(persist_err)?;
                 update_publish_queue_receipt(
                     &mut receipts,
-                    &mut meta,
-                    record.receipt_id,
+                    intent_record.receipt_id,
                     ReceiptState::NoDestination,
                 )?;
             }
@@ -1670,6 +1730,29 @@ fn close_intent(
                     .map_err(persist_err)?;
             }
             intents.remove(&intent_key_value).map_err(persist_err)?;
+            drop(deadlines);
+            drop(deadlines_by_intent);
+            drop(intents);
+            let mut receipts = write_txn
+                .open_table(PUBLISH_QUEUE_RECEIPTS)
+                .map_err(persist_err)?;
+            let mut meta = write_txn
+                .open_table(PUBLISH_QUEUE_META)
+                .map_err(persist_err)?;
+            mark_terminal_receipt(
+                &mut receipts,
+                &mut meta,
+                intent_record.receipt_id,
+                wall_clock_now(),
+                evidence_bytes,
+            )?;
+            drop(receipts);
+            drop(meta);
+            maintain_terminal_receipts_in_txn(
+                &write_txn,
+                wall_clock_now(),
+                TerminalRetentionLimits::PRODUCTION,
+            )?;
             CloseIntentOutcome::Closed
         }
     };
@@ -1707,12 +1790,30 @@ pub(super) fn accept_refused(
             expected_pubkey,
             accepted_at: None,
             state: ReceiptState::Refused(reason),
+            correlation: None,
+            terminal_sequence: None,
+            terminal_at: None,
+            terminal_bytes: None,
         };
         let encoded = encode_receipt(&record);
         let receipt_key_value = receipt_key(receipt_id);
         publish_queue_receipts
             .insert(&receipt_key_value, encoded.as_slice())
             .map_err(persist_err)?;
+        mark_terminal_receipt(
+            &mut publish_queue_receipts,
+            &mut publish_queue_meta,
+            receipt_id,
+            wall_clock_now(),
+            0,
+        )?;
+        drop(publish_queue_receipts);
+        drop(publish_queue_meta);
+        maintain_terminal_receipts_in_txn(
+            &write_txn,
+            wall_clock_now(),
+            TerminalRetentionLimits::PRODUCTION,
+        )?;
         receipt_id
     };
     commit_prepared(write_txn, receipt_id)
@@ -1785,103 +1886,161 @@ pub(super) fn publish_queue_receipts_after(
     Ok(out)
 }
 
-pub(super) fn next_superseded_receipt_deadline(
-    store: &RedbStore,
-) -> Result<Option<Timestamp>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
-    let meta = read_txn
-        .open_table(PUBLISH_QUEUE_META)
-        .map_err(persist_err)?;
-    let count = meta
-        .get(SUPERSEDED_RECEIPT_COUNT_KEY)
-        .map_err(persist_err)?
-        .map(|guard| {
-            super::publish_queue_codec::decode_meta_u64(guard.value(), "superseded receipt count")
-        })
-        .transpose()
-        .map_err(|error| codec_error("superseded receipt count", error))?
-        .unwrap_or(0);
-    let (lower, upper) = superseded_receipt_range();
-    let first = meta
-        .range::<&[u8]>(lower.as_slice()..=upper.as_slice())
-        .map_err(persist_err)?
-        .next()
-        .transpose()
-        .map_err(persist_err)?
-        .map(|(key, _)| parse_superseded_receipt_key(key.value()))
-        .transpose()
-        .map_err(|error| codec_error("superseded receipt index key", error))?;
-    if (count == 0) != first.is_none() {
-        return Err(PersistenceError::invariant(
-            "superseded receipt count disagrees with its ordered index",
-        ));
-    }
-    if count > crate::SUPERSEDED_RECEIPT_MAX_COUNT as u64 {
-        return Ok(Some(Timestamp::from(0)));
-    }
-    Ok(first.map(|(accepted_at, _)| accepted_at + crate::SUPERSEDED_RECEIPT_MAX_AGE_SECS))
+pub(super) fn maintain_terminal_receipts(
+    store: &mut RedbStore,
+) -> Result<Vec<u64>, PersistenceError> {
+    maintain_terminal_receipts_at(store, wall_clock_now(), TerminalRetentionLimits::PRODUCTION)
 }
 
-pub(super) fn prune_superseded_receipts(
+pub(crate) fn maintain_terminal_receipts_at(
     store: &mut RedbStore,
     now: Timestamp,
+    limits: TerminalRetentionLimits,
+) -> Result<Vec<u64>, PersistenceError> {
+    if !terminal_retention_due(store, now, limits)? {
+        return Ok(Vec::new());
+    }
+    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let candidates = maintain_terminal_receipts_in_txn(&write_txn, now, limits)?;
+    #[cfg(test)]
+    store.crash_if(RedbCrashPoint::TerminalRetentionBeforeCommit);
+    commit_prepared(write_txn, candidates)
+}
+
+pub(super) fn maintain_terminal_receipts_in_txn(
+    write_txn: &redb::WriteTransaction,
+    now: Timestamp,
+    limits: TerminalRetentionLimits,
 ) -> Result<Vec<u64>, PersistenceError> {
     let candidates = {
-        let read_txn = store.database()?.begin_read().map_err(persist_err)?;
-        let meta = read_txn
+        let meta = write_txn
             .open_table(PUBLISH_QUEUE_META)
             .map_err(persist_err)?;
-        let count = meta
-            .get(SUPERSEDED_RECEIPT_COUNT_KEY)
-            .map_err(persist_err)?
-            .map(|guard| {
-                super::publish_queue_codec::decode_meta_u64(
-                    guard.value(),
-                    "superseded receipt count",
-                )
-            })
-            .transpose()
-            .map_err(|error| codec_error("superseded receipt count", error))?
-            .unwrap_or(0);
-        let count = usize::try_from(count).map_err(|_| {
-            PersistenceError::invariant("superseded receipt count exceeds platform size")
-        })?;
-        let excess = count.saturating_sub(crate::SUPERSEDED_RECEIPT_MAX_COUNT);
-        let (lower, upper) = superseded_receipt_range();
+        let receipts = write_txn
+            .open_table(PUBLISH_QUEUE_RECEIPTS)
+            .map_err(persist_err)?;
+        let mut remaining_count =
+            read_meta_u64(&meta, TERMINAL_RECEIPT_COUNT_KEY, "terminal receipt count")?
+                .unwrap_or(0);
+        let mut remaining_bytes =
+            read_meta_u64(&meta, TERMINAL_RECEIPT_BYTES_KEY, "terminal receipt bytes")?
+                .unwrap_or(0);
+        let (lower, upper) = terminal_receipt_range();
         let mut candidates = Vec::new();
         for row in meta
             .range::<&[u8]>(lower.as_slice()..=upper.as_slice())
             .map_err(persist_err)?
         {
             let (key, _) = row.map_err(persist_err)?;
-            let (accepted_at, receipt_id) = parse_superseded_receipt_key(key.value())
-                .map_err(|error| codec_error("superseded receipt index key", error))?;
-            if candidates.len() >= excess
-                && now < accepted_at + crate::SUPERSEDED_RECEIPT_MAX_AGE_SECS
+            let (sequence, receipt_id) = parse_terminal_receipt_key(key.value())
+                .map_err(|error| codec_error("terminal receipt index key", error))?;
+            let receipt = receipts
+                .get(&receipt_key(receipt_id))
+                .map_err(persist_err)?
+                .map(|guard| guard.value().to_vec())
+                .ok_or_else(|| {
+                    PersistenceError::invariant("terminal index references missing receipt")
+                })?;
+            let record =
+                decode_receipt(&receipt).map_err(|error| codec_error("terminal receipt", error))?;
+            let terminal_bytes = record.terminal_bytes.ok_or_else(|| {
+                PersistenceError::invariant("terminal receipt has no byte accounting")
+            })?;
+            if record.terminal_sequence != Some(sequence) {
+                return Err(PersistenceError::invariant(
+                    "terminal receipt and FIFO sequence disagree",
+                ));
+            }
+            let terminal_at = record.terminal_at.ok_or_else(|| {
+                PersistenceError::invariant("terminal receipt has no completion time")
+            })?;
+            let age_due =
+                now.as_secs() >= terminal_at.as_secs().saturating_add(limits.max_age_secs);
+            if !age_due
+                && remaining_count <= limits.max_count
+                && remaining_bytes <= limits.max_bytes
             {
                 break;
             }
             candidates.push(receipt_id);
+            remaining_count = remaining_count
+                .checked_sub(1)
+                .ok_or_else(|| PersistenceError::invariant("terminal receipt count underflow"))?;
+            remaining_bytes = remaining_bytes
+                .checked_sub(terminal_bytes)
+                .ok_or_else(|| PersistenceError::invariant("terminal receipt bytes underflow"))?;
         }
-        if candidates.len() < excess {
+        if remaining_count > limits.max_count || remaining_bytes > limits.max_bytes {
             return Err(PersistenceError::invariant(
-                "superseded receipt count exceeds its ordered index",
+                "terminal receipt accounting exceeds its FIFO index",
             ));
         }
         candidates
     };
+
     for receipt_id in &candidates {
-        match remove_publish_queue_entry(store, *receipt_id)? {
-            crate::RemoveQueueEntryOutcome::Removed => {}
-            crate::RemoveQueueEntryOutcome::NotFound
-            | crate::RemoveQueueEntryOutcome::StillOpen => {
-                return Err(PersistenceError::invariant(
-                    "superseded receipt index disagrees with retained receipt",
-                ));
-            }
+        if remove_publish_queue_entry_in_txn(write_txn, *receipt_id)?
+            != crate::RemoveQueueEntryOutcome::Removed
+        {
+            return Err(PersistenceError::invariant(
+                "terminal FIFO references a non-removable receipt",
+            ));
         }
     }
     Ok(candidates)
+}
+
+fn terminal_retention_due(
+    store: &RedbStore,
+    now: Timestamp,
+    limits: TerminalRetentionLimits,
+) -> Result<bool, PersistenceError> {
+    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let meta = read_txn
+        .open_table(PUBLISH_QUEUE_META)
+        .map_err(persist_err)?;
+    let read_scalar = |key, name| {
+        meta.get(key)
+            .map_err(persist_err)?
+            .map(|guard| decode_meta_u64(guard.value(), name))
+            .transpose()
+            .map_err(|error| codec_error(name, error))
+    };
+    let count = read_scalar(TERMINAL_RECEIPT_COUNT_KEY, "terminal receipt count")?.unwrap_or(0);
+    let bytes = read_scalar(TERMINAL_RECEIPT_BYTES_KEY, "terminal receipt bytes")?.unwrap_or(0);
+    if count > limits.max_count || bytes > limits.max_bytes {
+        return Ok(true);
+    }
+    let (lower, upper) = terminal_receipt_range();
+    let Some(row) = meta
+        .range::<&[u8]>(lower.as_slice()..=upper.as_slice())
+        .map_err(persist_err)?
+        .next()
+    else {
+        return Ok(false);
+    };
+    let (key, _) = row.map_err(persist_err)?;
+    let (sequence, receipt_id) = parse_terminal_receipt_key(key.value())
+        .map_err(|error| codec_error("terminal receipt index key", error))?;
+    let receipts = read_txn
+        .open_table(PUBLISH_QUEUE_RECEIPTS)
+        .map_err(persist_err)?;
+    let receipt = receipts
+        .get(&receipt_key(receipt_id))
+        .map_err(persist_err)?
+        .map(|guard| guard.value().to_vec())
+        .ok_or_else(|| PersistenceError::invariant("terminal index references missing receipt"))?;
+    let record =
+        decode_receipt(&receipt).map_err(|error| codec_error("terminal receipt", error))?;
+    if record.terminal_sequence != Some(sequence) {
+        return Err(PersistenceError::invariant(
+            "terminal receipt and FIFO sequence disagree",
+        ));
+    }
+    let terminal_at = record
+        .terminal_at
+        .ok_or_else(|| PersistenceError::invariant("terminal receipt has no completion time"))?;
+    Ok(now.as_secs() >= terminal_at.as_secs().saturating_add(limits.max_age_secs))
 }
 
 /// Forget one retained receipt and every piece of evidence keyed to it
@@ -1891,7 +2050,15 @@ pub(super) fn remove_publish_queue_entry(
     receipt_id: u64,
 ) -> Result<crate::RemoveQueueEntryOutcome, PersistenceError> {
     let write_txn = store.database()?.begin_write().map_err(persist_err)?;
-    let outcome = {
+    let outcome = remove_publish_queue_entry_in_txn(&write_txn, receipt_id)?;
+    commit_prepared(write_txn, outcome)
+}
+
+fn remove_publish_queue_entry_in_txn(
+    write_txn: &redb::WriteTransaction,
+    receipt_id: u64,
+) -> Result<crate::RemoveQueueEntryOutcome, PersistenceError> {
+    {
         let mut receipts = write_txn
             .open_table(PUBLISH_QUEUE_RECEIPTS)
             .map_err(persist_err)?;
@@ -1912,32 +2079,52 @@ pub(super) fn remove_publish_queue_entry(
             {
                 return Ok(crate::RemoveQueueEntryOutcome::StillOpen);
             }
+            let claims = write_txn
+                .open_table(PUBLISH_QUEUE_KIND5_CLAIMS)
+                .map_err(persist_err)?;
+            if claims
+                .get(&intent_key(intent_id))
+                .map_err(persist_err)?
+                .is_some()
+            {
+                return Err(PersistenceError::invariant(
+                    "terminal receipt still owns provisional suppression claims",
+                ));
+            }
         }
         let mut meta = write_txn
             .open_table(PUBLISH_QUEUE_META)
             .map_err(persist_err)?;
-        remove_superseded_receipt_index(&mut meta, receipt_id, &record)?;
+        remove_terminal_receipt_index(&mut meta, receipt_id, &record)?;
         receipts.remove(&key).map_err(persist_err)?;
         // #591 tokens name this receipt id and nothing else; leaving one
         // behind would reattach a caller to a receipt that no longer exists.
         let mut correlations = write_txn
             .open_table(PUBLISH_QUEUE_CORRELATIONS)
             .map_err(persist_err)?;
-        let mut stale_tokens = Vec::new();
-        for row in correlations.iter().map_err(persist_err)? {
-            let (token, journaled) = row.map_err(persist_err)?;
-            if u64::from_be_bytes(*journaled.value()) == receipt_id {
-                stale_tokens.push(token.value().to_vec());
+        if let Some(token) = &record.correlation {
+            let mapped = correlations
+                .get(token.as_bytes())
+                .map_err(persist_err)?
+                .map(|guard| u64::from_be_bytes(*guard.value()));
+            if mapped != Some(receipt_id) {
+                return Err(PersistenceError::invariant(
+                    "receipt correlation reverse ownership disagrees",
+                ));
             }
-        }
-        for token in stale_tokens {
-            correlations.remove(token.as_slice()).map_err(persist_err)?;
+            correlations.remove(token.as_bytes()).map_err(persist_err)?;
         }
         // The intent row itself is already gone (checked above); its retained
         // per-relay evidence is what this door reclaims. Two passes (collect
         // then remove) — `redb` does not allow mutating a table while
         // iterating it.
         if let Some(intent_id) = record.intent_id {
+            let mut displaced = write_txn
+                .open_table(PUBLISH_QUEUE_DISPLACED)
+                .map_err(persist_err)?;
+            displaced
+                .remove(&intent_key(intent_id))
+                .map_err(persist_err)?;
             let (attempt_lower, attempt_upper) = attempt_range(intent_id);
             let mut attempts = write_txn
                 .open_table(PUBLISH_QUEUE_ATTEMPTS)
@@ -1997,8 +2184,30 @@ pub(super) fn remove_publish_queue_entry(
             for key in &route_victims {
                 routes.remove(key).map_err(persist_err)?;
             }
+            let (deadline_lower, deadline_upper) = deadline_intent_range(intent_id);
+            let mut deadlines = write_txn
+                .open_table(PUBLISH_QUEUE_DEADLINES)
+                .map_err(persist_err)?;
+            let mut deadlines_by_intent = write_txn
+                .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
+                .map_err(persist_err)?;
+            let mut deadline_victims = Vec::new();
+            for row in deadlines_by_intent
+                .range::<&[u8; 20]>(&deadline_lower..=&deadline_upper)
+                .map_err(persist_err)?
+            {
+                let (key, _) = row.map_err(persist_err)?;
+                let (_, at, relay_id) = parse_deadline_by_intent_key(key.value())
+                    .map_err(|error| codec_error("deadline-by-intent key", error))?;
+                deadline_victims.push((*key.value(), deadline_key(at, intent_id, relay_id)));
+            }
+            for (by_intent, ordered) in deadline_victims {
+                deadlines_by_intent
+                    .remove(&by_intent)
+                    .map_err(persist_err)?;
+                deadlines.remove(&ordered).map_err(persist_err)?;
+            }
         }
-        crate::RemoveQueueEntryOutcome::Removed
-    };
-    commit_prepared(write_txn, outcome)
+        Ok(crate::RemoveQueueEntryOutcome::Removed)
+    }
 }

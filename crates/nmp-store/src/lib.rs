@@ -76,6 +76,9 @@ mod persistent_store_lifetime;
 mod redb_store;
 #[cfg(test)]
 mod semantic_oracle;
+mod terminal_retention;
+#[cfg(test)]
+mod terminal_retention_tests;
 
 #[cfg(feature = "bench-instrumentation")]
 pub mod ingest_attribution;
@@ -1250,9 +1253,9 @@ pub enum ReceiptState {
     Cancelled,
     /// A newer accepted event won the same NIP-01 replaceable/addressable
     /// coordinate. Terminal: the obsolete body and all delivery machinery are
-    /// gone. A receipt remains only when a local handoff may have occurred,
-    /// and that safety evidence is destroyed after one hour or when it falls
-    /// outside the newest 500 superseded receipts.
+    /// gone. A receipt remains only when a local handoff may have occurred;
+    /// that safety evidence shares the same private terminal-history FIFO as
+    /// every other completed receipt.
     Superseded,
     /// Routing finished — knowledge exhausted — and named zero relays, so
     /// there was nowhere to publish ([`EventStore::close_unroutable_intent`]).
@@ -1288,11 +1291,9 @@ pub enum CompensationReason {
 
 /// A durably-retained receipt record, independent of whether the intent's
 /// open-work row (`PUBLISH_QUEUE_INTENTS`/[`PublishQueueIntent`]) still exists —
-/// see [`ReceiptState`]'s doc for why this separation exists. Superseded
-/// safety receipts are the one automatically disposable class: NMP destroys
-/// them after one hour and keeps no more than the newest 500. Other terminal
-/// receipt classes remain app-removable through
-/// [`EventStore::remove_publish_queue_entry`].
+/// see [`ReceiptState`]'s doc for why this separation exists. Complete history
+/// remains available while retained; `nmp-store` eventually removes the whole
+/// terminal closure under one private global policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishQueueReceipt {
     pub receipt_id: u64,
@@ -1306,17 +1307,11 @@ pub struct PublishQueueReceipt {
     pub frozen_id: EventId,
     pub expected_pubkey: PublicKey,
     /// Acceptance time for receipts backed by a real write intent. Receipt-
-    /// only semantic refusals never entered custody and therefore carry no
-    /// retention clock.
+    /// only semantic refusals enter receipt custody but have no accepted
+    /// intent, so their private terminal-retention clock is stored separately.
     pub accepted_at: Option<Timestamp>,
     pub state: ReceiptState,
 }
-
-/// Replaced-write safety receipts are short-lived evidence, not an archive.
-pub const SUPERSEDED_RECEIPT_MAX_AGE_SECS: u64 = 60 * 60;
-/// Even inside the age window, retain no more than this many replaced-write
-/// safety receipts. Oldest receipt identity loses first.
-pub const SUPERSEDED_RECEIPT_MAX_COUNT: usize = 500;
 
 /// Versioned, durable evidence for one publication attempt. The key is the
 /// full `(intent, relay, ordinal)` tuple: a restart can never confuse a new
@@ -2081,10 +2076,6 @@ pub trait EventStore {
     }
 
     /// Read every retained receipt back out, newest id last (#1039).
-    ///
-    /// The enumeration half of the app's outbox door. Superseded safety
-    /// receipts are bounded automatically; other terminal classes remain
-    /// app-removable and #46 continues to own their general retention policy.
     fn enumerate_publish_queue_receipts(
         &self,
     ) -> Result<Vec<PublishQueueReceipt>, PersistenceError>;
@@ -2103,15 +2094,6 @@ pub trait EventStore {
         after: Option<u64>,
         limit: u8,
     ) -> Result<Vec<PublishQueueReceipt>, PersistenceError>;
-
-    /// Permanently remove superseded receipt evidence once it is one hour old
-    /// or outside the newest 500 entries. Open obligations and every other
-    /// receipt state are outside this disposal class.
-    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError>;
-
-    /// Earliest age deadline for disposable supersession evidence. A count
-    /// overflow returns the epoch so the reducer schedules immediate pruning.
-    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError>;
 
     /// Forget one retained receipt and every piece of evidence keyed to it
     /// (#1039). The removal half of the app's outbox door, and a real
@@ -2392,9 +2374,9 @@ pub trait EventStore {
     /// expiry is a pre-custody refusal with no retained receipt.
     ///
     /// Terminal at birth. Custody is not viability: the entry exists so the
-    /// app can see the failure and remove it
-    /// ([`Self::remove_publish_queue_entry`]), never because anything will
-    /// retry it.
+    /// app can see the failure while it remains in the store's bounded
+    /// terminal history, never because anything will retry it. The app may
+    /// still remove it explicitly through [`Self::remove_publish_queue_entry`].
     ///
     /// Returns the store-allocated receipt id — the same durable
     /// high-water-mark `accept_write` allocates from (architecture review

@@ -60,27 +60,23 @@ Feature: Replaceable writes keep only useful delivery work
 
     # Some replacement evidence cannot disappear immediately: bytes may have
     # crossed a transport handoff, and forgetting that uncertainty would invite
-    # an unsafe blind retry. That narrow safety record is still finite history,
-    # not permission to accumulate every prior value forever.
+    # an unsafe blind retry. It therefore follows the same terminal-receipt
+    # retention rule as every other completed write, with no special class.
 
     # nmp:id=WRITES-REPLACEABLE-004
     # nmp:status=built
     # nmp:evidence=rust:nmp-store::a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safety_evidence
-    # nmp:evidence=rust:nmp-store::superseded_safety_receipts_are_bounded_by_age_and_count
-    # nmp:evidence=rust:nmp-store::superseded_safety_receipt_deadline_survives_redb_reopen
-    # nmp:evidence=rust:nmp-store::deadline_peek_and_prune_are_independent_of_unrelated_receipt_history
-    # nmp:evidence=rust:nmp::superseded_safety_receipt_is_pruned_by_the_engine_deadline
+    # nmp:evidence=rust:nmp-store::all_terminal_receipt_kinds_share_one_fifo
+    # nmp:evidence=rust:nmp-store::terminal_receipt_fifo_survives_redb_reopen
     # nmp:evidence=rust:nmp-parity::direct_and_ffi_reattach_are_semantically_identical_for_a_terminal_retained_receipt
-    # nmp:falsifier=removing the ordered superseded-receipt index makes every deadline peek materialize unrelated retained history; removing age or count eviction leaves more than 500 receipts or one past an hour
-    Scenario: Safety evidence for replaced writes is strictly bounded
+    # nmp:falsifier=Give superseded receipts their own retention class; replacement traffic can crowd or outlive unrelated terminal history under a policy the global FIFO does not explain.
+    Scenario: Replaced-write safety evidence follows the global terminal FIFO
       Given replaceable writes whose older values may have crossed a handoff
       Then their old event bodies and delivery machinery are permanently removed
       And only a terminal safety receipt represents the possible handoff
       And its terminal says the write was superseded after a possible handoff, not never sent
-      When their retained safety evidence becomes one hour old
-      Then NMP permanently removes that obsolete evidence
-      And if more than 500 replaced entries accumulate sooner, NMP keeps only the newest 500
-      And checking that cleanup deadline does not enumerate unrelated receipt history
+      When terminal receipt retention reaches its internal boundary
+      Then replaced-write evidence competes in the same oldest-first order as every other terminal receipt
       But current obligations are never classified as disposable
       And possible-handoff ambiguity is retained only as that bounded safety evidence
 

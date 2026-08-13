@@ -71,6 +71,10 @@ impl GovernedWrite {
         Ok(result)
     }
 
+    pub(super) fn transaction(&self) -> &redb::WriteTransaction {
+        &self.write_txn
+    }
+
     /// Flush every derived structure, commit, and return a value that the
     /// caller prepared before this transaction exit.
     pub(super) fn commit_prepared<T>(mut self, prepared: T) -> Result<T, PersistenceError> {

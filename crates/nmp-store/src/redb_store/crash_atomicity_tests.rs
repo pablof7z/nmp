@@ -446,9 +446,53 @@ fn redb_crash_worker() {
                 )
                 .expect("AUTH denial reaches crash seam");
         }
+        "terminal-retention-before-commit" => {
+            let mut store = RedbStore::open_with_crash_point(
+                path,
+                RedbCrashPoint::TerminalRetentionBeforeCommit,
+            )
+            .expect("open worker store");
+            let _ = publish_queue_ops::maintain_terminal_receipts_at(
+                &mut store,
+                Timestamp::from(u64::MAX / 4),
+                crate::terminal_retention::TerminalRetentionLimits {
+                    max_age_secs: u64::MAX,
+                    max_count: 0,
+                    max_bytes: u64::MAX,
+                },
+            );
+        }
         other => panic!("unknown crash point {other}"),
     }
     panic!("crash seam did not abort at {point}");
+}
+
+#[test]
+fn terminal_retention_whole_closure_eviction_is_atomic_across_process_death() {
+    let (_dir, path) = fixture();
+    let receipt_id = {
+        let mut store = RedbStore::open(&path).expect("initialize retention fixture");
+        let (frozen, _) = event_pair();
+        let accepted = store
+            .accept_write(accept_with_correlation(frozen, "retention-crash-token"))
+            .expect("accept retention fixture");
+        store
+            .cancel_write(accepted.journaled_intent_id().expect("intent id"))
+            .expect("terminalize retention fixture");
+        accepted.journaled_receipt_id().expect("receipt id")
+    };
+
+    crash(&path, "terminal-retention-before-commit");
+
+    let store = RedbStore::open(&path).expect("reopen rolled-back retention fixture");
+    assert_eq!(
+        store.lookup_correlation("retention-crash-token").unwrap(),
+        Some(receipt_id)
+    );
+    assert_eq!(
+        store.reattach_receipt(receipt_id).unwrap().unwrap().state,
+        ReceiptState::Cancelled
+    );
 }
 
 #[test]

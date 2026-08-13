@@ -23,15 +23,18 @@ use super::publish_queue::{
     AddrClaimant, PublishQueueIntentRecord, PublishQueueReceiptRecord, SuppressClaimRecord,
 };
 
-pub(super) type PublishQueueRelayId = u32;
+pub(crate) type PublishQueueRelayId = u32;
 
-pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 2;
+pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 3;
 pub(super) const PUBLISH_QUEUE_CODEC_VERSION_KEY: &[u8] = b"codec_version";
 pub(super) const NEXT_INTENT_ID_KEY: &[u8] = b"next_intent_id";
 pub(super) const NEXT_RECEIPT_ID_KEY: &[u8] = b"next_receipt_id";
 pub(super) const NEXT_RELAY_ID_KEY: &[u8] = b"next_relay_id";
-pub(super) const SUPERSEDED_RECEIPT_COUNT_KEY: &[u8] = b"superseded_receipt_count";
-pub(super) const SUPERSEDED_RECEIPT_PREFIX: &[u8] = b"superseded_receipt/";
+pub(crate) const NEXT_TERMINAL_SEQUENCE_KEY: &[u8] = b"next_terminal_sequence";
+pub(crate) const TERMINAL_RECEIPT_COUNT_KEY: &[u8] = b"terminal_receipt_count";
+pub(crate) const TERMINAL_RECEIPT_BYTES_KEY: &[u8] = b"terminal_receipt_bytes";
+pub(crate) const LAST_TERMINAL_AT_KEY: &[u8] = b"last_terminal_at";
+pub(crate) const TERMINAL_RECEIPT_PREFIX: &[u8] = b"terminal_receipt/";
 
 pub(super) const MAX_RELAY_BYTES: usize = 4_096;
 pub(super) const MAX_TEXT_BYTES: usize = 65_536;
@@ -40,48 +43,43 @@ pub(super) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_ROUTE_RELAYS: usize = 4_096;
 pub(super) const MAX_SUPPRESSION_CLAIMS: usize = 65_536;
 
-pub(super) fn superseded_receipt_key(accepted_at: Timestamp, receipt_id: u64) -> Vec<u8> {
-    let mut key = Vec::with_capacity(SUPERSEDED_RECEIPT_PREFIX.len() + 16);
-    key.extend_from_slice(SUPERSEDED_RECEIPT_PREFIX);
-    key.extend_from_slice(&accepted_at.as_secs().to_be_bytes());
+pub(crate) fn terminal_receipt_key(sequence: u64, receipt_id: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(TERMINAL_RECEIPT_PREFIX.len() + 16);
+    key.extend_from_slice(TERMINAL_RECEIPT_PREFIX);
+    key.extend_from_slice(&sequence.to_be_bytes());
     key.extend_from_slice(&receipt_id.to_be_bytes());
     key
 }
 
-pub(super) fn superseded_receipt_range() -> (Vec<u8>, Vec<u8>) {
-    let mut lower = Vec::with_capacity(SUPERSEDED_RECEIPT_PREFIX.len() + 16);
-    lower.extend_from_slice(SUPERSEDED_RECEIPT_PREFIX);
+pub(crate) fn terminal_receipt_range() -> (Vec<u8>, Vec<u8>) {
+    let mut lower = Vec::with_capacity(TERMINAL_RECEIPT_PREFIX.len() + 16);
+    lower.extend_from_slice(TERMINAL_RECEIPT_PREFIX);
     lower.extend_from_slice(&[0; 16]);
-    let mut upper = Vec::with_capacity(SUPERSEDED_RECEIPT_PREFIX.len() + 16);
-    upper.extend_from_slice(SUPERSEDED_RECEIPT_PREFIX);
+    let mut upper = Vec::with_capacity(TERMINAL_RECEIPT_PREFIX.len() + 16);
+    upper.extend_from_slice(TERMINAL_RECEIPT_PREFIX);
     upper.extend_from_slice(&[u8::MAX; 16]);
     (lower, upper)
 }
 
-pub(super) fn parse_superseded_receipt_key(
-    key: &[u8],
-) -> Result<(Timestamp, u64), PublishQueueCodecError> {
+pub(crate) fn parse_terminal_receipt_key(key: &[u8]) -> Result<(u64, u64), PublishQueueCodecError> {
     let suffix =
-        key.strip_prefix(SUPERSEDED_RECEIPT_PREFIX)
+        key.strip_prefix(TERMINAL_RECEIPT_PREFIX)
             .ok_or(PublishQueueCodecError::InvalidValue(
-                "superseded receipt key prefix",
+                "terminal receipt key prefix",
             ))?;
     if suffix.len() != 16 {
         return Err(PublishQueueCodecError::InvalidValue(
-            "superseded receipt key width",
+            "terminal receipt key width",
         ));
     }
-    let (accepted_at, receipt_id) = suffix.split_at(8);
-    let accepted_at: [u8; 8] = accepted_at
+    let (sequence, receipt_id) = suffix.split_at(8);
+    let sequence: [u8; 8] = sequence
         .try_into()
-        .map_err(|_| PublishQueueCodecError::InvalidValue("superseded receipt key width"))?;
+        .map_err(|_| PublishQueueCodecError::InvalidValue("terminal receipt key width"))?;
     let receipt_id: [u8; 8] = receipt_id
         .try_into()
-        .map_err(|_| PublishQueueCodecError::InvalidValue("superseded receipt key width"))?;
-    Ok((
-        Timestamp::from(u64::from_be_bytes(accepted_at)),
-        u64::from_be_bytes(receipt_id),
-    ))
+        .map_err(|_| PublishQueueCodecError::InvalidValue("terminal receipt key width"))?;
+    Ok((u64::from_be_bytes(sequence), u64::from_be_bytes(receipt_id)))
 }
 
 const INTENT_MAGIC: [u8; 4] = *b"NMDI";
@@ -99,7 +97,7 @@ const VALUE_VERSION: u8 = 1;
 const HEADER_LEN: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PublishQueueCodecError {
+pub(crate) enum PublishQueueCodecError {
     Truncated,
     BadMagic,
     UnsupportedVersion(u8),
@@ -687,7 +685,7 @@ fn decode_receipt_state(decoder: &mut Decoder<'_>) -> Result<ReceiptState, Publi
     }
 }
 
-pub(super) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
+pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
     let mut encoder = Encoder::new(RECEIPT_MAGIC);
     match record.intent_id {
         None => encoder.u8(0),
@@ -706,10 +704,31 @@ pub(super) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
         }
     }
     encode_receipt_state(&mut encoder, record.state);
+    encoder
+        .optional_text(
+            record.correlation.as_deref(),
+            MAX_TEXT_BYTES,
+            "correlation token",
+        )
+        .expect("validated correlation token");
+    match (
+        record.terminal_sequence,
+        record.terminal_at,
+        record.terminal_bytes,
+    ) {
+        (None, None, None) => encoder.u8(0),
+        (Some(sequence), Some(terminal_at), Some(terminal_bytes)) => {
+            encoder.u8(1);
+            encoder.u64(sequence);
+            encoder.u64(terminal_at.as_secs());
+            encoder.u64(terminal_bytes);
+        }
+        _ => unreachable!("terminal receipt metadata is all-or-none"),
+    }
     encoder.finish()
 }
 
-pub(super) fn decode_receipt(
+pub(crate) fn decode_receipt(
     bytes: &[u8],
 ) -> Result<PublishQueueReceiptRecord, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, RECEIPT_MAGIC)?;
@@ -731,6 +750,21 @@ pub(super) fn decode_receipt(
         }
     };
     let state = decode_receipt_state(&mut decoder)?;
+    let correlation = decoder.optional_text(MAX_TEXT_BYTES, "correlation token")?;
+    let (terminal_sequence, terminal_at, terminal_bytes) = match decoder.u8()? {
+        0 => (None, None, None),
+        1 => (
+            Some(decoder.u64()?),
+            Some(Timestamp::from(decoder.u64()?)),
+            Some(decoder.u64()?),
+        ),
+        other => {
+            return Err(PublishQueueCodecError::InvalidTag(
+                "terminal receipt metadata",
+                other,
+            ))
+        }
+    };
     decoder.finish()?;
     Ok(PublishQueueReceiptRecord {
         intent_id,
@@ -738,10 +772,14 @@ pub(super) fn decode_receipt(
         expected_pubkey,
         accepted_at,
         state,
+        correlation,
+        terminal_sequence,
+        terminal_at,
+        terminal_bytes,
     })
 }
 
-pub(super) fn encode_route(
+pub(crate) fn encode_route(
     relays: &[PublishQueueRelayId],
 ) -> Result<Vec<u8>, PublishQueueCodecError> {
     if relays.len() > MAX_ROUTE_RELAYS {
@@ -811,7 +849,7 @@ fn decode_attempt_outcome(
     }
 }
 
-pub(super) fn encode_attempt(
+pub(crate) fn encode_attempt(
     event: &Event,
     outcome: &PublishQueueAttemptOutcome,
 ) -> Result<Vec<u8>, PublishQueueCodecError> {
@@ -1006,7 +1044,7 @@ fn decode_lane_state(
     }
 }
 
-pub(super) fn encode_lane(
+pub(crate) fn encode_lane(
     revision: u64,
     last_ordinal: u64,
     state: &PublishQueueLaneState,
@@ -1096,7 +1134,7 @@ fn decode_handoff_result(
     }
 }
 
-pub(super) fn encode_attempt_details(
+pub(crate) fn encode_attempt_details(
     details: &PublishQueueAttemptDetails,
 ) -> Result<Vec<u8>, PublishQueueCodecError> {
     let mut encoder = Encoder::new(DETAIL_MAGIC);

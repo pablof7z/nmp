@@ -108,8 +108,8 @@ pub use store_bench::{
 mod schema;
 #[cfg(test)]
 use schema::*;
-mod publish_queue;
-mod publish_queue_codec;
+pub(crate) mod publish_queue;
+pub(crate) mod publish_queue_codec;
 #[cfg(test)]
 use publish_queue::*;
 mod canonical;
@@ -129,7 +129,7 @@ use store::RedbCrashPoint;
 pub use store::RedbStore;
 mod event_ops;
 mod ingest;
-mod publish_queue_ops;
+pub(crate) mod publish_queue_ops;
 mod write_ops;
 
 impl EventStore for RedbStore {
@@ -286,14 +286,6 @@ impl EventStore for RedbStore {
         limit: u8,
     ) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
         publish_queue_ops::publish_queue_receipts_after(self, after, limit)
-    }
-
-    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError> {
-        publish_queue_ops::prune_superseded_receipts(self, now)
-    }
-
-    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        publish_queue_ops::next_superseded_receipt_deadline(self)
     }
 
     fn remove_publish_queue_entry(
